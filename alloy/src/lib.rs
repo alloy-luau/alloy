@@ -10,6 +10,7 @@ pub mod build;
 pub mod config;
 pub mod declarations;
 pub mod desugar;
+pub mod directives;
 pub mod docs;
 pub mod extensions;
 pub mod fmt;
@@ -85,12 +86,13 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
 
     let mut rendered = desugar::render(src, &parsed.lexed.toks, &parsed.chunk, options);
 
-    // An extension on a foreign type makes the two artifacts differ: the
-    // check artifact keeps `v:flat()` for the analyzer, and the map
-    // follows it, since the server is the map's consumer.
+    // The check artifact is its own render: it types constructors and
+    // `self`, casts what the checker cannot follow, and keeps `v:flat()`
+    // for the analyzer. The map follows it, since the server is the
+    // map's consumer.
     let mut check = rendered.text.clone();
 
-    if rendered.ext_used && !options.check {
+    if !options.check {
         let check_options = EmitOptions {
             check: true,
             ..options.clone()
@@ -117,6 +119,14 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     lints.sort_by_key(|l| (l.start, l.name));
     // A node the desugar renders twice reports its lint twice.
     lints.dedup();
+
+    // `--@alloy-nocheck` and `--@alloy-ignore` silence their lines.
+    let silence = directives::scan(src);
+
+    if !silence.is_empty() {
+        diagnostics.retain(|d| silence.allows(directives::line_of(src, d.start as usize)));
+        lints.retain(|l| silence.allows(directives::line_of(src, l.start as usize)));
+    }
 
     // The ship artifact blanks type-only imports, keeping every position.
     let mut ship = rendered.text.clone().into_bytes();

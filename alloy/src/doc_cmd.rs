@@ -106,6 +106,19 @@ fn json() -> String {
 
 /// The page for one topic, or none.
 fn page(topic: &str, color: bool) -> Option<String> {
+    // A section number, as a diagnostic's code: `alloy doc 4.2`.
+    if let Some(sec) = docs::section(topic) {
+        let url = docs::book_url(topic).unwrap_or_default();
+        let head = format!("**{} {}**\n{url}\n\n", sec.number, sec.title);
+        let body = match sec.key {
+            Some("lints") => return Some(render(&head, color) + &lints_page(color)),
+            Some(key) => docs::lookup(key).unwrap_or(""),
+            None => "",
+        };
+
+        return Some(render(&format!("{head}{body}"), color));
+    }
+
     if let Some(l) = LINTS.iter().find(|l| l.name == topic) {
         let level = match l.default {
             Level::Allow => "off unless `[lint] strict = true`",

@@ -104,12 +104,23 @@ impl State {
                 } else {
                     (el, ec)
                 };
-                diagnostics.push(json!({
+                // `Alloy(4.2)`: the book section as the code, and the
+                // number links to the section.
+                let mut item = json!({
                     "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
                     "severity": 1,
-                    "source": "alloy",
+                    "source": "Alloy",
                     "message": d.message,
-                }));
+                });
+
+                if let Some(code) = alloy::docs::code_for(&d.message)
+                    && let Some(url) = alloy::docs::book_url(code)
+                {
+                    item["code"] = json!(code);
+                    item["codeDescription"] = json!({ "href": url });
+                }
+
+                diagnostics.push(item);
             }
 
             // Lints at their `[lint]` level: a warning, or an error for
@@ -138,9 +149,10 @@ impl State {
                 diagnostics.push(json!({
                     "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
                     "severity": severity,
-                    "source": "alloy",
-                    "code": l.name,
-                    "message": l.message,
+                    "source": "Alloy",
+                    "code": alloy::docs::LINT_CODE,
+                    "codeDescription": { "href": alloy::docs::book_url(alloy::docs::LINT_CODE).unwrap_or_default() },
+                    "message": format!("{}: {}", l.name, l.message),
                 }));
             }
         }
@@ -3559,6 +3571,17 @@ fn child_sees(uri: &str) -> bool {
 /// they map to the construct that produced them.
 fn keep_diagnostic(d: &Value, doc: &Doc) -> bool {
     let message = d.get("message").and_then(Value::as_str).unwrap_or_default();
+
+    // `--@alloy-nocheck` and `--@alloy-ignore` silence the checker too.
+    // The shadow keeps the source's lines, so the line is the same.
+    let silence = alloy::directives::scan(&doc.source);
+
+    if !silence.is_empty()
+        && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
+        && !silence.allows(sl as usize)
+    {
+        return false;
+    }
 
     if message
         .to_ascii_lowercase()

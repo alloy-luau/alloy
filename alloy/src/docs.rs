@@ -457,7 +457,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:directives",
-        "**Directives**\n\nA line comment that starts with `--@alloy-` steers the compiler for the file or the next line:\n\n```alloy\n--@alloy-nocheck        this file: no compiler diagnostics\n--@alloy-ignore         the next line: no compiler diagnostic\n```\n\nLuau's own `--!strict`, `--!nonstrict`, and `--!nocheck` pass through and set the checker's mode for the file.",
+        "**Directives**\n\nA comment that starts with `--@alloy-` silences diagnostics: the compiler's, the lints, and the checker's type errors, which the language server drops on the silenced lines before the editor sees them.\n\n```alloy\n--@alloy-nocheck        this file: nothing is reported\n--@alloy-ignore         the next line with code is silent\nlocal x = y.z --@alloy-ignore   at the end of a line: that line\n```\n\nUse one for a line the new solver gets wrong, and say why in the comment beside it. Luau's own `--!strict`, `--!nonstrict`, and `--!nocheck` pass through and set the checker's mode for the file.\n\nEvery diagnostic carries the book section it belongs to as its code, `Alloy(4.2)`; the number links to the section in the editor, and `alloy doc 4.2` prints it.",
     ),
     (
         "topic:mount",
@@ -479,4 +479,339 @@ pub fn keys_with_prefix(prefix: &str) -> Vec<&'static str> {
         .map(|(k, _)| *k)
         .filter(|k| k.starts_with(prefix))
         .collect()
+}
+
+/// The website of the book, where a diagnostic's code links.
+pub const SITE: &str = "https://alloy-luau.github.io";
+
+/// One numbered section of the book, as the website lays it out. A
+/// diagnostic carries a section's number as its code, `Alloy(4.2)`, and
+/// the number links to the section; `alloy doc 4.2` prints it.
+pub struct Section {
+    pub number: &'static str,
+    /// The anchor on the book page.
+    pub id: &'static str,
+    pub title: &'static str,
+    /// The doc entry that explains the section, when one does.
+    pub key: Option<&'static str>,
+}
+
+pub const BOOK: &[Section] = &[
+    Section {
+        number: "1",
+        id: "intro",
+        title: "Introduction",
+        key: None,
+    },
+    Section {
+        number: "2",
+        id: "getting-started",
+        title: "Getting started",
+        key: None,
+    },
+    Section {
+        number: "2.1",
+        id: "install",
+        title: "Install",
+        key: None,
+    },
+    Section {
+        number: "2.2",
+        id: "first-project",
+        title: "A first project",
+        key: Some("topic:build"),
+    },
+    Section {
+        number: "2.3",
+        id: "editor",
+        title: "The editor",
+        key: None,
+    },
+    Section {
+        number: "3",
+        id: "language",
+        title: "The language",
+        key: None,
+    },
+    Section {
+        number: "3.1",
+        id: "safe",
+        title: "Safe access",
+        key: Some("?."),
+    },
+    Section {
+        number: "3.2",
+        id: "modules",
+        title: "Modules",
+        key: Some("import"),
+    },
+    Section {
+        number: "3.3",
+        id: "async",
+        title: "Async and Futures",
+        key: Some("async"),
+    },
+    Section {
+        number: "3.4",
+        id: "enums",
+        title: "Enums and match",
+        key: Some("enum"),
+    },
+    Section {
+        number: "3.5",
+        id: "bindings",
+        title: "Conditional bindings",
+        key: Some("match"),
+    },
+    Section {
+        number: "3.6",
+        id: "structs",
+        title: "Structs and traits",
+        key: Some("struct"),
+    },
+    Section {
+        number: "3.7",
+        id: "interfaces",
+        title: "Interfaces and types",
+        key: Some("interface"),
+    },
+    Section {
+        number: "3.8",
+        id: "sugar",
+        title: "Sugar",
+        key: Some("?"),
+    },
+    Section {
+        number: "3.9",
+        id: "extensions",
+        title: "Extensions",
+        key: Some("impl"),
+    },
+    Section {
+        number: "3.10",
+        id: "macros",
+        title: "Macros",
+        key: Some("macro"),
+    },
+    Section {
+        number: "3.11",
+        id: "attributes",
+        title: "Attributes",
+        key: Some("attribute"),
+    },
+    Section {
+        number: "3.12",
+        id: "remotes",
+        title: "Remotes",
+        key: Some("remote"),
+    },
+    Section {
+        number: "3.13",
+        id: "markup",
+        title: "Markup",
+        key: None,
+    },
+    Section {
+        number: "3.14",
+        id: "tests",
+        title: "Tests",
+        key: Some("@test"),
+    },
+    Section {
+        number: "4",
+        id: "strict",
+        title: "Strict by default",
+        key: Some("topic:strict"),
+    },
+    Section {
+        number: "4.1",
+        id: "contracts",
+        title: "The contracts",
+        key: Some("topic:strict"),
+    },
+    Section {
+        number: "4.2",
+        id: "exhaustive",
+        title: "Exhaustive match",
+        key: Some("topic:exhaustive"),
+    },
+    Section {
+        number: "4.3",
+        id: "wire",
+        title: "Wire types",
+        key: Some("topic:wire"),
+    },
+    Section {
+        number: "4.4",
+        id: "directives",
+        title: "Directives",
+        key: Some("topic:directives"),
+    },
+    Section {
+        number: "5",
+        id: "tooling",
+        title: "Tooling",
+        key: None,
+    },
+    Section {
+        number: "5.1",
+        id: "build",
+        title: "alloy build",
+        key: Some("topic:build"),
+    },
+    Section {
+        number: "5.2",
+        id: "check",
+        title: "alloy check",
+        key: Some("topic:check"),
+    },
+    Section {
+        number: "5.3",
+        id: "lint",
+        title: "alloy lint",
+        key: Some("topic:lint"),
+    },
+    Section {
+        number: "5.4",
+        id: "fmt",
+        title: "alloy fmt",
+        key: Some("topic:fmt"),
+    },
+    Section {
+        number: "5.5",
+        id: "doc",
+        title: "alloy doc",
+        key: None,
+    },
+    Section {
+        number: "5.6",
+        id: "config",
+        title: "alloy.toml",
+        key: Some("topic:config"),
+    },
+    Section {
+        number: "5.7",
+        id: "luaurc",
+        title: ".luaurc and .config.luau",
+        key: Some("topic:luaurc"),
+    },
+    Section {
+        number: "5.8",
+        id: "mount",
+        title: "Mounts and project files",
+        key: Some("topic:mount"),
+    },
+    Section {
+        number: "6",
+        id: "reference",
+        title: "Reference",
+        key: None,
+    },
+    Section {
+        number: "6.1",
+        id: "ref-keywords",
+        title: "Keywords",
+        key: None,
+    },
+    Section {
+        number: "6.2",
+        id: "ref-operators",
+        title: "Operators",
+        key: None,
+    },
+    Section {
+        number: "6.3",
+        id: "ref-intrinsics",
+        title: "Intrinsics",
+        key: None,
+    },
+    Section {
+        number: "6.4",
+        id: "ref-attributes",
+        title: "Attributes",
+        key: None,
+    },
+    Section {
+        number: "6.5",
+        id: "ref-derives",
+        title: "Derives",
+        key: None,
+    },
+    Section {
+        number: "6.6",
+        id: "ref-std",
+        title: "Standard library",
+        key: None,
+    },
+    Section {
+        number: "6.7",
+        id: "lints",
+        title: "Lints",
+        key: Some("lints"),
+    },
+];
+
+/// The section a number names.
+pub fn section(number: &str) -> Option<&'static Section> {
+    BOOK.iter().find(|s| s.number == number)
+}
+
+/// The link for a section number.
+pub fn book_url(number: &str) -> Option<String> {
+    section(number).map(|s| format!("{SITE}/docs/#{}", s.id))
+}
+
+/// The lints' section number: every lint's code.
+pub const LINT_CODE: &str = "6.7";
+
+/// The book section a compiler diagnostic belongs to, from its text.
+/// The diagnostics name what they are about; the first match wins, from
+/// the most specific wording to the least.
+pub fn code_for(message: &str) -> Option<&'static str> {
+    let m = message.to_ascii_lowercase();
+    let rules: &[(&[&str], &str)] = &[
+        (&["not exhaustive"], "4.2"),
+        (&["remote"], "4.3"),
+        (&["directive"], "4.4"),
+        (&["reserved word"], "6.1"),
+        (&["markup"], "3.13"),
+        (&["@test", "test "], "3.14"),
+        (&["macro"], "3.10"),
+        (&["attribute", "derive"], "3.11"),
+        (
+            &[
+                "`or` pattern",
+                "pattern",
+                "destructur",
+                "let-else",
+                "binding",
+            ],
+            "3.5",
+        ),
+        (&["variant", "enum"], "3.4"),
+        (&["async", "await", "try", "future"], "3.3"),
+        (&["import", "export", "require", "module"], "3.2"),
+        (&["extension", "foreign", "primitive"], "3.9"),
+        (
+            &[
+                "trait",
+                "impl",
+                "struct",
+                "field",
+                "`new ",
+                "constructor",
+                "sealed",
+                "parameters in",
+            ],
+            "3.6",
+        ),
+        (&["interface", "type "], "3.7"),
+        (&["?.", "?:", "??", "->", "=>", "safe", "non-nil"], "3.1"),
+        (&["ternary", "spread", "where", "in operator"], "3.8"),
+    ];
+
+    rules
+        .iter()
+        .find(|(words, _)| words.iter().any(|w| m.contains(w)))
+        .map(|(_, code)| *code)
 }

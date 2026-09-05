@@ -126,8 +126,9 @@ impl Painter {
             Level::Error => ("✗", "error", RED),
             Level::Warning => ("!", "warning", AMBER),
         };
+        // `error(4.2)`: the book section, as the editor shows it.
         let label = match code {
-            Some(c) => format!("{word}[{c}]"),
+            Some(c) => format!("{word}({c})"),
             None => word.to_string(),
         };
         let label = if self.color {

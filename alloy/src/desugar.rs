@@ -177,6 +177,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         traits: HashMap::new(),
         trait_required: HashMap::new(),
         struct_fields: HashMap::new(),
+        generic_types: HashSet::new(),
         ext_methods: HashSet::new(),
         ext_statics: HashMap::new(),
         self_type: None,
@@ -372,6 +373,9 @@ struct Desugar<'s> {
     /// Declared struct fields by struct name: field name and whether it
     /// carries a default.
     struct_fields: HashMap<String, Vec<(String, bool)>>,
+    /// Structs declared with type parameters: their alias needs
+    /// arguments, so the check artifact leaves `self` untyped there.
+    generic_types: HashSet<String>,
     /// Extension method names declared on foreign types in this file, so
     /// `x:name(...)` routes through the dispatcher.
     ext_methods: HashSet<String>,
@@ -652,13 +656,22 @@ impl<'s> Desugar<'s> {
                     .enumerate()
                     .map(|(i, t)| format!("_{}: {}", i + 1, self.copy_type_to_string(*t)))
                     .collect();
+                // The check artifact types the constructor, so its value
+                // is the variant's member of the union and `tag` stays a
+                // literal, not a string.
+                let (plist, ret) = if self.options.check {
+                    (field_types.join(", "), format!(": {name}"))
+                } else {
+                    (params.join(", "), String::new())
+                };
+                let value = format!(
+                    "setmetatable({{ tag = \"{vname}\", {} }}, {name})",
+                    fields.join(", ")
+                );
+                let value = self.any_cast(&value);
                 self.generate(
                     vs,
-                    &format!(
-                        "function {name}.{vname}({}) return setmetatable({{ tag = \"{vname}\", {} }}, {name}) end",
-                        params.join(", "),
-                        fields.join(", ")
-                    ),
+                    &format!("function {name}.{vname}({plist}){ret} return {value} end"),
                 );
                 types.push(format!(
                     "{{ tag: \"{vname}\", {} }}",
@@ -730,7 +743,14 @@ impl<'s> Desugar<'s> {
         }
         let mut cursor = header_end;
 
-        if foreign && self.options.check {
+        // The check artifact types an untyped `self`: a foreign type by
+        // its name, a struct or enum of this file by its alias, unless
+        // the alias takes parameters that are not in scope here.
+        let local_type = (self.structs.contains(&target_name)
+            || self.enums.contains_key(&target_name))
+            && !self.generic_types.contains(&target_name);
+
+        if self.options.check && (foreign || local_type) {
             self.self_type = Some(target_name.clone());
         }
 
@@ -793,7 +813,14 @@ impl<'s> Desugar<'s> {
 
             for (tr, method, meta) in mapping {
                 if trait_name == *tr {
-                    tail.push_str(&format!(" {target}.{meta} = {target}.{method}"));
+                    // `delete` takes a `Deletable`, whose `Destroy` is
+                    // `(self: any) -> ()`; the check artifact says so.
+                    let value = if self.options.check && *tr == "Drop" {
+                        format!("({target}.{method} :: (self: any) -> ())")
+                    } else {
+                        format!("{target}.{method}")
+                    };
+                    tail.push_str(&format!(" {target}.{meta} = {value}"));
                 }
             }
 
@@ -832,11 +859,27 @@ impl<'s> Desugar<'s> {
             }
 
             // Default methods of a trait declared in this file flatten in.
+            // The check artifact assigns without the guard: a conditional
+            // assignment would make the property optional to the checker,
+            // and the struct would then not satisfy the trait.
             if let Some(defaults) = self.traits.get(&trait_name).cloned() {
+                let written: Vec<String> = i
+                    .methods
+                    .iter()
+                    .map(|f| self.text_of(f.path[0]).to_string())
+                    .collect();
+
                 for m in defaults {
-                    tail.push_str(&format!(
-                        " if {target}.{m} == nil then {target}.{m} = {trait_name}.{m} end"
-                    ));
+                    if self.options.check {
+                        // The impl's own method keeps its type.
+                        if !written.contains(&m) {
+                            tail.push_str(&format!(" {target}.{m} = {trait_name}.{m}"));
+                        }
+                    } else {
+                        tail.push_str(&format!(
+                            " if rawget({target}, \"{m}\") == nil then {target}.{m} = {trait_name}.{m} end"
+                        ));
+                    }
                 }
             }
         }
@@ -905,7 +948,8 @@ impl<'s> Desugar<'s> {
                 match name {
                     Some(n) => {
                         let sname = self.text_of(*n).to_string();
-                        out.tests.push(format!("getmetatable({path}) == {sname}"));
+                        out.tests
+                            .push(format!("getmetatable({}) == {sname}", self.any_cast(path)));
                     }
 
                     None => out.tests.push(format!("type({path}) == \"table\"")),
@@ -950,8 +994,8 @@ impl<'s> Desugar<'s> {
                 let mut cb = Compiled::default();
                 self.compile_pattern(a, path, &mut ca);
                 self.compile_pattern(b, path, &mut cb);
-                let ta = join_tests(&ca.tests);
-                let tb = join_tests(&cb.tests);
+                let ta = self.cast_tests(&join_tests(&ca.tests), path);
+                let tb = self.cast_tests(&join_tests(&cb.tests), path);
                 out.tests.push(format!("(({ta}) or ({tb}))"));
 
                 let names_a: Vec<&String> = ca.binds.iter().map(|(n, _)| n).collect();
@@ -971,6 +1015,10 @@ impl<'s> Desugar<'s> {
                         .find(|(m, _)| m == n)
                         .map(|(_, p)| p.clone())
                         .unwrap_or_else(|| pa.clone());
+                    // The checker refines each side by its own tag and
+                    // cannot pick one across the `or`; the check artifact
+                    // reads the payload untyped.
+                    let (pa, pb) = (self.cast_root(pa), self.cast_root(&pb));
                     out.binds
                         .push((n.clone(), format!("(if {ta} then {pa} else {pb})")));
                 }
@@ -2086,6 +2134,8 @@ impl<'s> Desugar<'s> {
 
         // Field types and defaults.
         let mut field_types = Vec::new();
+        // The constructor's record: a field with a default may be left out.
+        let mut param_types = Vec::new();
         let mut defaults = Vec::new();
         let mut field_names = Vec::new();
         let mut field_attrs = Vec::new();
@@ -2102,7 +2152,8 @@ impl<'s> Desugar<'s> {
             } else {
                 ""
             };
-            field_types.push(format!("{modifier}{fname}: {ty}{opt}"));
+            field_types.push(format!("{modifier}{fname}: {ty}"));
+            param_types.push(format!("{modifier}{fname}: {ty}{opt}"));
 
             if let Some(dv) = &f.default {
                 let v = self.render_to_string(dv);
@@ -2137,11 +2188,42 @@ impl<'s> Desugar<'s> {
         }
 
         // Header.
-        let mut header = format!(
-            "local {name} = {{}} {name}.__index = {name} setmetatable({name}, {{ __call = function(_, f) {} return setmetatable(f, {name}) end }}) function {name}.new(f) return {name}(f) end",
-            defaults.join(" ")
-        );
-        let _ = &mut header;
+        // The check artifact types the raw constructor, so `new Name { }`
+        // is a `Name` to the checker and not a metatable over a literal.
+        // A generic struct stays untyped: its parameters are not in
+        // scope here. A struct whose impl writes `new` gets no generated
+        // one in the check artifact, so the two do not clash.
+        // The check artifact has no metatable on the class table: with one,
+        // the instance type nests a metatable of its own, and the checker
+        // then rejects the struct as a trait or a `Deletable`. The fields
+        // form calls `__new`, a typed raw constructor, instead of the
+        // class. A generic struct stays untyped, its parameters being out
+        // of scope.
+        let typed = self.options.check && generics.is_empty();
+        let (param, ret) = if typed {
+            (
+                format!("f: {{ {} }}", param_types.join(", ")),
+                format!(": {name}"),
+            )
+        } else {
+            ("f".to_string(), String::new())
+        };
+        let d = defaults.join(" ");
+        let header = if self.options.check {
+            let new_fn = if self.structs_with_new.contains_key(&name) {
+                String::new()
+            } else {
+                format!(" function {name}.new({param}){ret} return {name}.__new(f) end")
+            };
+
+            format!(
+                "local {name} = {{}} {name}.__index = {name} function {name}.__new({param}){ret} {d} return (setmetatable(f, {name}) :: any) end{new_fn}"
+            )
+        } else {
+            format!(
+                "local {name} = {{}} {name}.__index = {name} setmetatable({name}, {{ __call = function(_, f) {d} return setmetatable(f, {name}) end }}) function {name}.new(f) return {name}(f) end"
+            )
+        };
         self.generate(start, &header);
 
         // Field lines carry only their trivia. The range starts at the
@@ -2255,6 +2337,13 @@ impl<'s> Desugar<'s> {
         fields: &[String],
         decls: &[Field],
     ) -> String {
+        // The check artifact types the receiver, as an impl method's self.
+        let sn = if self.options.check && !self.generic_types.contains(name) {
+            format!(": {name}")
+        } else {
+            String::new()
+        };
+        let tn = if self.options.check { ": any" } else { "" };
         match which {
             "Eq" => {
                 let cmp: Vec<String> = fields.iter().map(|f| format!("a.{f} == b.{f}")).collect();
@@ -2264,7 +2353,7 @@ impl<'s> Desugar<'s> {
                     cmp.join(" and ")
                 };
 
-                format!("{name}.__eq = function(a, b) return {body} end")
+                format!("{name}.__eq = function(a{sn}, b{sn}) return {body} end")
             }
 
             "Debug" => {
@@ -2279,12 +2368,14 @@ impl<'s> Desugar<'s> {
                 };
 
                 format!(
-                    "{name}.__tostring = function(s) return \"{name} {{ \" .. {inner} .. \" }}\" end"
+                    "{name}.__tostring = function(s{sn}) return \"{name} {{ \" .. {inner} .. \" }}\" end"
                 )
             }
 
             "Clone" => {
-                format!("function {name}.clone(s) return setmetatable(table.clone(s), {name}) end")
+                format!(
+                    "function {name}.clone(s{sn}) return setmetatable(table.clone(s), {name}) end"
+                )
             }
 
             "Serialize" => {
@@ -2314,8 +2405,9 @@ impl<'s> Desugar<'s> {
                 }
 
                 format!(
-                    "function {name}.to_table(s) return {{ {} }} end function {name}.from_table(t) return {name}({{ {} }}) end",
+                    "function {name}.to_table(s{sn}) return {{ {} }} end function {name}.from_table(t{tn}) return {}({{ {} }}) end",
                     to.join(", "),
+                    self.raw_ctor(name),
                     from.join(", ")
                 )
             }
@@ -2346,7 +2438,10 @@ impl<'s> Desugar<'s> {
             .iter()
             .map(|m| self.trait_method_type(m))
             .collect();
-        let type_line = format!("{export}type {name} = {{ {} }}", sigs.join(", "));
+        // Methods are read properties: a struct's methods are read-only to
+        // the checker, and a read-write slot would reject them.
+        let props: Vec<String> = sigs.iter().map(|s| format!("read {s}")).collect();
+        let type_line = format!("{export}type {name} = {{ {} }}", props.join(", "));
 
         if self.options.definitions {
             self.generate(start, &type_line);
@@ -2381,7 +2476,18 @@ impl<'s> Desugar<'s> {
                 Some(body) => {
                     // `function name(params): R` becomes `function Trait.name(params): R`.
                     let mname = self.text_of(m.name).to_string();
-                    let sig = self.signature_text(m.signature);
+                    let mut sig = self.signature_text(m.signature);
+
+                    // An untyped `self` is `any` in the check artifact: the
+                    // default lands on every implementing struct.
+                    if self.options.check {
+                        if sig.starts_with("(self)") {
+                            sig = sig.replacen("(self)", "(self: any)", 1);
+                        } else if sig.starts_with("(self,") {
+                            sig = sig.replacen("(self,", "(self: any,", 1);
+                        }
+                    }
+
                     self.generate(ms, &format!("function {name}.{mname}{sig}"));
                     let body_start = self.block_start_or(&body.block, self.byte_end(m.span));
                     self.copy(self.byte_end(m.signature), body_start);
@@ -3137,7 +3243,7 @@ impl<'s> Desugar<'s> {
         };
 
         format!(
-            "type function __mapped_{kind}(T) local props: {{ [any]: any }} = {{}} for k, v in T:properties() do local value: any = {value} props[k] = {entry} end return types.newtable(props) end"
+            "type function __mapped_{kind}(T) local function collect(t): {{ [any]: any }} if t:is(\"intersection\") then local all = {{}} for _, c in t:components() do for k, v in collect(c) do all[k] = v end end return all end return t:properties() end local props: {{ [any]: any }} = {{}} for k, v in collect(T) do local value: any = {value} props[k] = {entry} end return types.newtable(props) end"
         )
     }
 
@@ -3823,13 +3929,21 @@ impl<'s> Desugar<'s> {
             }
 
             Expr::Array { items, span } => {
+                // An empty literal has no element type; the check artifact
+                // lets the annotation on the left decide it.
+                let cast = self.options.check && items.is_empty();
                 let std = self.std();
-                self.generate(anchor, &format!("{std}.Array.from({{"));
+                let open_text = if cast {
+                    format!("({std}.Array.from({{")
+                } else {
+                    format!("{std}.Array.from({{")
+                };
+                self.generate(anchor, &open_text);
                 let open = self.toks[span.start as usize].end;
                 let close = self.toks[span.end as usize - 1].start;
                 let children: Vec<Child<'_>> = items.iter().map(Child::Expr).collect();
                 self.stitch_between(open, close, &children);
-                self.generate(close, "})");
+                self.generate(close, if cast { "}) :: any)" } else { "})" });
             }
 
             Expr::Table { fields, span }
@@ -3842,7 +3956,8 @@ impl<'s> Desugar<'s> {
                 let obj = self.reusable(object);
                 let method = self.text_of(*name).to_string();
                 let std = self.std();
-                self.generate(anchor, &format!("{std}.bind({obj}, {obj}.{method})"));
+                let bound = self.any_cast(&format!("{std}.bind({obj}, {obj}.{method})"));
+                self.generate(anchor, &bound);
             }
 
             Expr::New {
@@ -3859,7 +3974,7 @@ impl<'s> Desugar<'s> {
                 {
                     self.check_new(name, args.as_ref(), Some(table));
                     let n = self.render_to_string(name);
-                    self.generate(anchor, &format!("{n}("));
+                    self.generate(anchor, &format!("{}(", self.raw_ctor(&n)));
                     self.expr(table);
                     self.generate(self.byte_end(table.span()), ")");
                 } else {
@@ -4037,7 +4152,7 @@ impl<'s> Desugar<'s> {
         } else if self.enums.contains_key(&n) {
             format!("{n}.is({x})")
         } else {
-            format!("getmetatable({x}) == {n}")
+            format!("getmetatable({}) == {n}", self.any_cast(&x))
         };
 
         if negated {
@@ -4061,12 +4176,64 @@ impl<'s> Desugar<'s> {
             other => self.render_to_string(other),
         };
         let temp = self.hoist_text(value, anchor);
+        let returned = self.any_cast(&temp);
         self.hoist_stmt(
-            format!("if {temp}.tag == \"Err\" then return {temp} end"),
+            format!("if {temp}.tag == \"Err\" then return {returned} end"),
             anchor,
         );
 
-        format!("{temp}._1")
+        // `_1` is `T | E` to the checker; `unwrap` is `T`. The ship
+        // artifact reads the field, since the tag was just checked.
+        if self.options.check {
+            format!("{temp}:unwrap()")
+        } else {
+            format!("{temp}._1")
+        }
+    }
+
+    /// The raw constructor the fields form calls: the class table itself
+    /// through `__call`, or in the check artifact its typed `__new`.
+    fn raw_ctor(&self, name: &str) -> String {
+        if self.options.check {
+            format!("{name}.__new")
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// A test text with every read from `path` cast to `any` in the check
+    /// artifact: across an `or`, the checker refines each side by its own
+    /// tag and cannot read the other side's fields.
+    fn cast_tests(&self, test: &str, path: &str) -> String {
+        if !self.options.check {
+            return test.to_string();
+        }
+
+        test.replace(&format!("{path}."), &format!("({path} :: any)."))
+    }
+
+    /// An access path with its root cast to `any` in the check artifact:
+    /// `_m1._1` becomes `(_m1 :: any)._1`. The ship artifact keeps it.
+    fn cast_root(&self, path: &str) -> String {
+        if !self.options.check {
+            return path.to_string();
+        }
+
+        match path.find(['.', '[']) {
+            Some(i) => format!("({} :: any){}", &path[..i], &path[i..]),
+
+            None => path.to_string(),
+        }
+    }
+
+    /// `(x :: any)` in the check artifact, `x` in the ship artifact: for
+    /// a spot where the checker cannot follow what the emit knows.
+    fn any_cast(&self, x: &str) -> String {
+        if self.options.check {
+            format!("({x} :: any)")
+        } else {
+            x.to_string()
+        }
     }
 
     /// The intrinsics: a closed set, resolved by name.
@@ -4170,7 +4337,7 @@ impl<'s> Desugar<'s> {
             let n = self.render_to_string(name);
             let fields = self.render_to_string(table);
 
-            return format!("{n}({fields})");
+            return format!("{}({fields})", self.raw_ctor(&n));
         }
 
         let ctor = self.constructor_of(name);
@@ -4493,12 +4660,21 @@ impl<'s> Desugar<'s> {
                     ChildName::Computed(e) => self.render_to_string(e),
                 };
 
-                match (*wait, self.options.wait_timeout) {
+                let call = match (*wait, self.options.wait_timeout) {
                     (true, Some(t)) => format!("{prefix}:WaitForChild({n}, {})", luau_number(t)),
 
                     (true, None) => format!("{prefix}:WaitForChild({n})"),
 
                     (false, _) => format!("{prefix}:FindFirstChild({n})"),
+                };
+
+                // The checker types the child as `Instance`, which has no
+                // `CFrame`; the source names no class, so the check
+                // artifact lets the chain continue untyped.
+                if self.options.check {
+                    format!("({call} :: any)")
+                } else {
+                    call
                 }
             }
         }
@@ -4603,6 +4779,11 @@ impl<'s> Desugar<'s> {
             .map(|f| (self.text_of(f.name).to_string(), f.default.is_some()))
             .collect();
         self.structs.insert(name.clone());
+
+        if st.generics.is_some() {
+            self.generic_types.insert(name.clone());
+        }
+
         self.struct_fields.insert(name, fields);
     }
 
@@ -6237,9 +6418,21 @@ fn apply_bounds(ty: &str, bounds: &[(String, String)]) -> String {
     let bytes = ty.as_bytes();
     let mut i = 0;
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    // Depth inside `{ }` or `< >`: a bound applies to the bare parameter
+    // only. Under a table or a generic, `{ T & Bound }` is invariant and
+    // no concrete argument would satisfy it.
+    let mut depth = 0i32;
 
     while i < bytes.len() {
-        if is_word(bytes[i]) && (i == 0 || !is_word(bytes[i - 1])) {
+        match bytes[i] {
+            b'{' | b'<' => depth += 1,
+            b'}' => depth -= 1,
+            // `>` closes a generic; the one in `->` does not.
+            b'>' if i > 0 && bytes[i - 1] != b'-' => depth -= 1,
+            _ => {}
+        }
+
+        if depth <= 0 && is_word(bytes[i]) && (i == 0 || !is_word(bytes[i - 1])) {
             let start = i;
 
             while i < bytes.len() && is_word(bytes[i]) {

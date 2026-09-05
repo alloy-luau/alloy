@@ -14,8 +14,8 @@ export type Result<T, E> = {
 	unwrap: (self: any) -> T,
 	expect: (self: any, message: string) -> T,
 	unwrap_or: (self: any, default: T) -> T,
-	map: (self: any, f: (T) -> any) -> any,
-	map_err: (self: any, f: (E) -> any) -> any,
+	map: (self: any, f: (T) -> any) -> Result<any, E>,
+	map_err: (self: any, f: (E) -> any) -> Result<T, any>,
 	is_ok: (self: any) -> boolean,
 	is_err: (self: any) -> boolean,
 	ok: (self: any) -> T?,
@@ -25,11 +25,13 @@ export type Result<T, E> = {
 local Result = {}
 Result.__index = Result
 
-local function Ok<T, E>(value: T): Result<T, E>
+-- The other side is `any`, so an `Ok(1)` fits `Result<number, string>`:
+-- a generic left open would be `unknown`, and Result is invariant.
+local function Ok<T>(value: T): Result<T, any>
 	return table.freeze(setmetatable({ tag = "Ok", _1 = value }, Result)) :: any
 end
 
-local function Err<T, E>(err: E, trace: string?): Result<T, E>
+local function Err<E>(err: E, trace: string?): Result<any, E>
 	return table.freeze(setmetatable({ tag = "Err", _1 = err, trace = trace }, Result)) :: any
 end
 
@@ -85,7 +87,7 @@ end
 
 --- The one bridge to throwing APIs. The traceback is captured where the
 --- error happened and stored on the Err.
-function Result.pcall(f, ...)
+function Result.pcall(f: (...any) -> ...any, ...: any): Result<any, string>
 	local packed = table.pack(xpcall(f, function(e)
 		return { err = e, trace = debug.traceback(tostring(e), 2) }
 	end, ...))
@@ -102,7 +104,7 @@ alloy.Err = Err
 
 --- `try do ... end`: a block that returns Ok on a plain return and passes a
 --- Result through as is.
-function alloy.try_block(f: () -> any)
+function alloy.try_block(f: () -> any): Result<any, any>
 	local value = f()
 	if type(value) == "table" and getmetatable(value) == Result then
 		return value
@@ -175,7 +177,9 @@ local function settle(self, state, value, trace)
 end
 
 --- Runs `f` on a new thread and returns its Future.
-function alloy.future<T>(f: (...any) -> T, ...: any): Future<T>
+-- `...T` takes a body that returns nothing as well as one that returns
+-- a value, so an async function with no return type is a `Future`.
+function alloy.future<T>(f: (...any) -> ...T, ...: any): Future<T>
 	local self = new_future()
 	local args = table.pack(...)
 	task_lib.spawn(function()
@@ -238,7 +242,9 @@ end
 
 --- `await`: a Future, or anything with `andThen`. Yields until settled,
 --- returns the value, rethrows a stored error with its trace.
-function alloy.await<T>(target: Future<T>): T
+-- The extra values type as `any`: a `wait` on a remote settles with the
+-- whole payload, and `local a, b = await f` is then no error.
+function alloy.await<T>(target: Future<T>): (T, ...any)
 	if type(target) == "table" and getmetatable(target) == Future then
 		if target.state == PENDING then
 			local thread = coroutine.running()
@@ -274,7 +280,7 @@ function alloy.await<T>(target: Future<T>): T
 end
 
 --- `try await`: a failed Future becomes an Err instead of a throw.
-function alloy.try_await(target)
+function alloy.try_await(target: any): Result<any, any>
 	local ok, value = pcall(alloy.await, target)
 	if ok then
 		return Ok(value)
@@ -292,7 +298,7 @@ function Future.all<T>(futures: { Future<T> }): Future<{ T }>
 	end) :: any) :: Future<{ T }>
 end
 
-function Future.race<T>(futures: { Future<T> }): Future<T>
+function Future.race(futures: any): Future<any>
 	local winner = new_future()
 	for _, f in futures do
 		f:andThen(function(v)
@@ -301,10 +307,10 @@ function Future.race<T>(futures: { Future<T> }): Future<T>
 			settle(winner, REJECTED, e, nil)
 		end)
 	end
-	return (winner :: any) :: Future<T>
+	return (winner :: any) :: Future<any>
 end
 
-function Future.any<T>(futures: { Future<T> }): Future<T>
+function Future.any(futures: any): Future<any>
 	local winner = new_future()
 	local failed = 0
 	for _, f in futures do
@@ -317,7 +323,7 @@ function Future.any<T>(futures: { Future<T> }): Future<T>
 			end
 		end)
 	end
-	return (winner :: any) :: Future<T>
+	return (winner :: any) :: Future<any>
 end
 
 function Future.all_settled<T>(futures: { Future<T> }): Future<{ Result<T, any> }>
@@ -427,7 +433,7 @@ function Array.last(xs)
 	return xs[#xs]
 end
 
-function Array.map(xs, f)
+function Array.map<T, U>(xs: Array<T> | { T }, f: (T, number) -> U): Array<U>
 	local out = table.create(#xs)
 	for i, v in ipairs(xs) do
 		out[i] = f(v, i)
@@ -634,9 +640,24 @@ export type Set<T> = {
 -- Operator traits, as the shape a bound `T: Display` names.
 -- The mapped types of the language. A type function builds each shape,
 -- so the analyzer sees a real table type, not an alias it cannot open.
+-- The properties of a table type, or of every part of an intersection
+-- merged, so a mapped type over `A & B` sees both.
+type function __mapped_props(T)
+	if T:is("intersection") then
+		local all: { [any]: any } = {}
+		for _, c in T:components() do
+			for k, v in __mapped_props(c) do
+				all[k] = v
+			end
+		end
+		return all
+	end
+	return T:properties()
+end
+
 type function __mapped_optional(T)
 	local props: { [any]: any } = {}
-	for k, v in T:properties() do
+	for k, v in __mapped_props(T) do
 		local value: any = types.unionof((v.read or v.write) :: any, types.singleton(nil))
 		props[k] = { read = value, write = value }
 	end
@@ -645,7 +666,7 @@ end
 
 type function __mapped_read(T)
 	local props: { [any]: any } = {}
-	for k, v in T:properties() do
+	for k, v in __mapped_props(T) do
 		local value: any = (v.read or v.write) :: any
 		props[k] = { read = value }
 	end
@@ -654,7 +675,7 @@ end
 
 type function __mapped_write(T)
 	local props: { [any]: any } = {}
-	for k, v in T:properties() do
+	for k, v in __mapped_props(T) do
 		local value: any = (v.read or v.write) :: any
 		props[k] = { write = value }
 	end
@@ -668,16 +689,16 @@ export type Readonly<T> = __mapped_read<T>
 --- Every field of `T`, write only: `{ [K in keyof T]: write T[K] }`.
 export type Sink<T> = __mapped_write<T>
 
-export type Display = { to_string: (self: any) -> string }
-export type Debug = { debug: (self: any) -> string }
-export type Clone<T = any> = { clone: (self: any) -> T }
-export type Eq = { eq: (self: any, other: any) -> boolean }
-export type Ord = { lt: (self: any, other: any) -> boolean, le: (self: any, other: any) -> boolean }
-export type Add<T = any> = { add: (self: any, other: any) -> T }
-export type Sub<T = any> = { sub: (self: any, other: any) -> T }
-export type Mul<T = any> = { mul: (self: any, other: any) -> T }
-export type Div<T = any> = { div: (self: any, other: any) -> T }
-export type Serialize = { serialize: (self: any) -> any }
+export type Display = { read to_string: (self: any) -> string }
+export type Debug = { read debug: (self: any) -> string }
+export type Clone<T = any> = { read clone: (self: any) -> T }
+export type Eq = { read eq: (self: any, other: any) -> boolean }
+export type Ord = { read lt: (self: any, other: any) -> boolean, read le: (self: any, other: any) -> boolean }
+export type Add<T = any> = { read add: (self: any, other: any) -> T }
+export type Sub<T = any> = { read sub: (self: any, other: any) -> T }
+export type Mul<T = any> = { read mul: (self: any, other: any) -> T }
+export type Div<T = any> = { read div: (self: any, other: any) -> T }
+export type Serialize = { read serialize: (self: any) -> any }
 
 local Set = {}
 Set.__index = Set
@@ -799,7 +820,7 @@ export type Signal<T...> = {
 
 --- Anything with `Connect` or `connect`: a Signal, an RBXScriptSignal, or a
 --- third party signal.
-export type Signalish<T...> = {
+export type Signalish<T...> = RBXScriptSignal<T...> | Signal<T...> | {
 	Connect: (self: any, handler: (T...) -> ()) -> any,
 } | {
 	connect: (self: any, handler: (T...) -> ()) -> any,
@@ -1032,7 +1053,7 @@ alloy.Signal = Signal
 -- ---------------------------------------------------------------------------
 
 --- `x in t`, dispatched on the container.
-function alloy.contains(container, value)
+function alloy.contains(container: any, value: any): boolean
 	if type(container) == "string" then
 		return string.find(container :: string, tostring(value), 1, true) ~= nil
 	end
@@ -1167,7 +1188,7 @@ function alloy.attribute(name: string, targets, params)
 end
 
 --- Attributes on a struct or enum, from its declaration.
-function alloy.attrs(target, data)
+function alloy.attrs(target: any, data: any)
 	target.__attrs = data
 	return target
 end
@@ -1187,7 +1208,7 @@ local function lookup(data, attr)
 	return data[attr.name]
 end
 
-function Attributes.get(target, attr)
+function Attributes.get(target: any, attr: any): any
 	if type(target) == "function" then
 		return lookup(attached[target], attr)
 	end
@@ -1195,17 +1216,17 @@ function Attributes.get(target, attr)
 	return lookup(a and a.own, attr)
 end
 
-function Attributes.field(struct, field: string, attr)
+function Attributes.field(struct: any, field: string, attr: any): any
 	local a = type(struct) == "table" and rawget(struct, "__attrs")
 	return lookup(a and a.fields and a.fields[field], attr)
 end
 
-function Attributes.variant(enum, variant: string, attr)
+function Attributes.variant(enum: any, variant: string, attr: any): any
 	local a = type(enum) == "table" and rawget(enum, "__attrs")
 	return lookup(a and a.variants and a.variants[variant], attr)
 end
 
-function Attributes.of(target)
+function Attributes.of(target: any): any
 	if type(target) == "function" then
 		return attached[target] or {}
 	end
@@ -1214,10 +1235,10 @@ function Attributes.of(target)
 end
 
 --- Iterates the fields of a struct that carry an attribute.
-function Attributes.fields(struct, attr)
+function Attributes.fields(struct: any, attr: any)
 	local a = type(struct) == "table" and rawget(struct, "__attrs")
 	local fields = (a and a.fields) or {}
-	local out = {}
+	local out: { [string]: any } = {}
 	for name, data in pairs(fields) do
 		local v = data[attr.name]
 		if v ~= nil then
@@ -1243,10 +1264,10 @@ end
 --- What `delete` accepts: an Instance, a connection, or any table with
 --- one of the four methods.
 export type Deletable =
-	{ Disconnect: (self: any) -> () }
-	| { disconnect: (self: any) -> () }
-	| { Destroy: (self: any) -> () }
-	| { destroy: (self: any) -> () }
+	{ read Disconnect: (self: any) -> () }
+	| { read disconnect: (self: any) -> () }
+	| { read Destroy: (self: any) -> () }
+	| { read destroy: (self: any) -> () }
 
 --- `delete x`. A connection disconnects, anything else destroys; the
 --- Roblox spelling wins over the lowercase one, so a user class with
@@ -1324,7 +1345,23 @@ local function remote_instance(name: string, class: string)
 	return inst
 end
 
-function alloy.remote(spec)
+--- The object a `remote` declaration binds. `fire` and `call` take the
+--- player first on the server; `on` takes the handler; `wait` yields
+--- for the next event's payload.
+export type Remote = {
+	spec: any,
+	instance: Instance?,
+	fire: (...any) -> (),
+	fire_all: (...any) -> (),
+	fire_except: (...any) -> (),
+	call: (...any) -> Future<any>,
+	on: (handler: (...any) -> ...any) -> any,
+	once: (handler: (...any) -> ...any) -> any,
+	on_ratelimited: (handler: (...any) -> ...any) -> any,
+	wait: (...any) -> Future<any>,
+}
+
+function alloy.remote(spec: any): Remote
 	local is_function = spec.kind == "function"
 	local inst = remote_instance(spec.name, if is_function then "RemoteFunction" else "RemoteEvent")
 	local remote = { spec = spec, instance = inst }
@@ -1454,7 +1491,7 @@ function alloy.remote(spec)
 		end)
 	end
 
-	return remote
+	return (remote :: any) :: Remote
 end
 
 return table.freeze(alloy)

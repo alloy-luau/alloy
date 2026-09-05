@@ -398,7 +398,7 @@ fn print_diagnostics(input: &Path, report: &alloy::build::Report) {
                 line,
                 col,
                 Level::Error,
-                None,
+                alloy::docs::code_for(&d.message),
                 &d.message
             )
         );
@@ -563,7 +563,14 @@ fn lint_one(path: &str, lint_config: &LintConfig, summary: bool, args: &[String]
         let (line, col) = line_col(&source, d.start as usize);
         eprintln!(
             "{}",
-            p.diagnostic(path, line, col, Level::Error, None, &d.message)
+            p.diagnostic(
+                path,
+                line,
+                col,
+                Level::Error,
+                alloy::docs::code_for(&d.message),
+                &d.message
+            )
         );
     }
 
@@ -654,8 +661,8 @@ fn print_lints(
                 line,
                 col,
                 shown,
-                Some(l.name),
-                &l.message
+                Some(alloy::docs::LINT_CODE),
+                &format!("{}: {}", l.name, l.message)
             )
         );
     }
@@ -846,7 +853,14 @@ fn build_one(path: &str, args: &[String]) -> ExitCode {
         let (line, col) = line_col(&source, d.start as usize);
         eprintln!(
             "{}",
-            p.diagnostic(path, line, col, Level::Error, None, &d.message)
+            p.diagnostic(
+                path,
+                line,
+                col,
+                Level::Error,
+                alloy::docs::code_for(&d.message),
+                &d.message
+            )
         );
     }
 

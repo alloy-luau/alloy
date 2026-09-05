@@ -14,6 +14,7 @@ which `alloy.code-workspace` in that folder opens as a VS Code workspace:
 | `alloy-luau/alloy`                | `crates`     | This one: the compiler, the server, the std |
 | `alloy-luau/extensions`           | `extensions` | The VS Code extension, and Zed to come      |
 | `alloy-luau/alloy-luau.github.io` | `docs`       | The website: landing page and the book      |
+| `alloy-luau/examples`             | `examples`   | One file per feature, and the test project  |
 
 Inside this repository:
 
@@ -24,11 +25,11 @@ Inside this repository:
 | `luaux`         | luaux 0.2.0 fork for `.alx` markup | `alloy-luaux`    | none, path only  |
 | `alloy-lsp`     | Language server, a larvae-lsp fork | `alloy-luau-lsp` | `alloy-lsp-v`    |
 | `std`           | The runtime module and its specs   |                  |                  |
-| `examples`      | One file per feature; the tests    |                  |                  |
 
 `scripts/build.sh` builds the crates and, when the extensions repository
 is checked out beside this one, the extension too. `scripts/docs-content.sh`
-writes the website's reference data into `../docs`.
+writes the website's reference data into `../docs`. The tests compile
+every file of `../examples`, so that repository must be beside this one.
 
 ## Develop
 

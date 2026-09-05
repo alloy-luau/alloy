@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn formatting_is_idempotent_on_the_examples() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
 
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();

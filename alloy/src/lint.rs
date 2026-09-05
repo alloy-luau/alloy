@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn the_examples_carry_no_default_lints() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
         let config = LintConfig::default();
 
         for entry in std::fs::read_dir(dir).unwrap().flatten() {

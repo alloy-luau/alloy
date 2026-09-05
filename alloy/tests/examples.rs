@@ -24,7 +24,7 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn every_example_compiles_clean() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut files = Vec::new();
     sources(&root, &mut files);
     files.sort();
@@ -72,7 +72,7 @@ fn every_example_compiles_clean() {
 /// itself: a second compile changes nothing and reports nothing.
 #[test]
 fn every_output_compiles_to_itself() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut files = Vec::new();
     sources(&root, &mut files);
     let mut failures = Vec::new();
@@ -120,7 +120,7 @@ fn every_output_compiles_to_itself() {
 /// dropped, and the file cut short at many points.
 #[test]
 fn damaged_examples_never_panic() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut files = Vec::new();
     sources(&root, &mut files);
     let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;

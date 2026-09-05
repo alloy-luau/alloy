@@ -1,7 +1,8 @@
-# Test project for the compiler. The examples are the sources, so
-# `alloy build` from anywhere in the repo compiles all of them into build/.
+# Test project for the compiler. The examples repository, checked out
+# beside this one, holds the sources, so `alloy build` from anywhere in
+# this repo compiles all of them into build/.
 [build]
-in = "examples"
+in = "../examples"
 out = "build"
 exclude = []
 clean = true

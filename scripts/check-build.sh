@@ -50,8 +50,8 @@ lines=0
 for f in "${files[@]}"; do
   rel="${f#"$dir"/}"
   case "$rel" in alloy.luau) continue ;; esac
-  src="$root/examples/${rel%.luau}.aly"
-  [ -f "$src" ] || src="$root/examples/${rel%.luau}.alx"
+  src="$root/../examples/${rel%.luau}.aly"
+  [ -f "$src" ] || src="$root/../examples/${rel%.luau}.alx"
   [ -f "$src" ] || continue
   a=$(wc -l <"$src"); b=$(wc -l <"$f")
   if [ "$a" != "$b" ]; then

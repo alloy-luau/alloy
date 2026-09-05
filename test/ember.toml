@@ -1,8 +1,0 @@
-# Manifest for this project. See https://luaupm.com/docs
-# Add dependencies with `embr add <scope/name>`, then run `embr install`.
-
-[dependencies]
-jecs = { name = "ukendio/jecs", version = "^", index = "wally" }
-
-[indices]
-wally = "https://github.com/UpliftGames/wally-index"

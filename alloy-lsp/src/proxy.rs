@@ -3540,12 +3540,18 @@ fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
     }
 }
 
-/// The targets a declared attribute's hover names: `On field, struct.`
+/// The targets a declared attribute's hover names:
+/// `**Applies to** \`field\` · \`struct\``.
 fn declared_attribute_targets(hover: &str) -> Vec<&str> {
     hover
         .lines()
-        .find_map(|l| l.strip_prefix("On ").and_then(|r| r.strip_suffix('.')))
-        .map(|list| list.split(", ").collect())
+        .find_map(|l| l.strip_prefix("**Applies to** "))
+        .map(|list| {
+            list.split(" · ")
+                .map(|t| t.trim().trim_matches('`'))
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -3847,6 +3853,13 @@ mod tests {
         let src = "import * as M from \"./inventory\"\nlocal x = 1\n";
         assert_eq!(quoted_span_on_line(src, 0), Some((19, 32)));
         assert_eq!(quoted_span_on_line(src, 1), None);
+    }
+
+    #[test]
+    fn a_declared_attribute_names_its_targets_in_the_hover() {
+        let hover = "```alloy\n@icon(asset: string)\n```\n\n**Applies to** `struct` · `enum`";
+        assert_eq!(declared_attribute_targets(hover), vec!["struct", "enum"]);
+        assert!(declared_attribute_targets("```alloy\nlocal x\n```").is_empty());
     }
 
     #[test]

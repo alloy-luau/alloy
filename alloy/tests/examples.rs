@@ -25,6 +25,14 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn every_example_compiles_clean() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+
+    // The examples are their own repository beside this one; a
+    // checkout without it skips the test and says so.
+    if !root.is_dir() {
+        eprintln!("skipped: no examples checkout at {}", root.display());
+
+        return;
+    }
     let mut files = Vec::new();
     sources(&root, &mut files);
     files.sort();
@@ -73,6 +81,14 @@ fn every_example_compiles_clean() {
 #[test]
 fn every_output_compiles_to_itself() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+
+    // The examples are their own repository beside this one; a
+    // checkout without it skips the test and says so.
+    if !root.is_dir() {
+        eprintln!("skipped: no examples checkout at {}", root.display());
+
+        return;
+    }
     let mut files = Vec::new();
     sources(&root, &mut files);
     let mut failures = Vec::new();
@@ -121,6 +137,14 @@ fn every_output_compiles_to_itself() {
 #[test]
 fn damaged_examples_never_panic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+
+    // The examples are their own repository beside this one; a
+    // checkout without it skips the test and says so.
+    if !root.is_dir() {
+        eprintln!("skipped: no examples checkout at {}", root.display());
+
+        return;
+    }
     let mut files = Vec::new();
     sources(&root, &mut files);
     let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;

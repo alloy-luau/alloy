@@ -15,9 +15,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The tests compile every file of the examples repository, which
-      # sits beside this one in the workspace layout.
-      - name: Check out the examples beside this repository
-        run: git clone --depth 1 https://github.com/alloy-luau/examples ../examples
+      # sits beside this one in the workspace layout. It is private, so
+      # the checkout takes EXAMPLES_TOKEN, a fine-grained token with
+      # read access to it; without one the example tests skip.
+      - name: Check out the examples
+        id: examples
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: alloy-luau/examples
+          token: ${{ secrets.EXAMPLES_TOKEN || github.token }}
+          path: examples-repo
+      - name: Put the examples beside this repository
+        if: steps.examples.outcome == 'success'
+        run: ln -s "$GITHUB_WORKSPACE/examples-repo" ../examples
+      - name: Warn when the examples are missing
+        if: steps.examples.outcome != 'success'
+        run: echo "::warning::no access to alloy-luau/examples; add the EXAMPLES_TOKEN secret or make the repository public. The example tests skip."
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -29,6 +43,7 @@ jobs:
       - name: Test
         run: cargo test --workspace
       - name: Build the examples and hold them to the formatter
+        if: steps.examples.outcome == 'success'
         run: |
           cargo run -q -- check
           cargo run -q -- fmt --check ../examples

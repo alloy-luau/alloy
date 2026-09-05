@@ -755,6 +755,14 @@ mod tests {
     fn formatting_is_idempotent_on_the_examples() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
 
+        // The examples are their own repository beside this one; a
+        // checkout without it skips the test and says so.
+        if !dir.is_dir() {
+            eprintln!("skipped: no examples checkout at {}", dir.display());
+
+            return;
+        }
+
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();
 

@@ -4552,7 +4552,18 @@ impl<'s> Desugar<'s> {
                     let name = self.name_prefix(&mut inner, &mut guard, inner_simple);
                     inner_simple = false;
                     pending_guard = timed_waits && matches!(step, Step::Child { wait: true, .. });
-                    inner = self.apply(&name, &step);
+                    // `f?()` on a field of an optional function type: the new
+                    // solver loses the field's type under an earlier `== n`
+                    // refinement of a metatable-typed `self`, and reports an
+                    // error type at the call. The check artifact calls
+                    // through `any`; the guard on the value stays typed.
+                    let callee =
+                        if self.options.check && matches!(step, Step::Call { method: None, .. }) {
+                            format!("({name} :: any)")
+                        } else {
+                            name
+                        };
+                    inner = self.apply(&callee, &step);
                 }
 
                 Link::NonNil { span } => {

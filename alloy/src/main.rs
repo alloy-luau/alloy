@@ -15,6 +15,11 @@ mod ui;
 
 use ui::{Level, Painter};
 
+/// The version of this binary, for `alloy self update`.
+pub fn alloy_version() -> &'static str {
+    alloy::VERSION
+}
+
 /// A wrong invocation points at the help screen and fails.
 fn usage() -> ExitCode {
     let p = Painter::for_stderr();
@@ -155,7 +160,10 @@ fn positionals(args: &[String]) -> Vec<String> {
 
     while i < args.len() {
         match args[i].as_str() {
-            "--out" | "--config" | "--wait-timeout" | "--explain" => i += 2,
+            // Everything after `--` goes to another tool.
+            "--" => break,
+
+            "--out" | "--config" | "--wait-timeout" | "--explain" | "--filter" => i += 2,
 
             "-W" => i += 1,
 
@@ -668,6 +676,26 @@ fn flux_cmd(args: &[String]) -> ExitCode {
         return doc_cmd::run(&[name.to_string()]);
     }
 
+    if args.iter().any(|a| a == "--watch") {
+        let roots = match project(args) {
+            Ok((root, config)) => {
+                vec![root.join(&config.build.input), root.join(config::FILE_NAME)]
+            }
+
+            Err(e) => {
+                fail(&e);
+                return ExitCode::FAILURE;
+            }
+        };
+
+        return watch_loop(&roots, || flux_once(args));
+    }
+
+    flux_once(args)
+}
+
+/// One run of `alloy flux`.
+fn flux_once(args: &[String]) -> ExitCode {
     let (flags, args) = split_level_flags(args);
     let args = &args[..];
     let positional = positionals(args);
@@ -807,9 +835,52 @@ fn find_lest() -> Option<PathBuf> {
 /// source with a `@test` under `[test] out`. `--check` writes nothing
 /// and fails when a spec would change; `--run` runs lest afterwards.
 fn test_cmd(args: &[String]) -> ExitCode {
+    if args.iter().any(|a| a == "--watch" || a == "-W") {
+        let roots = match project(args) {
+            Ok((root, config)) => {
+                vec![root.join(&config.build.input), root.join(config::FILE_NAME)]
+            }
+
+            Err(e) => {
+                fail(&e);
+                return ExitCode::FAILURE;
+            }
+        };
+
+        return watch_loop(&roots, || test_once(args));
+    }
+
+    test_once(args)
+}
+
+/// The arguments for lest: `--coverage` and `--filter <text>` by their
+/// names here, and everything after `--` as given.
+fn lest_args(args: &[String], suite: &str) -> Vec<String> {
+    let mut out = vec![suite.to_string()];
+
+    if args.iter().any(|a| a == "--coverage") {
+        out.push("--coverage".to_string());
+    }
+
+    if let Some(text) = option(args, "--filter") {
+        out.push("--filter".to_string());
+        out.push(text.to_string());
+    }
+
+    if let Some(i) = args.iter().position(|a| a == "--") {
+        out.extend(args[i + 1..].iter().cloned());
+    }
+
+    out
+}
+
+/// One run of `alloy test`.
+fn test_once(args: &[String]) -> ExitCode {
     let positional = positionals(args);
     let check_only = args.iter().any(|a| a == "--check");
-    let run = args.iter().any(|a| a == "--run");
+    let run = args.iter().any(|a| a == "--run")
+        || args.iter().any(|a| a == "--coverage")
+        || option(args, "--filter").is_some();
     let (root, mut config) = match project(args) {
         Ok(p) => p,
 
@@ -1001,7 +1072,7 @@ fn test_cmd(args: &[String]) -> ExitCode {
 
     match std::process::Command::new(lest)
         .current_dir(&root)
-        .arg(&config.test.suite)
+        .args(lest_args(args, &config.test.suite))
         .status()
     {
         Ok(status) if status.success() => ExitCode::SUCCESS,

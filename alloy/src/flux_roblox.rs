@@ -234,8 +234,15 @@ impl<'s> Scan<'s> {
 mod tests {
     use crate::lint::apply_fixes;
 
+    /// The lints of a source, without `unused_variable`: the sources
+    /// here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        crate::compile(src).unwrap().lints
+        crate::compile(src)
+            .unwrap()
+            .lints
+            .into_iter()
+            .filter(|l| l.name != "unused_variable")
+            .collect()
     }
 
     fn fixed(src: &str) -> String {

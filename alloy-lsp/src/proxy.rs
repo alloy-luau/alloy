@@ -39,6 +39,8 @@ struct Pending {
     position: Option<(u32, u32)>,
     /// The character that triggered a completion, when one did.
     trigger: Option<String>,
+    /// The source range of the request, for code actions.
+    range: Option<((u32, u32), (u32, u32))>,
 }
 
 /// A question the server asked the editor.
@@ -162,6 +164,99 @@ impl State {
         }
 
         diagnostics
+    }
+
+    /// The code actions of the lints: a quick fix per rewrite whose lint
+    /// touches the range, each tied to its diagnostic so the editor's
+    /// light bulb finds it, and `source.fixAll` for the whole file.
+    fn lint_actions(&self, uri: &str, range: ((u32, u32), (u32, u32))) -> Vec<Value> {
+        let mut actions = Vec::new();
+        let Some(doc) = self.docs.get(uri) else {
+            return actions;
+        };
+        let Some(out) = &doc.output else {
+            return actions;
+        };
+        let lint_config = self.lint_config();
+        let ((from_line, _), (to_line, _)) = range;
+        let mut all_edits: Vec<Value> = Vec::new();
+
+        for l in &out.lints {
+            let Some(fix) = &l.fix else { continue };
+
+            if alloy::lint::level_of(&lint_config, l.name) == alloy::lint::Level::Allow {
+                continue;
+            }
+
+            let (sl, sc) = position_of(&doc.source, fix.start as usize);
+            let (el, ec) = position_of(&doc.source, fix.end as usize);
+            let edit = json!({
+                "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                "newText": fix.replacement,
+            });
+            all_edits.push(edit.clone());
+
+            let (ll, lc) = position_of(&doc.source, l.start as usize);
+            let (le, lec) = position_of(&doc.source, l.end.max(l.start) as usize);
+
+            if le < from_line || ll > to_line {
+                continue;
+            }
+
+            let one_line: String = fix
+                .replacement
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let shown = if one_line.chars().count() > 40 {
+                format!("{}…", one_line.chars().take(40).collect::<String>())
+            } else {
+                one_line
+            };
+            actions.push(json!({
+                "title": format!("Rewrite as `{shown}` ({})", l.name),
+                "kind": "quickfix",
+                "isPreferred": true,
+                "diagnostics": [{
+                    "range": { "start": { "line": ll, "character": lc }, "end": { "line": le, "character": lec } },
+                    "severity": 2,
+                    "source": "Alloy",
+                    "code": alloy::docs::LINT_CODE,
+                    "message": format!("{}: {}\n`alloy flux --fix` rewrites it.", l.name, l.message),
+                }],
+                "edit": { "changes": { uri: [edit] } },
+            }));
+        }
+
+        if all_edits.len() > 1 {
+            // Two rewrites that overlap keep the first, as `--fix` does.
+            let mut kept: Vec<Value> = Vec::new();
+            let mut last_end: Option<(u64, u64)> = None;
+
+            for e in &all_edits {
+                let start = (
+                    e["range"]["start"]["line"].as_u64().unwrap_or(0),
+                    e["range"]["start"]["character"].as_u64().unwrap_or(0),
+                );
+                let end = (
+                    e["range"]["end"]["line"].as_u64().unwrap_or(0),
+                    e["range"]["end"]["character"].as_u64().unwrap_or(0),
+                );
+
+                if last_end.is_none_or(|l| l <= start) {
+                    kept.push(e.clone());
+                    last_end = Some(end);
+                }
+            }
+
+            actions.push(json!({
+                "title": format!("Apply every Alloy rewrite in this file ({})", kept.len()),
+                "kind": "source.fixAll",
+                "edit": { "changes": { uri: kept } },
+            }));
+        }
+
+        actions
     }
 
     /// Completion items for the extensions on a primitive. The child does
@@ -347,6 +442,10 @@ impl State {
             "Partial",
             "Readonly",
             "Sink",
+            "Queue",
+            "Heap",
+            "Scope",
+            "Iter",
         ] {
             push(
                 name,
@@ -1348,6 +1447,7 @@ impl Server {
             .pointer("/params/context/triggerCharacter")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let range = message.pointer("/params/range").and_then(range_of);
 
         if let Some(id) = message.get("id") {
             let key = id_key(id);
@@ -1358,6 +1458,7 @@ impl Server {
                     ctx: ctx.clone(),
                     position,
                     trigger,
+                    range,
                 },
             );
         }
@@ -1935,11 +2036,20 @@ impl Server {
             edit_capabilities(&mut message);
         }
 
-        let (method, ctx, position, trigger) = match pending {
-            Some(p) => (p.method, p.ctx, p.position, p.trigger),
+        let (method, ctx, position, trigger, range) = match pending {
+            Some(p) => (p.method, p.ctx, p.position, p.trigger, p.range),
 
-            None => (String::new(), None, None, None),
+            None => (String::new(), None, None, None, None),
         };
+
+        // The child answers null when it has no action; the Alloy
+        // rewrites need a list to join.
+        if method == "textDocument/codeAction"
+            && ctx.is_some()
+            && message.get("result").is_some_and(Value::is_null)
+        {
+            message["result"] = json!([]);
+        }
 
         if let Some(result) = message.get_mut("result") {
             // Hints and tokens in generated text describe temps: gone
@@ -2092,6 +2202,17 @@ impl Server {
                         && let Some(items) = result.get_mut("items").and_then(Value::as_array_mut)
                     {
                         items.extend(st.alloy_diagnostics(uri));
+                    }
+                }
+
+                // The rewrites of the lints in the range, as quick fixes,
+                // and one action that applies every rewrite of the file.
+                "textDocument/codeAction" => {
+                    if let Some(uri) = &ctx
+                        && let Some(range) = range
+                        && let Some(actions) = result.as_array_mut()
+                    {
+                        actions.extend(st.lint_actions(uri, range));
                     }
                 }
 
@@ -3701,6 +3822,18 @@ fn edit_capabilities(message: &mut Value) {
 
     // The proxy formats `.aly` itself, with `alloy fmt`.
     caps.insert("documentFormattingProvider".into(), Value::Bool(true));
+
+    // The lints' rewrites are code actions, whatever the child offers.
+    let kinds = json!({ "codeActionKinds": ["quickfix", "source.fixAll"] });
+    match caps.get_mut("codeActionProvider") {
+        Some(Value::Object(existing)) => {
+            existing.insert("codeActionKinds".into(), kinds["codeActionKinds"].clone());
+        }
+
+        _ => {
+            caps.insert("codeActionProvider".into(), kinds);
+        }
+    }
 
     if let Some(Value::Object(tokens)) = caps.get_mut("semanticTokensProvider") {
         tokens.remove("range");

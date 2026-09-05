@@ -22,6 +22,8 @@ pub struct CheckSource {
     pub source: String,
     pub check: String,
     pub map: SpanMap,
+    /// One-based lines where `unused_variable` fired.
+    pub unused_lines: Vec<usize>,
 }
 
 /// One report of the checker, on a source.
@@ -383,6 +385,12 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         };
 
+        // `unused_variable` reports the plain cases; the checker's
+        // report on the same line would say it twice.
+        if kind == "LocalUnused" && f.unused_lines.contains(&mapped.0) {
+            continue;
+        }
+
         analysis.diagnostics.push(TypeDiag {
             rel: f.rel.clone(),
             line: mapped.0,
@@ -556,6 +564,7 @@ mod tests {
             source: src.to_string(),
             check: out.check.clone(),
             map: out.map,
+            unused_lines: Vec::new(),
         };
         assert_eq!(map_position(&f, 1, 19, true, "Expected"), Some((1, 19)));
         let silenced = CheckSource {

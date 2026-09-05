@@ -413,8 +413,15 @@ impl<'s> Scan<'s> {
 mod tests {
     use crate::lint::{Thresholds, apply_fixes};
 
+    /// The lints of a source, without `unused_variable`: the sources
+    /// here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        crate::compile(src).unwrap().lints
+        crate::compile(src)
+            .unwrap()
+            .lints
+            .into_iter()
+            .filter(|l| l.name != "unused_variable")
+            .collect()
     }
 
     fn fixed(src: &str) -> String {
@@ -445,7 +452,10 @@ mod tests {
             .lints
             .iter()
             .map(|l| l.name)
-            .filter(|n| crate::lint::level_of(&config, n) != crate::lint::Level::Allow)
+            .filter(|n| {
+                crate::lint::level_of(&config, n) != crate::lint::Level::Allow
+                    && *n != "unused_variable"
+            })
             .collect()
     }
 

@@ -652,3 +652,67 @@ fn hover_completion_and_extensions() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A lint with a rewrite is a quick fix, and the file gets a `source.fixAll`.
+#[test]
+fn code_actions_offer_the_lint_rewrites() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-actions-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "local p = workspace\nlocal n = p and p.Name\nlocal q = math.floor(#n / 2)\nprint(n, q)\n";
+    let file = dir.join("fix.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    let actions = s.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 5 } },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    let list = actions.as_array().cloned().unwrap_or_default();
+    let titles: Vec<String> = list
+        .iter()
+        .filter_map(|a| a["title"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.contains("manual_safe_access")),
+        "{titles:?}"
+    );
+    // The floor division sits on line 2, outside the range.
+    assert!(
+        !titles.iter().any(|t| t.contains("manual_floor_div")),
+        "{titles:?}"
+    );
+
+    let fix = list
+        .iter()
+        .find(|a| a["title"].as_str().is_some_and(|t| t.contains("manual_safe_access")))
+        .unwrap();
+    assert_eq!(fix["kind"], "quickfix");
+    let edit = &fix["edit"]["changes"][&uri][0];
+    assert_eq!(edit["newText"], "p?");
+    assert_eq!(edit["range"]["start"]["line"], 1);
+
+    let all = list
+        .iter()
+        .find(|a| a["kind"] == "source.fixAll")
+        .expect("a fix-all action");
+    assert_eq!(all["edit"]["changes"][&uri].as_array().unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

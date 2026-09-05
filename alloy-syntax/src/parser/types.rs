@@ -215,6 +215,10 @@ impl<'a> Parser<'a> {
                             | "Partial"
                             | "Readonly"
                             | "Sink"
+                            | "Queue"
+                            | "Heap"
+                            | "Scope"
+                            | "Iter"
                     ) && self.text_at(1) != ".";
                     let i = self.bump();
 

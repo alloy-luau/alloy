@@ -3,6 +3,8 @@
 //! twice, an `if` with two identical branches, a `return` written as an
 //! `if`. The names and levels sit in `lint::LINTS`.
 
+use alloy_syntax::lexer::TokKind;
+
 use crate::flux_scan::{CLOSERS, IfParts, Scan};
 use crate::lint::Lint;
 
@@ -21,7 +23,21 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.redundant_return(&mut out);
     s.local_then_return(&mut out);
     s.numeric_for_index(&mut out);
+    s.unused_variable(&mut out);
+    s.naming(&mut out);
     out
+}
+
+/// `playerCount`: starts lowercase, has a capital, has no underscore.
+fn is_camel_case(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && name.chars().any(|c| c.is_ascii_uppercase())
+        && !name.contains('_')
+}
+
+/// `PlayerState`: starts with a capital and has no underscore.
+fn is_pascal_case(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && !name.contains('_')
 }
 
 impl<'s> Scan<'s> {
@@ -635,12 +651,237 @@ impl<'s> Scan<'s> {
     }
 }
 
+impl<'s> Scan<'s> {
+    /// The names a `local` at `i` binds, with their tokens. A destructure
+    /// binds through a table pattern and stays out.
+    fn local_names(&self, i: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut j = i + 1;
+
+        // `local async function f`, `local const x`: the modifiers first.
+        while matches!(self.t(j), "async" | "const") {
+            j += 1;
+        }
+
+        if self.at(j, "function") {
+            return if self.is_name(j + 1) {
+                vec![j + 1]
+            } else {
+                out
+            };
+        }
+
+        // `local Pat(x) = e` binds through a pattern, not by this name.
+        if self.is_name(j) && self.at(j + 1, "(") {
+            return out;
+        }
+
+        while self.is_name(j) {
+            out.push(j);
+            j += 1;
+
+            // A type annotation runs to the comma or the `=` on the line.
+            if self.at(j, ":") {
+                let mut depth = 0i32;
+
+                while j < self.toks.len() && self.line_of(j) == self.line_of(i) {
+                    let t = self.t(j);
+
+                    if matches!(t, "(" | "{" | "[" | "<") {
+                        depth += 1;
+                    } else if matches!(t, ")" | "}" | "]" | ">") {
+                        depth -= 1;
+                    } else if depth == 0 && matches!(t, "," | "=") {
+                        break;
+                    }
+
+                    j += 1;
+                }
+            }
+
+            if self.at(j, ",") {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+
+        out
+    }
+
+    /// Whether the name at `n` appears again after token `from`.
+    fn read_after(&self, n: usize, from: usize) -> bool {
+        let name = self.t(n);
+
+        (from..self.toks.len())
+            .any(|j| j != n && self.toks[j].kind == TokKind::Ident && self.t(j) == name)
+    }
+
+    /// A local or a loop variable that nothing reads after it.
+    fn unused_variable(&self, out: &mut Vec<Lint>) {
+        for i in 0..self.toks.len() {
+            let names: Vec<usize> = match self.t(i) {
+                "local" | "const" if self.statement_start(i) => self.local_names(i),
+
+                "for" if self.statement_start(i) => {
+                    let mut names = Vec::new();
+                    let mut j = i + 1;
+
+                    while j < self.toks.len() && !matches!(self.t(j), "in" | "=" | "do") {
+                        if self.is_name(j) {
+                            names.push(j);
+                        }
+
+                        j += 1;
+                    }
+
+                    names
+                }
+
+                _ => continue,
+            };
+
+            for n in names {
+                let name = self.t(n);
+
+                if name.starts_with('_') || self.read_after(n, n + 1) {
+                    continue;
+                }
+
+                self.lint(
+                    out,
+                    "unused_variable",
+                    n,
+                    n,
+                    format!("`{name}` is never read; prefix it with `_` or remove it"),
+                    Some(format!("_{name}")),
+                );
+            }
+        }
+    }
+
+    /// The case of declared names.
+    fn naming(&self, out: &mut Vec<Lint>) {
+        for i in 0..self.toks.len() {
+            match self.t(i) {
+                "local" | "const" if self.statement_start(i) => {
+                    let is_function = self.at(i + 1, "function");
+
+                    for n in self.local_names(i) {
+                        let name = self.t(n);
+
+                        if is_camel_case(name) {
+                            self.lint(
+                                out,
+                                "camel_case_name",
+                                n,
+                                n,
+                                format!("`{name}` is camelCase; Alloy names are snake_case"),
+                                None,
+                            );
+                        } else if is_function && is_pascal_case(name) {
+                            self.lint(
+                                out,
+                                "pascal_case_function",
+                                n,
+                                n,
+                                format!("`{name}` is a local function in PascalCase; write it snake_case"),
+                                None,
+                            );
+                        }
+                    }
+                }
+
+                "function" if !matches!(self.prev(i), "." | ":") => {
+                    // The last name of the path, then the parameters. A
+                    // `local function` had its name read with the `local`.
+                    let is_local = matches!(self.prev(i), "local" | "async" | "const");
+                    let mut j = i + 1;
+                    let mut last = None;
+
+                    while self.is_name(j) || self.at(j, ".") || self.at(j, ":") {
+                        if self.is_name(j) {
+                            last = Some(j);
+                        }
+
+                        j += 1;
+                    }
+
+                    if let Some(n) = last
+                        && !is_local
+                        && is_camel_case(self.t(n))
+                    {
+                        self.lint(
+                            out,
+                            "camel_case_name",
+                            n,
+                            n,
+                            format!("`{}` is camelCase; Alloy names are snake_case", self.t(n)),
+                            None,
+                        );
+                    }
+
+                    if self.at(j, "(")
+                        && let Some(close) = self.matching(j)
+                    {
+                        let mut at_start = true;
+
+                        for k in j + 1..close {
+                            if at_start && self.is_name(k) && is_camel_case(self.t(k)) {
+                                self.lint(
+                                    out,
+                                    "camel_case_name",
+                                    k,
+                                    k,
+                                    format!(
+                                        "parameter `{}` is camelCase; Alloy names are snake_case",
+                                        self.t(k)
+                                    ),
+                                    None,
+                                );
+                            }
+
+                            at_start = self.at(k, ",") && self.matching_depth(j, k) == 1;
+                        }
+                    }
+                }
+
+                w @ ("struct" | "enum" | "trait" | "interface" | "type")
+                    if self.statement_start(i) || self.prev(i) == "export" =>
+                {
+                    let n = i + 1;
+
+                    if self.is_name(n) && !is_pascal_case(self.t(n)) && !self.at(n, "function") {
+                        self.lint(
+                            out,
+                            "type_case",
+                            n,
+                            n,
+                            format!("`{}` is a {w} name; write it PascalCase", self.t(n)),
+                            None,
+                        );
+                    }
+                }
+
+                _ => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::lint::apply_fixes;
 
+    /// The lints of a source, without `unused_variable`: the sources
+    /// here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        crate::compile(src).unwrap().lints
+        crate::compile(src)
+            .unwrap()
+            .lints
+            .into_iter()
+            .filter(|l| l.name != "unused_variable")
+            .collect()
     }
 
     fn fixed(src: &str) -> String {
@@ -825,6 +1066,78 @@ mod tests {
             names("local function f()\n    local x = g(1)\n    x = x + 1\n    return x\nend\n"),
             Vec::<&str>::new()
         );
+    }
+
+    #[test]
+    fn a_local_nothing_reads_fires() {
+        let unused = |src: &str| -> Vec<&'static str> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .map(|l| l.name)
+                .filter(|n| *n == "unused_variable")
+                .collect()
+        };
+        let src = "local count = 1\nlocal used = 2\nprint(used)\n";
+        let out = crate::compile(src).unwrap();
+        assert_eq!(
+            apply_fixes(src, &out.lints).0,
+            "local _count = 1\nlocal used = 2\nprint(used)\n"
+        );
+        assert_eq!(
+            unused("for i, v in t do\n    print(v)\nend\n"),
+            vec!["unused_variable"]
+        );
+        assert_eq!(
+            unused("for _, v in t do\n    print(v)\nend\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            unused("local function helper() end\nlocal x: number = 1\nprint(x)\n"),
+            vec!["unused_variable"]
+        );
+        assert_eq!(unused("local { a, b } = t\nprint(a)\n"), Vec::<&str>::new());
+        assert_eq!(
+            unused("local async function f() end\nf()\n"),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn the_naming_lints_read_the_case() {
+        let all = |src: &str| -> Vec<&'static str> {
+            lints(src)
+                .iter()
+                .map(|l| l.name)
+                .filter(|n| n.contains("case"))
+                .collect()
+        };
+        assert_eq!(
+            all("local playerCount = 1\nprint(playerCount)\n"),
+            vec!["camel_case_name"]
+        );
+        assert_eq!(
+            all("local Players = 1\nprint(Players)\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            all("local function LoadMap() end\nLoadMap()\n"),
+            vec!["pascal_case_function"]
+        );
+        assert_eq!(
+            all("local function f(maxHealth: number) return maxHealth end\nf(1)\n"),
+            vec!["camel_case_name"]
+        );
+        assert_eq!(
+            all("struct player_state as\n    x: number\nend\n"),
+            vec!["type_case"]
+        );
+        assert_eq!(
+            all("struct PlayerState as\n    x: number\nend\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(all("function M:Destroy() end\n"), Vec::<&str>::new());
     }
 
     #[test]

@@ -24,7 +24,7 @@ Commands:
   test [file]     Write a lest spec per source with a @test; --run runs it
   doc [topic]     Explain a keyword, an operator, a lint, an article
   init            Write alloy.toml, .luaurc, and .config.luau
-  self            Install or remove the binaries
+  self            Install, update, or remove the binaries
   help            Show this screen
 
 Options:
@@ -38,10 +38,12 @@ Usage: alloy self <command> [--dir <path>]
 
 Commands:
   install         Copy alloy and alloy-lsp to ~/.alloy/bin
+  update          Fetch the latest release and install its binaries
   uninstall       Remove the binaries from ~/.alloy/bin
 
 Options:
   --dir <path>    Install to, or remove from, <path>
+  --version <v>   With update: fetch this release instead of the latest
 ";
 
 pub const BUILD_TEXT: &str = "\
@@ -101,6 +103,7 @@ the `luau` group. With one file it compiles and lints that file.
 Options:
   --fix                 Apply the rewrites that keep the program the same
   -W, -A, -D <name>     Warn, allow, or deny a lint or a group for this run
+  --watch               Run again after every change, until ctrl-c
   --explain <lint>      Print the page of one lint and exit
   --no-typecheck        Skip luau-lsp for this run
   --config <file>       Read this alloy.toml instead of the nearest one
@@ -123,6 +126,10 @@ With one file, prints its spec.
 
 Options:
   --run                 Run lest on the suite afterwards
+  --coverage            Run lest with line coverage
+  --filter <text>       Run the tests whose name holds <text>
+  -- <args>             Pass the rest to lest as given
+  -W, --watch           Write again after every change, until ctrl-c
   --check               Write nothing; fail when a spec would change
   --out <dir>           Write the specs under <dir>
   --config <file>       Read this alloy.toml instead of the nearest one

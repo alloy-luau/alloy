@@ -215,11 +215,18 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         imports.push((rel.clone(), compiled.imports.clone()));
 
         if keep {
+            let unused_lines = compiled
+                .lints
+                .iter()
+                .filter(|l| l.name == "unused_variable")
+                .map(|l| source[..l.start as usize].matches('\n').count() + 1)
+                .collect();
             report.checks.push(crate::typecheck::CheckSource {
                 rel: rel.clone(),
                 source: source.clone(),
                 check: compiled.check.clone(),
                 map: compiled.map.clone(),
+                unused_lines,
             });
         }
 

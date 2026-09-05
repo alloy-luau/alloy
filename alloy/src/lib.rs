@@ -473,6 +473,29 @@ mod tests {
     }
 
     #[test]
+    fn a_macro_local_never_captures_the_callers_name() {
+        let src = "macro add_one(x)\n    local tmp = 1\n    x + tmp\nend\nlocal tmp = 10\nlocal r = $add_one(tmp)\nprint(r)\n";
+        let out = compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("local tmp__m1 = 1 return tmp + tmp__m1"),
+            "{}",
+            out.ship
+        );
+
+        // Two expansions get two names; a loop variable and a parameter
+        // rename too.
+        let src = "macro twice(x)\n    for i = 1, 2 do\n        local f = function(k) return k + x end\n        print(f(i))\n    end\nend\n$twice(i)\n$twice(k)\n";
+        let out = compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("i__m1") && out.ship.contains("k__m2"),
+            "{}",
+            out.ship
+        );
+    }
+
+    #[test]
     fn nil_coalescing_desugars() {
         assert_eq!(
             desugar("local v = a ?? 0\n"),

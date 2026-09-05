@@ -123,6 +123,10 @@ pub const AMBIENT: &[&str] = &[
     "Symbol",
     "Attributes",
     "Signal",
+    "Queue",
+    "Heap",
+    "Scope",
+    "Iter",
 ];
 
 pub const PRIMITIVES: &[&str] = &[
@@ -194,6 +198,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ext_hit: false,
         macros: HashMap::new(),
         test_names: Vec::new(),
+        macro_serial: 0,
         mapped_used: Vec::new(),
     };
 
@@ -409,6 +414,8 @@ struct Desugar<'s> {
     test_names: Vec<(String, bool)>,
     /// Mapped-type shapes used, each needing one type function declared.
     mapped_used: Vec<&'static str>,
+    /// Expansions so far, for the unique names of a body's locals.
+    macro_serial: u32,
 }
 
 /// A macro body captured as one-line source, so an expansion re-parses.
@@ -2858,6 +2865,21 @@ impl<'s> Desugar<'s> {
 
         let rest: Vec<String> = arg_texts.iter().skip(m.params.len()).cloned().collect();
 
+        // Hygiene: a local the body declares gets a name of its own per
+        // expansion, so an argument that names the caller's `tmp` never
+        // reads the body's `tmp`.
+        self.macro_serial += 1;
+        let serial = self.macro_serial;
+        let mut renames: HashMap<String, String> = HashMap::new();
+
+        for name in body_locals(&m.body) {
+            if !m.params.contains(&name) && !name.starts_with("__") {
+                renames
+                    .entry(name.clone())
+                    .or_insert_with(|| format!("{name}__m{serial}"));
+            }
+        }
+
         // Substitute whole words in the one-line body.
         let substitute = |text: &str| -> String {
             let mut out = String::new();
@@ -2877,6 +2899,8 @@ impl<'s> Desugar<'s> {
                     } else {
                         out.push_str(&format!("({a})"));
                     }
+                } else if let Some(r) = renames.get(word) {
+                    out.push_str(r);
                 } else {
                     out.push_str(word);
                 }
@@ -2979,6 +3003,112 @@ impl<'s> Desugar<'s> {
 }
 
 /// Text that reads the same with or without parentheses around it.
+/// The names a macro body declares: after `local`, the variables of a
+/// `for`, and the parameters of a `function` inside it. The body is one
+/// line of tokens joined by spaces.
+fn body_locals(body: &str) -> Vec<String> {
+    let words: Vec<&str> = body.split(' ').collect();
+    let is_name = |w: &str| {
+        w.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && w.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !matches!(w, "function" | "in" | "do" | "end" | "local" | "for")
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < words.len() {
+        match words[i] {
+            "local" => {
+                let mut j = i + 1;
+
+                if words.get(j) == Some(&"function") {
+                    j += 1;
+                }
+
+                while let Some(w) = words.get(j) {
+                    if is_name(w) {
+                        out.push((*w).to_string());
+                        j += 1;
+
+                        // A type annotation runs to the next comma or `=`.
+                        if words.get(j) == Some(&":") {
+                            while let Some(t) = words.get(j)
+                                && !matches!(*t, "," | "=")
+                                && !(j > i + 1 && is_name(t) && words.get(j - 1) == Some(&","))
+                            {
+                                j += 1;
+                            }
+                        }
+                    }
+
+                    if words.get(j) == Some(&",") {
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            "for" => {
+                let mut j = i + 1;
+
+                while let Some(w) = words.get(j)
+                    && !matches!(*w, "in" | "=" | "do")
+                {
+                    if is_name(w) {
+                        out.push((*w).to_string());
+                    }
+
+                    j += 1;
+                }
+            }
+
+            "function" => {
+                let mut j = i + 1;
+
+                while let Some(w) = words.get(j)
+                    && *w != "("
+                    && !matches!(*w, "end" | "local")
+                {
+                    j += 1;
+                }
+
+                if words.get(j) == Some(&"(") {
+                    let mut depth = 0i32;
+                    let mut at_start = true;
+
+                    while let Some(w) = words.get(j) {
+                        match *w {
+                            "(" | "{" | "[" | "<" => depth += 1,
+                            ")" | "}" | "]" | ">" => depth -= 1,
+                            _ => {}
+                        }
+
+                        if depth == 0 {
+                            break;
+                        }
+
+                        if at_start && is_name(w) && depth == 1 && *w != "self" {
+                            out.push((*w).to_string());
+                        }
+
+                        at_start = matches!(*w, "(" | ",") && depth == 1;
+                        j += 1;
+                    }
+                }
+            }
+
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    out
+}
+
 fn is_simple_text(t: &str) -> bool {
     !t.is_empty()
         && t.chars()

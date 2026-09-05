@@ -1049,6 +1049,487 @@ end
 alloy.Signal = Signal
 
 -- ---------------------------------------------------------------------------
+-- Queue, Heap, Scope, Iter: what a game loop reaches for next.
+-- ---------------------------------------------------------------------------
+
+--- A first-in, first-out queue over a ring of indices. `push` appends,
+--- `pop` takes the oldest. Iterating reads front to back without a pop.
+export type Queue<T> = {
+	push: (self: Queue<T>, value: T) -> (),
+	pop: (self: Queue<T>) -> T?,
+	peek: (self: Queue<T>) -> T?,
+	len: (self: Queue<T>) -> number,
+	is_empty: (self: Queue<T>) -> boolean,
+	clear: (self: Queue<T>) -> (),
+	to_array: (self: Queue<T>) -> Array<T>,
+}
+
+local Queue = {}
+Queue.__index = Queue
+
+function Queue.new<T>(): Queue<T>
+	return (setmetatable({ _items = {}, _head = 1, _tail = 0 }, Queue) :: any) :: Queue<T>
+end
+
+function Queue.from<T>(t: { T }): Queue<T>
+	local self = Queue.new()
+	for _, v in ipairs(t) do
+		self:push(v)
+	end
+	return self
+end
+
+function Queue.push(self, value)
+	self._tail += 1
+	self._items[self._tail] = value
+end
+
+function Queue.pop(self)
+	if self._head > self._tail then
+		return nil
+	end
+	local value = self._items[self._head]
+	self._items[self._head] = nil
+	self._head += 1
+	-- An empty queue starts its indices over, so they never run away.
+	if self._head > self._tail then
+		self._head = 1
+		self._tail = 0
+	end
+	return value
+end
+
+function Queue.peek(self)
+	return self._items[self._head]
+end
+
+function Queue.len(self)
+	return self._tail - self._head + 1
+end
+
+function Queue.is_empty(self)
+	return self._head > self._tail
+end
+
+function Queue.clear(self)
+	self._items = {}
+	self._head = 1
+	self._tail = 0
+end
+
+function Queue.to_array(self)
+	local out = {}
+	for i = self._head, self._tail do
+		table.insert(out, self._items[i])
+	end
+	return setmetatable(out, Array)
+end
+
+function Queue.__iter(self)
+	local i = self._head - 1
+	return function()
+		i += 1
+		if i > self._tail then
+			return nil
+		end
+		return self._items[i]
+	end
+end
+
+alloy.Queue = Queue
+
+--- A binary heap. `pop` yields the least value under `less`, which
+--- defaults to `<`; pass one for tables: `Heap.new(function(a, b) return
+--- a.cost < b.cost end)`. Iterating pops nothing; `to_array` sorts.
+export type Heap<T> = {
+	push: (self: Heap<T>, value: T) -> (),
+	pop: (self: Heap<T>) -> T?,
+	peek: (self: Heap<T>) -> T?,
+	len: (self: Heap<T>) -> number,
+	is_empty: (self: Heap<T>) -> boolean,
+	clear: (self: Heap<T>) -> (),
+	to_array: (self: Heap<T>) -> Array<T>,
+}
+
+local Heap = {}
+Heap.__index = Heap
+
+local function heap_default_less(a, b)
+	return a < b
+end
+
+function Heap.new<T>(less: ((T, T) -> boolean)?): Heap<T>
+	return (setmetatable({ _items = {}, _less = less or heap_default_less }, Heap) :: any) :: Heap<T>
+end
+
+function Heap.from<T>(t: { T }, less: ((T, T) -> boolean)?): Heap<T>
+	local self = Heap.new(less)
+	for _, v in ipairs(t) do
+		self:push(v)
+	end
+	return self
+end
+
+function Heap.push(self, value)
+	local items, less = self._items, self._less
+	table.insert(items, value)
+	local i = #items
+	while i > 1 do
+		local parent = i // 2
+		if not less(items[i], items[parent]) then
+			break
+		end
+		items[i], items[parent] = items[parent], items[i]
+		i = parent
+	end
+end
+
+function Heap.pop(self)
+	local items, less = self._items, self._less
+	local n = #items
+	if n == 0 then
+		return nil
+	end
+	local top = items[1]
+	items[1] = items[n]
+	items[n] = nil
+	n -= 1
+	local i = 1
+	while true do
+		local left, right = i * 2, i * 2 + 1
+		local smallest = i
+		if left <= n and less(items[left], items[smallest]) then
+			smallest = left
+		end
+		if right <= n and less(items[right], items[smallest]) then
+			smallest = right
+		end
+		if smallest == i then
+			break
+		end
+		items[i], items[smallest] = items[smallest], items[i]
+		i = smallest
+	end
+	return top
+end
+
+function Heap.peek(self)
+	return self._items[1]
+end
+
+function Heap.len(self)
+	return #self._items
+end
+
+function Heap.is_empty(self)
+	return #self._items == 0
+end
+
+function Heap.clear(self)
+	self._items = {}
+end
+
+function Heap.to_array(self)
+	local out = table.clone(self._items)
+	table.sort(out, self._less)
+	return setmetatable(out, Array)
+end
+
+function Heap.__iter(self)
+	local sorted = self:to_array()
+	local i = 0
+	return function()
+		i += 1
+		return sorted[i]
+	end
+end
+
+alloy.Heap = Heap
+
+--- A cleanup bag. `add` takes anything `delete` accepts, or a function,
+--- and gives it back; `clean` runs them newest first and empties the
+--- bag. A Scope has `Destroy`, so `delete scope` cleans it, and a scope
+--- may hold another scope.
+export type Scope = {
+	add: <T>(self: Scope, item: T) -> T,
+	remove: (self: Scope, item: any) -> boolean,
+	clean: (self: Scope) -> (),
+	extend: (self: Scope) -> Scope,
+	len: (self: Scope) -> number,
+	Destroy: (self: Scope) -> (),
+}
+
+local Scope = {}
+Scope.__index = Scope
+
+function Scope.new(): Scope
+	return (setmetatable({ _items = {} }, Scope) :: any) :: Scope
+end
+
+function Scope.add(self, item)
+	table.insert(self._items, item)
+	return item
+end
+
+function Scope.remove(self, item)
+	local at = table.find(self._items, item)
+	if at == nil then
+		return false
+	end
+	table.remove(self._items, at)
+	return true
+end
+
+function Scope.clean(self)
+	local items = self._items
+	self._items = {}
+	for i = #items, 1, -1 do
+		local item = items[i]
+		if type(item) == "function" then
+			item()
+		else
+			alloy.delete(item)
+		end
+	end
+end
+
+function Scope.extend(self)
+	return self:add(Scope.new())
+end
+
+function Scope.len(self)
+	return #self._items
+end
+
+Scope.Destroy = Scope.clean
+
+alloy.Scope = Scope
+
+--- A lazy iterator: a `next` that yields the next value or nil, with the
+--- chain methods on top. Nothing runs until `collect`, `for_each`, or a
+--- `for` loop pulls. `Iter.from` takes an array, a function, or anything
+--- with `__iter`; `Iter.range(a, b, step)` counts.
+export type Iter<T> = {
+	next: (self: Iter<T>) -> T?,
+	map: <U>(self: Iter<T>, f: (T) -> U) -> Iter<U>,
+	filter: (self: Iter<T>, f: (T) -> boolean) -> Iter<T>,
+	take: (self: Iter<T>, n: number) -> Iter<T>,
+	skip: (self: Iter<T>, n: number) -> Iter<T>,
+	take_while: (self: Iter<T>, f: (T) -> boolean) -> Iter<T>,
+	chain: (self: Iter<T>, other: Iter<T>) -> Iter<T>,
+	collect: (self: Iter<T>) -> Array<T>,
+	for_each: (self: Iter<T>, f: (T) -> ()) -> (),
+	count: (self: Iter<T>) -> number,
+	any: (self: Iter<T>, f: (T) -> boolean) -> boolean,
+	all: (self: Iter<T>, f: (T) -> boolean) -> boolean,
+	find: (self: Iter<T>, f: (T) -> boolean) -> T?,
+	reduce: <U>(self: Iter<T>, f: (U, T) -> U, init: U) -> U,
+	first: (self: Iter<T>) -> T?,
+	last: (self: Iter<T>) -> T?,
+}
+
+local Iter = {}
+Iter.__index = Iter
+
+local function iter_of(next)
+	return setmetatable({ _next = next }, Iter)
+end
+
+function Iter.from<T>(source: any): Iter<T>
+	if type(source) == "function" then
+		return (iter_of(source) :: any) :: Iter<T>
+	end
+	local mt = getmetatable(source)
+	if mt == Iter then
+		return source
+	end
+	if type(mt) == "table" and mt.__iter ~= nil then
+		local f, s, c = mt.__iter(source)
+		return (iter_of(function()
+			local value = f(s, c)
+			c = value
+			return value
+		end) :: any) :: Iter<T>
+	end
+	local i = 0
+	return (iter_of(function()
+		i += 1
+		return source[i]
+	end) :: any) :: Iter<T>
+end
+
+function Iter.range(from: number, to: number, step: number?): Iter<number>
+	local by = step or 1
+	local at = from - by
+	return (iter_of(function()
+		at += by
+		if (by > 0 and at > to) or (by < 0 and at < to) then
+			return nil
+		end
+		return at
+	end) :: any) :: Iter<number>
+end
+
+function Iter.next(self)
+	return self._next()
+end
+
+function Iter.map(self, f)
+	local inner = self._next
+	return iter_of(function()
+		local value = inner()
+		if value == nil then
+			return nil
+		end
+		return f(value)
+	end)
+end
+
+function Iter.filter(self, f)
+	local inner = self._next
+	return iter_of(function()
+		while true do
+			local value = inner()
+			if value == nil or f(value) then
+				return value
+			end
+		end
+	end)
+end
+
+function Iter.take(self, n)
+	local inner = self._next
+	local left = n
+	return iter_of(function()
+		if left <= 0 then
+			return nil
+		end
+		left -= 1
+		return inner()
+	end)
+end
+
+function Iter.skip(self, n)
+	local inner = self._next
+	local left = n
+	return iter_of(function()
+		while left > 0 do
+			left -= 1
+			if inner() == nil then
+				return nil
+			end
+		end
+		return inner()
+	end)
+end
+
+function Iter.take_while(self, f)
+	local inner = self._next
+	local done = false
+	return iter_of(function()
+		if done then
+			return nil
+		end
+		local value = inner()
+		if value == nil or not f(value) then
+			done = true
+			return nil
+		end
+		return value
+	end)
+end
+
+function Iter.chain(self, other)
+	local first, second = self._next, other._next
+	local on_second = false
+	return iter_of(function()
+		if not on_second then
+			local value = first()
+			if value ~= nil then
+				return value
+			end
+			on_second = true
+		end
+		return second()
+	end)
+end
+
+function Iter.collect(self)
+	local out = {}
+	for value in self do
+		table.insert(out, value)
+	end
+	return setmetatable(out, Array)
+end
+
+function Iter.for_each(self, f)
+	for value in self do
+		f(value)
+	end
+end
+
+function Iter.count(self)
+	local n = 0
+	for _ in self do
+		n += 1
+	end
+	return n
+end
+
+function Iter.any(self, f)
+	for value in self do
+		if f(value) then
+			return true
+		end
+	end
+	return false
+end
+
+function Iter.all(self, f)
+	for value in self do
+		if not f(value) then
+			return false
+		end
+	end
+	return true
+end
+
+function Iter.find(self, f)
+	for value in self do
+		if f(value) then
+			return value
+		end
+	end
+	return nil
+end
+
+function Iter.reduce(self, f, init)
+	local acc = init
+	for value in self do
+		acc = f(acc, value)
+	end
+	return acc
+end
+
+function Iter.first(self)
+	return self._next()
+end
+
+function Iter.last(self)
+	local last = nil
+	for value in self do
+		last = value
+	end
+	return last
+end
+
+function Iter.__iter(self)
+	return self._next
+end
+
+alloy.Iter = Iter
+
+-- ---------------------------------------------------------------------------
 -- Operators and sugar.
 -- ---------------------------------------------------------------------------
 

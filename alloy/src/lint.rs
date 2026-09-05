@@ -87,6 +87,8 @@ pub enum Group {
     Roblox,
     /// Strict rules, off until `[lint] strict = true` or `warn = ["pedantic"]`.
     Pedantic,
+    /// The case of names, off until `warn = ["naming"]`.
+    Naming,
 }
 
 impl Group {
@@ -98,6 +100,7 @@ impl Group {
         Group::Perf,
         Group::Roblox,
         Group::Pedantic,
+        Group::Naming,
     ];
 
     pub fn name(self) -> &'static str {
@@ -109,6 +112,7 @@ impl Group {
             Group::Perf => "perf",
             Group::Roblox => "roblox",
             Group::Pedantic => "pedantic",
+            Group::Naming => "naming",
         }
     }
 
@@ -125,6 +129,7 @@ impl Group {
             Group::Perf => "code that runs slower than the plain form",
             Group::Roblox => "a Roblox API that is deprecated or misused",
             Group::Pedantic => "strict rules, off until `[lint] strict = true`",
+            Group::Naming => "the case of names, off until `[lint] warn = [\"naming\"]`",
         }
     }
 }
@@ -252,6 +257,13 @@ pub const LINTS: &[LintInfo] = &[
         default: Level::Warn,
         summary: "`c and a or b` in place of a ternary",
         detail: "Flux. The `and ... or` idiom yields `b` when `a` is false or nil, whatever `c` was; that is the classic Lua trap. `c ? a : b` picks by `c` alone. When `a` is a literal that is never false, the two are the same and `alloy flux --fix` rewrites it; otherwise the lint shows the ternary and leaves the change to the author.",
+    },
+    LintInfo {
+        name: "unused_variable",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a local that nothing reads",
+        detail: "A `local`, a `local function`, or a loop variable that appears nowhere after its declaration. A leftover, or a typo in the name that reads it. Prefix it with `_` to say it is unused on purpose; `alloy flux --fix` does that. The type checker reports the scoped cases this lint cannot see.",
     },
     LintInfo {
         name: "empty_block",
@@ -524,6 +536,28 @@ pub const LINTS: &[LintInfo] = &[
         summary: "an exported declaration with no comment above it",
         detail: "Pedantic. An `export` is the interface of the module. A comment line right above it, `--` or `---`, says what it is for; the language server shows it on hover.",
     },
+    // --- naming ----------------------------------------------------------------
+    LintInfo {
+        name: "camel_case_name",
+        group: Group::Naming,
+        default: Level::Allow,
+        summary: "a local, function, or parameter in camelCase",
+        detail: "Naming. Alloy code is snake_case: `player_count`, not `playerCount`. Engine members stay PascalCase and Luau builtins lowercase, so the three read as three namespaces. A PascalCase local for a service or a module, `local Players`, is not camelCase and does not fire.",
+    },
+    LintInfo {
+        name: "type_case",
+        group: Group::Naming,
+        default: Level::Allow,
+        summary: "a struct, enum, trait, interface, or type not in PascalCase",
+        detail: "Naming. A type name starts with a capital and has no underscore: `PlayerState`. The name of a type reads as one in a signature that way.",
+    },
+    LintInfo {
+        name: "pascal_case_function",
+        group: Group::Naming,
+        default: Level::Allow,
+        summary: "a `local function` in PascalCase",
+        detail: "Naming. A local function is snake_case, `load_map`, so a call reads as a call and not as a constructor. A method of an engine protocol, `function Drop:Destroy`, keeps the host's case and does not fire.",
+    },
 ];
 
 /// The level a lint runs at under a config: its own name in a list
@@ -549,7 +583,7 @@ pub fn level_of(config: &LintConfig, name: &str) -> Level {
     }
 
     match info {
-        Some(l) if l.default == Level::Allow && config.strict => Level::Warn,
+        Some(l) if l.group == Group::Pedantic && config.strict => Level::Warn,
         Some(l) => l.default,
         None => Level::Warn,
     }
@@ -1039,7 +1073,7 @@ mod tests {
         out.lints
             .iter()
             .map(|l| l.name)
-            .filter(|n| level_of(&config, n) != Level::Allow)
+            .filter(|n| level_of(&config, n) != Level::Allow && *n != "unused_variable")
             .collect()
     }
 

@@ -152,7 +152,11 @@ impl State {
                     "source": "Alloy",
                     "code": alloy::docs::LINT_CODE,
                     "codeDescription": { "href": alloy::docs::book_url(alloy::docs::LINT_CODE).unwrap_or_default() },
-                    "message": format!("{}: {}", l.name, l.message),
+                    "message": if l.fix.is_some() {
+                        format!("{}: {}\n`alloy lint --fix` rewrites it.", l.name, l.message)
+                    } else {
+                        format!("{}: {}", l.name, l.message)
+                    },
                 }));
             }
         }

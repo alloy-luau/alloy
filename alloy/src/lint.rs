@@ -16,13 +16,46 @@ use alloy_syntax::lexer::{Tok, TokKind};
 use crate::config::LintConfig;
 use crate::fmt::structure;
 
-/// One lint hit: a byte range in the source and the message.
+/// One lint hit: a byte range in the source, the message, and the
+/// rewrite when the lint has one that keeps the program the same.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lint {
     pub name: &'static str,
     pub start: u32,
     pub end: u32,
     pub message: String,
+    pub fix: Option<Fix>,
+}
+
+/// A rewrite `alloy lint --fix` applies: the bytes from `start` to
+/// `end` become `replacement`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fix {
+    pub start: u32,
+    pub end: u32,
+    pub replacement: String,
+}
+
+/// Applies the fixes of `lints` to `src`, last to first so the offsets
+/// hold. Two fixes that overlap keep the first.
+pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
+    let mut fixes: Vec<&Fix> = lints.iter().filter_map(|l| l.fix.as_ref()).collect();
+    fixes.sort_by_key(|f| (f.start, f.end));
+    let mut chosen: Vec<&Fix> = Vec::new();
+
+    for f in fixes {
+        if chosen.last().is_none_or(|c| c.end <= f.start) {
+            chosen.push(f);
+        }
+    }
+
+    let mut out = src.to_string();
+
+    for f in chosen.iter().rev() {
+        out.replace_range(f.start as usize..f.end as usize, &f.replacement);
+    }
+
+    (out, chosen.len())
 }
 
 /// What a lint does when it fires.
@@ -69,14 +102,98 @@ pub const LINTS: &[LintInfo] = &[
     LintInfo {
         name: "deprecated_global",
         default: Level::Warn,
-        summary: "a call to `wait`, `spawn`, or `delay`",
-        detail: "The legacy scheduler globals run on the 30 Hz legacy pipeline and their timing drifts. `task.wait`, `task.spawn`, `task.delay`, and `task.defer` are the replacements.",
+        summary: "a call to `wait`, `spawn`, `delay`, or `unpack`",
+        detail: "The legacy scheduler globals run on the 30 Hz legacy pipeline and their timing drifts. `task.wait`, `task.spawn`, `task.delay`, and `task.defer` are the replacements; `unpack` is `table.unpack`. `alloy lint --fix` rewrites them.",
     },
     LintInfo {
         name: "unused_import",
         default: Level::Warn,
         summary: "an imported name the file never uses",
         detail: "The name an `import` binds appears nowhere after the import. The require still runs, so the module loads for nothing. Remove the name, or the import.",
+    },
+    LintInfo {
+        name: "manual_safe_access",
+        default: Level::Warn,
+        summary: "`a and a.b`, the guard written by hand",
+        detail: "Flux. `a and a.b` reads `a` twice to guard one index. `a?.b` is the guard: it stops at nil and yields nil. With `or` after it, `a?.b ?? x` is the same when `b` is never false; the lint leaves that rewrite to the author. `alloy lint --fix` rewrites the plain form.",
+    },
+    LintInfo {
+        name: "manual_coalesce",
+        default: Level::Warn,
+        summary: "`if x == nil then x = v end`, a coalescing assignment by hand",
+        detail: "Flux. The three-line nil check assigns when `x` is nil and nothing else. `x ??= v` is that statement, and it reads `x` once. `alloy lint --fix` rewrites it.",
+    },
+    LintInfo {
+        name: "and_or_ternary",
+        default: Level::Warn,
+        summary: "`c and a or b` in place of a ternary",
+        detail: "Flux. The `and ... or` idiom yields `b` when `a` is false or nil, whatever `c` was; that is the classic Lua trap. `c ? a : b` picks by `c` alone. When `a` is a literal that is never false, the two are the same and `alloy lint --fix` rewrites it; otherwise the lint shows the ternary and leaves the change to the author.",
+    },
+    LintInfo {
+        name: "manual_child_lookup",
+        default: Level::Warn,
+        summary: "`:FindFirstChild(\"X\")` or `:WaitForChild(\"X\")` with a literal name",
+        detail: "Flux. `parent->X` is `FindFirstChild(\"X\")` and `parent=>X` is `WaitForChild(\"X\")`, typed from the sourcemap and shorter to read. A call with a second argument stays as it is. `alloy lint --fix` rewrites the one-argument form.",
+    },
+    LintInfo {
+        name: "nil_check_call",
+        default: Level::Warn,
+        summary: "`if f then f(...) end`, an optional call by hand",
+        detail: "Flux. A block that tests a function and calls it is `f?(...)`: the call runs when `f` is set and yields nil when it is not. `alloy lint --fix` rewrites it.",
+    },
+    LintInfo {
+        name: "manual_type_test",
+        default: Level::Warn,
+        summary: "`typeof(x) == \"T\"` in place of `x is T`",
+        detail: "Flux. `x is T` compiles to the right test for the name, `type`, `typeof`, or `IsA`, and the checker narrows `x` in the branch. A string comparison narrows nothing. `alloy lint --fix` rewrites primitives, `Instance`, and the Roblox datatypes.",
+    },
+    LintInfo {
+        name: "legacy_iterator",
+        default: Level::Warn,
+        summary: "`pairs` or `ipairs` around a `for ... in` table",
+        detail: "Flux. Luau iterates a table without a wrapper, arrays in order and then the rest, and honors `__iter`. `pairs` and `ipairs` add a call and hide the metamethod. `alloy lint --fix` removes them.",
+    },
+    LintInfo {
+        name: "manual_floor_div",
+        default: Level::Warn,
+        summary: "`math.floor(a / b)` in place of `a // b`",
+        detail: "Flux. Floor division is an operator: `a // b`. The lint fires when the argument is one division with no other operator around it, so the rewrite is the same value. `alloy lint --fix` rewrites it, in parentheses where a neighbour binds tighter.",
+    },
+    LintInfo {
+        name: "manual_push",
+        default: Level::Warn,
+        summary: "`table.insert` or `table.remove` on a value typed as an Array",
+        detail: "Flux. A value declared `T[]`, `Array<T>`, or with an array literal carries methods: `xs:push(v)` and `xs:pop()`. The `table` functions work on it too, but the method names the intent and keeps the type. `alloy lint --fix` rewrites the two-argument insert and the one-argument remove.",
+    },
+    LintInfo {
+        name: "concat_interpolation",
+        default: Level::Warn,
+        summary: "a `..` chain that joins literals and values",
+        detail: "Flux. A chain such as `\"Hello \" .. name .. \"!\"` is one interpolated string: `` `Hello {name}!` ``. The backtick form calls `tostring` on each hole, so a `tostring(x)` in the chain becomes `{x}`. The lint skips a chain whose literals hold a backtick, a brace, or an escape. `alloy lint --fix` rewrites the rest.",
+    },
+    LintInfo {
+        name: "raw_pcall",
+        default: Level::Warn,
+        summary: "a `pcall` or `xpcall`",
+        detail: "Flux. `pcall` yields a flag and a value the caller has to test by hand, and the error loses its traceback. `Result.pcall(f, ...)` yields a `Result` with the traceback on the `Err`, and `try` unwraps it or returns it. No automatic rewrite: the surrounding code changes with it.",
+    },
+    LintInfo {
+        name: "raw_require",
+        default: Level::Warn,
+        summary: "a `require` where an `import` would do",
+        detail: "Flux. `import` resolves the path at build time, binds only the names the file uses, and carries the types; the checker follows it and `unused_import` watches it. `require` binds the whole module at runtime. `alloy lint --fix` rewrites `local X = require(\"./x\")` to `import X from \"./x\"`; an instance path stays for the author.",
+    },
+    LintInfo {
+        name: "manual_class",
+        default: Level::Warn,
+        summary: "`X.__index = X`, the class idiom by hand",
+        detail: "Flux. The metatable idiom writes the constructor, the `__index`, and the method table by hand, and the checker sees plain tables. `struct X as ... end` with `impl X` emits the same tables with types, `new X(...)` for construction, and traits for shared behaviour. No automatic rewrite.",
+    },
+    LintInfo {
+        name: "explicit_any",
+        default: Level::Allow,
+        summary: "an annotation of `any`",
+        detail: "Strict only. Flux. `any` turns the checker off for the value and everything read from it. `unknown` keeps the checker on, and `x is T` narrows it where the code needs a shape. The lint skips the `any_cast` the compiler writes.",
     },
     LintInfo {
         name: "implicit_any",
@@ -336,6 +453,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, definitions: bool) -> Vec<Lin
                             text(*p),
                             text(*p)
                         ),
+                        fix: None,
                     });
                 }
             }
@@ -351,6 +469,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, definitions: bool) -> Vec<Lin
                     "`{}` is public and has no return type; write `): T` after the parameters",
                     text(name_tok)
                 ),
+                fix: None,
             });
         }
     }
@@ -420,6 +539,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, definitions: bool) -> Vec<Lin
                     message: format!(
                         "`{name}` may be nil and nothing checks it; guard it with `if {name} then`, or index with `?.`"
                     ),
+                    fix: None,
                 });
             }
         }
@@ -458,6 +578,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, definitions: bool) -> Vec<Lin
                     "`{}` returns a value that may be nil; guard the result before indexing it, or use `?.`",
                     t.text(src)
                 ),
+                fix: None,
             });
         }
     }
@@ -467,7 +588,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, definitions: bool) -> Vec<Lin
         let name = t.text(src);
 
         if t.kind != TokKind::Ident
-            || !matches!(name, "wait" | "spawn" | "delay")
+            || !matches!(name, "wait" | "spawn" | "delay" | "unpack")
             || declared.contains(name)
             || matches!(
                 i.checked_sub(1).map(text),
@@ -478,11 +599,25 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, definitions: bool) -> Vec<Lin
             continue;
         }
 
+        let replacement = if name == "unpack" {
+            "table.unpack".to_string()
+        } else {
+            format!("task.{name}")
+        };
         lints.push(Lint {
             name: "deprecated_global",
             start: t.start,
             end: t.end,
-            message: format!("`{name}` is the legacy scheduler; call `task.{name}` instead"),
+            message: if name == "unpack" {
+                "`unpack` is the legacy global; call `table.unpack` instead".to_string()
+            } else {
+                format!("`{name}` is the legacy scheduler; call `task.{name}` instead")
+            },
+            fix: Some(Fix {
+                start: t.start,
+                end: t.end,
+                replacement,
+            }),
         });
     }
 
@@ -512,11 +647,13 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, definitions: bool) -> Vec<Lin
                     start: n.start,
                     end: n.end,
                     message: format!("`{name}` is imported and never used"),
+                    fix: None,
                 });
             }
         }
     }
 
+    lints.extend(crate::flux::run(src, toks));
     lints.sort_by_key(|l| l.start);
     lints
 }

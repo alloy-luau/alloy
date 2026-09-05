@@ -532,10 +532,18 @@ fn lint_cmd(args: &[String]) -> ExitCode {
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
     print_diagnostics(&input, &report);
-    let (warnings, denied) = print_lints(&input, &report.lints, &lint_config, args);
+    let fix = args.iter().any(|a| a == "--fix");
+    let (rewrites, remaining) = if fix {
+        apply_lint_fixes(&input, &report.lints, &lint_config)
+    } else {
+        (0, report.lints.clone())
+    };
+    let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
+    offer_fixes(&report.lints, &lint_config, fix);
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
     let counts = p.summary(&[
         (report.written.len(), "files", ui::DIM),
+        (rewrites, "fixed", ui::GREEN),
         (warnings, "warnings", ui::AMBER),
         (denied, "denied", ui::RED),
     ]);
@@ -579,7 +587,14 @@ fn lint_one(path: &str, lint_config: &LintConfig, summary: bool, args: &[String]
         .iter()
         .map(|l| (PathBuf::from(path), l.clone()))
         .collect();
-    let (warnings, denied) = print_lints(Path::new(""), &lints, lint_config, args);
+    let fix = args.iter().any(|a| a == "--fix");
+    let (_, remaining) = if fix {
+        apply_lint_fixes(Path::new(""), &lints, lint_config)
+    } else {
+        (0, lints.clone())
+    };
+    let (warnings, denied) = print_lints(Path::new(""), &remaining, lint_config, args);
+    offer_fixes(&lints, lint_config, fix);
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
 
     let clean = out.diagnostics.is_empty() && denied == 0 && !(deny_warnings && warnings > 0);
@@ -665,9 +680,100 @@ fn print_lints(
                 &format!("{}: {}", l.name, l.message)
             )
         );
+
+        if let Some(fix) = &l.fix {
+            let one_line = fix
+                .replacement
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!("{}", p.note(&format!("rewrite: {one_line}")));
+        }
     }
 
     (warnings, denied)
+}
+
+/// `--fix`: applies the rewrites of the lints at `warn` or `deny`, one
+/// file at a time. Returns how many rewrites landed and the lints that
+/// had none, which the caller prints.
+fn apply_lint_fixes(
+    input: &Path,
+    lints: &[(PathBuf, Lint)],
+    config: &LintConfig,
+) -> (usize, Vec<(PathBuf, Lint)>) {
+    let p = Painter::for_stderr();
+    let mut paths: Vec<&PathBuf> = lints.iter().map(|(rel, _)| rel).collect();
+    paths.sort();
+    paths.dedup();
+    let mut rewrites = 0;
+    let mut remaining: Vec<(PathBuf, Lint)> = lints
+        .iter()
+        .filter(|(_, l)| l.fix.is_none())
+        .cloned()
+        .collect();
+
+    for rel in paths {
+        let live: Vec<Lint> = lints
+            .iter()
+            .filter(|(r, l)| {
+                r == rel && l.fix.is_some() && lint::level_of(config, l.name) != lint::Level::Allow
+            })
+            .map(|(_, l)| l.clone())
+            .collect();
+
+        if live.is_empty() {
+            continue;
+        }
+
+        let path = input.join(rel);
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let (text, n) = lint::apply_fixes(&source, &live);
+
+        if n == 0 || text == source {
+            continue;
+        }
+
+        match std::fs::write(&path, text) {
+            Ok(()) => {
+                rewrites += n;
+                eprintln!("{}", p.wrote(&format!("{}: {n} rewrites", path.display())));
+            }
+
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    p.fail(&format!("{}: cannot write: {e}", path.display()))
+                );
+                remaining.extend(live.into_iter().map(|l| (rel.clone(), l)));
+            }
+        }
+    }
+
+    remaining.sort_by_key(|(rel, l)| (rel.clone(), l.start));
+    (rewrites, remaining)
+}
+
+/// Says how many rewrites `--fix` would apply, when it was not given.
+fn offer_fixes(lints: &[(PathBuf, Lint)], config: &LintConfig, fixed: bool) {
+    if fixed {
+        return;
+    }
+
+    let n = lints
+        .iter()
+        .filter(|(_, l)| l.fix.is_some() && lint::level_of(config, l.name) != lint::Level::Allow)
+        .count();
+
+    if n > 0 {
+        let p = Painter::for_stderr();
+        eprintln!(
+            "{}",
+            p.note(&format!("`alloy lint --fix` applies {n} of these rewrites"))
+        );
+    }
 }
 
 /// `alloy fmt`: formats the project sources, or the paths given.
@@ -676,17 +782,16 @@ fn fmt_cmd(args: &[String]) -> ExitCode {
     let check_only = args.iter().any(|a| a == "--check");
     let positional = positionals(args);
     let mut files: Vec<PathBuf> = Vec::new();
+    let (root, config) = match project(args) {
+        Ok(p) => p,
+
+        Err(e) => {
+            fail(&e.to_string());
+            return ExitCode::FAILURE;
+        }
+    };
 
     if positional.is_empty() {
-        let (root, config) = match project(args) {
-            Ok(p) => p,
-
-            Err(e) => {
-                fail(&e.to_string());
-                return ExitCode::FAILURE;
-            }
-        };
-
         match alloy::build::sources(&root.join(&config.build.input)) {
             Ok(list) => files.extend(list),
 
@@ -722,11 +827,7 @@ fn fmt_cmd(args: &[String]) -> ExitCode {
     for path in &files {
         let name = path.to_string_lossy();
 
-        if name.ends_with(".alx") {
-            eprintln!(
-                "{}",
-                p.note(&format!("{name}: skipped, fmt formats .aly files"))
-            );
+        if config.fmt.exclude.iter().any(|g| glob_matches(g, &name)) {
             skipped += 1;
 
             continue;
@@ -743,7 +844,12 @@ fn fmt_cmd(args: &[String]) -> ExitCode {
             }
         };
 
-        let formatted = match alloy::fmt::format(&source) {
+        let result = if name.ends_with(".alx") {
+            alloy::fmt_alx::format_alx(&source, &config.fmt)
+        } else {
+            alloy::fmt::format_with(&source, &config.fmt)
+        };
+        let formatted = match result {
             Ok(f) => f,
 
             Err(e) => {
@@ -793,6 +899,38 @@ fn fmt_cmd(args: &[String]) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// `[fmt] exclude`: a pattern matches a path when its pieces around
+/// each `*` appear in order, the first at the start and the last at the
+/// end, unless the pattern begins or ends with `*`.
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let pieces: Vec<&str> = pattern.split('*').collect();
+
+    if pieces.len() == 1 {
+        return path == pattern || path.ends_with(&format!("/{pattern}"));
+    }
+
+    let mut at = 0;
+
+    for (k, piece) in pieces.iter().enumerate() {
+        if piece.is_empty() {
+            continue;
+        }
+
+        let Some(found) = path[at..].find(piece) else {
+            return false;
+        };
+
+        if k == 0 && found != 0 {
+            return false;
+        }
+
+        at += found + piece.len();
+    }
+
+    pieces.last().is_some_and(|last| last.is_empty()) || at == path.len()
 }
 
 /// Compiles one file the way `alloy build <file>` does.

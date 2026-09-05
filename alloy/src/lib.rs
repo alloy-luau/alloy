@@ -13,7 +13,10 @@ pub mod desugar;
 pub mod directives;
 pub mod docs;
 pub mod extensions;
+pub mod flux;
 pub mod fmt;
+pub mod fmt_alx;
+pub mod fmt_structure;
 pub mod lint;
 pub mod luau_config;
 pub mod project;
@@ -22,7 +25,7 @@ pub mod roblox_classes;
 
 pub use alx::{AlxOutput, compile_alx};
 pub use desugar::{Diagnostic, EmitOptions, MacroSource};
-pub use lint::Lint;
+pub use lint::{Fix, Lint};
 pub use render::SpanMap;
 
 /// The markup compiler `.alx` files run through first; see crates/luaux.

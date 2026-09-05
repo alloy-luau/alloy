@@ -17,6 +17,7 @@ pub struct Config {
     pub build: Build,
     pub emit: Emit,
     pub lint: LintConfig,
+    pub fmt: FmtConfig,
     pub project: Project,
     /// The `[mount]` table: alias to `[path, mount]`. The folder at
     /// `path` lands at `mount` in the DataModel, and `@alias/...`
@@ -50,6 +51,235 @@ impl Default for Project {
             sourcemap: true,
         }
     }
+}
+
+/// The `[fmt]` table: how Anneal, the formatter behind `alloy fmt`,
+/// lays code out. The names follow larvae and stylua where the option is
+/// theirs, so a config ports over; the Alloy-only options sit last.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct FmtConfig {
+    /// The width a bracket group breaks past.
+    pub column_width: usize,
+    pub line_endings: LineEndings,
+    pub indent_type: IndentType,
+    /// Spaces per level, when `indent_type` is spaces.
+    pub indent_width: usize,
+    pub quote_style: QuoteStyle,
+    /// `.5` and `0.5`: add the zero, strip it, or leave the literal.
+    pub leading_zero: LeadingZero,
+    /// The parentheses of a call with one string or one table argument.
+    pub call_parentheses: CallParentheses,
+    /// `function f ()` and `function ()`: where a space goes.
+    pub space_after_function_names: FunctionNameSpace,
+    /// Whether `if c then return end` may sit on one line.
+    pub collapse_simple_statement: Collapse,
+    /// A blank line right after a block opener or before its closer.
+    pub block_newline_gaps: BlockGaps,
+    /// A trailing comma in the source keeps its group expanded.
+    pub magic_trailing_comma: bool,
+    /// `{ a }` rather than `{a}`.
+    pub space_inside_braces: bool,
+    /// `f( a )` rather than `f(a)`.
+    pub space_inside_parens: bool,
+    /// `t[ k ]` rather than `t[k]`.
+    pub space_inside_brackets: bool,
+    /// An expanded group ends its last element with a comma.
+    pub trailing_comma: bool,
+    pub call_chains: CallChains,
+    pub sort_requires: SortRequires,
+    /// Alloy's own: `[ 1, 2 ]` rather than `[1, 2]` in an array literal.
+    pub space_inside_array: bool,
+    /// Alloy's own: the `:` of a struct's fields line up.
+    pub align_struct_fields: bool,
+    /// Paths the formatter leaves alone. A `*` matches any run of
+    /// characters: `"vendor/*"`, `"*.gen.aly"`.
+    pub exclude: Vec<String>,
+    /// The markup of `.alx` files.
+    pub alx: AlxFmt,
+}
+
+impl Default for FmtConfig {
+    fn default() -> Self {
+        Self {
+            column_width: 100,
+            line_endings: LineEndings::Unix,
+            indent_type: IndentType::Spaces,
+            indent_width: 4,
+            quote_style: QuoteStyle::AutoPreferDouble,
+            leading_zero: LeadingZero::Add,
+            call_parentheses: CallParentheses::Always,
+            space_after_function_names: FunctionNameSpace::Never,
+            collapse_simple_statement: Collapse::Never,
+            block_newline_gaps: BlockGaps::Never,
+            magic_trailing_comma: true,
+            space_inside_braces: true,
+            space_inside_parens: false,
+            space_inside_brackets: false,
+            trailing_comma: true,
+            call_chains: CallChains::default(),
+            sort_requires: SortRequires::default(),
+            space_inside_array: true,
+            align_struct_fields: false,
+            exclude: Vec::new(),
+            alx: AlxFmt::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LineEndings {
+    Unix,
+    Windows,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IndentType {
+    Spaces,
+    Tabs,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuoteStyle {
+    AutoPreferDouble,
+    AutoPreferSingle,
+    ForceDouble,
+    ForceSingle,
+    Preserve,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LeadingZero {
+    Add,
+    Strip,
+    Preserve,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CallParentheses {
+    Always,
+    NoSingleString,
+    NoSingleTable,
+    None,
+    Input,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FunctionNameSpace {
+    Never,
+    Definitions,
+    Calls,
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Collapse {
+    Never,
+    FunctionOnly,
+    ConditionalOnly,
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockGaps {
+    Never,
+    Preserve,
+}
+
+/// How a chain of method calls lays out.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct CallChains {
+    pub style: CallChainStyle,
+    /// A chain with this many calls breaks even when it fits; 0 breaks
+    /// only what runs past the width.
+    pub min_calls: usize,
+}
+
+impl Default for CallChains {
+    fn default() -> Self {
+        Self {
+            style: CallChainStyle::Preserve,
+            min_calls: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CallChainStyle {
+    Preserve,
+    Method,
+    Full,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct SortRequires {
+    pub enabled: bool,
+    pub grouping: RequireGrouping,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RequireGrouping {
+    #[default]
+    Flat,
+    ByKind,
+}
+
+/// The `[fmt.alx]` table: the markup of `.alx` files, after luaux-worm.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct AlxFmt {
+    /// The quotes of an attribute's string; `quote_style` does not govern it.
+    pub attribute_quotes: AttributeQuotes,
+    /// The `>` of a tag that breaks goes after the last attribute.
+    pub bracket_same_line: bool,
+    /// One attribute per line at all times.
+    pub attribute_per_line: bool,
+    /// The space in `<Frame />`.
+    pub self_closing_space: bool,
+    /// Fill each text line, or break where the author broke.
+    pub text_wrap: TextWrap,
+    /// A blank line between two children stays.
+    pub blank_lines: bool,
+}
+
+impl Default for AlxFmt {
+    fn default() -> Self {
+        Self {
+            attribute_quotes: AttributeQuotes::Double,
+            bracket_same_line: false,
+            attribute_per_line: false,
+            self_closing_space: true,
+            text_wrap: TextWrap::Fill,
+            blank_lines: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AttributeQuotes {
+    Double,
+    Single,
+    Preserve,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TextWrap {
+    Fill,
+    Preserve,
 }
 
 /// The `[lint]` table: which lints `alloy lint` runs, and at what level.
@@ -144,7 +374,21 @@ artifact = "ship"
 # blank `import type` lines in the output so they add no dependency
 # erase_type_imports = false
 
+[fmt]
+# Anneal, the formatter. Every key has a default; these are the ones a
+# project changes most. `alloy doc fmt` lists them all.
+column_width = 100
+indent_type = "spaces"
+indent_width = 4
+quote_style = "auto-prefer-double"
+# call_parentheses = "always"
+# exclude = ["vendor/*"]
+# sort_requires = { enabled = true, grouping = "by-kind" }
+# [fmt.alx]
+# attribute_per_line = false
+
 [lint]
+# Flux, the linter.
 # turn on the strict-only lints: implicit_any, missing_return_type
 strict = false
 # lints that fail `alloy lint`; `alloy doc lints` names them all

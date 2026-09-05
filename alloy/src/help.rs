@@ -73,10 +73,13 @@ Options:
 pub const LINT_TEXT: &str = "\
 Usage: alloy lint [file] [options]
 
-Runs the lints over the project, or one file. `alloy doc lints` names
-them; the [lint] table of alloy.toml sets their levels.
+Runs the lints over the project, or one file. Flux, the best-practice
+lints, name the Alloy form of a Luau habit and carry the rewrite.
+`alloy doc lints` names them all; the [lint] table of alloy.toml sets
+their levels.
 
 Options:
+  --fix                 Apply the rewrites that keep the program the same
   --config <file>       Read this alloy.toml instead of the nearest one
   --strict              Turn the strict-only lints on for this run
   --deny-warnings       Fail on any warning
@@ -86,8 +89,9 @@ Options:
 pub const FMT_TEXT: &str = "\
 Usage: alloy fmt [paths] [options]
 
-Formats the project's .aly files in place, or the paths given. Only
-whitespace changes.
+Formats the project's .aly and .alx files in place, or the paths given.
+Anneal lays the code out from the tokens and the [fmt] options; the
+program stays the same. `alloy doc fmt` lists the options.
 
 Options:
   --check               Write nothing; fail when a file would change

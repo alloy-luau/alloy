@@ -1089,6 +1089,7 @@ impl<'s> Desugar<'s> {
                 start: at.start,
                 end: at.end,
                 message: "this `default` never runs: the arms cover every variant; delete it so a new variant is a missing arm, not a silent fallback".to_string(),
+                fix: None,
             });
         }
 
@@ -1098,6 +1099,7 @@ impl<'s> Desugar<'s> {
                 start: at.start,
                 end: at.end,
                 message: "this `default` is empty and swallows every variant without an arm; name them, or write the fallback".to_string(),
+                fix: None,
             });
         }
     }

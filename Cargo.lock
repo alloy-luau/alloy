@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-luau"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "alloy-luaux",
  "alloy-syntax",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-luau-lsp"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "alloy-luau",
  "alloy-syntax",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-luaux"
-version = "0.2.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "full_moon",
  "globset",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-syntax"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "rayon",
 ]

@@ -1,6 +1,6 @@
 [package]
 name = "alloy-luaux"
-version = "0.2.0"
+version = "0.1.0-rc.1"
 description = "Fork of luaux 0.2.0, the JSX-style markup compiler for Luau, with the Alloy patches"
 edition = "2021"
 rust-version.workspace = true

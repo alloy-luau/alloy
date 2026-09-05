@@ -1,6 +1,6 @@
 [package]
 name = "alloy-syntax"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 description = "Alloy lexer, parser, lossless printer, and error recovery. Forked from alloy_syntax."
 edition.workspace = true
 rust-version.workspace = true

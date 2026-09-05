@@ -1,6 +1,6 @@
 [package]
 name = "alloy-luau-lsp"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 description = "Language server for Alloy. Desugars in memory and proxies luau-lsp."
 edition.workspace = true
 rust-version.workspace = true
@@ -14,8 +14,8 @@ name = "alloy-lsp"
 path = "src/main.rs"
 
 [dependencies]
-alloy = { package = "alloy-luau", version = "0.1.0", path = "../alloy" }
-alloy-syntax = { version = "0.1.0", path = "../alloy-syntax" }
+alloy = { package = "alloy-luau", version = "0.1.0-rc.1", path = "../alloy" }
+alloy-syntax = { version = "0.1.0-rc.1", path = "../alloy-syntax" }
 serde_json = "1"
 
 [lints]

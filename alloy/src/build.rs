@@ -23,6 +23,8 @@ pub struct Report {
     /// and what the alias sync did.
     pub project_files: Vec<PathBuf>,
     pub notes: Vec<String>,
+    /// The check artifacts, kept for the type check of `alloy flux`.
+    pub checks: Vec<crate::typecheck::CheckSource>,
 }
 
 impl Report {
@@ -52,18 +54,24 @@ pub fn run(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report> {
         ..Config::default()
     };
 
-    run_with(root, &config, true)
+    run_with(root, &config, true, false)
 }
 
 /// The build of a whole config: the mounts write the project files and
 /// route the requires.
 pub fn run_project(root: &Path, config: &Config) -> std::io::Result<Report> {
-    run_with(root, config, true)
+    run_with(root, config, true, false)
 }
 
 /// `check` for a whole config.
 pub fn check_project(root: &Path, config: &Config) -> std::io::Result<Report> {
-    run_with(root, config, false)
+    run_with(root, config, false, false)
+}
+
+/// `flux` for a whole config: the check, with the artifacts kept for
+/// the analyzer.
+pub fn flux_project(root: &Path, config: &Config) -> std::io::Result<Report> {
+    run_with(root, config, false, true)
 }
 
 /// The build without the write: every source compiles and the report
@@ -76,7 +84,7 @@ pub fn check(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report>
         ..Config::default()
     };
 
-    run_with(root, &config, false)
+    run_with(root, &config, false, false)
 }
 
 /// The Alloy sources under `input`, sorted.
@@ -88,7 +96,7 @@ pub fn sources(input: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(list)
 }
 
-fn run_with(root: &Path, config: &Config, write: bool) -> std::io::Result<Report> {
+fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::Result<Report> {
     let build = &config.build;
     let emit = &config.emit;
     let base_options = EmitOptions {
@@ -97,6 +105,7 @@ fn run_with(root: &Path, config: &Config, write: bool) -> std::io::Result<Report
             .std_require
             .clone()
             .unwrap_or_else(|| "@alloy".to_string()),
+        thresholds: config.flux.thresholds(),
         ..EmitOptions::default()
     };
     let input = root.join(&build.input);
@@ -104,6 +113,7 @@ fn run_with(root: &Path, config: &Config, write: bool) -> std::io::Result<Report
     let exclude = globs(&build.exclude)?;
     let mut report = Report::default();
     let mut expected: HashSet<PathBuf> = HashSet::new();
+    let mut imports: Vec<(PathBuf, Vec<crate::ImportRef>)> = Vec::new();
 
     let mut sources = Vec::new();
     walk(&input, &mut sources)?;
@@ -202,6 +212,17 @@ fn run_with(root: &Path, config: &Config, write: bool) -> std::io::Result<Report
             report.lints.push((rel.clone(), l.clone()));
         }
 
+        imports.push((rel.clone(), compiled.imports.clone()));
+
+        if keep {
+            report.checks.push(crate::typecheck::CheckSource {
+                rel: rel.clone(),
+                source: source.clone(),
+                check: compiled.check.clone(),
+                map: compiled.map.clone(),
+            });
+        }
+
         if !write {
             report.written.push(rel_out);
 
@@ -228,6 +249,11 @@ fn run_with(root: &Path, config: &Config, write: bool) -> std::io::Result<Report
 
         report.written.push(rel_out);
     }
+
+    report.lints.extend(circular_imports(&imports));
+    report
+        .lints
+        .sort_by(|a, b| (&a.0, a.1.start).cmp(&(&b.0, b.1.start)));
 
     if !write {
         return Ok(report);
@@ -278,7 +304,104 @@ fn run_with(root: &Path, config: &Config, write: bool) -> std::io::Result<Report
     Ok(report)
 }
 
-fn globs(patterns: &[String]) -> std::io::Result<GlobSet> {
+/// The source a relative import of `from` names, among the sources:
+/// `./x` beside it, `../x` above, with `.aly`, `.alx`, or `init.aly`.
+fn resolve_import(from: &Path, path: &str, sources: &[PathBuf]) -> Option<PathBuf> {
+    if !(path.starts_with("./") || path.starts_with("../")) {
+        return None;
+    }
+
+    let base = from.parent().unwrap_or(Path::new(""));
+    let mut joined = PathBuf::new();
+
+    for c in base.join(path).components() {
+        match c {
+            std::path::Component::CurDir => {}
+
+            std::path::Component::ParentDir => {
+                joined.pop();
+            }
+
+            other => joined.push(other),
+        }
+    }
+
+    for ext in ["aly", "alx"] {
+        let candidate = joined.with_extension(ext);
+
+        if sources.contains(&candidate) {
+            return Some(candidate);
+        }
+
+        let init = joined.join(format!("init.{ext}"));
+
+        if sources.contains(&init) {
+            return Some(init);
+        }
+    }
+
+    None
+}
+
+/// `circular_import`: an import that leads back to the file it sits in.
+/// Each file on the cycle reports the import that starts it.
+fn circular_imports(imports: &[(PathBuf, Vec<crate::ImportRef>)]) -> Vec<(PathBuf, Lint)> {
+    let sources: Vec<PathBuf> = imports.iter().map(|(p, _)| p.clone()).collect();
+    let mut edges: Vec<(usize, &crate::ImportRef, usize)> = Vec::new();
+
+    for (i, (from, list)) in imports.iter().enumerate() {
+        for im in list {
+            if let Some(to) = resolve_import(from, &im.path, &sources)
+                && let Some(j) = sources.iter().position(|s| *s == to)
+            {
+                edges.push((i, im, j));
+            }
+        }
+    }
+
+    // Whether `to` reaches `from` along the edges.
+    let reaches = |start: usize, goal: usize| {
+        let mut seen = vec![false; sources.len()];
+        let mut stack = vec![start];
+
+        while let Some(n) = stack.pop() {
+            if n == goal {
+                return true;
+            }
+
+            if std::mem::replace(&mut seen[n], true) {
+                continue;
+            }
+
+            stack.extend(edges.iter().filter(|(a, _, _)| *a == n).map(|(_, _, b)| *b));
+        }
+
+        false
+    };
+
+    edges
+        .iter()
+        .filter(|(from, _, to)| reaches(*to, *from))
+        .map(|(from, im, to)| {
+            (
+                sources[*from].clone(),
+                Lint {
+                    name: "circular_import",
+                    start: im.start,
+                    end: im.end,
+                    message: format!(
+                        "`{}` imports `{}`, which imports it back; move the shared part into a third module",
+                        sources[*from].display(),
+                        sources[*to].display()
+                    ),
+                    fix: None,
+                },
+            )
+        })
+        .collect()
+}
+
+pub fn globs(patterns: &[String]) -> std::io::Result<GlobSet> {
     let mut b = GlobSetBuilder::new();
 
     for p in patterns {
@@ -328,6 +451,25 @@ fn walk_all(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cycle_of_imports_is_a_lint_on_each_file() {
+        let im = |path: &str| crate::ImportRef {
+            start: 0,
+            end: 1,
+            path: path.to_string(),
+        };
+        let imports = vec![
+            (PathBuf::from("a.aly"), vec![im("./b")]),
+            (PathBuf::from("b.aly"), vec![im("./c")]),
+            (PathBuf::from("c.aly"), vec![im("./a"), im("./d")]),
+            (PathBuf::from("d.aly"), vec![]),
+        ];
+        let lints = circular_imports(&imports);
+        let files: Vec<String> = lints.iter().map(|(p, _)| p.display().to_string()).collect();
+        assert_eq!(files, vec!["a.aly", "b.aly", "c.aly"]);
+        assert!(lints[0].1.message.contains("`a.aly` imports `b.aly`"));
+    }
 
     #[test]
     fn output_names_follow_the_source() {

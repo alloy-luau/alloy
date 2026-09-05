@@ -54,13 +54,7 @@ impl SpanMap {
     /// its anchor, so a diagnostic in emitted code points at the construct
     /// that produced it.
     pub fn to_source(&self, out: u32) -> u32 {
-        let idx = match self.starts.binary_search(&out) {
-            Ok(i) => i,
-
-            Err(0) => 0,
-
-            Err(i) => i - 1,
-        };
+        let idx = self.chunk_at(out);
 
         match self.chunks.get(idx) {
             Some(Chunk::Copied { src_start, .. }) => src_start + (out - self.starts[idx]),
@@ -73,15 +67,17 @@ impl SpanMap {
 
     /// Reports if an output offset sits inside generated text.
     pub fn is_generated(&self, out: u32) -> bool {
-        let idx = match self.starts.binary_search(&out) {
-            Ok(i) => i,
+        matches!(
+            self.chunks.get(self.chunk_at(out)),
+            Some(Chunk::Generated { .. })
+        )
+    }
 
-            Err(0) => 0,
-
-            Err(i) => i - 1,
-        };
-
-        matches!(self.chunks.get(idx), Some(Chunk::Generated { .. }))
+    /// The chunk that holds an output offset: the last one that starts
+    /// at or before it, so an empty chunk at the same start yields to
+    /// the one with the text.
+    fn chunk_at(&self, out: u32) -> usize {
+        self.starts.partition_point(|s| *s <= out).saturating_sub(1)
     }
 
     pub fn chunks(&self) -> &[Chunk] {

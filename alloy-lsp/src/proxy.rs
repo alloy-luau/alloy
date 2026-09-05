@@ -153,7 +153,7 @@ impl State {
                     "code": alloy::docs::LINT_CODE,
                     "codeDescription": { "href": alloy::docs::book_url(alloy::docs::LINT_CODE).unwrap_or_default() },
                     "message": if l.fix.is_some() {
-                        format!("{}: {}\n`alloy lint --fix` rewrites it.", l.name, l.message)
+                        format!("{}: {}\n`alloy flux --fix` rewrites it.", l.name, l.message)
                     } else {
                         format!("{}: {}", l.name, l.message)
                     },

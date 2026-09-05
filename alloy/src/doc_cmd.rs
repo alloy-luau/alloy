@@ -7,7 +7,7 @@
 use std::process::ExitCode;
 
 use alloy::docs::{self, TABLE};
-use alloy::lint::{LINTS, Level};
+use alloy::lint::{Group, LINTS, Level};
 
 use crate::highlight::{self, Mode};
 use crate::ui::{self, BOLD, RESET};
@@ -92,7 +92,7 @@ fn json() -> String {
                 Level::Deny => "deny",
             };
 
-            serde_json::json!({ "name": l.name, "default": level, "summary": l.summary, "detail": l.detail })
+            serde_json::json!({ "name": l.name, "group": l.group.name(), "default": level, "summary": l.summary, "detail": l.detail })
         })
         .collect();
     let value = serde_json::json!({
@@ -126,11 +126,34 @@ fn page(topic: &str, color: bool) -> Option<String> {
             Level::Deny => "deny",
         };
         let body = format!(
-            "**{}**\nDefault: {level}\n\n{}\n\n{}",
-            l.name, l.summary, l.detail
+            "**{}**\nGroup: {}. Default: {level}\n\n{}\n\n{}",
+            l.name,
+            l.group.name(),
+            l.summary,
+            l.detail
         );
 
         return Some(render(&body, color));
+    }
+
+    // A group: its lints.
+    if let Some(group) = Group::from_name(topic) {
+        let mut out = format!("**{}**\n{}\n\n", group.name(), group.summary());
+
+        for l in LINTS.iter().filter(|l| l.group == group) {
+            out.push_str(&format!("  {:<24} {}\n", l.name, l.summary));
+        }
+
+        out.push_str("\n`alloy doc <lint>` explains one.\n");
+
+        return Some(render(&out, color));
+    }
+
+    if topic == alloy::lint::LUAU_GROUP {
+        return Some(render(
+            "**luau**\nThe type checker's own lints, `LocalUnused`, `LocalShadow`, `ImplicitReturn`, and the rest, which `alloy flux` reports beside Flux's. `[lint]` sets their level by this name, or by the lint's own name.\n",
+            color,
+        ));
     }
 
     let keys = [
@@ -157,22 +180,28 @@ fn page(topic: &str, color: bool) -> Option<String> {
     None
 }
 
-/// The lint list as a page.
+/// The lint list as a page, by group.
 fn lints_page(color: bool) -> String {
     let mut out = String::new();
     out.push_str(&heading("Lints", color));
-    out.push_str("`alloy lint` runs them; `[lint]` in alloy.toml sets `deny`, `warn`, and `allow` lists, and `strict = true` turns the strict-only ones on.\n\n");
+    out.push_str("`alloy flux` and `alloy lint` run them; `[lint]` in alloy.toml sets `deny`, `warn`, and `allow` lists by lint or by group, and `strict = true` turns the pedantic group on.\n\n");
 
-    for l in LINTS {
-        let level = match l.default {
-            Level::Allow => "strict",
-            Level::Warn => "warn",
-            Level::Deny => "deny",
-        };
-        out.push_str(&format!("  {:<22} {:<7} {}\n", l.name, level, l.summary));
+    for group in Group::ALL {
+        out.push_str(&format!("**{}**: {}\n", group.name(), group.summary()));
+
+        for l in LINTS.iter().filter(|l| l.group == *group) {
+            let level = match l.default {
+                Level::Allow => "allow",
+                Level::Warn => "warn",
+                Level::Deny => "deny",
+            };
+            out.push_str(&format!("  {:<24} {:<6} {}\n", l.name, level, l.summary));
+        }
+
+        out.push('\n');
     }
 
-    out.push_str("\n`alloy doc <lint>` explains one.\n");
+    out.push_str("**luau**: the type checker's own lints, under `alloy flux`.\n\n`alloy doc <lint>` explains one; `alloy doc <group>` lists a group.\n");
     render(&out, color)
 }
 

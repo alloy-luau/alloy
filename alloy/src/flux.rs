@@ -4,20 +4,20 @@
 //! Alloy has a word for: `a and a.b` for `a?.b`, `if f then f() end`
 //! for `f?()`, `typeof(x) == "T"` for `x is T`. When the rewrite keeps
 //! the program the same, the lint carries it as a `Fix` and
-//! `alloy lint --fix` applies it. When it would not, the message shows
+//! `alloy flux --fix` applies it. When it would not, the message shows
 //! the form and leaves the change to the author.
 //!
 //! The names and levels sit in `lint::LINTS` with the other lints.
 
-use alloy_syntax::lexer::{Tok, TokKind};
+use alloy_syntax::lexer::TokKind;
 
 use crate::desugar::PRIMITIVES;
-use crate::lint::{Fix, Lint};
+use crate::flux_scan::Scan;
+use crate::lint::Lint;
 use crate::roblox_classes::DATATYPES;
 
-/// Runs the Flux lints on one file.
-pub fn run(src: &str, toks: &[Tok]) -> Vec<Lint> {
-    let s = Scan { src, toks };
+/// Runs the style lints on one file.
+pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     let mut out = Vec::new();
     s.manual_safe_access(&mut out);
     s.manual_coalesce(&mut out);
@@ -36,205 +36,7 @@ pub fn run(src: &str, toks: &[Tok]) -> Vec<Lint> {
     out
 }
 
-struct Scan<'s> {
-    src: &'s str,
-    toks: &'s [Tok],
-}
-
-const KEYWORDS: &[&str] = &[
-    "and", "or", "not", "if", "then", "else", "elseif", "end", "for", "in", "while", "do",
-    "repeat", "until", "return", "break", "continue", "local", "function", "nil", "true", "false",
-];
-
-/// Tokens after which the next token starts an expression.
-const EXPR_BEFORE: &[&str] = &[
-    "=", "(", ",", "[", "{", "return", "and", "or", "not", "+", "-", "*", "/", "//", "%", "^",
-    "..", "==", "~=", "<", ">", "<=", ">=", "?", ":", "in", "then", "else", "local", "until",
-    "while", "if", "elseif",
-];
-
 impl<'s> Scan<'s> {
-    fn t(&self, i: usize) -> &'s str {
-        self.toks.get(i).map(|t| t.text(self.src)).unwrap_or("")
-    }
-
-    fn at(&self, i: usize, text: &str) -> bool {
-        self.t(i) == text
-    }
-
-    fn is_name(&self, i: usize) -> bool {
-        self.toks.get(i).is_some_and(|t| t.kind == TokKind::Ident) && !KEYWORDS.contains(&self.t(i))
-    }
-
-    fn prev(&self, i: usize) -> &'s str {
-        if i == 0 { "" } else { self.t(i - 1) }
-    }
-
-    fn start(&self, i: usize) -> u32 {
-        self.toks[i].start
-    }
-
-    fn end(&self, i: usize) -> u32 {
-        self.toks[i.min(self.toks.len() - 1)].end
-    }
-
-    /// The source text of the tokens `a..b`.
-    fn slice(&self, a: usize, b: usize) -> &'s str {
-        if a >= b || a >= self.toks.len() {
-            return "";
-        }
-
-        &self.src[self.start(a) as usize..self.end(b - 1) as usize]
-    }
-
-    fn line_of(&self, i: usize) -> usize {
-        self.src[..self.start(i.min(self.toks.len() - 1)) as usize]
-            .matches('\n')
-            .count()
-    }
-
-    /// Whether `i` starts a statement: nothing before it on the line, or
-    /// a token that ends one.
-    fn statement_start(&self, i: usize) -> bool {
-        i == 0
-            || self.line_of(i - 1) != self.line_of(i)
-            || matches!(
-                self.prev(i),
-                "then" | "do" | "else" | "end" | ";" | "repeat"
-            )
-    }
-
-    /// A name and its `.name` members: `a.b.c`. The end is exclusive.
-    fn path_end(&self, i: usize) -> Option<usize> {
-        if !self.is_name(i) {
-            return None;
-        }
-
-        let mut j = i + 1;
-
-        while self.at(j, ".") && self.is_name(j + 1) {
-            j += 2;
-        }
-
-        Some(j)
-    }
-
-    /// Whether the tokens from `b` spell the same path as `a..a_end`;
-    /// the end of the second path when they do.
-    fn same_path(&self, a: usize, a_end: usize, b: usize) -> Option<usize> {
-        let n = a_end - a;
-
-        for k in 0..n {
-            if self.t(a + k) != self.t(b + k) || self.toks.get(b + k).is_none() {
-                return None;
-            }
-        }
-
-        Some(b + n)
-    }
-
-    fn matching(&self, open: usize) -> Option<usize> {
-        let mut depth = 0i32;
-
-        for i in open..self.toks.len() {
-            let text = self.t(i);
-
-            if matches!(text, "(" | "[" | "{") || text.ends_with('(') || text.ends_with('[') {
-                depth += 1;
-            } else if matches!(text, ")" | "]" | "}") {
-                depth -= 1;
-
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-        }
-
-        None
-    }
-
-    /// The exclusive end of a simple expression at `i`: a literal, a
-    /// name with members, calls and indexes, or a bracket group; with
-    /// one prefix `-`, `#`, or `not`.
-    fn expr_end(&self, i: usize) -> Option<usize> {
-        let mut j = i;
-
-        if matches!(self.t(j), "-" | "#" | "not") {
-            j += 1;
-        }
-
-        let t = self.toks.get(j)?;
-        let text = t.text(self.src);
-
-        match t.kind {
-            TokKind::Str { .. } | TokKind::InterpStr | TokKind::Number => j += 1,
-
-            TokKind::Ident if matches!(text, "true" | "false" | "nil") => j += 1,
-
-            TokKind::Ident if self.is_name(j) => j += 1,
-
-            TokKind::InterpHead => {
-                while j < self.toks.len() && self.toks[j].kind != TokKind::InterpTail {
-                    j += 1;
-                }
-
-                j += 1;
-            }
-
-            _ if matches!(text, "(" | "{" | "[") => j = self.matching(j)? + 1,
-
-            _ => return None,
-        }
-
-        loop {
-            let text = self.t(j);
-
-            let same_line = self.line_of(j) == self.line_of(j - 1);
-            let group = matches!(text, "(" | "[") || (text == "{" && self.is_name(j - 1));
-
-            if matches!(text, "." | ":") && self.is_name(j + 1) {
-                j += 2;
-            } else if group && same_line {
-                j = self.matching(j)? + 1;
-            } else {
-                return Some(j);
-            }
-        }
-    }
-
-    /// The content of a plain string literal at `i`, without its quotes.
-    fn string_content(&self, i: usize) -> Option<&'s str> {
-        let text = self.t(i);
-
-        if text.len() >= 2 && (text.starts_with('"') || text.starts_with('\'')) {
-            Some(&text[1..text.len() - 1])
-        } else {
-            None
-        }
-    }
-
-    fn lint(
-        &self,
-        out: &mut Vec<Lint>,
-        name: &'static str,
-        a: usize,
-        b: usize,
-        message: String,
-        fix: Option<String>,
-    ) {
-        out.push(Lint {
-            name,
-            start: self.start(a),
-            end: self.end(b),
-            message,
-            fix: fix.map(|replacement| Fix {
-                start: self.start(a),
-                end: self.end(b),
-                replacement,
-            }),
-        });
-    }
-
     // --- the lints -----------------------------------------------------------------------
 
     /// `a and a.b` is `a?.b`.
@@ -369,15 +171,9 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            // The condition runs back to the start of the expression.
-            let mut c = k;
-
-            while c > 0
-                && !EXPR_BEFORE.contains(&self.prev(c))
-                && self.line_of(c - 1) == self.line_of(c)
-            {
-                c -= 1;
-            }
+            // The condition runs back to the start of the expression,
+            // comparisons included: `n ~= nil and n or x`.
+            let c = self.expr_start_before(k);
 
             if c == k || matches!(self.prev(c), "?" | ":") {
                 continue;
@@ -773,7 +569,7 @@ impl<'s> Scan<'s> {
     }
 
     /// The bracket depth of `j` relative to the opener at `open`.
-    fn matching_depth(&self, open: usize, j: usize) -> i32 {
+    pub(crate) fn matching_depth(&self, open: usize, j: usize) -> i32 {
         let mut depth = 0i32;
 
         for k in open..j {
@@ -1023,8 +819,15 @@ mod tests {
         apply_fixes(src, &lints(src)).0
     }
 
+    /// The lints at their default level: the pedantic ones stay out.
     fn names(src: &str) -> Vec<&'static str> {
-        lints(src).iter().map(|l| l.name).collect()
+        let config = crate::config::LintConfig::default();
+
+        lints(src)
+            .iter()
+            .map(|l| l.name)
+            .filter(|n| crate::lint::level_of(&config, n) != crate::lint::Level::Allow)
+            .collect()
     }
 
     #[test]
@@ -1168,7 +971,13 @@ mod tests {
             fixed("local X = require(\"./x\")\n"),
             "import X from \"./x\"\n"
         );
-        assert_eq!(names("local x: any = 1\n"), vec!["explicit_any"]);
+        assert_eq!(
+            lints("local x: any = 1\n")
+                .iter()
+                .map(|l| l.name)
+                .collect::<Vec<_>>(),
+            vec!["explicit_any"]
+        );
     }
 
     #[test]

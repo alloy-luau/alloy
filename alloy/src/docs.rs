@@ -308,7 +308,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@test",
-        "```alloy\n@test\nfunction name() ... end\n```\nA test that `alloy test` runs. The ship artifact blanks it; the check artifact keeps it typed.",
+        "```alloy\n@test\nfunction name() ... end\n```\nA test beside the code it tests. The ship artifact blanks it, line for line; the check artifact keeps it typed; `alloy test` writes it into a lest spec with everything it reaches. An `async` test is awaited.",
     ),
     (
         "@unreliable",
@@ -433,7 +433,15 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:lint",
-        "**alloy lint**\n\nRuns the lints over the project, or over one file. A lint is advice: the code runs, and the lint names a habit that costs bugs. Flux is the set that knows the Alloy form of a Luau habit: `a and a.b` for `a?.b`, `if f then f() end` for `f?()`, `typeof(x) == \"T\"` for `x is T`, `\"a\" .. b` for `` `a{b}` ``. Each of those carries its rewrite, and `--fix` applies the ones that keep the program the same.\n\n```\nalloy lint                 the project of the nearest alloy.toml\nalloy lint src/game.aly    one file\nalloy lint --fix           apply the rewrites that keep the program the same\nalloy lint --strict        the strict-only lints too\nalloy lint --deny-warnings fail on any hit\nalloy lint --list          every lint with its default level\n```\n\nThe `[lint]` table of alloy.toml sets the levels:\n\n```toml\n[lint]\nstrict = true\ndeny = [\"optional_access\"]\nallow = [\"concat_interpolation\"]\n```\n\n`alloy doc lints` lists them; `alloy doc <name>` explains one. The language server shows the same lints as warnings, with the rewrite in the message.",
+        "**alloy lint**\n\nRuns the lints over the project, or over one file, and nothing else; `alloy flux` runs them with the compile and the type check. A lint is advice: the code runs, and the lint names a habit that costs bugs. The lints are Flux's, in seven groups:\n\n  correctness   code that is wrong, or cannot run\n  suspicious    code that is probably not what the author meant\n  style         a Luau habit with an Alloy form: `a and a.b` for `a?.b`, `typeof(x) == \"T\"` for `x is T`\n  complexity    a simple thing done in a hard way; the limits sit in `[flux]`\n  perf          code that runs slower than the plain form\n  roblox        a Roblox API that is deprecated or misused\n  pedantic      strict rules, off until `[lint] strict = true`\n\nA lint whose rewrite keeps the program the same carries it, and `--fix` applies those.\n\n```\nalloy lint                 the project of the nearest alloy.toml\nalloy lint src/game.aly    one file\nalloy lint --fix           apply the rewrites that keep the program the same\nalloy lint -W pedantic     a level for this run: -W warns, -A allows, -D denies\nalloy lint --deny-warnings fail on any hit\nalloy lint --list          every lint with its group and default level\n```\n\nThe `[lint]` table of alloy.toml sets the levels. A list takes a lint name or a group name, and a name beats its group:\n\n```toml\n[lint]\nstrict = true\ndeny = [\"correctness\"]\nwarn = [\"pedantic\"]\nallow = [\"concat_interpolation\", \"luau\"]\n```\n\n`luau` is the group of the type checker's own lints, `LocalUnused` and the rest, which `alloy flux` reports. `alloy doc lints` lists every lint; `alloy doc <name>` explains one, and `alloy doc <group>` lists a group. The language server shows the same lints as warnings, with the rewrite in the message.",
+    ),
+    (
+        "topic:flux",
+        "**alloy flux**\n\nFlux is the whole analysis in one run, what clippy is to cargo. It compiles every source, runs luau-lsp over the check artifact and maps the type errors onto the Alloy lines, and runs every lint at its `[lint]` level: Flux's own seven groups, and the checker's lints under the `luau` group. It also sees what one file cannot: `circular_import` reports two files that import each other.\n\n```\nalloy flux                 the project of the nearest alloy.toml\nalloy flux src/game.aly    one file: the compile and the lints\nalloy flux --fix           apply the rewrites that keep the program the same\nalloy flux -D correctness  deny a group for this run; -W warns, -A allows\nalloy flux --explain manual_floor_div\nalloy flux --no-typecheck  skip luau-lsp\nalloy flux --list          every lint with its group and default level\n```\n\nThe check artifact keeps the source's lines, so a type error on line 12 of the output is on line 12 of the source; the column maps through the span map. The artifacts go into a mirror of the project under the temp directory, with the root's Luau configuration and a link to every other folder, so requires resolve as they do in the editor.\n\nThe `[flux]` table:\n\n```toml\n[flux]\ntypecheck = true                  # run luau-lsp over the check artifact\ndefinitions = []                  # extra .d.luau or .d.aly files; the project's .d.aly join on their own\nroblox_types = true               # load the Roblox globals\nsecurity_level = \"PluginSecurity\" # LocalUserSecurity, RobloxScriptSecurity, None\n# luau_lsp = \"/path/to/luau-lsp\"  # unset: the PATH, then ~/.alloy/bin and ~/.ember/bin\ntoo_many_arguments = 7\ntoo_many_lines = 100\nmax_nesting = 5\ncognitive_complexity = 25\n```\n\nThe Roblox globals come from the luau-lsp extension's storage when the editor has them, and download once into `~/.alloy/types` otherwise. A `--@alloy-ignore` line silences the checker's report on that line, as it does in the editor.",
+    ),
+    (
+        "topic:test",
+        "**alloy test**\n\nA test lives beside the code it tests: a `@test` function in the module, blanked from the ship artifact. `alloy test` builds the project, then writes one lest spec per source that holds a `@test`, under `[test] out`:\n\n```\nsrc/inventory.aly        ->  tests/inventory.spec.luau\nsrc/ui/menu.aly          ->  tests/ui/menu.spec.luau\n```\n\nA spec carries the tests and every top-level statement they reach: the imports they use, the locals and functions they call, the structs and the impls those need. The rest of the module stays out, so its side effects stay out of the test VM. The slice keeps the source's lines, so a failure points at the real one. Each relative `require` in the spec points at the build output, the runtime included, and the spec ends with a `describe` that registers each test by name; an `async` test is awaited.\n\n```alloy\nlocal function clamp01(x: number): number\n    return math.clamp(x, 0, 1)\nend\n\n@test\nfunction clamp_keeps_range()\n    $assert_eq(clamp01(2), 1)\nend\n```\n\n```\nalloy test                 build, then write the specs\nalloy test --run           and run lest on the suite\nalloy test --check         write nothing; fail when a spec would change\nalloy test src/game.aly    one file's spec, to stdout\n```\n\nThe `[test]` table:\n\n```toml\n[test]\nout = \"tests\"     # where the specs go\nsuite = \"alloy\"   # the suite name in lest.toml\nlest = true       # write lest.toml and the @lest alias when the root has none\n```\n\nWith `lest = true`, the first run writes a `lest.toml` with one suite over `tests/**/*.spec.luau` on the native backend, and adds `lest = \".lest/core\"` to the aliases of `.luaurc`, which is where lest puts its framework. `lest` then runs the suite; on its VM the runtime falls back to plain coroutines, so an `await` settles at once. `$assert` and `$assert_eq` raise, and lest reports the line.",
     ),
     (
         "topic:fmt",
@@ -441,7 +449,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:check",
-        "**alloy check**\n\nCompiles every source of the project and writes nothing. The report carries the compiler's diagnostics and the lints at their `[lint]` levels, and the exit code is one on any diagnostic or denied lint. `alloy check <file>` does the same for one file.",
+        "**alloy check**\n\nCompiles every source of the project and writes nothing. The report carries the compiler's diagnostics and the lints at their `[lint]` levels, and the exit code is one on any diagnostic or denied lint. `alloy check <file>` does the same for one file. `alloy flux` is the same run with the type check on top.",
     ),
     (
         "topic:build",
@@ -449,7 +457,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:config",
-        "**alloy.toml**\n\n```toml\n[build]\nin = \"src\"\nout = \"build\"\nexclude = []\nclean = false\nartifact = \"ship\"\n\n[emit]\n# wait_timeout = 5\n# std_require = \"@alloy\"\n# erase_type_imports = false\n\n[lint]\nstrict = false\ndeny = []\nwarn = []\nallow = []\n```\n\nEvery key has a default, and an unknown key is an error. `alloy init` writes the file, plus `.luaurc` and `.config.luau` when the folder has neither: strict mode and the `@alloy` alias for the runtime the build writes. `[project]` and `[mount]` describe the DataModel tree; `alloy doc mount` explains them.",
+        "**alloy.toml**\n\n```toml\n[build]\nin = \"src\"\nout = \"build\"\nexclude = []\nclean = false\nartifact = \"ship\"\n\n[emit]\n# wait_timeout = 5\n# std_require = \"@alloy\"\n# erase_type_imports = false\n\n[lint]\nstrict = false\ndeny = []\nwarn = []\nallow = []\n\n[flux]\ntypecheck = true\ndefinitions = []\n\n[test]\nout = \"tests\"\nsuite = \"alloy\"\n```\n\nEvery key has a default, and an unknown key is an error. `alloy doc lint`, `alloy doc flux`, `alloy doc fmt`, and `alloy doc test` explain their tables. `alloy init` writes the file, plus `.luaurc` and `.config.luau` when the folder has neither: strict mode and the `@alloy` alias for the runtime the build writes. `[project]` and `[mount]` describe the DataModel tree; `alloy doc mount` explains them.",
     ),
     (
         "topic:luaurc",
@@ -673,30 +681,42 @@ pub const BOOK: &[Section] = &[
     },
     Section {
         number: "5.4",
+        id: "flux",
+        title: "alloy flux",
+        key: Some("topic:flux"),
+    },
+    Section {
+        number: "5.5",
         id: "fmt",
         title: "alloy fmt",
         key: Some("topic:fmt"),
     },
     Section {
-        number: "5.5",
+        number: "5.6",
+        id: "test",
+        title: "alloy test",
+        key: Some("topic:test"),
+    },
+    Section {
+        number: "5.7",
         id: "doc",
         title: "alloy doc",
         key: None,
     },
     Section {
-        number: "5.6",
+        number: "5.8",
         id: "config",
         title: "alloy.toml",
         key: Some("topic:config"),
     },
     Section {
-        number: "5.7",
+        number: "5.9",
         id: "luaurc",
         title: ".luaurc and .config.luau",
         key: Some("topic:luaurc"),
     },
     Section {
-        number: "5.8",
+        number: "5.10",
         id: "mount",
         title: "Mounts and project files",
         key: Some("topic:mount"),

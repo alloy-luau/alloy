@@ -60,6 +60,11 @@ pub struct EmitOptions {
     /// their names routes through the dispatcher in every file, not only
     /// in the file that declares the impl.
     pub extensions: Vec<crate::extensions::Extension>,
+    /// The limits of the complexity lints.
+    pub thresholds: crate::lint::Thresholds,
+    /// Render the test artifact: a `@test` function stays in the output
+    /// as a local, unregistered, for `alloy test` to call by name.
+    pub tests: bool,
 }
 
 /// A macro as source text, for expansion in a nested compile.
@@ -83,6 +88,8 @@ impl Default for EmitOptions {
             macros: Vec::new(),
             check: false,
             extensions: Vec::new(),
+            thresholds: crate::lint::Thresholds::default(),
+            tests: false,
         }
     }
 }
@@ -100,6 +107,8 @@ pub struct Rendered {
     /// Whether the file declares an extension on a foreign type, so the
     /// check artifact differs from the ship artifact.
     pub ext_used: bool,
+    /// The `@test` functions: name and whether it is async.
+    pub tests: Vec<(String, bool)>,
 }
 
 /// The std names that are ambient in Alloy source.
@@ -282,6 +291,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ship_blanks: out_blanks,
         uses_std: d.uses_std,
         ext_used: d.ext_hit,
+        tests: d.test_names,
     }
 }
 
@@ -393,8 +403,10 @@ struct Desugar<'s> {
     ext_hit: bool,
     /// Macros declared in this file, by name.
     macros: HashMap<String, MacroRef>,
-    /// The check artifact registers tests; the ship artifact blanks them.
-    test_names: Vec<String>,
+    /// The `@test` functions, with whether each is async. The check
+    /// artifact registers them, the ship artifact blanks them, and the
+    /// test artifact keeps them for `alloy test`.
+    test_names: Vec<(String, bool)>,
     /// Mapped-type shapes used, each needing one type function declared.
     mapped_used: Vec<&'static str>,
 }
@@ -571,9 +583,10 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// The export table, appended after the last token.
+    /// The export table, appended after the last token. The test
+    /// artifact has no module to return: the spec's footer follows.
     fn module_return(&mut self, at: u32, block: &Block) {
-        if self.exports.is_empty() {
+        if self.exports.is_empty() || self.options.tests {
             return;
         }
 
@@ -2760,7 +2773,7 @@ impl<'s> Desugar<'s> {
         let decl_start = self.toks[first_tok as usize].start;
         let fname = name.map(|n| self.text_of(n).to_string());
 
-        if is_test {
+        if is_test && !self.options.tests {
             self.ship_blanks.push((start, self.byte_end(span)));
         }
 
@@ -2797,9 +2810,12 @@ impl<'s> Desugar<'s> {
 
         if let Some(f) = &fname {
             if is_test {
-                let std = self.std();
-                tail.push_str(&format!(" {std}.test({}, {f})", luau_string(f)));
-                self.test_names.push(f.clone());
+                self.test_names.push((f.clone(), body.is_async.is_some()));
+
+                if !self.options.tests {
+                    let std = self.std();
+                    tail.push_str(&format!(" {std}.test({}, {f})", luau_string(f)));
+                }
             }
 
             if !user.is_empty() {

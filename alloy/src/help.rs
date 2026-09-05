@@ -18,8 +18,10 @@ Usage: alloy <command> [options]
 Commands:
   build [file]    Build the project, or one file; -W watches
   check [file]    Compile, write nothing, report errors and lints
-  lint [file]     Run the lints of the [lint] table
+  flux [file]     Compile, type-check, and lint; --fix applies rewrites
+  lint [file]     Run the lints alone; --fix applies rewrites
   fmt [paths]     Format the sources in place
+  test [file]     Write a lest spec per source with a @test; --run runs it
   doc [topic]     Explain a keyword, an operator, a lint, an article
   init            Write alloy.toml, .luaurc, and .config.luau
   self            Install or remove the binaries
@@ -73,17 +75,59 @@ Options:
 pub const LINT_TEXT: &str = "\
 Usage: alloy lint [file] [options]
 
-Runs the lints over the project, or one file. Flux, the best-practice
-lints, name the Alloy form of a Luau habit and carry the rewrite.
-`alloy doc lints` names them all; the [lint] table of alloy.toml sets
-their levels.
+Runs the lints over the project, or one file, and nothing else. The
+lints are Flux's, in seven groups: correctness, suspicious, style,
+complexity, perf, roblox, pedantic. `alloy doc lints` names them all;
+the [lint] table of alloy.toml sets their levels by name or by group.
 
 Options:
   --fix                 Apply the rewrites that keep the program the same
+  -W, -A, -D <name>     Warn, allow, or deny a lint or a group for this run
   --config <file>       Read this alloy.toml instead of the nearest one
-  --strict              Turn the strict-only lints on for this run
+  --strict              Turn the pedantic group on for this run
   --deny-warnings       Fail on any warning
-  --list                Print every lint with its default level
+  --list                Print every lint with its group and default level
+";
+
+pub const FLUX_TEXT: &str = "\
+Usage: alloy flux [file] [options]
+
+Flux is the whole analysis in one run, what clippy is to cargo. It
+compiles every source, runs luau-lsp over the check artifact and maps
+the type errors onto the Alloy lines, and runs every lint at its [lint]
+level: the seven groups of Flux's own, plus the checker's lints under
+the `luau` group. With one file it compiles and lints that file.
+
+Options:
+  --fix                 Apply the rewrites that keep the program the same
+  -W, -A, -D <name>     Warn, allow, or deny a lint or a group for this run
+  --explain <lint>      Print the page of one lint and exit
+  --no-typecheck        Skip luau-lsp for this run
+  --config <file>       Read this alloy.toml instead of the nearest one
+  --strict              Turn the pedantic group on for this run
+  --deny-warnings       Fail on any warning
+  --list                Print every lint with its group and default level
+
+The [flux] table names the luau-lsp binary and the definitions files,
+and sets the limits of the complexity lints. `alloy doc flux` explains it.
+";
+
+pub const TEST_TEXT: &str = "\
+Usage: alloy test [file] [options]
+
+Builds the project, then writes one lest spec per source that holds a
+@test function, under the [test] out folder. Each spec carries the
+tests and every top-level statement they reach: the imports, the
+locals, the structs and their impls. The rest of the module stays out.
+With one file, prints its spec.
+
+Options:
+  --run                 Run lest on the suite afterwards
+  --check               Write nothing; fail when a spec would change
+  --out <dir>           Write the specs under <dir>
+  --config <file>       Read this alloy.toml instead of the nearest one
+
+`alloy doc test` explains the layout and the lest.toml it writes.
 ";
 
 pub const FMT_TEXT: &str = "\
@@ -233,7 +277,9 @@ mod tests {
     fn plain_render_lists_every_command() {
         let help = render(false);
 
-        for name in ["build", "check", "lint", "fmt", "doc", "init", "self"] {
+        for name in [
+            "build", "check", "flux", "lint", "fmt", "test", "doc", "init", "self",
+        ] {
             assert!(help.contains(name), "{name} is missing");
         }
 

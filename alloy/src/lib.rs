@@ -14,6 +14,10 @@ pub mod directives;
 pub mod docs;
 pub mod extensions;
 pub mod flux;
+pub mod flux_complexity;
+pub mod flux_correctness;
+pub mod flux_roblox;
+pub mod flux_scan;
 pub mod fmt;
 pub mod fmt_alx;
 pub mod fmt_structure;
@@ -22,6 +26,8 @@ pub mod luau_config;
 pub mod project;
 pub mod render;
 pub mod roblox_classes;
+pub mod testbuild;
+pub mod typecheck;
 
 pub use alx::{AlxOutput, compile_alx};
 pub use desugar::{Diagnostic, EmitOptions, MacroSource};
@@ -48,6 +54,18 @@ pub struct Output {
     pub lints: Vec<Lint>,
     /// Whether the emitted code requires the runtime.
     pub uses_std: bool,
+    /// The `import` statements: the path token's range and the path.
+    pub imports: Vec<ImportRef>,
+    /// The `@test` functions, in order: name and whether it is async.
+    pub tests: Vec<(String, bool)>,
+}
+
+/// One `import ... from "path"` of a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportRef {
+    pub start: u32,
+    pub end: u32,
+    pub path: String,
 }
 
 /// A source that could not be lexed or parsed even leniently.
@@ -117,7 +135,13 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
 
     diagnostics.extend(rendered.diagnostics);
 
-    let mut lints = lint::run(src, &parsed.lexed.toks, &parsed.chunk, options.definitions);
+    let mut lints = lint::run(
+        src,
+        &parsed.lexed.toks,
+        &parsed.chunk,
+        options.definitions,
+        &options.thresholds,
+    );
     lints.extend(rendered.lints);
     lints.sort_by_key(|l| (l.start, l.name));
     // A node the desugar renders twice reports its lint twice.
@@ -142,6 +166,31 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         }
     }
 
+    let imports = parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            alloy_syntax::ast::Stmt::Import(i) => {
+                let t = parsed.lexed.toks[i.path.start as usize];
+                let text = t.text(src);
+                let path = text
+                    .get(1..text.len().saturating_sub(1))
+                    .unwrap_or(text)
+                    .to_string();
+
+                Some(ImportRef {
+                    start: t.start,
+                    end: t.end,
+                    path,
+                })
+            }
+
+            _ => None,
+        })
+        .collect();
+
     Ok(Output {
         check,
         ship: String::from_utf8(ship).expect("blanking keeps UTF-8"),
@@ -149,6 +198,8 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         diagnostics,
         lints,
         uses_std: rendered.uses_std,
+        imports,
+        tests: rendered.tests,
     })
 }
 

@@ -68,8 +68,10 @@ terminal, and every diagnostic names its section: `alloy doc 4.2`.
 |------------------------|------------------------------------------------|
 | `alloy build`          | Compile the project; `-W` watches               |
 | `alloy check`          | Compile, write nothing, report errors and lints |
-| `alloy lint`           | Run Flux, the lints; `--fix` applies rewrites   |
+| `alloy flux`           | Compile, type-check, and lint; `--fix` rewrites |
+| `alloy lint`           | Run Flux, the lints, alone                      |
 | `alloy fmt`            | Run Anneal, the formatter, over the sources     |
+| `alloy test`           | Write a lest spec per source with a `@test`     |
 | `alloy doc <topic>`    | Explain a keyword, an operator, a lint, a topic |
 
 ## This repository

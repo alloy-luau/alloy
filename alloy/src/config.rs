@@ -18,6 +18,8 @@ pub struct Config {
     pub emit: Emit,
     pub lint: LintConfig,
     pub fmt: FmtConfig,
+    pub flux: FluxConfig,
+    pub test: TestConfig,
     pub project: Project,
     /// The `[mount]` table: alias to `[path, mount]`. The folder at
     /// `path` lands at `mount` in the DataModel, and `@alias/...`
@@ -282,12 +284,12 @@ pub enum TextWrap {
     Preserve,
 }
 
-/// The `[lint]` table: which lints `alloy lint` runs, and at what level.
+/// The `[lint]` table: the level of each lint. A list takes a lint name
+/// or a group name, `pedantic`; a name beats its group.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LintConfig {
-    /// Turns the strict-only lints on: `implicit_any` and
-    /// `missing_return_type`.
+    /// Turns the `pedantic` group on, at `warn`.
     pub strict: bool,
     /// Lints that fail the run.
     pub deny: Vec<String>,
@@ -295,6 +297,91 @@ pub struct LintConfig {
     pub warn: Vec<String>,
     /// Lints that stay silent.
     pub allow: Vec<String>,
+}
+
+/// The `[flux]` table: what `alloy flux` runs beyond the lints, and the
+/// thresholds of the complexity lints. The levels of the lints stay in
+/// `[lint]`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct FluxConfig {
+    /// Run luau-lsp over the check artifact and report its type errors
+    /// on the source lines.
+    pub typecheck: bool,
+    /// Definitions files for the type check, `.d.luau` or `.d.aly`,
+    /// relative to the root. The `.d.aly` files of the project join
+    /// them on their own.
+    pub definitions: Vec<String>,
+    /// Load the Roblox globals. The file comes from the luau-lsp
+    /// extension's storage, or downloads once into `~/.alloy/types`.
+    pub roblox_types: bool,
+    /// The security level of the Roblox globals: `PluginSecurity`,
+    /// `LocalUserSecurity`, `RobloxScriptSecurity`, or `None`.
+    pub security_level: String,
+    /// The luau-lsp binary. Unset means `luau-lsp` on the PATH, then
+    /// `~/.alloy/bin` and `~/.ember/bin`.
+    pub luau_lsp: Option<String>,
+    /// `too_many_arguments` fires past this many parameters.
+    pub too_many_arguments: usize,
+    /// `too_many_lines` fires past this many lines in one function.
+    pub too_many_lines: usize,
+    /// `deep_nesting` fires past this many nested blocks.
+    pub max_nesting: usize,
+    /// `cognitive_complexity` fires past this score.
+    pub cognitive_complexity: usize,
+}
+
+impl Default for FluxConfig {
+    fn default() -> Self {
+        let t = crate::lint::Thresholds::default();
+
+        Self {
+            typecheck: true,
+            definitions: Vec::new(),
+            roblox_types: true,
+            security_level: "PluginSecurity".to_string(),
+            luau_lsp: None,
+            too_many_arguments: t.too_many_arguments,
+            too_many_lines: t.too_many_lines,
+            max_nesting: t.max_nesting,
+            cognitive_complexity: t.cognitive_complexity,
+        }
+    }
+}
+
+impl FluxConfig {
+    /// The thresholds the complexity lints read.
+    pub fn thresholds(&self) -> crate::lint::Thresholds {
+        crate::lint::Thresholds {
+            too_many_arguments: self.too_many_arguments,
+            too_many_lines: self.too_many_lines,
+            max_nesting: self.max_nesting,
+            cognitive_complexity: self.cognitive_complexity,
+        }
+    }
+}
+
+/// The `[test]` table: where `alloy test` writes the specs.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct TestConfig {
+    /// The folder the specs land in, relative to the root. Each source
+    /// with a `@test` writes `<out>/<path>.spec.luau`.
+    pub out: PathBuf,
+    /// The suite name in `lest.toml`.
+    pub suite: String,
+    /// Write `lest.toml` and the `@lest` alias when the root has none.
+    pub lest: bool,
+}
+
+impl Default for TestConfig {
+    fn default() -> Self {
+        Self {
+            out: PathBuf::from("tests"),
+            suite: "alloy".to_string(),
+            lest: true,
+        }
+    }
 }
 
 /// The `[emit]` table: the few knobs that change what emitted code does.
@@ -388,13 +475,32 @@ quote_style = "auto-prefer-double"
 # attribute_per_line = false
 
 [lint]
-# Flux, the linter.
-# turn on the strict-only lints: implicit_any, missing_return_type
+# the levels of the lints; a list takes a lint or a group: correctness,
+# suspicious, style, complexity, perf, roblox, pedantic, luau
+# turn the pedantic group on
 strict = false
-# lints that fail `alloy lint`; `alloy doc lints` names them all
+# lints that fail the run; `alloy doc lints` names them all
 deny = []
 warn = []
 allow = []
+
+[flux]
+# `alloy flux`: the type check and the thresholds; `alloy doc flux`
+# run luau-lsp over the check artifact
+typecheck = true
+# extra definitions files; the project's .d.aly files join on their own
+definitions = []
+# too_many_arguments = 7
+# too_many_lines = 100
+# max_nesting = 5
+# cognitive_complexity = 25
+
+[test]
+# `alloy test` writes one lest spec per source with a @test
+out = "tests"
+suite = "alloy"
+# write lest.toml and the @lest alias when the root has none
+lest = true
 
 [project]
 # the name in default.project.json and .alloy/build.project.json

@@ -66,6 +66,14 @@ fn main() -> ExitCode {
 
         Some("lint") => lint_cmd(&args[1..]),
 
+        Some("flux") if wants_help(&args) => command_help(help::FLUX_TEXT),
+
+        Some("flux") => flux_cmd(&args[1..]),
+
+        Some("test") if wants_help(&args) => command_help(help::TEST_TEXT),
+
+        Some("test") => test_cmd(&args[1..]),
+
         Some("fmt") if wants_help(&args) => command_help(help::FMT_TEXT),
 
         Some("fmt") => fmt_cmd(&args[1..]),
@@ -139,15 +147,15 @@ fn option<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// The arguments that are not options. `--out`, `--config`, and
-/// `--wait-timeout` take a value.
+/// The arguments that are not options. `--out`, `--config`,
+/// `--wait-timeout`, and `--explain` take a value.
 fn positionals(args: &[String]) -> Vec<String> {
     let mut positional = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
         match args[i].as_str() {
-            "--out" | "--config" | "--wait-timeout" => i += 2,
+            "--out" | "--config" | "--wait-timeout" | "--explain" => i += 2,
 
             "-W" => i += 1,
 
@@ -422,7 +430,7 @@ fn check(args: &[String]) -> ExitCode {
             return usage();
         }
 
-        return lint_one(file, &LintConfig::default(), true, args);
+        return lint_one(file, &LintConfig::default(), Some("check"), args);
     }
 
     let (root, mut config) = match project(args) {
@@ -466,30 +474,128 @@ fn check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `alloy lint`: every lint at `warn` or `deny` under the `[lint]`
-/// table. `--strict` turns the strict-only lints on for this run, and
-/// `--deny-warnings` fails the run on any hit.
-fn lint_cmd(args: &[String]) -> ExitCode {
-    if args.iter().any(|a| a == "--list") {
-        let p = Painter::for_stdout();
+/// `-W name`, `-A name`, `-D name`, and their long forms, taken out of
+/// the arguments: the level each sets, and the arguments that remain.
+fn split_level_flags(args: &[String]) -> (Vec<(lint::Level, String)>, Vec<String>) {
+    let mut flags = Vec::new();
+    let mut rest = Vec::new();
+    let mut i = 0;
 
-        for l in lint::LINTS {
+    while i < args.len() {
+        let level = match args[i].as_str() {
+            "-W" | "--warn" => Some(lint::Level::Warn),
+            "-A" | "--allow" => Some(lint::Level::Allow),
+            "-D" | "--deny" => Some(lint::Level::Deny),
+            _ => None,
+        };
+
+        match (level, args.get(i + 1)) {
+            (Some(level), Some(name)) if !name.starts_with('-') => {
+                flags.push((level, name.clone()));
+                i += 2;
+            }
+
+            _ => {
+                rest.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+
+    (flags, rest)
+}
+
+/// The `[lint]` table with `--strict` and the level flags applied. A
+/// flag beats the table: its name leaves the other lists.
+fn lint_config_for(
+    config: &Config,
+    flags: &[(lint::Level, String)],
+    args: &[String],
+) -> LintConfig {
+    let mut lint_config = config.lint.clone();
+
+    if args.iter().any(|a| a == "--strict") {
+        lint_config.strict = true;
+    }
+
+    for (level, name) in flags {
+        for list in [
+            &mut lint_config.allow,
+            &mut lint_config.warn,
+            &mut lint_config.deny,
+        ] {
+            list.retain(|n| n != name);
+        }
+
+        match level {
+            lint::Level::Allow => lint_config.allow.push(name.clone()),
+            lint::Level::Warn => lint_config.warn.push(name.clone()),
+            lint::Level::Deny => lint_config.deny.push(name.clone()),
+        }
+    }
+
+    for name in lint::unknown_names(&lint_config) {
+        eprintln!(
+            "{}",
+            Painter::for_stderr().warn(&format!(
+                "`{name}` is neither a lint nor a group; `alloy flux --list` has them"
+            ))
+        );
+    }
+
+    lint_config
+}
+
+/// `--list`: every lint with its group and default level.
+fn list_lints() -> ExitCode {
+    let p = Painter::for_stdout();
+
+    for group in lint::Group::ALL {
+        println!(
+            "{}  {}",
+            p.bold(group.name()),
+            p.paint(ui::DIM, group.summary())
+        );
+
+        for l in lint::LINTS.iter().filter(|l| l.group == *group) {
             let (level, rgb) = match l.default {
-                lint::Level::Allow => ("strict", ui::DIM),
+                lint::Level::Allow => ("allow", ui::DIM),
                 lint::Level::Warn => ("warn", ui::AMBER),
                 lint::Level::Deny => ("deny", ui::RED),
             };
             println!(
-                "{:<22} {}  {}",
-                p.bold(l.name),
+                "  {:<24} {}  {}",
+                l.name,
                 p.paint(rgb, &format!("{level:<6}")),
                 l.summary
             );
         }
 
-        return ExitCode::SUCCESS;
+        println!();
     }
 
+    println!(
+        "{}  {}",
+        p.bold(lint::LUAU_GROUP),
+        p.paint(
+            ui::DIM,
+            "the type checker's own lints, LocalUnused and the rest, under `alloy flux`"
+        )
+    );
+
+    ExitCode::SUCCESS
+}
+
+/// `alloy lint`: every lint at `warn` or `deny` under the `[lint]`
+/// table. `--strict` turns the pedantic lints on for this run, and
+/// `--deny-warnings` fails the run on any hit.
+fn lint_cmd(args: &[String]) -> ExitCode {
+    if args.iter().any(|a| a == "--list") {
+        return list_lints();
+    }
+
+    let (flags, args) = split_level_flags(args);
+    let args = &args[..];
     let positional = positionals(args);
     let (root, config) = match project(args) {
         Ok(p) => p,
@@ -499,17 +605,7 @@ fn lint_cmd(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut lint_config = config.lint.clone();
-
-    if args.iter().any(|a| a == "--strict") {
-        lint_config.strict = true;
-    }
-
-    for name in lint::unknown_names(&lint_config) {
-        eprintln!(
-            "alloy: [lint] names `{name}`, which is not a lint; `alloy lint --list` has them"
-        );
-    }
+    let lint_config = lint_config_for(&config, &flags, args);
 
     if let Some(file) = positional.first() {
         if !is_source(file) {
@@ -517,7 +613,7 @@ fn lint_cmd(args: &[String]) -> ExitCode {
             return usage();
         }
 
-        return lint_one(file, &lint_config, false, args);
+        return lint_one(file, &lint_config, None, args);
     }
 
     let report = match alloy::build::check_project(&root, &config) {
@@ -539,7 +635,7 @@ fn lint_cmd(args: &[String]) -> ExitCode {
         (0, report.lints.clone())
     };
     let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
-    offer_fixes(&report.lints, &lint_config, fix);
+    offer_fixes(&report.lints, &lint_config, fix, "lint");
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
     let counts = p.summary(&[
         (report.written.len(), "files", ui::DIM),
@@ -559,8 +655,375 @@ fn lint_cmd(args: &[String]) -> ExitCode {
     }
 }
 
-/// Lints or checks one file outside a project.
-fn lint_one(path: &str, lint_config: &LintConfig, summary: bool, args: &[String]) -> ExitCode {
+/// `alloy flux`: the compile, the type check of the check artifact
+/// through luau-lsp, and every lint at its `[lint]` level, in one run.
+/// `--fix` applies the rewrites; `-W`, `-A`, and `-D` set a level for
+/// this run; `--explain <lint>` prints its page.
+fn flux_cmd(args: &[String]) -> ExitCode {
+    if args.iter().any(|a| a == "--list") {
+        return list_lints();
+    }
+
+    if let Some(name) = option(args, "--explain") {
+        return doc_cmd::run(&[name.to_string()]);
+    }
+
+    let (flags, args) = split_level_flags(args);
+    let args = &args[..];
+    let positional = positionals(args);
+    let (root, config) = match project(args) {
+        Ok(p) => p,
+
+        Err(e) => {
+            fail(&e.to_string());
+            return ExitCode::FAILURE;
+        }
+    };
+    let lint_config = lint_config_for(&config, &flags, args);
+
+    if let Some(file) = positional.first() {
+        if !is_source(file) {
+            fail(&format!("{file} is not an .aly file"));
+            return usage();
+        }
+
+        return lint_one(file, &lint_config, Some("flux"), args);
+    }
+
+    let report = match alloy::build::flux_project(&root, &config) {
+        Ok(r) => r,
+
+        Err(e) => {
+            fail(&e.to_string());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let p = Painter::for_stderr();
+    let input = root.join(&config.build.input);
+    print_diagnostics(&input, &report);
+
+    // The type check: errors count as errors, the checker's lints take
+    // their level from the `luau` group.
+    let mut type_errors = 0;
+    let mut type_warnings = 0;
+    let mut type_denied = 0;
+    let typecheck = config.flux.typecheck && !args.iter().any(|a| a == "--no-typecheck");
+
+    if typecheck {
+        match alloy::typecheck::analyze(&root, &config, &report.checks) {
+            Ok(analysis) => {
+                for note in &analysis.notes {
+                    eprintln!("{}", p.note(note));
+                }
+
+                for d in &analysis.diagnostics {
+                    let path = input.join(&d.rel).display().to_string();
+                    let level = if d.is_error() {
+                        type_errors += 1;
+
+                        Level::Error
+                    } else {
+                        match lint::level_of(&lint_config, &d.kind) {
+                            lint::Level::Allow => continue,
+
+                            lint::Level::Deny => {
+                                type_denied += 1;
+
+                                Level::Error
+                            }
+
+                            lint::Level::Warn => {
+                                type_warnings += 1;
+
+                                Level::Warning
+                            }
+                        }
+                    };
+                    eprintln!(
+                        "{}",
+                        p.diagnostic(
+                            &path,
+                            d.line,
+                            d.col,
+                            level,
+                            Some("luau"),
+                            &format!("{}: {}", d.kind, d.message)
+                        )
+                    );
+                }
+            }
+
+            Err(e) => eprintln!("{}", p.warn(&format!("type check skipped: {e}"))),
+        }
+    }
+
+    let fix = args.iter().any(|a| a == "--fix");
+    let (rewrites, remaining) = if fix {
+        apply_lint_fixes(&input, &report.lints, &lint_config)
+    } else {
+        (0, report.lints.clone())
+    };
+    let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
+    offer_fixes(&report.lints, &lint_config, fix, "flux");
+    let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
+    let errors = report.diagnostics.len() + type_errors;
+    let warnings = warnings + type_warnings;
+    let denied = denied + type_denied;
+    let counts = p.summary(&[
+        (report.written.len(), "files", ui::DIM),
+        (errors, "errors", ui::RED),
+        (warnings, "warnings", ui::AMBER),
+        (denied, "denied", ui::RED),
+        (rewrites, "fixed", ui::GREEN),
+    ]);
+
+    if report.is_clean() && type_errors == 0 && denied == 0 && !(deny_warnings && warnings > 0) {
+        eprintln!("{} {counts}", p.ok("flux"));
+
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("{} {counts}", p.fail("flux"));
+
+        ExitCode::FAILURE
+    }
+}
+
+/// The lest binary, on the PATH or under `~/.ember/bin`.
+fn find_lest() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "lest.exe" } else { "lest" };
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".ember/bin"));
+    }
+
+    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+}
+
+/// `alloy test`: builds the project, then writes one lest spec per
+/// source with a `@test` under `[test] out`. `--check` writes nothing
+/// and fails when a spec would change; `--run` runs lest afterwards.
+fn test_cmd(args: &[String]) -> ExitCode {
+    let positional = positionals(args);
+    let check_only = args.iter().any(|a| a == "--check");
+    let run = args.iter().any(|a| a == "--run");
+    let (root, mut config) = match project(args) {
+        Ok(p) => p,
+
+        Err(e) => {
+            fail(&e.to_string());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Some(out) = option(args, "--out") {
+        config.test.out = PathBuf::from(out);
+    }
+
+    let p = Painter::for_stderr();
+
+    // One file: its spec to stdout.
+    if let Some(file) = positional.first() {
+        if !file.ends_with(".aly") {
+            fail(&format!("{file} is not an .aly file"));
+            return usage();
+        }
+
+        let source = match std::fs::read_to_string(file) {
+            Ok(s) => s,
+
+            Err(e) => {
+                fail(&format!("{file}: {e}"));
+                return ExitCode::FAILURE;
+            }
+        };
+        let rel = Path::new(file)
+            .strip_prefix(&root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| PathBuf::from(file));
+
+        return match alloy::testbuild::spec(&config, &root, &rel, &source) {
+            Ok(Some((text, diagnostics, _))) => {
+                for d in &diagnostics {
+                    let (line, col) = line_col(&source, d.start as usize);
+                    eprintln!(
+                        "{}",
+                        p.diagnostic(
+                            file,
+                            line,
+                            col,
+                            Level::Error,
+                            alloy::docs::code_for(&d.message),
+                            &d.message
+                        )
+                    );
+                }
+
+                print!("{text}");
+
+                if diagnostics.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+
+            Ok(None) => {
+                eprintln!("{}", p.note(&format!("{file} has no @test")));
+
+                ExitCode::SUCCESS
+            }
+
+            Err(e) => {
+                fail(&format!("{file}: {e}"));
+
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // The specs require the build output, so the build comes first.
+    if !check_only {
+        let build = match alloy::build::run_project(&root, &config) {
+            Ok(r) => r,
+
+            Err(e) => {
+                fail(&e.to_string());
+                return ExitCode::FAILURE;
+            }
+        };
+        let input = root.join(&config.build.input);
+        print_diagnostics(&input, &build);
+
+        if !build.is_clean() {
+            eprintln!("{}", p.fail("test: the build has errors; no spec written"));
+
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let report = match alloy::testbuild::run(&root, &config, !check_only) {
+        Ok(r) => r,
+
+        Err(e) => {
+            fail(&e.to_string());
+            return ExitCode::FAILURE;
+        }
+    };
+    let input = root.join(&config.build.input);
+
+    for (rel, d) in &report.diagnostics {
+        let path = input.join(rel);
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        let (line, col) = line_col(&source, d.start as usize);
+        eprintln!(
+            "{}",
+            p.diagnostic(
+                &path.display().to_string(),
+                line,
+                col,
+                Level::Error,
+                alloy::docs::code_for(&d.message),
+                &d.message
+            )
+        );
+    }
+
+    for (rel, message) in &report.failures {
+        eprintln!(
+            "{}",
+            p.fail(&format!("{}: {message}", input.join(rel).display()))
+        );
+    }
+
+    for note in &report.notes {
+        eprintln!("{}", p.note(note));
+    }
+
+    for file in &report.written {
+        eprintln!("{}", p.wrote(&root.join(file).display().to_string()));
+    }
+
+    for file in &report.stale {
+        eprintln!(
+            "{}",
+            p.warn(&format!("{} would change", root.join(file).display()))
+        );
+    }
+
+    for file in &report.removed {
+        eprintln!(
+            "{}",
+            p.note(&format!("removed {}", root.join(file).display()))
+        );
+    }
+
+    let counts = p.summary(&[
+        (report.tests, "tests", ui::DIM),
+        (report.written.len(), "specs", ui::GREEN),
+        (report.stale.len(), "stale", ui::AMBER),
+        (report.removed.len(), "removed", ui::AMBER),
+        (
+            report.diagnostics.len() + report.failures.len(),
+            "errors",
+            ui::RED,
+        ),
+    ]);
+    let out = p.paint(
+        ui::DIM,
+        &format!(
+            "{} {}",
+            if p.color { "→" } else { "->" },
+            root.join(&config.test.out).display()
+        ),
+    );
+
+    if !report.is_clean() {
+        eprintln!("{} {counts}  {out}", p.fail("test"));
+
+        return ExitCode::FAILURE;
+    }
+
+    eprintln!("{} {counts}  {out}", p.ok("test"));
+
+    if !run {
+        return ExitCode::SUCCESS;
+    }
+
+    let Some(lest) = find_lest() else {
+        fail("lest is not on the PATH; see https://github.com/lest-luau/lest");
+
+        return ExitCode::FAILURE;
+    };
+
+    match std::process::Command::new(lest)
+        .current_dir(&root)
+        .arg(&config.test.suite)
+        .status()
+    {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+
+        Ok(_) => ExitCode::FAILURE,
+
+        Err(e) => {
+            fail(&format!("cannot run lest: {e}"));
+
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Lints or checks one file outside a project. `summary` names the
+/// command that prints a closing line.
+fn lint_one(
+    path: &str,
+    lint_config: &LintConfig,
+    summary: Option<&str>,
+    args: &[String],
+) -> ExitCode {
     let Some((source, out)) = compile_file(path, args) else {
         return ExitCode::FAILURE;
     };
@@ -594,12 +1057,12 @@ fn lint_one(path: &str, lint_config: &LintConfig, summary: bool, args: &[String]
         (0, lints.clone())
     };
     let (warnings, denied) = print_lints(Path::new(""), &remaining, lint_config, args);
-    offer_fixes(&lints, lint_config, fix);
+    offer_fixes(&lints, lint_config, fix, summary.unwrap_or("lint"));
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
 
     let clean = out.diagnostics.is_empty() && denied == 0 && !(deny_warnings && warnings > 0);
 
-    if summary {
+    if let Some(command) = summary {
         let counts = p.summary(&[
             (out.diagnostics.len(), "errors", ui::RED),
             (warnings, "warnings", ui::AMBER),
@@ -608,9 +1071,9 @@ fn lint_one(path: &str, lint_config: &LintConfig, summary: bool, args: &[String]
         eprintln!(
             "{} {counts}",
             if clean {
-                p.ok("check")
+                p.ok(command)
             } else {
-                p.fail("check")
+                p.fail(command)
             }
         );
     }
@@ -677,7 +1140,12 @@ fn print_lints(
                 col,
                 shown,
                 Some(alloy::docs::LINT_CODE),
-                &format!("{}: {}", l.name, l.message)
+                &format!(
+                    "{}: {} {}",
+                    l.name,
+                    l.message,
+                    p.paint(ui::DIM, &format!("[{}]", lint::group_name(l.name)))
+                )
             )
         );
 
@@ -757,7 +1225,7 @@ fn apply_lint_fixes(
 }
 
 /// Says how many rewrites `--fix` would apply, when it was not given.
-fn offer_fixes(lints: &[(PathBuf, Lint)], config: &LintConfig, fixed: bool) {
+fn offer_fixes(lints: &[(PathBuf, Lint)], config: &LintConfig, fixed: bool, command: &str) {
     if fixed {
         return;
     }
@@ -771,7 +1239,9 @@ fn offer_fixes(lints: &[(PathBuf, Lint)], config: &LintConfig, fixed: bool) {
         let p = Painter::for_stderr();
         eprintln!(
             "{}",
-            p.note(&format!("`alloy lint --fix` applies {n} of these rewrites"))
+            p.note(&format!(
+                "`alloy {command} --fix` applies {n} of these rewrites"
+            ))
         );
     }
 }

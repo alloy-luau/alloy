@@ -1,0 +1,19 @@
+[package]
+name = "alloy-luaux"
+version = "0.2.0"
+description = "Fork of luaux 0.2.0, the JSX-style markup compiler for Luau, with the Alloy patches"
+edition = "2021"
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+publish = false
+
+[lib]
+name = "luaux"
+path = "src/lib.rs"
+
+[dependencies]
+full_moon = { version = "2.2.0", features = ["luau"] }
+globset = "0.4.19"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"

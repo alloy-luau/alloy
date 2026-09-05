@@ -1,0 +1,33 @@
+[package]
+name = "alloy-luau"
+default-run = "alloy"
+version = "0.1.0"
+description = "Alloy: a strict superset of Luau that transpiles to plain Luau"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["luau", "roblox", "transpiler"]
+categories = ["compilers", "development-tools"]
+
+[lib]
+name = "alloy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "alloy"
+path = "src/main.rs"
+
+[dependencies]
+# The fork of luaux 0.2.0 in crates/luaux; see its NOTICE.
+luaux = { package = "alloy-luaux", path = "../luaux" }
+alloy-syntax = { version = "0.1.0", path = "../alloy-syntax" }
+globset = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+serde_json = "1"
+dirs = "6"
+terminal_size = "0.4"
+
+[lints]
+workspace = true

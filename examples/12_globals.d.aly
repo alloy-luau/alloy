@@ -1,0 +1,39 @@
+-- A declaration file. No runtime. Alloy compiles it to .d.luau in memory
+-- and layers it into the analyzer's definitions.
+
+-- Luau's definition syntax works as is.
+declare function warn_once(message: string): ()
+
+declare extern type PluginToolbar with
+    function CreateButton(self, id: string, tooltip: string, icon: string): PluginToolbarButton
+end
+
+declare plugin: Plugin
+
+-- Alloy type sugar works here too.
+interface Serializable as
+    read version: number
+    write debug_sink: (string) -> ()
+end
+
+interface SaveData extends Serializable as
+
+    coins: number
+    items: { string }
+end
+
+trait Codec
+    function encode(self): string
+    function decode(self, raw: string): SaveData
+end
+
+-- Type functions are allowed here, written by hand or generated.
+type function Keys(t)
+    local out: { type } = {}
+    for k in t:properties() do
+        table.insert(out, k)
+    end
+    return types.unionof(table.unpack(out))
+end
+
+export type Patch<T> = { [K in keyof T]: T[K]? }

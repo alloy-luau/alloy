@@ -1,0 +1,22 @@
+[package]
+name = "alloy-luau-lsp"
+version = "0.1.0"
+description = "Language server for Alloy. Desugars in memory and proxies luau-lsp."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["luau", "roblox", "lsp"]
+categories = ["development-tools"]
+
+[[bin]]
+name = "alloy-lsp"
+path = "src/main.rs"
+
+[dependencies]
+alloy = { package = "alloy-luau", version = "0.1.0", path = "../alloy" }
+alloy-syntax = { version = "0.1.0", path = "../alloy-syntax" }
+serde_json = "1"
+
+[lints]
+workspace = true

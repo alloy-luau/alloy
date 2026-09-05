@@ -1,0 +1,18 @@
+*.md
+!README.md
+!LICENSE.MD
+!CONTRIBUTING.md
+
+# Rust
+target/
+
+# Node
+node_modules/
+out/
+*.vsix
+
+# Alloy output
+build/
+
+# lest writes its framework here on each run
+std/.lest/

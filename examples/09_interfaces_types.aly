@@ -1,0 +1,62 @@
+-- `interface` is sugar over `type` with `extends`. Mapped types compile
+-- to a generated type function that the real solver runs.
+
+interface Named as
+    name: string
+end
+
+interface Positioned as
+    position: Vector3
+end
+
+-- `read` and `write` are upstream's property modifiers.
+-- A read field cannot be assigned through this type. A write field
+-- cannot be read through it, which makes a sink.
+interface Logged as
+    read id: number
+    write log: string
+end
+
+-- A known interface base flattens into one table type at emit.
+-- emits: type Entity = { name: string, position: Vector3, id: number }
+interface Entity extends Named, Positioned as
+    id: number
+end
+
+-- An arbitrary base type falls back to `&`.
+type Tagged = { tags: { string } }
+interface TaggedEntity extends Tagged as
+    id: number
+end
+
+-- A mapped type. Users never write the type function by hand.
+-- `Partial`, `Readonly`, and `Sink` are language-level types; the std
+-- provides these three. A file that declares one of the names keeps its
+-- own, as `Sink` does here.
+--   type Partial<T> = { [K in keyof T]: T[K]? }
+--   type Readonly<T> = { [K in keyof T]: read T[K] }
+type Sink<T> = { [K in keyof T]: write T[K] }
+
+-- Plain type functions stay available.
+type function Keys(t)
+    local out = {}
+    for k in t:properties() do
+        table.insert(out, k)
+    end
+    return types.unionof(table.unpack(out))
+end
+
+local function patch(entity: Entity, changes: Partial<Entity>): Entity
+    return {
+        id = changes.id ?? entity.id,
+        name = changes.name ?? entity.name,
+        position = changes.position ?? entity.position,
+    }
+end
+
+local frozen: Readonly<Entity> = table.freeze({ id = 1, name = "a", position = Vector3.zero })
+local keys: Keys<Entity> = "name"
+
+local sink: Sink<{ line: string }> = { line = "" }
+sink.line = "written"
+print(patch, frozen, keys, sink)

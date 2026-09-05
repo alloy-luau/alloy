@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["alloy", "alloy-syntax", "alloy-lsp", "luaux"]
+# `cargo run` with no `-p` runs the `alloy` command.
+default-members = ["alloy"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/alloy-luau/alloy"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

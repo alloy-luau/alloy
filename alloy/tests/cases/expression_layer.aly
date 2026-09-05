@@ -1,0 +1,45 @@
+--!strict
+local v = c ? "a" : "b"
+local w = x is Part
+local u = k is Enum.KeyCode
+local s = n is not nil
+local t = 3 in xs
+local b = a band m bor 1 shl 2
+local cfg = { volume = 1 } satisfies Config
+local xs: number[] = [ 1, 2, 3 ]
+local ys: read string[] = []
+local up = "abc":upper()
+btn.Activated:Connect(self:on_click)
+local p = new Vector3(1, 2, 3)
+local q = new Instance("Part") {
+	Name = "x",
+	Anchored = true,
+	Parent = ws,
+}
+delete q
+local function f(a: number = 1, { x, y }: P, ...) -> number
+	return a + x + y
+end
+local async function load(id: number) -> Profile
+	local raw = await fetch(id)
+	return raw
+end
+local function g(): Result<number, string>
+	local n = try parse("1")
+	local m = try await load(2)
+	return Ok(n + m)
+end
+local fut = async do return 1 end
+local res = try do return 2 end
+local merged = { ...base, x = 1, ...other }
+local { a, b = first } = t
+local [ head, ...rest ] = xs
+for _, { x, y } in points where x > 0 do print(x, y) end
+$dbg(v)
+local name = $nameof(a.b.c)
+local text = $stringify(1 + 2)
+$assert(a > b)
+$assert_eq(a, b)
+local bn = $bnot(a)
+local sym = Symbol.new("k")
+local arr = Array.from({ 1 })

@@ -1,0 +1,33 @@
+{
+  "name": "game",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Alloy": {
+        "$path": "../build/alloy.luau"
+      },
+      "Packages": {
+        "$path": "../packages/roblox"
+      },
+      "Shared": {
+        "$path": "../build/shared"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "../build/server"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "../build/client"
+        }
+      }
+    }
+  }
+}

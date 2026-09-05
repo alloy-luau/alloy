@@ -1,0 +1,8 @@
+x ??= 1
+t.a.b ??= c
+t[f()] ??= x
+get()[k] ??= v
+local function f()
+	cache[key] ??= compute()
+	cache[key] ??= other()
+end

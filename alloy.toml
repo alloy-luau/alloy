@@ -1,0 +1,9 @@
+# Test project for the compiler. The examples are the sources, so
+# `alloy build` from anywhere in the repo compiles all of them into build/.
+[build]
+in = "examples"
+out = "build"
+exclude = []
+clean = true
+# ship runs on Roblox; check is what luau-lsp sees
+artifact = "ship"

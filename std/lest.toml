@@ -1,0 +1,10 @@
+# The runtime tests. `cd std && lest` runs them on lest's own Luau VM,
+# which has no `task` and no `game`: the runtime falls back to plain
+# coroutines there, and the specs cover that path.
+
+[suites.std]
+include = ["tests/**/*.spec.luau"]
+
+[settings]
+backend = "native"
+timeout_ms = 5000

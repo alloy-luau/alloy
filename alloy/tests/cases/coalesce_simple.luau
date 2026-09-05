@@ -1,0 +1,5 @@
+local volume = (if settings.volume == nil then 0.5 else settings.volume)
+local name = (if player == nil then "nobody" else player)
+local _1 = (if a == nil then b else a) local nested = (if _1 == nil then c else _1)
+local cmp = (if a == nil then b == c else a)
+_1 = (if t.x == nil then t.y else t.x) return (if _1 == nil then 0 else _1)

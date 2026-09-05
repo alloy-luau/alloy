@@ -1,0 +1,3 @@
+# `cargo alloy build` runs the workspace binary without installing it.
+[alias]
+alloy = "run -q -p alloy-luau --"

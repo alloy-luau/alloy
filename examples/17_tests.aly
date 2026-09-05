@@ -1,0 +1,33 @@
+-- Inline tests. `@test` functions run under `alloy test` and are blanked
+-- from the ship artifact, line for line.
+
+local Players = game:GetService("Players")
+
+local function clamp01(x: number): number
+    return math.clamp(x, 0, 1)
+end
+
+local function names(): string[]
+    return Array.from(Players:GetPlayers()):map(function(p) return p.Name end)
+end
+
+@test
+function clamp_keeps_range()
+    $assert_eq(clamp01(2), 1)
+    $assert_eq(clamp01(-1), 0)
+    $assert(clamp01(0.5) == 0.5)
+end
+
+@test
+function names_start_empty()
+    $assert_eq(#names(), 0)
+end
+
+-- A test may be async. The runner awaits it.
+@test
+async function loads_within_a_frame()
+    local value = await Future.delay(0)
+    $assert(value == nil)
+end
+
+return { clamp01 = clamp01, names = names }

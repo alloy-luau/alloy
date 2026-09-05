@@ -1,0 +1,53 @@
+-- Async functions return a Future. `await` yields until it settles.
+
+local HttpService = game:GetService("HttpService")
+local DataStoreService = game:GetService("DataStoreService")
+
+type Profile = { name: string, level: number }
+
+-- `async` means one thing: the function returns Future<Profile>.
+-- The body runs on task.spawn under xpcall. The Future stores the result.
+-- `async` sits where `function` sits, after `local`, `const`, or `export`.
+local async function load_profile(user_id: number) -> Profile
+    local store = DataStoreService:GetDataStore("profiles")
+    local raw = store:GetAsync(`profile/{user_id}`)
+    return HttpService:JSONDecode(raw)
+end
+
+const async function load_many(ids: { number }): { Profile }
+    local futures = {}
+    for i, id in ids do
+        futures[i] = load_profile(id)
+    end
+    -- Future.all settles when every Future settles.
+    return await Future.all(futures)
+end
+
+-- `await` is legal wherever a yield is legal, not only inside `async`.
+local function greet(user_id: number)
+    local profile = await load_profile(user_id)
+    print(`Welcome back, {profile.name} (level {profile.level})`)
+end
+
+-- Awaitable protocol: anything with the awaitable shape works, including
+-- an evaera Promise, with no wrapper.
+local function wait_for_promise(promise: any)
+    return await promise
+end
+
+-- A settled Future resolves at once. A failed Future rethrows the stored
+-- error with the traceback captured at the failure site.
+local first = load_profile(1)
+local again = await first
+local same = await first
+
+-- Cancellation stops work that has not started and rejects waiters.
+local slow = load_many({ 1, 2, 3 })
+slow:cancel()
+
+-- An async function expression.
+local ping = async function(): number
+    return os.clock()
+end
+
+print(again.name == same.name, greet, wait_for_promise, await ping())

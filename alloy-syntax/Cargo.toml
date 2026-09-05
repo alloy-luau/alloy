@@ -1,0 +1,20 @@
+[package]
+name = "alloy-syntax"
+version = "0.1.0"
+description = "Alloy lexer, parser, lossless printer, and error recovery. Forked from alloy_syntax."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["luau", "roblox", "parser"]
+categories = ["parser-implementations"]
+
+[lib]
+name = "alloy_syntax"
+path = "src/lib.rs"
+
+[dependencies]
+rayon = "1"
+
+[lints]
+workspace = true

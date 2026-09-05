@@ -1,0 +1,79 @@
+-- Extension impls on foreign types. The language server injects each
+-- method into the class declaration, so `part:fade(1)` is typed and
+-- completed natively. At runtime a call by an extension name goes through
+-- a dispatcher that tries the real method first, then the impl by kind.
+
+trait Shape
+    function area(self): number
+end
+
+-- A Roblox datatype. A foreign impl is project-wide, so it is exported.
+export impl Vector3
+    function flat(self): Vector3
+        return Vector3.new(self.X, 0, self.Z)
+    end
+
+    function with_y(self, y: number): Vector3
+        return Vector3.new(self.X, y, self.Z)
+    end
+
+    -- No self: a static, called as Vector3.zero(). `-> T` is `: T`.
+    function zero() -> Vector3
+        return Vector3.new(0, 0, 0)
+    end
+end
+
+-- An Instance class. Subclasses inherit through the ClassName chain.
+export impl BasePart
+    function fade(self, seconds: number)
+        game:GetService("TweenService")
+            :Create(self, TweenInfo.new(seconds), { Transparency = 1 })
+            :Play()
+    end
+end
+
+-- A trait on a foreign type.
+export impl Shape for BasePart
+    function area(self): number
+        return self.Size.X * self.Size.Z
+    end
+end
+
+-- A primitive.
+export impl string
+    function trim(self): string
+        return self:match("^%s*(.-)%s*$") :: string
+    end
+end
+
+-- An Alloy struct. No rewrite is needed here; `:` is a plain call.
+struct Circle as
+    radius: number
+end
+
+impl Shape for Circle
+    function area(self): number
+        return math.pi * self.radius ^ 2
+    end
+end
+
+-- Usage. The analyzer sees the injected declarations, so these are
+-- ordinary typed calls.
+local position = Vector3.new(1, 2, 3)
+local flat = position:flat():with_y(5)
+local origin = Vector3.zero()
+
+local part = new Instance("Part") { Anchored = true, Parent = workspace }
+part:fade(1)
+
+local clean = "  hello  ":trim()
+
+-- A bounded generic works for structs and foreign types alike.
+local function total_area<T: Shape>(shapes: T[]) -> number
+    return shapes:reduce(function(acc, shape) return acc + shape:area() end, 0)
+end
+
+print(flat, origin, clean, total_area([ new Circle { radius = 1 } ]), total_area([ part ]))
+
+-- A receiver with no impl and no real method is a type error:
+-- local bad = (5):trim()

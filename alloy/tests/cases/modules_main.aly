@@ -1,0 +1,27 @@
+-- Imports are sugar over require. Paths pass through unchanged.
+
+-- emits: local Inventory = require("./inventory")
+import * as Inventory from "./inventory"
+
+-- emits: local _m = require("./inventory") local add, total = _m.add, _m.total
+import { add, total, MAX_STACK as CAP } from "./inventory"
+
+-- A `type` specifier next to values emits a type alias. The require stays.
+-- emits: local _m = require("./inventory") local add = _m.add type Inventory = _m.Inventory
+import { add as add_item, type Inventory } from "./inventory"
+
+-- A type-only import. `erase_type_imports` blanks it in the ship artifact.
+import type { Item } from "./inventory"
+
+-- A default export imports as the module value. Same as `* as`.
+import theme from "./theme"
+
+-- `@alias` comes from .luaurc or .config.luau.
+import * as Signal from "@packages/signal"
+
+local sword: Item = { id = 1, name = "Sword", count = 1 }
+local bag: Inventory = add({}, sword)
+add_item(bag, sword)
+
+print(total(bag), CAP, Inventory.version)
+print(Signal, theme.primary)

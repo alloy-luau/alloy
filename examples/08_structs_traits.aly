@@ -1,0 +1,94 @@
+-- Structs, traits, and impls emit the idiomatic metatable pattern.
+-- Alloy structs are plain tables that vanilla Luau can use.
+
+-- `derive` is pure codegen. `read` marks a read-only field; `write`
+-- marks a write-only one. Both are upstream modifiers.
+@derive(Eq, Debug, Clone)
+struct Vec2 as
+    read x: number
+    read y: number
+end
+
+struct Log as
+
+    write sink: (string) -> ()
+end
+
+-- `impl` adds methods. `new` is a normal function on the struct table.
+-- `Vec2 { x = x, y = y }` is a plain call with a table argument.
+impl Vec2
+    function new(x: number, y: number): Vec2
+        return new Vec2 { x = x, y = y }
+    end
+
+    function len(self): number
+        return math.sqrt(self.x * self.x + self.y * self.y)
+    end
+end
+
+-- A trait is a structural contract. A method with a body is a default.
+-- Defaults flatten into each implementing struct at emit time.
+trait Shape
+    function area(self): number
+
+    function describe(self): string
+        return `shape with area {self:area()}`
+    end
+end
+
+struct Circle as
+
+    radius: number
+end
+
+struct Rect as w: number, h: number end
+
+impl Shape for Circle
+    function area(self): number
+        return math.pi * self.radius * self.radius
+    end
+end
+
+impl Shape for Rect
+    function area(self): number
+        return self.w * self.h
+    end
+
+    function describe(self): string
+        return `{self.w} by {self.h}`
+    end
+end
+
+-- Operator traits map to metamethods.
+-- Add is __add, Eq is __eq, Display is __tostring.
+impl Add for Vec2
+    function add(self, other: Vec2): Vec2
+        return Vec2.new(self.x + other.x, self.y + other.y)
+    end
+end
+
+impl Display for Vec2
+    function to_string(self): string
+        return `({self.x}, {self.y})`
+    end
+end
+
+-- A bound is structural. `T: Display` emits `T & Display` on the
+-- parameter; the return type stays `T`.
+local function show_all<T: Display>(items: { T }): T?
+    for _, item in items do
+        print(tostring(item))
+    end
+    return items[1]
+end
+
+local function biggest<T: Shape & Display>(a: T, b: T): T
+    return if a:area() >= b:area() then a else b
+end
+
+local v = new Vec2(1, 2) + new Vec2(3, 4)
+local shapes: { Shape } = { new Circle { radius = 1 }, new Rect { w = 2, h = 3 } }
+
+print(v:len(), tostring(v), v == Vec2.new(4, 6))
+print(shapes[1]:describe(), shapes[2]:describe())
+print(show_all({ v }), biggest)

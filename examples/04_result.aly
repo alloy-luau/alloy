@@ -1,0 +1,68 @@
+-- Result carries a payload on failure. There is no Option; `T?` is enough.
+
+local HttpService = game:GetService("HttpService")
+
+type Config = { volume: number, muted: boolean }
+
+-- A Result-returning function declares it. Normal calls never get pcall.
+local function parse_volume(text: string): Result<number, string>
+    local n = tonumber(text)
+    if n == nil then
+        return Err(`"{text}" is not a number`)
+    end
+    if n < 0 or n > 1 then
+        return Err(`{n} is out of range`)
+    end
+    return Ok(n)
+end
+
+-- `try` is a prefix keyword. On Err it returns that Err from this
+-- function. It compiles only inside a function that returns Result.
+local function parse_config(raw: { volume: string, muted: string }): Result<Config, string>
+    local volume = try parse_volume(raw.volume)
+    local muted = raw.muted == "true"
+    return Ok({ volume = volume, muted = muted })
+end
+
+-- Result.pcall is the only bridge to throwing APIs. It keeps the
+-- traceback on the Err.
+local function decode(body: string): Result<Config, string>
+    local data = try Result.pcall(HttpService.JSONDecode, HttpService, body)
+    return parse_config(data)
+end
+
+-- Methods live on a shared metatable.
+local config = decode('{"volume":"0.5","muted":"false"}')
+local volume = config:map(function(c) return c.volume end):unwrap_or(1)
+
+-- `unwrap` and `expect` throw on Err, with the stored traceback.
+local loud = parse_volume("0.9"):expect("volume must parse")
+
+-- Values travel; bugs throw.
+match parse_volume("2") with
+    case Ok(v) then print("volume", v)
+    case Err(msg) then warn(msg)
+end
+
+-- `try do ... end` is an expression whose value is a Result. Inside it,
+-- `try` and `return` target the block.
+local function load_both(a: string, b: string): Result<number, string>
+    local combined = try do
+        local x = try parse_volume(a)
+        local y = try parse_volume(b)
+        return x + y
+    end
+    return combined:map(function(v) return v / 2 end)
+end
+
+-- `try await` turns a failed Future into an Err.
+local async function fetch(url: string): string
+    return HttpService:GetAsync(url)
+end
+
+local function fetch_or_err(url: string): Result<string, string>
+    local body = try await fetch(url)
+    return Ok(body)
+end
+
+print(volume, loud, fetch_or_err, load_both)

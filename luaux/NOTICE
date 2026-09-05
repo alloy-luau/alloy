@@ -1,0 +1,13 @@
+This crate is a fork of luaux 0.2.0 (crates.io, revision dad67d6), part of
+luau-xml, published under the MIT license. Alloy carries it as a path
+dependency with three patches:
+
+- `Config.extra_bound`: names the caller knows are bound, so a component
+  declared with Alloy syntax resolves. Alloy's parser supplies them.
+- `can_end_expression` counts `!`, so a comparison after a non-nil assert
+  does not open markup.
+- `compile::markup_spans` is public, so Alloy can blank markup before it
+  collects bindings.
+
+Every other line is upstream luaux. Upstream fixes land here by re-applying
+the patches on the new revision.

@@ -1,0 +1,82 @@
+-- Safe access operators.
+-- Every operator here emits fixed Luau. Emit never looks at a type.
+
+local Players = game:GetService("Players")
+
+-- `??` tests nil only. `or` would replace `false`.
+local function volume(settings: { volume: number? }?): number
+    return settings?.volume ?? 0.5
+end
+
+-- `??=` assigns when the left side is nil. The index runs once.
+local cache: { [string]: number } = {}
+local function get_or_seed(key: string): number
+    cache[key] ??= math.random()
+    return cache[key]
+end
+
+-- `?.` is a plain index behind a nil check. It works on tables and on
+-- Instance properties, and many Instance properties can be nil.
+local function head_position(player: Player): Vector3?
+    return player?.Character?.PrimaryPart?.Position
+end
+
+-- `?:` calls a method when the left side is not nil. Arguments do not
+-- evaluate when the call is skipped.
+local function humanoid_of(character: Model?): Humanoid?
+    return character?:FindFirstChildOfClass("Humanoid")
+end
+
+-- `?[` indexes with an expression.
+local function lookup(t: { [string]: number }?, key: string): number?
+    return t?[key]
+end
+
+-- `->` is FindFirstChild. Use it for a child that only exists at runtime.
+-- emits: local map = workspace:FindFirstChild("Map")
+local map = workspace->Map
+local spawn = workspace->Map->Spawns->Spawn1
+
+-- A name with spaces is a string literal. A dynamic name goes in brackets.
+local points = workspace->"Spawn Points"
+local slot = workspace->`Slot{1}`
+local function child_named(name: string): Instance?
+    return workspace->[name]
+end
+
+-- `=>` is WaitForChild. It throws on a nil left side, like any method.
+-- emits: return player:WaitForChild("PlayerGui"):WaitForChild("Main Menu"):WaitForChild("Health")
+local function health_bar(player: Player): Instance
+    return player=>PlayerGui=>"Main Menu"=>Health
+end
+
+-- `!` asserts not nil. The message quotes the source text.
+-- emits: if primary == nil then error("model.PrimaryPart is nil") else primary
+local function root_of(model: Model): BasePart
+    return model.PrimaryPart!
+end
+
+-- Chain rule: one `?` guards every later link. `!` ends the guard.
+local function spawn_cframe(): CFrame?
+    -- nil when Map or Spawns is missing; never reaches `.CFrame`
+    return workspace->Map->Spawns->Spawn1?.CFrame
+end
+
+local function must_spawn(): CFrame
+    -- `->Spawn1!` reads "child Spawn1 must exist now"
+    return (workspace->Map->Spawns->Spawn1! :: BasePart).CFrame
+end
+
+-- `!` is only ever the non-nil assert, so an assert followed by a call
+-- needs no parentheses. "Call if present" is the optional call `x?(...)`.
+type Handler = { on_done: ((number) -> ())? }
+local function finish(handler: Handler, code: number)
+    handler.on_done!(code)
+    handler.on_done?(code)
+end
+
+-- What `!` and `?` do not do: a security-locked property or a throwing
+-- `__index` still throws. `?` is not `pcall`.
+local first = Players:GetPlayers()[1]
+print(head_position(first), humanoid_of(first?.Character), map, spawn)
+print(volume(nil), get_or_seed("seed"), lookup(nil, "x"), spawn_cframe(), must_spawn, root_of, health_bar, finish, points, slot, child_named)

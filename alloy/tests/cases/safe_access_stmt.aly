@@ -1,0 +1,6 @@
+local function run(handler, part)
+	handler.on_done?(1)
+	handler?.child?:Destroy()
+	part->Fire?:Play()
+	handler.on_done!(2)
+end

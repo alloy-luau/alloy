@@ -1,0 +1,5 @@
+local volume = settings.volume ?? 0.5
+local name = player ?? "nobody"
+local nested = a ?? b ?? c
+local cmp = a ?? b == c
+return t.x ?? t.y ?? 0

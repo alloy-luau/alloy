@@ -1,0 +1,3 @@
+This crate started as a copy of alloy_syntax 0.1.1 (MIT), from
+https://github.com/larvae-luau/larvae at revision a5a8e61, by the same author.
+Alloy extends it with error recovery, a type tree, and the Alloy grammar.

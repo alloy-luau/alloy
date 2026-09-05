@@ -1,0 +1,23 @@
+local a = t?.x
+local b = t?.x?.y.z
+local c = f()?.x
+local d = t?[k]
+local e = t?:m(1, g())
+local h = cb?(1)
+local i = w->Map->Spawns->Spawn1
+local j = w->"Spawn Points"->`Slot{n}`->[name]
+local k = gui=>Hud=>Health
+local l = m.PrimaryPart!
+local m2 = t?.x!.y
+local n = w->Map->Spawn!.CFrame
+local o = t?.x ?? 0
+local p = (t?.x :: number).z
+t?.x = 1
+t?.x.y += 1
+t?.x ??= 2
+t?:m()
+t?.x?:m()
+cb!(1)
+local function inner(q)
+	return q?.a?.b
+end

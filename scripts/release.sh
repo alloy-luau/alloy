@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# Bumps one package, commits, tags, and pushes. CI builds the release.
+# Bumps every crate to one version, commits, tags, and pushes. CI builds
+# the zips, the GitHub release, and the crates.io publish.
 #
-#   scripts/release.sh alloy-syntax 0.2.0 -> tag alloy-syntax-v0.2.0
-#   scripts/release.sh alloy 0.2.0       -> tag alloy-v0.2.0
-#   scripts/release.sh alloy-lsp 0.2.0   -> tag alloy-lsp-v0.2.0
-# The VS Code extension releases from the extensions repo.
+#   scripts/release.sh 0.2.0    -> tag v0.2.0
 set -euo pipefail
 
-target="${1:-}"
-version="${2:-}"
-if [ -z "$target" ] || [ -z "$version" ]; then
-  echo "usage: scripts/release.sh <alloy-syntax|alloy|alloy-lsp> <version>" >&2
+version="${1:-}"
+if [ -z "$version" ]; then
+  echo "usage: scripts/release.sh <version>" >&2
   exit 1
 fi
 if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
@@ -26,23 +23,19 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-case "$target" in
-  alloy-syntax|alloy|alloy-lsp)
-    manifest="$target/Cargo.toml"
-    # Only the first version line is the package version.
-    sed -i "0,/^version = \".*\"/s//version = \"$version\"/" "$manifest"
-    cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace
-    git add "$manifest" Cargo.lock
-    ;;
-  *)
-    echo "unknown target: $target" >&2
-    exit 1
-    ;;
-esac
+for crate in alloy-syntax luaux alloy alloy-lsp; do
+  # Only the first version line is the package version.
+  sed -i "0,/^version = \".*\"/s//version = \"$version\"/" "$crate/Cargo.toml"
+done
+# The path dependencies name a version too.
+sed -i "s/\(alloy-syntax = { version = \)\"[^\"]*\"/\1\"$version\"/" alloy/Cargo.toml alloy-lsp/Cargo.toml
+sed -i "s/\(package = \"alloy-luau\", version = \)\"[^\"]*\"/\1\"$version\"/" alloy-lsp/Cargo.toml
+cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace
+git add ./*/Cargo.toml Cargo.lock
 
-tag="$target-v$version"
-git commit -m "release: $target $version"
-git tag -a "$tag" -m "$target $version"
+tag="v$version"
+git commit -m "chore(release): $version"
+git tag -a "$tag" -m "Alloy $version"
 git push origin HEAD
 git push origin "$tag"
 echo "pushed $tag; CI builds the release"

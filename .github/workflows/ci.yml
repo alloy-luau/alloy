@@ -14,6 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The tests compile every file of the examples repository, which
+      # sits beside this one in the workspace layout.
+      - name: Check out the examples beside this repository
+        run: git clone --depth 1 https://github.com/alloy-luau/examples ../examples
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -24,3 +28,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Build the examples and hold them to the formatter
+        run: |
+          cargo run -q -- check
+          cargo run -q -- fmt --check ../examples

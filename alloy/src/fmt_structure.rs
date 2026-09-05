@@ -57,6 +57,29 @@ pub struct Structure {
     /// For each token that opens a block, the index of the token that
     /// closes it.
     pub ends: Vec<Option<usize>>,
+    /// For each token, the zero-based line it starts on.
+    pub lines: Vec<usize>,
+}
+
+/// The zero-based line each token starts on, in one pass over the
+/// source. A scan from the start per token would be quadratic.
+pub fn token_lines(src: &str, toks: &[Tok]) -> Vec<usize> {
+    let mut lines = Vec::with_capacity(toks.len());
+    let mut line = 0usize;
+    let mut at = 0usize;
+
+    for t in toks {
+        let start = t.start as usize;
+
+        if start > at {
+            line += src[at..start].matches('\n').count();
+            at = start;
+        }
+
+        lines.push(line);
+    }
+
+    lines
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -111,7 +134,7 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
     let mut steps = vec![Step::default(); toks.len()];
     let mut ends = vec![None; toks.len()];
     let mut depth = 0usize;
-    let line_of = |t: &Tok| src[..t.start as usize].matches('\n').count();
+    let lines = token_lines(src, toks);
 
     for (i, t) in toks.iter().enumerate() {
         let text = t.text(src);
@@ -121,7 +144,7 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
             None
         };
         let next = toks.get(i + 1).map(|n| n.text(src));
-        let line = line_of(t);
+        let line = lines[i];
         let member = matches!(prev, Some("." | ":" | "?." | "?:"));
         let mut closes = 0usize;
         let mut opens = 0usize;
@@ -209,7 +232,7 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
             _ if member => {}
 
             _ => match text {
-                "function" if signature_only(src, toks, i, &stack) => {}
+                "function" if signature_only(src, toks, i, &stack, &lines) => {}
 
                 "function" => {
                     // The parameter list follows the name path, if any.
@@ -407,13 +430,13 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
         depth = depth.saturating_sub(closes) + opens;
     }
 
-    Structure { steps, ends }
+    Structure { steps, ends, lines }
 }
 
 /// A `function` line with no body: a `declare function`, a method of a
 /// declared class, or a trait signature. A trait signature is followed
 /// by another `function`, an attribute, or the `end` of the trait.
-fn signature_only(src: &str, toks: &[Tok], i: usize, stack: &[Frame]) -> bool {
+fn signature_only(src: &str, toks: &[Tok], i: usize, stack: &[Frame], lines: &[usize]) -> bool {
     if ["declare", "remote", "attribute"]
         .iter()
         .any(|w| line_has_before(src, toks, i, w))
@@ -430,11 +453,10 @@ fn signature_only(src: &str, toks: &[Tok], i: usize, stack: &[Frame]) -> bool {
         "class" | "with" => true,
 
         "trait" => {
-            let line = src[..toks[i].start as usize].matches('\n').count();
-            let next_line = toks
-                .iter()
-                .skip(i + 1)
-                .find(|t| src[..t.start as usize].matches('\n').count() > line);
+            let line = lines[i];
+            let next_line = (i + 1..toks.len())
+                .find(|&j| lines[j] > line)
+                .map(|j| &toks[j]);
 
             match next_line.map(|t| t.text(src)) {
                 Some("function" | "end" | "@") => true,

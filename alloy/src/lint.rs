@@ -615,7 +615,7 @@ pub fn run(
 
     let text = |i: usize| toks[i].text(src);
     let st = structure(src, toks);
-    let line_of = |i: usize| src[..toks[i].start as usize].matches('\n').count();
+    let line_of = |i: usize| st.lines[i];
 
     // The `impl` and `trait` blocks, as token ranges.
     let impl_ranges: Vec<(usize, usize)> = toks

@@ -86,9 +86,7 @@ impl<'s> Scan<'s> {
     }
 
     pub(crate) fn line_of(&self, i: usize) -> usize {
-        self.src[..self.start(i.min(self.toks.len() - 1)) as usize]
-            .matches('\n')
-            .count()
+        self.st.lines[i.min(self.toks.len() - 1)]
     }
 
     /// Whether `i` starts a statement: nothing before it on the line, or

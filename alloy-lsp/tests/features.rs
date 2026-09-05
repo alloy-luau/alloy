@@ -480,7 +480,7 @@ fn hover_completion_and_extensions() {
     // A user attribute and a macro hover as what they are.
     let h = s.hover(&uri, 61, 2);
     assert!(
-        h.contains("@icon(asset: string)") && h.contains("On struct."),
+        h.contains("@icon(asset: string)") && h.contains("**Applies to** `struct`"),
         "attribute: {h}"
     );
 

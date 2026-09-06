@@ -24,6 +24,10 @@ pub enum Context {
     },
     /// `remote X(...) |`: the `from`.
     RemoteFrom { prefix: String },
+    /// `struct Name |`, `enum Name |`, `interface Name |`: the `as` that
+    /// opens the body, and `extends` for an interface. The child would
+    /// offer `assert` here.
+    DeclarationAs { prefix: String, interface: bool },
     /// `import |` or `import type |`.
     ImportHead { prefix: String, type_only: bool },
     /// `import { a, b| } from "./m"`: names from the module.
@@ -73,6 +77,36 @@ fn import_spec(src: &str, line_start: usize, offset: usize) -> Option<Context> {
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// `struct Name `, `enum Name<T> `, `export interface Name `: the head
+/// of a declaration whose body opener comes next. `Some(true)` for an
+/// interface, which may take `extends` first.
+fn declaration_head(head: &str) -> Option<bool> {
+    let t = head.trim_start();
+    let t = t.strip_prefix("export ").map(str::trim_start).unwrap_or(t);
+    let (rest, interface) = if let Some(r) = t.strip_prefix("struct ") {
+        (r, false)
+    } else if let Some(r) = t.strip_prefix("enum ") {
+        (r, false)
+    } else {
+        (t.strip_prefix("interface ")?, true)
+    };
+    let rest = rest.trim_start();
+    let name_len = rest.chars().take_while(|c| is_word(*c)).count();
+
+    if name_len == 0 {
+        return None;
+    }
+
+    let mut after = &rest[name_len..];
+
+    if after.starts_with('<') {
+        let close = after.find('>')?;
+        after = &after[close + 1..];
+    }
+
+    (after.ends_with([' ', '\t']) && after.trim().is_empty()).then_some(interface)
 }
 
 /// The declaration keyword a line starts with, `export` aside.
@@ -210,6 +244,13 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
     {
         return Some(Context::DeriveArg {
             prefix: prefix.to_string(),
+        });
+    }
+
+    if let Some(interface) = declaration_head(head) {
+        return Some(Context::DeclarationAs {
+            prefix: prefix.to_string(),
+            interface,
         });
     }
 
@@ -361,6 +402,33 @@ mod tests {
     fn at(src: &str) -> Option<Context> {
         let offset = src.find('|').unwrap();
         detect(&src.replace('|', ""), offset)
+    }
+
+    #[test]
+    fn a_declaration_name_wants_as() {
+        assert_eq!(
+            at("enum Test |"),
+            Some(Context::DeclarationAs {
+                prefix: String::new(),
+                interface: false
+            })
+        );
+        assert_eq!(
+            at("export struct Vec2<T> as|"),
+            Some(Context::DeclarationAs {
+                prefix: "as".to_string(),
+                interface: false
+            })
+        );
+        assert_eq!(
+            at("interface Entity ex|"),
+            Some(Context::DeclarationAs {
+                prefix: "ex".to_string(),
+                interface: true
+            })
+        );
+        assert_eq!(at("enum Test as |"), None);
+        assert_eq!(at("enum |"), None);
     }
 
     #[test]

@@ -72,6 +72,8 @@ struct State {
     plain: HashMap<String, String>,
     /// The mirror URI of the runtime module; its diagnostics stay inside.
     runtime_uri: Option<String>,
+    /// The places the runtime was written to, one per project input.
+    runtimes: std::cell::RefCell<std::collections::HashSet<PathBuf>>,
     /// The child's settings, answered on `workspace/configuration`.
     settings: Value,
     /// Questions in flight, by request id.
@@ -687,6 +689,27 @@ impl State {
                 ));
             }
 
+            Context::DeclarationAs { prefix, interface } => {
+                items.push(word(
+                    "as",
+                    14,
+                    Some(
+                        "Opens the body: the fields of a struct, the variants of an enum."
+                            .to_string(),
+                    ),
+                    offset - prefix.len(),
+                ));
+
+                if *interface {
+                    items.push(word(
+                        "extends",
+                        14,
+                        Some("The interfaces this one takes its fields from: `interface Entity extends Named as`.".to_string()),
+                        offset - prefix.len(),
+                    ));
+                }
+            }
+
             Context::RemoteFrom { prefix } => {
                 items.push(word(
                     "from",
@@ -770,10 +793,18 @@ impl State {
 
         let options = match config {
             Some((config_path, config)) => {
-                let root = config_path.parent().unwrap_or(Path::new("."));
-                let input = root.join(&config.build.input);
-                let rel = path.strip_prefix(&input).unwrap_or(&path);
-                let depth = rel.components().count().saturating_sub(1);
+                let root = normalize(config_path.parent().unwrap_or(Path::new(".")));
+                let input = normalize(&root.join(&config.build.input));
+                let file = normalize(&path);
+                // The runtime sits at the input root of the file's own
+                // project, as the build puts it at the output root; a file
+                // outside that input gets it beside itself.
+                let (depth, runtime_dir) = match file.strip_prefix(&input) {
+                    Ok(rel) => (rel.components().count().saturating_sub(1), input.clone()),
+
+                    Err(_) => (0, normalize(&dir)),
+                };
+                self.ensure_runtime(&runtime_dir);
                 let std_require = config.emit.std_require.clone().unwrap_or_else(|| {
                     if depth == 0 {
                         "./alloy".to_string()
@@ -793,13 +824,17 @@ impl State {
                 }
             }
 
-            None => EmitOptions {
-                file_name,
-                std_require: "./alloy".to_string(),
-                definitions,
-                extensions: self.extensions.clone(),
-                ..EmitOptions::default()
-            },
+            None => {
+                self.ensure_runtime(&normalize(&dir));
+
+                EmitOptions {
+                    file_name,
+                    std_require: "./alloy".to_string(),
+                    definitions,
+                    extensions: self.extensions.clone(),
+                    ..EmitOptions::default()
+                }
+            }
         };
 
         (options, jsx)
@@ -815,7 +850,9 @@ impl State {
     /// with an Alloy extension swapped to Luau. A path outside the root
     /// goes under `_outside`.
     fn mirror_path(&self, real: &Path) -> PathBuf {
-        let rel = match self.root.as_deref().and_then(|r| real.strip_prefix(r).ok()) {
+        let real = normalize(real);
+        let root = self.root.as_deref().map(normalize);
+        let rel = match root.as_deref().and_then(|r| real.strip_prefix(r).ok()) {
             Some(rel) => rel.to_path_buf(),
 
             None => {
@@ -882,6 +919,16 @@ impl State {
             .unwrap_or_else(|| child.to_string());
 
         (real, false)
+    }
+
+    /// Writes the runtime into the mirror under `dir` once, so the
+    /// `require` of a file there resolves for the child.
+    fn ensure_runtime(&self, dir: &Path) {
+        let real = dir.join("alloy.luau");
+
+        if self.runtimes.borrow_mut().insert(real.clone()) {
+            self.write_mirror(&real, alloy::RUNTIME);
+        }
     }
 
     /// Writes a mirror file, creating its directories.
@@ -2557,7 +2604,8 @@ impl Server {
 
         let runtime = {
             let mut st = self.state.lock().expect("state");
-            let real = input.join("alloy.luau");
+            let real = normalize(&input.join("alloy.luau"));
+            st.runtimes.borrow_mut().insert(real.clone());
             st.write_mirror(&real, alloy::RUNTIME);
             let uri = st.child_uri(&path_to_uri(&real));
             st.runtime_uri = Some(uri.clone());
@@ -2745,6 +2793,28 @@ fn walk(dir: &Path, skip: Option<&Path>, out: &mut Vec<PathBuf>, plain: &mut Vec
 
 /// The mirror directory for a workspace root: stable per root, so a
 /// restart finds the same place and starts it clean.
+/// A path with its `.` and `..` components folded, so `crates/../examples`
+/// and `examples` name one place.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+
+            other => out.push(other),
+        }
+    }
+
+    out
+}
+
 fn mirror_dir(root: Option<&Path>) -> PathBuf {
     use std::hash::{Hash, Hasher};
 

@@ -771,3 +771,51 @@ fn a_multi_root_workspace_answers_hover() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A file under its own alloy.toml, outside the root, whose root config
+/// names an input with `..` in it: the runtime require still resolves.
+#[test]
+fn a_file_outside_the_root_finds_the_runtime() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let base = std::env::temp_dir().join(format!("alloy-lsp-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("crates");
+    let game = base.join("examples").join("game");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(game.join("src/client")).unwrap();
+    std::fs::write(
+        root.join("alloy.toml"),
+        "[build]\nin = \"../examples\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        game.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    let src = "local xs = [ 1, 2 ]\nlocal n: number = \"s\"\nprint(xs, n)\n";
+    let file = game.join("src/client/test.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &root);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // The type error proves the checker ran on the file; the runtime
+    // require it starts with resolved, or there would be a second report.
+    let diags = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("number")));
+    assert!(
+        !diags.iter().any(|d| d.contains("Unknown require")),
+        "{diags:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}

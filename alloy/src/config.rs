@@ -559,7 +559,8 @@ impl Default for Build {
 pub const FILE_NAME: &str = "alloy.toml";
 
 /// A default file, written by `alloy init`.
-pub const TEMPLATE: &str = r#"[build]
+pub const TEMPLATE: &str = r#"#:schema .alloy/alloy.schema.json
+[build]
 in = "src"
 out = "build"
 exclude = []

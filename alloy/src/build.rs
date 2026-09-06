@@ -408,6 +408,25 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         report.project_files.push(rel);
     }
 
+    // The schema of this project, ingots and all; a `#:schema` line at
+    // the top of alloy.toml points the editor at it.
+    let schema_rel = PathBuf::from(".alloy/alloy.schema.json");
+    let schema_path = root.join(&schema_rel);
+    let schema_text = serde_json::to_string_pretty(&crate::schema::project(
+        &ingots.list.iter().map(|i| &i.manifest).collect::<Vec<_>>(),
+    ))
+    .unwrap_or_default()
+        + "\n";
+
+    if let Some(parent) = schema_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if std::fs::read_to_string(&schema_path).ok().as_deref() != Some(schema_text.as_str()) {
+        std::fs::write(&schema_path, &schema_text)?;
+    }
+
+    report.project_files.push(schema_rel);
     report.notes = crate::project::sync_aliases(config, root)?;
 
     // The runtime rides along with the output.

@@ -126,15 +126,33 @@ pub struct Manifest {
     #[serde(default)]
     pub hooks: Vec<Hook>,
     /// The options with their defaults; `[ingot.<name>]` overrides them.
+    /// An option may be written as `{ default = ..., doc = "..." }`; the
+    /// parse keeps the default here and the doc in `option_docs`.
     #[serde(default)]
     pub options: toml::Table,
+    /// What each option is for, for the editor's completion.
+    #[serde(skip)]
+    pub option_docs: BTreeMap<String, String>,
     #[serde(default)]
     pub lints: BTreeMap<String, LintDecl>,
 }
 
 impl Manifest {
     pub fn parse(text: &str) -> Result<Manifest, String> {
-        let m: Manifest = toml::from_str(text).map_err(|e| e.message().to_string())?;
+        let mut m: Manifest = toml::from_str(text).map_err(|e| e.message().to_string())?;
+
+        for (key, value) in m.options.iter_mut() {
+            if let toml::Value::Table(t) = value
+                && let Some(default) = t.get("default").cloned()
+            {
+                if let Some(doc) = t.get("doc").and_then(|d| d.as_str()) {
+                    m.option_docs.insert(key.clone(), doc.to_string());
+                }
+
+                *value = default;
+            }
+        }
+
         m.validate()?;
 
         Ok(m)

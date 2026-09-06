@@ -791,6 +791,83 @@ pub fn schema() -> Value {
     Value::Object(root)
 }
 
+/// The schema of one project: the general one, plus what its ingots
+/// declare. `[ingot.<name>]` gets the options of the manifest, each
+/// with its default and its doc, and the `[lint]` lists complete the
+/// ingots' lint names and groups. The build writes it to
+/// `.alloy/alloy.schema.json`, and a `#:schema` line at the top of
+/// alloy.toml points the editor at it.
+pub fn project(manifests: &[&crate::ingot::Manifest]) -> Value {
+    let mut root = schema();
+    let mut names: Vec<String> = Vec::new();
+
+    for m in manifests {
+        names.push(m.name.clone());
+        names.extend(m.lints.keys().map(|l| format!("{}/{l}", m.name)));
+
+        let mut props = Map::new();
+
+        for (key, default) in &m.options {
+            let mut s = Map::new();
+            let ty = match default {
+                toml::Value::String(_) => "string",
+                toml::Value::Integer(_) => "integer",
+                toml::Value::Float(_) => "number",
+                toml::Value::Boolean(_) => "boolean",
+                toml::Value::Array(_) => "array",
+                _ => "object",
+            };
+            s.insert("type".into(), json!(ty));
+            s.insert("default".into(), toml_to_json(default));
+
+            if let Some(doc) = m.option_docs.get(key) {
+                s.insert("description".into(), json!(doc));
+            }
+
+            props.insert(key.clone(), Value::Object(s));
+        }
+
+        let table = json!({
+            "type": "object",
+            "title": format!("[ingot.{}]", m.name),
+            "description": if m.description.is_empty() {
+                format!("The options of the `{}` ingot.", m.name)
+            } else {
+                m.description.clone()
+            },
+            "additionalProperties": false,
+            "properties": Value::Object(props),
+        });
+
+        if let Some(ingot) = root.pointer_mut("/properties/ingot/properties") {
+            ingot[m.name.as_str()] = table;
+        }
+
+        if let Some(ingots) = root.pointer_mut("/properties/ingots/properties") {
+            ingots[m.name.as_str()] = ingot_value();
+        }
+    }
+
+    if names.is_empty() {
+        return root;
+    }
+
+    for list in ["deny", "warn", "allow"] {
+        if let Some(e) = root.pointer_mut(&format!(
+            "/properties/lint/properties/{list}/items/anyOf/0/enum"
+        )) && let Some(all) = e.as_array_mut()
+        {
+            all.extend(names.iter().map(|n| json!(n)));
+        }
+    }
+
+    root
+}
+
+fn toml_to_json(v: &toml::Value) -> Value {
+    serde_json::to_value(v).unwrap_or(Value::Null)
+}
+
 /// The schema as pretty JSON with a final newline, as `alloy self schema`
 /// prints it.
 pub fn to_string() -> String {
@@ -891,6 +968,31 @@ mod tests {
             extra.is_empty(),
             "schema keys that Config rejects: {extra:?}"
         );
+    }
+
+    #[test]
+    fn a_project_schema_carries_its_ingots() {
+        let m = crate::ingot::Manifest::parse(
+            "name = \"enamel\"\napi = 1\nhooks = [\"lint\"]\n[options]\nhelper = { default = \"__enamel\", doc = \"The helper's name.\" }\nsort = true\n[lints.no_effect]\ndefault = \"warn\"\nsummary = \"nothing\"\n",
+        )
+        .unwrap();
+        let s = project(&[&m]);
+        assert_eq!(
+            s["properties"]["ingot"]["properties"]["enamel"]["properties"]["helper"]["default"],
+            json!("__enamel")
+        );
+        assert_eq!(
+            s["properties"]["ingot"]["properties"]["enamel"]["properties"]["helper"]["description"],
+            json!("The helper's name.")
+        );
+        assert_eq!(
+            s["properties"]["ingot"]["properties"]["enamel"]["properties"]["sort"]["type"],
+            json!("boolean")
+        );
+        let names = s["properties"]["lint"]["properties"]["deny"]["items"]["anyOf"][0]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(names.contains(&json!("enamel/no_effect")) && names.contains(&json!("enamel")));
     }
 
     #[test]

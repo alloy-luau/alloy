@@ -1,0 +1,885 @@
+//! The JSON Schema of `alloy.toml`, for the editor.
+//!
+//! One data table here names every table and key of `crate::config`,
+//! with its type, default, and documentation. `alloy self schema` prints
+//! it, and a TOML language server (Even Better TOML, taplo, Tombi)
+//! completes and checks the file from it. The tests hold the table to
+//! the `Config` struct, so a new key fails a test until it is listed.
+
+use serde_json::{Map, Value, json};
+
+use crate::lint::{Group, LINTS, LUAU_GROUP};
+
+/// The type of one key, as the schema states it.
+#[derive(Debug, Clone, Copy)]
+pub enum Ty {
+    Bool,
+    /// A whole number, zero or more.
+    Int,
+    /// A number with a fraction.
+    Number,
+    Str,
+    StrList,
+    /// A string from a fixed set.
+    Choice(&'static [&'static str]),
+}
+
+/// One key of a table.
+#[derive(Debug, Clone, Copy)]
+pub struct Key {
+    pub name: &'static str,
+    pub ty: Ty,
+    /// The default as JSON text; `None` for a key that is unset by default.
+    pub default: Option<&'static str>,
+    pub doc: &'static str,
+    /// Names to offer for a `StrList`, without rejecting others.
+    pub suggest: Option<fn() -> Vec<String>>,
+}
+
+/// One table of the file. A dotted name, `fmt.alx`, nests.
+#[derive(Debug, Clone, Copy)]
+pub struct Table {
+    pub name: &'static str,
+    pub doc: &'static str,
+    pub keys: &'static [Key],
+    /// The table takes any key, each with this value schema.
+    pub open: Option<fn() -> Value>,
+}
+
+const fn key(name: &'static str, ty: Ty, default: &'static str, doc: &'static str) -> Key {
+    Key {
+        name,
+        ty,
+        default: Some(default),
+        doc,
+        suggest: None,
+    }
+}
+
+const fn unset(name: &'static str, ty: Ty, doc: &'static str) -> Key {
+    Key {
+        name,
+        ty,
+        default: None,
+        doc,
+        suggest: None,
+    }
+}
+
+const fn lint_list(name: &'static str, doc: &'static str) -> Key {
+    Key {
+        name,
+        ty: Ty::StrList,
+        default: Some("[]"),
+        doc,
+        suggest: Some(lint_names),
+    }
+}
+
+/// The groups, then every lint, as a `[lint]` list accepts them.
+pub fn lint_names() -> Vec<String> {
+    Group::ALL
+        .iter()
+        .map(|g| g.name().to_string())
+        .chain(std::iter::once(LUAU_GROUP.to_string()))
+        .chain(LINTS.iter().map(|l| l.name.to_string()))
+        .collect()
+}
+
+fn mount_value() -> Value {
+    json!({
+        "type": "array",
+        "description": "The path on disk, relative to this file, and the DataModel location as `@game/Service/Folder`. A `.server.` or `.client.` file name picks the script class; `init` names its directory.",
+        "items": [
+            { "type": "string", "description": "The folder on disk, relative to this file." },
+            { "type": "string", "description": "The DataModel location: `@game/Service/Folder`.", "pattern": "^@game/" }
+        ],
+        "minItems": 2,
+        "maxItems": 2,
+        "examples": [["src/server", "@game/ServerScriptService/Server"]]
+    })
+}
+
+fn ingot_value() -> Value {
+    json!({
+        "description": "Where the ingot comes from: a path relative to this file that holds `ingot.toml` and the binary, or a GitHub release pinned by version.",
+        "oneOf": [
+            { "type": "string", "description": "A directory relative to this file." },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "path": { "type": "string", "description": "A directory relative to this file." },
+                    "repo": { "type": "string", "description": "`owner/repo` on GitHub; the release `v<version>` holds the zip." },
+                    "version": { "type": "string", "description": "The release version to pin." },
+                    "asset": { "type": "string", "description": "The asset name in the release. Unset means `<name>-ingot-<target>.zip`, then `<name>-ingot.zip`." },
+                    "order": { "type": "integer", "description": "The pass the ingot's transform runs in, over the manifest's word. A lower number runs first." },
+                    "lints": {
+                        "type": "object",
+                        "description": "Lints of this ingot switched on or off by name, over the manifest's defaults.",
+                        "additionalProperties": { "type": "boolean" }
+                    }
+                }
+            }
+        ],
+        "examples": ["ingots/tailwind", { "repo": "alloy-luau/tailwind-ingot", "version": "0.1.0" }]
+    })
+}
+
+fn ingot_options_value() -> Value {
+    json!({
+        "type": "object",
+        "description": "The options of one ingot, over the defaults its manifest declares. The key is the ingot's name under `[ingots]`; a key the manifest does not declare is an error.",
+        "additionalProperties": true
+    })
+}
+
+/// Where the published schema lives: the copy the VS Code extension
+/// ships, on the main branch of the extensions repository.
+pub const URL: &str =
+    "https://raw.githubusercontent.com/alloy-luau/extensions/main/vscode/schemas/alloy.toml.json";
+
+const BOOL: Ty = Ty::Bool;
+const INT: Ty = Ty::Int;
+const STR: Ty = Ty::Str;
+
+pub const TABLES: &[Table] = &[
+    Table {
+        name: "build",
+        doc: "What compiles, and where the output goes.",
+        keys: &[
+            key(
+                "in",
+                STR,
+                r#""src""#,
+                "The source root. Every `.aly` and `.alx` under it compiles, relative to the folder that holds this file.",
+            ),
+            key(
+                "out",
+                STR,
+                r#""build""#,
+                "The output root. The tree under `in` is mirrored under it, and the runtime is written beside it as `alloy.luau`.",
+            ),
+            key(
+                "exclude",
+                Ty::StrList,
+                "[]",
+                "Glob patterns, relative to `in`, of sources to skip.",
+            ),
+            key(
+                "clean",
+                BOOL,
+                "false",
+                "Delete an output whose source is gone.",
+            ),
+            key(
+                "artifact",
+                Ty::Choice(&["ship", "check"]),
+                r#""ship""#,
+                "Which artifact to write. `ship` runs on Roblox; `check` is what luau-lsp sees, with the types kept.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "emit",
+        doc: "The few knobs that change what emitted code does.",
+        keys: &[
+            unset(
+                "wait_timeout",
+                Ty::Number,
+                "Seconds passed to every `WaitForChild` that `=>` emits. Unset means no timeout: the engine waits forever and warns after five seconds. With a timeout the call can return nil, so `=>` guards like `->`.",
+            ),
+            unset(
+                "std_require",
+                STR,
+                "The string emitted code passes to `require` for the runtime. Unset means a relative path to the `alloy.luau` the build writes, or the instance path through the mounts.",
+            ),
+            key(
+                "erase_type_imports",
+                BOOL,
+                "false",
+                "Blank `import type` lines in the output so they add no runtime dependency. The output is then untyped for anyone who analyzes it directly.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "lint",
+        doc: "The level of each lint under `alloy flux` and `alloy lint`. A list takes a lint name or a group name: correctness, suspicious, style, complexity, perf, roblox, pedantic, naming, or luau for the type checker's own. A name beats its group. `alloy doc lints` names them.",
+        keys: &[
+            key(
+                "strict",
+                BOOL,
+                "false",
+                "Turns the pedantic group on, at warn: `implicit_any`, `missing_return_type`, `explicit_any`, `todo_comment`, `print_debug`, `missing_doc`.",
+            ),
+            lint_list("deny", "Lints or groups that fail the run."),
+            lint_list("warn", "Lints or groups that print and pass."),
+            lint_list("allow", "Lints or groups that stay silent."),
+        ],
+        open: None,
+    },
+    Table {
+        name: "flux",
+        doc: "What `alloy flux` runs beyond the lints, and the limits of the complexity lints. The levels of the lints stay in `[lint]`. `alloy doc flux` explains it.",
+        keys: &[
+            key(
+                "typecheck",
+                BOOL,
+                "true",
+                "Run luau-lsp over the check artifact and report its type errors on the source lines.",
+            ),
+            key(
+                "definitions",
+                Ty::StrList,
+                "[]",
+                "Definitions files for the type check, `.d.luau` or `.d.aly`, relative to this file. The project's `.d.aly` files join them on their own.",
+            ),
+            key(
+                "roblox_types",
+                BOOL,
+                "true",
+                "Load the Roblox globals. The file comes from the luau-lsp extension's storage, or downloads once into `~/.alloy/types`.",
+            ),
+            key(
+                "security_level",
+                Ty::Choice(&[
+                    "PluginSecurity",
+                    "LocalUserSecurity",
+                    "RobloxScriptSecurity",
+                    "None",
+                ]),
+                r#""PluginSecurity""#,
+                "The security level of the Roblox globals.",
+            ),
+            unset(
+                "luau_lsp",
+                STR,
+                "The luau-lsp binary. Unset means `luau-lsp` on the PATH, then `~/.alloy/bin` and `~/.ember/bin`.",
+            ),
+            key(
+                "too_many_arguments",
+                INT,
+                "7",
+                "`too_many_arguments` fires past this many parameters; `self` does not count.",
+            ),
+            key(
+                "too_many_lines",
+                INT,
+                "100",
+                "`too_many_lines` fires past this many lines in one function.",
+            ),
+            key(
+                "max_nesting",
+                INT,
+                "5",
+                "`deep_nesting` fires past this many nested blocks.",
+            ),
+            key(
+                "cognitive_complexity",
+                INT,
+                "25",
+                "`cognitive_complexity` fires past this score: one per branch, loop, `and`, `or`, and ternary, plus the depth of each branch.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "test",
+        doc: "Where `alloy test` writes the specs: one lest spec per source with a `@test`, with everything the tests reach. `alloy doc test` explains it.",
+        keys: &[
+            key(
+                "out",
+                STR,
+                r#""tests""#,
+                "The folder the specs land in, relative to this file. Each source with a `@test` writes `<out>/<path>.spec.luau`.",
+            ),
+            key("suite", STR, r#""alloy""#, "The suite name in `lest.toml`."),
+            key(
+                "lest",
+                BOOL,
+                "true",
+                "Write `lest.toml` and the `@lest` alias of `.luaurc` when the root has none.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "fmt",
+        doc: "How Anneal, `alloy fmt`, lays code out. The names follow larvae and stylua where the option is theirs; `alloy doc fmt` explains each.",
+        keys: &[
+            key(
+                "column_width",
+                INT,
+                "100",
+                "The width a bracket group breaks past: a call, a table, or an array that does not fit goes one element per line.",
+            ),
+            key(
+                "line_endings",
+                Ty::Choice(&["unix", "windows"]),
+                r#""unix""#,
+                "The line ending of the written file.",
+            ),
+            key(
+                "indent_type",
+                Ty::Choice(&["spaces", "tabs"]),
+                r#""spaces""#,
+                "What one indentation level is.",
+            ),
+            key(
+                "indent_width",
+                INT,
+                "4",
+                "Spaces per level, when `indent_type` is spaces.",
+            ),
+            key(
+                "quote_style",
+                Ty::Choice(&[
+                    "auto-prefer-double",
+                    "auto-prefer-single",
+                    "force-double",
+                    "force-single",
+                    "preserve",
+                ]),
+                r#""auto-prefer-double""#,
+                "The quotes of a string literal. An `auto` style keeps the other quote for a string that holds the preferred one; `force` escapes instead.",
+            ),
+            key(
+                "leading_zero",
+                Ty::Choice(&["add", "strip", "preserve"]),
+                r#""add""#,
+                "`.5` and `0.5`: add the zero, strip it, or leave the literal.",
+            ),
+            key(
+                "call_parentheses",
+                Ty::Choice(&[
+                    "always",
+                    "no-single-string",
+                    "no-single-table",
+                    "none",
+                    "input",
+                ]),
+                r#""always""#,
+                "The parentheses of a call with one string or one table argument: `f(\"x\")` and `f \"x\"`. `input` keeps what the author wrote.",
+            ),
+            key(
+                "space_after_function_names",
+                Ty::Choice(&["never", "definitions", "calls", "always"]),
+                r#""never""#,
+                "Where a space goes before the `(` of a function: `function f ()` in definitions, `f ()` in calls.",
+            ),
+            key(
+                "collapse_simple_statement",
+                Ty::Choice(&["never", "function-only", "conditional-only", "always"]),
+                r#""never""#,
+                "Whether `if c then return end` or a function with one statement may sit on one line.",
+            ),
+            key(
+                "block_newline_gaps",
+                Ty::Choice(&["never", "preserve"]),
+                r#""never""#,
+                "A blank line right after a block opener or right before its closer: dropped, or kept.",
+            ),
+            key(
+                "magic_trailing_comma",
+                BOOL,
+                "true",
+                "A trailing comma in the source keeps its group expanded, one element per line, whatever the width.",
+            ),
+            key(
+                "space_inside_braces",
+                BOOL,
+                "true",
+                "`{ a = 1 }` rather than `{a = 1}`.",
+            ),
+            key(
+                "space_inside_parens",
+                BOOL,
+                "false",
+                "`f( a )` rather than `f(a)`.",
+            ),
+            key(
+                "space_inside_brackets",
+                BOOL,
+                "false",
+                "`t[ k ]` rather than `t[k]`.",
+            ),
+            key(
+                "trailing_comma",
+                BOOL,
+                "true",
+                "An expanded table or array ends its last element with a comma.",
+            ),
+            key(
+                "space_inside_array",
+                BOOL,
+                "true",
+                "Alloy's own: `[ 1, 2 ]` rather than `[1, 2]` in an array literal.",
+            ),
+            key(
+                "align_struct_fields",
+                BOOL,
+                "false",
+                "Alloy's own: the `:` of a struct's fields line up.",
+            ),
+            key(
+                "expand_imports",
+                BOOL,
+                "false",
+                "Alloy's own: an `import { }` or `export { }` list with more than one name breaks one name per line. Off, a trailing comma in the list asks for the same.",
+            ),
+            key(
+                "exclude",
+                Ty::StrList,
+                "[]",
+                "Paths the formatter leaves alone. A `*` matches any run of characters: `\"vendor/*\"`, `\"*.gen.aly\"`.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "fmt.call_chains",
+        doc: "How a chain of method calls breaks.",
+        keys: &[
+            key(
+                "style",
+                Ty::Choice(&["preserve", "method", "full"]),
+                r#""preserve""#,
+                "`method` breaks before each call past the first, `full` before every call, once the chain holds `min_calls` calls. `preserve` keeps the author's lines.",
+            ),
+            key(
+                "min_calls",
+                INT,
+                "3",
+                "The number of calls a chain needs before it breaks; 0 breaks only what runs past the width.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "fmt.sort_requires",
+        doc: "Sorting of the `import` lines at the top of a file.",
+        keys: &[
+            key(
+                "enabled",
+                BOOL,
+                "false",
+                "Sort the run of `import` statements at the top of the file by path.",
+            ),
+            key(
+                "grouping",
+                Ty::Choice(&["flat", "by-kind"]),
+                r#""flat""#,
+                "`by-kind` orders `@alias` paths first, then absolute ones, then relative ones; `flat` sorts by path alone.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "fmt.alx",
+        doc: "The markup of `.alx` files, after luaux-worm. The code around it formats like any `.aly` file.",
+        keys: &[
+            key(
+                "attribute_quotes",
+                Ty::Choice(&["double", "single", "preserve"]),
+                r#""double""#,
+                "The quotes of a string attribute: `Name=\"x\"`. `quote_style` does not govern it.",
+            ),
+            key(
+                "bracket_same_line",
+                BOOL,
+                "false",
+                "The `>` of a tag that broke its attributes sits on the last attribute's line rather than its own.",
+            ),
+            key(
+                "attribute_per_line",
+                BOOL,
+                "false",
+                "A tag that breaks its attributes puts every attribute on its own line, rather than as many as fit.",
+            ),
+            key(
+                "self_closing_space",
+                BOOL,
+                "true",
+                "`<Frame />` rather than `<Frame/>`.",
+            ),
+            key(
+                "text_wrap",
+                Ty::Choice(&["fill", "preserve"]),
+                r#""fill""#,
+                "`fill` reflows text children to the column width; `preserve` keeps the author's line breaks.",
+            ),
+            key(
+                "blank_lines",
+                BOOL,
+                "true",
+                "A blank line between two children stays.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "project",
+        doc: "The Rojo project the mounts describe.",
+        keys: &[
+            key(
+                "name",
+                STR,
+                r#""game""#,
+                "The name in `default.project.json` and `.alloy/build.project.json`.",
+            ),
+            key(
+                "runtime",
+                STR,
+                r#""@game/ReplicatedStorage/Alloy""#,
+                "Where `alloy.luau` mounts. Emitted code requires it by a relative instance path from each file's mount.",
+            ),
+            key(
+                "sourcemap",
+                BOOL,
+                "true",
+                "Write `.alloy/sourcemap.json` on every build. The language server reads it for `@game/` completion and instance types.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "mount",
+        doc: "Where each folder lands in the DataModel: `alias = [path, mount]`. The folder at `path` lands at `mount`, `require(\"@alias/x\")` resolves through it, and with one or more mounts `alloy build` writes `default.project.json` over the sources and `.alloy/build.project.json` over the output.",
+        keys: &[],
+        open: Some(mount_value),
+    },
+    Table {
+        name: "ingots",
+        doc: "The extensions of the project, name to source. An ingot is an executable beside an `ingot.toml`; it edits source before the desugar, lints, formats, and answers the editor. `alloy doc ingots` explains them.",
+        keys: &[],
+        open: Some(ingot_value),
+    },
+    Table {
+        name: "ingot",
+        doc: "One table per ingot, `[ingot.<name>]`: its options, over the defaults its manifest declares.",
+        keys: &[],
+        open: Some(ingot_options_value),
+    },
+];
+
+/// The schema of one key.
+fn key_schema(k: &Key) -> Value {
+    let mut s = Map::new();
+
+    match k.ty {
+        Ty::Bool => {
+            s.insert("type".into(), json!("boolean"));
+        }
+
+        Ty::Int => {
+            s.insert("type".into(), json!("integer"));
+            s.insert("minimum".into(), json!(0));
+        }
+
+        Ty::Number => {
+            s.insert("type".into(), json!("number"));
+            s.insert("minimum".into(), json!(0));
+        }
+
+        Ty::Str => {
+            s.insert("type".into(), json!("string"));
+        }
+
+        Ty::Choice(values) => {
+            s.insert("type".into(), json!("string"));
+            s.insert("enum".into(), json!(values));
+        }
+
+        Ty::StrList => {
+            s.insert("type".into(), json!("array"));
+
+            // `anyOf` offers the names in completion and still accepts any
+            // string: a lint that is newer than the schema must not error.
+            let items = match k.suggest {
+                Some(names) => json!({
+                    "anyOf": [
+                        { "type": "string", "enum": names() },
+                        { "type": "string" }
+                    ]
+                }),
+
+                None => json!({ "type": "string" }),
+            };
+
+            s.insert("items".into(), items);
+        }
+    }
+
+    s.insert("description".into(), json!(k.doc));
+
+    if let Some(d) = k.default {
+        let value: Value = serde_json::from_str(d).expect("a default is JSON text");
+        s.insert("default".into(), value);
+    }
+
+    Value::Object(s)
+}
+
+/// The schema of one table, with its own keys only; nested tables are
+/// added by `schema`.
+fn table_schema(t: &Table) -> Value {
+    let mut properties = Map::new();
+
+    for k in t.keys {
+        properties.insert(k.name.to_string(), key_schema(k));
+    }
+
+    let mut s = Map::new();
+    s.insert("type".into(), json!("object"));
+    s.insert("title".into(), json!(format!("[{}]", t.name)));
+    s.insert("description".into(), json!(t.doc));
+    s.insert("properties".into(), Value::Object(properties));
+
+    match t.open {
+        Some(value) => {
+            s.insert("additionalProperties".into(), value());
+        }
+
+        None => {
+            s.insert("additionalProperties".into(), json!(false));
+        }
+    }
+
+    Value::Object(s)
+}
+
+/// The whole schema, draft-07.
+pub fn schema() -> Value {
+    let mut root = Map::new();
+    root.insert(
+        "$schema".into(),
+        json!("http://json-schema.org/draft-07/schema#"),
+    );
+    root.insert("$id".into(), json!(URL));
+    root.insert("title".into(), json!("alloy.toml"));
+    root.insert(
+        "description".into(),
+        json!(
+            "The project file of Alloy. Every key has a default, and an unknown key is an error."
+        ),
+    );
+    root.insert("type".into(), json!("object"));
+    root.insert("additionalProperties".into(), json!(false));
+    root.insert("properties".into(), Value::Object(Map::new()));
+
+    // A parent table is listed before its children, so `fmt.alx` finds
+    // `fmt` in place.
+    for t in TABLES {
+        let mut node = root.get_mut("properties").expect("the root has properties");
+        let mut parts = t.name.split('.').peekable();
+
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                node.as_object_mut()
+                    .expect("properties is an object")
+                    .insert(part.to_string(), table_schema(t));
+            } else {
+                node = node
+                    .get_mut(part)
+                    .and_then(|v| v.get_mut("properties"))
+                    .unwrap_or_else(|| panic!("the table {} has no parent {part}", t.name));
+            }
+        }
+    }
+
+    Value::Object(root)
+}
+
+/// The schema as pretty JSON with a final newline, as `alloy self schema`
+/// prints it.
+pub fn to_string() -> String {
+    serde_json::to_string_pretty(&schema()).expect("the schema is plain JSON") + "\n"
+}
+
+/// Every key path of the schema, `build.in`, `fmt.alx.text_wrap`. A table
+/// with open keys, `mount`, is one path.
+pub fn key_paths() -> Vec<String> {
+    let mut out = Vec::new();
+
+    for t in TABLES {
+        if t.open.is_some() {
+            out.push(t.name.to_string());
+        }
+
+        for k in t.keys {
+            out.push(format!("{}.{}", t.name, k.name));
+        }
+    }
+
+    out.sort();
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, TEMPLATE};
+    use std::collections::BTreeSet;
+
+    /// Every leaf path of a TOML value. A table named in `open` counts as
+    /// one leaf, whatever it holds.
+    fn toml_paths(value: &toml::Value, prefix: &str, open: &[&str], out: &mut BTreeSet<String>) {
+        if let toml::Value::Table(t) = value {
+            if !prefix.is_empty() && open.contains(&prefix) {
+                out.insert(prefix.to_string());
+                return;
+            }
+
+            for (k, v) in t {
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+
+                toml_paths(v, &path, open, out);
+            }
+        } else {
+            out.insert(prefix.to_string());
+        }
+    }
+
+    fn open_tables() -> Vec<&'static str> {
+        TABLES
+            .iter()
+            .filter(|t| t.open.is_some())
+            .map(|t| t.name)
+            .collect()
+    }
+
+    #[test]
+    fn the_schema_and_the_config_name_the_same_keys() {
+        // The optional keys are absent from a serialized default, so the
+        // test sets each one.
+        let mut config = Config::default();
+        config.emit.wait_timeout = Some(5.0);
+        config.emit.std_require = Some("@alloy".into());
+        config.flux.luau_lsp = Some("luau-lsp".into());
+
+        let value = toml::Value::try_from(&config).unwrap();
+        let mut from_config = BTreeSet::new();
+        toml_paths(&value, "", &open_tables(), &mut from_config);
+
+        let from_schema: BTreeSet<String> = key_paths().into_iter().collect();
+
+        let missing: Vec<_> = from_config.difference(&from_schema).collect();
+        assert!(
+            missing.is_empty(),
+            "keys of Config without a schema entry: {missing:?}"
+        );
+
+        let extra: Vec<_> = from_schema.difference(&from_config).collect();
+        assert!(
+            extra.is_empty(),
+            "schema keys that Config rejects: {extra:?}"
+        );
+    }
+
+    #[test]
+    fn the_template_uses_schema_keys_only() {
+        let from_schema: BTreeSet<String> = key_paths().into_iter().collect();
+
+        let value: toml::Value = toml::from_str(TEMPLATE).unwrap();
+        let mut used = BTreeSet::new();
+        toml_paths(&value, "", &open_tables(), &mut used);
+
+        // The commented lines, `# key = value` and `# [table]`, are the
+        // keys the template suggests; they must be real too.
+        let mut table = String::new();
+
+        for line in TEMPLATE.lines() {
+            let line = line.trim();
+
+            if let Some(name) = line
+                .strip_prefix('[')
+                .or_else(|| line.strip_prefix("# ["))
+                .and_then(|l| l.strip_suffix(']'))
+            {
+                table = name.to_string();
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("# ") {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+                    .collect();
+
+                if !name.is_empty() && rest[name.len()..].starts_with(" = ") {
+                    used.insert(format!("{table}.{name}"));
+                }
+            }
+        }
+
+        // An inline table, `sort_requires = { ... }`, names a nested
+        // table, and any key sits under an open table.
+        let open = open_tables();
+        let unknown: Vec<_> = used
+            .iter()
+            .filter(|p| !from_schema.contains(*p))
+            .filter(|p| !TABLES.iter().any(|t| t.name == p.as_str()))
+            .filter(|p| !open.iter().any(|o| p.starts_with(&format!("{o}."))))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "template keys the schema lacks: {unknown:?}"
+        );
+    }
+
+    #[test]
+    fn nested_tables_sit_under_their_parent() {
+        let s = schema();
+        let alx = &s["properties"]["fmt"]["properties"]["alx"];
+        assert_eq!(alx["type"], "object");
+        assert_eq!(
+            alx["properties"]["text_wrap"]["enum"],
+            json!(["fill", "preserve"])
+        );
+        assert_eq!(
+            s["properties"]["build"]["properties"]["in"]["default"],
+            "src"
+        );
+        assert_eq!(s["properties"]["build"]["additionalProperties"], false);
+        assert_eq!(
+            s["properties"]["mount"]["additionalProperties"]["type"],
+            "array"
+        );
+    }
+
+    #[test]
+    fn a_lint_list_offers_every_group_and_lint() {
+        let s = schema();
+        let names = &s["properties"]["lint"]["properties"]["deny"]["items"]["anyOf"][0]["enum"];
+        let names: Vec<&str> = names
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+
+        for g in Group::ALL {
+            assert!(names.contains(&g.name()), "{} is missing", g.name());
+        }
+
+        assert!(names.contains(&"luau"));
+
+        for l in LINTS {
+            assert!(names.contains(&l.name), "{} is missing", l.name);
+        }
+    }
+
+    #[test]
+    fn the_schema_prints_as_json() {
+        let text = to_string();
+        assert!(text.ends_with('\n'));
+        let back: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back["$schema"], "http://json-schema.org/draft-07/schema#");
+    }
+}

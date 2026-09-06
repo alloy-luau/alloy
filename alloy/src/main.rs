@@ -11,7 +11,9 @@ mod doc_cmd;
 mod help;
 mod highlight;
 mod ingot_cmd;
+mod jsonc;
 mod self_cmd;
+mod self_code;
 mod ui;
 
 use ui::{Level, Painter};

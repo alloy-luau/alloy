@@ -101,9 +101,15 @@ pub fn fold(text: &str, known: &Known) -> String {
             break;
         }
 
-        out.replace_range(head_start..tail_start + tail_end, &new_head);
+        // Every name the head uses resolved: the rest of the clause,
+        // parsed or not, is for those names alone.
+        let clause_end = out[tail_start..]
+            .find("\n```")
+            .map_or(out.len(), |k| tail_start + k);
+        out.replace_range(head_start..clause_end.max(tail_start + tail_end), &new_head);
     }
 
+    fold_heads(&mut out, known);
     fold_results(&mut out);
     fold_lite_results(&mut out);
     fold_enums(&mut out, known);
@@ -112,8 +118,21 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_array_alias(&mut out);
     fold_narrowed_primitives(&mut out);
     out = fold_temp_receiver(&out);
+    fold_aliases(&mut out, known);
 
     out
+}
+
+/// `type Snapshot = Readonly<Profile>`: the mapped form reads as the
+/// alias the source named.
+fn fold_aliases(text: &mut String, known: &Known) {
+    for shape in &known.shapes {
+        let Shape::Alias { name, target } = shape else {
+            continue;
+        };
+
+        *text = replace_var(text, target, name);
+    }
 }
 
 /// An `is table` or `is function` test meets the value with a shape the
@@ -203,6 +222,28 @@ fn strip_lone_parens(text: &mut String) {
     }
 }
 
+/// A type printed in place, `local r: { fire: ..., on: ... }`, with no
+/// clause, reads by name the way a binding does.
+fn fold_heads(text: &mut String, known: &Known) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(": {") {
+        let open = from + i + 2;
+        let Some(len) = balanced_len(&text[open..]) else {
+            break;
+        };
+
+        match name_of_body(&text[open..open + len], known) {
+            Some(name) => {
+                text.replace_range(open..open + len, &name);
+                from = open + name.len();
+            }
+
+            None => from = open + 1,
+        }
+    }
+}
+
 /// A mapped result prints as one table with `tag: "Ok" | "Err"` and
 /// `read _1: T | E`; it reads as `Result<T, E>`.
 fn fold_lite_results(text: &mut String) {
@@ -284,8 +325,17 @@ fn fold_array_alias(text: &mut String) {
 /// The type text before ` where `: from the start of its line, past a
 /// `local x: ` or `x: ` head, so a replacement keeps the label.
 fn head_of(text: &str, where_at: usize) -> (usize, &str) {
-    let line_start = text[..where_at].rfind('\n').map(|n| n + 1).unwrap_or(0);
-    let line = &text[line_start..where_at];
+    // A head printed over several lines ends in a bracket before the
+    // `where`; the type starts on the line that opens it.
+    let before = text[..where_at].trim_end();
+    let group_start = before
+        .chars()
+        .next_back()
+        .filter(|c| matches!(c, '}' | ')' | ']'))
+        .and_then(|_| enclosing_open(text, before.len() - 1))
+        .unwrap_or(where_at);
+    let line_start = text[..group_start].rfind('\n').map(|n| n + 1).unwrap_or(0);
+    let line = &text[line_start..group_start];
     // The type starts after the last `: ` outside brackets on the line,
     // or at the line start when the line is the type alone.
     let mut depth = 0i32;
@@ -300,7 +350,28 @@ fn head_of(text: &str, where_at: usize) -> (usize, &str) {
         }
     }
 
-    (line_start + start, &line[start..])
+    (line_start + start, &text[line_start + start..where_at])
+}
+
+/// The opener that matches the closing bracket at `close`.
+fn enclosing_open(text: &str, close: usize) -> Option<usize> {
+    let mut depth = 0i32;
+
+    for (k, c) in text[..=close].char_indices().rev() {
+        match c {
+            '}' | ')' | ']' => depth += 1,
+            '{' | '(' | '[' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn parse_bindings(text: &str) -> (Vec<Binding>, usize) {
@@ -479,13 +550,14 @@ fn resolve(bindings: &[Binding], known: &Known) -> Vec<(String, String)> {
 
 /// The members of `{ a: T, b: U }` as `(key, type)` pairs, split at
 /// the commas of depth one.
-fn members(body: &str) -> Vec<(String, String)> {
+/// The members of a table body split at the commas of depth one, with
+/// their modifiers.
+fn member_parts(body: &str) -> Vec<&str> {
     let inner = body.trim();
     let inner = inner
         .strip_prefix('{')
         .and_then(|s| s.strip_suffix('}'))
         .unwrap_or(inner);
-    let mut out = Vec::new();
     let mut depth = 0i32;
     let mut in_string = false;
     let mut start = 0;
@@ -514,7 +586,13 @@ fn members(body: &str) -> Vec<(String, String)> {
 
     parts.push(&inner[start..]);
 
-    for part in parts {
+    parts
+}
+
+fn members(body: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+
+    for part in member_parts(body) {
         let part = part.trim();
 
         if part.is_empty() {
@@ -612,6 +690,42 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
     let m = members(trimmed);
     let has = |key: &str| m.iter().any(|(k, _)| k == key);
     let get = |key: &str| m.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+
+    // The object a `remote` declaration binds.
+    if has("fire_all") && has("on_ratelimited") && has("wait") {
+        return Some("Remote".to_string());
+    }
+
+    // A mapped type over a struct: every field read-only, or every
+    // field optional, over the struct's field set.
+    if !m.is_empty() && trimmed.starts_with('{') {
+        let parts: Vec<&str> = member_parts(trimmed)
+            .into_iter()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        let all_read = parts.iter().all(|p| p.starts_with("read "));
+        let all_optional = parts.iter().all(|p| !p.starts_with("read "))
+            && m.iter().all(|(_, v)| v.ends_with('?'));
+        let keys: Vec<String> = m.iter().map(|(k, _)| k.clone()).collect();
+
+        if all_read || all_optional {
+            for shape in &known.shapes {
+                let Shape::Struct { name, fields } = shape else {
+                    continue;
+                };
+                let all: Vec<&String> = fields.iter().map(|(f, _)| f).collect();
+                let public: Vec<&String> =
+                    fields.iter().filter(|(_, p)| !p).map(|(f, _)| f).collect();
+
+                if same_set(&keys, &all) || same_set(&keys, &public) {
+                    let head = if all_read { "Readonly" } else { "Partial" };
+
+                    return Some(format!("{head}<{name}>"));
+                }
+            }
+        }
+    }
 
     // The std containers, by the methods that name their arguments.
     if let Some(elem) = get("[number]")
@@ -1055,6 +1169,34 @@ mod tests {
             "local v: (userdata & ~Instance)\n    | *error-type*\n    | boolean".to_string();
         fold_narrowed_primitives(&mut text);
         assert_eq!(text, "local v: userdata & ~Instance\n    | boolean");
+    }
+
+    #[test]
+    fn a_mapped_type_over_a_struct_reads_as_its_alias() {
+        let mut known = known();
+        known.shapes.push(Shape::Alias {
+            name: "Snapshot".into(),
+            target: "Readonly<Saber>".into(),
+        });
+        let text = "```luau\nlocal first: {\n    read color: t1,\n    read cost: number,\n    read id: string\n} where t1 = {\n    [number]: number,\n    concat: (self: t1, other: t1) -> t1,\n    push: (self: t1, ...number) -> ()\n}\n```";
+        assert_eq!(fold(text, &known), "```luau\nlocal first: Snapshot\n```");
+        let partial = "local part: {\n    color: t1?,\n    cost: number?,\n    id: string?\n} where t1 = {\n    [number]: number,\n    concat: (self: t1, other: t1) -> t1,\n    push: (self: t1, ...number) -> ()\n}";
+        assert_eq!(fold(partial, &known), "local part: Partial<Saber>");
+    }
+
+    #[test]
+    fn a_resolved_head_drops_a_clause_it_cannot_parse() {
+        let text = "```luau\nlocal self: t1 where t1 = { @metatable t2, {\n    read color: t3,\n    read cost: number,\n    read id: string\n} } ; t3 = {\n    [number]: number,\n    concat: (self: t3, other: t3) -> t3,\n    push: (self: t3, ...number) -> ()\n} ; t2 = <T>(x: T) -> T ; t4 = {\n    __new: (f: {}) -> t1\n}\n```";
+        assert_eq!(fold(text, &known()), "```luau\nlocal self: Saber\n```");
+    }
+
+    #[test]
+    fn a_remote_reads_by_name_in_place() {
+        let text = "```luau\nlocal BuySaber: {\n    call: (id: string) -> Future<any>,\n    fire: (id: string) -> (),\n    fire_all: (id: string) -> (),\n    fire_except: (except: Player, id: string) -> (),\n    instance: Instance?,\n    on: (handler: (sender: Player, id: string) -> ()) -> RBXScriptConnection,\n    on_ratelimited: (handler: (player: Player) -> ()) -> (),\n    once: (handler: (sender: Player, id: string) -> ()) -> RBXScriptConnection,\n    spec: any,\n    wait: () -> Future<any>\n}\n```";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "```luau\nlocal BuySaber: Remote\n```"
+        );
     }
 
     #[test]

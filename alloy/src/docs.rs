@@ -201,7 +201,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("on", "The targets of an `attribute` declaration."),
     (
         "remote",
-        "```alloy\nremote Name(params) from client\nremote function Name(params): R from server\n```\nA typed channel between server and client. The compiler generates the serializer. Use `.fire`, `.fire_all`, `.on`, and `.call`.",
+        "```alloy\nremote Name(params) from client\nremote function Name(params): R from server\n```\nA typed channel between server and client. The compiler generates the serializer. Use `.fire`, `.fire_all`, `.on`, and `.call`.\n\nThe declaration types the object. The side that fires passes the parameters, and a default makes one optional; a handler gets them filled, and a server handler gets the sender first: `BuySaber.on(function(sender, id) ... end)` types `sender: Player` and `id: string`. `call` on a remote function yields `Future<R>`.",
     ),
     (
         "where",

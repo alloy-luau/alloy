@@ -4336,7 +4336,19 @@ fn append_initializer(value: &str, doc: &Doc, line: u32, character: u32) -> Opti
             // belongs to another statement.
             let line_end = rhs.find('\n').unwrap_or(rhs.len());
 
+            // The hover is a use of this binding: no function between
+            // the declaration and the hover takes the name as a parameter,
+            // and no later `local` rebinds it.
+            let hovered_before = offset < at;
+            let rebound = !hovered_before
+                && rebinds(
+                    &doc.source[at + word.len()..offset.max(at + word.len())],
+                    word,
+                );
+
             if rhs.starts_with("new ")
+                && !hovered_before
+                && !rebound
                 && let Some(open) = rhs[..line_end].find('{')
                 && let Some(close) = matching_brace(rhs, open)
             {
@@ -4354,6 +4366,37 @@ fn append_initializer(value: &str, doc: &Doc, line: u32, character: u32) -> Opti
     }
 
     None
+}
+
+/// Whether a stretch of source binds `name` again: a function that
+/// takes it as a parameter, or a `local` that declares it.
+fn rebinds(text: &str, name: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with("local ")
+            && trimmed[6..].trim_start().starts_with(name)
+            && !keywords::is_word_at(
+                trimmed,
+                6 + trimmed[6..].len() - trimmed[6..].trim_start().len() + name.len(),
+            )
+        {
+            return true;
+        }
+
+        if let Some(f) = line.find("function")
+            && let Some(open) = line[f..].find('(')
+            && let Some(close) = line[f + open..].find(')')
+        {
+            let params = &line[f + open + 1..f + open + close];
+
+            return params
+                .split(',')
+                .any(|p| p.trim().split(':').next().is_some_and(|n| n.trim() == name));
+        }
+
+        false
+    })
 }
 
 /// The index of the `}` that closes the `{` at `open`.

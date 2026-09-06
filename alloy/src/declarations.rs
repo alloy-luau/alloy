@@ -680,12 +680,17 @@ pub enum Shape {
         /// Each variant with its payload types as source text.
         variants: Vec<(String, Vec<String>)>,
     },
+    /// `type Snapshot = Readonly<Profile>`: a mapped type over a
+    /// struct, so a hover names the alias.
+    Alias { name: String, target: String },
 }
 
 impl Shape {
     pub fn name(&self) -> &str {
         match self {
-            Shape::Struct { name, .. } | Shape::Enum { name, .. } => name,
+            Shape::Struct { name, .. } | Shape::Enum { name, .. } | Shape::Alias { name, .. } => {
+                name
+            }
         }
     }
 }
@@ -731,11 +736,38 @@ pub fn shapes(src: &str) -> Vec<Shape> {
                     .collect(),
             }),
 
+            Stmt::TypeAlias(a) => {
+                let whole = text(a.span);
+                let Some((_, rhs)) = whole.split_once('=') else {
+                    continue;
+                };
+                let target = rhs.trim();
+
+                if is_mapped_over_name(target) {
+                    out.push(Shape::Alias {
+                        name: text(a.name),
+                        target: target.to_string(),
+                    });
+                }
+            }
+
             _ => {}
         }
     }
 
     out
+}
+
+/// `Readonly<Profile>`, `Partial<Profile>`, or `Sink<Profile>`.
+fn is_mapped_over_name(target: &str) -> bool {
+    ["Readonly<", "Partial<", "Sink<"].iter().any(|head| {
+        target
+            .strip_prefix(head)
+            .and_then(|rest| rest.strip_suffix('>'))
+            .is_some_and(|inner| {
+                !inner.is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+    })
 }
 
 #[cfg(test)]

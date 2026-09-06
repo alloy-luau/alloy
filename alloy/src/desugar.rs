@@ -3063,20 +3063,110 @@ impl<'s> Desugar<'s> {
         let attrs = self.attr_table(&r.attributes);
         let kind = if r.is_function { "function" } else { "event" };
         let std = self.std();
-        let text = format!(
-            "local {name} = {std}.remote({{ name = {}, kind = \"{kind}\", from_client = {}, from_server = {}, params = {{ {} }}, defaults = {{ {} }}, attrs = {attrs} }})",
+        let value = format!(
+            "{std}.remote({{ name = {}, kind = \"{kind}\", from_client = {}, from_server = {}, params = {{ {} }}, defaults = {{ {} }}, attrs = {attrs} }})",
             luau_string(&name),
             r.from_client,
             r.from_server,
             params.join(", "),
             defaults.join(", ")
         );
+        // The check artifact types the object by the declaration, so a
+        // handler's parameters and a `fire` carry the declared types.
+        let text = if self.options.check {
+            let ty = self.remote_type(r);
+
+            format!("local {name} = (({value} :: any) :: {ty})")
+        } else {
+            format!("local {name} = {value}")
+        };
         self.generate(start, &text);
         self.blank_lines(start, end);
 
         if r.exported {
             self.exports.push((name.clone(), name));
         }
+    }
+
+    /// The type of a remote object, from its declaration. The side that
+    /// fires passes the parameters, with a default making one optional;
+    /// the side that handles gets them filled, and the server's handler
+    /// gets the sender first. A remote open on both sides overloads.
+    fn remote_type(&mut self, r: &RemoteDecl) -> String {
+        let std = self.std();
+        let mut fire_params = Vec::new();
+        let mut handler_params = Vec::new();
+
+        for p in &r.params {
+            let name = self.text_of(p.name).to_string();
+            let ty =
+                p.ty.map(|t| self.text_of(t).trim().to_string())
+                    .unwrap_or_else(|| "any".to_string());
+            let optional = if p.default.is_some() && !ty.ends_with('?') {
+                format!("{ty}?")
+            } else {
+                ty.clone()
+            };
+            fire_params.push(format!("{name}: {optional}"));
+            handler_params.push(format!("{name}: {ty}"));
+        }
+
+        let fire = fire_params.join(", ");
+        let handler = handler_params.join(", ");
+        let with_player = |first: &str, rest: &str| {
+            if rest.is_empty() {
+                first.to_string()
+            } else {
+                format!("{first}, {rest}")
+            }
+        };
+        let ret = r
+            .ret_type
+            .map(|t| self.text_of(t).trim().to_string())
+            .unwrap_or_else(|| "()".to_string());
+        // A server handler of a remote function may answer with a Future.
+        // `Future<()>` is no type, so an event's `call` yields any.
+        let answer = if r.is_function && ret != "()" {
+            format!("{ret} | {std}.Future<{ret}>")
+        } else {
+            ret.clone()
+        };
+        let future = if r.is_function && ret != "()" {
+            format!("{std}.Future<{ret}>")
+        } else {
+            format!("{std}.Future<any>")
+        };
+        let connection = if r.is_function {
+            "()"
+        } else {
+            "RBXScriptConnection"
+        };
+
+        // The client fires and the server handles.
+        let client_fire = format!("({fire}) -> ()");
+        let server_on = format!(
+            "(handler: ({}) -> {answer}) -> {connection}",
+            with_player("sender: Player", &handler)
+        );
+        let client_call = format!("({fire}) -> {future}");
+        // The server fires and the client handles.
+        let server_fire = format!("({}) -> ()", with_player("player: Player", &fire));
+        let client_on = format!("(handler: ({handler}) -> {ret}) -> {connection}");
+        let server_call = format!("({}) -> {future}", with_player("player: Player", &fire));
+
+        let pick = |client: String, server: String| match (r.from_client, r.from_server) {
+            (true, false) => client,
+            (false, true) => server,
+            _ => format!("({client}) & ({server})"),
+        };
+        let fire_ty = pick(client_fire, server_fire);
+        let on_ty = pick(server_on, client_on);
+        let call_ty = pick(client_call, server_call);
+
+        format!(
+            "{{ spec: any, instance: Instance?, fire: {fire_ty}, fire_all: ({fire}) -> (), fire_except: ({}) -> (), call: {call_ty}, on: {on_ty}, once: {on_ty}, on_ratelimited: (handler: (player: Player) -> ()) -> (), wait: () -> {std}.Future<any> }}",
+            with_player("except: Player", &fire)
+        )
     }
 
     // --- attributes ------------------------------------------------------------

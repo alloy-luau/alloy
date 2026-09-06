@@ -819,3 +819,60 @@ fn a_file_outside_the_root_finds_the_runtime() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// An enum's variants complete as enum members with their signatures,
+/// and a payload position offers types, not values.
+#[test]
+fn enum_variants_complete_as_members_and_payloads_take_types() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-enum-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "enum Msg as\n    Move(number)\n    Quit\nend\nlocal m = Msg.\nprint(m)\n";
+    let file = dir.join("en.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // After `Msg.`: both variants are enum members with a signature.
+    let r = s.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 4, "character": 14 } }),
+    );
+    let items = r
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let find = |label: &str| items.iter().find(|i| i["label"] == label).cloned();
+    let mv = find("Move").expect("Move completes");
+    assert_eq!(mv["kind"], 20, "{mv}");
+    assert!(
+        mv["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("Msg.Move(number)")),
+        "{mv}"
+    );
+    let quit = find("Quit").expect("Quit completes");
+    assert_eq!(quit["kind"], 20, "{quit}");
+
+    // Inside `Move(`: types, and no `assert`.
+    let labels = s.completion_labels(&uri, 1, 9);
+    assert!(labels.iter().any(|l| l == "number"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "Players"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "Msg"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "assert"), "{labels:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

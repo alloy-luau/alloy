@@ -28,6 +28,10 @@ pub enum Context {
     /// opens the body, and `extends` for an interface. The child would
     /// offer `assert` here.
     DeclarationAs { prefix: String, interface: bool },
+    /// `Move(num|` inside an `enum` body: a payload type. The emit turns
+    /// the payload into a typed constructor, so the child sees no type
+    /// slot at this position.
+    EnumPayload { prefix: String },
     /// `import |` or `import type |`.
     ImportHead { prefix: String, type_only: bool },
     /// `import { a, b| } from "./m"`: names from the module.
@@ -77,6 +81,65 @@ fn import_spec(src: &str, line_start: usize, offset: usize) -> Option<Context> {
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Whether the cursor sits inside the parentheses of a variant, on a
+/// line of an `enum` body: `Move(num|`. The head is the line up to the
+/// word being typed.
+fn in_enum_payload(src: &str, line_start: usize, head: &str) -> bool {
+    // `Name(` with the parenthesis still open, attributes aside.
+    let t = head.trim_start();
+    let mut rest = t;
+
+    while let Some(after) = rest.strip_prefix('@') {
+        let end = after
+            .find(|c: char| {
+                !(is_word(c) || c == '(' || c == ')' || c == ',' || c == ' ' || c == '"')
+            })
+            .unwrap_or(after.len());
+        rest = after[end..].trim_start();
+
+        if rest == t {
+            break;
+        }
+    }
+
+    let name_len = rest.chars().take_while(|c| is_word(*c)).count();
+    let after_name = rest[name_len..].trim_start();
+
+    if name_len == 0 || !after_name.starts_with('(') {
+        return false;
+    }
+
+    let opens = after_name.matches('(').count();
+    let closes = after_name.matches(')').count();
+
+    if opens <= closes {
+        return false;
+    }
+
+    // The nearest declaration above is an `enum` that is still open.
+    for line in src[..line_start].lines().rev() {
+        let l = line.trim_start();
+        let l = l.strip_prefix("export ").unwrap_or(l);
+
+        if l.starts_with("enum ") {
+            return true;
+        }
+
+        if l == "end"
+            || l.starts_with("struct ")
+            || l.starts_with("impl ")
+            || l.starts_with("trait ")
+            || l.starts_with("interface ")
+            || l.starts_with("function ")
+            || l.starts_with("local ")
+        {
+            return false;
+        }
+    }
+
+    false
 }
 
 /// `struct Name `, `enum Name<T> `, `export interface Name `: the head
@@ -254,6 +317,12 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         });
     }
 
+    if in_enum_payload(src, line_start, head) {
+        return Some(Context::EnumPayload {
+            prefix: prefix.to_string(),
+        });
+    }
+
     let trimmed = before.trim_start();
 
     let attr_decl = trimmed
@@ -402,6 +471,25 @@ mod tests {
     fn at(src: &str) -> Option<Context> {
         let offset = src.find('|').unwrap();
         detect(&src.replace('|', ""), offset)
+    }
+
+    #[test]
+    fn a_variant_payload_is_a_type_slot() {
+        assert_eq!(
+            at("enum Msg as\n    Move(num|"),
+            Some(Context::EnumPayload {
+                prefix: "num".to_string()
+            })
+        );
+        assert_eq!(
+            at("enum Msg as\n    Move(number, |"),
+            Some(Context::EnumPayload {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(at("enum Msg as\n    Move(number) |"), None);
+        assert_eq!(at("enum Msg as\nend\nlocal x = f(num|"), None);
+        assert_eq!(at("local x = f(num|"), None);
     }
 
     #[test]

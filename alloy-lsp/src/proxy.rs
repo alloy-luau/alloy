@@ -261,6 +261,73 @@ impl State {
         actions
     }
 
+    /// After `Msg.`, the child lists a variant as the function or the
+    /// string the emit made of it. Each one becomes an enum member with
+    /// the variant's signature as its detail.
+    fn mark_enum_members(&self, uri: &str, line: u32, character: u32, result: &mut Value) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return;
+        };
+        let head = doc.source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+        let Some(before_dot) = head.strip_suffix('.') else {
+            return;
+        };
+        let enum_name: String = before_dot
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+
+        if enum_name.is_empty() {
+            return;
+        }
+
+        let is_enum = doc.decls.iter().any(|d| {
+            d.name == enum_name && d.hover.lines().nth(1).is_some_and(|l| l.contains("enum "))
+        });
+
+        if !is_enum {
+            return;
+        }
+
+        let items = match result {
+            Value::Array(items) => items,
+
+            Value::Object(obj) => match obj.get_mut("items").and_then(Value::as_array_mut) {
+                Some(items) => items,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+
+        for item in items.iter_mut() {
+            let Some(label) = item["label"].as_str() else {
+                continue;
+            };
+            let full = format!("{enum_name}.{label}");
+
+            if let Some(d) = doc.decls.iter().find(|d| d.name == full) {
+                let signature = d
+                    .hover
+                    .lines()
+                    .find(|l| l.starts_with(&full))
+                    .unwrap_or(&full)
+                    .to_string();
+                item["kind"] = json!(20);
+                item["detail"] = json!(signature);
+                item["documentation"] = json!({ "kind": "markdown", "value": d.hover });
+            }
+        }
+    }
+
     /// Completion items for the extensions on a primitive. The child does
     /// not know them, so the proxy adds them when the receiver is a
     /// string: after `:` when the child listed the string methods, and
@@ -707,6 +774,27 @@ impl State {
                         Some("The interfaces this one takes its fields from: `interface Entity extends Named as`.".to_string()),
                         offset - prefix.len(),
                     ));
+                }
+            }
+
+            Context::EnumPayload { prefix } => {
+                // The primitives, the types of the workspace and the std,
+                // then the Roblox classes and datatypes.
+                for name in [
+                    "number", "string", "boolean", "any", "unknown", "nil", "thread", "buffer",
+                ] {
+                    items.push(word(name, 14, None, offset - prefix.len()));
+                }
+
+                items.extend(self.type_completions(&[]));
+
+                for name in alloy::roblox_classes::INSTANCE_CLASSES
+                    .iter()
+                    .chain(alloy::roblox_classes::DATATYPES)
+                {
+                    let mut item = word(name, 7, None, offset - prefix.len());
+                    item["detail"] = json!("roblox");
+                    items.push(item);
                 }
             }
 
@@ -2333,6 +2421,7 @@ impl Server {
                         && let Some((line, character)) = position
                         && trigger.as_deref() != Some("\n")
                     {
+                        st.mark_enum_members(uri, line, character, result);
                         let mut extra = st.auto_imports(uri, line, character);
                         extra.extend(st.primitive_completions(uri, line, character, result));
                         extra.extend(st.std_completions(uri, line, character, result));

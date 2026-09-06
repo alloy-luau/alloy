@@ -24,8 +24,10 @@ luaux = { package = "alloy-luaux", path = "../luaux" }
 alloy-syntax = { version = "0.1.0-rc.1", path = "../alloy-syntax" }
 globset = "0.4"
 serde = { version = "1", features = ["derive"] }
-toml = "1"
-serde_json = "1"
+# `preserve_order` keeps a data file's keys in document order in the
+# module the build writes from it.
+toml = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 dirs = "6"
 terminal_size = "0.4"
 

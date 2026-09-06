@@ -1,0 +1,5 @@
+import data from "./data.json"
+import { coins, limits } from "./config.toml"
+const x = import("./data.json")
+local y = require("./config.toml")
+print(data.name, coins, limits.max, x, y)

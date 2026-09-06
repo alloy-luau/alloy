@@ -1,0 +1,2 @@
+import cfg, { coins as few } from "../cfg.toml"
+print(cfg, few)

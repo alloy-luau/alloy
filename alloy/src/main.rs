@@ -377,6 +377,7 @@ fn build_project(args: &[String]) -> ExitCode {
     let counts = p.summary(&[
         (report.written.len(), "written", ui::GREEN),
         (report.copied.len(), "copied", ui::DIM),
+        (report.data.len(), "data", ui::DIM),
         (report.skipped.len(), "skipped", ui::DIM),
         (report.removed.len(), "removed", ui::AMBER),
         (report.diagnostics.len(), "diagnostics", ui::RED),

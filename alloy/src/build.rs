@@ -1,6 +1,6 @@
 //! `alloy build`: every source under `in`, compiled into the tree under `out`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -27,6 +27,9 @@ pub struct Report {
     pub checks: Vec<crate::typecheck::CheckSource>,
     /// Plain `.luau` and `.lua` files copied from `in` to `out`.
     pub copied: Vec<PathBuf>,
+    /// The `.json` and `.toml` files a source names, written to `out`
+    /// as `.luau` modules; the paths are relative to `out`.
+    pub data: Vec<PathBuf>,
 }
 
 impl Report {
@@ -120,15 +123,30 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     let mut sources = Vec::new();
     walk(&input, &mut sources)?;
     sources.sort();
+    let mut plain = Vec::new();
+    walk_plain(&input, &mut plain)?;
+
+    // A data file builds beside the modules; one that would build to
+    // the same `.luau` as a source or a plain file is a diagnostic.
+    let mut data_files = DataFiles {
+        input: input.clone(),
+        input_rel: build.input.clone(),
+        out: out.clone(),
+        owners: HashMap::new(),
+        done: HashMap::new(),
+    };
+
+    for path in sources.iter().chain(&plain) {
+        let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
+        let out_rel = output_for(&rel).unwrap_or_else(|| rel.clone());
+        data_files.owners.entry(out_rel).or_insert(rel);
+    }
 
     // A plain `.luau` or `.lua` beside the sources goes to the output as
     // it is, so a `require("./other")` from emitted code finds it there.
     if write {
-        let mut plain = Vec::new();
-        walk_plain(&input, &mut plain)?;
-
-        for path in plain {
-            let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
+        for path in &plain {
+            let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
 
             if exclude.is_match(&rel) {
                 continue;
@@ -136,7 +154,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
             let target = out.join(&rel);
             expected.insert(target.clone());
-            let text = std::fs::read(&path)?;
+            let text = std::fs::read(path)?;
 
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -245,6 +263,28 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
         imports.push((rel.clone(), compiled.imports.clone()));
 
+        // Every data file the source names becomes a module in the
+        // output; a problem with one is a diagnostic on the literal.
+        let mut data_diagnostics = Vec::new();
+
+        for r in &compiled.data_refs {
+            match data_files.module(&r.path, &rel, &source_rel, write) {
+                Ok(out_rel) => {
+                    expected.insert(out.join(&out_rel));
+
+                    if !report.data.contains(&out_rel) {
+                        report.data.push(out_rel);
+                    }
+                }
+
+                Err(message) => data_diagnostics.push(Diagnostic {
+                    start: r.start,
+                    end: r.end,
+                    message,
+                }),
+            }
+        }
+
         if keep {
             let unused_lines = compiled
                 .lints
@@ -255,6 +295,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             let error_lines = compiled
                 .diagnostics
                 .iter()
+                .chain(&data_diagnostics)
                 .map(|d| source[..d.start as usize].matches('\n').count() + 1)
                 .collect();
             report.checks.push(crate::typecheck::CheckSource {
@@ -265,6 +306,10 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
                 unused_lines,
                 error_lines,
             });
+        }
+
+        for d in data_diagnostics {
+            report.diagnostics.push((rel.clone(), d));
         }
 
         if !write {
@@ -346,6 +391,135 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     }
 
     Ok(report)
+}
+
+/// The data files of one build: each converts once, and every source
+/// that names it gets the same answer.
+struct DataFiles {
+    /// `[build] in`, absolute and as written, for reads and messages.
+    input: PathBuf,
+    input_rel: PathBuf,
+    out: PathBuf,
+    /// The output path each source, plain file, and data file claims,
+    /// by the file that claims it, relative to `in`.
+    owners: HashMap<PathBuf, PathBuf>,
+    /// The outcome per data file, relative to `in`: the output path, or
+    /// the diagnostic.
+    done: HashMap<PathBuf, Result<PathBuf, String>>,
+}
+
+impl DataFiles {
+    /// The output module for a data spec named from a source, or the
+    /// message for the import.
+    fn module(
+        &mut self,
+        spec: &str,
+        from: &Path,
+        source_rel: &Path,
+        write: bool,
+    ) -> Result<PathBuf, String> {
+        let Some(format) = crate::data::Format::of(spec) else {
+            return Err(format!("data file \"{spec}\" is neither .json nor .toml"));
+        };
+
+        // An alias walks the mount table or `.luaurc` into a place the
+        // build does not write; a data file sits under `in`.
+        if !(spec.starts_with("./") || spec.starts_with("../")) {
+            return Err(format!(
+                "data file \"{spec}\" needs a relative path, `./` or `../`"
+            ));
+        }
+
+        let Some(rel) = data_path(from, spec) else {
+            return Err(format!(
+                "data file \"{spec}\" lies outside [build] in; move it under the source root"
+            ));
+        };
+
+        if let Some(done) = self.done.get(&rel) {
+            return done.clone();
+        }
+
+        let result = self.convert(&rel, spec, format, source_rel, write);
+        self.done.insert(rel, result.clone());
+
+        result
+    }
+
+    fn convert(
+        &mut self,
+        rel: &Path,
+        spec: &str,
+        format: crate::data::Format,
+        source_rel: &Path,
+        write: bool,
+    ) -> Result<PathBuf, String> {
+        let shown = |p: &Path| self.input_rel.join(p).to_string_lossy().replace('\\', "/");
+        let path = self.input.join(rel);
+
+        if !path.is_file() {
+            return Err(crate::typecheck::unknown_module_message(spec, source_rel));
+        }
+
+        let out_rel = rel.with_extension("luau");
+
+        if let Some(owner) = self.owners.get(&out_rel) {
+            return Err(format!(
+                "data file {} and {} both build {}; rename one",
+                shown(rel),
+                shown(owner),
+                shown(&out_rel)
+            ));
+        }
+
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("data file {}: {e}", shown(rel)))?;
+        let luau = crate::data::convert(&text, format).map_err(|e| {
+            format!(
+                "data file {} does not parse as {}: {e}",
+                shown(rel),
+                format.name()
+            )
+        })?;
+        self.owners.insert(out_rel.clone(), rel.to_path_buf());
+
+        if write {
+            let target = self.out.join(&out_rel);
+
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+
+            if std::fs::read_to_string(&target).ok().as_deref() != Some(luau.as_str()) {
+                std::fs::write(&target, &luau).map_err(|e| e.to_string())?;
+            }
+        }
+
+        Ok(out_rel)
+    }
+}
+
+/// The path under `in` a relative data spec names from a source, or
+/// none when it climbs out of `in`.
+fn data_path(from: &Path, spec: &str) -> Option<PathBuf> {
+    let base = from.parent().unwrap_or(Path::new(""));
+    let mut joined = PathBuf::new();
+
+    for c in base.join(spec).components() {
+        match c {
+            std::path::Component::CurDir => {}
+
+            std::path::Component::ParentDir => {
+                if !joined.pop() {
+                    return None;
+                }
+            }
+
+            other => joined.push(other),
+        }
+    }
+
+    Some(joined)
 }
 
 /// The source a relative import of `from` names, among the sources:
@@ -500,6 +674,33 @@ pub fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Every `.json` and `.toml` file under a directory, recursively: what
+/// a data import may name.
+pub fn walk_data(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn go(dir: &Path, top: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        if !dir.is_dir() || skipped_dir(dir, top) {
+            return Ok(());
+        }
+
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+
+            if path.is_dir() {
+                go(&path, false, out)?;
+            } else if crate::data::Format::of_path(&path).is_some() {
+                out.push(path);
+            }
+        }
+
+        Ok(())
+    }
+
+    go(dir, true, out)?;
+    out.sort();
+
+    Ok(())
+}
+
 /// Every Alloy source under a directory, recursively.
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     fn go(dir: &Path, top: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -561,6 +762,19 @@ mod tests {
         let files: Vec<String> = lints.iter().map(|(p, _)| p.display().to_string()).collect();
         assert_eq!(files, vec!["a.aly", "b.aly", "c.aly"]);
         assert!(lints[0].1.message.contains("`a.aly` imports `b.aly`"));
+    }
+
+    #[test]
+    fn a_data_path_stays_under_the_input() {
+        assert_eq!(
+            data_path(Path::new("a/main.aly"), "./data.json"),
+            Some(PathBuf::from("a/data.json"))
+        );
+        assert_eq!(
+            data_path(Path::new("a/b/main.aly"), "../cfg.toml"),
+            Some(PathBuf::from("a/cfg.toml"))
+        );
+        assert_eq!(data_path(Path::new("main.aly"), "../cfg.toml"), None);
     }
 
     #[test]

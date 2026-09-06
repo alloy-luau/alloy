@@ -1,0 +1,13 @@
+# game settings
+title = "Alloy"
+coins = 100
+
+[limits]
+max = 10
+min = 1
+
+[[pets]]
+name = "cat"
+
+[[pets]]
+name = "dog"

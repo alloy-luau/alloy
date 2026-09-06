@@ -281,6 +281,34 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
     }
 
+    // Every data file becomes the module the build writes from it, so
+    // `require("./data")` types as its table. A file beside a module of
+    // the same stem is left out: the build reports that collision, and
+    // the module wins here as it does there.
+    let mut data = Vec::new();
+    let _ = crate::build::walk_data(&input, &mut data);
+
+    for path in data {
+        let rel = path.strip_prefix(&input).unwrap_or(&path);
+
+        if crate::data::module_beside(&path).is_some() {
+            continue;
+        }
+
+        if let Some(format) = crate::data::Format::of_path(&path)
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(luau) = crate::data::convert(&text, format)
+        {
+            let target = out.join(rel).with_extension("luau");
+
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+
+            std::fs::write(&target, luau).map_err(|e| e.to_string())?;
+        }
+    }
+
     // The artifacts sit where the build would put them, so `./x` and
     // `../alloy` resolve.
     for f in files {
@@ -480,8 +508,15 @@ pub fn unknown_module_message(spec: &str, source_rel: &Path) -> String {
         }
     }
 
+    // A data path names one file; a module path names one of several.
+    let what = match crate::data::Format::of(spec) {
+        Some(format) => format!("no {} file", format.name()),
+
+        None => "no .aly, .alx, or .luau file".to_string(),
+    };
+
     format!(
-        "\"{spec}\" names no module; no .aly, .alx, or .luau file at {}",
+        "\"{spec}\" names no module; {what} at {}",
         target.to_string_lossy().replace('\\', "/")
     )
 }
@@ -646,6 +681,10 @@ mod tests {
         assert_eq!(
             unknown_module_message("@packages/react", Path::new("src/main.aly")),
             "\"@packages/react\" names no module; no alias @packages in .luaurc or in the [mount] table"
+        );
+        assert_eq!(
+            unknown_module_message("./data.json", Path::new("src/app/main.aly")),
+            "\"./data.json\" names no module; no JSON file at src/app/data.json"
         );
         assert_eq!(
             quoted_on_line("import { a } from \"./x\"\nlocal y = 1\n", 0),

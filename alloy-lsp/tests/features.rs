@@ -138,19 +138,21 @@ impl Session {
             .unwrap_or_else(|| r.to_string())
     }
 
-    fn completion_labels(&mut self, uri: &str, line: u32, character: u32) -> Vec<String> {
+    fn completion_items(&mut self, uri: &str, line: u32, character: u32) -> Vec<Value> {
         let r = self.request(
             "textDocument/completion",
             json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }),
         );
-        let items = r
-            .get("items")
+
+        r.get("items")
             .and_then(Value::as_array)
             .or_else(|| r.as_array())
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
 
-        items
+    fn completion_labels(&mut self, uri: &str, line: u32, character: u32) -> Vec<String> {
+        self.completion_items(uri, line, character)
             .iter()
             .filter_map(|i| i["label"].as_str().map(str::to_string))
             .collect()
@@ -1071,6 +1073,138 @@ fn a_compiler_error_line_silences_the_checker() {
         !diags.iter().any(|d| d.contains("SyntaxError: Expected")),
         "{diags:?}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A JSON or TOML file imports as a table: hover shows the table type,
+/// the keys complete after the name and inside the import braces, the
+/// path completes with its extension, definition opens the file, and a
+/// saved change regenerates the module.
+#[test]
+fn data_files_import_as_typed_tables() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/data.json"),
+        "{ \"name\": \"game\", \"players\": 12, \"tags\": [\"a\"] }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/config.toml"),
+        "title = \"cfg\"\ncoins = 100\n\n[limits]\nmax = 10\n",
+    )
+    .unwrap();
+    let src = "import data from \"./data.json\"\nimport { coins } from \"./config.toml\"\nprint(data.name, coins)\nimport {  } from \"./config.toml\"\nimport more from \"./\"\n";
+    let file = dir.join("src/main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // The checker ran, and both data imports resolved.
+    let diags = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("\"./\"")));
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.contains(".json") || d.contains(".toml")),
+        "{diags:?}"
+    );
+
+    let hover = s.hover(&uri, 0, 8);
+    assert!(
+        hover.contains("name") && hover.contains("string") && hover.contains("players"),
+        "{hover}"
+    );
+
+    let labels = s.completion_labels(&uri, 2, 11);
+    assert!(
+        ["name", "players", "tags"]
+            .iter()
+            .all(|k| labels.iter().any(|l| l == k)),
+        "{labels:?}"
+    );
+
+    let items = s.completion_items(&uri, 3, 9);
+    let detail = |key: &str| {
+        items
+            .iter()
+            .find(|i| i["label"] == key)
+            .map(|i| i["detail"].as_str().unwrap_or("").to_string())
+    };
+    assert_eq!(detail("coins").as_deref(), Some("number"));
+    assert_eq!(detail("title").as_deref(), Some("string"));
+    assert_eq!(detail("limits").as_deref(), Some("{ ... }"));
+    assert!(!items.iter().any(|i| i["label"] == "type"), "{items:?}");
+
+    let labels = s.completion_labels(&uri, 4, 20);
+    assert!(
+        labels.iter().any(|l| l == "data.json") && labels.iter().any(|l| l == "config.toml"),
+        "{labels:?}"
+    );
+
+    let definition = |s: &mut Session, line: u32, character: u32| {
+        s.request(
+            "textDocument/definition",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }),
+        )
+    };
+    let on_path = definition(&mut s, 0, 22);
+    assert!(
+        on_path[0]["uri"]
+            .as_str()
+            .is_some_and(|u| u.ends_with("/src/data.json")),
+        "{on_path}"
+    );
+    let on_name = definition(&mut s, 1, 10);
+    assert!(
+        on_name[0]["uri"]
+            .as_str()
+            .is_some_and(|u| u.ends_with("/src/config.toml")),
+        "{on_name}"
+    );
+    assert_eq!(on_name[0]["range"]["start"]["line"], json!(1));
+
+    // A saved change to the data file reaches the module in the mirror.
+    std::fs::write(
+        dir.join("src/data.json"),
+        "{ \"name\": \"game\", \"players\": 12, \"tags\": [\"a\"], \"level\": 3 }\n",
+    )
+    .unwrap();
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles", "params": {
+            "changes": [{ "uri": format!("file://{}", dir.join("src/data.json").display()), "type": 2 }] } }),
+    );
+    let mut labels = Vec::new();
+
+    for _ in 0..20 {
+        labels = s.completion_labels(&uri, 2, 11);
+
+        if labels.iter().any(|l| l == "level") {
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    assert!(labels.iter().any(|l| l == "level"), "{labels:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

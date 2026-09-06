@@ -163,21 +163,33 @@ fn parent_of(config: &Config, rel: &Path) -> Option<Vec<String>> {
     Some(path)
 }
 
-/// The require string for the runtime from a file, through the mounts.
-/// `None` when the file is under no mount, or the runtime mount is not
-/// under `@game/`.
+/// The require string for the runtime in the ship artifact of a file
+/// under a mount: the runtime's own `@game/...` path, which Luau takes
+/// as it is. `None` when the file is under no mount, or the runtime is
+/// not under `@game/`.
 pub fn std_require_for(config: &Config, rel: &Path) -> Option<String> {
+    instance_path(config, rel)?;
+    segments(&config.project.runtime)?;
+
+    Some(config.project.runtime.clone())
+}
+
+/// The require string for the runtime from a file, as a relative
+/// instance path. The analyzer resolves a require in the sourcemap's
+/// tree, and knows `./` and `../` there.
+pub fn std_require_relative_for(config: &Config, rel: &Path) -> Option<String> {
     let parent = parent_of(config, rel)?;
     let runtime = segments(&config.project.runtime)?;
 
     Some(relative(&parent, &runtime))
 }
 
-/// The require string for `@alias/rest` from a file, through the mounts.
-pub fn resolve_alias(config: &Config, rel: &Path, alias: &str, rest: &str) -> Option<String> {
-    let parent = parent_of(config, rel)?;
+/// The require string for `@alias/rest`: the mount's `@game/...` path
+/// with the rest of the way down as instance names.
+pub fn resolve_alias(config: &Config, _rel: &Path, alias: &str, rest: &str) -> Option<String> {
     let m = config.mount.get(alias)?;
-    let mut target = segments(&m.1)?;
+    segments(&m.1)?;
+    let mut target = vec![m.1.trim_end_matches('/').to_string()];
 
     for part in rest.split('/').filter(|p| !p.is_empty()) {
         let name = instance_name(part).or_else(|| {
@@ -194,11 +206,11 @@ pub fn resolve_alias(config: &Config, rel: &Path, alias: &str, rest: &str) -> Op
         }
     }
 
-    Some(relative(&parent, &target))
+    Some(target.join("/"))
 }
 
 /// Rewrites every `require("@alias/...")` in an emitted text to the
-/// relative instance path, for the aliases the mount table names, and
+/// `@game/...` instance path, for the aliases the mount table names, and
 /// drops the extension of a data path, `./x.json`, since the build
 /// writes it as `x.luau`. The text keeps its line count: a replacement
 /// holds no newline.
@@ -650,26 +662,31 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
     }
 
     #[test]
-    fn the_runtime_require_walks_the_tree() {
+    fn the_runtime_require_is_the_game_path() {
         let c = config();
         assert_eq!(
             std_require_for(&c, Path::new("src/server/combat/hit.aly")).unwrap(),
+            "@game/ReplicatedStorage/Alloy"
+        );
+        assert!(std_require_for(&c, Path::new("src/other.aly")).is_none());
+        assert_eq!(
+            std_require_relative_for(&c, Path::new("src/server/combat/hit.aly")).unwrap(),
             "../../../ReplicatedStorage/Alloy"
         );
         assert_eq!(
-            std_require_for(&c, Path::new("src/shared/util.aly")).unwrap(),
+            std_require_relative_for(&c, Path::new("src/shared/util.aly")).unwrap(),
             "../Alloy"
         );
     }
 
     #[test]
-    fn an_alias_require_becomes_a_relative_path() {
+    fn an_alias_require_becomes_a_game_path() {
         let c = config();
         let text = "local jecs = require(\"@pkg/jecs\") local u = require(\"@shared/util\") local x = require(\"./x\")";
         let out = rewrite_requires(&c, Path::new("src/server/main.server.aly"), text);
         assert_eq!(
             out,
-            "local jecs = require(\"../../ReplicatedStorage/Packages/jecs\") local u = require(\"../../ReplicatedStorage/Shared/util\") local x = require(\"./x\")"
+            "local jecs = require(\"@game/ReplicatedStorage/Packages/jecs\") local u = require(\"@game/ReplicatedStorage/Shared/util\") local x = require(\"./x\")"
         );
         assert_eq!(
             rewrite_requires(
@@ -681,7 +698,7 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         );
         assert_eq!(
             rewrite_requires(&c, Path::new("src/shared/a.aly"), "require(\"@shared/b\")"),
-            "require(\"./b\")"
+            "require(\"@game/ReplicatedStorage/Shared/b\")"
         );
     }
 

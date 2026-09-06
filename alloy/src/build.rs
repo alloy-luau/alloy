@@ -233,7 +233,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
         // The runtime sits at the output root; a file requires it by a
         // relative path unless the project names one. Under a mount the
-        // path walks the instance tree to the runtime's mount instead.
+        // ship names the runtime's `@game/...` path instead.
         let depth = rel.components().count().saturating_sub(1);
         let source_rel = build.input.join(&rel);
         let by_file = if depth == 0 {
@@ -328,7 +328,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             let unused_lines = compiled
                 .lints
                 .iter()
-                .filter(|l| l.name == "unused_variable")
+                .filter(|l| l.name == "unused_variable" || l.name == "unused_function")
                 .map(|l| source[..l.start as usize].matches('\n').count() + 1)
                 .collect();
             let error_lines = compiled
@@ -358,7 +358,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         // Roblox reads no `.luaurc`: an `@alias` require in the ship
-        // artifact becomes the relative instance path.
+        // artifact becomes the `@game/...` instance path.
         let ship = crate::project::rewrite_requires(config, &source_rel, &compiled.ship);
         let text = match build.artifact {
             Artifact::Ship => &ship,

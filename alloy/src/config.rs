@@ -427,6 +427,10 @@ pub struct TestConfig {
     pub suite: String,
     /// Write `lest.toml` and the `@lest` alias when the root has none.
     pub lest: bool,
+    /// Load the engine doubles before each spec: `Vector3`, `Color3`,
+    /// `Enum`, `task`, `game`, and a small Instance tree, so shared
+    /// code runs on a plain VM. In Studio the doubles do nothing.
+    pub shim: bool,
 }
 
 impl Default for TestConfig {
@@ -435,6 +439,7 @@ impl Default for TestConfig {
             out: PathBuf::from("tests"),
             suite: "alloy".to_string(),
             lest: true,
+            shim: true,
         }
     }
 }
@@ -556,6 +561,8 @@ out = "tests"
 suite = "alloy"
 # write lest.toml and the @lest alias when the root has none
 lest = true
+# load engine doubles (Vector3, Enum, task, game, Instance) before a spec
+shim = true
 
 [project]
 # the name in default.project.json and .alloy/build.project.json

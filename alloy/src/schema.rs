@@ -302,6 +302,12 @@ pub const TABLES: &[Table] = &[
                 "true",
                 "Write `lest.toml` and the `@lest` alias of `.luaurc` when the root has none.",
             ),
+            key(
+                "shim",
+                BOOL,
+                "true",
+                "Load engine doubles before each spec: `Vector3`, `Color3`, `Enum`, `task`, `game`, and a small Instance tree, so shared code runs on a plain VM. In Studio they do nothing.",
+            ),
         ],
         open: None,
     },

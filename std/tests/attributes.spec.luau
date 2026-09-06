@@ -18,27 +18,27 @@ describe("Attributes", function()
 			own = { icon = { "rbxassetid://1" } },
 			fields = { count = { range = { 0, 99 } }, name = {} },
 		})
-		expect(Attributes.get(Item, icon)).toEqual({ "rbxassetid://1" })
+		expect(Attributes.get(Item, icon)).toEqual({ asset = "rbxassetid://1" })
 		expect(Attributes.get(Item, range)).toBeNil()
-		expect(Attributes.field(Item, "count", range)).toEqual({ 0, 99 })
+		expect(Attributes.field(Item, "count", range)).toEqual({ min = 0, max = 99 })
 		expect(Attributes.field(Item, "name", range)).toBeNil()
 		expect(Attributes.of(Item)).toEqual({ icon = { "rbxassetid://1" } })
 		local seen = {}
 		for field, data in Attributes.fields(Item, range) do
 			seen[field] = data
 		end
-		expect(seen).toEqual({ count = { 0, 99 } })
+		expect(seen).toEqual({ count = { min = 0, max = 99 } })
 	end)
 
 	it("reads a variant's attributes", function()
 		local Msg = alloy.attrs({}, { variants = { Quit = { icon = { "x" } } } })
-		expect(Attributes.variant(Msg, "Quit", icon)).toEqual({ "x" })
+		expect(Attributes.variant(Msg, "Quit", icon)).toEqual({ asset = "x" })
 		expect(Attributes.variant(Msg, "Move", icon)).toBeNil()
 	end)
 
 	it("attaches to a function value", function()
 		local f = alloy.attach(function() end, { icon = { "f" } })
-		expect(Attributes.get(f, icon)).toEqual({ "f" })
+		expect(Attributes.get(f, icon)).toEqual({ asset = "f" })
 		expect(Attributes.of(f)).toEqual({ icon = { "f" } })
 		expect(Attributes.of(function() end)).toEqual({})
 		expect(Attributes.get({}, icon)).toBeNil()

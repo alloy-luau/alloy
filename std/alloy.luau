@@ -74,19 +74,52 @@ end
 -- Result: a tagged table. `tag` is "Ok" or "Err"; `_1` holds the payload.
 -- ---------------------------------------------------------------------------
 
-export type Result<T, E> = {
+-- Two shapes under one name, so `r.tag == "Ok"` narrows `r._1` to `T`
+-- in a `match` arm and in `if local Ok(v) = r`.
+-- The value a `map` or `map_err` yields: the same surface without a
+-- further `map`, so the alias does not name itself with other
+-- arguments, which the solver rejects as non-uniform recursion.
+export type ResultLite<T, E> = {
 	tag: "Ok" | "Err",
-	_1: T | E,
+	read _1: T | E,
 	unwrap: (self: any) -> T,
 	expect: (self: any, message: string) -> T,
-	unwrap_or: (self: any, default: T) -> T,
-	map: (self: any, f: (T) -> any) -> Result<any, E>,
-	map_err: (self: any, f: (E) -> any) -> Result<T, any>,
+	unwrap_or: (self: any, default: any) -> T,
 	is_ok: (self: any) -> boolean,
 	is_err: (self: any) -> boolean,
 	ok: (self: any) -> T?,
 	trace: string?,
 }
+
+export type ResultOk<T, E> = {
+	tag: "Ok",
+	read _1: T,
+	unwrap: (self: any) -> T,
+	expect: (self: any, message: string) -> T,
+	unwrap_or: (self: any, default: any) -> T,
+	map: <U>(self: any, f: (T) -> U) -> ResultLite<U, E>,
+	map_err: <F>(self: any, f: (E) -> F) -> ResultLite<T, F>,
+	is_ok: (self: any) -> boolean,
+	is_err: (self: any) -> boolean,
+	ok: (self: any) -> T?,
+	trace: string?,
+}
+
+export type ResultErr<T, E> = {
+	tag: "Err",
+	read _1: E,
+	unwrap: (self: any) -> T,
+	expect: (self: any, message: string) -> T,
+	unwrap_or: (self: any, default: any) -> T,
+	map: <U>(self: any, f: (T) -> U) -> ResultLite<U, E>,
+	map_err: <F>(self: any, f: (E) -> F) -> ResultLite<T, F>,
+	is_ok: (self: any) -> boolean,
+	is_err: (self: any) -> boolean,
+	ok: (self: any) -> T?,
+	trace: string?,
+}
+
+export type Result<T, E> = ResultOk<T, E> | ResultErr<T, E>
 
 local Result = {}
 Result.__index = Result
@@ -222,6 +255,9 @@ if task_lib == nil then
 		end,
 		wait = function(seconds: number?)
 			return seconds or 0
+		end,
+		cancel = function(thread: thread)
+			coroutine.close(thread)
 		end,
 	}
 end
@@ -423,45 +459,97 @@ alloy.Future = Future
 
 export type Array<T> = {
 	[number]: T,
-	len: (self: Array<T>) -> number,
-	is_empty: (self: Array<T>) -> boolean,
-	push: (self: Array<T>, ...T) -> (),
-	pop: (self: Array<T>) -> T?,
-	first: (self: Array<T>) -> T?,
-	last: (self: Array<T>) -> T?,
-	map: <U>(self: Array<T>, f: (T, number) -> U) -> Array<U>,
-	filter: (self: Array<T>, f: (T, number) -> boolean) -> Array<T>,
-	find: (self: Array<T>, f: (T, number) -> boolean) -> T?,
-	find_index: (self: Array<T>, f: (T, number) -> boolean) -> number?,
-	contains: (self: Array<T>, value: T) -> boolean,
-	index_of: (self: Array<T>, value: T) -> number?,
-	for_each: (self: Array<T>, f: (T, number) -> ()) -> (),
-	reduce: <U>(self: Array<T>, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: Array<T>, from: number, to: number?) -> Array<T>,
-	concat: (self: Array<T>, other: Array<T>) -> Array<T>,
-	reverse: (self: Array<T>) -> Array<T>,
-	sort_by: (self: Array<T>, f: (T, T) -> boolean) -> Array<T>,
-	join: (self: Array<T>, sep: string?) -> string,
+	len: (self: { read [number]: T }) -> number,
+	is_empty: (self: { read [number]: T }) -> boolean,
+	push: (self: { read [number]: T }, ...T) -> (),
+	pop: (self: { read [number]: T }) -> T?,
+	first: (self: { read [number]: T }) -> T?,
+	last: (self: { read [number]: T }) -> T?,
+	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array2<U>,
+	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Array<T>,
+	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
+	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
+	contains: (self: { read [number]: T }, value: T) -> boolean,
+	index_of: (self: { read [number]: T }, value: T) -> number?,
+	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
+	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
+	slice: (self: { read [number]: T }, from: number, to: number?) -> Array<T>,
+	concat: (self: { read [number]: T }, other: Array<T>) -> Array<T>,
+	reverse: (self: { read [number]: T }) -> Array<T>,
+	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array<T>,
+	join: (self: { read [number]: T }, sep: string?) -> string,
+}
+
+-- Luau rejects an alias that names itself with other arguments, so
+-- `map` cannot return `Array<U>`. `Array2` and `Array3` are the same
+-- shape one and two maps deep; a third map in a chain is `any`. Their
+-- `self` is the bare table: every `self: Array2<T>` is one more
+-- expansion of the alias, and the solver gives up past a few hundred.
+-- A `self: any` is no good either, it turns every inferred `U` to any.
+export type Array2<T> = {
+	[number]: T,
+	len: (self: { read [number]: T }) -> number,
+	is_empty: (self: { read [number]: T }) -> boolean,
+	push: (self: { read [number]: T }, ...T) -> (),
+	pop: (self: { read [number]: T }) -> T?,
+	first: (self: { read [number]: T }) -> T?,
+	last: (self: { read [number]: T }) -> T?,
+	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array3<U>,
+	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Array2<T>,
+	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
+	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
+	contains: (self: { read [number]: T }, value: T) -> boolean,
+	index_of: (self: { read [number]: T }, value: T) -> number?,
+	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
+	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
+	slice: (self: { read [number]: T }, from: number, to: number?) -> Array2<T>,
+	concat: (self: { read [number]: T }, other: Array2<T>) -> Array2<T>,
+	reverse: (self: { read [number]: T }) -> Array2<T>,
+	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array2<T>,
+	join: (self: { read [number]: T }, sep: string?) -> string,
+}
+
+export type Array3<T> = {
+	[number]: T,
+	len: (self: { read [number]: T }) -> number,
+	is_empty: (self: { read [number]: T }) -> boolean,
+	push: (self: { read [number]: T }, ...T) -> (),
+	pop: (self: { read [number]: T }) -> T?,
+	first: (self: { read [number]: T }) -> T?,
+	last: (self: { read [number]: T }) -> T?,
+	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> any,
+	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Array3<T>,
+	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
+	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
+	contains: (self: { read [number]: T }, value: T) -> boolean,
+	index_of: (self: { read [number]: T }, value: T) -> number?,
+	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
+	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
+	slice: (self: { read [number]: T }, from: number, to: number?) -> Array3<T>,
+	concat: (self: { read [number]: T }, other: Array3<T>) -> Array3<T>,
+	reverse: (self: { read [number]: T }) -> Array3<T>,
+	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array3<T>,
+	join: (self: { read [number]: T }, sep: string?) -> string,
 }
 
 -- `read T[]`: the Array methods that do not mutate.
 export type ReadArray<T> = {
 	read [number]: T,
-	len: (self: any) -> number,
-	is_empty: (self: any) -> boolean,
-	first: (self: any) -> T?,
-	last: (self: any) -> T?,
-	map: <U>(self: any, f: (T, number) -> U) -> Array<U>,
-	filter: (self: any, f: (T, number) -> boolean) -> Array<T>,
-	find: (self: any, f: (T, number) -> boolean) -> T?,
-	find_index: (self: any, f: (T, number) -> boolean) -> number?,
-	contains: (self: any, value: T) -> boolean,
-	index_of: (self: any, value: T) -> number?,
-	for_each: (self: any, f: (T, number) -> ()) -> (),
-	reduce: <U>(self: any, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: any, from: number, to: number?) -> Array<T>,
-	concat: (self: any, other: Array<T>) -> Array<T>,
-	join: (self: any, sep: string?) -> string,
+	len: (self: { read [number]: T }) -> number,
+	is_empty: (self: { read [number]: T }) -> boolean,
+	first: (self: { read [number]: T }) -> T?,
+	last: (self: { read [number]: T }) -> T?,
+	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array<U>,
+	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Array<T>,
+	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
+	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
+	contains: (self: { read [number]: T }, value: T) -> boolean,
+	index_of: (self: { read [number]: T }, value: T) -> number?,
+	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
+	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
+	slice: (self: { read [number]: T }, from: number, to: number?) -> Array<T>,
+	concat: (self: { read [number]: T }, other: Array<T>) -> Array<T>,
+	join: (self: { read [number]: T }, sep: string?) -> string,
 }
 
 -- `write T[]`: a sink. Push and index assignment only.
@@ -1424,7 +1512,7 @@ alloy.Scope = Scope
 --- with `__iter`; `Iter.range(a, b, step)` counts.
 export type Iter<T> = {
 	next: (self: Iter<T>) -> T?,
-	map: <U>(self: Iter<T>, f: (T) -> U) -> Iter<U>,
+	map: <U>(self: Iter<T>, f: (T) -> U) -> Iter2<U>,
 	filter: (self: Iter<T>, f: (T) -> boolean) -> Iter<T>,
 	take: (self: Iter<T>, n: number) -> Iter<T>,
 	skip: (self: Iter<T>, n: number) -> Iter<T>,
@@ -1439,6 +1527,46 @@ export type Iter<T> = {
 	reduce: <U>(self: Iter<T>, f: (U, T) -> U, init: U) -> U,
 	first: (self: Iter<T>) -> T?,
 	last: (self: Iter<T>) -> T?,
+}
+
+-- `Iter2` and `Iter3`: the same shape one and two maps deep, for the
+-- reason `Array2` gives.
+export type Iter2<T> = {
+	next: (self: { next: (self: any) -> T? }) -> T?,
+	map: <U>(self: { next: (self: any) -> T? }, f: (T) -> U) -> Iter3<U>,
+	filter: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter2<T>,
+	take: (self: { next: (self: any) -> T? }, n: number) -> Iter2<T>,
+	skip: (self: { next: (self: any) -> T? }, n: number) -> Iter2<T>,
+	take_while: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter2<T>,
+	chain: (self: { next: (self: any) -> T? }, other: Iter2<T>) -> Iter2<T>,
+	collect: (self: { next: (self: any) -> T? }) -> Array<T>,
+	for_each: (self: { next: (self: any) -> T? }, f: (T) -> ()) -> (),
+	count: (self: { next: (self: any) -> T? }) -> number,
+	any: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
+	all: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
+	find: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> T?,
+	reduce: <U>(self: { next: (self: any) -> T? }, f: (U, T) -> U, init: U) -> U,
+	first: (self: { next: (self: any) -> T? }) -> T?,
+	last: (self: { next: (self: any) -> T? }) -> T?,
+}
+
+export type Iter3<T> = {
+	next: (self: { next: (self: any) -> T? }) -> T?,
+	map: <U>(self: { next: (self: any) -> T? }, f: (T) -> U) -> any,
+	filter: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter3<T>,
+	take: (self: { next: (self: any) -> T? }, n: number) -> Iter3<T>,
+	skip: (self: { next: (self: any) -> T? }, n: number) -> Iter3<T>,
+	take_while: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter3<T>,
+	chain: (self: { next: (self: any) -> T? }, other: Iter3<T>) -> Iter3<T>,
+	collect: (self: { next: (self: any) -> T? }) -> Array<T>,
+	for_each: (self: { next: (self: any) -> T? }, f: (T) -> ()) -> (),
+	count: (self: { next: (self: any) -> T? }) -> number,
+	any: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
+	all: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
+	find: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> T?,
+	reduce: <U>(self: { next: (self: any) -> T? }, f: (U, T) -> U, init: U) -> U,
+	first: (self: { next: (self: any) -> T? }) -> T?,
+	last: (self: { next: (self: any) -> T? }) -> T?,
 }
 
 local Iter = {}
@@ -1701,9 +1829,9 @@ function alloy.assert_eq(where: string, left_source: string, left, right_source:
 end
 
 --- The object initializer: `new X(args) { ... }` assigns each field in order.
-function alloy.init(object, fields)
+function alloy.init<T>(object: T, fields: { [string]: any }): T
 	for k, v in pairs(fields) do
-		object[k] = v
+		(object :: any)[k] = v
 	end
 	return object
 end
@@ -1798,6 +1926,11 @@ end
 
 local attached = setmetatable({}, { __mode = "k" })
 
+-- The type argument is the shape of the arguments an attribute takes,
+-- `{ min: number, max: number }` for `range(min, max)`; the compiler
+-- casts each declaration to it, and a read comes back typed.
+export type Attribute<T = any> = { name: string, targets: { string }, params: { string }, read value: T }
+
 function alloy.attribute(name: string, targets, params)
 	return table.freeze({ name = name, targets = targets, params = params })
 end
@@ -1816,14 +1949,24 @@ end
 
 local Attributes = {}
 
+-- The emit stores the arguments in declaration order; the attribute
+-- value names them, so a reader sees `{ min = 0, max = 100 }`.
 local function lookup(data, attr)
 	if data == nil then
 		return nil
 	end
-	return data[attr.name]
+	local value = data[attr.name]
+	if type(value) ~= "table" or type(attr.params) ~= "table" then
+		return value
+	end
+	local named = {}
+	for i, param in ipairs(attr.params) do
+		named[param] = value[i]
+	end
+	return named
 end
 
-function Attributes.get(target: any, attr: any): any
+function Attributes.get<T>(target: any, attr: Attribute<T>): T?
 	if type(target) == "function" then
 		return lookup(attached[target], attr)
 	end
@@ -1831,12 +1974,12 @@ function Attributes.get(target: any, attr: any): any
 	return lookup(a and a.own, attr)
 end
 
-function Attributes.field(struct: any, field: string, attr: any): any
+function Attributes.field<T>(struct: any, field: string, attr: Attribute<T>): T?
 	local a = type(struct) == "table" and rawget(struct, "__attrs")
 	return lookup(a and a.fields and a.fields[field], attr)
 end
 
-function Attributes.variant(enum: any, variant: string, attr: any): any
+function Attributes.variant<T>(enum: any, variant: string, attr: Attribute<T>): T?
 	local a = type(enum) == "table" and rawget(enum, "__attrs")
 	return lookup(a and a.variants and a.variants[variant], attr)
 end
@@ -1850,12 +1993,12 @@ function Attributes.of(target: any): any
 end
 
 --- Iterates the fields of a struct that carry an attribute.
-function Attributes.fields(struct: any, attr: any)
+function Attributes.fields<T>(struct: any, attr: Attribute<T>): { [string]: T }
 	local a = type(struct) == "table" and rawget(struct, "__attrs")
 	local fields = (a and a.fields) or {}
 	local out: { [string]: any } = {}
 	for name, data in pairs(fields) do
-		local v = data[attr.name]
+		local v = lookup(data, attr)
 		if v ~= nil then
 			out[name] = v
 		end
@@ -1896,6 +2039,15 @@ function alloy.delete(target: Deletable)
 	end
 	if kind == "RBXScriptConnection" then
 		(target :: any):Disconnect()
+		return
+	end
+	-- A thread a scope holds, from `task.spawn`: cancel is its delete.
+	if kind == "thread" then
+		task_lib.cancel(target :: any)
+		return
+	end
+	if kind == "function" then
+		(target :: any)()
 		return
 	end
 	if kind == "table" then

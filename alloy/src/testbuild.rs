@@ -38,6 +38,17 @@ impl Report {
     }
 }
 
+/// The folder under `[test] out` that holds the modules the specs
+/// require: every source compiled with file paths, the runtime, the
+/// data modules, and the plain files. The build output cannot serve:
+/// under a mount its requires are instance paths.
+pub const MODULES: &str = ".modules";
+
+/// The modules folder, relative to the root.
+pub fn modules_dir(config: &Config) -> PathBuf {
+    config.test.out.join(MODULES)
+}
+
 /// The path of the spec for a source, relative to the test folder:
 /// `a/b.aly` becomes `a/b.spec.luau`.
 pub fn spec_for(rel: &Path) -> Option<PathBuf> {
@@ -58,6 +69,10 @@ struct Decl {
     /// A name the statement extends: `impl X`, `function X.f`, `X.k = v`.
     /// The statement goes with the declaration of that name.
     attaches: Option<String>,
+    /// A statement that declares nothing and runs for effect: a loop, a
+    /// block, a call, an index assignment. It goes with the declarations
+    /// it names, since a `for` that fills a table is what the table is.
+    effect: bool,
     /// Every identifier inside the statement.
     refs: HashSet<String>,
     /// Whether the statement is a `@test` function.
@@ -191,10 +206,36 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
         Stmt::Attribute(a) => declares.push(name_of(src, toks, a.name)),
         Stmt::Macro(m) => declares.push(name_of(src, toks, m.name)),
         Stmt::Class(c) => declares.push(name_of(src, toks, c.name)),
-        Stmt::Impl(i) => attaches = Some(name_of(src, toks, i.target)),
+        // An impl on a foreign type, `impl string`, attaches to a name no
+        // test declares; its method names are what a test reaches for.
+        Stmt::Impl(i) => {
+            attaches = Some(name_of(src, toks, i.target));
+
+            for m in &i.methods {
+                if let Some(last) = m.path.last() {
+                    declares.push(name_of(src, toks, *last));
+                }
+            }
+        }
 
         _ => {}
     }
+
+    let effect = declares.is_empty()
+        && attaches.is_none()
+        && !is_test
+        && matches!(
+            stmt,
+            Stmt::NumericFor(_)
+                | Stmt::GenericFor(_)
+                | Stmt::While(_)
+                | Stmt::Repeat(_)
+                | Stmt::Do(_)
+                | Stmt::If(_)
+                | Stmt::Call(..)
+                | Stmt::Assign(_)
+                | Stmt::Match(_)
+        );
 
     let refs = (span.start..span.end)
         .map(|j| toks[j as usize])
@@ -205,6 +246,7 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
     Decl {
         declares,
         attaches,
+        effect,
         refs,
         is_test,
         start,
@@ -258,8 +300,10 @@ pub fn slice(src: &str, toks: &[Tok], chunk: &Chunk) -> Option<String> {
                 .attaches
                 .as_ref()
                 .is_some_and(|n| declared_by_selected.contains(n));
+            let effect_on_selected =
+                d.effect && d.refs.iter().any(|n| declared_by_selected.contains(n));
 
-            if declares_needed || attaches_selected {
+            if declares_needed || attaches_selected || effect_on_selected {
                 selected[k] = true;
                 needed.extend(d.refs.iter().cloned());
                 changed = true;
@@ -342,34 +386,187 @@ fn target_for(config: &Config, root: &Path, source_rel: &Path, path: &str) -> Op
     };
     let normal = normalize(&joined);
 
-    // An Alloy source under `in` has an output under `out`.
+    // Anything under `in` has a module under the modules folder: a
+    // compiled source, a data file, or a plain file copied over.
     if let Ok(under) = normal.strip_prefix(&config.build.input) {
-        for ext in ["aly", "alx"] {
-            let candidate = root
-                .join(&config.build.input)
-                .join(under)
-                .with_extension(ext);
+        let input = root.join(&config.build.input);
+        let modules = modules_dir(config);
 
-            if candidate.is_file() {
+        for ext in ["aly", "alx"] {
+            if input.join(under).with_extension(ext).is_file() {
                 return crate::build::output_for(&under.with_extension(ext))
-                    .map(|o| config.build.out.join(o).with_extension(""));
+                    .map(|o| modules.join(o).with_extension(""));
             }
         }
 
         // `init.aly` names its directory.
         for ext in ["aly", "alx"] {
-            if root
-                .join(&config.build.input)
-                .join(under)
-                .join(format!("init.{ext}"))
-                .is_file()
-            {
-                return Some(config.build.out.join(under));
+            if input.join(under).join(format!("init.{ext}")).is_file() {
+                return Some(modules.join(under));
+            }
+        }
+
+        for ext in ["json", "toml", "luau", "lua"] {
+            if input.join(under).with_extension(ext).is_file() {
+                return Some(modules.join(under));
             }
         }
     }
 
     Some(normal)
+}
+
+/// The engine names the doubles stand in for.
+const SHIM_NAMES: &[&str] = &[
+    "typeof",
+    "Vector3",
+    "Vector2",
+    "CFrame",
+    "Color3",
+    "UDim",
+    "UDim2",
+    "NumberRange",
+    "Enum",
+    "Instance",
+    "task",
+    "game",
+    "workspace",
+    "warn",
+];
+
+/// The doubles as locals at the head of a chunk, so a module that names
+/// `Vector3` or `game` at load has them. The VM gives each chunk its own
+/// globals, so a global the shim set would stay in the shim. The line
+/// joins the first line, so every later line keeps its number.
+fn with_shim(text: &str, shim_require: &str) -> String {
+    let values: Vec<String> = SHIM_NAMES.iter().map(|n| format!("__shim.{n}")).collect();
+
+    format!(
+        "local __shim = require({}) local {} = {} {text}",
+        luau_string(shim_require),
+        SHIM_NAMES.join(", "),
+        values.join(", ")
+    )
+}
+
+/// Writes the modules folder: every source compiled with file-path
+/// requires, the runtime, every data file as a module, and the plain
+/// files. The folder is rebuilt from nothing on each run.
+fn write_modules(
+    root: &Path,
+    config: &Config,
+    ingots: &crate::ingot::Ingots,
+    extensions: &[crate::extensions::Extension],
+) -> std::io::Result<Vec<(PathBuf, String)>> {
+    let mut failures = Vec::new();
+    let input = root.join(&config.build.input);
+    let modules = modules_dir(config);
+    let dir = root.join(&modules);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("alloy.luau"), crate::RUNTIME)?;
+    std::fs::write(dir.join("shim.luau"), crate::SHIM)?;
+    let exclude = crate::build::globs(&config.build.exclude)?;
+    let jsx = crate::luaux::Config::load(root).ok();
+    let runtime = modules.join("alloy");
+    let aliases = crate::modules::aliases(root, config);
+
+    for path in crate::build::sources(&input)? {
+        let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
+
+        if exclude.is_match(&rel) {
+            continue;
+        }
+
+        let Some(rel_out) = crate::build::output_for(&rel) else {
+            continue;
+        };
+        let module_rel = modules.join(&rel_out);
+        let source = std::fs::read_to_string(&path)?;
+        let source_rel = config.build.input.join(&rel);
+        let options = EmitOptions {
+            file_name: source_rel.to_string_lossy().into_owned(),
+            definitions: rel.to_string_lossy().ends_with(".d.aly"),
+            std_require: relative_require(&source_rel, &runtime),
+            wait_timeout: config.emit.wait_timeout,
+            extensions: extensions.to_vec(),
+            import_types: crate::modules::import_types(&source, &path, &aliases),
+            import_trait_defaults: crate::modules::import_trait_defaults(&source, &path, &aliases),
+            ..EmitOptions::default()
+        };
+        let compiled = crate::compile_file(
+            &source_rel.to_string_lossy(),
+            &source,
+            &options,
+            jsx.as_ref(),
+            Some(ingots),
+        );
+
+        match compiled {
+            Ok(out) => {
+                let mut text = rewrite_requires(config, root, &source_rel, &module_rel, &out.ship);
+
+                if config.test.shim {
+                    text = with_shim(&text, &relative_require(&module_rel, &modules.join("shim")));
+                }
+
+                let target = dir.join(&rel_out);
+
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                std::fs::write(target, text)?;
+            }
+
+            Err(e) => failures.push((rel, e.to_string())),
+        }
+    }
+
+    let mut plain = Vec::new();
+    crate::build::walk_plain(&input, &mut plain)?;
+
+    for path in plain {
+        let rel = path.strip_prefix(&input).unwrap_or(&path);
+        let target = dir.join(rel);
+
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        std::fs::copy(&path, target)?;
+    }
+
+    let mut data = Vec::new();
+    crate::build::walk_data(&input, &mut data)?;
+
+    for path in data {
+        let rel = path.strip_prefix(&input).unwrap_or(&path);
+
+        if crate::data::module_beside(&path).is_some() {
+            continue;
+        }
+
+        if let Some(format) = crate::data::Format::of_path(&path)
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            match crate::data::convert(&text, format) {
+                Ok(luau) => {
+                    let target = dir.join(rel).with_extension("luau");
+
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+
+                    std::fs::write(target, luau)?;
+                }
+
+                Err(e) => failures.push((rel.to_path_buf(), e.to_string())),
+            }
+        }
+    }
+
+    Ok(failures)
 }
 
 /// A path with its `.` and `..` components folded.
@@ -445,6 +642,7 @@ pub fn spec(
     source_rel: &Path,
     source: &str,
     ingots: Option<&crate::ingot::Ingots>,
+    extensions: &[crate::extensions::Extension],
 ) -> Result<Option<(String, Vec<Diagnostic>, usize)>, crate::CompileError> {
     let parsed = alloy_syntax::parse_lenient(source, Default::default()).map_err(|e| {
         crate::CompileError {
@@ -463,12 +661,22 @@ pub fn spec(
         )
         .unwrap_or_default(),
     );
-    let runtime = config.build.out.join("alloy");
+    // The require is written from the source's place, as every other
+    // require in the text, and the rewrite below moves them all.
+    let runtime = modules_dir(config).join("alloy");
+    let aliases = crate::modules::aliases(root, config);
     let options = EmitOptions {
         file_name: source_rel.to_string_lossy().into_owned(),
-        std_require: relative_require(&spec_rel, &runtime),
+        std_require: relative_require(source_rel, &runtime),
         tests: true,
         wait_timeout: config.emit.wait_timeout,
+        extensions: extensions.to_vec(),
+        import_types: crate::modules::import_types(source, &root.join(source_rel), &aliases),
+        import_trait_defaults: crate::modules::import_trait_defaults(
+            source,
+            &root.join(source_rel),
+            &aliases,
+        ),
         ..EmitOptions::default()
     };
     let out = crate::compile_file(
@@ -479,6 +687,14 @@ pub fn spec(
         ingots,
     )?;
     let mut text = rewrite_requires(config, root, source_rel, &spec_rel, &out.ship);
+
+    if config.test.shim {
+        text = with_shim(
+            &text,
+            &relative_require(&spec_rel, &modules_dir(config).join("shim")),
+        );
+    }
+
     let name = source_rel
         .strip_prefix(&config.build.input)
         .unwrap_or(source_rel)
@@ -542,6 +758,24 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
             .push((PathBuf::from(crate::config::FILE_NAME), p.to_string()));
     }
 
+    // Extensions are project wide, as in the build: a call by an
+    // extension name routes through the dispatcher in every spec.
+    let mut extensions = Vec::new();
+
+    for path in crate::build::sources(&input)? {
+        if path.extension().is_some_and(|e| e == "aly")
+            && let Ok(source) = std::fs::read_to_string(&path)
+        {
+            extensions.extend(crate::extensions::collect(&source));
+        }
+    }
+
+    if write {
+        for (rel, message) in write_modules(root, config, &ingots, &extensions)? {
+            report.failures.push((rel, message));
+        }
+    }
+
     for path in crate::build::sources(&input)? {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
 
@@ -555,7 +789,14 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
         let source = std::fs::read_to_string(&path)?;
         let source_rel = config.build.input.join(&rel);
 
-        let built = match spec(config, root, &source_rel, &source, Some(&ingots)) {
+        let built = match spec(
+            config,
+            root,
+            &source_rel,
+            &source,
+            Some(&ingots),
+            &extensions,
+        ) {
             Ok(Some(b)) => b,
 
             Ok(None) => continue,
@@ -762,13 +1003,14 @@ mod tests {
             Path::new("src/m.aly"),
             src,
             None,
+            &[],
         )
         .unwrap()
         .unwrap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(count, 2);
         assert!(
-            text.contains("local __alloy = require(\"../build/alloy\")"),
+            text.contains("local __alloy = require(\"./.modules/alloy\")"),
             "{text}"
         );
         assert!(text.contains("__lest.describe(\"m\", function()"), "{text}");

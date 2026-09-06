@@ -118,7 +118,7 @@ pub const TABLE: &[(&str, &str)] = &[
     // Declarations
     (
         "struct",
-        "```alloy\nstruct Name as\n    field: T\nend\n```\nA record with fields. `impl Name` adds methods. `Name { x = 1 }` is the raw constructor and `new Name(...)` calls `Name.new`. `@derive(Eq, Debug, Clone)` on the line before generates methods.\n\nEmits a table type plus a metatable with `__index` and a `__tostring`, so `print(v)` and `` `{v}` `` show `Name { x = 1, y = 2 }`. A `to_string` in the impl, an `impl Display`, replaces the default printer.",
+        "```alloy\nstruct Name as\n    field: T\nend\n```\nA record with fields. `impl Name` adds methods. `Name { x = 1 }` is the raw constructor and `new Name(...)` calls `Name.new`. `@derive(Eq, Debug, Clone)` on the line before generates methods. A field or a method marked `private` belongs to the impl alone.\n\nEmits a table type plus a metatable with `__index` and a `__tostring`, so `print(v)` and `` `{v}` `` show `Name { x = 1, y = 2 }`. A `to_string` in the impl, an `impl Display`, replaces the default printer.",
     ),
     (
         "impl",
@@ -210,6 +210,14 @@ pub const TABLE: &[(&str, &str)] = &[
     (
         "satisfies",
         "```alloy\nexpr satisfies T\n```\nChecks the literal against `T` under contextual typing and reports a key `T` does not name. The type is `T`.",
+    ),
+    (
+        "private",
+        "```alloy\nstruct Counter as\n    read name: string\n    private count: number = 0\nend\n\nimpl Counter\n    function bump(self): number\n        self.count += 1\n        return self.count\n    end\n\n    private function reset(self)\n        self.count = 0\n    end\nend\n```\nA field or an `impl` method that only the struct's own methods reach. The word compiles to nothing at runtime: the check artifact keeps the private members out of the struct's public type, so `c.count` and `c:reset()` in other code are type errors in the editor and under `alloy flux`, and the `private_access` lint reports them in the same file. A private field may still be set in `new Counter { }`. A struct with type parameters keeps one view. `public` is the default and needs no word.",
+    ),
+    (
+        "public",
+        "```alloy\nimpl Counter\n    public function peek(self): number\n        return self.count\n    end\nend\n```\nThe default visibility, written out for symmetry with `private`. A public member is part of the struct's type in every file. Both words are reserved.",
     ),
     (
         "read",

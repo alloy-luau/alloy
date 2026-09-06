@@ -57,6 +57,8 @@ const KEYWORDS: &[&str] = &[
     "enum",
     "trait",
     "impl",
+    "private",
+    "public",
     "interface",
     "extends",
     "as",

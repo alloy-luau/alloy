@@ -244,6 +244,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "Both branches hold the same statements, so the condition decides nothing. One branch was meant to differ, or the `if` is a leftover. The ternary form `c ? a : a` fires too.",
     },
     LintInfo {
+        name: "private_access",
+        group: Group::Correctness,
+        default: Level::Warn,
+        summary: "a private field or method read outside its struct's impl",
+        detail: "A member marked `private` belongs to the struct's own methods. This access sits outside every `impl` of that struct, in the same file; in the editor and under `alloy flux` the type checker reports it as an error, since the public type of the struct has no such member. The lint reads names, so a plain table with a field of the same name fires it too; `--@alloy-ignore` silences that line.",
+    },
+    LintInfo {
         name: "circular_import",
         group: Group::Correctness,
         default: Level::Warn,
@@ -754,7 +761,9 @@ pub fn run(
         let prev = i.checked_sub(1).map(text);
         let prev2 = i.checked_sub(2).map(text);
         let exported = prev == Some("export") || (prev == Some("async") && prev2 == Some("export"));
-        let in_impl = impl_ranges.iter().any(|(a, b)| *a < i && i < *b);
+        let private =
+            prev == Some("private") || (prev == Some("async") && prev2 == Some("private"));
+        let in_impl = !private && impl_ranges.iter().any(|(a, b)| *a < i && i < *b);
 
         fns.push(Fn {
             at: i,

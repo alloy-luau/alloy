@@ -25,6 +25,7 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.numeric_for_index(&mut out);
     s.unused_variable(&mut out);
     s.naming(&mut out);
+    s.private_access(&mut out);
     out
 }
 
@@ -652,6 +653,100 @@ impl<'s> Scan<'s> {
 }
 
 impl<'s> Scan<'s> {
+    /// The private members of each struct in the file: `(member, struct)`
+    /// from `private name: T` in a `struct` and `private function name`
+    /// in an `impl`.
+    fn private_members(&self) -> Vec<(&'s str, &'s str)> {
+        let mut out = Vec::new();
+
+        for i in 0..self.toks.len() {
+            if !self.at(i, "private") {
+                continue;
+            }
+
+            let owner = self.enclosing_owner(i);
+            let Some(owner) = owner else { continue };
+
+            if self.at(i + 1, "function") && self.is_name(i + 2) {
+                out.push((self.t(i + 2), owner));
+            } else if self.at(i + 1, "async") && self.at(i + 2, "function") && self.is_name(i + 3) {
+                out.push((self.t(i + 3), owner));
+            } else {
+                let mut j = i + 1;
+
+                if matches!(self.t(j), "read" | "write") && self.is_name(j + 1) {
+                    j += 1;
+                }
+
+                if self.is_name(j) && self.at(j + 1, ":") {
+                    out.push((self.t(j), owner));
+                }
+            }
+        }
+
+        out
+    }
+
+    /// The struct a token sits in: the target of the `struct` or `impl`
+    /// block that encloses it.
+    fn enclosing_owner(&self, j: usize) -> Option<&'s str> {
+        let mut best: Option<(usize, &'s str)> = None;
+
+        for (i, e) in self.st.ends.iter().enumerate() {
+            let Some(e) = e else { continue };
+
+            if !(i < j && j < *e) || !matches!(self.t(i), "struct" | "impl") {
+                continue;
+            }
+
+            let name = if self.at(i, "impl") && self.is_name(i + 1) && self.at(i + 2, "for") {
+                self.t(i + 3)
+            } else {
+                self.t(i + 1)
+            };
+
+            if best.is_none_or(|(b, _)| i > b) {
+                best = Some((i, name));
+            }
+        }
+
+        best.map(|(_, n)| n)
+    }
+
+    /// `x.count` or `x:reset()` outside the impl of the struct that
+    /// declared `count` or `reset` private.
+    fn private_access(&self, out: &mut Vec<Lint>) {
+        let members = self.private_members();
+
+        if members.is_empty() {
+            return;
+        }
+
+        for i in 0..self.toks.len() {
+            if !matches!(self.prev(i), "." | ":" | "?." | "?:") || !self.is_name(i) {
+                continue;
+            }
+
+            let name = self.t(i);
+            let Some((_, owner)) = members.iter().find(|(m, _)| *m == name) else {
+                continue;
+            };
+
+            if self.enclosing_owner(i) == Some(*owner) {
+                continue;
+            }
+
+            self.lint(
+                out,
+                "private_access",
+                i,
+                i,
+                format!("`{name}` is private to `{owner}`; only its impl reaches it"),
+                None,
+            );
+        }
+    }
+
     /// The names a `local` at `i` binds, with their tokens. A destructure
     /// binds through a table pattern and stays out.
     fn local_names(&self, i: usize) -> Vec<usize> {
@@ -1138,6 +1233,20 @@ mod tests {
             Vec::<&str>::new()
         );
         assert_eq!(all("function M:Destroy() end\n"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_private_member_read_outside_its_impl_fires() {
+        let src = "struct C as\n    private count: number = 0\nend\nimpl C\n    function bump(self): number\n        self.count += 1\n        self:log()\n        return self.count\n    end\n    private function log(self)\n        print(self.count)\n    end\nend\nlocal c = new C {}\nprint(c.count)\nc:log()\nprint(c:bump())\n";
+        let all = lints(src);
+        let hits: Vec<&str> = all
+            .iter()
+            .filter(|l| l.name == "private_access")
+            .map(|l| l.message.as_str())
+            .collect();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(hits[0].contains("`count` is private to `C`"));
+        assert!(hits[1].contains("`log` is private to `C`"));
     }
 
     #[test]

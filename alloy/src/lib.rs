@@ -354,8 +354,8 @@ mod tests {
 
     #[test]
     fn reserved_words_cannot_be_names() {
-        let bad = compile("local new = 1\nlocal function await() end\nlocal function f(delete) end\nprint(match)\n").unwrap();
-        assert_eq!(bad.diagnostics.len(), 4, "{:?}", bad.diagnostics);
+        let bad = compile("local new = 1\nlocal function await() end\nlocal function f(delete) end\nprint(match)\nlocal private = 1\n").unwrap();
+        assert_eq!(bad.diagnostics.len(), 5, "{:?}", bad.diagnostics);
         assert!(bad.diagnostics[0].message.contains("reserved"));
 
         let fine = compile("struct V as\n    x: number\nend\nimpl V\n    function new(): V\n        return new V { x = 1 }\n    end\nend\nlocal make = Instance.new\nfunction V.await() end\nlocal v = new V()\nprint(make, v, V.new)\n").unwrap();
@@ -524,6 +524,51 @@ mod tests {
             "{}",
             out.ship
         );
+    }
+
+    #[test]
+    fn private_members_leave_the_public_view_of_the_check_artifact() {
+        let src = "struct Counter as\n    read name: string\n    private count: number = 0\nend\nimpl Counter\n    function bump(self): number\n        self.count += 1\n        self:log()\n        return self.count\n    end\n    public function peek(self): number\n        return self.count\n    end\n    private function log(self)\n        print(self.count)\n    end\nend\n";
+        let out = compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        // The ship artifact: every method on the class, no view.
+        assert!(
+            out.ship.contains("function Counter.log(self)"),
+            "{}",
+            out.ship
+        );
+        assert!(!out.ship.contains("private"), "{}", out.ship);
+        assert!(!out.ship.contains("Counter__all"), "{}", out.ship);
+        // The check artifact: the public type, the full view, the
+        // private method on its own table, `self` rebound in public ones.
+        assert!(
+            out.check.contains("local Counter__private = {}"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("type Counter = typeof(setmetatable({} :: { read name: string }, Counter)) type Counter__all = Counter & { count: number } & typeof(Counter__private)"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("function Counter.bump(self: Counter): number local self = (self :: any) :: Counter__all"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("function Counter.peek(self: Counter): number local self"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("function Counter__private.log(self: Counter__all)"),
+            "{}",
+            out.check
+        );
+        assert_eq!(out.check.lines().count(), src.lines().count());
     }
 
     #[test]

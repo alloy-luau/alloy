@@ -1006,6 +1006,7 @@ impl<'a> Parser<'a> {
             attributes,
             attrs: Vec::new(),
             exported: false,
+            visibility: None,
             path,
             is_method,
             body,
@@ -1883,6 +1884,13 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
+            let visibility = if matches!(self.text(), "private" | "public") {
+                let i = self.bump();
+
+                Some(TokSpan::new(i, i + 1))
+            } else {
+                None
+            };
             let modifier = if matches!(self.text(), "read" | "write") && self.name_at(1) {
                 let i = self.bump();
 
@@ -1900,6 +1908,7 @@ impl<'a> Parser<'a> {
             };
             fields.push(Field {
                 attributes,
+                visibility,
                 modifier,
                 name,
                 ty,
@@ -2356,6 +2365,15 @@ impl<'a> Parser<'a> {
                 Vec::new()
             };
 
+            // `private function f`, `public async function g`.
+            let visibility = if matches!(self.text(), "private" | "public")
+                && matches!(self.text_at(1), "function" | "async")
+            {
+                Some(TokSpan::new(self.bump(), self.pos))
+            } else {
+                None
+            };
+
             let is_async = if self.at("async") && self.text_at(1) == "function" {
                 Some(TokSpan::new(self.bump(), self.pos))
             } else {
@@ -2370,6 +2388,7 @@ impl<'a> Parser<'a> {
                 unreachable!("function_stmt parses a function");
             };
             f.body.is_async = is_async;
+            f.visibility = visibility;
             methods.push(f);
         }
 

@@ -540,6 +540,8 @@ fn is_reserved(word: &str) -> bool {
             | "true"
             | "until"
             | "while"
+            | "private"
+            | "public"
     )
 }
 

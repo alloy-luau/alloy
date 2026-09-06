@@ -17,6 +17,7 @@ pub(crate) struct Scan<'s> {
 pub(crate) const KEYWORDS: &[&str] = &[
     "and", "or", "not", "if", "then", "else", "elseif", "end", "for", "in", "while", "do",
     "repeat", "until", "return", "break", "continue", "local", "function", "nil", "true", "false",
+    "private", "public",
 ];
 
 /// Tokens that end the expression before them when walked backwards:

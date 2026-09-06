@@ -200,6 +200,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         test_names: Vec::new(),
         macro_serial: 0,
         structs_with_to_string: HashSet::new(),
+        private_types: HashSet::new(),
+        self_prologue: None,
         mapped_used: Vec::new(),
     };
 
@@ -420,6 +422,13 @@ struct Desugar<'s> {
     /// Structs whose impl writes `to_string`: they print through it, so
     /// the default printer stays out.
     structs_with_to_string: HashSet<String>,
+    /// Structs with a `private` field or method. The check artifact
+    /// gives each two views: the public type, and `Name__all` for the
+    /// impl's own methods.
+    private_types: HashSet<String>,
+    /// A line the next function header runs first: the `self` of a
+    /// public method rebound to the full view.
+    self_prologue: Option<String>,
 }
 
 /// A macro body captured as one-line source, so an expansion re-parses.
@@ -786,21 +795,61 @@ impl<'s> Desugar<'s> {
             || self.enums.contains_key(&target_name))
             && !self.generic_types.contains(&target_name);
 
-        if self.options.check && (foreign || local_type) {
-            self.self_type = Some(target_name.clone());
-        }
+        let types_self = self.options.check && (foreign || local_type);
+        // A struct with private members: a private method lands on
+        // `Target__private` in the check artifact, and a public method
+        // rebinds `self` to the full view on its first line.
+        let split = !foreign && self.has_private_view(&target_name);
 
         self.impl_target = Some(target_name.clone());
 
         for m in &i.methods {
+            let is_private = m.visibility.is_some_and(|v| self.text_of(v) == "private");
+
+            if types_self {
+                self.self_type = Some(if split && is_private {
+                    format!("{target_name}__all")
+                } else {
+                    target_name.clone()
+                });
+            }
+
+            let has_self = m
+                .body
+                .params
+                .first()
+                .is_some_and(|p| self.text_of(p.name) == "self");
+
+            if split && !is_private && has_self {
+                self.self_prologue =
+                    Some(format!("local self = (self :: any) :: {target_name}__all"));
+            }
+
             let ms = self.byte_start(m.span);
             self.copy(cursor, ms);
-            let fn_tok_end = self.toks[m.span.start as usize].end;
+            let fn_tok = (m.span.start as usize..m.span.end as usize)
+                .find(|&k| self.toks[k].text(self.src) == "function")
+                .unwrap_or(m.span.start as usize);
+            let fn_tok_end = self.toks[fn_tok].end;
             let name_span = m.path[0];
             let mname = self.text_of(name_span).to_string();
-            // `function name(` becomes `function Target.name(`.
-            self.copy(ms, fn_tok_end);
-            self.generate(fn_tok_end, &format!(" {target}.{mname}"));
+            // `function name(` becomes `function Target.name(`. The
+            // `private` or `public` word has no Luau form and goes.
+            match m.visibility {
+                Some(v) => {
+                    self.copy(ms, self.byte_start(v));
+                    self.copy(self.byte_end(v), fn_tok_end);
+                }
+
+                None => self.copy(ms, fn_tok_end),
+            }
+
+            let owner = if split && is_private {
+                format!("{target}__private")
+            } else {
+                target.clone()
+            };
+            self.generate(fn_tok_end, &format!(" {owner}.{mname}"));
             let after_name = self.byte_end(name_span);
             let rest = TokSpan::new(name_span.end as usize, m.span.end as usize);
             let _ = after_name;
@@ -819,6 +868,7 @@ impl<'s> Desugar<'s> {
             }
 
             cursor = self.byte_end(m.span);
+            self.self_prologue = None;
         }
 
         self.self_type = None;
@@ -1942,6 +1992,13 @@ impl<'s> Desugar<'s> {
                         self.structs_with_to_string.insert(target.clone());
                     }
 
+                    if i.methods
+                        .iter()
+                        .any(|m| m.visibility.is_some_and(|v| self.text_of(v) == "private"))
+                    {
+                        self.private_types.insert(target.clone());
+                    }
+
                     if i.trait_name.is_none()
                         && let Some(ctor) = i.methods.iter().find_map(|m| {
                             m.path
@@ -2185,6 +2242,10 @@ impl<'s> Desugar<'s> {
         let mut defaults = Vec::new();
         let mut field_names = Vec::new();
         let mut field_attrs = Vec::new();
+        // The check artifact keeps a private field out of the public view.
+        let split = self.has_private_view(&name);
+        let mut public_types = Vec::new();
+        let mut private_types = Vec::new();
 
         for f in &st.fields {
             let fname = self.text_of(f.name).to_string();
@@ -2201,6 +2262,12 @@ impl<'s> Desugar<'s> {
             field_types.push(format!("{modifier}{fname}: {ty}"));
             param_types.push(format!("{modifier}{fname}: {ty}{opt}"));
 
+            if f.visibility.is_some_and(|v| self.text_of(v) == "private") {
+                private_types.push(format!("{modifier}{fname}: {ty}"));
+            } else {
+                public_types.push(format!("{modifier}{fname}: {ty}"));
+            }
+
             if let Some(dv) = &f.default {
                 let v = self.render_to_string(dv);
                 defaults.push(format!("if f.{fname} == nil then f.{fname} = {v} end"));
@@ -2215,10 +2282,26 @@ impl<'s> Desugar<'s> {
             field_names.push(fname);
         }
 
-        let type_line = format!(
-            "{export}type {name}{generics} = typeof(setmetatable({{}} :: {{ {} }}, {name}))",
-            field_types.join(", ")
-        );
+        let type_line = if split {
+            // `Name` is what the world sees; `Name__all` is the same table
+            // with the private fields and the private methods, which the
+            // impl's methods put on `Name__private` in this artifact.
+            let hidden = if private_types.is_empty() {
+                String::new()
+            } else {
+                format!(" & {{ {} }}", private_types.join(", "))
+            };
+
+            format!(
+                "{export}type {name} = typeof(setmetatable({{}} :: {{ {} }}, {name})) type {name}__all = {name}{hidden} & typeof({name}__private)",
+                public_types.join(", ")
+            )
+        } else {
+            format!(
+                "{export}type {name}{generics} = typeof(setmetatable({{}} :: {{ {} }}, {name}))",
+                field_types.join(", ")
+            )
+        };
 
         if self.options.definitions {
             self.generate(
@@ -2262,8 +2345,14 @@ impl<'s> Desugar<'s> {
                 format!(" function {name}.new({param}){ret} return {name}.__new(f) end")
             };
 
+            let private_table = if split {
+                format!(" local {name}__private = {{}}")
+            } else {
+                String::new()
+            };
+
             format!(
-                "local {name} = {{}} {name}.__index = {name} function {name}.__new({param}){ret} {d} return (setmetatable(f, {name}) :: any) end{new_fn}"
+                "local {name} = {{}} {name}.__index = {name}{private_table} function {name}.__new({param}){ret} {d} return (setmetatable(f, {name}) :: any) end{new_fn}"
             )
         } else {
             format!(
@@ -2299,7 +2388,7 @@ impl<'s> Desugar<'s> {
         if !derives_debug && !self.structs_with_to_string.contains(&name) {
             let std = self.std();
             let sn = if self.options.check && !self.generic_types.contains(&name) {
-                format!(": {name}")
+                format!(": {}", self.self_alias(&name))
             } else {
                 String::new()
             };
@@ -2405,7 +2494,7 @@ impl<'s> Desugar<'s> {
     ) -> String {
         // The check artifact types the receiver, as an impl method's self.
         let sn = if self.options.check && !self.generic_types.contains(name) {
-            format!(": {name}")
+            format!(": {}", self.self_alias(name))
         } else {
             String::new()
         };
@@ -4987,7 +5076,33 @@ impl<'s> Desugar<'s> {
             self.generic_types.insert(name.clone());
         }
 
+        if st
+            .fields
+            .iter()
+            .any(|f| f.visibility.is_some_and(|v| self.text_of(v) == "private"))
+        {
+            self.private_types.insert(name.clone());
+        }
+
         self.struct_fields.insert(name, fields);
+    }
+
+    /// Whether the check artifact splits a struct into a public view and
+    /// a full one: it has a private member and no type parameters.
+    fn has_private_view(&self, name: &str) -> bool {
+        self.options.check
+            && self.private_types.contains(name)
+            && !self.generic_types.contains(name)
+    }
+
+    /// The type of `self` inside a struct's own code: the full view when
+    /// the struct has private members, else the struct.
+    fn self_alias(&self, name: &str) -> String {
+        if self.has_private_view(name) {
+            format!("{name}__all")
+        } else {
+            name.to_string()
+        }
     }
 
     /// The fields form names every field without a default and no field
@@ -5638,6 +5753,11 @@ impl<'s> Desugar<'s> {
         // 4. The prologue and the async wrapper, on the header line.
         let has_vararg = body.params.iter().any(|p| p.is_vararg);
         let mut lead = String::new();
+
+        if let Some(p) = self.self_prologue.take() {
+            lead.push(' ');
+            lead.push_str(&p);
+        }
 
         for p in &prologue {
             lead.push(' ');

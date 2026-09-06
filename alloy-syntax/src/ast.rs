@@ -215,6 +215,8 @@ pub struct StructDecl {
 #[derive(Debug)]
 pub struct Field {
     pub attributes: Vec<Attr>,
+    /// `private` or `public`; a field is public without one.
+    pub visibility: Option<TokSpan>,
     /// `read` or `write`.
     pub modifier: Option<TokSpan>,
     pub name: TokSpan,
@@ -598,6 +600,8 @@ pub struct Function {
     pub attrs: Vec<Attr>,
     /// `export function f()`; the module exposes the function by value.
     pub exported: bool,
+    /// `private function` or `public function` in an `impl`.
+    pub visibility: Option<TokSpan>,
     /// Every name token in the dotted path, with the `:` method name included.
     pub path: Vec<TokSpan>,
     pub is_method: bool,

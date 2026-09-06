@@ -240,7 +240,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
 /// the build, the tests, and the editor agree on what a file becomes.
 ///
 /// `path` picks the kind and is what the ingots see; `jsx` is the
-/// `luaux.toml` of the project, used for `.alx`.
+/// project's markup config, its `[alx]` table, used for `.alx`.
 pub fn compile_file(
     path: &str,
     source: &str,

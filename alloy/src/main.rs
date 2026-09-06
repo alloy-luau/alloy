@@ -108,6 +108,28 @@ fn main() -> ExitCode {
 /// The ingots of the project a file sits in, for a one-file command.
 /// A load problem prints as a warning; the compile goes on without
 /// that ingot.
+/// The markup config for one file: the `[alx]` table of the nearest
+/// alloy.toml, or a `luaux.toml` in the working directory.
+fn markup_near(path: &Path) -> Result<alloy::luaux::Config, String> {
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let dir = if dir.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        dir
+    };
+
+    match alloy::config::Config::find(&dir) {
+        Some(config_path) => {
+            let config = alloy::config::Config::load(&config_path).map_err(|e| e.to_string())?;
+            let root = config_path.parent().unwrap_or(Path::new("."));
+
+            config.markup(root)
+        }
+
+        None => alloy::luaux::Config::load(Path::new(".")).map_err(|e| e.message),
+    }
+}
+
 fn load_ingots_near(path: &Path) -> Option<alloy::ingot::Ingots> {
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let dir = if dir.as_os_str().is_empty() {
@@ -1591,13 +1613,14 @@ fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> 
         ..alloy::EmitOptions::default()
     };
 
-    // `luaux.toml` in the working directory picks the UI library, and
-    // the nearest alloy.toml names the ingots.
-    let jsx = match alloy::luaux::Config::load(Path::new(".")) {
+    // The nearest alloy.toml's `[alx]` picks the UI library, else a
+    // `luaux.toml` in the working directory; the same file names the
+    // ingots.
+    let jsx = match markup_near(Path::new(path)) {
         Ok(c) => Some(c),
 
         Err(err) if path.ends_with(".alx") => {
-            fail(&format!("{path}: {}", err.message));
+            fail(&format!("{path}: {err}"));
             return None;
         }
 

@@ -467,7 +467,7 @@ fn write_modules(
     std::fs::write(dir.join("alloy.luau"), crate::RUNTIME)?;
     std::fs::write(dir.join("shim.luau"), crate::SHIM)?;
     let exclude = crate::build::globs(&config.build.exclude)?;
-    let jsx = crate::luaux::Config::load(root).ok();
+    let jsx = config.markup(root).ok();
     let runtime = modules.join("alloy");
     let aliases = crate::modules::aliases(root, config);
 

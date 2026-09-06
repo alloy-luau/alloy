@@ -199,8 +199,9 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
     }
 
-    // `luaux.toml` beside `alloy.toml` picks the UI library for `.alx`.
-    let jsx_config = luaux::Config::load(root).map_err(|e| e.message);
+    // `[alx]` in alloy.toml, or a `luaux.toml` beside it, picks the UI
+    // library for `.alx`.
+    let jsx_config = config.markup(root);
     let module_aliases = crate::modules::aliases(root, config);
 
     // The ingots start once per build and see every file.

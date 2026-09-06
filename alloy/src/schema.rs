@@ -568,7 +568,100 @@ pub const TABLES: &[Table] = &[
         keys: &[],
         open: Some(ingot_options_value),
     },
+    Table {
+        name: "alx",
+        doc: "How `.alx` markup lowers: the factory it calls and the names it maps. The shape `luaux.toml` has, kept in this file so a project needs no second one; a `luaux.toml` beside it still reads when this table is empty. `alloy doc markup` explains the keys.",
+        keys: &[],
+        open: None,
+    },
+    Table {
+        name: "alx.factory",
+        doc: "The functions the lowered markup calls. With no key set, the markup picks a UI library on its own; with any key set, it assumes nothing.",
+        keys: &[
+            unset(
+                "backend",
+                Ty::Choice(&["table", "element"]),
+                "The arrangement of a lowered element: `table` passes children in the props table, `element` as a third argument.",
+            ),
+            unset(
+                "create",
+                STR,
+                "The expression that constructs an element, called with the class name.",
+            ),
+            unset(
+                "children",
+                STR,
+                "The expression that attaches children, when the backend takes one.",
+            ),
+            unset(
+                "event",
+                STR,
+                "The expression that connects an event handler.",
+            ),
+            unset(
+                "compute",
+                STR,
+                "The expression that wraps a computed value.",
+            ),
+            unset("use", STR, "The expression that reads a state value."),
+            unset(
+                "fragment",
+                STR,
+                "The expression that groups children without a parent.",
+            ),
+            unset(
+                "interpolate",
+                Ty::Choice(&["plain", "compute"]),
+                "How `{expr}` in text lowers: `plain` inserts the value, `compute` wraps it.",
+            ),
+            unset(
+                "merge",
+                STR,
+                "The expression that merges a spread props table.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
+        name: "alx.elements",
+        doc: "Element name aliases: `Frame = \"frame\"` renames one class in markup, and `all = \"camel\"` renames every class by a scheme: PascalCase, camelCase, snake_case, or flatcase.",
+        keys: &[],
+        open: Some(alias_value),
+    },
+    Table {
+        name: "alx.properties",
+        doc: "Property and event aliases: `Text = \"text\"` for every class, `all = \"camel\"` for a scheme, or a class table with its own.",
+        keys: &[],
+        open: Some(property_alias_value),
+    },
+    Table {
+        name: "alx.lints",
+        doc: "The levels of the markup lints.",
+        keys: &[unset(
+            "static_conditional_child",
+            Ty::Choice(&["off", "warn", "error"]),
+            "Markup in a child expression that no function encloses: it is built once, not on each render.",
+        )],
+        open: None,
+    },
 ];
+
+fn alias_value() -> Value {
+    json!({
+        "type": "string",
+        "description": "The name markup uses for this class, or a casing scheme for `all`."
+    })
+}
+
+fn property_alias_value() -> Value {
+    json!({
+        "description": "The name markup uses for this property in every class, or a table of aliases for one class.",
+        "oneOf": [
+            { "type": "string" },
+            { "type": "object", "additionalProperties": { "type": "string" } }
+        ]
+    })
+}
 
 /// The schema of one key.
 fn key_schema(k: &Key) -> Value {
@@ -768,6 +861,18 @@ mod tests {
         config.emit.wait_timeout = Some(5.0);
         config.emit.std_require = Some("@alloy".into());
         config.flux.luau_lsp = Some("luau-lsp".into());
+        config.alx.factory = crate::config::AlxFactory {
+            backend: Some("table".into()),
+            create: Some("create".into()),
+            children: Some("children".into()),
+            event: Some("event".into()),
+            compute: Some("compute".into()),
+            use_fn: Some("use".into()),
+            fragment: Some("fragment".into()),
+            interpolate: Some("plain".into()),
+            merge: Some("merge".into()),
+        };
+        config.alx.lints.static_conditional_child = Some("warn".into());
 
         let value = toml::Value::try_from(&config).unwrap();
         let mut from_config = BTreeSet::new();

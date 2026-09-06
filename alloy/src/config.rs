@@ -32,6 +32,61 @@ pub struct Config {
     /// defaults its manifest declares. The compiler passes them through
     /// and never reads them.
     pub ingot: BTreeMap<String, toml::Table>,
+    /// The `[alx]` table: how markup lowers, the factory it calls and
+    /// the names it maps. A project with `.alx` files sets it here; a
+    /// `luaux.toml` beside the file still reads when the table is empty.
+    pub alx: Alx,
+}
+
+/// The `[alx]` table: the markup settings, the shape `luaux.toml` has,
+/// so a project needs no second file for them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct Alx {
+    pub factory: AlxFactory,
+    /// Element name aliases, `Frame = "frame"`, or `all = "camel"`.
+    pub elements: BTreeMap<String, toml::Value>,
+    /// Property aliases, `Text = "text"`, per class as a table.
+    pub properties: BTreeMap<String, toml::Value>,
+    pub lints: AlxLints,
+}
+
+/// `[alx.factory]`: the functions the lowered markup calls.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct AlxFactory {
+    pub backend: Option<String>,
+    pub create: Option<String>,
+    pub children: Option<String>,
+    pub event: Option<String>,
+    pub compute: Option<String>,
+    #[serde(rename = "use")]
+    pub use_fn: Option<String>,
+    pub fragment: Option<String>,
+    pub interpolate: Option<String>,
+    pub merge: Option<String>,
+}
+
+/// `[alx.lints]`: the levels of the markup lints.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct AlxLints {
+    pub static_conditional_child: Option<String>,
+}
+
+impl Alx {
+    /// Whether the project wrote anything under `[alx]`.
+    pub fn is_set(&self) -> bool {
+        *self != Self::default()
+    }
+
+    /// The table as the markup compiler's own config.
+    pub fn to_markup(&self) -> Result<luaux::Config, String> {
+        let text = toml::to_string(self).map_err(|e| e.to_string())?;
+
+        luaux::Config::parse(&text)
+            .map_err(|e| format!("[alx]: {}", e.message.trim_start_matches("luaux.toml: ")))
+    }
 }
 
 /// Where an ingot comes from: a directory that holds `ingot.toml` and
@@ -555,6 +610,13 @@ definitions = []
 # max_nesting = 5
 # cognitive_complexity = 25
 
+# [alx]
+# how .alx markup lowers: the factory it calls and the names it maps;
+# `alloy doc markup` explains the keys
+# [alx.factory]
+# backend = "table"
+# create = "create"
+
 [test]
 # `alloy test` writes one lest spec per source with a @test
 out = "tests"
@@ -641,6 +703,17 @@ impl Config {
             std::fs::read_to_string(path).map_err(|e| ConfigError::Read(path.to_path_buf(), e))?;
 
         Self::parse(&text, path)
+    }
+
+    /// The markup config of the project: the `[alx]` table when it
+    /// holds anything, else a `luaux.toml` at the root, else the
+    /// defaults.
+    pub fn markup(&self, root: &Path) -> Result<luaux::Config, String> {
+        if self.alx.is_set() {
+            return self.alx.to_markup();
+        }
+
+        luaux::Config::load(root).map_err(|e| e.message)
     }
 
     /// Finds `alloy.toml` in `start` or the nearest ancestor. The project

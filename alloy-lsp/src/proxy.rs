@@ -1184,8 +1184,8 @@ impl State {
         items
     }
 
-    /// The emit options and luaux config for a file, from the nearest
-    /// `alloy.toml` and `luaux.toml`.
+    /// The emit options and markup config for a file, from the nearest
+    /// `alloy.toml`: its `[alx]` table, or a `luaux.toml` beside it.
     fn options_for(&self, uri: &str) -> (EmitOptions, alloy::luaux::Config) {
         let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -1197,7 +1197,11 @@ impl State {
             .and_then(|(p, _)| p.parent().map(Path::to_path_buf))
             .or_else(|| self.root.clone())
             .unwrap_or_else(|| dir.clone());
-        let jsx = alloy::luaux::Config::load(&config_dir).unwrap_or_default();
+        let jsx = config
+            .as_ref()
+            .map(|(_, c)| c.markup(&config_dir))
+            .unwrap_or_else(|| alloy::luaux::Config::load(&config_dir).map_err(|e| e.message))
+            .unwrap_or_default();
 
         let options = match config {
             Some((config_path, config)) => {

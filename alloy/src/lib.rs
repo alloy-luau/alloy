@@ -26,6 +26,7 @@ pub mod luau_config;
 pub mod project;
 pub mod render;
 pub mod roblox_classes;
+pub mod schema;
 pub mod testbuild;
 pub mod typecheck;
 

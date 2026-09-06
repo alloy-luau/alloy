@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::help;
+use crate::self_code;
 use crate::ui::{self, Painter};
 
 fn fail(message: &str) {
@@ -17,6 +18,20 @@ fn fail(message: &str) {
 const BINARIES: [&str; 2] = ["alloy", "alloy-lsp"];
 
 pub fn run(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("schema") => {
+            print!("{}", alloy::schema::to_string());
+            return ExitCode::SUCCESS;
+        }
+
+        Some("--help" | "-h" | "help") | None => {
+            print!("{}", help::render_plain(help::SELF_TEXT, ui::want_color()));
+            return ExitCode::SUCCESS;
+        }
+
+        _ => {}
+    }
+
     let dir = match args.iter().position(|a| a == "--dir") {
         Some(i) => match args.get(i + 1) {
             Some(d) => PathBuf::from(d),
@@ -44,13 +59,13 @@ pub fn run(args: &[String]) -> ExitCode {
 
         Some("uninstall") => uninstall(&dir),
 
-        Some("--help" | "-h" | "help") | None => {
-            print!("{}", help::render_plain(help::SELF_TEXT, ui::want_color()));
-            ExitCode::SUCCESS
-        }
+        Some("code") => self_code::run(&dir, args.iter().any(|a| a == "--dry-run")),
 
-        Some(other) => {
-            fail(&format!("unknown self command `{other}`"));
+        other => {
+            fail(&format!(
+                "unknown self command `{}`",
+                other.unwrap_or_default()
+            ));
             eprint!("{}", help::render_plain(help::SELF_TEXT, false));
             ExitCode::FAILURE
         }
@@ -370,6 +385,10 @@ fn install(dir: &Path) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    println!(
+        "{}",
+        p.note("`alloy self code` gives alloy.toml completion in VS Code and Zed")
+    );
     path_hint(dir);
 
     ExitCode::SUCCESS

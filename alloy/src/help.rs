@@ -40,10 +40,13 @@ Commands:
   install         Copy alloy and alloy-lsp to ~/.alloy/bin
   update          Fetch the latest release and install its binaries
   uninstall       Remove the binaries from ~/.alloy/bin
+  code            Write ~/.alloy/alloy.schema.json and point VS Code and Zed at it
+  schema          Print the JSON Schema of alloy.toml
 
 Options:
-  --dir <path>    Install to, or remove from, <path>
+  --dir <path>    Install to, or remove from, <path>; code writes beside it
   --version <v>   With update: fetch this release instead of the latest
+  --dry-run       With code: print the edits and write nothing
 ";
 
 pub const BUILD_TEXT: &str = "\

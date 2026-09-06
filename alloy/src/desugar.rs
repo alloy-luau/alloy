@@ -81,11 +81,16 @@ pub struct EmitOptions {
     /// Per imported trait, the names of its default methods, so an
     /// `impl Trait for S` here flattens them in as a local trait's would.
     pub import_trait_defaults: Vec<(String, Vec<String>)>,
+    /// The imported async functions declared to return a `Result`: a
+    /// `try await f()` on one is the Result itself. See
+    /// `crate::modules::import_result_asyncs`.
+    pub import_result_asyncs: Vec<String>,
 }
 
 /// `HashMap<string, number>` as `("HashMap", "string, number")`, for the
 /// std containers whose constructor takes the arguments. Any other
-/// annotation is `None`.
+/// annotation is `None`: a `Signal<T...>` takes a pack, which explicit
+/// arguments cannot name, and the annotation alone types it.
 fn generic_head(ty: &str) -> Option<(String, String)> {
     let ty = ty.trim();
     let open = ty.find('<')?;
@@ -93,7 +98,7 @@ fn generic_head(ty: &str) -> Option<(String, String)> {
 
     if !matches!(
         base,
-        "HashMap" | "Set" | "Array" | "Queue" | "Heap" | "Signal" | "Iter" | "Future"
+        "HashMap" | "Set" | "Array" | "Queue" | "Heap" | "Iter" | "Future"
     ) || !ty.ends_with('>')
     {
         return None;
@@ -138,6 +143,7 @@ impl Default for EmitOptions {
             tests: false,
             import_types: Vec::new(),
             import_trait_defaults: Vec::new(),
+            import_result_asyncs: Vec::new(),
         }
     }
 }
@@ -218,6 +224,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         new_stmt_next: 0,
         import_next: 0,
         expected_generic: None,
+        result_asyncs: options.import_result_asyncs.iter().cloned().collect(),
+        param_hint: None,
         return_at: None,
         struct_field_types: HashMap::new(),
         temp_next: 0,
@@ -430,6 +438,13 @@ struct Desugar<'s> {
     /// name and arguments, so the constructor call takes them. The
     /// solver reads no expected type into a generic call.
     expected_generic: Option<(String, String)>,
+    /// The async functions of this file, and the imported ones, declared
+    /// to return a `Result`: `try await` on a call to one is the Result.
+    result_asyncs: HashSet<String>,
+    /// A type for the first parameter of the next function literal: the
+    /// accumulator of a `reduce` takes the type of a literal initial
+    /// value, since the checker reads the function before the value.
+    param_hint: Option<String>,
     /// Where the export return starts in the side buffer, once written.
     return_at: Option<u32>,
     /// The fields of each struct declared here with their types, for the
@@ -2202,6 +2217,27 @@ impl<'s> Desugar<'s> {
         }
 
         for stmt in &block.stmts {
+            let returns_result = |body: &FunctionBody| {
+                body.is_async.is_some()
+                    && body
+                        .ret_type
+                        .is_some_and(|rt| self.text_of(rt).trim_start().starts_with("Result<"))
+            };
+
+            match stmt {
+                Stmt::Function(f) if f.path.len() == 1 && returns_result(&f.body) => {
+                    let name = self.text_of(f.path[0]).to_string();
+                    self.result_asyncs.insert(name);
+                }
+
+                Stmt::LocalFunction(f) if returns_result(&f.body) => {
+                    let name = self.text_of(f.name).to_string();
+                    self.result_asyncs.insert(name);
+                }
+
+                _ => {}
+            }
+
             let declared = match stmt {
                 Stmt::TypeAlias(t) => Some(t.name),
 
@@ -3625,6 +3661,33 @@ fn join_tests(tests: &[String]) -> String {
     }
 }
 
+/// Whether a block, or a nested block of it, returns a value. A function
+/// literal inside has its own returns and does not count.
+fn returns_value(block: &Block) -> bool {
+    block.stmts.iter().any(|stmt| match stmt {
+        Stmt::Return(r) => !r.values.is_empty(),
+
+        _ => stmt_children(stmt).iter().any(|child| match child {
+            Child::Block(b) => returns_value(b),
+
+            _ => false,
+        }),
+    })
+}
+
+/// The type of a literal, for a parameter that takes its value.
+fn literal_type(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Number(_) => Some("number".to_string()),
+
+        Expr::String(_) | Expr::InterpString(_) | Expr::Interp { .. } => Some("string".to_string()),
+
+        Expr::True(_) | Expr::False(_) => Some("boolean".to_string()),
+
+        _ => None,
+    }
+}
+
 fn if_has_local(i: &If) -> bool {
     i.branches
         .iter()
@@ -4025,7 +4088,11 @@ impl<'s> Desugar<'s> {
     /// the span.
     fn keep_lines(&mut self, span: TokSpan, before: u32) {
         let start = self.byte_start(span) as usize;
-        let end = self.byte_end(span) as usize;
+        // Trailing whitespace of the span copies after the statement.
+        let end = start
+            + self.src[start..self.byte_end(span) as usize]
+                .trim_end()
+                .len();
         let want = self.src[start..end].matches('\n').count();
         let have = self.r.newlines_since(before);
 
@@ -4758,6 +4825,22 @@ impl<'s> Desugar<'s> {
     fn expr(&mut self, e: &Expr) {
         let anchor = self.byte_start(e.span());
 
+        if let Expr::Call {
+            method: Some(m),
+            args: CallArgs::Paren(args),
+            ..
+        } = e
+            && self.text_of(*m) == "reduce"
+            && let [Expr::Function { body, .. }, init] = args.as_slice()
+            && body
+                .params
+                .first()
+                .is_some_and(|p| p.ty.is_none() && p.destructure.is_none())
+            && let Some(ty) = literal_type(init)
+        {
+            self.param_hint = Some(ty);
+        }
+
         match e {
             Expr::Name(span) => {
                 let name = self.text_of(*span);
@@ -4967,7 +5050,9 @@ impl<'s> Desugar<'s> {
                 self.if_expr_with_locals(*span, branches, else_value);
             }
 
-            Expr::Function { body, .. } if function_needs_rewrite(body) => {
+            Expr::Function { body, .. }
+                if function_needs_rewrite(body) || self.param_hint.is_some() =>
+            {
                 self.function_with_header(e.span(), body);
             }
 
@@ -5103,8 +5188,17 @@ impl<'s> Desugar<'s> {
             Expr::Await { operand: inner, .. } => {
                 let x = self.render_to_string(inner);
                 let std = self.std();
+                // A call to an async function declared to return a Result
+                // settles with the Result: the typed form says so.
+                let known = matches!(&**inner, Expr::Call { func, method: None, .. }
+                    if matches!(&**func, Expr::Name(n) if self.result_asyncs.contains(self.text_of(*n))));
+                let helper = if known {
+                    "try_await_result"
+                } else {
+                    "try_await"
+                };
 
-                format!("{std}.try_await({x})")
+                format!("{std}.{helper}({x})")
             }
 
             other => self.render_to_string(other),
@@ -6733,7 +6827,9 @@ impl<'s> Desugar<'s> {
         let mut prologue: Vec<String> = Vec::new();
         let mut param_temp = 0;
 
-        for p in &body.params {
+        let param_hint = self.param_hint.take();
+
+        for (idx, p) in body.params.iter().enumerate() {
             let ps = self.byte_start(p.name);
             self.copy(cursor, ps);
 
@@ -6756,6 +6852,12 @@ impl<'s> Desugar<'s> {
                 && let Some(target) = self.self_type.clone()
             {
                 self.generate(cursor, &format!(": {target}"));
+            } else if idx == 0
+                && p.ty.is_none()
+                && p.destructure.is_none()
+                && let Some(hint) = &param_hint
+            {
+                self.generate(cursor, &format!(": {hint}"));
             }
 
             if let Some(t) = p.ty {
@@ -6816,6 +6918,13 @@ impl<'s> Desugar<'s> {
             }
 
             cursor = re;
+        } else if body.is_async.is_some() && !returns_value(&body.block) {
+            // An async body that returns nothing resolves to nothing: the
+            // checker would infer `Future<unknown>` from the wrapper.
+            // `()` is no type argument, so nil stands in; the editor
+            // reads it back as `Future<()>`.
+            let std = self.std();
+            self.generate(cursor, &format!(": {std}.Future<nil>"));
         }
 
         // 4. The prologue and the async wrapper, on the header line.
@@ -6832,10 +6941,17 @@ impl<'s> Desugar<'s> {
             lead.push_str(p);
         }
 
+        // A body that returns nothing resolves to nil: the wrapper alone
+        // would infer `Future<unknown>`, which the header's `Future<nil>`
+        // refuses.
+        let to_nil =
+            body.is_async.is_some() && body.ret_type.is_none() && !returns_value(&body.block);
+
         if body.is_async.is_some() {
             let std = self.std();
             lead.push_str(&format!(
-                " return {std}.future(function({})",
+                " return {}{std}.future(function({})",
+                if to_nil { "(" } else { "" },
                 if has_vararg { "..." } else { "" }
             ));
         }
@@ -6852,10 +6968,14 @@ impl<'s> Desugar<'s> {
         self.copy(after, end_tok.start);
 
         if body.is_async.is_some() {
-            self.generate(
-                end_tok.start,
-                if has_vararg { "end, ...) " } else { "end) " },
-            );
+            let std = self.std();
+            let close = if has_vararg { "end, ...)" } else { "end)" };
+            let text = if to_nil {
+                format!("{close} :: any) :: {std}.Future<nil> ")
+            } else {
+                format!("{close} ")
+            };
+            self.generate(end_tok.start, &text);
         }
 
         self.copy(end_tok.start, end_tok.end);

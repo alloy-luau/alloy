@@ -130,7 +130,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "interface",
-        "```alloy\ninterface Name extends Base as\n    field: T\nend\n```\nA structural object shape, sugar over `type`. A known base flattens into one table type; any other base joins with `&`.",
+        "```alloy\ninterface Name extends Base as\n    field: T\nend\n```\nA structural object shape, sugar over `type`. A known base flattens into one table type; any other base joins with `&`. A field takes no `private` or `public`: an interface is a shape other code sees whole.",
     ),
     (
         "enum",
@@ -175,11 +175,11 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "async",
-        "```alloy\nasync function f() ... end\nasync do ... end\n```\nReturns a Future. The body runs on `task.spawn` under `xpcall`, and the Future memoizes the result.",
+        "```alloy\nasync function f() ... end\nasync do ... end\n```\nReturns a Future. The body runs on `task.spawn` under `xpcall`, and the Future memoizes the result. `async function f(): T` is `Future<T>`; without a return type, a body that returns a value infers `T`, and one that returns nothing is `Future<()>`.",
     ),
     (
         "await",
-        "```alloy\nawait expr\n```\nYields until the Future settles, then returns its value or rethrows its error. Accepts a Future or any value with `andThen`.",
+        "```alloy\nawait expr\n```\nYields until the Future settles, then returns its value or rethrows its error. Accepts a Future or any value with `andThen`.\n\n`try await f()` turns a rejection into an Err. When `f` is an async function declared to return a `Result`, the Result it settles with is the value, not an Ok around it.",
     ),
     (
         "try",
@@ -392,7 +392,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Result",
-        "```alloy\nlocal r: Result<number, string> = Ok(1)\nlocal v = r:unwrap_or(0)\n```\n`Ok(value)` or `Err(error)`, from the std. `try` turns a throw into an Err; `?` returns an Err early.\n\nMethods: `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `is_ok`, `is_err`, `ok`. `Result.pcall(f, ...)` wraps a throwing call.",
+        "```alloy\nlocal r: Result<number, string> = Ok(1)\nlocal v = r:unwrap_or(0)\n```\n`Ok(value)` or `Err(error)`, from the std. `try` turns a throw into an Err; `?` returns an Err early.\n\nMethods: `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `is_ok`, `is_err`, `ok`. `Result.pcall(f, ...)` wraps a throwing call.\n\n`unwrap_or(d)` is `T | D`, so `r:unwrap_or(nil)` is `T?`. `map` and `map_err` yield a Result of the same surface whose own `map` is `any`: Luau rejects an alias that names itself with other arguments. `Result<T, E>` is covariant, so a `Result<Boost, E>` passes where `Result<any, E>` is asked.",
     ),
     (
         "Ok",

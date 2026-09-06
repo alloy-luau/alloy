@@ -84,6 +84,71 @@ pub fn exported_trait_defaults(source: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// The exported async functions whose declared return type is a
+/// `Result`. A `try await` on one yields the Result itself, so the
+/// emit calls `try_await_result` there.
+pub fn exported_result_asyncs(source: &str) -> Vec<String> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| {
+        let t = toks[span.start as usize];
+
+        source[t.start as usize..t.end as usize].to_string()
+    };
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let alloy_syntax::ast::Stmt::Function(f) = stmt
+            && f.exported
+            && f.body.is_async.is_some()
+            && f.body.ret_type.is_some_and(|rt| text(rt) == "Result")
+            && f.path.len() == 1
+        {
+            out.push(text(f.path[0]));
+        }
+    }
+
+    out
+}
+
+/// The `Result`-returning async functions of every module a source
+/// imports, flat.
+pub fn import_result_asyncs(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<String> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut out = Vec::new();
+
+    for spec in import_specs(source) {
+        let Some(path) = resolve(&spec, from, aliases) else {
+            continue;
+        };
+
+        if seen.contains(&path) {
+            continue;
+        }
+
+        seen.push(path.clone());
+
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            out.extend(exported_result_asyncs(&text));
+        }
+    }
+
+    out
+}
+
+/// The import result asyncs of a file under the nearest `alloy.toml`.
+pub fn import_result_asyncs_for_file(path: &Path, source: &str) -> Vec<String> {
+    let (from, aliases) = file_context(path);
+
+    import_result_asyncs(source, &from, &aliases)
+}
+
 /// For each import of a source, the default methods of the traits the
 /// module exports, flat: `(trait, methods)`.
 pub fn import_trait_defaults(

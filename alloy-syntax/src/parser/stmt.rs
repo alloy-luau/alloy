@@ -2068,6 +2068,15 @@ impl<'a> Parser<'a> {
         let fields = self.fields()?;
         self.expect("end")?;
 
+        // An interface is a shape other code sees whole: a field of it
+        // has no visibility.
+        for v in fields.iter().filter_map(|f| f.visibility) {
+            self.report_at(
+                self.toks[v.start as usize].start as usize,
+                "an interface field has no visibility; `private` and `public` belong to a struct",
+            );
+        }
+
         Ok(Stmt::Interface(InterfaceDecl {
             exported,
             name,

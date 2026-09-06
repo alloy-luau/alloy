@@ -572,6 +572,21 @@ mod tests {
     }
 
     #[test]
+    fn a_module_and_names_import_in_one_line() {
+        let out =
+            compile("import jecs, { world, type Entity } from \"@pkg/jecs\"\nprint(jecs, world)\n")
+                .unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.starts_with(
+                "local jecs = require(\"@pkg/jecs\") local world = jecs.world type Entity = jecs.Entity\n"
+            ),
+            "{}",
+            out.ship
+        );
+    }
+
+    #[test]
     fn nil_coalescing_desugars() {
         assert_eq!(
             desugar("local v = a ?? 0\n"),

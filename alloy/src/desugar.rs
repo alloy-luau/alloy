@@ -470,6 +470,46 @@ impl<'s> Desugar<'s> {
                 self.generate(anchor, &format!("local {name} = require({path})"));
             }
 
+            // `import M, { a } from "p"`: the module binds by its name, and
+            // the names read from it: `local M = require("p") local a = M.a`.
+            ImportKind::Both(module, specs) => {
+                let base = self.text_of(*module).to_string();
+                let mut text = format!("local {base} = require({path})");
+                let mut names = Vec::new();
+                let mut values = Vec::new();
+                let mut types = Vec::new();
+
+                for sp in specs {
+                    let name = self.text_of(sp.name).to_string();
+                    let local = sp
+                        .alias
+                        .map(|a| self.text_of(a).to_string())
+                        .unwrap_or(name.clone());
+
+                    if sp.is_type {
+                        types.push(format!("type {local} = {base}.{name}"));
+                    } else {
+                        names.push(local);
+                        values.push(format!("{base}.{name}"));
+                    }
+                }
+
+                if !names.is_empty() {
+                    text.push_str(&format!(
+                        " local {} = {}",
+                        names.join(", "),
+                        values.join(", ")
+                    ));
+                }
+
+                for t in types {
+                    text.push(' ');
+                    text.push_str(&t);
+                }
+
+                self.generate(anchor, &text);
+            }
+
             ImportKind::Named(specs) => {
                 let temp = self.hoist_text(format!("require({path})"), anchor);
                 let mut names = Vec::new();
@@ -3649,6 +3689,14 @@ impl<'s> Desugar<'s> {
 
             Stmt::Import(i) => match &i.kind {
                 ImportKind::Namespace(n) => self.declare_name(*n),
+
+                ImportKind::Both(n, specs) => {
+                    self.declare_name(*n);
+
+                    for sp in specs {
+                        self.declare_name(sp.alias.unwrap_or(sp.name));
+                    }
+                }
 
                 ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
                     for sp in specs {

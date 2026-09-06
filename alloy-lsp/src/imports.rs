@@ -317,6 +317,17 @@ pub fn bound_names(src: &str) -> Vec<String> {
         }
 
         if let Some(open) = rest.find('{') {
+            // `import M, { a }`: the module binds by its name too.
+            let head = rest[..open].trim_end();
+
+            if let Some(module) = head.strip_suffix(',') {
+                let module = module.trim();
+
+                if !module.is_empty() && module.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    out.push(module.to_string());
+                }
+            }
+
             let close = rest[open..]
                 .find('}')
                 .map(|c| open + c)

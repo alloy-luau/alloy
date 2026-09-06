@@ -308,6 +308,8 @@ pub struct Import {
 pub enum ImportKind {
     /// `* as M` and `M`: the whole module.
     Namespace(TokSpan),
+    /// `M, { a, b as c }`: the whole module and names picked from it.
+    Both(TokSpan, Vec<ImportSpec>),
     /// `{ a, b as c, type T }`.
     Named(Vec<ImportSpec>),
     /// `type { T, U }`: erased in the ship artifact.

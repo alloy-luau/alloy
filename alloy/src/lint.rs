@@ -1015,6 +1015,10 @@ pub fn run(
         let bound: Vec<u32> = match &im.kind {
             ImportKind::Namespace(n) => vec![n.start],
 
+            ImportKind::Both(n, specs) => std::iter::once(n.start)
+                .chain(specs.iter().map(|s| s.alias.unwrap_or(s.name).start))
+                .collect(),
+
             ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => specs
                 .iter()
                 .map(|s| s.alias.unwrap_or(s.name).start)
@@ -1132,6 +1136,14 @@ mod tests {
         assert_eq!(
             names("import { a, b } from \"./m\"\nprint(a)\n"),
             vec!["unused_import"]
+        );
+        assert_eq!(
+            names("import m, { a } from \"./m\"\nprint(a)\n"),
+            vec!["unused_import"]
+        );
+        assert_eq!(
+            names("import m, { a } from \"./m\"\nprint(a, m)\n"),
+            Vec::<&str>::new()
         );
     }
 

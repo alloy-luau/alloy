@@ -1764,7 +1764,12 @@ impl<'a> Parser<'a> {
 
             "type" => self.text_at(2) == "{",
 
-            _ => self.name_at(1) && self.text_at(2) == "from",
+            // `import M from` and `import M, { a } from`.
+            _ => {
+                self.name_at(1)
+                    && (self.text_at(2) == "from"
+                        || (self.text_at(2) == "," && self.text_at(3) == "{"))
+            }
         }
     }
 
@@ -1787,7 +1792,16 @@ impl<'a> Parser<'a> {
         } else if self.at("{") {
             ImportKind::Named(self.import_specs()?)
         } else {
-            ImportKind::Namespace(self.expect_name()?)
+            let module = self.expect_name()?;
+
+            // `import M, { a } from`: the module and names from it.
+            if self.at(",") && self.text_at(1) == "{" {
+                self.bump();
+
+                ImportKind::Both(module, self.import_specs()?)
+            } else {
+                ImportKind::Namespace(module)
+            }
         };
 
         self.expect("from")?;

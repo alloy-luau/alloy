@@ -167,6 +167,14 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
         Stmt::Import(i) => match &i.kind {
             ImportKind::Namespace(n) => declares.push(name_of(src, toks, *n)),
 
+            ImportKind::Both(n, specs) => {
+                declares.push(name_of(src, toks, *n));
+
+                for s in specs {
+                    declares.push(name_of(src, toks, s.alias.unwrap_or(s.name)));
+                }
+            }
+
             ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
                 for s in specs {
                     declares.push(name_of(src, toks, s.alias.unwrap_or(s.name)));

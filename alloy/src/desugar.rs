@@ -3294,9 +3294,11 @@ impl<'s> Desugar<'s> {
             lead.push_str("local ");
         }
 
-        self.generate(start, &lead);
-        // An attribute on its own line keeps that line.
+        // The lead sits on the declaration's line, so the function and
+        // its fold start there. An attribute on its own line keeps that
+        // line, blank.
         self.blank_lines(start, decl_start);
+        self.generate(decl_start, &lead);
         let rest = TokSpan::new(first_tok as usize, span.end as usize);
 
         if function_needs_rewrite(body) {
@@ -4005,13 +4007,40 @@ impl<'s> Desugar<'s> {
         for stmt in &block.stmts {
             let start = self.byte_start(stmt.span());
             self.copy(cursor, start);
+            let before = self.r.out_len();
             self.stmt(stmt);
+            self.keep_lines(stmt.span(), before);
             cursor = self.byte_end(stmt.span());
         }
 
         self.copy(cursor, self.byte_end(block.span));
         self.scopes.pop();
         self.declared.pop();
+    }
+
+    /// A statement's output holds every newline of its source span, so
+    /// the lines after it stay where they are. A replacement written as
+    /// one line over several source lines, `local x = if local ... then
+    /// ... else ...`, gets the missing newlines copied from the end of
+    /// the span.
+    fn keep_lines(&mut self, span: TokSpan, before: u32) {
+        let start = self.byte_start(span) as usize;
+        let end = self.byte_end(span) as usize;
+        let want = self.src[start..end].matches('\n').count();
+        let have = self.r.newlines_since(before);
+
+        if have >= want {
+            return;
+        }
+
+        let positions: Vec<u32> = self.src[start..end]
+            .match_indices('\n')
+            .map(|(i, _)| (start + i) as u32)
+            .collect();
+
+        for nl in &positions[positions.len() - (want - have)..] {
+            self.r.copy(*nl, nl + 1);
+        }
     }
 
     /// Renders a function body: its temps start fresh behind a barrier, and
@@ -4430,9 +4459,40 @@ impl<'s> Desugar<'s> {
 
             Stmt::Delete { expr, span } => {
                 let anchor = self.byte_start(*span);
-                let target = self.render_to_string(expr);
                 let std = self.std();
-                self.generate(anchor, &format!("{std}.delete({target})"));
+                // The target renders in place, so the editor maps a
+                // position inside it.
+                self.generate(anchor, &format!("{std}.delete("));
+                self.expr(expr);
+                let close = self.byte_end(*span);
+                let mut tail = ")".to_string();
+
+                // A field or an index empties after its value is gone, so
+                // the table holds nothing destroyed. The check artifact
+                // writes through `any`: a `read` field takes no assignment.
+                if let Expr::Index {
+                    object,
+                    key,
+                    optional: false,
+                    ..
+                } = expr
+                {
+                    let obj = self.render_to_string(object);
+                    let slot = match key {
+                        IndexKey::Field(n) => format!(".{}", self.text_of(*n)),
+
+                        IndexKey::Computed(e) => format!("[{}]", self.render_to_string(e)),
+                    };
+                    // A `;` keeps `f(x) (y).z = nil` from reading as a call.
+                    let receiver = if self.options.check {
+                        format!("; ({obj} :: any)")
+                    } else {
+                        format!(" {obj}")
+                    };
+                    tail.push_str(&format!("{receiver}{slot} = nil"));
+                }
+
+                self.generate(close, &tail);
             }
 
             Stmt::Function(f) if function_needs_rewrite(&f.body) => {

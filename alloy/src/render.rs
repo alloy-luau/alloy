@@ -372,6 +372,13 @@ impl<'s> Renderer<'s> {
     }
 
     /// Copies a byte range of the source.
+    /// The newlines the output gained since it was `from` bytes long.
+    pub fn newlines_since(&self, from: u32) -> usize {
+        self.out[(from as usize).min(self.out.len())..]
+            .matches('\n')
+            .count()
+    }
+
     pub fn copy(&mut self, start: u32, end: u32) {
         if start >= end {
             return;

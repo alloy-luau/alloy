@@ -756,11 +756,13 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
         && has("Fire")
         && has("DisconnectAll")
     {
-        // `Connect: (self: t1, f: (A, B) -> ()) -> t2`
+        // `Connect: (self: t1, handler: (A, B) -> ()) -> t2`: the
+        // handler's parameters are the signal's arguments.
         let args = sig
-            .find("f: (")
-            .and_then(|i| {
-                let from = i + 4;
+            .find("handler: (")
+            .map(|i| i + "handler: (".len())
+            .or_else(|| sig.find("f: (").map(|i| i + "f: (".len()))
+            .and_then(|from| {
                 balanced_len(&sig[from - 1..]).map(|len| sig[from..from - 1 + len - 1].to_string())
             })
             .unwrap_or_default();

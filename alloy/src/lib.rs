@@ -496,6 +496,37 @@ mod tests {
     }
 
     #[test]
+    fn structs_and_enums_print_by_default_unless_the_author_writes_a_printer() {
+        let src = "struct V as\n    x: number\n    y: number\nend\nenum Msg as\n    Move(number)\n    Quit\nend\nprint(new V { x = 1, y = 2 }, Msg.Move(1))\n";
+        let out = compile(src).unwrap();
+        assert!(
+            out.ship.contains(
+                "V.__tostring = function(s) return __alloy.show_struct(\"V\", s, { \"x\", \"y\" }) end"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.ship.contains(
+                "Msg.__tostring = function(v) return __alloy.show_variant(\"Msg\", v) end"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(out.check.contains("function(s: V)"), "{}", out.check);
+
+        let own = "struct V as\n    x: number\nend\nimpl V\n    function to_string(self): string\n        return `v{self.x}`\n    end\nend\n@derive(Debug)\nstruct W as\n    x: number\nend\n";
+        let out = compile(own).unwrap();
+        assert!(!out.ship.contains("show_struct"), "{}", out.ship);
+        assert!(
+            out.ship
+                .contains("W.__tostring = function(s) return \"W { \""),
+            "{}",
+            out.ship
+        );
+    }
+
+    #[test]
     fn nil_coalescing_desugars() {
         assert_eq!(
             desugar("local v = a ?? 0\n"),

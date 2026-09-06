@@ -199,6 +199,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         macros: HashMap::new(),
         test_names: Vec::new(),
         macro_serial: 0,
+        structs_with_to_string: HashSet::new(),
         mapped_used: Vec::new(),
     };
 
@@ -416,6 +417,9 @@ struct Desugar<'s> {
     mapped_used: Vec<&'static str>,
     /// Expansions so far, for the unique names of a body's locals.
     macro_serial: u32,
+    /// Structs whose impl writes `to_string`: they print through it, so
+    /// the default printer stays out.
+    structs_with_to_string: HashSet<String>,
 }
 
 /// A macro body captured as one-line source, so an expansion re-parses.
@@ -714,10 +718,22 @@ impl<'s> Desugar<'s> {
         }
 
         let export = if e.exported { "export " } else { "" };
+        // A variant with a payload prints as `Msg.Move(1, 2)`; a unit
+        // variant is a string and prints as its name already.
+        let printer = if self.options.definitions {
+            String::new()
+        } else {
+            let std = self.std();
+
+            format!(
+                " {name}.__tostring = function(v) return {std}.show_variant({}, v) end",
+                luau_string(&name)
+            )
+        };
         self.generate(
             end_tok.start,
             &format!(
-                "function {name}.is(v) return {test} end {export}type {name} = {}",
+                "function {name}.is(v) return {test} end{printer} {export}type {name} = {}",
                 types.join(" | ")
             ),
         );
@@ -1918,6 +1934,14 @@ impl<'s> Desugar<'s> {
                 Stmt::Impl(i) => {
                     let target = self.text_of(i.target).to_string();
 
+                    if i.methods.iter().any(|m| {
+                        m.path
+                            .first()
+                            .is_some_and(|n| self.text_of(*n) == "to_string")
+                    }) {
+                        self.structs_with_to_string.insert(target.clone());
+                    }
+
                     if i.trait_name.is_none()
                         && let Some(ctor) = i.methods.iter().find_map(|m| {
                             m.path
@@ -2254,6 +2278,7 @@ impl<'s> Desugar<'s> {
 
         // Derives and attributes on the `end` line.
         let mut tail = type_line;
+        let mut derives_debug = false;
 
         for a in &st.attributes {
             let Some(aname) = a.name else { continue };
@@ -2261,10 +2286,29 @@ impl<'s> Desugar<'s> {
             if self.text_of(aname) == "derive" {
                 for arg in &a.args {
                     let which = self.text_of(arg.span()).to_string();
+                    derives_debug |= which == "Debug";
                     tail.push(' ');
                     tail.push_str(&self.derive_struct(&name, &which, &field_names, &st.fields));
                 }
             }
+        }
+
+        // The default printer: `Name { x = 1, y = 2 }`. A `to_string` in
+        // the struct's impl, or `@derive(Debug)`, writes its own and this
+        // one stays out; a `__tostring` set later replaces it either way.
+        if !derives_debug && !self.structs_with_to_string.contains(&name) {
+            let std = self.std();
+            let sn = if self.options.check && !self.generic_types.contains(&name) {
+                format!(": {name}")
+            } else {
+                String::new()
+            };
+            let fields: Vec<String> = field_names.iter().map(|f| luau_string(f)).collect();
+            tail.push_str(&format!(
+                " {name}.__tostring = function(s{sn}) return {std}.show_struct({}, s, {{ {} }}) end",
+                luau_string(&name),
+                fields.join(", ")
+            ));
         }
 
         let own = self.attr_table(&st.attributes);

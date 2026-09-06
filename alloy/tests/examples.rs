@@ -164,6 +164,11 @@ fn damaged_examples_never_panic() {
             continue;
         }
 
+        // A file with no bytes has nothing to damage.
+        if src.is_empty() {
+            continue;
+        }
+
         let options = EmitOptions {
             file_name: name.clone(),
             definitions: name.ends_with(".d.aly"),

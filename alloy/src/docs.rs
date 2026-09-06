@@ -118,7 +118,7 @@ pub const TABLE: &[(&str, &str)] = &[
     // Declarations
     (
         "struct",
-        "```alloy\nstruct Name as\n    field: T\nend\n```\nA record with fields. `impl Name` adds methods. `Name { x = 1 }` is the raw constructor and `new Name(...)` calls `Name.new`. `@derive(Eq, Debug, Clone)` on the line before generates methods.\n\nEmits a table type plus a metatable with `__index`.",
+        "```alloy\nstruct Name as\n    field: T\nend\n```\nA record with fields. `impl Name` adds methods. `Name { x = 1 }` is the raw constructor and `new Name(...)` calls `Name.new`. `@derive(Eq, Debug, Clone)` on the line before generates methods.\n\nEmits a table type plus a metatable with `__index` and a `__tostring`, so `print(v)` and `` `{v}` `` show `Name { x = 1, y = 2 }`. A `to_string` in the impl, an `impl Display`, replaces the default printer.",
     ),
     (
         "impl",
@@ -263,7 +263,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "derive:Debug",
-        "```alloy\n@derive(Debug)\n```\nGenerates `debug` and `__tostring`: the struct's name and its fields, as text.",
+        "```alloy\n@derive(Debug)\n```\nGenerates `debug` and `__tostring`: the struct's name and its fields, as text. Every struct prints that way by default; the derive adds the `debug` method, and a `to_string` in the impl replaces both.",
     ),
     (
         "derive:Clone",

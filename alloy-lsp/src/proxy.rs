@@ -1036,15 +1036,21 @@ impl Server {
                         params.insert("rootPath".to_string(), Value::String(mirror_path));
                     }
 
+                    // Every folder of the editor maps into the one mirror,
+                    // so the child gets one folder. With the same URI
+                    // listed twice it never finishes configuring its
+                    // workspaces, and every request waits forever.
                     if let Some(folders) = params
                         .get_mut("workspaceFolders")
                         .and_then(Value::as_array_mut)
                     {
-                        for folder in folders {
-                            if let Some(u) = folder.get_mut("uri") {
-                                *u = Value::String(mirror_uri.clone());
-                            }
-                        }
+                        let name = folders
+                            .first()
+                            .and_then(|f| f.get("name"))
+                            .cloned()
+                            .unwrap_or_else(|| Value::String("workspace".to_string()));
+                        folders.clear();
+                        folders.push(json!({ "uri": mirror_uri.clone(), "name": name }));
                     }
 
                     let caps = params.entry("capabilities").or_insert_with(|| json!({}));
@@ -1233,6 +1239,10 @@ impl Server {
 
                 self.forward_plain(message);
             }
+
+            // The mirror is the child's one folder, whatever the editor
+            // adds or removes on its side.
+            Some("workspace/didChangeWorkspaceFolders") => {}
 
             Some("workspace/didRenameFiles") => {
                 let files = message

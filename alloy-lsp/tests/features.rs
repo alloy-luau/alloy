@@ -293,6 +293,16 @@ print(Symbol)
 ";
 
 fn start(child: &Path, dir: &Path) -> Session {
+    let root = format!("file://{}", dir.display());
+
+    start_with(
+        child,
+        json!({ "processId": std::process::id(), "rootUri": root, "capabilities": {} }),
+    )
+}
+
+/// A session initialized with the given `initialize` params.
+fn start_with(child: &Path, init_params: Value) -> Session {
     let mut server = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_alloy-lsp"))
             .arg("--luau-lsp")
@@ -318,11 +328,7 @@ fn start(child: &Path, dir: &Path) -> Session {
         next_id: 0,
         _server: server,
     };
-    let root = format!("file://{}", dir.display());
-    let init = s.request(
-        "initialize",
-        json!({ "processId": std::process::id(), "rootUri": root, "capabilities": {} }),
-    );
+    let init = s.request("initialize", init_params);
     let triggers = init["capabilities"]["completionProvider"]["triggerCharacters"]
         .as_array()
         .cloned()
@@ -664,7 +670,8 @@ fn code_actions_offer_the_lint_rewrites() {
     let dir = std::env::temp_dir().join(format!("alloy-lsp-actions-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = "local p = workspace\nlocal n = p and p.Name\nlocal q = math.floor(#n / 2)\nprint(n, q)\n";
+    let src =
+        "local p = workspace\nlocal n = p and p.Name\nlocal q = math.floor(#n / 2)\nprint(n, q)\n";
     let file = dir.join("fix.aly");
     std::fs::write(&file, src).unwrap();
 
@@ -701,7 +708,11 @@ fn code_actions_offer_the_lint_rewrites() {
 
     let fix = list
         .iter()
-        .find(|a| a["title"].as_str().is_some_and(|t| t.contains("manual_safe_access")))
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .is_some_and(|t| t.contains("manual_safe_access"))
+        })
         .unwrap();
     assert_eq!(fix["kind"], "quickfix");
     let edit = &fix["edit"]["changes"][&uri][0];
@@ -715,4 +726,48 @@ fn code_actions_offer_the_lint_rewrites() {
     assert_eq!(all["edit"]["changes"][&uri].as_array().unwrap().len(), 2);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A multi-root workspace: the editor names several folders, and a file
+/// in a folder other than the first still hovers.
+#[test]
+fn a_multi_root_workspace_answers_hover() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let base = std::env::temp_dir().join(format!("alloy-lsp-roots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let first = base.join("crates");
+    let other = base.join("examples");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let src = "local xs = [ 1, 2 ]\nprint(xs)\n";
+    let file = other.join("list.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start_with(
+        &child,
+        json!({
+            "processId": std::process::id(),
+            "rootUri": format!("file://{}", first.display()),
+            "capabilities": {},
+            "workspaceFolders": [
+                { "uri": format!("file://{}", first.display()), "name": "crates" },
+                { "uri": format!("file://{}", other.display()), "name": "examples" },
+            ],
+        }),
+    );
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    let h = s.hover(&uri, 1, 6);
+    assert!(h.contains("Array") || h.contains("xs"), "{h}");
+
+    let _ = std::fs::remove_dir_all(&base);
 }

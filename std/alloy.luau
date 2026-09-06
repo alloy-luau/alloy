@@ -5,6 +5,72 @@
 local alloy = {}
 
 -- ---------------------------------------------------------------------------
+-- Printing. Every Alloy value has a `__tostring`, so `print(v)` and
+-- `{v}` in a string show the value and not a table address. A struct's
+-- own `to_string` replaces the default the compiler writes.
+-- ---------------------------------------------------------------------------
+
+--- The text of a value inside a printed container: a string in quotes,
+--- anything else through `tostring`.
+function alloy.show(v: any): string
+	if type(v) == "string" then
+		return `"{string.gsub(v, '["\\]', "\\%0")}"`
+	end
+	return tostring(v)
+end
+
+local function show_list(values: { any }, open: string, close: string): string
+	if #values == 0 then
+		return open .. close
+	end
+	local parts = table.create(#values)
+	for i, v in ipairs(values) do
+		parts[i] = alloy.show(v)
+	end
+	return open .. " " .. table.concat(parts, ", ") .. " " .. close
+end
+
+--- `Name { x = 1, y = 2 }`: the default printer of a struct, over its
+--- declared fields in order.
+function alloy.show_struct(name: string, s: any, fields: { string }): string
+	if #fields == 0 then
+		return name .. " {}"
+	end
+	local parts = table.create(#fields)
+	for i, f in ipairs(fields) do
+		parts[i] = f .. " = " .. alloy.show(s[f])
+	end
+	return name .. " { " .. table.concat(parts, ", ") .. " }"
+end
+
+--- `Msg.Move(1, 2)`: the printer of an enum variant with a payload.
+function alloy.show_variant(name: string, v: any): string
+	local parts = {}
+	local i = 1
+	while v["_" .. i] ~= nil do
+		table.insert(parts, alloy.show(v["_" .. i]))
+		i += 1
+	end
+	return `{name}.{v.tag}({table.concat(parts, ", ")})`
+end
+
+--- The keys of a map in a stable order, so a printed map reads the same
+--- every time.
+local function sorted_keys(t: { [any]: any }): { any }
+	local keys = {}
+	for k in pairs(t) do
+		table.insert(keys, k)
+	end
+	table.sort(keys, function(a, b)
+		if type(a) == type(b) and (type(a) == "number" or type(a) == "string") then
+			return a < b
+		end
+		return tostring(a) < tostring(b)
+	end)
+	return keys
+end
+
+-- ---------------------------------------------------------------------------
 -- Result: a tagged table. `tag` is "Ok" or "Err"; `_1` holds the payload.
 -- ---------------------------------------------------------------------------
 
@@ -96,6 +162,10 @@ function Result.pcall(f: (...any) -> ...any, ...: any): Result<any, string>
 	end
 	local failure = packed[2]
 	return Err(failure.err, failure.trace)
+end
+
+function Result.__tostring(self)
+	return `{self.tag}({alloy.show(self._1)})`
 end
 
 alloy.Result = Result
@@ -336,6 +406,15 @@ function Future.all_settled<T>(futures: { Future<T> }): Future<{ Result<T, any> 
 	end) :: any) :: Future<{ Result<T, any> }>
 end
 
+local STATE_NAMES = { [PENDING] = "pending", [RESOLVED] = "resolved", [REJECTED] = "rejected", [CANCELLED] = "cancelled" }
+
+function Future.__tostring(self)
+	if self.state == RESOLVED then
+		return `Future \{ resolved = {alloy.show(self.value)} }`
+	end
+	return `Future \{ {STATE_NAMES[self.state] or "pending"} }`
+end
+
 alloy.Future = Future
 
 -- ---------------------------------------------------------------------------
@@ -525,6 +604,10 @@ function Array.join(xs, sep: string?)
 	return table.concat(parts, sep or "")
 end
 
+function Array.__tostring(self)
+	return show_list(self, "[", "]")
+end
+
 alloy.Array = Array
 
 -- ---------------------------------------------------------------------------
@@ -622,6 +705,19 @@ end
 function HashMap.clear(self)
 	table.clear(self._items)
 	self._count = 0
+end
+
+function HashMap.__tostring(self)
+	local keys = sorted_keys(self._items)
+	if #keys == 0 then
+		return "HashMap {}"
+	end
+	local parts = table.create(#keys)
+	for i, k in ipairs(keys) do
+		local key = if type(k) == "string" and string.match(k, "^[%a_][%w_]*$") then k else `[{alloy.show(k)}]`
+		parts[i] = key .. " = " .. alloy.show(self._items[k])
+	end
+	return "HashMap { " .. table.concat(parts, ", ") .. " }"
 end
 
 alloy.HashMap = HashMap
@@ -777,6 +873,10 @@ function Set.to_array(self)
 		table.insert(out, v)
 	end
 	return setmetatable(out, Array)
+end
+
+function Set.__tostring(self)
+	return show_list(sorted_keys(self._items), "Set {", "}")
 end
 
 alloy.Set = Set
@@ -1136,6 +1236,10 @@ function Queue.__iter(self)
 	end
 end
 
+function Queue.__tostring(self)
+	return show_list(self:to_array(), "Queue [", "]")
+end
+
 alloy.Queue = Queue
 
 --- A binary heap. `pop` yields the least value under `less`, which
@@ -1244,6 +1348,10 @@ function Heap.__iter(self)
 	end
 end
 
+function Heap.__tostring(self)
+	return show_list(self:to_array(), "Heap [", "]")
+end
+
 alloy.Heap = Heap
 
 --- A cleanup bag. `add` takes anything `delete` accepts, or a function,
@@ -1302,6 +1410,11 @@ function Scope.len(self)
 end
 
 Scope.Destroy = Scope.clean
+
+function Scope.__tostring(self)
+	local n = #self._items
+	return `Scope \{ {n} {if n == 1 then "item" else "items"} }`
+end
 
 alloy.Scope = Scope
 
@@ -1525,6 +1638,10 @@ end
 
 function Iter.__iter(self)
 	return self._next
+end
+
+function Iter.__tostring()
+	return "Iter { lazy }"
 end
 
 alloy.Iter = Iter

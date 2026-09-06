@@ -1912,28 +1912,97 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            let name = self.expect_name()?;
-            self.expect(":")?;
-            let ty = self.type_()?;
-            let default = if self.eat("=") {
-                Some(self.expr()?)
-            } else {
-                None
-            };
-            fields.push(Field {
-                attributes,
-                visibility,
-                modifier,
-                name,
-                ty,
-                default,
-                span: TokSpan::new(f_start, self.pos),
-            });
+            // A field still being typed, a modifier alone or a name with
+            // no type, gets one diagnostic that names what is missing.
+            // The rest of the line is skipped and the declaration goes
+            // on, so the file around it still parses.
+            match self.field_rest() {
+                Ok((name, ty, default)) => {
+                    fields.push(Field {
+                        attributes,
+                        visibility,
+                        modifier,
+                        name,
+                        ty,
+                        default,
+                        span: TokSpan::new(f_start, self.pos),
+                    });
 
-            let _ = self.eat(",") || self.eat(";");
+                    let _ = self.eat(",") || self.eat(";");
+                }
+
+                Err((offset, message)) => {
+                    self.report_at(offset, &message);
+
+                    // Past the rest of the line, and past at least one
+                    // token, so a broken field that starts a line cannot
+                    // hold the loop in place.
+                    if self.pos == f_start && !self.at_end() {
+                        self.bump();
+                    }
+
+                    while !self.at_end() && !self.at("end") && !self.newline_before_pos() {
+                        self.bump();
+                    }
+                }
+            }
         }
 
         Ok(fields)
+    }
+
+    /// `name: T = default` of a field, after its attributes and
+    /// modifiers. An error carries the offset to report at and what the
+    /// field lacks.
+    fn field_rest(&mut self) -> Result<(TokSpan, TokSpan, Option<Expr>), (usize, String)> {
+        let prev = self
+            .pos
+            .checked_sub(1)
+            .and_then(|i| self.toks.get(i))
+            .map(|t| {
+                (
+                    t.start as usize,
+                    &self.src[t.start as usize..t.end as usize],
+                )
+            });
+        let here = self.toks.get(self.pos).map(|t| t.start as usize);
+
+        if !self.name_at(0) {
+            return Err(match prev {
+                Some((at, word @ ("private" | "public" | "read" | "write"))) => (
+                    at,
+                    format!("`{word}` needs a field name after it: `{word} name: T`"),
+                ),
+
+                _ => (
+                    here.unwrap_or(self.src.len()),
+                    format!("expected a field name, found {}", self.found()),
+                ),
+            });
+        }
+
+        let name_at = self.toks[self.pos].start as usize;
+        let name = TokSpan::new(self.pos, self.pos + 1);
+        let word = self.text().to_string();
+        self.bump();
+
+        if !self.eat(":") {
+            return Err((name_at, format!("field `{word}` needs a type: `{word}: T`")));
+        }
+
+        let ty = self.type_().map_err(|e| {
+            (
+                e.offset,
+                format!("field `{word}` needs a type after `:`; {}", e.message),
+            )
+        })?;
+        let default = if self.eat("=") {
+            Some(self.expr().map_err(|e| (e.offset, e.message))?)
+        } else {
+            None
+        };
+
+        Ok((name, ty, default))
     }
 
     fn struct_decl(

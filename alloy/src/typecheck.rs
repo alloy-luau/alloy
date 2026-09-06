@@ -24,6 +24,9 @@ pub struct CheckSource {
     pub map: SpanMap,
     /// One-based lines where `unused_variable` fired.
     pub unused_lines: Vec<usize>,
+    /// One-based lines that carry a compiler diagnostic; the checker's
+    /// reports there describe an unreliable emit and stay out.
+    pub error_lines: Vec<usize>,
 }
 
 /// One report of the checker, on a source.
@@ -411,6 +414,10 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         }
 
+        if f.error_lines.contains(&mapped.0) {
+            continue;
+        }
+
         // A require the checker could not resolve names what the source
         // asked for; it is an error, as the require fails at runtime.
         let (kind, message) = if message.starts_with("Unknown require") {
@@ -666,6 +673,7 @@ mod tests {
             check: out.check.clone(),
             map: out.map,
             unused_lines: Vec::new(),
+            error_lines: Vec::new(),
         };
         assert_eq!(map_position(&f, 1, 19, true, "Expected"), Some((1, 19)));
         let silenced = CheckSource {

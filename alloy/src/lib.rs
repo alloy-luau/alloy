@@ -587,6 +587,104 @@ mod tests {
     }
 
     #[test]
+    fn a_half_typed_field_reports_once_and_the_struct_still_parses() {
+        let src = "struct T as\n    public count: number\n    private \nend\nlocal t = new T { count = 1 }\nprint(t)\n";
+        let out = compile(src).unwrap();
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec!["`private` needs a field name after it: `private name: T`"],
+            "{messages:?}"
+        );
+        // The diagnostic sits on the modifier, not on the `end` below.
+        assert_eq!(
+            out.diagnostics[0].start as usize,
+            src.find("private").unwrap()
+        );
+        assert!(
+            out.ship.contains("local t = T({ count = 1 })"),
+            "{}",
+            out.ship
+        );
+
+        let src = "struct T as\n    name\n    x: number\nend\n";
+        let out = compile(src).unwrap();
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec!["field `name` needs a type: `name: T`"],
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn new_on_a_name_without_a_constructor_is_one_diagnostic_over_the_expression() {
+        let src = "attribute icon(asset: string) on struct\nenum Msg as\n    Quit\nend\nlocal a = new icon { }\nlocal m = new Msg { }\nprint(a, m)\n";
+        let out = compile(src).unwrap();
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(
+            messages[0].starts_with("`icon` is an attribute and cannot be constructed with `new`"),
+            "{messages:?}"
+        );
+        assert!(
+            messages[1].starts_with("`Msg` is an enum and cannot be constructed with `new`"),
+            "{messages:?}"
+        );
+        let whole = &src[out.diagnostics[0].start as usize..out.diagnostics[0].end as usize];
+        assert_eq!(whole, "new icon { }");
+        assert_eq!(docs::kind_for(messages[0]), "ConstructorError");
+    }
+
+    #[test]
+    fn an_imported_struct_constructs_through_the_runtime_and_types_in_the_check() {
+        let src = "import { Counter } from \"./counter\"\nlocal c = new Counter {\n    name = \"hits\",\n}\nlocal d = new Counter(1) { name = \"x\" }\nprint(c, d)\n";
+        let out = compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        // The table copies as it is, lines and all: the runtime constructs
+        // in the ship artifact, the typed constructor in the check one.
+        assert!(
+            out.ship
+                .contains("local c = __alloy.construct(Counter, {\n    name = \"hits\",\n})"),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.check
+                .contains("local c = Counter.new({\n    name = \"hits\",\n})"),
+            "{}",
+            out.check
+        );
+        // With arguments the fields land one per line after the call.
+        assert!(
+            out.ship.contains("local d = Counter.new(1) d.name = \"x\""),
+            "{}",
+            out.ship
+        );
+        assert_eq!(out.ship.lines().count(), src.lines().count());
+    }
+
+    #[test]
+    fn diagnostics_carry_a_kind() {
+        assert_eq!(
+            docs::kind_for("`new` is a reserved word and cannot be a name"),
+            "ReservedWord"
+        );
+        assert_eq!(
+            docs::kind_for("expected a name, found `end`"),
+            "SyntaxError"
+        );
+        assert_eq!(
+            docs::kind_for("this match is not exhaustive: `Msg` has no arm for `Leave`"),
+            "ExhaustiveMatch"
+        );
+        assert_eq!(
+            docs::labeled("internal: generated text holds a newline"),
+            "InternalError: internal: generated text holds a newline"
+        );
+    }
+
+    #[test]
     fn nil_coalescing_desugars() {
         assert_eq!(
             desugar("local v = a ?? 0\n"),

@@ -114,7 +114,7 @@ impl State {
                     "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
                     "severity": 1,
                     "source": "Alloy",
-                    "message": d.message,
+                    "message": alloy::docs::labeled(&d.message),
                 });
 
                 if let Some(code) = alloy::docs::code_for(&d.message)
@@ -348,6 +348,56 @@ impl State {
 
                 item["insertTextFormat"] = json!(if payload.is_empty() { 1 } else { 2 });
                 item.as_object_mut().map(|o| o.remove("command"));
+            }
+        }
+    }
+
+    /// A name the workspace declares completes as what it is: an
+    /// attribute shows `@icon(asset: string)`, a struct `struct V`, in
+    /// place of the table type the child sees.
+    fn mark_declarations(&self, result: &mut Value) {
+        let items = match result {
+            Value::Array(items) => items,
+
+            Value::Object(obj) => match obj.get_mut("items").and_then(Value::as_array_mut) {
+                Some(items) => items,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+
+        for item in items.iter_mut() {
+            let Some(label) = item["label"].as_str().map(str::to_string) else {
+                continue;
+            };
+
+            if label.contains('.') || label.starts_with(['@', '$']) {
+                continue;
+            }
+
+            let sigil = format!("@{label}");
+            let decl = self
+                .docs
+                .values()
+                .flat_map(|d| d.decls.iter())
+                .find(|d| d.name == sigil || d.name == label);
+            let Some(d) = decl else { continue };
+            let Some(head) = d.hover.lines().nth(1) else {
+                continue;
+            };
+
+            if d.name == sigil {
+                item["kind"] = json!(21);
+                item["detail"] = json!(head);
+                item["documentation"] = json!({ "kind": "markdown", "value": d.hover });
+            } else if let Some(word) = ["struct", "enum", "trait", "interface"]
+                .iter()
+                .find(|w| head.contains(&format!("{w} ")))
+            {
+                item["detail"] = json!(format!("{word} {label}"));
+                item["documentation"] = json!({ "kind": "markdown", "value": d.hover });
             }
         }
     }
@@ -1794,12 +1844,18 @@ impl Server {
             word.to_string()
         };
 
-        let found = doc.decls.iter().find(|d| d.name == key).or_else(|| {
-            st.docs
-                .values()
-                .flat_map(|d| d.decls.iter())
-                .find(|d| d.name == key)
-        });
+        // An attribute or a macro is keyed by its sigil; a bare name that
+        // an import bound finds it that way.
+        let sigils = [format!("@{key}"), format!("${key}")];
+        let lookup = |name: &str| {
+            doc.decls.iter().find(|d| d.name == name).or_else(|| {
+                st.docs
+                    .values()
+                    .flat_map(|d| d.decls.iter())
+                    .find(|d| d.name == name)
+            })
+        };
+        let found = lookup(&key).or_else(|| sigils.iter().find_map(|k| lookup(k)));
 
         let Some(decl) = found else {
             return false;
@@ -2534,6 +2590,7 @@ impl Server {
                         && trigger.as_deref() != Some("\n")
                     {
                         st.mark_enum_members(uri, line, character, result);
+                        st.mark_declarations(result);
                         let mut extra = st.auto_imports(uri, line, character);
                         extra.extend(st.primitive_completions(uri, line, character, result));
                         extra.extend(st.std_completions(uri, line, character, result));
@@ -4008,6 +4065,20 @@ fn keep_diagnostic(d: &Value, doc: &Doc) -> bool {
     if message
         .to_ascii_lowercase()
         .starts_with("samelinestatement")
+    {
+        return false;
+    }
+
+    // A line the compiler already reports on has an unreliable emit,
+    // and the checker's report there describes that emit, not the code:
+    // `Unknown global 'new'` under `ReservedWord`, a syntax error under
+    // a half-typed statement.
+    if let Some(out) = &doc.output
+        && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
+        && out
+            .diagnostics
+            .iter()
+            .any(|a| alloy::directives::line_of(&doc.source, a.start as usize) == sl as usize)
     {
         return false;
     }

@@ -202,6 +202,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         structs_with_to_string: HashSet::new(),
         private_types: HashSet::new(),
         self_prologue: None,
+        not_constructible: HashMap::new(),
         mapped_used: Vec::new(),
     };
 
@@ -429,6 +430,9 @@ struct Desugar<'s> {
     /// A line the next function header runs first: the `self` of a
     /// public method rebound to the full view.
     self_prologue: Option<String>,
+    /// Attributes, interfaces, and remotes declared in this file: names
+    /// `new` cannot construct.
+    not_constructible: HashMap<String, &'static str>,
 }
 
 /// A macro body captured as one-line source, so an expansion re-parses.
@@ -3718,11 +3722,28 @@ impl<'s> Desugar<'s> {
                 self.note_struct(st);
             }
 
-            Stmt::Trait(t) => self.declare_name(t.name),
+            Stmt::Trait(t) => {
+                self.declare_name(t.name);
+                self.not_constructible
+                    .insert(self.text_of(t.name).to_string(), "trait");
+            }
 
-            Stmt::Remote(r) => self.declare_name(r.name),
+            Stmt::Remote(r) => {
+                self.declare_name(r.name);
+                self.not_constructible
+                    .insert(self.text_of(r.name).to_string(), "remote");
+            }
 
-            Stmt::Attribute(a) => self.declare_name(a.name),
+            Stmt::Attribute(a) => {
+                self.declare_name(a.name);
+                self.not_constructible
+                    .insert(self.text_of(a.name).to_string(), "attribute");
+            }
+
+            Stmt::Interface(i) => {
+                self.not_constructible
+                    .insert(self.text_of(i.name).to_string(), "interface");
+            }
 
             _ => {}
         }
@@ -4294,21 +4315,27 @@ impl<'s> Desugar<'s> {
                 type_args,
                 args,
                 init,
-                ..
+                span,
             } => {
-                // The fields form copies its table, which may span lines;
-                // generated text never holds a newline.
+                // A fields table copies as it is, since it may span
+                // lines and generated text never holds a newline.
                 if self.fields_form(name, args.as_ref(), init.as_deref())
                     && let Some(table) = init.as_deref()
                 {
-                    self.check_new(name, args.as_ref(), Some(table));
+                    self.check_new(name, args.as_ref(), Some(table), *span);
                     let n = self.render_to_string(name);
                     self.generate(anchor, &format!("{}(", self.raw_ctor(&n)));
                     self.expr(table);
                     self.generate(self.byte_end(table.span()), ")");
                 } else {
-                    let text = self.new_expr(name, *type_args, args.as_ref(), init.as_deref());
-                    self.generate(anchor, &text);
+                    let head =
+                        self.new_head(name, *type_args, args.as_ref(), init.as_deref(), *span);
+                    self.generate(anchor, &head);
+
+                    if let Some(table) = init.as_deref() {
+                        self.expr(table);
+                        self.generate(self.byte_end(table.span()), ")");
+                    }
                 }
             }
 
@@ -4649,46 +4676,51 @@ impl<'s> Desugar<'s> {
     }
 
     /// `new Name(args)`, `new Name<<T>>(args)`, `new Name(args) { init }`.
-    fn new_expr(
+    /// The head of a `new` expression before its fields table, and
+    /// whether one follows: `Name.new(args)` alone, `__alloy.init(
+    /// Name.new(args), ` for a call with fields, `__alloy.construct(
+    /// Name, ` for fields on a name this file does not declare, which
+    /// the check artifact types as `Name.new(`, the typed constructor
+    /// an imported struct carries. The caller copies the table after it.
+    fn new_head(
         &mut self,
         name: &Expr,
         type_args: Option<TokSpan>,
         args: Option<&CallArgs>,
         init: Option<&Expr>,
+        whole: TokSpan,
     ) -> String {
-        self.check_new(name, args, init);
-
-        // The fields form is the class call, inside the struct's own
-        // constructor too, where `.new` would call itself.
-        if self.fields_form(name, args, init)
-            && let Some(table) = init
-        {
-            let n = self.render_to_string(name);
-            let fields = self.render_to_string(table);
-
-            return format!("{}({fields})", self.raw_ctor(&n));
-        }
-
+        self.check_new(name, args, init, whole);
         let ctor = self.constructor_of(name);
         let n = self.render_to_string(name);
         let t = type_args
             .map(|s| self.text_of(s).to_string())
             .unwrap_or_default();
-        let a = match args {
-            Some(a) => self.args_text(a),
 
-            None => "()".to_string(),
-        };
-        let call = format!("{n}.{ctor}{t}{a}");
+        match (args, init) {
+            (Some(a), None) => {
+                let a = self.args_text(a);
 
-        match init {
-            None => call,
+                format!("{n}.{ctor}{t}{a}")
+            }
 
-            Some(table) => {
-                let fields = self.render_to_string(table);
+            (None, None) => format!("{n}.{ctor}{t}()"),
+
+            (Some(a), Some(_)) => {
+                let a = self.args_text(a);
                 let std = self.std();
 
-                format!("{std}.init({call}, {fields})")
+                format!("{std}.init({n}.{ctor}{t}{a}, ")
+            }
+
+            (None, Some(_)) => {
+                if self.options.check {
+                    format!("{n}.{ctor}{t}(")
+                } else {
+                    let std = self.std();
+
+                    format!("{std}.construct({n}, ")
+                }
             }
         }
     }
@@ -5217,11 +5249,46 @@ impl<'s> Desugar<'s> {
     /// The two mistakes with `new` on a struct: the fields form on one that
     /// writes a constructor, outside that constructor's impl, and
     /// parentheses on one that writes none.
-    fn check_new(&mut self, name: &Expr, args: Option<&CallArgs>, init: Option<&Expr>) {
+    fn check_new(
+        &mut self,
+        name: &Expr,
+        args: Option<&CallArgs>,
+        init: Option<&Expr>,
+        whole: TokSpan,
+    ) {
         let Expr::Name(n) = name else {
             return;
         };
         let text = self.text_of(*n).to_string();
+
+        // A name that is not a value with a constructor: the whole
+        // expression is the error, since none of it can run.
+        let what = if self.enums.contains_key(&text) && !self.structs.contains(&text) {
+            Some("enum")
+        } else {
+            self.not_constructible.get(&text).copied()
+        };
+
+        if let Some(what) = what {
+            let hint = match what {
+                "enum" => format!("pick a variant: `{text}.Variant(...)`"),
+                "attribute" => format!("write it above a declaration: `@{text}(...)`"),
+                "trait" => "construct a struct that implements it".to_string(),
+                "interface" => "construct a struct that has its fields".to_string(),
+                _ => "a remote is called, not constructed".to_string(),
+            };
+            self.diagnostics.push(Diagnostic {
+                start: self.byte_start(whole),
+                end: self.byte_end(whole),
+                message: format!(
+                    "`{text}` is an {what} and cannot be constructed with `new`; {hint}"
+                )
+                .replace("an trait", "a trait")
+                .replace("an remote", "a remote"),
+            });
+
+            return;
+        }
 
         if !self.structs.contains(&text) {
             return;
@@ -5463,13 +5530,13 @@ impl<'s> Desugar<'s> {
                 type_args,
                 args,
                 init: Some(init),
-                ..
+                span,
             }),
         ) = (l.names.len(), l.values.len(), l.values.first())
             && l.names[0].destructure.is_none()
             && !self.fields_form(name, args.as_ref(), Some(init))
         {
-            self.local_new_init(l, name, *type_args, args.as_ref(), init, anchor);
+            self.local_new_init(l, name, *type_args, args.as_ref(), init, *span, anchor);
 
             return;
         }
@@ -5532,6 +5599,7 @@ impl<'s> Desugar<'s> {
         self.generate(anchor, &text);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn local_new_init(
         &mut self,
         l: &Local,
@@ -5539,21 +5607,35 @@ impl<'s> Desugar<'s> {
         type_args: Option<TokSpan>,
         args: Option<&CallArgs>,
         init: &Expr,
+        whole: TokSpan,
         anchor: u32,
     ) {
         // The binding itself holds the instance from the first line, so
         // a hover on its name finds a local there, and each field line
         // assigns through the name. `const` is a `local` in Luau.
-        self.check_new(name, args, Some(init));
+        self.check_new(name, args, Some(init), whole);
         let ctor = self.constructor_of(name);
         let n = self.render_to_string(name);
         let t = type_args
             .map(|s| self.text_of(s).to_string())
             .unwrap_or_default();
-        let a = match args {
-            Some(a) => self.args_text(a),
+        // With no arguments the name is one this file did not declare:
+        // the runtime constructs it, and the check artifact types the
+        // constructor call so the field lines below check against it.
+        let head = match args {
+            Some(a) => {
+                let a = self.args_text(a);
 
-            None => "()".to_string(),
+                format!("{n}.{ctor}{t}{a}")
+            }
+
+            None if self.options.check => format!("{n}.{ctor}{t}({{}} :: any)"),
+
+            None => {
+                let std = self.std();
+
+                format!("{std}.construct({n}, {{}})")
+            }
         };
         let ty = match l.names[0].ty {
             Some(t) => format!(": {}", self.text_of(t)),
@@ -5561,7 +5643,7 @@ impl<'s> Desugar<'s> {
             None => String::new(),
         };
         let binding = self.text_of(l.names[0].name).to_string();
-        self.generate(anchor, &format!("local {binding}{ty} = {n}.{ctor}{t}{a}"));
+        self.generate(anchor, &format!("local {binding}{ty} = {head}"));
 
         let Expr::Table { fields, span } = init else {
             unreachable!("the parser only builds a table initializer");

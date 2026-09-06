@@ -416,7 +416,7 @@ fn print_diagnostics(input: &Path, report: &alloy::build::Report) {
                 col,
                 Level::Error,
                 alloy::docs::code_for(&d.message),
-                &d.message
+                &alloy::docs::labeled(&d.message)
             )
         );
     }
@@ -929,7 +929,7 @@ fn test_once(args: &[String]) -> ExitCode {
                             col,
                             Level::Error,
                             alloy::docs::code_for(&d.message),
-                            &d.message
+                            &alloy::docs::labeled(&d.message)
                         )
                     );
                 }
@@ -999,7 +999,7 @@ fn test_once(args: &[String]) -> ExitCode {
                 col,
                 Level::Error,
                 alloy::docs::code_for(&d.message),
-                &d.message
+                &alloy::docs::labeled(&d.message)
             )
         );
     }
@@ -1112,7 +1112,7 @@ fn lint_one(
                 col,
                 Level::Error,
                 alloy::docs::code_for(&d.message),
-                &d.message
+                &alloy::docs::labeled(&d.message)
             )
         );
     }
@@ -1539,7 +1539,7 @@ fn build_one(path: &str, args: &[String]) -> ExitCode {
                 col,
                 Level::Error,
                 alloy::docs::code_for(&d.message),
-                &d.message
+                &alloy::docs::labeled(&d.message)
             )
         );
     }

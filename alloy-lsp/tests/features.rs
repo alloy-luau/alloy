@@ -991,3 +991,86 @@ fn import_names_come_from_plain_luau_modules() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Probe: an attribute imported from another file hovers as the
+/// attribute, on the import and at a use.
+#[test]
+fn an_imported_attribute_hovers_as_an_attribute() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-attr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("attrs.aly"),
+        "export attribute icon(asset: string) on struct\n",
+    )
+    .unwrap();
+    let src = "import { icon } from \"./attrs\"\n\n@icon(\"rbxassetid://1\")\nstruct V as\n    x: number\nend\nprint(icon)\n";
+    let file = dir.join("main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    let on_import = s.hover(&uri, 0, 10);
+    assert!(
+        on_import.contains("@icon(asset: string)"),
+        "import: {on_import}"
+    );
+    let at_use = s.hover(&uri, 2, 2);
+    assert!(at_use.contains("@icon(asset: string)"), "use: {at_use}");
+    let bare = s.hover(&uri, 6, 7);
+    assert!(bare.contains("@icon(asset: string)"), "bare: {bare}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A line the compiler reports on gets no report from the checker: the
+/// reserved word alone, not `Unknown global` beside it.
+#[test]
+fn a_compiler_error_line_silences_the_checker() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-kinds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "local test = new\nlocal n: number = \"s\"\nprint(test, n)\n";
+    let file = dir.join("k.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    let diags = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("number")));
+    assert!(
+        diags.iter().any(|d| d.starts_with("ReservedWord: ")),
+        "{diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.contains("Unknown global")),
+        "{diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.contains("SyntaxError: Expected")),
+        "{diags:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

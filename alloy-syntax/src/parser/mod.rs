@@ -451,6 +451,16 @@ impl<'a> Parser<'a> {
         None
     }
 
+    /// Records a diagnostic at a byte offset, up to the cap.
+    fn report_at(&mut self, offset: usize, message: &str) {
+        if self.diagnostics.len() < MAX_DIAGNOSTICS {
+            self.diagnostics.push(ParseError {
+                offset,
+                message: message.to_string(),
+            });
+        }
+    }
+
     /// Records a diagnostic in lenient mode, up to the cap.
     fn report(&mut self, message: &str) {
         if self.diagnostics.len() < MAX_DIAGNOSTICS {

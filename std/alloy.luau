@@ -1708,6 +1708,23 @@ function alloy.init(object, fields)
 	return object
 end
 
+--- `new Name { fields }` on a name this file did not declare: an
+--- imported Alloy struct constructs through its class call, which sets
+--- the metatable and the defaults; any other class constructs through
+--- its `new` and takes the fields after.
+function alloy.construct(class, fields)
+	if type(class) == "table" then
+		local mt = getmetatable(class)
+		if rawget(class, "__index") == class and type(mt) == "table" and mt.__call ~= nil then
+			return class(fields)
+		end
+		if type(class.new) == "function" then
+			return alloy.init(class.new(), fields)
+		end
+	end
+	error(`new: {tostring(class)} has no constructor`, 2)
+end
+
 -- ---------------------------------------------------------------------------
 -- Extension impls on foreign types: a registry keyed by runtime kind.
 -- ---------------------------------------------------------------------------

@@ -808,6 +808,47 @@ pub fn book_url(number: &str) -> Option<String> {
 /// The lints' section number: every lint's code.
 pub const LINT_CODE: &str = "6.7";
 
+/// The kind of a compiler diagnostic, from its text: the word before
+/// the colon in `ReservedWord: ...`, the way the checker names its own.
+pub fn kind_for(message: &str) -> &'static str {
+    let m = message.to_ascii_lowercase();
+    let rules: &[(&[&str], &str)] = &[
+        (&["internal:"], "InternalError"),
+        (&["reserved word"], "ReservedWord"),
+        (&["in macro expansion"], "MacroError"),
+        (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),
+        (&["remote"], "WireType"),
+        (&["directive"], "DirectiveError"),
+        (&["@test", "test "], "TestError"),
+        (&["macro"], "MacroError"),
+        (&["`new ", "constructor", "construct"], "ConstructorError"),
+        (&["attribute", "derive"], "AttributeError"),
+        (&["import", "export", "require", "module"], "ImportError"),
+        (
+            &["does not write", "parameters in", "trait"],
+            "TraitContract",
+        ),
+        (&["field", "sealed", "struct"], "StructError"),
+        (&["variant", "enum"], "EnumError"),
+        (
+            &["expected", "unexpected", "unterminated", "needs a", "found"],
+            "SyntaxError",
+        ),
+    ];
+
+    rules
+        .iter()
+        .find(|(words, _)| words.iter().any(|w| m.contains(w)))
+        .map(|(_, kind)| *kind)
+        .unwrap_or("AlloyError")
+}
+
+/// A compiler diagnostic as the editor and the CLI show it: its kind,
+/// a colon, its text.
+pub fn labeled(message: &str) -> String {
+    format!("{}: {message}", kind_for(message))
+}
+
 /// The book section a compiler diagnostic belongs to, from its text.
 /// The diagnostics name what they are about; the first match wins, from
 /// the most specific wording to the least.

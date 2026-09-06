@@ -72,4 +72,35 @@ describe("delete", function()
 	end)
 end)
 
+describe("construct", function()
+	it("calls an Alloy struct's class and a plain class's new", function()
+		local Vec = {}
+		Vec.__index = Vec
+		setmetatable(Vec, {
+			__call = function(_, f)
+				if f.y == nil then
+					f.y = 0
+				end
+				return setmetatable(f, Vec)
+			end,
+		})
+		local v = alloy.construct(Vec, { x = 1 })
+		expect(v.x).toBe(1)
+		expect(v.y).toBe(0)
+		expect(getmetatable(v)).toBe(Vec)
+
+		local Plain = {}
+		Plain.__index = Plain
+		function Plain.new()
+			return setmetatable({ made = true }, Plain)
+		end
+		local p = alloy.construct(Plain, { x = 2 })
+		expect(p.made).toBe(true)
+		expect(p.x).toBe(2)
+		expect(function()
+			alloy.construct({}, {})
+		end).toThrow("no constructor")
+	end)
+end)
+
 return nil

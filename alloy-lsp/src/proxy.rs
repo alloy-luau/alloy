@@ -1130,13 +1130,13 @@ impl State {
                 self.ensure_runtime(&runtime_dir);
                 // A file under a mount sits in the sourcemap, and the child
                 // resolves its requires in the DataModel tree: the runtime
-                // is `../Alloy` there, as the ship writes it. A file outside
-                // every mount reaches the runtime on disk.
+                // is `../Alloy` there. A file outside every mount reaches
+                // the runtime on disk.
                 let source_rel = file.strip_prefix(&root).ok().map(Path::to_path_buf);
                 let std_require = config.emit.std_require.clone().unwrap_or_else(|| {
                     source_rel
                         .as_deref()
-                        .and_then(|rel| alloy::project::std_require_for(&config, rel))
+                        .and_then(|rel| alloy::project::std_require_relative_for(&config, rel))
                         .unwrap_or_else(|| {
                             if depth == 0 {
                                 "./alloy".to_string()
@@ -2486,8 +2486,10 @@ impl Server {
                             Some(doc) => {
                                 let mut out: Vec<Value> = Vec::new();
 
+                                let lint_config = st.lint_config();
+
                                 for mut d in diagnostics {
-                                    if !keep_diagnostic(&d, doc) {
+                                    if !keep_diagnostic(&d, doc, &lint_config) {
                                         continue;
                                     }
 
@@ -2639,7 +2641,8 @@ impl Server {
                     // A pulled report gets the filter the push path has.
                     "textDocument/diagnostic" => {
                         if let Some(items) = result.get_mut("items").and_then(Value::as_array_mut) {
-                            items.retain(|d| keep_diagnostic(d, doc));
+                            let lint_config = st.lint_config();
+                            items.retain(|d| keep_diagnostic(d, doc, &lint_config));
 
                             for d in items.iter_mut() {
                                 friendly_message(d, doc, &st);
@@ -2720,7 +2723,8 @@ impl Server {
                     if let Some(doc) = doc
                         && let Some(items) = report.get_mut("items").and_then(Value::as_array_mut)
                     {
-                        items.retain(|d| keep_diagnostic(d, doc));
+                        let lint_config = st.lint_config();
+                        items.retain(|d| keep_diagnostic(d, doc, &lint_config));
                     }
                 }
             }
@@ -4620,7 +4624,7 @@ fn child_sees(uri: &str) -> bool {
 /// touches generated text, or an unused-variable lint for a name that an
 /// intrinsic such as `$nameof` consumed. Errors in generated text stay;
 /// they map to the construct that produced them.
-fn keep_diagnostic(d: &Value, doc: &Doc) -> bool {
+fn keep_diagnostic(d: &Value, doc: &Doc, lint_config: &alloy::config::LintConfig) -> bool {
     let message = d.get("message").and_then(Value::as_str).unwrap_or_default();
 
     // `--@alloy-nocheck` and `--@alloy-ignore` silence the checker too.
@@ -4663,6 +4667,20 @@ fn keep_diagnostic(d: &Value, doc: &Doc) -> bool {
 
     if let Some(name) = unused_name(message)
         && consumed_by_intrinsic(&doc.source, name)
+    {
+        return false;
+    }
+
+    // `unused_variable` and `unused_function` say it on the same line;
+    // the checker's report would say it twice.
+    if unused_name(message).is_some()
+        && let Some(out) = &doc.output
+        && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
+        && out.lints.iter().any(|l| {
+            matches!(l.name, "unused_variable" | "unused_function")
+                && alloy::lint::level_of(lint_config, l.name) != alloy::lint::Level::Allow
+                && alloy::directives::line_of(&doc.source, l.start as usize) == sl as usize
+        })
     {
         return false;
     }

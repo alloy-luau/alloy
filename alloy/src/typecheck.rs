@@ -22,7 +22,7 @@ pub struct CheckSource {
     pub source: String,
     pub check: String,
     pub map: SpanMap,
-    /// One-based lines where `unused_variable` fired.
+    /// One-based lines where `unused_variable` or `unused_function` fired.
     pub unused_lines: Vec<usize>,
     /// One-based lines that carry a compiler diagnostic; the checker's
     /// reports there describe an unreliable emit and stay out.
@@ -474,9 +474,9 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         };
 
-        // `unused_variable` reports the plain cases; the checker's
-        // report on the same line would say it twice.
-        if kind == "LocalUnused" && f.unused_lines.contains(&mapped.0) {
+        // `unused_variable` and `unused_function` report the plain cases;
+        // the checker's report on the same line would say it twice.
+        if matches!(kind, "LocalUnused" | "FunctionUnused") && f.unused_lines.contains(&mapped.0) {
             continue;
         }
 

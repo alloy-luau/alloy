@@ -812,11 +812,17 @@ impl<'s> Scan<'s> {
             .any(|j| j != n && self.toks[j].kind == TokKind::Ident && self.t(j) == name)
     }
 
-    /// A local or a loop variable that nothing reads after it.
+    /// A local or a loop variable that nothing reads after it, as
+    /// `unused_variable`; a function that nothing calls, declared or
+    /// bound to a local, as `unused_function`.
     fn unused_variable(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
-            let names: Vec<usize> = match self.t(i) {
-                "local" | "const" if self.statement_start(i) => self.local_names(i),
+            let (names, is_function): (Vec<usize>, bool) = match self.t(i) {
+                "local" | "const" if self.statement_start(i) => {
+                    let names = self.local_names(i);
+
+                    (names.clone(), self.binds_function(i, &names))
+                }
 
                 "for" if self.statement_start(i) => {
                     let mut names = Vec::new();
@@ -830,7 +836,41 @@ impl<'s> Scan<'s> {
                         j += 1;
                     }
 
-                    names
+                    (names, false)
+                }
+
+                // `function f` and `async function f` at statement level:
+                // a plain name, not exported, not a method of an `impl`
+                // or a `trait`. A global reads from anywhere in the file.
+                "function" | "async" if self.statement_start(i) && self.prev(i) != "export" => {
+                    let f = if self.at(i, "async") { i + 1 } else { i };
+
+                    if !self.at(f, "function")
+                        || !self.is_name(f + 1)
+                        || !self.at(f + 2, "(")
+                        || self.inside_block(i, &["impl", "trait", "struct", "declare"])
+                        || self.has_attribute(i)
+                    {
+                        continue;
+                    }
+
+                    let n = f + 1;
+                    let name = self.t(n);
+
+                    if name.starts_with('_') || self.read_after(n, 0) {
+                        continue;
+                    }
+
+                    self.lint(
+                        out,
+                        "unused_function",
+                        n,
+                        n,
+                        format!("`{name}` is never called; prefix it with `_` or remove it"),
+                        Some(format!("_{name}")),
+                    );
+
+                    continue;
                 }
 
                 _ => continue,
@@ -843,16 +883,110 @@ impl<'s> Scan<'s> {
                     continue;
                 }
 
+                let (lint, verb) = if is_function {
+                    ("unused_function", "called")
+                } else {
+                    ("unused_variable", "read")
+                };
+
                 self.lint(
                     out,
-                    "unused_variable",
+                    lint,
                     n,
                     n,
-                    format!("`{name}` is never read; prefix it with `_` or remove it"),
+                    format!("`{name}` is never {verb}; prefix it with `_` or remove it"),
                     Some(format!("_{name}")),
                 );
             }
         }
+    }
+
+    /// Whether the `local` or `const` at `i` binds a function: `local
+    /// function f`, `local async function f`, or one name with a
+    /// function, plain or async, as its value.
+    fn binds_function(&self, i: usize, names: &[usize]) -> bool {
+        let mut j = i + 1;
+
+        while matches!(self.t(j), "async" | "const") {
+            j += 1;
+        }
+
+        if self.at(j, "function") {
+            return true;
+        }
+
+        let [n] = names else {
+            return false;
+        };
+        let eq = n + 1;
+
+        self.at(eq, "=")
+            && (self.at(eq + 1, "function")
+                || (self.at(eq + 1, "async") && self.at(eq + 2, "function")))
+    }
+
+    /// Whether an attribute, `@test` or `@name(...)`, stands right
+    /// before token `i`: the runtime or the compiler calls such a
+    /// function, not the file.
+    fn has_attribute(&self, i: usize) -> bool {
+        let src = self.src.as_bytes();
+        let mut k = self.start(i) as usize;
+
+        {
+            while k > 0 && (src[k - 1] as char).is_ascii_whitespace() {
+                k -= 1;
+            }
+
+            if k == 0 {
+                return false;
+            }
+
+            // `@name(...)`: step over the arguments.
+            if src[k - 1] == b')' {
+                let mut depth = 0i32;
+
+                while k > 0 {
+                    k -= 1;
+
+                    match src[k] {
+                        b')' => depth += 1,
+                        b'(' => {
+                            depth -= 1;
+
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if depth != 0 {
+                    return false;
+                }
+            }
+
+            let end = k;
+
+            while k > 0 && ((src[k - 1] as char).is_ascii_alphanumeric() || src[k - 1] == b'_') {
+                k -= 1;
+            }
+
+            if k == end {
+                return false;
+            }
+
+            k > 0 && src[k - 1] == b'@'
+        }
+    }
+
+    /// Whether token `j` sits inside a block one of `kinds` opens.
+    fn inside_block(&self, j: usize, kinds: &[&str]) -> bool {
+        self.st
+            .ends
+            .iter()
+            .enumerate()
+            .any(|(i, e)| e.is_some_and(|e| i < j && j < e) && kinds.contains(&self.t(i)))
     }
 
     /// The case of declared names.
@@ -968,14 +1102,14 @@ impl<'s> Scan<'s> {
 mod tests {
     use crate::lint::apply_fixes;
 
-    /// The lints of a source, without `unused_variable`: the sources
+    /// The lints of a source, without the unused ones: the sources
     /// here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {
         crate::compile(src)
             .unwrap()
             .lints
             .into_iter()
-            .filter(|l| l.name != "unused_variable")
+            .filter(|l| !matches!(l.name, "unused_variable" | "unused_function"))
             .collect()
     }
 
@@ -1171,7 +1305,7 @@ mod tests {
                 .lints
                 .iter()
                 .map(|l| l.name)
-                .filter(|n| *n == "unused_variable")
+                .filter(|n| n.starts_with("unused_"))
                 .collect()
         };
         let src = "local count = 1\nlocal used = 2\nprint(used)\n";
@@ -1190,12 +1324,59 @@ mod tests {
         );
         assert_eq!(
             unused("local function helper() end\nlocal x: number = 1\nprint(x)\n"),
-            vec!["unused_variable"]
+            vec!["unused_function"]
         );
         assert_eq!(unused("local { a, b } = t\nprint(a)\n"), Vec::<&str>::new());
         assert_eq!(
             unused("local async function f() end\nf()\n"),
             Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn a_function_nothing_calls_fires() {
+        let unused = |src: &str| -> Vec<&'static str> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .map(|l| l.name)
+                .filter(|n| n.starts_with("unused_"))
+                .collect()
+        };
+        assert_eq!(unused("function f() end\n"), vec!["unused_function"]);
+        assert_eq!(unused("async function f() end\n"), vec!["unused_function"]);
+        assert_eq!(
+            unused("local f = function() end\n"),
+            vec!["unused_function"]
+        );
+        assert_eq!(
+            unused("const g = async function() end\n"),
+            vec!["unused_function"]
+        );
+        assert_eq!(
+            unused("local f = function() end\nf()\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            unused("print(1)\nfunction f() end\nf()\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(unused("export function f() end\n"), Vec::<&str>::new());
+        assert_eq!(unused("@test\nfunction f() end\n"), Vec::<&str>::new());
+        assert_eq!(
+            unused("@ratelimit(1, 2)\nasync function f() end\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            unused("struct S as\n    x: number\nend\nimpl S\n    function m(self) end\nend\n"),
+            Vec::<&str>::new()
+        );
+        let src = "local f = function() end\n";
+        let out = crate::compile(src).unwrap();
+        assert_eq!(
+            apply_fixes(src, &out.lints).0,
+            "local _f = function() end\n"
         );
     }
 

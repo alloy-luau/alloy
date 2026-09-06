@@ -270,7 +270,14 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Suspicious,
         default: Level::Warn,
         summary: "a local that nothing reads",
-        detail: "A `local`, a `local function`, or a loop variable that appears nowhere after its declaration. A leftover, or a typo in the name that reads it. Prefix it with `_` to say it is unused on purpose; `alloy flux --fix` does that. The type checker reports the scoped cases this lint cannot see.",
+        detail: "A `local` or a loop variable that appears nowhere after its declaration. A leftover, or a typo in the name that reads it. Prefix it with `_` to say it is unused on purpose; `alloy flux --fix` does that. The type checker reports the scoped cases this lint cannot see, and `unused_function` covers a function.",
+    },
+    LintInfo {
+        name: "unused_function",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a function that nothing calls",
+        detail: "A `function`, a `local function`, an `async function`, or a local or const bound to a function value, whose name appears nowhere else in the file. An exported function, and a method of an `impl` or a `trait`, are for other files and do not fire. Prefix the name with `_` to keep it on purpose; `alloy flux --fix` does that.",
     },
     LintInfo {
         name: "empty_block",
@@ -1174,7 +1181,10 @@ mod tests {
         out.lints
             .iter()
             .map(|l| l.name)
-            .filter(|n| level_of(&config, n) != Level::Allow && *n != "unused_variable")
+            .filter(|n| {
+                level_of(&config, n) != Level::Allow
+                    && !matches!(*n, "unused_variable" | "unused_function")
+            })
             .collect()
     }
 

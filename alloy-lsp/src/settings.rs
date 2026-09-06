@@ -119,6 +119,22 @@ pub fn child_flags(options: &Value) -> Vec<String> {
         flags.push("--flag:LuauSolverV2=true".to_string());
     }
 
+    // A printed type must arrive whole: the proxy folds a struct's
+    // table back to its name from the complete text, and the default
+    // limit cuts a struct with a few methods to `*TRUNCATED*`.
+    let overrides = section
+        .and_then(|f| f.get("override"))
+        .and_then(Value::as_object);
+
+    for name in [
+        "LuauTypeMaximumStringifierLength",
+        "LuauTableTypeMaximumStringifierLength",
+    ] {
+        if !overrides.is_some_and(|o| o.contains_key(name)) {
+            flags.push(format!("--flag:{name}=200000"));
+        }
+    }
+
     if let Some(overrides) = section
         .and_then(|f| f.get("override"))
         .and_then(Value::as_object)
@@ -150,12 +166,26 @@ mod tests {
             vec![
                 "--no-flags-enabled",
                 "--flag:LuauSolverV2=true",
+                "--flag:LuauTypeMaximumStringifierLength=200000",
                 "--flag:LuauTableTypeMaximumStringifierLength=100",
                 "--flag:LuauX=true"
             ]
         );
-        assert_eq!(child_flags(&json!({})), vec!["--flag:LuauSolverV2=true"]);
-        assert!(child_flags(&json!({ "fflags": { "enableNewSolver": false } })).is_empty());
+        assert_eq!(
+            child_flags(&json!({})),
+            vec![
+                "--flag:LuauSolverV2=true",
+                "--flag:LuauTypeMaximumStringifierLength=200000",
+                "--flag:LuauTableTypeMaximumStringifierLength=200000"
+            ]
+        );
+        assert_eq!(
+            child_flags(&json!({ "fflags": { "enableNewSolver": false } })),
+            vec![
+                "--flag:LuauTypeMaximumStringifierLength=200000",
+                "--flag:LuauTableTypeMaximumStringifierLength=200000"
+            ]
+        );
     }
 
     #[test]
@@ -171,10 +201,11 @@ mod tests {
     fn fflags_become_command_line_flags() {
         let flags =
             child_flags(&json!({ "luauLsp": { "fflags": { "override": { "LuauX": "true" } } } }));
-        assert_eq!(flags, ["--flag:LuauSolverV2=true", "--flag:LuauX=true"]);
+        assert_eq!(flags[0], "--flag:LuauSolverV2=true");
+        assert_eq!(flags.last().unwrap(), "--flag:LuauX=true");
         let flags = child_flags(&json!({ "luauLsp": { "fflags": { "enableNewSolver": false } } }));
-        assert!(flags.is_empty());
-        assert_eq!(child_flags(&json!({})), ["--flag:LuauSolverV2=true"]);
+        assert!(flags.iter().all(|f| f.contains("Stringifier")));
+        assert_eq!(child_flags(&json!({}))[0], "--flag:LuauSolverV2=true");
     }
 
     #[test]

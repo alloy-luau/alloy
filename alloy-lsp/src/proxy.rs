@@ -136,6 +136,17 @@ impl State {
         crate::ingots::actions(doc, uri, &actions)
     }
 
+    /// The structs and enums of every open document, for the folds.
+    fn known_shapes(&self) -> crate::shapes::Known {
+        crate::shapes::Known {
+            shapes: self
+                .docs
+                .values()
+                .flat_map(|d| d.shapes.iter().chain(&d.import_shapes).cloned())
+                .collect(),
+        }
+    }
+
     /// The `[lint]` table of the workspace's alloy.toml, or the defaults.
     fn lint_config(&self) -> alloy::config::LintConfig {
         self.root
@@ -421,6 +432,15 @@ impl State {
 
             _ => return,
         };
+
+        // The emit's own names stay out of the list: the runtime local,
+        // the import and temp locals, the private view tables, and the
+        // raw constructor.
+        items.retain(|item| {
+            item["label"]
+                .as_str()
+                .is_none_or(|label| !is_internal_name(label))
+        });
 
         for item in items.iter_mut() {
             let Some(label) = item["label"].as_str().map(str::to_string) else {
@@ -1108,12 +1128,22 @@ impl State {
                     Err(_) => (0, normalize(&dir)),
                 };
                 self.ensure_runtime(&runtime_dir);
+                // A file under a mount sits in the sourcemap, and the child
+                // resolves its requires in the DataModel tree: the runtime
+                // is `../Alloy` there, as the ship writes it. A file outside
+                // every mount reaches the runtime on disk.
+                let source_rel = file.strip_prefix(&root).ok().map(Path::to_path_buf);
                 let std_require = config.emit.std_require.clone().unwrap_or_else(|| {
-                    if depth == 0 {
-                        "./alloy".to_string()
-                    } else {
-                        format!("{}alloy", "../".repeat(depth))
-                    }
+                    source_rel
+                        .as_deref()
+                        .and_then(|rel| alloy::project::std_require_for(&config, rel))
+                        .unwrap_or_else(|| {
+                            if depth == 0 {
+                                "./alloy".to_string()
+                            } else {
+                                format!("{}alloy", "../".repeat(depth))
+                            }
+                        })
                 });
 
                 EmitOptions {
@@ -1263,7 +1293,9 @@ impl State {
             let _ = std::fs::write(&target, text);
         }
 
-        if let Some(format) = alloy::data::Format::of_path(real) {
+        if let Some(format) = alloy::data::Format::of_path(real)
+            && !alloy::data::is_project_file(real)
+        {
             self.mirror_data(real, text, format);
         }
     }
@@ -2591,6 +2623,7 @@ impl Server {
                             }
 
                             text = fold_std_shapes(&text);
+                            text = crate::shapes::fold(&text, &st.known_shapes());
 
                             if let Some(with_init) = append_initializer(&text, doc, line, character)
                             {
@@ -2707,6 +2740,9 @@ impl Server {
                 )
             {
                 strip_std_prefix(result);
+                // The checker prints a struct as its runtime table and a
+                // unit enum as a union of strings; the names go back.
+                crate::shapes::fold_value(result, &st.known_shapes());
 
                 if let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u)) {
                     strip_import_temps(result, &doc.shadow);
@@ -2834,12 +2870,20 @@ impl Server {
 
     /// Opens or replaces a document and its shadow.
     fn open_doc(&self, uri: &str, text: String, version: i64, by_editor: bool) {
-        let (options, jsx, ingots) = {
+        let (mut options, jsx, ingots) = {
             let st = self.state.lock().expect("state");
             let (o, j) = st.options_for(uri);
 
             (o, j, st.ingots.clone())
         };
+
+        // A value import of a struct or an enum binds its type too.
+        if let Some(path) = uri_to_path(uri) {
+            options.import_types = alloy::modules::import_types_for_file(&path, &text);
+            options.import_trait_defaults =
+                alloy::modules::import_trait_defaults_for_file(&path, &text);
+        }
+
         let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
         let (shadow, existed) = {
             let mut st = self.state.lock().expect("state");
@@ -2897,7 +2941,7 @@ impl Server {
     }
 
     fn change_doc(&self, uri: &str, version: i64, changes: &[Value]) {
-        let (options, jsx) = self.state.lock().expect("state").options_for(uri);
+        let (mut options, jsx) = self.state.lock().expect("state").options_for(uri);
         let mut st = self.state.lock().expect("state");
         let ingots = st.ingots.clone();
 
@@ -2925,6 +2969,13 @@ impl Server {
         }
 
         doc.version = version;
+
+        if let Some(path) = uri_to_path(uri) {
+            options.import_types = alloy::modules::import_types_for_file(&path, &doc.source);
+            options.import_trait_defaults =
+                alloy::modules::import_trait_defaults_for_file(&path, &doc.source);
+        }
+
         doc.compile(&options, &jsx, ingots.as_deref());
         let shadow_text = doc.shadow.clone();
         let shadow = st.child_uri(uri);
@@ -3355,7 +3406,10 @@ fn walk(dir: &Path, skip: Option<&Path>, out: &mut Vec<PathBuf>, plain: &mut Vec
         let name = entry.file_name().to_string_lossy().into_owned();
 
         if path.is_dir() {
-            if matches!(name.as_str(), ".git" | "node_modules" | "target")
+            // A dot directory holds tooling state, `.lest` or the test
+            // modules, not sources; `.alloy` keeps the build's sourcemap.
+            if matches!(name.as_str(), "node_modules" | "target")
+                || (name.starts_with('.') && name != ".alloy")
                 || Some(path.as_path()) == skip
             {
                 continue;
@@ -3752,8 +3806,13 @@ fn import_temps(shadow: &str) -> Vec<String> {
             .rev()
             .collect();
 
-        if name.starts_with('_')
-            && name[1..].chars().all(|c| c.is_ascii_digit())
+        let digits = name
+            .strip_prefix("_m")
+            .or_else(|| name.strip_prefix('_'))
+            .unwrap_or("");
+
+        if !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_digit())
             && !temps.contains(&name)
         {
             temps.push(name);
@@ -3800,10 +3859,31 @@ fn strip_import_temps(value: &mut Value, shadow: &str) {
 /// Removes the runtime's table from a type text, in every string of the
 /// value: `__alloy.Future<T>` becomes `Future<T>`, and the primitive
 /// helper `__alloy_string.trim` becomes `string.trim`.
+/// A name the emit made: `__alloy`, `__alloy_string`, `_m1`, `_1`,
+/// `Name__private`, `Name__all`, `__new`, and the mapped type functions.
+pub fn is_internal_name(label: &str) -> bool {
+    let digits_after = |prefix: &str| {
+        label
+            .strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+    };
+
+    // Metamethods and the emit's helpers share the `__` prefix, and
+    // neither is a name to complete.
+    label.starts_with("__")
+        || label == "__impl"
+        || label.ends_with("__private")
+        || label.ends_with("__all")
+        || digits_after("_m")
+        || digits_after("_")
+        || digits_after("_c")
+        || digits_after("_n")
+}
+
 fn strip_std_prefix(value: &mut Value) {
     match value {
         Value::String(s) => {
-            if s.contains("__alloy") || s.contains("__mapped_") {
+            if s.contains("__alloy") || s.contains("__mapped_") || s.contains("__all") {
                 let mut out = s.clone();
 
                 for primitive in alloy::desugar::PRIMITIVES {
@@ -3812,6 +3892,7 @@ fn strip_std_prefix(value: &mut Value) {
 
                 *s = out
                     .replace("__alloy.", "")
+                    .replace("__all", "")
                     .replace("__mapped_optional<", "Partial<")
                     .replace("__mapped_read<", "Readonly<")
                     .replace("__mapped_write<", "Sink<");
@@ -4060,7 +4141,13 @@ fn mirrored_sourcemap(text: &str, input: &Path, out: Option<&Path>, root: &Path)
 
         if let Some(b) = s.strip_suffix(".d.aly") {
             format!("{b}.d.luau")
-        } else if let Some(b) = s.strip_suffix(".aly").or_else(|| s.strip_suffix(".alx")) {
+        } else if let Some(b) = s
+            .strip_suffix(".aly")
+            .or_else(|| s.strip_suffix(".alx"))
+            .or_else(|| s.strip_suffix(".json"))
+            .or_else(|| s.strip_suffix(".toml"))
+        {
+            // A data file is a module in the mirror, as in the build.
             format!("{b}.luau")
         } else {
             s.to_string()
@@ -4191,47 +4278,6 @@ fn fold_std_shapes(value: &str) -> String {
         out.replace_range(open..=close, &format!("Future<{inner}>"));
     }
 
-    // Array, in either print: the metatable pair `t1 where t1 = { @metatable
-    // t2, {T} } ; t2 = { __index: t2, concat: ...`, or the alias expanded to
-    // `t1 where t1 = { [number]: T, concat: (self: t1, other: t1) -> t1, ...`.
-    if let Some(i) = out.find(" where ")
-        && out.contains("concat:")
-    {
-        let elem = if let Some(meta) = out[i..].find("{ @metatable ") {
-            let elem_start = i + meta + "{ @metatable ".len();
-
-            out[elem_start..]
-                .find(',')
-                .and_then(|comma| {
-                    out[elem_start + comma..]
-                        .find('{')
-                        .map(|b| elem_start + comma + b + 1)
-                })
-                .and_then(|e| {
-                    out[e..]
-                        .find('}')
-                        .map(|end| out[e..e + end].trim().to_string())
-                })
-        } else if let Some(k) = out[i..].find("[number]: ") {
-            let elem_start = i + k + "[number]: ".len();
-
-            out[elem_start..]
-                .find(',')
-                .map(|end| out[elem_start..elem_start + end].trim().to_string())
-        } else {
-            None
-        };
-
-        if let Some(elem) = elem {
-            let type_start = out[..i]
-                .rfind(char::is_whitespace)
-                .map(|w| w + 1)
-                .unwrap_or(0);
-            let fence_end = out[i..].find("\n```").map(|f| i + f).unwrap_or(out.len());
-            out.replace_range(type_start..fence_end, &format!("{elem}[]"));
-        }
-    }
-
     // A plain `Array<T>` reads as the sugar the source has.
     let mut from = 0;
 
@@ -4286,8 +4332,12 @@ fn append_initializer(value: &str, doc: &Doc, line: u32, character: u32) -> Opti
         {
             let rhs = after[eq + 1..].trim_start();
 
+            // The fields open on the `new` line; a brace on a later line
+            // belongs to another statement.
+            let line_end = rhs.find('\n').unwrap_or(rhs.len());
+
             if rhs.starts_with("new ")
-                && let Some(open) = rhs.find('{')
+                && let Some(open) = rhs[..line_end].find('{')
                 && let Some(close) = matching_brace(rhs, open)
             {
                 let block = rhs[open..=close].trim();
@@ -4341,7 +4391,14 @@ fn keep_annotation(value: &str, doc: &Doc, line: u32, character: u32) -> Option<
 
     let (start, end) = keywords::word_range(&doc.source, offset);
     let word = &doc.source[start..end];
-    let annotation = declared_annotation(&doc.source, word)?;
+    let (decl_at, annotation) = declared_annotation(&doc.source, word, offset)?;
+
+    // A test on the name between its declaration and the hover narrows
+    // it: the child's type is the narrowed one, and it stays.
+    if decl_at < offset && narrowed_between(&doc.source[decl_at..offset], word) {
+        return None;
+    }
+
     let (fence, rest) = value.split_once('\n')?;
     let (body, tail) = rest.split_once("\n```")?;
     let header_end = body.find('\n').unwrap_or(body.len());
@@ -4357,10 +4414,13 @@ fn keep_annotation(value: &str, doc: &Doc, line: u32, character: u32) -> Option<
     Some(format!("{fence}\n{head}: {annotation}\n```{tail}"))
 }
 
-/// The type text after the first `name:` in the source: up to a `,`, a
-/// `)`, an `=`, or the line's end at bracket depth zero.
-fn declared_annotation(source: &str, name: &str) -> Option<String> {
+/// The type text after the `name:` nearest before `at`: up to a `,`, a
+/// `)`, an `=`, or the line's end at bracket depth zero. The result
+/// carries the declaration's offset. A use never comes before its
+/// declaration, so a later `name:` belongs to another scope.
+fn declared_annotation(source: &str, name: &str, at: usize) -> Option<(usize, String)> {
     let mut from = 0;
+    let mut found: Option<(usize, String)> = None;
 
     while let Some(i) = source[from..].find(name) {
         let start = from + i;
@@ -4371,7 +4431,8 @@ fn declared_annotation(source: &str, name: &str) -> Option<String> {
             && !keywords::is_word_at(source, end);
         let after = source[end..].trim_start();
 
-        if bounded && after.starts_with(':') && !after.starts_with("::") {
+        // `v: T` annotates; `v:m()` calls and `v :: T` casts.
+        if bounded && after.starts_with(": ") {
             let text = after[1..].trim_start();
             let mut depth = 0i32;
             let mut stop = text.len();
@@ -4394,13 +4455,60 @@ fn declared_annotation(source: &str, name: &str) -> Option<String> {
 
             let annotation = text[..stop].trim();
 
-            return (!annotation.is_empty()).then(|| annotation.to_string());
+            if start > at {
+                break;
+            }
+
+            if !annotation.is_empty() {
+                found = Some((start, annotation.to_string()));
+            }
         }
 
         from = end;
     }
 
-    None
+    found
+}
+
+/// Whether a stretch of source tests `name`, so a use after it may be
+/// narrowed: an `is`, a `typeof` or `type` call, an `IsA`, a nil
+/// comparison, or a truthiness test.
+fn narrowed_between(text: &str, name: &str) -> bool {
+    let tests = [
+        format!("{name} is "),
+        format!("typeof({name})"),
+        format!("type({name})"),
+        format!("{name}:IsA("),
+        format!("{name} == nil"),
+        format!("{name} ~= nil"),
+        format!("if {name} then"),
+        format!("if not {name} then"),
+        format!(" and {name} then"),
+        format!("{name} and "),
+        format!("{name} or "),
+        format!("local {name} = "),
+    ];
+
+    for (i, _) in text.match_indices(name) {
+        let bounded = i
+            .checked_sub(1)
+            .is_none_or(|b| !keywords::is_word_at(text, b));
+
+        if !bounded {
+            continue;
+        }
+
+        let from = text[..i].rfind(['\n', ' ', '(']).map_or(0, |k| k);
+
+        if tests
+            .iter()
+            .any(|t| text[from..].starts_with(t) || text[i..].starts_with(t))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// What a built-in attribute goes on.

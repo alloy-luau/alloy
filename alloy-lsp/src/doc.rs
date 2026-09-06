@@ -21,6 +21,10 @@ pub struct Doc {
     pub decls: Vec<alloy::declarations::Declaration>,
     /// The bindings of the file with their declaring keywords.
     pub bindings: Vec<alloy::declarations::Binding>,
+    /// The structs and enums, so a printed type folds back to its name.
+    pub shapes: Vec<alloy::declarations::Shape>,
+    /// The shapes of the modules the file imports.
+    pub import_shapes: Vec<alloy::declarations::Shape>,
     pub is_alx: bool,
 }
 
@@ -40,6 +44,8 @@ impl Doc {
             exports: Vec::new(),
             decls: Vec::new(),
             bindings: Vec::new(),
+            shapes: Vec::new(),
+            import_shapes: Vec::new(),
             is_alx: options.file_name.ends_with(".alx"),
         };
         doc.compile(options, jsx, ingots);
@@ -57,6 +63,11 @@ impl Doc {
         self.exports = crate::imports::exports_of(&self.source, self.is_alx);
         self.decls = alloy::declarations::summaries(&self.source, options.definitions);
         self.bindings = alloy::declarations::bindings(&self.source);
+        self.shapes = alloy::declarations::shapes(&self.source);
+        self.import_shapes = alloy::modules::import_shapes_for_file(
+            std::path::Path::new(&options.file_name),
+            &self.source,
+        );
         // `file_name` is the real path, which is what the ingots see.
         let compiled =
             alloy::compile_file(&options.file_name, &self.source, options, Some(jsx), ingots);
@@ -80,13 +91,29 @@ impl Doc {
             return (line, character);
         };
 
-        let Some(offset) = offset_of(&self.source, line, character) else {
+        // For `.alx`, the map speaks lowered positions: same line, the
+        // column through the word under it.
+        let (text, character) = match &out.lowered {
+            Some(low) => {
+                let from = line_text(&self.source, line);
+                let to = line_text(low, line);
+
+                (
+                    low.as_str(),
+                    alloy::alx::map_column(from, to, character as usize) as u32,
+                )
+            }
+
+            None => (self.source.as_str(), character),
+        };
+
+        let Some(offset) = offset_of(text, line, character) else {
             return (line, character);
         };
 
         // A byte a desugar replaced has no output position: take the next
         // copied byte on the line, else the previous one.
-        let (ls, le) = line_bounds(&self.source, offset);
+        let (ls, le) = line_bounds(text, offset);
         let mapped = (offset..=le)
             .find_map(|o| out.map.to_output(o as u32))
             .or_else(|| (ls..offset).rev().find_map(|o| out.map.to_output(o as u32)));
@@ -111,7 +138,17 @@ impl Doc {
 
         let src = out.map.to_source(offset as u32) as usize;
 
-        position_of(&self.source, src.min(self.source.len()))
+        match &out.lowered {
+            Some(low) => {
+                let (line, col) = position_of(low, src.min(low.len()));
+                let from = line_text(low, line);
+                let to = line_text(&self.source, line);
+
+                (line, alloy::alx::map_column(from, to, col as usize) as u32)
+            }
+
+            None => position_of(&self.source, src.min(self.source.len())),
+        }
     }
 
     /// Applies one LSP content change.
@@ -173,6 +210,11 @@ pub fn position_of(text: &str, offset: usize) -> (u32, u32) {
 }
 
 /// The byte bounds of the line holding `offset`, end exclusive of `\n`.
+/// The text of line `line`, without its newline; empty past the end.
+fn line_text(text: &str, line: u32) -> &str {
+    text.split('\n').nth(line as usize).unwrap_or("")
+}
+
 fn line_bounds(text: &str, offset: usize) -> (usize, usize) {
     let start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
     let end = text[offset..].find('\n').map_or(text.len(), |i| offset + i);

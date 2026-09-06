@@ -388,7 +388,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Future",
-        "```alloy\nlocal f = Future.delay(1)\nlocal v = await f\n```\nA memoized task, from the std. `async function` returns one; `await` yields until it settles.\n\nStatics: `resolve`, `reject`, `delay`, `all`, `race`, `any`, `all_settled`. Methods: `cancel`, `is_settled`, `andThen`.",
+        "```alloy\nlocal f = Future.delay(1)\nlocal v = await f\n```\nA memoized task, from the std. `async function` returns one; `await` yields until it settles.\n\nStatics: `resolve`, `reject`, `delay`, `all`, `race`, `any`, `all_settled`. Methods: `cancel`, `is_settled`, `andThen`.\n\nThe type is covariant: `race` and `any` over a list of `Future<number>` and `Future<string>` yield `Future<number | string>`. `delay` is `Future<()>`, `reject` is `Future<never>`, and an `async function` without a return type and without a `return` value is `Future<()>` too.",
     ),
     (
         "Result",
@@ -492,7 +492,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:directives",
-        "**Directives**\n\nA comment that starts with `--@alloy-` silences diagnostics: the compiler's, the lints, and the checker's type errors, which the language server drops on the silenced lines before the editor sees them.\n\n```alloy\n--@alloy-nocheck        this file: nothing is reported\n--@alloy-ignore         the next line with code is silent\nlocal x = y.z --@alloy-ignore   at the end of a line: that line\n```\n\nUse one for a line the new solver gets wrong, and say why in the comment beside it. Luau's own `--!strict`, `--!nonstrict`, and `--!nocheck` pass through and set the checker's mode for the file.\n\nEvery diagnostic carries the book section it belongs to as its code, `Alloy(4.2)`; the number links to the section in the editor, and `alloy doc 4.2` prints it.",
+        "**Directives**\n\nA comment that starts with `--@alloy-` silences diagnostics: the compiler's, the lints, and the checker's type errors, which the language server drops on the silenced lines before the editor sees them. The editor lists the directives after `--`, `--@`, or `--!`, and on an empty line.\n\n```alloy\n--@alloy-nocheck        this file: nothing is reported\n--@alloy-ignore         the next line with code is silent\nlocal x = y.z --@alloy-ignore   at the end of a line: that line\n```\n\nUse one for a line the new solver gets wrong, and say why in the comment beside it. Luau's own `--!strict`, `--!nonstrict`, and `--!nocheck` pass through and set the checker's mode for the file.\n\nEvery diagnostic carries the book section it belongs to as its code, `Alloy(4.2)`; the number links to the section in the editor, and `alloy doc 4.2` prints it.",
     ),
     (
         "topic:ingots",

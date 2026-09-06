@@ -36,6 +36,51 @@ impl<'a> Parser<'a> {
         Ok(TokSpan::new(start, self.pos))
     }
 
+    /// Consumes the `<...>` arguments of a type, each as a type, so an
+    /// `Array<number[]>` records the edit of its argument. A list the
+    /// type grammar refuses is taken for its extent alone.
+    fn type_args(&mut self) -> Result<(), ParseError> {
+        let start = self.pos;
+        let saved = self.type_edits.len();
+
+        match self.type_args_inner() {
+            Ok(()) => Ok(()),
+
+            Err(_) => {
+                self.pos = start;
+                self.type_edits.truncate(saved);
+                self.angle_span()?;
+
+                Ok(())
+            }
+        }
+    }
+
+    fn type_args_inner(&mut self) -> Result<(), ParseError> {
+        self.expect("<")?;
+
+        while !self.at(">") {
+            // A variadic argument, `...T`, or a pack, `T...`.
+            if self.at("...") {
+                self.bump();
+            }
+
+            self.type_body()?;
+
+            if !self.eat(",") {
+                break;
+            }
+        }
+
+        if self.at(">=") {
+            return Err(self.err("write `> =` here, `>=` reads as one operator"));
+        }
+
+        self.expect(">")?;
+
+        Ok(())
+    }
+
     pub(super) fn type_(&mut self) -> Result<TokSpan, ParseError> {
         self.enter()?;
 
@@ -233,7 +278,7 @@ impl<'a> Parser<'a> {
                     }
 
                     if self.at("<") {
-                        self.angle_span()?;
+                        self.type_args()?;
                     }
 
                     // This is a generic type pack: `T...`.

@@ -319,6 +319,21 @@ pub fn desugar(source: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_reduce_accumulator_takes_the_literal_type() {
+        let out = compile("local xs = [ 1, 2 ]\nlocal t = xs:reduce(function(acc, n) return acc + n end, 0)\nlocal s = xs:reduce(function(acc, n) return acc .. n end, \"\")\nprint(t, s)\n").unwrap();
+        assert!(
+            out.check.contains("function(acc: number, n)"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("function(acc: string, n)"),
+            "{}",
+            out.check
+        );
+    }
+
     fn messages(src: &str) -> Vec<String> {
         compile(src)
             .unwrap()

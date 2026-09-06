@@ -225,7 +225,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         import_next: 0,
         expected_generic: None,
         result_asyncs: options.import_result_asyncs.iter().cloned().collect(),
-        param_hint: None,
+        inserts: Vec::new(),
         return_at: None,
         struct_field_types: HashMap::new(),
         temp_next: 0,
@@ -281,6 +281,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
+    d.scan_reduce_inserts(&chunk.block);
 
     // Leading trivia, the block, trailing trivia: the printer's shape. The
     // std require, when the file needs one, goes on the first line after
@@ -441,10 +442,10 @@ struct Desugar<'s> {
     /// The async functions of this file, and the imported ones, declared
     /// to return a `Result`: `try await` on a call to one is the Result.
     result_asyncs: HashSet<String>,
-    /// A type for the first parameter of the next function literal: the
+    /// Text to write at a source byte the next copy spans: the
     /// accumulator of a `reduce` takes the type of a literal initial
     /// value, since the checker reads the function before the value.
-    param_hint: Option<String>,
+    inserts: Vec<(u32, String)>,
     /// Where the export return starts in the side buffer, once written.
     return_at: Option<u32>,
     /// The fields of each struct declared here with their types, for the
@@ -2199,6 +2200,49 @@ impl<'s> Desugar<'s> {
 
     /// Gathers the names that other statements route through: extension
     /// methods, statics, macros, traits. One pass over the top level.
+    /// Finds every `reduce` whose initial value is a literal and whose
+    /// function leaves its accumulator untyped: the parameter takes the
+    /// literal's type, since the checker reads the function before the
+    /// value and would leave it generic.
+    fn scan_reduce_inserts(&mut self, block: &Block) {
+        for stmt in &block.stmts {
+            self.scan_children(stmt_children(stmt));
+        }
+    }
+
+    fn scan_children(&mut self, children: Vec<Child<'_>>) {
+        for child in children {
+            match child {
+                Child::Expr(e) => self.scan_expr_for_reduce(e),
+
+                Child::Block(b) => self.scan_reduce_inserts(b),
+
+                Child::Function(f) => self.scan_reduce_inserts(&f.block),
+            }
+        }
+    }
+
+    fn scan_expr_for_reduce(&mut self, e: &Expr) {
+        if let Expr::Call {
+            method: Some(m),
+            args: CallArgs::Paren(args),
+            ..
+        } = e
+            && self.text_of(*m) == "reduce"
+            && let [Expr::Function { body, .. }, init] = args.as_slice()
+            && body
+                .params
+                .first()
+                .is_some_and(|p| p.ty.is_none() && p.destructure.is_none() && !p.is_vararg)
+            && let Some(ty) = literal_type(init)
+        {
+            let at = self.byte_end(body.params[0].name);
+            self.inserts.push((at, format!(": {ty}")));
+        }
+
+        self.scan_children(expr_children(e));
+    }
+
     fn prescan(&mut self, block: &Block) {
         for ext in &self.options.extensions {
             if ext.is_static {
@@ -3827,6 +3871,20 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        // An insert inside the range splits the copy around it.
+        if let Some(i) = self
+            .inserts
+            .iter()
+            .position(|(p, _)| start < *p && *p <= end)
+        {
+            let (at, text) = self.inserts.remove(i);
+            self.copy(start, at);
+            self.generate(at, &text);
+            self.copy(at, end);
+
+            return;
+        }
+
         let edit = self.type_edits.iter().copied().find(|e| match e {
             TypeEdit::ArraySuffix {
                 modifier,
@@ -4825,22 +4883,6 @@ impl<'s> Desugar<'s> {
     fn expr(&mut self, e: &Expr) {
         let anchor = self.byte_start(e.span());
 
-        if let Expr::Call {
-            method: Some(m),
-            args: CallArgs::Paren(args),
-            ..
-        } = e
-            && self.text_of(*m) == "reduce"
-            && let [Expr::Function { body, .. }, init] = args.as_slice()
-            && body
-                .params
-                .first()
-                .is_some_and(|p| p.ty.is_none() && p.destructure.is_none())
-            && let Some(ty) = literal_type(init)
-        {
-            self.param_hint = Some(ty);
-        }
-
         match e {
             Expr::Name(span) => {
                 let name = self.text_of(*span);
@@ -5050,9 +5092,7 @@ impl<'s> Desugar<'s> {
                 self.if_expr_with_locals(*span, branches, else_value);
             }
 
-            Expr::Function { body, .. }
-                if function_needs_rewrite(body) || self.param_hint.is_some() =>
-            {
+            Expr::Function { body, .. } if function_needs_rewrite(body) => {
                 self.function_with_header(e.span(), body);
             }
 
@@ -6827,9 +6867,7 @@ impl<'s> Desugar<'s> {
         let mut prologue: Vec<String> = Vec::new();
         let mut param_temp = 0;
 
-        let param_hint = self.param_hint.take();
-
-        for (idx, p) in body.params.iter().enumerate() {
+        for p in &body.params {
             let ps = self.byte_start(p.name);
             self.copy(cursor, ps);
 
@@ -6852,12 +6890,6 @@ impl<'s> Desugar<'s> {
                 && let Some(target) = self.self_type.clone()
             {
                 self.generate(cursor, &format!(": {target}"));
-            } else if idx == 0
-                && p.ty.is_none()
-                && p.destructure.is_none()
-                && let Some(hint) = &param_hint
-            {
-                self.generate(cursor, &format!(": {hint}"));
             }
 
             if let Some(t) = p.ty {

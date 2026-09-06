@@ -565,6 +565,91 @@ impl State {
             .collect()
     }
 
+    /// Completion items for the comment directives. In a comment that
+    /// holds nothing yet, `--`, `--@`, or `--!` lists them; on a line
+    /// with nothing before the cursor, they come last, so a bare request
+    /// at the top level finds them too. The edit replaces from the `--`
+    /// to the cursor, so the typed part filters and never doubles.
+    fn directive_completions(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return Vec::new();
+        };
+
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let head = &doc.source[line_start..offset];
+        let (edit_start, typed, last) = match head.find("--") {
+            Some(i) => {
+                let comment = &head[i + 2..];
+
+                // Text past the sigil is the author's; a directive there
+                // would land inside their words.
+                if !comment.is_empty()
+                    && !comment.starts_with('@')
+                    && !comment.starts_with('!')
+                    && !comment.trim().is_empty()
+                {
+                    return Vec::new();
+                }
+
+                (line_start + i, comment.trim_start(), false)
+            }
+
+            None if head.trim().is_empty() => (offset, "", true),
+
+            None => return Vec::new(),
+        };
+        let (_, start_char) = position_of(&doc.source, edit_start);
+        let alloy_only = typed.starts_with('@');
+        let luau_only = typed.starts_with('!');
+        let directives: [(&str, &str); 5] = [
+            (
+                "--@alloy-ignore",
+                "Silences the next line that holds code, or this line when it sits at the end of one: the compiler's, the lints, and the checker's diagnostics.",
+            ),
+            (
+                "--@alloy-nocheck",
+                "Silences every diagnostic in this file.",
+            ),
+            (
+                "--!strict",
+                "The checker's strict mode for this file: every type must be known.",
+            ),
+            (
+                "--!nonstrict",
+                "The checker's nonstrict mode for this file.",
+            ),
+            ("--!nocheck", "The checker skips this file."),
+        ];
+
+        directives
+            .iter()
+            .filter(|(text, _)| {
+                (!alloy_only || text.starts_with("--@")) && (!luau_only || text.starts_with("--!"))
+            })
+            .map(|(text, doc_text)| {
+                json!({
+                    "label": text,
+                    "kind": 14,
+                    "detail": "directive",
+                    "documentation": { "kind": "markdown", "value": doc_text },
+                    "filterText": text,
+                    "sortText": if last { format!("zz{text}") } else { format!("0{text}") },
+                    "textEdit": {
+                        "range": {
+                            "start": { "line": line, "character": start_char },
+                            "end": { "line": line, "character": character },
+                        },
+                        "newText": text,
+                    },
+                })
+            })
+            .collect()
+    }
+
     /// Completion items for the ambient std names, `HashMap` and the
     /// rest. The child knows them only as `__alloy.Name`, so a name typed
     /// at the start of an expression never reaches its list.
@@ -2307,6 +2392,17 @@ impl Server {
             return false;
         };
 
+        // Inside a comment, `@` opens a directive, not an attribute.
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+
+        if doc.source[line_start..offset].contains("--") {
+            let items = st.directive_completions(uri, line, character);
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": items }));
+
+            return true;
+        }
+
         let Some(ctx) = context::detect(&doc.source, offset) else {
             return false;
         };
@@ -2755,6 +2851,23 @@ impl Server {
                 // unit enum as a union of strings; the names go back.
                 crate::shapes::fold_value(result, &st.known_shapes());
 
+                // A type hint inserts its edit on a click: the label shows
+                // that text, so the two never differ.
+                if method == "textDocument/inlayHint"
+                    && let Some(hints) = result.as_array_mut()
+                {
+                    for h in hints.iter_mut() {
+                        if let Some(text) = h
+                            .pointer("/textEdits/0/newText")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            && hint_label(h).starts_with(':')
+                        {
+                            h["label"] = json!(text);
+                        }
+                    }
+                }
+
                 if let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u)) {
                     strip_import_temps(result, &doc.shadow);
                 }
@@ -2848,6 +2961,7 @@ impl Server {
                         extra.extend(st.primitive_completions(uri, line, character, result));
                         extra.extend(st.std_completions(uri, line, character, result));
                         extra.extend(st.ingot_items(uri, line, character, trigger.as_deref()));
+                        extra.extend(st.directive_completions(uri, line, character));
 
                         if !extra.is_empty() {
                             match result {

@@ -22,6 +22,7 @@ pub fn fold_value(value: &mut Value, known: &Known) {
                 || s.contains("\" | \"")
                 || s.contains("__private")
                 || s.contains("Array<")
+                || s.contains(" | ")
             {
                 *s = fold(s, known);
             }
@@ -162,9 +163,15 @@ fn fold_read_arrays(text: &mut String) {
 }
 
 /// `T | D` of an `unwrap_or` prints twice when both are the same:
-/// `number | number` reads as `number`. Each type after a `: ` on a
-/// line loses its repeated members.
+/// `number | number` reads as `number`, and two instantiations of one
+/// alias print as two members, `Array<number> | Array<number>`. Each
+/// type after a `: ` on a line loses its repeated members, at any
+/// depth.
 fn fold_union_dupes(text: &mut String) {
+    if !text.contains(" | ") {
+        return;
+    }
+
     let mut out = String::with_capacity(text.len());
 
     for (i, line) in text.split('\n').enumerate() {
@@ -177,42 +184,179 @@ fn fold_union_dupes(text: &mut String) {
             continue;
         };
         let (head, ty) = line.split_at(colon + 2);
+        out.push_str(head);
+        out.push_str(&dedupe_type(ty));
+    }
 
-        if !ty.contains(" | ") {
-            out.push_str(line);
-            continue;
-        }
+    *text = out;
+}
 
-        let mut members: Vec<&str> = Vec::new();
-        let mut depth = 0i32;
-        let mut from = 0;
+/// The type text with every union's repeated members dropped.
+fn dedupe_type(text: &str) -> String {
+    let members = split_union(text);
 
-        for (k, c) in ty.char_indices() {
-            match c {
-                '(' | '{' | '[' | '<' => depth += 1,
-                ')' | '}' | ']' | '>' => depth -= 1,
-                '|' if depth == 0 && ty[..k].ends_with(' ') && ty[k + 1..].starts_with(' ') => {
-                    members.push(ty[from..k - 1].trim());
-                    from = k + 2;
-                }
-                _ => {}
-            }
-        }
-
-        members.push(ty[from..].trim());
-        let mut kept: Vec<&str> = Vec::new();
+    if members.len() > 1 {
+        let mut kept: Vec<String> = Vec::new();
 
         for m in members {
+            let m = dedupe_type(m.trim());
+
             if !kept.contains(&m) {
                 kept.push(m);
             }
         }
 
-        out.push_str(head);
-        out.push_str(&kept.join(" | "));
+        return kept.join(" | ");
     }
 
-    *text = out;
+    // No union at this depth: each bracket group gets its own pass.
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap_or(' ');
+        let close = match c {
+            '<' => Some('>'),
+            '(' => Some(')'),
+            '{' => Some('}'),
+            '[' => Some(']'),
+            _ => None,
+        };
+
+        if let Some(close) = close
+            && let Some(len) = group_len(&text[i..], c, close)
+        {
+            out.push(c);
+            out.push_str(&dedupe_list(&text[i + 1..i + len - 1]));
+            out.push(close);
+            i += len;
+
+            continue;
+        }
+
+        out.push(c);
+        i += c.len_utf8();
+    }
+
+    out
+}
+
+/// The inside of a group: parts at the commas of depth zero, each a
+/// type or a `name: type`, with its own spacing kept.
+fn dedupe_list(text: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut depth = 0i32;
+    let mut from = 0;
+    let bytes = text.as_bytes();
+
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'<' | b'(' | b'{' | b'[' => depth += 1,
+            b'>' if i > 0 && bytes[i - 1] == b'-' => {}
+            b'>' | b')' | b'}' | b']' => depth -= 1,
+            b',' if depth == 0 => {
+                parts.push(&text[from..i]);
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(&text[from..]);
+
+    let mut out = Vec::with_capacity(parts.len());
+
+    for part in parts {
+        let lead = part.len() - part.trim_start().len();
+        let trail = part.len() - part.trim_end().len();
+        let body = part.trim();
+        let deduped = match label_end(body) {
+            Some(at) => format!("{}{}", &body[..at], dedupe_type(&body[at..])),
+
+            None => dedupe_type(body),
+        };
+        out.push(format!(
+            "{}{deduped}{}",
+            &part[..lead],
+            &part[part.len() - trail..]
+        ));
+    }
+
+    out.join(",")
+}
+
+/// The end of a `name: ` or `read name: ` label at depth zero, when the
+/// text starts with one.
+fn label_end(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let bytes = text.as_bytes();
+
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'<' | b'(' | b'{' | b'[' => depth += 1,
+            b'>' | b')' | b'}' | b']' => depth -= 1,
+            b'|' | b'&' if depth == 0 => return None,
+            b':' if depth == 0
+                && bytes.get(i + 1) == Some(&b' ')
+                && bytes.get(i + 2) != Some(&b':') =>
+            {
+                return Some(i + 2);
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// The members of a union at depth zero of `text`; one member when the
+/// text holds no such union. An arrow's `>` closes no bracket.
+fn split_union(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut from = 0;
+    let bytes = text.as_bytes();
+
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'<' | b'(' | b'{' | b'[' => depth += 1,
+            b'>' if i > 0 && bytes[i - 1] == b'-' => {}
+            b'>' | b')' | b'}' | b']' => depth -= 1,
+            b'|' if depth == 0
+                && i > 0
+                && bytes[i - 1] == b' '
+                && bytes.get(i + 1) == Some(&b' ') =>
+            {
+                out.push(&text[from..i - 1]);
+                from = i + 2;
+            }
+            _ => {}
+        }
+    }
+
+    out.push(&text[from..]);
+
+    out
+}
+
+/// The length of the group `open ... close` that starts the text.
+fn group_len(text: &str, open: char, close: char) -> Option<usize> {
+    let mut depth = 0i32;
+    let bytes = text.as_bytes();
+
+    for i in 0..bytes.len() {
+        if bytes[i] == open as u8 {
+            depth += 1;
+        } else if bytes[i] == close as u8 && !(close == '>' && i > 0 && bytes[i - 1] == b'-') {
+            depth -= 1;
+
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+    }
+
+    None
 }
 
 /// `type Snapshot = Readonly<Profile>`: the mapped form reads as the
@@ -1788,6 +1932,24 @@ mod tests {
         assert_eq!(
             fold(text, &Known::default()),
             "```luau\nlocal v: string | number\n```"
+        );
+    }
+
+    #[test]
+    fn a_union_of_one_type_reads_once() {
+        let k = Known::default();
+        assert_eq!(
+            fold(": Array<number[] | number[]>", &k),
+            ": Array<number[]>"
+        );
+        assert_eq!(fold("local n: number | number", &k), "local n: number");
+        assert_eq!(
+            fold("f: (a: number | string) -> (number | number)", &k),
+            "f: (a: number | string) -> (number)"
+        );
+        assert_eq!(
+            fold("x: { a: number | number } | nil", &k),
+            "x: { a: number } | nil"
         );
     }
 

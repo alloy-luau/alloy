@@ -54,6 +54,9 @@ pub enum Context {
     /// `import("...")`: a module path. `text` is what the string holds so
     /// far, and `start` the byte offset after the opening quote.
     ImportSpec { text: String, start: usize },
+    /// Right after the closing quote of a module path: the statement is
+    /// done, and no list belongs here.
+    Nothing,
 }
 
 /// The string a module path is being typed in, when the cursor is inside
@@ -62,6 +65,20 @@ fn import_spec(src: &str, line_start: usize, offset: usize) -> Option<Context> {
     let before = &src[line_start..offset];
     let quote = before.rfind(['"', '\''])?;
     let text = &before[quote + 1..];
+
+    // The cursor right after a closed path string: nothing to offer.
+    if text.is_empty() {
+        let quotes: Vec<usize> = before.match_indices(['"', '\'']).map(|(i, _)| i).collect();
+
+        if quotes.len() >= 2 && quotes.len() % 2 == 0 {
+            let open = quotes[quotes.len() - 2];
+            let head = before[..open].trim_end();
+
+            if head.ends_with("from") || head.ends_with("require(") || head.ends_with("import(") {
+                return Some(Context::Nothing);
+            }
+        }
+    }
 
     if text.contains(['"', '\'']) {
         return None;
@@ -425,9 +442,18 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             let after_name = inside.trim_end().chars().last().is_some_and(is_word)
                 && inside.ends_with(' ')
                 && prefix.is_empty();
+            // The path in either quote.
             let spec = line
                 .find("from")
-                .and_then(|i| line[i..].split('"').nth(1))
+                .and_then(|i| {
+                    let rest = &line[i..];
+                    let q = rest.find(['"', '\''])?;
+                    let quote = rest.as_bytes()[q] as char;
+                    let inner = &rest[q + 1..];
+                    let end = inner.find(quote)?;
+
+                    Some(&inner[..end])
+                })
                 .map(str::to_string);
 
             return Some(Context::ImportNames {
@@ -490,6 +516,20 @@ mod tests {
         assert_eq!(at("enum Msg as\n    Move(number) |"), None);
         assert_eq!(at("enum Msg as\nend\nlocal x = f(num|"), None);
         assert_eq!(at("local x = f(num|"), None);
+    }
+
+    #[test]
+    fn import_names_read_the_path_in_either_quote() {
+        match at("import { | } from '@pkg/jecs'") {
+            Some(Context::ImportNames { spec, .. }) => {
+                assert_eq!(spec.as_deref(), Some("@pkg/jecs"))
+            }
+            other => panic!("{other:?}"),
+        }
+        match at("import { | } from \"./lib\"") {
+            Some(Context::ImportNames { spec, .. }) => assert_eq!(spec.as_deref(), Some("./lib")),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -594,6 +634,8 @@ mod tests {
             })
         );
         assert_eq!(at("local s = \"from |\""), None);
+        assert_eq!(at("import { a } from '@pkg/jecs'|"), Some(Context::Nothing));
+        assert_eq!(at("local m = require(\"./x\"|)"), Some(Context::Nothing));
     }
 
     fn target_of(src: &str) -> Option<&'static str> {

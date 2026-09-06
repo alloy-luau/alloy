@@ -309,7 +309,7 @@ impl State {
         };
 
         for item in items.iter_mut() {
-            let Some(label) = item["label"].as_str() else {
+            let Some(label) = item["label"].as_str().map(str::to_string) else {
                 continue;
             };
             let full = format!("{enum_name}.{label}");
@@ -322,9 +322,69 @@ impl State {
                     .unwrap_or(&full)
                     .to_string();
                 item["kind"] = json!(20);
-                item["detail"] = json!(signature);
+                item["detail"] = json!(signature.clone());
                 item["documentation"] = json!({ "kind": "markdown", "value": d.hover });
+
+                // The child inserts `Move(_1, _2)`; the payload types read
+                // better as the placeholders.
+                let payload = payload_types(&signature);
+                let insert = if payload.is_empty() {
+                    label.to_string()
+                } else {
+                    let slots: Vec<String> = payload
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| format!("${{{}:{t}}}", i + 1))
+                        .collect();
+
+                    format!("{label}({})", slots.join(", "))
+                };
+
+                if item.get("textEdit").is_some() {
+                    item["textEdit"]["newText"] = json!(insert);
+                } else {
+                    item["insertText"] = json!(insert);
+                }
+
+                item["insertTextFormat"] = json!(if payload.is_empty() { 1 } else { 2 });
+                item.as_object_mut().map(|o| o.remove("command"));
             }
+        }
+    }
+
+    /// Signature help on a variant constructor: the child shows the
+    /// emit's `_1: Player`; the variant's own shape, `Msg.Move(Player,
+    /// number)`, replaces it, one parameter per payload type.
+    fn rewrite_variant_signatures(&self, uri: &str, result: &mut Value) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(signatures) = result.get_mut("signatures").and_then(Value::as_array_mut) else {
+            return;
+        };
+
+        for sig in signatures.iter_mut() {
+            let Some(label) = sig["label"].as_str() else {
+                continue;
+            };
+            let Some(d) = doc
+                .decls
+                .iter()
+                .filter(|d| d.name.contains('.'))
+                .find(|d| label.contains(&format!("{}(", d.name)))
+            else {
+                continue;
+            };
+            let Some(shape) = d.hover.lines().find(|l| l.starts_with(&d.name)) else {
+                continue;
+            };
+            let params: Vec<Value> = payload_types(shape)
+                .into_iter()
+                .map(|t| json!({ "label": t }))
+                .collect();
+            sig["label"] = json!(shape);
+            sig["parameters"] = json!(params);
+            sig["documentation"] = json!({ "kind": "markdown", "value": d.hover });
         }
     }
 
@@ -711,30 +771,60 @@ impl State {
                     && let Some(path) = uri_to_path(uri)
                     && let Some(dir) = path.parent()
                 {
-                    let target = imports::module_path(&imports::lexical(dir, spec));
+                    // `@alias/x` goes through the nearest .luaurc; a
+                    // relative spec is path arithmetic.
+                    let resolved = match spec.strip_prefix('@') {
+                        Some(rest) => {
+                            let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
 
-                    for (u, d) in &self.docs {
-                        let Some(p) = uri_to_path(u) else { continue };
+                            luaurc_aliases(dir, self.root.as_deref())
+                                .into_iter()
+                                .find(|(a, _)| a == alias)
+                                .map(|(_, base)| imports::lexical(&base, tail))
+                        }
 
-                        if imports::module_path(&p) != target {
+                        None => Some(imports::lexical(dir, spec)),
+                    };
+                    let mut exports: Vec<imports::Export> = Vec::new();
+
+                    if let Some(resolved) = resolved {
+                        let target = imports::module_path(&resolved);
+
+                        // An open document first; else the file on disk,
+                        // which a plain Luau module in a package is.
+                        for (u, d) in &self.docs {
+                            let Some(p) = uri_to_path(u) else { continue };
+
+                            if imports::module_path(&p) == target {
+                                exports.extend(d.exports.iter().cloned());
+                            }
+                        }
+
+                        if exports.is_empty()
+                            && let Some(file) = imports::module_file(&target)
+                        {
+                            exports = imports::exports_of_file(&file, 0);
+                        }
+                    }
+
+                    for e in &exports {
+                        if *type_only && !e.is_type {
                             continue;
                         }
 
-                        for e in &d.exports {
-                            if *type_only && !e.is_type {
-                                continue;
-                            }
-
-                            let label = if e.is_type && !*type_only {
-                                format!("type {}", e.name)
-                            } else {
-                                e.name.clone()
-                            };
-                            items.push(word(&label, e.kind, None, from));
-                        }
+                        let label = if e.is_type && !*type_only {
+                            format!("type {}", e.name)
+                        } else {
+                            e.name.clone()
+                        };
+                        items.push(word(&label, e.kind, None, from));
                     }
                 }
             }
+
+            // A finished statement wants no list: after the closing quote
+            // of an import path, Enter is a newline.
+            Context::Nothing => {}
 
             Context::ImportStar => {
                 items.push(word(
@@ -2362,15 +2452,10 @@ impl Server {
                 }
             }
 
+            // The Alloy diagnostics travel on the push channel alone, in
+            // `publish`; a pulled report that carried them too showed
+            // each lint twice in an editor that reads both.
             match method.as_str() {
-                "textDocument/diagnostic" => {
-                    if let Some(uri) = &ctx
-                        && let Some(items) = result.get_mut("items").and_then(Value::as_array_mut)
-                    {
-                        items.extend(st.alloy_diagnostics(uri));
-                    }
-                }
-
                 // The rewrites of the lints in the range, as quick fixes,
                 // and one action that applies every rewrite of the file.
                 "textDocument/codeAction" => {
@@ -2379,6 +2464,12 @@ impl Server {
                         && let Some(actions) = result.as_array_mut()
                     {
                         actions.extend(st.lint_actions(uri, range));
+                    }
+                }
+
+                "textDocument/signatureHelp" => {
+                    if let Some(uri) = &ctx {
+                        st.rewrite_variant_signatures(uri, result);
                     }
                 }
 
@@ -3950,8 +4041,8 @@ fn keep_diagnostic(d: &Value, doc: &Doc) -> bool {
 }
 
 /// A child message as the editor should read it: a mirror path reads as
-/// the real one, and an unresolved require names the module the source
-/// asked for, as a warning under the imports section.
+/// the real one, and an unresolved require is an `UnknownModule` error
+/// over the whole import, naming the module the source asked for.
 fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
     let Some(message) = d.get("message").and_then(Value::as_str) else {
         return;
@@ -3971,13 +4062,26 @@ fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
             .and_then(|(uri, _)| uri_to_path(uri))
             .map(|p| st.friendly_path(&p))
             .unwrap_or_default();
-        d["message"] = json!(alloy::typecheck::unknown_module_message(
-            &spec,
-            Path::new(&source_rel)
+        d["message"] = json!(format!(
+            "UnknownModule: {}",
+            alloy::typecheck::unknown_module_message(&spec, Path::new(&source_rel))
         ));
-        d["severity"] = json!(2);
+        d["severity"] = json!(1);
         d["source"] = json!("Alloy");
         d["code"] = json!("3.2");
+
+        // The whole statement, from its first word to the end of the path.
+        if let Some(text) = doc.source.lines().nth(line) {
+            let start = text.len() - text.trim_start().len();
+            let start = text[..start].encode_utf16().count() as u32;
+            let end = quoted_span_on_line(&doc.source, line as u32)
+                .map(|(_, e)| e)
+                .unwrap_or_else(|| text.encode_utf16().count() as u32);
+            d["range"] = json!({
+                "start": { "line": line, "character": start },
+                "end": { "line": line, "character": end },
+            });
+        }
 
         if let Some(url) = alloy::docs::book_url("3.2") {
             d["codeDescription"] = json!({ "href": url });
@@ -3998,6 +4102,41 @@ fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
         let rewritten = message.replace(&outside, "").replace(&mirror, &root);
         d["message"] = json!(rewritten);
     }
+}
+
+/// The payload types of a variant signature, `Msg.Move(Player, number)`
+/// giving `["Player", "number"]`, split at the commas outside brackets.
+fn payload_types(signature: &str) -> Vec<String> {
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = signature.rfind(')') else {
+        return Vec::new();
+    };
+    let inner = &signature[open + 1..close];
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' | '{' | '<' | '[' => depth += 1,
+            ')' | '}' | '>' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(inner[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    let last = inner[start..].trim();
+
+    if !last.is_empty() {
+        out.push(last.to_string());
+    }
+
+    out
 }
 
 /// The variable of a `LocalUnused` or `FunctionUnused` lint.
@@ -4237,6 +4376,20 @@ mod tests {
         let src = "import * as M from \"./inventory\"\nlocal x = 1\n";
         assert_eq!(quoted_span_on_line(src, 0), Some((19, 32)));
         assert_eq!(quoted_span_on_line(src, 1), None);
+    }
+
+    #[test]
+    fn a_variant_signature_splits_into_its_payload_types() {
+        assert_eq!(
+            payload_types("Msg.Move(Player, number)"),
+            vec!["Player", "number"]
+        );
+        assert_eq!(
+            payload_types("Msg.Pair({ x: number, y: number }, Map<string, number>)"),
+            vec!["{ x: number, y: number }", "Map<string, number>"]
+        );
+        assert!(payload_types("Msg.Quit").is_empty());
+        assert!(payload_types("Msg.Unit()").is_empty());
     }
 
     #[test]

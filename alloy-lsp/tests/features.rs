@@ -821,7 +821,7 @@ fn a_file_outside_the_root_finds_the_runtime() {
     assert!(
         !diags
             .iter()
-            .any(|d| d.contains("Unknown require") || d.contains("unknown module")),
+            .any(|d| d.contains("Unknown require") || d.contains("UnknownModule")),
         "{diags:?}"
     );
 
@@ -839,14 +839,16 @@ fn a_file_outside_the_root_finds_the_runtime() {
     let diags = s.diagnostics(&main_uri, |ds| ds.iter().any(|d| d.contains("number")));
     assert!(!diags.iter().any(|d| d.contains("util")), "{diags:?}");
     assert!(
-        diags.iter().any(|d| d.contains("unknown module \"./nope\"")
-            && d.contains("no .aly, .alx, or .luau file at")),
+        diags.iter().any(
+            |d| d.starts_with("UnknownModule: \"./nope\" names no module")
+                && d.contains("no .aly, .alx, or .luau file at")
+        ),
         "{diags:?}"
     );
     assert!(
         diags
             .iter()
-            .any(|d| d.contains("unknown module \"@pkg/thing\"") && d.contains("no alias `@pkg`")),
+            .any(|d| d.starts_with("UnknownModule: \"@pkg/thing\"") && d.contains("no alias @pkg")),
         "{diags:?}"
     );
     assert!(
@@ -869,7 +871,7 @@ fn enum_variants_complete_as_members_and_payloads_take_types() {
     let dir = std::env::temp_dir().join(format!("alloy-lsp-enum-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = "enum Msg as\n    Move(number)\n    Quit\nend\nlocal m = Msg.\nprint(m)\n";
+    let src = "enum Msg as\n    Move(number)\n    Quit\nend\nlocal m = Msg.\nprint(m)\nlocal v = Msg.Move(1)\n";
     let file = dir.join("en.aly");
     std::fs::write(&file, src).unwrap();
 
@@ -903,6 +905,20 @@ fn enum_variants_complete_as_members_and_payloads_take_types() {
     );
     let quit = find("Quit").expect("Quit completes");
     assert_eq!(quit["kind"], 20, "{quit}");
+    let inserted = mv["textEdit"]["newText"]
+        .as_str()
+        .or_else(|| mv["insertText"].as_str())
+        .unwrap_or("");
+    assert_eq!(inserted, "Move(${1:number})", "{mv}");
+
+    // Signature help inside `Msg.Move(`: the variant's shape, not `_1`.
+    let help = s.request(
+        "textDocument/signatureHelp",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 6, "character": 19 } }),
+    );
+    let sig = &help["signatures"][0];
+    assert_eq!(sig["label"], "Msg.Move(number)", "{help}");
+    assert_eq!(sig["parameters"][0]["label"], "number", "{help}");
 
     // Inside `Move(`: types, and no `assert`.
     let labels = s.completion_labels(&uri, 1, 9);
@@ -910,6 +926,68 @@ fn enum_variants_complete_as_members_and_payloads_take_types() {
     assert!(labels.iter().any(|l| l == "Players"), "{labels:?}");
     assert!(labels.iter().any(|l| l == "Msg"), "{labels:?}");
     assert!(!labels.iter().any(|l| l == "assert"), "{labels:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The names of an import complete from a plain Luau module too, through
+/// an `@alias` of `.luaurc`, following a `return M` re-export.
+#[test]
+fn import_names_come_from_plain_luau_modules() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-names-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("packages/inner")).unwrap();
+    std::fs::write(
+        dir.join(".luaurc"),
+        "{ \"languageMode\": \"strict\", \"aliases\": { \"pkg\": \"packages\" } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("packages/inner/jecs.luau"),
+        "local jecs = {}\nfunction jecs.world()\n    return {}\nend\njecs.pair = 1\nexport type Entity = number\nreturn jecs\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("packages/jecs.luau"),
+        "local module = require(\"./inner/jecs\")\nexport type Entity = module.Entity\nreturn module\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.luau"),
+        "return {\n    a = 1,\n    b = function() end,\n}\n",
+    )
+    .unwrap();
+    let src = "import {  } from '@pkg/jecs'\nimport {  } from \"./lib\"\n";
+    let file = dir.join("main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    let labels = s.completion_labels(&uri, 0, 9);
+    assert!(labels.iter().any(|l| l == "world"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "pair"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "type Entity"), "{labels:?}");
+
+    let labels = s.completion_labels(&uri, 1, 9);
+    assert!(
+        labels.iter().any(|l| l == "a") && labels.iter().any(|l| l == "b"),
+        "{labels:?}"
+    );
+
+    // After the closing quote: nothing.
+    let labels = s.completion_labels(&uri, 0, 28);
+    assert!(labels.is_empty(), "{labels:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

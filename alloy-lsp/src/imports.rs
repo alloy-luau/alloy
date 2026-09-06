@@ -110,6 +110,125 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
         }
     }
 
+    // A plain Luau module exports what it returns: the keys of a table
+    // literal, or the members set on the name it returns.
+    if let Some(Stmt::Return(r)) = parsed.chunk.block.stmts.last() {
+        match r.values.first() {
+            Some(Expr::Table { fields, .. }) => {
+                for f in fields {
+                    if let alloy_syntax::ast::TableField::Named { name, value } = f {
+                        let kind = if matches!(value, Expr::Function { .. }) {
+                            3
+                        } else {
+                            6
+                        };
+                        push(name_of(*name), false, false, kind);
+                    }
+                }
+            }
+
+            Some(Expr::Name(span)) => {
+                let module = name_of(*span);
+                let text_at = |i: usize| toks.get(i).map(|t| t.text(text)).unwrap_or("");
+
+                for i in 0..toks.len() {
+                    // `M.key = ...` at the start of a line.
+                    if text_at(i) == module
+                        && text_at(i + 1) == "."
+                        && toks.get(i + 2).is_some_and(|t| t.kind == TokKind::Ident)
+                        && text_at(i + 3) == "="
+                        && (i == 0
+                            || text[toks[i - 1].end as usize..toks[i].start as usize]
+                                .contains('\n'))
+                    {
+                        let kind = if text_at(i + 4) == "function" { 3 } else { 6 };
+                        push(text_at(i + 2).to_string(), false, false, kind);
+                    }
+
+                    // `function M.key(` and `function M:key(`.
+                    if text_at(i) == "function"
+                        && text_at(i + 1) == module
+                        && matches!(text_at(i + 2), "." | ":")
+                        && toks.get(i + 3).is_some_and(|t| t.kind == TokKind::Ident)
+                    {
+                        push(text_at(i + 3).to_string(), false, false, 3);
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    out
+}
+
+/// The module a plain file re-exports: `local M = require("./x")` with
+/// `return M` at the end. The spec, for the caller to follow.
+pub fn follow_of(src: &str) -> Option<String> {
+    let parsed = alloy_syntax::parse_lenient(src, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let Some(Stmt::Return(r)) = parsed.chunk.block.stmts.last() else {
+        return None;
+    };
+    let Some(Expr::Name(span)) = r.values.first() else {
+        return None;
+    };
+    let module = toks[span.start as usize].text(src);
+    let text_at = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or("");
+
+    (0..toks.len()).find_map(|i| {
+        (text_at(i) == "local"
+            && text_at(i + 1) == module
+            && text_at(i + 2) == "="
+            && text_at(i + 3) == "require"
+            && text_at(i + 4) == "(")
+            .then(|| text_at(i + 5))
+            .filter(|t| t.len() >= 2 && t.starts_with(['"', '\'']))
+            .map(|t| t[1..t.len() - 1].to_string())
+    })
+}
+
+/// The file a module path names on disk: the Alloy or Luau file with
+/// that stem, or the `init` file of that directory.
+pub fn module_file(target: &Path) -> Option<PathBuf> {
+    let stem = target.to_string_lossy().into_owned();
+
+    ["aly", "alx", "luau", "lua"]
+        .iter()
+        .map(|ext| PathBuf::from(format!("{stem}.{ext}")))
+        .chain(
+            ["init.aly", "init.alx", "init.luau", "init.lua"]
+                .iter()
+                .map(|n| target.join(n)),
+        )
+        .find(|p| p.is_file())
+}
+
+/// The exports of a file on disk, following `return M` to the module
+/// `M` was required from, a few hops at most.
+pub fn exports_of_file(path: &Path, depth: u8) -> Vec<Export> {
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let is_alx = path.extension().is_some_and(|e| e == "alx");
+    let mut out = exports_of(&src, is_alx);
+
+    if depth < 3
+        && let Some(spec) = follow_of(&src)
+        && let Some(dir) = path.parent()
+        && let Some(next) = module_file(&module_path(&lexical(dir, &spec)))
+    {
+        for e in exports_of_file(&next, depth + 1) {
+            if !out
+                .iter()
+                .any(|o| o.name == e.name && o.is_type == e.is_type)
+            {
+                out.push(e);
+            }
+        }
+    }
+
     out
 }
 

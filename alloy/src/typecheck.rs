@@ -42,7 +42,10 @@ pub struct TypeDiag {
 impl TypeDiag {
     /// A type or syntax error, as opposed to one of the checker's lints.
     pub fn is_error(&self) -> bool {
-        matches!(self.kind.as_str(), "TypeError" | "SyntaxError")
+        matches!(
+            self.kind.as_str(),
+            "TypeError" | "SyntaxError" | "UnknownModule"
+        )
     }
 }
 
@@ -409,13 +412,13 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
 
         // A require the checker could not resolve names what the source
-        // asked for, as a warning under the `luau` group.
+        // asked for; it is an error, as the require fails at runtime.
         let (kind, message) = if message.starts_with("Unknown require") {
             let spec = quoted_on_line(&f.source, mapped.0.saturating_sub(1)).unwrap_or_default();
             let rel = config.build.input.join(&f.rel);
 
             (
-                "UnknownRequire".to_string(),
+                "UnknownModule".to_string(),
                 unknown_module_message(&spec, &rel),
             )
         } else {
@@ -440,15 +443,16 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     Ok(analysis)
 }
 
-/// The report for a require the checker could not resolve, from the
-/// module path the source wrote and the source's own path relative to
-/// the root: what was asked for, and where it was looked for.
+/// The `UnknownModule` report for a require the checker could not
+/// resolve, from the module path the source wrote and the source's own
+/// path relative to the root: what was asked for, and where it was
+/// looked for. The kind is the caller's prefix.
 pub fn unknown_module_message(spec: &str, source_rel: &Path) -> String {
     if let Some(rest) = spec.strip_prefix('@') {
         let alias = rest.split('/').next().unwrap_or(rest);
 
         return format!(
-            "unknown module \"{spec}\": no alias `@{alias}` in .luaurc or in the [mount] table"
+            "\"{spec}\" names no module; no alias @{alias} in .luaurc or in the [mount] table"
         );
     }
 
@@ -470,7 +474,7 @@ pub fn unknown_module_message(spec: &str, source_rel: &Path) -> String {
     }
 
     format!(
-        "unknown module \"{spec}\": no .aly, .alx, or .luau file at {}",
+        "\"{spec}\" names no module; no .aly, .alx, or .luau file at {}",
         target.to_string_lossy().replace('\\', "/")
     )
 }
@@ -626,15 +630,15 @@ mod tests {
     fn an_unknown_module_names_what_was_asked_for() {
         assert_eq!(
             unknown_module_message("./ui", Path::new("src/app/main.aly")),
-            "unknown module \"./ui\": no .aly, .alx, or .luau file at src/app/ui"
+            "\"./ui\" names no module; no .aly, .alx, or .luau file at src/app/ui"
         );
         assert_eq!(
             unknown_module_message("../shared/util", Path::new("src/app/main.aly")),
-            "unknown module \"../shared/util\": no .aly, .alx, or .luau file at src/shared/util"
+            "\"../shared/util\" names no module; no .aly, .alx, or .luau file at src/shared/util"
         );
         assert_eq!(
             unknown_module_message("@packages/react", Path::new("src/main.aly")),
-            "unknown module \"@packages/react\": no alias `@packages` in .luaurc or in the [mount] table"
+            "\"@packages/react\" names no module; no alias @packages in .luaurc or in the [mount] table"
         );
         assert_eq!(
             quoted_on_line("import { a } from \"./x\"\nlocal y = 1\n", 0),

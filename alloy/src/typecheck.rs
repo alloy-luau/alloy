@@ -256,6 +256,25 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         definitions.push(root.join(d));
     }
 
+    // A plain `.luau` beside the sources sits in the output too, as the
+    // build copies it, so a require of it resolves.
+    let input = root.join(&config.build.input);
+    let mut plain = Vec::new();
+    let _ = crate::build::walk_plain(&input, &mut plain);
+
+    for path in plain {
+        let rel = path.strip_prefix(&input).unwrap_or(&path);
+        let target = out.join(rel);
+
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        if let Ok(text) = std::fs::read(&path) {
+            std::fs::write(&target, text).map_err(|e| e.to_string())?;
+        }
+    }
+
     // The artifacts sit where the build would put them, so `./x` and
     // `../alloy` resolve.
     for f in files {
@@ -358,9 +377,7 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         let (line_no, col, kind, message) = (report.line, report.col, report.kind, report.message);
 
         // The layout lints read the emit, not the source.
-        if message.contains("Unknown require")
-            || matches!(kind, "SameLineStatement" | "MultiLineStatement")
-        {
+        if matches!(kind, "SameLineStatement" | "MultiLineStatement") {
             continue;
         }
 
@@ -391,12 +408,26 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         }
 
+        // A require the checker could not resolve names what the source
+        // asked for, as a warning under the `luau` group.
+        let (kind, message) = if message.starts_with("Unknown require") {
+            let spec = quoted_on_line(&f.source, mapped.0.saturating_sub(1)).unwrap_or_default();
+            let rel = config.build.input.join(&f.rel);
+
+            (
+                "UnknownRequire".to_string(),
+                unknown_module_message(&spec, &rel),
+            )
+        } else {
+            (kind.to_string(), message.to_string())
+        };
+
         analysis.diagnostics.push(TypeDiag {
             rel: f.rel.clone(),
             line: mapped.0,
             col: mapped.1,
-            kind: kind.to_string(),
-            message: message.to_string(),
+            kind,
+            message,
         });
         last = Some(analysis.diagnostics.len() - 1);
     }
@@ -407,6 +438,52 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     analysis.diagnostics.dedup();
 
     Ok(analysis)
+}
+
+/// The report for a require the checker could not resolve, from the
+/// module path the source wrote and the source's own path relative to
+/// the root: what was asked for, and where it was looked for.
+pub fn unknown_module_message(spec: &str, source_rel: &Path) -> String {
+    if let Some(rest) = spec.strip_prefix('@') {
+        let alias = rest.split('/').next().unwrap_or(rest);
+
+        return format!(
+            "unknown module \"{spec}\": no alias `@{alias}` in .luaurc or in the [mount] table"
+        );
+    }
+
+    let base = source_rel.parent().unwrap_or(Path::new(""));
+    let mut target = PathBuf::new();
+
+    for c in base.join(spec).components() {
+        match c {
+            std::path::Component::CurDir => {}
+
+            std::path::Component::ParentDir => {
+                if !target.pop() {
+                    target.push("..");
+                }
+            }
+
+            other => target.push(other),
+        }
+    }
+
+    format!(
+        "unknown module \"{spec}\": no .aly, .alx, or .luau file at {}",
+        target.to_string_lossy().replace('\\', "/")
+    )
+}
+
+/// The content of the first quoted string on a zero-based line.
+pub fn quoted_on_line(source: &str, line: usize) -> Option<String> {
+    let text = source.lines().nth(line)?;
+    let open = text.find(['"', '\''])?;
+    let quote = text.as_bytes()[open] as char;
+    let rest = &text[open + 1..];
+    let close = rest.find(quote)?;
+
+    Some(rest[..close].to_string())
 }
 
 /// One line of the analyzer's output, split.
@@ -544,6 +621,26 @@ fn line_col(text: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_module_names_what_was_asked_for() {
+        assert_eq!(
+            unknown_module_message("./ui", Path::new("src/app/main.aly")),
+            "unknown module \"./ui\": no .aly, .alx, or .luau file at src/app/ui"
+        );
+        assert_eq!(
+            unknown_module_message("../shared/util", Path::new("src/app/main.aly")),
+            "unknown module \"../shared/util\": no .aly, .alx, or .luau file at src/shared/util"
+        );
+        assert_eq!(
+            unknown_module_message("@packages/react", Path::new("src/main.aly")),
+            "unknown module \"@packages/react\": no alias `@packages` in .luaurc or in the [mount] table"
+        );
+        assert_eq!(
+            quoted_on_line("import { a } from \"./x\"\nlocal y = 1\n", 0),
+            Some("./x".to_string())
+        );
+    }
 
     #[test]
     fn the_analyzer_line_parses() {

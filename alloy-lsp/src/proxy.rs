@@ -1009,6 +1009,22 @@ impl State {
         (real, false)
     }
 
+    /// A real path as a message shows it: relative to the root when it
+    /// is under it, else as it is.
+    fn friendly_path(&self, path: &Path) -> String {
+        let path = normalize(path);
+        let shown = match self.root.as_deref().map(normalize) {
+            Some(root) => path
+                .strip_prefix(&root)
+                .map(Path::to_path_buf)
+                .unwrap_or(path),
+
+            None => path,
+        };
+
+        shown.to_string_lossy().replace('\\', "/")
+    }
+
     /// Writes the runtime into the mirror under `dir` once, so the
     /// `require` of a file there resolves for the child.
     fn ensure_runtime(&self, dir: &Path) {
@@ -2093,6 +2109,7 @@ impl Server {
                                     }
 
                                     map_from_shadow(&mut d, Some(&source), &st);
+                                    friendly_message(&mut d, doc, &st);
 
                                     // Two references in one desugar map to
                                     // one source token: report it once.
@@ -2239,6 +2256,10 @@ impl Server {
                     "textDocument/diagnostic" => {
                         if let Some(items) = result.get_mut("items").and_then(Value::as_array_mut) {
                             items.retain(|d| keep_diagnostic(d, doc));
+
+                            for d in items.iter_mut() {
+                                friendly_message(d, doc, &st);
+                            }
                         }
                     }
 
@@ -2643,7 +2664,17 @@ impl Server {
         let mut files = Vec::new();
         let mut plain = Vec::new();
         walk(&root, out.as_deref(), &mut files, &mut plain);
+
+        // An input outside the root, `in = "../examples"`, gets its
+        // shadows too, or a require between its files finds nothing.
+        let input = normalize(&input);
+
+        if !input.starts_with(normalize(&root)) && input.is_dir() {
+            walk(&input, out.as_deref(), &mut files, &mut plain);
+        }
+
         files.sort();
+        files.dedup();
 
         // Plain files copy into the mirror, so requires to them resolve.
         // The root's Luau configuration sets strict mode when it sets no
@@ -3916,6 +3947,57 @@ fn keep_diagnostic(d: &Value, doc: &Doc) -> bool {
     let end = offset_of(&doc.shadow, el, ec).unwrap_or(doc.shadow.len());
 
     !(start..end.max(start + 1)).any(|o| out.map.is_generated(o as u32))
+}
+
+/// A child message as the editor should read it: a mirror path reads as
+/// the real one, and an unresolved require names the module the source
+/// asked for, as a warning under the imports section.
+fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
+    let Some(message) = d.get("message").and_then(Value::as_str) else {
+        return;
+    };
+
+    // The child writes `TypeError: Unknown require: <path>`.
+    if message.contains("Unknown require") {
+        let line = d
+            .pointer("/range/start/line")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let spec = alloy::typecheck::quoted_on_line(&doc.source, line).unwrap_or_default();
+        let source_rel = st
+            .docs
+            .iter()
+            .find(|(_, other)| std::ptr::eq(*other, doc))
+            .and_then(|(uri, _)| uri_to_path(uri))
+            .map(|p| st.friendly_path(&p))
+            .unwrap_or_default();
+        d["message"] = json!(alloy::typecheck::unknown_module_message(
+            &spec,
+            Path::new(&source_rel)
+        ));
+        d["severity"] = json!(2);
+        d["source"] = json!("Alloy");
+        d["code"] = json!("3.2");
+
+        if let Some(url) = alloy::docs::book_url("3.2") {
+            d["codeDescription"] = json!({ "href": url });
+        }
+
+        return;
+    }
+
+    let mirror = st.mirror.to_string_lossy().into_owned();
+
+    if message.contains(&mirror) {
+        let outside = format!("{mirror}/_outside");
+        let root = st
+            .root
+            .as_deref()
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let rewritten = message.replace(&outside, "").replace(&mirror, &root);
+        d["message"] = json!(rewritten);
+    }
 }
 
 /// The variable of a `LocalUnused` or `FunctionUnused` lint.

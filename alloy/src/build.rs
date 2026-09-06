@@ -25,6 +25,8 @@ pub struct Report {
     pub notes: Vec<String>,
     /// The check artifacts, kept for the type check of `alloy flux`.
     pub checks: Vec<crate::typecheck::CheckSource>,
+    /// Plain `.luau` and `.lua` files copied from `in` to `out`.
+    pub copied: Vec<PathBuf>,
 }
 
 impl Report {
@@ -118,6 +120,35 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     let mut sources = Vec::new();
     walk(&input, &mut sources)?;
     sources.sort();
+
+    // A plain `.luau` or `.lua` beside the sources goes to the output as
+    // it is, so a `require("./other")` from emitted code finds it there.
+    if write {
+        let mut plain = Vec::new();
+        walk_plain(&input, &mut plain)?;
+
+        for path in plain {
+            let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
+
+            if exclude.is_match(&rel) {
+                continue;
+            }
+
+            let target = out.join(&rel);
+            expected.insert(target.clone());
+            let text = std::fs::read(&path)?;
+
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            if std::fs::read(&target).ok().as_deref() != Some(text.as_slice()) {
+                std::fs::write(&target, &text)?;
+            }
+
+            report.copied.push(rel);
+        }
+    }
 
     // Extensions are project wide: a call by an extension name routes
     // through the dispatcher in every file, so the set comes first.
@@ -419,26 +450,74 @@ pub fn globs(patterns: &[String]) -> std::io::Result<GlobSet> {
     b.build().map_err(std::io::Error::other)
 }
 
-/// Every Alloy source under a directory, recursively.
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
+/// A directory the source walks leave alone: a dot directory, a package
+/// store, a build tree, or a nested project with an `alloy.toml` of its
+/// own, which builds on its own.
+fn skipped_dir(path: &Path, top: bool) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
+    name.starts_with('.')
+        || matches!(name.as_str(), "node_modules" | "target")
+        || (!top && path.join(crate::config::FILE_NAME).is_file())
+}
 
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("aly" | "alx")
-        ) {
-            out.push(path);
+/// Every plain Luau file under a directory, recursively: what a require
+/// from emitted code may name beside the sources.
+pub fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn go(dir: &Path, top: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        if !dir.is_dir() || skipped_dir(dir, top) {
+            return Ok(());
         }
+
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+
+            if path.is_dir() {
+                go(&path, false, out)?;
+            } else if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("luau" | "lua")
+            ) {
+                out.push(path);
+            }
+        }
+
+        Ok(())
     }
+
+    go(dir, true, out)?;
+    out.sort();
 
     Ok(())
+}
+
+/// Every Alloy source under a directory, recursively.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn go(dir: &Path, top: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        if !dir.is_dir() || skipped_dir(dir, top) {
+            return Ok(());
+        }
+
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+
+            if path.is_dir() {
+                go(&path, false, out)?;
+            } else if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("aly" | "alx")
+            ) {
+                out.push(path);
+            }
+        }
+
+        Ok(())
+    }
+
+    go(dir, true, out)
 }
 
 fn walk_all(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {

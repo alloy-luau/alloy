@@ -800,6 +800,12 @@ fn a_file_outside_the_root_finds_the_runtime() {
     let src = "local xs = [ 1, 2 ]\nlocal n: number = \"s\"\nprint(xs, n)\n";
     let file = game.join("src/client/test.aly");
     std::fs::write(&file, src).unwrap();
+    // A neighbour under the root's input, there before the server starts.
+    std::fs::write(
+        base.join("examples/util.aly"),
+        "export function one(): number\n    return 1\nend\n",
+    )
+    .unwrap();
 
     let mut s = start(&child, &root);
     let uri = format!("file://{}", file.display());
@@ -812,6 +818,37 @@ fn a_file_outside_the_root_finds_the_runtime() {
     // The type error proves the checker ran on the file; the runtime
     // require it starts with resolved, or there would be a second report.
     let diags = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("number")));
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.contains("Unknown require") || d.contains("unknown module")),
+        "{diags:?}"
+    );
+
+    // A file under the root's input imports its neighbour: the startup
+    // pass shadowed it, so the import resolves.
+    let main_src = "import { one } from \"./util\"\nimport { gone } from \"./nope\"\nimport { x } from \"@pkg/thing\"\nlocal n: number = \"s\"\nprint(one(), gone, x, n)\n";
+    let main = base.join("examples/main.aly");
+    std::fs::write(&main, main_src).unwrap();
+    let main_uri = format!("file://{}", main.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": main_uri, "languageId": "alloy-luau", "version": 1, "text": main_src } } }),
+    );
+    let diags = s.diagnostics(&main_uri, |ds| ds.iter().any(|d| d.contains("number")));
+    assert!(!diags.iter().any(|d| d.contains("util")), "{diags:?}");
+    assert!(
+        diags.iter().any(|d| d.contains("unknown module \"./nope\"")
+            && d.contains("no .aly, .alx, or .luau file at")),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("unknown module \"@pkg/thing\"") && d.contains("no alias `@pkg`")),
+        "{diags:?}"
+    );
     assert!(
         !diags.iter().any(|d| d.contains("Unknown require")),
         "{diags:?}"

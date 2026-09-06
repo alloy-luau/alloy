@@ -477,7 +477,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:build",
-        "**alloy build**\n\nCompiles every `.aly` and `.alx` under `[build] in` to Luau under `[build] out`, mirroring the tree, and writes the runtime as `alloy.luau` at the output root. A file that did not change is not rewritten, so a Rojo sync stays quiet. `artifact = \"ship\"` writes the code Roblox runs; `\"check\"` writes what luau-lsp sees, with the types kept. `clean = true` removes an output whose source is gone.\n\n```\nalloy build                one project\nalloy build src/game.aly   one file, to stdout\nalloy build --check --map  the check artifact and its chunk map\n```",
+        "**alloy build**\n\nCompiles every `.aly` and `.alx` under `[build] in` to Luau under `[build] out`, mirroring the tree, and writes the runtime as `alloy.luau` at the output root. A plain `.luau` or `.lua` beside the sources is copied as it is, so a `require(\"./other\")` finds it in the output. A file that did not change is not rewritten, so a Rojo sync stays quiet. `artifact = \"ship\"` writes the code Roblox runs; `\"check\"` writes what luau-lsp sees, with the types kept. `clean = true` removes an output whose source is gone.\n\n```\nalloy build                one project\nalloy build src/game.aly   one file, to stdout\nalloy build --check --map  the check artifact and its chunk map\n```",
     ),
     (
         "topic:config",

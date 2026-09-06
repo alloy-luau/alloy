@@ -23,8 +23,6 @@ const DEPRECATED_METHODS: &[(&str, &str)] = &[
     ("connect", "Connect"),
     ("disconnect", "Disconnect"),
     ("wait", "Wait"),
-    ("remove", "Destroy"),
-    ("clone", "Clone"),
     ("children", "GetChildren"),
     ("getChildren", "GetChildren"),
     ("findFirstChild", "FindFirstChild"),
@@ -211,9 +209,30 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // The keywords between `export` and the name are not it:
+            // `export async function load`, `export const LIMIT`.
             let mut j = i + 1;
 
-            while j < self.toks.len() && !self.is_name(j) {
+            while j < self.toks.len()
+                && (!self.is_name(j)
+                    || matches!(
+                        self.t(j),
+                        "async"
+                            | "function"
+                            | "const"
+                            | "local"
+                            | "struct"
+                            | "enum"
+                            | "type"
+                            | "interface"
+                            | "trait"
+                            | "remote"
+                            | "attribute"
+                            | "macro"
+                            | "impl"
+                            | "class"
+                    ))
+            {
                 j += 1;
             }
 
@@ -264,7 +283,7 @@ mod tests {
     fn old_method_names_take_the_new_ones() {
         assert_eq!(
             fixed("part.Touched:connect(f)\nlocal c = part:clone()\n"),
-            "part.Touched:Connect(f)\nlocal c = part:Clone()\n"
+            "part.Touched:Connect(f)\nlocal c = part:clone()\n"
         );
         assert_eq!(
             names("function Signal:connect(f) end\nlocal c = s:connect(f)\n"),

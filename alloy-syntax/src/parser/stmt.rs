@@ -1313,6 +1313,20 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn expr_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
+        // `new X(...) { }`, `try f()`, and `await f()` stand alone as
+        // statements: their value is dropped, the way a call's is.
+        if matches!(self.text(), "new" | "try" | "await") && self.prefix_word_here() {
+            let e = self.expr()?;
+
+            return match &e {
+                Expr::New { .. } | Expr::Try { .. } | Expr::Await { .. } => {
+                    Ok(Stmt::Call(e, TokSpan::new(start, self.pos)))
+                }
+
+                _ => Err(self.err("this expression is not a statement")),
+            };
+        }
+
         let first = self.suffixed_expr()?;
         // This is an assignment, in the plain or the compound form.
         if self.at("=") || self.at(",") || self.compound_op_at().is_some() {
@@ -2355,11 +2369,11 @@ impl<'a> Parser<'a> {
             }
 
             let v_start = self.pos;
-
-            if self.at("@") {
-                self.attrs()?;
-            }
-
+            let attributes = if self.at("@") {
+                self.attrs()?
+            } else {
+                Vec::new()
+            };
             let vname = self.expect_name()?;
             let mut payload = Vec::new();
 
@@ -2382,6 +2396,7 @@ impl<'a> Parser<'a> {
             };
 
             variants.push(Variant {
+                attributes,
                 name: vname,
                 payload,
                 value,

@@ -345,6 +345,8 @@ pub struct EnumDecl {
 
 #[derive(Debug)]
 pub struct Variant {
+    /// The attributes above the variant, `@icon("...")`.
+    pub attributes: Vec<Attr>,
     pub name: TokSpan,
     /// The payload types, as spans.
     pub payload: Vec<TokSpan>,

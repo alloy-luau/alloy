@@ -309,7 +309,12 @@ impl<'s> Scan<'s> {
             let prev = self.prev(k);
 
             if !matches!(prev, "then" | "else") {
-                return !EXPR_IF_BEFORE.contains(&prev);
+                // A `?` or `!` that ends the line above is a type suffix
+                // or an assert, never a ternary waiting for its `if`.
+                let first_on_line = k == 0 || self.line_of(k - 1) != self.line_of(k);
+
+                return !EXPR_IF_BEFORE.contains(&prev)
+                    || (first_on_line && matches!(prev, "?" | "!" | ">" | ">>"));
             }
 
             // Back to the `if` this `then` or `else` belongs to, on this line.

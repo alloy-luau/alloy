@@ -994,7 +994,7 @@ fn test_once(args: &[String]) -> ExitCode {
 
         let ingots = alloy::ingot::Ingots::load(&root, &config);
 
-        return match alloy::testbuild::spec(&config, &root, &rel, &source, Some(&ingots)) {
+        return match alloy::testbuild::spec(&config, &root, &rel, &source, Some(&ingots), &[]) {
             Ok(Some((text, diagnostics, _))) => {
                 for d in &diagnostics {
                     let (line, col) = line_col(&source, d.start as usize);
@@ -1579,6 +1579,11 @@ fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> 
         wait_timeout: option(args, "--wait-timeout").and_then(|t| t.parse().ok()),
         file_name: path.to_string(),
         definitions: path.ends_with(".d.aly"),
+        import_types: alloy::modules::import_types_for_file(Path::new(path), &source),
+        import_trait_defaults: alloy::modules::import_trait_defaults_for_file(
+            Path::new(path),
+            &source,
+        ),
         ..alloy::EmitOptions::default()
     };
 

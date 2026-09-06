@@ -25,6 +25,7 @@ pub mod fmt_structure;
 pub mod ingot;
 pub mod lint;
 pub mod luau_config;
+pub mod modules;
 pub mod project;
 pub mod render;
 pub mod roblox_classes;
@@ -64,6 +65,9 @@ pub struct Output {
     pub data_refs: Vec<ImportRef>,
     /// The `@test` functions, in order: name and whether it is async.
     pub tests: Vec<(String, bool)>,
+    /// For `.alx`: the Alloy text luaux lowered the markup to. The check
+    /// artifact's positions are positions in this text, not the source.
+    pub lowered: Option<String>,
 }
 
 /// One `import ... from "path"` of a file, or one data path with the
@@ -101,6 +105,10 @@ pub fn compile(src: &str) -> Result<Output, CompileError> {
 /// the output root so the emitted `require` resolves.
 pub const RUNTIME: &str = include_str!("../../std/alloy.luau");
 
+/// The engine doubles `alloy test` loads before a spec; see
+/// `std/shim.luau`.
+pub const SHIM: &str = include_str!("../../std/shim.luau");
+
 /// Compiles with the `[emit]` knobs of a project.
 pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileError> {
     let parse_options = alloy_syntax::parser::ParseOptions {
@@ -112,7 +120,16 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         message: e.message,
     })?;
 
-    let mut rendered = desugar::render(src, &parsed.lexed.toks, &parsed.chunk, options);
+    let ship_options = options.ship_std_require.as_ref().map(|s| EmitOptions {
+        std_require: s.clone(),
+        ..options.clone()
+    });
+    let mut rendered = desugar::render(
+        src,
+        &parsed.lexed.toks,
+        &parsed.chunk,
+        ship_options.as_ref().unwrap_or(options),
+    );
 
     // The check artifact is its own render: it types constructors and
     // `self`, casts what the checker cannot follow, and keeps `v:flat()`
@@ -213,6 +230,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         imports,
         data_refs: data::references(src),
         tests: rendered.tests,
+        lowered: None,
     })
 }
 

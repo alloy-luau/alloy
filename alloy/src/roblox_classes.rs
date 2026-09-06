@@ -2181,6 +2181,7 @@ pub const DATATYPES: &[&str] = &[
     "PhysicalProperties",
     "PluginConnection",
     "RBXScriptConnection",
+    "RBXScriptSignal",
     "Random",
     "Ray",
     "RaycastParams",

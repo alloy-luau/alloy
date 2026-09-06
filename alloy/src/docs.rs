@@ -85,7 +85,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "is",
-        "```alloy\nx is T\n```\nType test. `T` is a type name: a primitive, a Roblox datatype, an Instance class, `Enum.Name`, or an Alloy struct or enum. `x is not T` negates.\n\nEmits `type`, `typeof`, `IsA`, or a metatable check, chosen by the name.",
+        "```alloy\nx is T\n```\nType test. `T` is a type name: a primitive, a Roblox datatype, an Instance class, `Enum.Name`, or an Alloy struct or enum. `x is not T` negates.\n\nEmits `type`, `typeof`, `IsA`, or a metatable check, chosen by the name.\n\nIn an `if`, a test on a plain name narrows it in the branch. Luau refines a primitive, a class, and a datatype on its own; the check artifact adds a cast for a struct, an enum, an imported type, and `RBXScriptSignal`, and gives `table` and `function` a shape that indexes and calls. `x is not T` narrows the else branch, or the code after a guard that returns, breaks, continues, or errors.",
     ),
     (
         "in",
@@ -381,7 +381,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Array",
-        "```alloy\nlocal xs = [ 1, 2, 3 ]\nlocal ys: Array<number> = xs:map(f)\n```\nThe array type of the std. An array literal carries its metatable, so methods work on it. `T[]` and `Array<T>` name the same type.\n\nMethods: `len`, `is_empty`, `push`, `pop`, `first`, `last`, `map`, `filter`, `find`, `find_index`, `contains`, `index_of`, `for_each`, `reduce`, `slice`, `concat`, `reverse`, `sort_by`, `join`.",
+        "```alloy\nlocal xs = [ 1, 2, 3 ]\nlocal ys: Array<number> = xs:map(f)\n```\nThe array type of the std. An array literal carries its metatable, so methods work on it. `T[]` and `Array<T>` name the same type.\n\nMethods: `len`, `is_empty`, `push`, `pop`, `first`, `last`, `map`, `filter`, `find`, `find_index`, `contains`, `index_of`, `for_each`, `reduce`, `slice`, `concat`, `reverse`, `sort_by`, `join`.\n\nLuau rejects an alias that names itself with other arguments, so `map` returns the same shape under a second name, and the third `map` in one chain is `any`. Annotate the accumulator of `reduce` when its body uses it: `xs:reduce(function(acc: number, x) return acc + x end, 0)`.",
     ),
     (
         "Future",

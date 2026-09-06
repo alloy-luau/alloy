@@ -177,6 +177,25 @@ fn mirror_dir(root: &Path) -> PathBuf {
         .join("root")
 }
 
+/// A path with `.` and `..` folded, no file system access.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+
+            other => out.push(other),
+        }
+    }
+
+    out
+}
+
 fn link_entry(from: &Path, to: &Path) {
     #[cfg(unix)]
     {
@@ -216,7 +235,7 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         .flatten()
     {
         let name = entry.file_name();
-        let skip = [".git", "target", "node_modules"]
+        let skip = [".git", "target", "node_modules", ".luaurc", ".config.luau"]
             .iter()
             .any(|s| name == *s)
             || Path::new(&name) == config.build.input
@@ -228,22 +247,41 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
     }
 
-    if !root.join(".luaurc").is_file() && !root.join(".config.luau").is_file() {
-        let c = crate::luau_config::LuauConfig {
-            language_mode: Some("strict".to_string()),
-            aliases: vec![(
-                "alloy".to_string(),
-                format!(
-                    "./{}/alloy",
-                    config.build.out.to_string_lossy().replace('\\', "/")
-                ),
-            )],
-        };
-        let _ = std::fs::write(
-            mirror.join(".luaurc"),
-            crate::luau_config::render_luaurc(&c),
-        );
+    // The mirror lays the artifacts out as the output, so an alias that
+    // names a folder under `in`, a mount, points at its output here.
+    let mut luau = crate::luau_config::read_dir(root)
+        .map(|(_, c)| c)
+        .unwrap_or_default();
+
+    if luau.language_mode.is_none() {
+        luau.language_mode = Some("strict".to_string());
     }
+
+    let input_abs = normalize(&root.join(&config.build.input));
+
+    for (_, target) in &mut luau.aliases {
+        let abs = normalize(&root.join(target.as_str()));
+
+        if let Ok(rest) = abs.strip_prefix(&input_abs) {
+            let mapped = config.build.out.join(rest);
+            *target = format!("./{}", mapped.to_string_lossy().replace('\\', "/"));
+        }
+    }
+
+    if !luau.aliases.iter().any(|(a, _)| a == "alloy") {
+        luau.aliases.push((
+            "alloy".to_string(),
+            format!(
+                "./{}/alloy",
+                config.build.out.to_string_lossy().replace('\\', "/")
+            ),
+        ));
+    }
+
+    let _ = std::fs::write(
+        mirror.join(".luaurc"),
+        crate::luau_config::render_luaurc(&luau),
+    );
 
     let out = mirror.join(&config.build.out);
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;

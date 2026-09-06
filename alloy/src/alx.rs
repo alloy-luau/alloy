@@ -58,6 +58,10 @@ pub fn compile_alx(
         d.end = remap(&lowered, src, d.end);
     }
 
+    // A component is a function a tag names, `<Row />`, so its name
+    // is PascalCase by the markup's own rule.
+    output.lints.retain(|l| l.name != "pascal_case_function");
+
     for l in &mut output.lints {
         l.start = remap(&lowered, src, l.start);
         l.end = remap(&lowered, src, l.end);
@@ -80,6 +84,7 @@ pub fn compile_alx(
     }
 
     output.diagnostics.sort_by_key(|d| d.start);
+    output.lowered = Some(lowered.clone());
 
     Ok(AlxOutput { output, lowered })
 }
@@ -93,23 +98,70 @@ fn markup_message(message: &str, help: Option<&str>) -> String {
 }
 
 /// An offset in the lowered text as an offset in the source: same line,
-/// column clamped to the source line.
+/// column through `map_column`.
 fn remap(lowered: &str, src: &str, offset: u32) -> u32 {
     let offset = (offset as usize).min(lowered.len());
     let line = lowered[..offset].matches('\n').count();
-    let col = offset - lowered[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let line_start = lowered[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let col = offset - line_start;
+    let low_line = lowered[line_start..].split('\n').next().unwrap_or("");
 
     let mut start = 0usize;
 
     for (i, l) in src.split('\n').enumerate() {
         if i == line {
-            return (start + col.min(l.len())) as u32;
+            return (start + map_column(low_line, l, col)) as u32;
         }
 
         start += l.len() + 1;
     }
 
     src.len() as u32
+}
+
+/// A column of one line as a column of the other, for a line the
+/// lowering rewrote. The word under the column finds its n-th twin in
+/// the other line; a column outside a word, or a word the other line
+/// lacks, clamps.
+pub fn map_column(from: &str, to: &str, col: usize) -> usize {
+    let col = col.min(from.len());
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let bytes = from.as_bytes();
+
+    let mut start = col;
+    while start > 0 && is_word(bytes[start - 1] as char) {
+        start -= 1;
+    }
+
+    let mut end = col;
+    while end < bytes.len() && is_word(bytes[end] as char) {
+        end += 1;
+    }
+
+    if start == end {
+        return col.min(to.len());
+    }
+
+    let word = &from[start..end];
+    let nth = word_starts(from, word).filter(|&s| s < start).count();
+
+    match word_starts(to, word).nth(nth) {
+        Some(at) => at + (col - start),
+
+        None => col.min(to.len()),
+    }
+}
+
+/// The starts of `word` in `text`, as whole words.
+fn word_starts<'a>(text: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+
+    text.match_indices(word).filter_map(move |(at, _)| {
+        let before = text[..at].chars().next_back().is_some_and(is_word);
+        let after = text[at + word.len()..].chars().next().is_some_and(is_word);
+
+        (!before && !after).then_some(at)
+    })
 }
 
 /// The names the file binds, by a token scan of the blanked source.

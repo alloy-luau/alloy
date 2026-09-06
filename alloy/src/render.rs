@@ -84,6 +84,42 @@ impl SpanMap {
         &self.chunks
     }
 
+    /// The output range the source range produced: every chunk copied
+    /// from inside it or generated at an anchor inside it. `None` when
+    /// nothing of the range reached the output.
+    pub fn output_span(&self, src_start: u32, src_end: u32) -> Option<(u32, u32)> {
+        let mut lo = u32::MAX;
+        let mut hi = 0u32;
+
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            let start = self.starts[i];
+
+            match chunk {
+                // Adjacent copies merge into one chunk, so a copy may
+                // reach past the range on either side: only its part
+                // inside the range counts.
+                Chunk::Copied {
+                    src_start: a,
+                    src_end: b,
+                } if *a < src_end && *b > src_start => {
+                    let from = src_start.max(*a) - a;
+                    let to = src_end.min(*b) - a;
+                    lo = lo.min(start + from);
+                    hi = hi.max(start + to);
+                }
+
+                Chunk::Generated { anchor, len } if *anchor >= src_start && *anchor < src_end => {
+                    lo = lo.min(start);
+                    hi = hi.max(start + len);
+                }
+
+                _ => {}
+            }
+        }
+
+        (lo < hi).then_some((lo, hi))
+    }
+
     /// The output length the map covers.
     pub fn out_len(&self) -> u32 {
         self.out_len

@@ -796,10 +796,14 @@ pub fn run(
             while m < close {
                 let tt = text(m);
 
-                if tt.ends_with('(') || tt.ends_with('[') || tt.ends_with('{') {
+                // `<` opens a type argument list: `Result<T, E>` holds a
+                // comma that separates no parameters.
+                if tt.ends_with('(') || tt.ends_with('[') || tt.ends_with('{') || tt == "<" {
                     depth += 1;
-                } else if matches!(tt, ")" | "]" | "}") {
+                } else if matches!(tt, ")" | "]" | "}" | ">") {
                     depth -= 1;
+                } else if tt == ">>" {
+                    depth -= 2;
                 } else if tt == "," && depth == 0 {
                     break;
                 }

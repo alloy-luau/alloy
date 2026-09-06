@@ -63,6 +63,44 @@ pub fn strip_spec(spec: &str) -> &str {
     }
 }
 
+/// A project or tool file that happens to be JSON or TOML: never data,
+/// so no mirror or build turns `alloy.toml` into an `alloy.luau` beside
+/// the runtime.
+pub fn is_project_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        "alloy.toml"
+            | "luaux.toml"
+            | "lest.toml"
+            | "wally.toml"
+            | "wally.lock"
+            | "rokit.toml"
+            | "aftman.toml"
+            | "foreman.toml"
+            | "pesde.toml"
+            | "pesde.lock"
+            | "ember.toml"
+            | "ember.lock"
+            | "lpm.toml"
+            | "lpm.lock"
+            | "larvae.toml"
+            | "stylua.toml"
+            | "selene.toml"
+            | "Cargo.toml"
+            | "package.json"
+            | "package-lock.json"
+            | "tsconfig.json"
+            | "sourcemap.json"
+            | "biome.json"
+            | "deno.json"
+    ) || name.ends_with(".project.json")
+        || name.starts_with('.')
+}
+
 /// A quoted path literal with its data extension stripped: `"./x.json"`
 /// is `"./x"`. Text that is not such a literal comes back as it is.
 pub fn strip_literal(literal: &str) -> String {

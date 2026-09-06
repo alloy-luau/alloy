@@ -232,6 +232,9 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
             _ if member => {}
 
             _ => match text {
+                // `x is function` names a type; nothing opens.
+                "function" if i > 0 && toks[i - 1].text(src) == "is" => {}
+
                 "function" if signature_only(src, toks, i, &stack, &lines) => {}
 
                 "function" => {
@@ -253,7 +256,11 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 }
 
                 "if" => {
-                    let in_expr = expression_context(prev)
+                    // `): number?` ends a signature line; the `if` that
+                    // opens the next line is a statement, not a ternary.
+                    let first_on_line = i == 0 || lines[i - 1] != line;
+                    let in_expr = (expression_context(prev)
+                        && !(first_on_line && matches!(prev, Some("?" | "!" | ">" | ">>"))))
                         || (matches!(prev, Some("then" | "else"))
                             && top(&stack) == Some(Kind::ExprIf));
 
@@ -495,4 +502,18 @@ fn line_has_before(src: &str, toks: &[Tok], i: usize, word: &str) -> bool {
         .rev()
         .take_while(|t| t.start as usize >= line_start)
         .any(|t| t.text(src) == word)
+}
+
+#[cfg(test)]
+mod statement_if_tests {
+    #[test]
+    fn a_statement_if_after_a_type_suffix_opens_a_block() {
+        let src = "local function s(now: number): number?\n    if now < 1 then\n        return nil\n    end\n    return now\nend\n";
+        let toks = alloy_syntax::lexer::lex(src).unwrap().toks;
+        let st = super::structure(src, &toks);
+        let i = toks.iter().position(|t| t.text(src) == "if").unwrap();
+        let prev = toks[i - 1].text(src);
+        let end = st.ends[i].map(|e| toks[e].text(src).to_string());
+        assert_eq!((prev, end), ("?", Some("end".to_string())));
+    }
 }

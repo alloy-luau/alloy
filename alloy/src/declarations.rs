@@ -663,3 +663,104 @@ mod binding_tests {
         assert_eq!(prefix_of(src, "x"), None);
     }
 }
+
+/// The shape of a struct or an enum, for a reader that folds the
+/// checker's printed types back to their names: the fields a struct's
+/// instance table shows, and the variants of an enum with their
+/// payload types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shape {
+    Struct {
+        name: String,
+        /// Every field, in order, with whether it is private.
+        fields: Vec<(String, bool)>,
+    },
+    Enum {
+        name: String,
+        /// Each variant with its payload types as source text.
+        variants: Vec<(String, Vec<String>)>,
+    },
+}
+
+impl Shape {
+    pub fn name(&self) -> &str {
+        match self {
+            Shape::Struct { name, .. } | Shape::Enum { name, .. } => name,
+        }
+    }
+}
+
+/// The structs and enums a source declares.
+pub fn shapes(src: &str) -> Vec<Shape> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| -> String {
+        let a = toks[span.start as usize].start as usize;
+        let b = toks[(span.end as usize)
+            .saturating_sub(1)
+            .max(span.start as usize)]
+        .end as usize;
+
+        src[a..b].to_string()
+    };
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        match stmt {
+            Stmt::Struct(s) => out.push(Shape::Struct {
+                name: text(s.name),
+                fields: s
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let private = f.visibility.is_some_and(|v| text(v) == "private");
+
+                        (text(f.name), private)
+                    })
+                    .collect(),
+            }),
+
+            Stmt::Enum(e) => out.push(Shape::Enum {
+                name: text(e.name),
+                variants: e
+                    .variants
+                    .iter()
+                    .map(|v| (text(v.name), v.payload.iter().map(|p| text(*p)).collect()))
+                    .collect(),
+            }),
+
+            _ => {}
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    #[test]
+    fn structs_and_enums_report_their_shape() {
+        let src = "struct S as\n    read x: number\n    private n: number = 0\nend\nenum E as\n    A\n    B(number, string)\nend\n";
+        let got = shapes(src);
+        assert_eq!(
+            got,
+            vec![
+                Shape::Struct {
+                    name: "S".into(),
+                    fields: vec![("x".into(), false), ("n".into(), true)],
+                },
+                Shape::Enum {
+                    name: "E".into(),
+                    variants: vec![
+                        ("A".into(), vec![]),
+                        ("B".into(), vec!["number".into(), "string".into()])
+                    ],
+                },
+            ]
+        );
+    }
+}

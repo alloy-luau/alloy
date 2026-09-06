@@ -727,14 +727,22 @@ impl<'s> Formatter<'s> {
         let prev = self.prev_code(i).map(|p| self.items[p].text.as_str());
 
         match text {
+            // `x is function` names a type; nothing opens.
             "function" => {
                 !self.line_has_before(i, "declare")
                     && !self.line_has_before(i, "attribute")
                     && prev != Some("remote")
+                    && prev != Some("is")
                     && self.signature.get(i) != Some(&true)
             }
 
-            "if" => !prev.is_some_and(expression_context),
+            // `): number?` ends a signature line; the `if` that opens
+            // the next line is a statement, not a ternary.
+            "if" => {
+                !prev.is_some_and(expression_context)
+                    || (self.first_on_line(i)
+                        && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>")))
+            }
 
             "do" => !self.for_header_before(i),
 
@@ -776,6 +784,11 @@ impl<'s> Formatter<'s> {
         let t = &self.items[i];
 
         t.is("while") || (t.is("for") && !self.line_has_before(i, "impl"))
+    }
+
+    /// Whether the item opens its line.
+    fn first_on_line(&self, i: usize) -> bool {
+        i == 0 || self.items[i].newlines_before > 0
     }
 
     fn line_has_before(&self, i: usize, word: &str) -> bool {
@@ -846,7 +859,12 @@ impl<'s> Formatter<'s> {
             let text = it.text.as_str();
             let prev = self.prev_code(i).map(|p| self.items[p].text.as_str());
 
-            if it.newlines_before > 0 && !matches!(text, "else" | "elseif") {
+            // A `then`, `else`, or `elseif` that opens a line continues
+            // the `if` expression above it; any other token ends it.
+            let continues_expr_if = matches!(text, "else" | "elseif")
+                || (text == "then" && stack.last() == Some(&Frame::ExprIf));
+
+            if it.newlines_before > 0 && !continues_expr_if {
                 while stack.last() == Some(&Frame::ExprIf) {
                     stack.pop();
                 }
@@ -889,7 +907,9 @@ impl<'s> Formatter<'s> {
                     } else if stack.last() == Some(&Frame::ExprIf)
                         || (mid_line && self.line_has_before(i, "if"))
                     {
-                        depths[i] = level(&stack);
+                        // A `then` or `else` that opens a line inside an
+                        // `if` expression continues it, one level in.
+                        depths[i] = level(&stack) + usize::from(!mid_line);
                     } else if stack.last() == Some(&Frame::Block) {
                         depths[i] = level(&stack).saturating_sub(1);
                     } else {
@@ -918,11 +938,17 @@ impl<'s> Formatter<'s> {
                     }
                 }
 
+                "then" if stack.last() == Some(&Frame::ExprIf) && it.newlines_before > 0 => {
+                    depths[i] = level(&stack) + 1;
+                }
+
                 _ => {
                     depths[i] = level(&stack);
 
                     if text == "if"
-                        && (prev.is_some_and(expression_context)
+                        && ((prev.is_some_and(expression_context)
+                            && !(self.first_on_line(i)
+                                && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>"))))
                             || (matches!(prev, Some("then") | Some("else"))
                                 && stack.last() == Some(&Frame::ExprIf)))
                     {

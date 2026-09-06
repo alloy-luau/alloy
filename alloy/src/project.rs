@@ -52,11 +52,19 @@ fn mount_of<'a>(config: &'a Config, rel: &Path) -> Option<(&'a str, &'a Mount, P
 /// The instance name of a script file: the stem with `.server`,
 /// `.client`, and `.d` removed. `init` names its directory.
 fn instance_name(file: &str) -> Option<String> {
+    // A data file is a ModuleScript to Rojo and to the build alike; a
+    // project file beside the sources is neither.
+    if crate::data::is_project_file(Path::new(file)) {
+        return None;
+    }
+
     let stem = file
         .strip_suffix(".aly")
         .or_else(|| file.strip_suffix(".alx"))
         .or_else(|| file.strip_suffix(".luau"))
-        .or_else(|| file.strip_suffix(".lua"))?;
+        .or_else(|| file.strip_suffix(".lua"))
+        .or_else(|| file.strip_suffix(".json"))
+        .or_else(|| file.strip_suffix(".toml"))?;
     let stem = stem
         .strip_suffix(".server")
         .or_else(|| stem.strip_suffix(".client"))

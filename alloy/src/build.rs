@@ -128,12 +128,29 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
     // A data file builds beside the modules; one that would build to
     // the same `.luau` as a source or a plain file is a diagnostic.
+    // An alias in a data path resolves through the mount table and the
+    // root's Luau configuration, to a folder under `in`.
+    let mut aliases: Vec<(String, PathBuf)> = config
+        .mount
+        .iter()
+        .map(|(alias, m)| (alias.clone(), normalize_path(&root.join(&m.0))))
+        .collect();
+
+    if let Some((_, luau)) = crate::luau_config::read_dir(root) {
+        for (alias, target) in luau.aliases {
+            if !aliases.iter().any(|(a, _)| *a == alias) {
+                aliases.push((alias, normalize_path(&root.join(target))));
+            }
+        }
+    }
+
     let mut data_files = DataFiles {
-        input: input.clone(),
+        input: normalize_path(&input),
         input_rel: build.input.clone(),
         out: out.clone(),
         owners: HashMap::new(),
         done: HashMap::new(),
+        aliases,
     };
 
     for path in sources.iter().chain(&plain) {
@@ -184,6 +201,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
     // `luaux.toml` beside `alloy.toml` picks the UI library for `.alx`.
     let jsx_config = luaux::Config::load(root).map_err(|e| e.message);
+    let module_aliases = crate::modules::aliases(root, config);
 
     // The ingots start once per build and see every file.
     let ingots = crate::ingot::Ingots::load(root, config);
@@ -218,21 +236,30 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         // path walks the instance tree to the runtime's mount instead.
         let depth = rel.components().count().saturating_sub(1);
         let source_rel = build.input.join(&rel);
-        let std_require = emit
-            .std_require
-            .clone()
-            .or_else(|| crate::project::std_require_for(config, &source_rel))
-            .unwrap_or_else(|| {
-                if depth == 0 {
-                    "./alloy".to_string()
-                } else {
-                    format!("{}alloy", "../".repeat(depth))
-                }
-            });
+        let by_file = if depth == 0 {
+            "./alloy".to_string()
+        } else {
+            format!("{}alloy", "../".repeat(depth))
+        };
+        let (std_require, ship_std_require) = match &emit.std_require {
+            Some(s) => (s.clone(), None),
+
+            None => (
+                by_file,
+                crate::project::std_require_for(config, &source_rel),
+            ),
+        };
         let options = EmitOptions {
             file_name: rel.to_string_lossy().into_owned(),
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
+            ship_std_require,
+            import_types: crate::modules::import_types(&source, &path, &module_aliases),
+            import_trait_defaults: crate::modules::import_trait_defaults(
+                &source,
+                &path,
+                &module_aliases,
+            ),
             ..base_options.clone()
         };
 
@@ -418,6 +445,27 @@ struct DataFiles {
     /// The outcome per data file, relative to `in`: the output path, or
     /// the diagnostic.
     done: HashMap<PathBuf, Result<PathBuf, String>>,
+    /// Alias to the folder it names, absolute: the mounts, then `.luaurc`.
+    aliases: Vec<(String, PathBuf)>,
+}
+
+/// A path with `.` and `..` folded, no file system access.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+
+            other => out.push(other),
+        }
+    }
+
+    out
 }
 
 impl DataFiles {
@@ -434,18 +482,40 @@ impl DataFiles {
             return Err(format!("data file \"{spec}\" is neither .json nor .toml"));
         };
 
-        // An alias walks the mount table or `.luaurc` into a place the
-        // build does not write; a data file sits under `in`.
-        if !(spec.starts_with("./") || spec.starts_with("../")) {
-            return Err(format!(
-                "data file \"{spec}\" needs a relative path, `./` or `../`"
-            ));
-        }
+        // `@alias/x.json` resolves through the mounts or `.luaurc`; the
+        // folder must sit under `in`, since the build writes there.
+        let rel = if let Some(rest) = spec.strip_prefix('@') {
+            let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
+            let Some((_, dir)) = self.aliases.iter().find(|(a, _)| a == alias) else {
+                return Err(format!(
+                    "data file \"{spec}\" names no alias @{alias} in the [mount] table or .luaurc"
+                ));
+            };
+            let abs = normalize_path(&dir.join(tail));
 
-        let Some(rel) = data_path(from, spec) else {
-            return Err(format!(
-                "data file \"{spec}\" lies outside [build] in; move it under the source root"
-            ));
+            match abs.strip_prefix(&self.input) {
+                Ok(rel) => rel.to_path_buf(),
+
+                Err(_) => {
+                    return Err(format!(
+                        "data file \"{spec}\" lies outside [build] in; move it under the source root"
+                    ));
+                }
+            }
+        } else {
+            if !(spec.starts_with("./") || spec.starts_with("../")) {
+                return Err(format!(
+                    "data file \"{spec}\" needs a relative path, `./` or `../`, or an alias, `@shared/`"
+                ));
+            }
+
+            let Some(rel) = data_path(from, spec) else {
+                return Err(format!(
+                    "data file \"{spec}\" lies outside [build] in; move it under the source root"
+                ));
+            };
+
+            rel
         };
 
         if let Some(done) = self.done.get(&rel) {
@@ -699,7 +769,9 @@ pub fn walk_data(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 
             if path.is_dir() {
                 go(&path, false, out)?;
-            } else if crate::data::Format::of_path(&path).is_some() {
+            } else if crate::data::Format::of_path(&path).is_some()
+                && !crate::data::is_project_file(&path)
+            {
                 out.push(path);
             }
         }

@@ -20,10 +20,15 @@ use alloy_syntax::ast::{
     PatternLocal, RemoteDecl, Stmt, StructDecl, TableField, TokSpan, TraitDecl, TraitMethod,
     TypeEdit, While,
 };
-use alloy_syntax::lexer::Tok;
+use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
+
+/// Datatypes the definitions declare as a type alias, not a class. A
+/// `typeof` test on one names it at run time, but the checker cannot
+/// refine a value by it, so the check artifact narrows by a cast.
+const ALIAS_DATATYPES: &[&str] = &["RBXScriptSignal"];
 
 /// A message tied to a source byte range.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +47,10 @@ pub struct EmitOptions {
     pub file_name: String,
     /// The string passed to `require` for the runtime.
     pub std_require: String,
+    /// The ship artifact's runtime require when it differs: under a
+    /// mount it is the instance path, while the check artifact and the
+    /// tests keep the file path.
+    pub ship_std_require: Option<String>,
     /// A `.d.aly`: declarations only, no runtime tables, no std require.
     pub definitions: bool,
     /// Blank `import type` lines in the ship artifact, so a type-only
@@ -65,6 +74,42 @@ pub struct EmitOptions {
     /// Render the test artifact: a `@test` function stays in the output
     /// as a local, unregistered, for `alloy test` to call by name.
     pub tests: bool,
+    /// Per import spec, the type names the module exports, so a value
+    /// import of a struct or an enum binds the type too. See
+    /// `crate::modules::import_types`.
+    pub import_types: Vec<(String, Vec<String>)>,
+    /// Per imported trait, the names of its default methods, so an
+    /// `impl Trait for S` here flattens them in as a local trait's would.
+    pub import_trait_defaults: Vec<(String, Vec<String>)>,
+}
+
+/// `HashMap<string, number>` as `("HashMap", "string, number")`, for the
+/// std containers whose constructor takes the arguments. Any other
+/// annotation is `None`.
+fn generic_head(ty: &str) -> Option<(String, String)> {
+    let ty = ty.trim();
+    let open = ty.find('<')?;
+    let base = ty[..open].trim();
+
+    if !matches!(
+        base,
+        "HashMap" | "Set" | "Array" | "Queue" | "Heap" | "Signal" | "Iter" | "Future"
+    ) || !ty.ends_with('>')
+    {
+        return None;
+    }
+
+    let args = &ty[open + 1..ty.len() - 1];
+
+    Some((base.to_string(), args.trim().to_string()))
+}
+
+/// One field of a struct or an interface, as the prescan keeps it.
+#[derive(Debug, Clone)]
+struct FieldType {
+    name: String,
+    ty: TokSpan,
+    private: bool,
 }
 
 /// A macro as source text, for expansion in a nested compile.
@@ -83,6 +128,7 @@ impl Default for EmitOptions {
             wait_timeout: None,
             file_name: "<input>".to_string(),
             std_require: "@alloy".to_string(),
+            ship_std_require: None,
             definitions: false,
             erase_type_imports: false,
             macros: Vec::new(),
@@ -90,6 +136,8 @@ impl Default for EmitOptions {
             extensions: Vec::new(),
             thresholds: crate::lint::Thresholds::default(),
             tests: false,
+            import_types: Vec::new(),
+            import_trait_defaults: Vec::new(),
         }
     }
 }
@@ -167,6 +215,11 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         diagnostics: Vec::new(),
         lints: Vec::new(),
         hoists: Vec::new(),
+        new_stmt_next: 0,
+        import_next: 0,
+        expected_generic: None,
+        return_at: None,
+        struct_field_types: HashMap::new(),
         temp_next: 0,
         declared: Vec::new(),
         no_hoist: 0,
@@ -236,7 +289,13 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             d.copy(insert_at, first_start);
             d.block(&chunk.block);
             let last = toks[toks.len() - 1].end;
+            d.return_at = Some(d.r.out_len());
             d.module_return(last, &chunk.block);
+
+            if d.r.out_len() == d.return_at.unwrap_or(0) {
+                d.return_at = None;
+            }
+
             d.copy(last, src.len() as u32);
         }
 
@@ -262,6 +321,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     }
 
     let _ = prefix_len;
+    // The export return follows the last statement; a blanked test at
+    // the end of the file must not take it along.
+    let return_start = d.return_at.map(|at| d.r.out_len() + at);
     d.r.append(side);
 
     let blanks = d.ship_blanks.clone();
@@ -283,11 +345,16 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         // is inclusive for generated text.
         let generated = matches!(chunk, crate::render::Chunk::Generated { .. });
 
+        let start = map.chunk_start(i);
+
+        if return_start.is_some_and(|r| start >= r) {
+            continue;
+        }
+
         if blanks
             .iter()
             .any(|(a, b)| src_at >= *a && (src_at < *b || (generated && src_at == *b)))
         {
-            let start = map.chunk_start(i);
             out_blanks.push((start, start + len));
         }
     }
@@ -320,15 +387,29 @@ fn first_code_line(src: &str) -> usize {
 }
 
 /// One thing a statement hoists in front of itself.
-enum Hoist {
+enum Hoist<'s> {
     /// `local _k = value`, or `_k = value` when the block declared it.
     Temp {
         index: u32,
-        value: String,
+        value: HoistValue<'s>,
         anchor: u32,
     },
     /// A whole statement, such as the early return of `try`.
     Stmt { text: String, anchor: u32 },
+    /// `local name = value`, always a new local: an import's module,
+    /// whose type must not be another module's.
+    Fresh {
+        name: String,
+        value: String,
+        anchor: u32,
+    },
+}
+
+/// What a temp holds: text the desugar wrote, or an expression rendered
+/// with its provenance, so a receiver that spans lines keeps them.
+enum HoistValue<'s> {
+    Text(String),
+    Rendered(Renderer<'s>),
 }
 
 struct Desugar<'s> {
@@ -340,7 +421,20 @@ struct Desugar<'s> {
     /// The lints the walk finds, see `crate::lint`.
     lints: Vec<Lint>,
     /// The hoists the statement under render has asked for, in order.
-    hoists: Vec<Hoist>,
+    hoists: Vec<Hoist<'s>>,
+    /// The count of `new X(...) { }` statements, for their locals.
+    new_stmt_next: u32,
+    /// The count of imports, for their locals `_m1`, `_m2`, each its own.
+    import_next: u32,
+    /// `local m: HashMap<K, V> = HashMap.new()`: the annotation's base
+    /// name and arguments, so the constructor call takes them. The
+    /// solver reads no expected type into a generic call.
+    expected_generic: Option<(String, String)>,
+    /// Where the export return starts in the side buffer, once written.
+    return_at: Option<u32>,
+    /// The fields of each struct declared here with their types, for the
+    /// mapped types the check artifact expands inline.
+    struct_field_types: HashMap<String, Vec<FieldType>>,
     /// The next temp index inside the statement under render.
     temp_next: u32,
     /// Per open block: the temp indices already declared in it, and in
@@ -466,6 +560,20 @@ impl<'s> Desugar<'s> {
     /// `import` becomes `require` plus locals or type aliases. A data
     /// path loses its extension: the build writes `data.json` as
     /// `data.luau`, and `require("./data")` finds it.
+    /// Whether the module a quoted spec names exports a type by this
+    /// name, from the index the caller built.
+    fn module_exports_type(&self, quoted: &str, name: &str) -> bool {
+        let spec = quoted
+            .strip_prefix(['"', '\''])
+            .and_then(|s| s.strip_suffix(['"', '\'']))
+            .unwrap_or(quoted);
+
+        self.options
+            .import_types
+            .iter()
+            .any(|(s, types)| s == spec && types.iter().any(|t| t == name))
+    }
+
     fn import_stmt(&mut self, i: &Import) {
         let anchor = self.byte_start(i.span);
         let path = crate::data::strip_literal(self.text_of(i.path));
@@ -495,6 +603,12 @@ impl<'s> Desugar<'s> {
                     if sp.is_type {
                         types.push(format!("type {local} = {base}.{name}"));
                     } else {
+                        // A struct or an enum is a value and a type; the
+                        // type comes along when the module exports one.
+                        if self.module_exports_type(&path, &name) {
+                            types.push(format!("type {local} = {base}.{name}"));
+                        }
+
                         names.push(local);
                         values.push(format!("{base}.{name}"));
                     }
@@ -517,7 +631,7 @@ impl<'s> Desugar<'s> {
             }
 
             ImportKind::Named(specs) => {
-                let temp = self.hoist_text(format!("require({path})"), anchor);
+                let temp = self.hoist_import(&path, anchor);
                 let mut names = Vec::new();
                 let mut values = Vec::new();
                 let mut types = Vec::new();
@@ -532,6 +646,10 @@ impl<'s> Desugar<'s> {
                     if sp.is_type {
                         types.push(format!("type {local} = {temp}.{name}"));
                     } else {
+                        if self.module_exports_type(&path, &name) {
+                            types.push(format!("type {local} = {temp}.{name}"));
+                        }
+
                         names.push(local);
                         values.push(format!("{temp}.{name}"));
                     }
@@ -566,7 +684,7 @@ impl<'s> Desugar<'s> {
                     self.ship_blanks
                         .push((self.byte_start(i.span), self.byte_end(i.span)));
                 }
-                let temp = self.hoist_text(format!("require({path})"), anchor);
+                let temp = self.hoist_import(&path, anchor);
                 let parts: Vec<String> = specs
                     .iter()
                     .map(|sp| {
@@ -601,7 +719,7 @@ impl<'s> Desugar<'s> {
 
             Some(path) => {
                 let path = crate::data::strip_literal(self.text_of(path));
-                let temp = self.hoist_text(format!("require({path})"), anchor);
+                let temp = self.hoist_import(&path, anchor);
                 let mut types = Vec::new();
 
                 for sp in &e.specs {
@@ -721,7 +839,14 @@ impl<'s> Desugar<'s> {
                 types.push(format!("typeof({name}.{vname})"));
                 unit_tests.push(format!("v == {name}.{vname}"));
             } else if v.payload.is_empty() {
-                self.generate(vs, &format!("{name}.{vname} = \"{vname}\""));
+                // The checker widens a string field to `string`; the cast
+                // to the enum keeps `Ok(Zone.Spawn)` a `Result<Zone, _>`.
+                let value = if self.options.check {
+                    format!("(\"{vname}\" :: {name})")
+                } else {
+                    format!("\"{vname}\"")
+                };
+                self.generate(vs, &format!("{name}.{vname} = {value}"));
                 types.push(format!("\"{vname}\""));
                 unit_tests.push(format!("v == \"{vname}\""));
             } else {
@@ -775,7 +900,7 @@ impl<'s> Desugar<'s> {
         let export = if e.exported { "export " } else { "" };
         // A variant with a payload prints as `Msg.Move(1, 2)`; a unit
         // variant is a string and prints as its name already.
-        let printer = if self.options.definitions {
+        let mut printer = if self.options.definitions {
             String::new()
         } else {
             let std = self.std();
@@ -785,6 +910,67 @@ impl<'s> Desugar<'s> {
                 luau_string(&name)
             )
         };
+
+        // `@derive(Eq)` compares the tag and the payload slots; a unit
+        // variant is a string and compares on its own. `Clone` copies a
+        // payload variant with its metatable; `Debug` is the printer above.
+        let max_arity = e
+            .variants
+            .iter()
+            .map(|v| v.payload.len())
+            .max()
+            .unwrap_or(0);
+
+        for a in &e.attributes {
+            let Some(aname) = a.name else { continue };
+
+            if self.text_of(aname) != "derive" {
+                continue;
+            }
+
+            for arg in &a.args {
+                match self.text_of(arg.span()) {
+                    "Eq" => {
+                        let slots: Vec<String> = (1..=max_arity)
+                            .map(|i| format!(" and a._{i} == b._{i}"))
+                            .collect();
+                        printer.push_str(&format!(
+                            " {name}.__eq = function(a: any, b: any): boolean return a.tag == b.tag{} end",
+                            slots.join("")
+                        ));
+                    }
+
+                    "Clone" => {
+                        printer.push_str(&format!(
+                            " function {name}.clone(v: any): any return if type(v) == \"table\" then setmetatable(table.clone(v), {name}) else v end"
+                        ));
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+
+        // The attributes on the enum and on its variants, for
+        // `Attributes.get(Enum, attr)` and `Attributes.variant`.
+        let own = self.attr_table(&e.attributes);
+        let variant_attrs: Vec<String> = e
+            .variants
+            .iter()
+            .filter_map(|v| {
+                let table = self.attr_table(&v.attributes);
+
+                (table != "{}").then(|| format!("{} = {table}", self.text_of(v.name)))
+            })
+            .collect();
+
+        if !self.options.definitions && (own != "{}" || !variant_attrs.is_empty()) {
+            let std = self.std();
+            printer.push_str(&format!(
+                " {std}.attrs({name}, {{ own = {own}, variants = {{ {} }} }})",
+                variant_attrs.join(", ")
+            ));
+        }
         self.generate(
             end_tok.start,
             &format!(
@@ -994,7 +1180,15 @@ impl<'s> Desugar<'s> {
             // The check artifact assigns without the guard: a conditional
             // assignment would make the property optional to the checker,
             // and the struct would then not satisfy the trait.
-            if let Some(defaults) = self.traits.get(&trait_name).cloned() {
+            let defaults = self.traits.get(&trait_name).cloned().or_else(|| {
+                self.options
+                    .import_trait_defaults
+                    .iter()
+                    .find(|(t, _)| *t == trait_name)
+                    .map(|(_, d)| d.clone())
+            });
+
+            if let Some(defaults) = defaults {
                 let written: Vec<String> = i
                     .methods
                     .iter()
@@ -2306,7 +2500,9 @@ impl<'s> Desugar<'s> {
                 ""
             };
             field_types.push(format!("{modifier}{fname}: {ty}"));
-            param_types.push(format!("{modifier}{fname}: {ty}{opt}"));
+            // The constructor fills defaults into this table, so a
+            // `read` field is plain here.
+            param_types.push(format!("{fname}: {ty}{opt}"));
 
             if f.visibility.is_some_and(|v| self.text_of(v) == "private") {
                 private_types.push(format!("{modifier}{fname}: {ty}"));
@@ -2315,7 +2511,9 @@ impl<'s> Desugar<'s> {
             }
 
             if let Some(dv) = &f.default {
+                self.expected_generic = generic_head(&ty);
                 let v = self.render_to_string(dv);
+                self.expected_generic = None;
                 defaults.push(format!("if f.{fname} == nil then f.{fname} = {v} end"));
             }
 
@@ -2460,10 +2658,14 @@ impl<'s> Desugar<'s> {
         // Declared keys are present from construction, so `__newindex`
         // only sees a declared key when its value was nil; that write
         // goes through.
-        if st
-            .attributes
-            .iter()
-            .any(|a| a.name.is_some_and(|n| self.text_of(n) == "sealed"))
+        // The check artifact leaves it out: the struct type already
+        // rejects an unknown key, and a `__newindex` on the metatable
+        // stops the solver from reducing a mapped type over the struct.
+        if !self.options.check
+            && st
+                .attributes
+                .iter()
+                .any(|a| a.name.is_some_and(|n| self.text_of(n) == "sealed"))
         {
             let keys: Vec<String> = field_names.iter().map(|f| format!("{f} = true")).collect();
             tail.push_str(&format!(
@@ -2574,9 +2776,16 @@ impl<'s> Desugar<'s> {
             }
 
             "Clone" => {
-                format!(
-                    "function {name}.clone(s{sn}) return setmetatable(table.clone(s), {name}) end"
-                )
+                // The checker reads `setmetatable` of a metatable type as a
+                // new shape; the annotation keeps the struct's own.
+                let ret = if self.options.check {
+                    format!(": {name}")
+                } else {
+                    String::new()
+                };
+                let value = self.any_cast(&format!("setmetatable(table.clone(s), {name})"));
+
+                format!("function {name}.clone(s{sn}){ret} return {value} end")
             }
 
             "Serialize" => {
@@ -2893,15 +3102,37 @@ impl<'s> Desugar<'s> {
             .map(|p| luau_string(self.text_of(p.name)))
             .collect();
         let std = self.std();
-        self.generate(
-            start,
-            &format!(
-                "local {name} = {std}.attribute({}, {{ {} }}, {{ {} }})",
-                luau_string(&name),
-                targets.join(", "),
-                params.join(", ")
-            ),
+        let value = format!(
+            "{std}.attribute({}, {{ {} }}, {{ {} }})",
+            luau_string(&name),
+            targets.join(", "),
+            params.join(", ")
         );
+        // The check artifact types the value by its arguments, so
+        // `Attributes.get(S, attr)` reads as `{ min: number, max: number }?`.
+        let value = if self.options.check {
+            let fields: Vec<String> = a
+                .params
+                .iter()
+                .map(|p| {
+                    let ty = match p.ty {
+                        Some(t) => self.copy_type_to_string(t),
+
+                        None => "any".to_string(),
+                    };
+
+                    format!("{}: {}", self.text_of(p.name), ty.trim())
+                })
+                .collect();
+
+            format!(
+                "({value} :: any) :: {std}.Attribute<{{ {} }}>",
+                fields.join(", ")
+            )
+        } else {
+            value
+        };
+        self.generate(start, &format!("local {name} = {value}"));
         self.blank_lines(start, self.byte_end(a.span));
 
         if a.exported {
@@ -3364,13 +3595,44 @@ impl<'s> Desugar<'s> {
     }
 
     fn generate(&mut self, anchor: u32, text: &str) {
-        if let Err(NewlineInGenerated { anchor, text }) = self.r.generate(anchor, text) {
+        if let Err(NewlineInGenerated { anchor, text }) = self.r.generate(anchor, text)
+            && !self.generate_spanning(anchor, &text)
+        {
             self.diagnostics.push(Diagnostic {
                 start: anchor,
                 end: anchor,
                 message: format!("internal: generated text holds a newline: {text:?}"),
             });
         }
+    }
+
+    /// Text assembled from source that spans lines, such as a hoisted
+    /// chain prefix with a function literal in it: each piece between the
+    /// newlines is generated, and each newline is copied from the source
+    /// after the anchor, in order, so the line count and the map hold.
+    /// False when the source has too few newlines there.
+    fn generate_spanning(&mut self, anchor: u32, text: &str) -> bool {
+        let pieces: Vec<&str> = text.split('\n').collect();
+        let mut cursor = anchor as usize;
+        let mut newlines = Vec::with_capacity(pieces.len() - 1);
+
+        for _ in 1..pieces.len() {
+            let Some(at) = self.src[cursor..].find('\n') else {
+                return false;
+            };
+            newlines.push((cursor + at) as u32);
+            cursor += at + 1;
+        }
+
+        for (i, piece) in pieces.iter().enumerate() {
+            let _ = self.r.generate(anchor, piece);
+
+            if let Some(nl) = newlines.get(i) {
+                self.r.copy(*nl, nl + 1);
+            }
+        }
+
+        true
     }
 
     fn diagnose(&mut self, span: TokSpan, message: &str) {
@@ -3442,6 +3704,11 @@ impl<'s> Desugar<'s> {
 
                 if self.is_local(&name) || self.declared_types.contains(&name) {
                     self.r.copy(ns, ne);
+                } else if let Some((table, after)) = self.mapped_over_declared(span, end) {
+                    self.generate(ns, &table);
+                    self.copy(after, end);
+
+                    return;
                 } else {
                     let std = self.type_std();
                     self.generate(ns, &format!("{std}{name}"));
@@ -3743,8 +4010,13 @@ impl<'s> Desugar<'s> {
             }
 
             Stmt::Interface(i) => {
-                self.not_constructible
-                    .insert(self.text_of(i.name).to_string(), "interface");
+                let name = self.text_of(i.name).to_string();
+                self.not_constructible.insert(name.clone(), "interface");
+                // An interface with no base has its fields here; one
+                // with a base keeps the type function, which sees them.
+                if i.extends.is_empty() {
+                    self.note_field_types(&name, &i.fields);
+                }
             }
 
             _ => {}
@@ -3770,28 +4042,49 @@ impl<'s> Desugar<'s> {
         let hoists = std::mem::replace(&mut self.hoists, saved_hoists);
         self.temp_next = saved_next;
 
-        for h in &hoists {
+        for h in hoists {
             match h {
                 Hoist::Temp {
                     index,
                     value,
                     anchor,
                 } => {
-                    let keyword = if self.temp_declared(*index) {
+                    let keyword = if self.temp_declared(index) {
                         ""
                     } else {
-                        self.declare_temp(*index);
+                        self.declare_temp(index);
 
                         "local "
                     };
 
-                    let line = format!("{keyword}_{index} = {value} ");
-                    self.generate(*anchor, &line);
+                    match value {
+                        HoistValue::Text(text) => {
+                            let line = format!("{keyword}_{index} = {text} ");
+                            self.generate(anchor, &line);
+                        }
+
+                        // The value keeps its source chunks, so a function
+                        // literal inside it keeps its lines.
+                        HoistValue::Rendered(rendered) => {
+                            self.generate(anchor, &format!("{keyword}_{index} = "));
+                            self.r.append(rendered);
+                            self.generate(anchor, " ");
+                        }
+                    }
                 }
 
                 Hoist::Stmt { text, anchor } => {
                     let line = format!("{text} ");
-                    self.generate(*anchor, &line);
+                    self.generate(anchor, &line);
+                }
+
+                Hoist::Fresh {
+                    name,
+                    value,
+                    anchor,
+                } => {
+                    let line = format!("local {name} = {value} ");
+                    self.generate(anchor, &line);
                 }
             }
         }
@@ -3947,6 +4240,48 @@ impl<'s> Desugar<'s> {
                 self.generate(anchor, &text);
             }
 
+            // `new X(...) { fields }` alone: the instance lands in a temp and
+            // each field assigns through it, as the local form does.
+            Stmt::Call(
+                Expr::New {
+                    name,
+                    type_args,
+                    args,
+                    init: Some(init),
+                    span: whole,
+                },
+                span,
+            ) if !self.fields_form(name, args.as_ref(), Some(init)) => {
+                let anchor = self.byte_start(*span);
+                // A fresh local each time: a reused temp would carry
+                // the type of an earlier statement into the checker.
+                self.new_stmt_next += 1;
+                let binding = format!("_n{}", self.new_stmt_next);
+                self.new_init(
+                    &format!("local {binding}"),
+                    &binding,
+                    name,
+                    *type_args,
+                    args.as_ref(),
+                    init,
+                    *whole,
+                    anchor,
+                );
+            }
+
+            // `new X(...)`, `await f()`: a call once rendered. `try f()`
+            // drops its value into a throwaway local, since the unwrapped
+            // value is a name and a name is no statement.
+            Stmt::Call(e @ (Expr::New { .. } | Expr::Await { .. } | Expr::Try { .. }), span) => {
+                let anchor = self.byte_start(*span);
+
+                if matches!(e, Expr::Try { .. }) {
+                    self.generate(anchor, "local _ = ");
+                }
+
+                self.expr(e);
+            }
+
             // An attribute on a local has nothing to attach to: a
             // diagnostic, and the text goes so the output stays Luau.
             Stmt::Local(l) if !l.attrs.is_empty() => {
@@ -3987,6 +4322,22 @@ impl<'s> Desugar<'s> {
 
             Stmt::Local(l) if local_needs_rewrite(l) => self.local_stmt(l),
 
+            // `local m: HashMap<K, V> = HashMap.new()`: the call takes the
+            // annotation's arguments, since the solver infers none.
+            Stmt::Local(l) if self.annotated_constructor(l).is_some() => {
+                self.expected_generic = self.annotated_constructor(l);
+                let span = stmt.span();
+                let children = stmt_children(stmt);
+                self.stitch(span, &children, |d, child| match child {
+                    Child::Expr(e) => d.expr(e),
+
+                    Child::Block(b) => d.block(b),
+
+                    Child::Function(b) => d.function_block(b),
+                });
+                self.expected_generic = None;
+            }
+
             Stmt::Delete { expr, span } => {
                 let anchor = self.byte_start(*span);
                 let target = self.render_to_string(expr);
@@ -4008,6 +4359,11 @@ impl<'s> Desugar<'s> {
                 let span = stmt.span();
                 let children = stmt_children(stmt);
                 let reevaluated = reevaluated_conditions(stmt);
+                let (narrow_blocks, narrow_after) = match stmt {
+                    Stmt::If(i) => self.narrowings(i),
+
+                    _ => (Vec::new(), None),
+                };
                 self.stitch(span, &children, |d, child| match child {
                     Child::Expr(e) => {
                         let guard = reevaluated.contains(&std::ptr::from_ref::<Expr>(e));
@@ -4023,10 +4379,24 @@ impl<'s> Desugar<'s> {
                         }
                     }
 
-                    Child::Block(b) => d.block(b),
+                    Child::Block(b) => {
+                        if let Some((_, prefix)) =
+                            narrow_blocks.iter().find(|(at, _)| *at == b.span.start)
+                        {
+                            let anchor = d.byte_start(b.span);
+                            d.generate(anchor, prefix);
+                        }
+
+                        d.block(b);
+                    }
 
                     Child::Function(b) => d.function_block(b),
                 });
+
+                if let Some(text) = narrow_after {
+                    let anchor = self.byte_end(span);
+                    self.generate(anchor, &text);
+                }
             }
         }
     }
@@ -4104,12 +4474,17 @@ impl<'s> Desugar<'s> {
 
     /// Renders an expression into a string, with no effect on the output.
     fn render_to_string(&mut self, e: &Expr) -> String {
+        self.render_to_side(e).finish().0
+    }
+
+    /// Renders an expression into its own renderer, chunks and all.
+    fn render_to_side(&mut self, e: &Expr) -> Renderer<'s> {
         let mut side = Renderer::new(self.src);
         std::mem::swap(&mut self.r, &mut side);
         self.expr(e);
         std::mem::swap(&mut self.r, &mut side);
 
-        side.finish().0
+        side
     }
 
     /// Hoists rendered text into a temp and returns the temp's name.
@@ -4134,11 +4509,25 @@ impl<'s> Desugar<'s> {
         let index = self.temp_next;
         self.hoists.push(Hoist::Temp {
             index,
-            value,
+            value: HoistValue::Text(value),
             anchor,
         });
 
         format!("_{index}")
+    }
+
+    /// Hoists a module require into a local of its own, `_m1`, so its
+    /// type is the module's and a type alias through it resolves.
+    fn hoist_import(&mut self, path: &str, anchor: u32) -> String {
+        self.import_next += 1;
+        let name = format!("_m{}", self.import_next);
+        self.hoists.push(Hoist::Fresh {
+            name: name.clone(),
+            value: format!("require({path})"),
+            anchor,
+        });
+
+        name
     }
 
     /// Hoists a whole statement in front of the current one.
@@ -4158,12 +4547,28 @@ impl<'s> Desugar<'s> {
         self.hoists.push(Hoist::Stmt { text, anchor });
     }
 
-    /// Hoists an expression into a temp and returns the temp's name.
+    /// Hoists an expression into a temp and returns the temp's name. The
+    /// expression renders with its provenance, so one that spans lines,
+    /// a function literal as an argument, keeps every line in place.
     fn hoist(&mut self, e: &Expr) -> String {
-        let value = self.render_to_string(e);
         let anchor = self.byte_start(e.span());
 
-        self.hoist_text(value, anchor)
+        if self.no_hoist > 0 {
+            let value = self.render_to_string(e);
+
+            return self.hoist_text(value, anchor);
+        }
+
+        let rendered = self.render_to_side(e);
+        self.temp_next += 1;
+        let index = self.temp_next;
+        self.hoists.push(Hoist::Temp {
+            index,
+            value: HoistValue::Rendered(rendered),
+            anchor,
+        });
+
+        format!("_{index}")
     }
 
     /// An expression that is cheap and side-effect free to read twice.
@@ -4246,7 +4651,8 @@ impl<'s> Desugar<'s> {
                 if chain_has_alloy(e)
                     || self.chain_has_ext(e)
                     || self.is_struct_call(e)
-                    || self.is_import_call(e) =>
+                    || self.is_import_call(e)
+                    || self.expected_generic.is_some() =>
             {
                 let text = self.chain_expr(e);
                 self.generate(anchor, &text);
@@ -4326,9 +4732,23 @@ impl<'s> Desugar<'s> {
                 {
                     self.check_new(name, args.as_ref(), Some(table), *span);
                     let n = self.render_to_string(name);
-                    self.generate(anchor, &format!("{}(", self.raw_ctor(&n)));
+                    // Inside the struct's own impl the instance carries the
+                    // full view, so `self.count` in `new` type checks.
+                    let full_view = self.impl_target.as_deref() == Some(n.as_str())
+                        && self.has_private_view(&n);
+                    let open = if full_view {
+                        format!("(({}(", self.raw_ctor(&n))
+                    } else {
+                        format!("{}(", self.raw_ctor(&n))
+                    };
+                    self.generate(anchor, &open);
                     self.expr(table);
-                    self.generate(self.byte_end(table.span()), ")");
+                    let close = if full_view {
+                        format!(") :: any) :: {n}__all)")
+                    } else {
+                        ")".to_string()
+                    };
+                    self.generate(self.byte_end(table.span()), &close);
                 } else {
                     let head =
                         self.new_head(name, *type_args, args.as_ref(), init.as_deref(), *span);
@@ -4504,7 +4924,13 @@ impl<'s> Desugar<'s> {
         } else if let Some(item) = n.strip_prefix("Enum.") {
             format!("typeof({x}) == \"EnumItem\" and {x}.EnumType == Enum.{item}")
         } else if INSTANCE_CLASSES.contains(&n.as_str()) {
-            format!("typeof({x}) == \"Instance\" and {x}:IsA(\"{n}\")")
+            if n == "Instance" {
+                // The root class: `typeof` alone answers, and an `IsA`
+                // on a value typed `any` trips the solver.
+                format!("typeof({x}) == \"Instance\"")
+            } else {
+                format!("typeof({x}) == \"Instance\" and {x}:IsA(\"{n}\")")
+            }
         } else if DATATYPES.contains(&n.as_str()) {
             format!("typeof({x}) == \"{n}\"")
         } else if self.enums.contains_key(&n) {
@@ -4697,7 +5123,7 @@ impl<'s> Desugar<'s> {
         let n = self.render_to_string(name);
         let t = type_args
             .map(|s| self.text_of(s).to_string())
-            .unwrap_or_default();
+            .unwrap_or_else(|| self.expected_args_for(name));
 
         match (args, init) {
             (Some(a), None) => {
@@ -4904,6 +5330,29 @@ impl<'s> Desugar<'s> {
 
         let mut inner_simple = self.is_simple(base);
         let mut guard: Option<String> = None;
+
+        // `HashMap.new()` under `local m: HashMap<K, V>`: the arguments
+        // the annotation names go on the call.
+        if let (Expr::Name(n), Some((base_name, args_text))) = (base, self.expected_generic.clone())
+            && self.text_of(*n) == base_name
+            && let [
+                Link::Plain(Step::Field(f)),
+                Link::Plain(Step::Call {
+                    method: None,
+                    type_args: None,
+                    args,
+                }),
+            ] = links.as_slice()
+            && matches!(self.text_of(*f), "new" | "from" | "with_capacity")
+        {
+            let method = self.text_of(*f).to_string();
+            let a = self.args_text(args);
+
+            return ChainParts {
+                guard: None,
+                inner: format!("{inner}.{method}<<{args_text}>>{a}"),
+            };
+        }
 
         for link in links {
             let link = match link {
@@ -5162,6 +5611,7 @@ impl<'s> Desugar<'s> {
             .map(|f| (self.text_of(f.name).to_string(), f.default.is_some()))
             .collect();
         self.structs.insert(name.clone());
+        self.note_field_types(&name, &st.fields);
 
         if st.generics.is_some() {
             self.generic_types.insert(name.clone());
@@ -5178,6 +5628,134 @@ impl<'s> Desugar<'s> {
         self.struct_fields.insert(name, fields);
     }
 
+    /// `Partial<S>` at an ambient name token, with `S` declared here:
+    /// the expanded table and the byte after the closing `>`.
+    fn mapped_over_declared(&mut self, span: TokSpan, end: u32) -> Option<(String, u32)> {
+        let name = self.text_of(span).to_string();
+
+        if !matches!(name.as_str(), "Partial" | "Readonly" | "Sink") {
+            return None;
+        }
+
+        let i = span.end as usize;
+        let lt = self.toks.get(i)?;
+        let target = self.toks.get(i + 1)?;
+        let gt = self.toks.get(i + 2)?;
+
+        if lt.text(self.src) != "<" || target.kind != TokKind::Ident || gt.end > end {
+            return None;
+        }
+
+        let closes = gt.text(self.src) == ">" || gt.text(self.src) == ">>";
+
+        if !closes {
+            return None;
+        }
+
+        let target_name = target.text(self.src).to_string();
+        let table = self.inline_mapped(&name, &target_name)?;
+        // `>>` closes an outer list too; only the first `>` is this one.
+        let after = if gt.text(self.src) == ">>" {
+            gt.start + 1
+        } else {
+            gt.end
+        };
+
+        Some((table, after))
+    }
+
+    /// The annotation's base and arguments when a one-name local with a
+    /// std container annotation holds that container's constructor call
+    /// and nothing else: `Base.new()`, `Base.from(x)`, `new Base()`.
+    fn annotated_constructor(&self, l: &Local) -> Option<(String, String)> {
+        if l.names.len() != 1 || l.values.len() != 1 || l.names[0].destructure.is_some() {
+            return None;
+        }
+
+        let head = generic_head(self.text_of(l.names[0].ty?))?;
+        let value = &l.values[0];
+
+        let is_ctor = match value {
+            Expr::New {
+                name,
+                type_args: None,
+                ..
+            } => matches!(name.as_ref(), Expr::Name(n) if self.text_of(*n) == head.0),
+
+            _ => {
+                let (base, links) = flatten(value);
+
+                matches!(base, Expr::Name(n) if self.text_of(*n) == head.0)
+                    && matches!(
+                        links.as_slice(),
+                        [
+                            Link::Plain(Step::Field(f)),
+                            Link::Plain(Step::Call {
+                                method: None,
+                                type_args: None,
+                                ..
+                            })
+                        ] if matches!(self.text_of(*f), "new" | "from" | "with_capacity")
+                    )
+            }
+        };
+
+        is_ctor.then_some(head)
+    }
+
+    /// `<K, V>` for `new Base(...)` under an annotation `Base<K, V>`.
+    fn expected_args_for(&self, name: &Expr) -> String {
+        match (name, &self.expected_generic) {
+            (Expr::Name(n), Some((base, args))) if self.text_of(*n) == base => {
+                format!("<<{args}>>")
+            }
+
+            _ => String::new(),
+        }
+    }
+
+    fn note_field_types(&mut self, name: &str, fields: &[Field]) {
+        let types = fields
+            .iter()
+            .map(|f| FieldType {
+                name: self.text_of(f.name).to_string(),
+                ty: f.ty,
+                private: f.visibility.is_some_and(|v| self.text_of(v) == "private"),
+            })
+            .collect();
+        self.struct_field_types.insert(name.to_string(), types);
+    }
+
+    /// `Partial<S>`, `Readonly<S>`, `Sink<S>` over a struct or an
+    /// interface declared here, as a plain table type. The solver's type
+    /// functions cannot reduce a type that holds `Array<T>` or another
+    /// recursive generic, and the fields are known, so the check
+    /// artifact writes them out. `None` when the name is not one of
+    /// these or the argument is not a declared type.
+    fn inline_mapped(&mut self, mapped: &str, target: &str) -> Option<String> {
+        let (prefix, optional) = match mapped {
+            "Partial" => ("", "?"),
+            "Readonly" => ("read ", ""),
+            "Sink" => ("write ", ""),
+            _ => return None,
+        };
+        let fields = self.struct_field_types.get(target)?.clone();
+        let mut parts = Vec::new();
+
+        for f in fields.iter().filter(|f| !f.private) {
+            let ty = self.copy_type_to_string(f.ty);
+            let ty = ty.trim();
+            let opt = if optional.is_empty() || ty.ends_with('?') {
+                ""
+            } else {
+                optional
+            };
+            parts.push(format!("{prefix}{}: {ty}{opt}", f.name));
+        }
+
+        Some(format!("{{ {} }}", parts.join(", ")))
+    }
+
     /// Whether the check artifact splits a struct into a public view and
     /// a full one: it has a private member and no type parameters.
     fn has_private_view(&self, name: &str) -> bool {
@@ -5188,6 +5766,177 @@ impl<'s> Desugar<'s> {
 
     /// The type of `self` inside a struct's own code: the full view when
     /// the struct has private members, else the struct.
+    /// What the check artifact adds to an `if` so the checker sees an
+    /// `is` test on a type it cannot refine: a struct, an enum, an alias
+    /// datatype. Each branch that tests `x is T` on a plain name starts
+    /// with `local x = ((x :: any) :: T)`; `x is not T` types the else
+    /// branch, or the code after a guard that leaves.
+    fn narrowings(&self, i: &If) -> (Vec<(u32, String)>, Option<String>) {
+        let mut blocks = Vec::new();
+
+        if !self.options.check {
+            return (blocks, None);
+        }
+
+        for (cond, block) in &i.branches {
+            let Cond::Expr(e) = cond else {
+                continue;
+            };
+            let mut tests = Vec::new();
+            self.positive_tests(e, &mut tests);
+            let prefix: String = tests
+                .iter()
+                .map(|(name, ty)| format!("local {name} = (({name} :: any) :: {ty}) "))
+                .collect();
+
+            if !prefix.is_empty() {
+                blocks.push((block.span.start, prefix));
+            }
+        }
+
+        let mut after = None;
+
+        if i.branches.len() == 1
+            && let Cond::Expr(e) = &i.branches[0].0
+            && let Some((name, ty)) = self.negative_test(e)
+        {
+            let text = format!("local {name} = (({name} :: any) :: {ty})");
+
+            match &i.else_block {
+                Some(b) => blocks.push((b.span.start, format!("{text} "))),
+
+                None if self.block_leaves(&i.branches[0].1) => after = Some(format!(" {text}")),
+
+                None => {}
+            }
+        }
+
+        (blocks, after)
+    }
+
+    /// The `x is T` tests an `and` chain holds, as (name, type).
+    fn positive_tests(&self, e: &Expr, out: &mut Vec<(String, String)>) {
+        match e {
+            Expr::Paren { inner, .. } => self.positive_tests(inner, out),
+
+            Expr::Binary { op, lhs, rhs, .. } if self.text_of(*op) == "and" => {
+                self.positive_tests(lhs, out);
+                self.positive_tests(rhs, out);
+            }
+
+            Expr::Is {
+                expr,
+                negated: false,
+                name,
+                ..
+            } => {
+                if let Expr::Name(n) = &**expr
+                    && let Some(ty) = self.narrow_type(self.text_of(*name), self.text_of(*n))
+                {
+                    out.push((self.text_of(*n).to_string(), ty));
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    /// `x is not T`, or `not (x is T)`, as (name, type).
+    fn negative_test(&self, e: &Expr) -> Option<(String, String)> {
+        match e {
+            Expr::Paren { inner, .. } => self.negative_test(inner),
+
+            Expr::Unary { op, operand, .. } if self.text_of(*op) == "not" => {
+                let mut tests = Vec::new();
+                self.positive_tests(operand, &mut tests);
+
+                (tests.len() == 1).then(|| tests.remove(0))
+            }
+
+            Expr::Is {
+                expr,
+                negated: true,
+                name,
+                ..
+            } => match &**expr {
+                Expr::Name(n) => {
+                    let ty = self.narrow_type(self.text_of(*name), self.text_of(*n))?;
+
+                    Some((self.text_of(*n).to_string(), ty))
+                }
+
+                _ => None,
+            },
+
+            _ => None,
+        }
+    }
+
+    /// The type an `is` narrows `value` to when Luau cannot: a struct,
+    /// an enum, an imported type, or a datatype the definitions declare
+    /// as an alias. A class, a primitive, and a datatype class refine on
+    /// their own; `table` and `function` refine to the top types, which
+    /// no index or call accepts, so those meet the value's own type.
+    fn narrow_type(&self, name: &str, value: &str) -> Option<String> {
+        match name {
+            "table" => return Some(format!("typeof({value}) & {{ [any]: any }}")),
+
+            // Both function shapes: a call yields values, and a callback
+            // parameter that returns nothing accepts it.
+            "function" => {
+                return Some(format!(
+                    "typeof({value}) & ((...any) -> ...any) & ((...any) -> ())"
+                ));
+            }
+
+            _ => {}
+        }
+
+        if self.generic_types.contains(name) {
+            return None;
+        }
+
+        if self.structs.contains(name) {
+            return Some(if self.impl_target.as_deref() == Some(name) {
+                self.self_alias(name)
+            } else {
+                name.to_string()
+            });
+        }
+
+        if self.enums.contains_key(name)
+            || self
+                .options
+                .import_types
+                .iter()
+                .any(|(_, names)| names.iter().any(|n| n == name))
+            || ALIAS_DATATYPES.contains(&name)
+        {
+            return Some(name.to_string());
+        }
+
+        None
+    }
+
+    /// Whether a block ends in a statement that leaves it: a return, a
+    /// break, a continue, or an `error` call.
+    fn block_leaves(&self, block: &Block) -> bool {
+        match block.stmts.last() {
+            Some(Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_)) => true,
+
+            Some(Stmt::Call(
+                Expr::Call {
+                    func, method: None, ..
+                },
+                _,
+            )) => {
+                matches!(&**func, Expr::Name(n) if self.text_of(*n) == "error")
+            }
+
+            _ => false,
+        }
+    }
+
     fn self_alias(&self, name: &str) -> String {
         if self.has_private_view(name) {
             format!("{name}__all")
@@ -5565,7 +6314,9 @@ impl<'s> Desugar<'s> {
         let mut decls: Vec<String> = Vec::new();
 
         for (b, v) in l.names.iter().zip(&l.values) {
+            self.expected_generic = b.ty.and_then(|t| generic_head(self.text_of(t)));
             let value = self.render_to_string(v);
+            self.expected_generic = None;
             let ty =
                 b.ty.map(|t| format!(": {}", self.text_of(t)))
                     .unwrap_or_default();
@@ -5624,6 +6375,38 @@ impl<'s> Desugar<'s> {
         // The binding itself holds the instance from the first line, so
         // a hover on its name finds a local there, and each field line
         // assigns through the name. `const` is a `local` in Luau.
+        let ty = match l.names[0].ty {
+            Some(t) => format!(": {}", self.text_of(t)),
+
+            None => String::new(),
+        };
+        let binding = self.text_of(l.names[0].name).to_string();
+        self.new_init(
+            &format!("local {binding}{ty}"),
+            &binding,
+            name,
+            type_args,
+            args,
+            init,
+            whole,
+            anchor,
+        );
+    }
+
+    /// The initializer form: `decl = X.new(args)` on the first line, then
+    /// one `binding.field = value` per field line.
+    #[allow(clippy::too_many_arguments)]
+    fn new_init(
+        &mut self,
+        decl: &str,
+        binding: &str,
+        name: &Expr,
+        type_args: Option<TokSpan>,
+        args: Option<&CallArgs>,
+        init: &Expr,
+        whole: TokSpan,
+        anchor: u32,
+    ) {
         self.check_new(name, args, Some(init), whole);
         let ctor = self.constructor_of(name);
         let n = self.render_to_string(name);
@@ -5648,13 +6431,7 @@ impl<'s> Desugar<'s> {
                 format!("{std}.construct({n}, {{}})")
             }
         };
-        let ty = match l.names[0].ty {
-            Some(t) => format!(": {}", self.text_of(t)),
-
-            None => String::new(),
-        };
-        let binding = self.text_of(l.names[0].name).to_string();
-        self.generate(anchor, &format!("local {binding}{ty} = {head}"));
+        self.generate(anchor, &format!("{decl} = {head}"));
 
         let Expr::Table { fields, span } = init else {
             unreachable!("the parser only builds a table initializer");

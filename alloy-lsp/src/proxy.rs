@@ -2638,15 +2638,13 @@ impl Server {
                         }
                     }
 
-                    // A pulled report gets the filter the push path has.
+                    // A pulled report gets the filter the push path has. The
+                    // messages wait for the mapping below: a range set here
+                    // in source terms would map once more, to one byte.
                     "textDocument/diagnostic" => {
                         if let Some(items) = result.get_mut("items").and_then(Value::as_array_mut) {
                             let lint_config = st.lint_config();
                             items.retain(|d| keep_diagnostic(d, doc, &lint_config));
-
-                            for d in items.iter_mut() {
-                                friendly_message(d, doc, &st);
-                            }
                         }
                     }
 
@@ -2730,6 +2728,15 @@ impl Server {
             }
 
             map_from_shadow(result, ctx.as_deref(), &st);
+
+            if method == "textDocument/diagnostic"
+                && let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u))
+                && let Some(items) = result.get_mut("items").and_then(Value::as_array_mut)
+            {
+                for d in items.iter_mut() {
+                    friendly_message(d, doc, &st);
+                }
+            }
 
             // The editor never sees the runtime's table: `__alloy.Future<T>`
             // reads `Future<T>`, and `__alloy_string.trim` reads `string.trim`.

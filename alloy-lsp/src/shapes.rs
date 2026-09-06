@@ -110,17 +110,109 @@ pub fn fold(text: &str, known: &Known) -> String {
     }
 
     fold_heads(&mut out, known);
+    fold_tagged_results(&mut out);
     fold_results(&mut out);
     fold_lite_results(&mut out);
-    fold_enums(&mut out, known);
+    fold_symbols(&mut out);
+
+    // An enum inside another's payload folds first, and then the outer.
+    for _ in 0..3 {
+        let before = out.len();
+        fold_enums(&mut out, known);
+
+        if out.len() == before {
+            break;
+        }
+    }
     out = fold_private_views(&out);
     fold_full_views(&mut out, known);
     fold_array_alias(&mut out);
     fold_narrowed_primitives(&mut out);
     out = fold_temp_receiver(&out);
     fold_aliases(&mut out, known);
+    // An async body that returns nothing types as `Future<nil>`, since
+    // `()` is no type argument; it reads as `Future<()>`.
+    out = out.replace("Future<nil>", "Future<()>");
+    fold_union_dupes(&mut out);
+    fold_read_arrays(&mut out);
 
     out
+}
+
+/// An Array method's receiver, `{ read [number]: T }`, prints as
+/// `{read T}`; the sugar is `read T[]`.
+fn fold_read_arrays(text: &mut String) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find("{read ") {
+        let at = from + i;
+        let Some(len) = balanced_len(&text[at..]) else {
+            break;
+        };
+        let inner = text[at + 6..at + len - 1].trim().to_string();
+
+        if inner.contains('{') || inner.contains(' ') {
+            from = at + 6;
+            continue;
+        }
+
+        text.replace_range(at..at + len, &format!("read {inner}[]"));
+        from = at;
+    }
+}
+
+/// `T | D` of an `unwrap_or` prints twice when both are the same:
+/// `number | number` reads as `number`. Each type after a `: ` on a
+/// line loses its repeated members.
+fn fold_union_dupes(text: &mut String) {
+    let mut out = String::with_capacity(text.len());
+
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+
+        let Some(colon) = line.find(": ") else {
+            out.push_str(line);
+            continue;
+        };
+        let (head, ty) = line.split_at(colon + 2);
+
+        if !ty.contains(" | ") {
+            out.push_str(line);
+            continue;
+        }
+
+        let mut members: Vec<&str> = Vec::new();
+        let mut depth = 0i32;
+        let mut from = 0;
+
+        for (k, c) in ty.char_indices() {
+            match c {
+                '(' | '{' | '[' | '<' => depth += 1,
+                ')' | '}' | ']' | '>' => depth -= 1,
+                '|' if depth == 0 && ty[..k].ends_with(' ') && ty[k + 1..].starts_with(' ') => {
+                    members.push(ty[from..k - 1].trim());
+                    from = k + 2;
+                }
+                _ => {}
+            }
+        }
+
+        members.push(ty[from..].trim());
+        let mut kept: Vec<&str> = Vec::new();
+
+        for m in members {
+            if !kept.contains(&m) {
+                kept.push(m);
+            }
+        }
+
+        out.push_str(head);
+        out.push_str(&kept.join(" | "));
+    }
+
+    *text = out;
 }
 
 /// `type Snapshot = Readonly<Profile>`: the mapped form reads as the
@@ -687,6 +779,21 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
         return Some(head.to_string());
     }
 
+    // A body an earlier pass already named, `Future<number>`, `number[]`:
+    // the name is the body.
+    if !trimmed.starts_with('{')
+        && !trimmed.starts_with('(')
+        && !trimmed.contains("->")
+        && !trimmed.contains(" & ")
+        && !trimmed.contains(" | ")
+        && trimmed
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        return Some(trimmed.to_string());
+    }
+
     let m = members(trimmed);
     let has = |key: &str| m.iter().any(|(k, _)| k == key);
     let get = |key: &str| m.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
@@ -774,6 +881,31 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
         return Some("SignalConnection".to_string());
     }
 
+    // The engine's signal alias, expanded: the callback names the arguments.
+    if let Some(sig) = get("Connect")
+        && has("ConnectParallel")
+        && has("Once")
+    {
+        let args = sig
+            .find("callback: (")
+            .map(|i| i + "callback: (".len())
+            .and_then(|from| {
+                balanced_len(&sig[from - 1..]).map(|len| sig[from..from - 1 + len - 1].to_string())
+            })
+            .unwrap_or_default();
+
+        return Some(format!("RBXScriptSignal<{args}>"));
+    }
+
+    // A Future carries its value type as `__value`.
+    if let Some(v) = get("__value")
+        && has("andThen")
+    {
+        let t = if v == "nil" { "()" } else { v };
+
+        return Some(format!("Future<{t}>"));
+    }
+
     if let Some(sig) = get("andThen")
         && has("is_settled")
     {
@@ -786,6 +918,8 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
                     .map(|len| sig[from..from + len].to_string())
             })
             .unwrap_or_else(|| "any".to_string());
+
+        let t = if t == "nil" { "()".to_string() } else { t };
 
         return Some(format!("Future<{t}>"));
     }
@@ -989,6 +1123,197 @@ fn fold_results(text: &mut String) {
     }
 }
 
+/// A Result prints as two groups, each a tagged table met with the
+/// methods table: `({ read _1: E, tag: "Err", ... } & { ... }) | ({ read
+/// _1: T, tag: "Ok", ... } & { ... })`, or with the methods first as
+/// `(ResultMethods<T, E> & { ... })` in a signature. The pair reads as
+/// `Result<T, E>`; one group alone, a narrowed side, as `ResultOk<T, E>`
+/// or `ResultErr<T, E>`. `__ok` and `__err` carry the arguments. The
+/// innermost pair folds first, so a `map` inside reads too.
+fn fold_tagged_results(text: &mut String) {
+    let mut limit = text.len();
+
+    while let Some(at) = text[..limit].rfind("tag: \"") {
+        limit = at;
+
+        let Some(open) = enclosing_brace(text, at) else {
+            continue;
+        };
+        let Some(group) = result_group(text, open) else {
+            continue;
+        };
+        let (start, end, ok, err, tag) = group;
+
+        // The other side sits before, or after; a long union breaks the
+        // line before its `|`.
+        let after = text[end..].trim_start();
+        let before = text[..start].trim_end();
+        let pair = if after.starts_with("| (") {
+            let brace_at = end + (text[end..].len() - after.len()) + "| (".len();
+
+            group_brace(text, brace_at)
+                .and_then(|brace| result_group(text, brace))
+                .filter(|g| g.4 != tag)
+                .map(|g| (start, g.1))
+        } else if before.ends_with('|') && before[..before.len() - 1].trim_end().ends_with(')') {
+            let close = before[..before.len() - 1].trim_end().len() - 1;
+
+            group_start(text, close)
+                .and_then(|s_start| group_brace(text, s_start + 1))
+                .and_then(|brace| result_group(text, brace))
+                .filter(|g| g.4 != tag)
+                .map(|g| (g.0, end))
+        } else {
+            None
+        };
+
+        let (whole_start, whole_end, name) = match pair {
+            Some((ws, we)) => (ws, we, format!("Result<{ok}, {err}>")),
+
+            None => (start, end, format!("Result{tag}<{ok}, {err}>")),
+        };
+
+        text.replace_range(whole_start..whole_end, &name);
+        limit = whole_start;
+    }
+}
+
+/// The `{` of the tagged table of a group that opens at `paren`: the
+/// first brace of the group's first part when that part is a table, else
+/// the brace after the `& `.
+fn group_brace(text: &str, after_paren: usize) -> Option<usize> {
+    let rest = &text[after_paren..];
+
+    if rest.starts_with('{') {
+        return Some(after_paren);
+    }
+
+    let amp = rest.find(" & {")?;
+
+    Some(after_paren + amp + 3)
+}
+
+/// One group of a printed Result, given the `{` of its tagged table:
+/// the group's start (its `(`), its end (past the `)`), the `__ok` and
+/// `__err` types, and the tag. `None` when the shape is not a Result
+/// member.
+fn result_group(text: &str, brace: usize) -> Option<(usize, usize, String, String, String)> {
+    let table_len = balanced_len(&text[brace..])?;
+    let members = members(&text[brace..brace + table_len]);
+    let tag = members
+        .iter()
+        .find(|(k, _)| k == "tag")
+        .map(|(_, v)| v.trim_matches('"').to_string())?;
+
+    if tag != "Ok" && tag != "Err" {
+        return None;
+    }
+
+    let ok = members
+        .iter()
+        .find(|(k, _)| k == "__ok")
+        .map(|(_, v)| v.clone())?;
+    let err = members
+        .iter()
+        .find(|(k, _)| k == "__err")
+        .map(|(_, v)| v.clone())?;
+    let after = brace + table_len;
+
+    let before = text[..brace].trim_end();
+
+    // Methods first: `ResultMethods<T, E> & { ... }`, in parens or not.
+    // The hover names the runtime's table before the strip: `__alloy.`.
+    if before.ends_with('&') {
+        let head_end = before.len() - 1;
+        let head = text[..head_end].trim_end();
+        let mut name_at = head.rfind("ResultMethods")?;
+
+        if head[name_at..].contains(' ') && !head[name_at..].contains(", ") {
+            return None;
+        }
+
+        if head[..name_at].ends_with("__alloy.") {
+            name_at -= "__alloy.".len();
+        }
+
+        let paren = name_at > 0 && text[..name_at].trim_end().ends_with('(');
+        let (start, end) = if paren && text[after..].starts_with(')') {
+            (text[..name_at].trim_end().len() - 1, after + 1)
+        } else {
+            (name_at, after)
+        };
+
+        return Some((start, end, ok, err, tag));
+    }
+
+    // Tagged table first: `{ ... } & { methods }`, in parens or not.
+    let rest = &text[after..];
+    let pad = rest.len() - rest.trim_start().len();
+    let methods_at = after + pad;
+
+    if !text[methods_at..].starts_with("& ") {
+        return None;
+    }
+
+    let m_open = methods_at + 2;
+    let m_len = other_len(&text[m_open..])?;
+    let close = m_open + m_len;
+    let paren = text[..brace].ends_with('(');
+
+    if paren && text[close..].starts_with(')') {
+        return Some((brace - 1, close + 1, ok, err, tag));
+    }
+
+    Some((brace, close, ok, err, tag))
+}
+
+/// The length of the methods part: a table, or an alias with arguments.
+fn other_len(text: &str) -> Option<usize> {
+    if text.starts_with('{') {
+        return balanced_len(text);
+    }
+
+    let open = text.find('<')?;
+    let mut depth = 0i32;
+
+    for (k, c) in text[open..].char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(open + k + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// The `(` that opens the group a `)` at `close` ends.
+fn group_start(text: &str, close: usize) -> Option<usize> {
+    let mut depth = 0i32;
+
+    for (k, c) in text[..=close].char_indices().rev() {
+        match c {
+            ')' | '}' | ']' => depth += 1,
+            '(' | '{' | '[' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 /// The `{` that opens the table a byte sits in.
 fn enclosing_brace(text: &str, at: usize) -> Option<usize> {
     let mut depth = 0i32;
@@ -1005,8 +1330,31 @@ fn enclosing_brace(text: &str, at: usize) -> Option<usize> {
     None
 }
 
-/// A unit enum prints as the union of its names in alphabetical order;
-/// a payload enum as that union with `{ _1: T, tag: "V" }` members.
+/// A Symbol prints as an empty table under a metatable with a printer;
+/// it reads as `Symbol`.
+fn fold_symbols(text: &mut String) {
+    let pattern = "{ @metatable { __tostring: (...any) -> string }, { } }";
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find("{ @metatable {") {
+        let at = from + i;
+
+        match match_loose(&text[at..], pattern) {
+            Some(len) => {
+                text.replace_range(at..at + len, "Symbol");
+                from = at + "Symbol".len();
+            }
+
+            None => from = at + 1,
+        }
+    }
+}
+
+/// An enum prints as the union of its members: `"Name"` for a unit,
+/// `{ _1: T, tag: "V" }` for a payload. The members come in the order
+/// of their text, and a payload of another enum may already read by
+/// name, so the match is a set: a union whose members are the enum's,
+/// in any order, reads as the enum.
 fn fold_enums(text: &mut String, known: &Known) {
     for shape in &known.shapes {
         let Shape::Enum { name, variants } = shape else {
@@ -1017,43 +1365,184 @@ fn fold_enums(text: &mut String, known: &Known) {
             continue;
         }
 
-        let mut units: Vec<String> = variants
+        let members: Vec<String> = variants
             .iter()
-            .filter(|(_, p)| p.is_empty())
-            .map(|(v, _)| format!("\"{v}\""))
-            .collect();
-        units.sort();
-        let payloads: Vec<String> = variants
-            .iter()
-            .filter(|(_, p)| !p.is_empty())
             .map(|(v, p)| {
-                let fields: Vec<String> = p
-                    .iter()
-                    .enumerate()
-                    .map(|(i, t)| format!("_{}: {t}", i + 1))
-                    .collect();
+                if p.is_empty() {
+                    format!("\"{v}\"")
+                } else {
+                    let fields: Vec<String> = p
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| format!("_{}: {t}", i + 1))
+                        .collect();
 
-                format!("{{ {}, tag: \"{v}\" }}", fields.join(", "))
+                    format!("{{ {}, tag: \"{v}\" }}", fields.join(", "))
+                }
             })
             .collect();
-        let mut members = units;
-        members.extend(payloads);
-        let printed = members.join(" | ");
+        let first = members[0].split(',').next().unwrap_or("").to_string();
         let mut from = 0;
 
-        // A long union prints over several lines: the match reads past
-        // any whitespace.
-        while let Some(i) = text[from..].find(&members[0]) {
+        while let Some(i) = text[from..].find(&first) {
             let at = from + i;
+            let Some((start, end, found)) = union_around(text, at) else {
+                from = at + 1;
+                continue;
+            };
+            let all = members.len() == found.len()
+                && members.iter().all(|m| {
+                    found
+                        .iter()
+                        .any(|f| match_loose(f, m).is_some_and(|len| len == f.len()))
+                });
 
-            match match_loose(&text[at..], &printed) {
-                Some(len) => {
-                    text.replace_range(at..at + len, name);
-                    from = at + name.len();
-                }
-
-                None => from = at + members[0].len(),
+            if all {
+                text.replace_range(start..end, name);
+                from = start + name.len();
+            } else {
+                from = at + 1;
             }
+        }
+    }
+}
+
+/// The union a byte sits in: its start, its end, and its members, with
+/// any whitespace around each `|`. A member is a quoted string, a
+/// braced table, or a name with its arguments.
+fn union_around(text: &str, at: usize) -> Option<(usize, usize, Vec<&str>)> {
+    // Back up to the start of the member that holds `at`.
+    let mut start = text[..=at].rfind(['{', '"'])?;
+
+    if text[start..].starts_with('"')
+        && !text[..start].ends_with([' ', '(', ':', '|', '\n', '<', ','])
+    {
+        return None;
+    }
+
+    // Extend left over `| member` pairs.
+    loop {
+        let before = text[..start].trim_end();
+
+        if !before.ends_with('|') {
+            break;
+        }
+
+        let prev_end = before.len() - 1;
+        let prev = text[..prev_end].trim_end();
+        let prev_start = member_start(text, prev.len())?;
+        start = prev_start;
+    }
+
+    // Walk right over members and separators.
+    let mut members = Vec::new();
+    let mut pos = start;
+
+    loop {
+        let len = member_len(&text[pos..])?;
+        members.push(&text[pos..pos + len]);
+        let mut next = pos + len;
+        let rest = text[next..].trim_start();
+
+        if !rest.starts_with('|') {
+            return Some((start, next, members));
+        }
+
+        next += text[next..].len() - rest.len() + 1;
+        let gap = text[next..].len() - text[next..].trim_start().len();
+        pos = next + gap;
+    }
+}
+
+/// The length of one union member at the start of `text`.
+fn member_len(text: &str) -> Option<usize> {
+    if text.starts_with('{') {
+        return balanced_len(text);
+    }
+
+    if let Some(rest) = text.strip_prefix('"') {
+        return rest.find('"').map(|i| i + 2);
+    }
+
+    let name: usize = text
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+        .map(char::len_utf8)
+        .sum();
+
+    if name == 0 {
+        return None;
+    }
+
+    if text[name..].starts_with('<') {
+        let mut depth = 0i32;
+
+        for (k, c) in text[name..].char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+
+                    if depth == 0 {
+                        return Some(name + k + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        return None;
+    }
+
+    Some(name)
+}
+
+/// The start of the union member that ends at `end`.
+fn member_start(text: &str, end: usize) -> Option<usize> {
+    let last = text[..end].chars().next_back()?;
+
+    match last {
+        '}' => group_start(text, end - 1),
+
+        '"' => text[..end - 1].rfind('"'),
+
+        '>' => {
+            let mut depth = 0i32;
+
+            for (k, c) in text[..end].char_indices().rev() {
+                match c {
+                    '>' => depth += 1,
+                    '<' => {
+                        depth -= 1;
+
+                        if depth == 0 {
+                            let head = &text[..k];
+                            let name_len = head
+                                .chars()
+                                .rev()
+                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                                .map(char::len_utf8)
+                                .sum::<usize>();
+
+                            return Some(k - name_len);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            None
+        }
+
+        _ => {
+            let name_len = text[..end]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                .map(char::len_utf8)
+                .sum::<usize>();
+
+            (name_len > 0).then_some(end - name_len)
         }
     }
 }
@@ -1198,6 +1687,116 @@ mod tests {
         assert_eq!(
             fold(text, &Known::default()),
             "```luau\nlocal BuySaber: Remote\n```"
+        );
+    }
+
+    #[test]
+    fn a_result_of_two_groups_reads_by_name() {
+        let text = "local config: ({\n    read _1: string,\n    read __err: string,\n    read __ok: number,\n    tag: \"Err\",\n    read trace: string?\n} & {\n    read expect: (self: {\n        read tag: string\n    }, message: string) -> number,\n    read map: <U>(self: { read tag: string }, f: (number) -> U) -> ({ read _1: U, read __err: string, read __ok: U, tag: \"Ok\", read trace: string? } & { read ok: (self: any) -> U? }) | ({ read _1: string, read __err: string, read __ok: U, tag: \"Err\", read trace: string? } & { read ok: (self: any) -> U? })\n}) | ({\n    read _1: number,\n    read __err: string,\n    read __ok: number,\n    tag: \"Ok\",\n    read trace: string?\n} & {\n    read expect: (self: {\n        read tag: string\n    }, message: string) -> number\n})";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "local config: Result<number, string>"
+        );
+        let sig = "function open(player: Player): Future<(ResultMethods<Session, string> & { read _1: Session, read __err: string, read __ok: Session, tag: \"Ok\", read trace: string? }) | (ResultMethods<Session, string> & { read _1: string, read __err: string, read __ok: Session, tag: \"Err\", read trace: string? })>";
+        assert_eq!(
+            fold(sig, &Known::default()),
+            "function open(player: Player): Future<Result<Session, string>>"
+        );
+        let multi = "```luau\nfunction open(player: Player): Future<(ResultMethods<Session, string> & {\n    read _1: Session,\n    read __err: string,\n    read __ok: Session,\n    tag: \"Ok\",\n    read trace: string?\n}) | (ResultMethods<Session, string> & {\n    read _1: string,\n    read __err: string,\n    read __ok: Session,\n    tag: \"Err\",\n    read trace: string?\n})>\n```";
+        assert_eq!(
+            fold(multi, &Known::default()),
+            "```luau\nfunction open(player: Player): Future<Result<Session, string>>\n```"
+        );
+        let prefixed = "function open(player: Player): __alloy.Future<(__alloy.ResultMethods<Session, string> & { read _1: Session, read __err: string, read __ok: Session, tag: \"Ok\", read trace: string? }) | (__alloy.ResultMethods<Session, string> & { read _1: string, read __err: string, read __ok: Session, tag: \"Err\", read trace: string? })>";
+        assert_eq!(
+            fold(prefixed, &Known::default()),
+            "function open(player: Player): __alloy.Future<Result<Session, string>>"
+        );
+        let one = "local r: ResultMethods<number, string> & { read _1: number, read __err: string, read __ok: number, tag: \"Ok\", read trace: string? }";
+        assert_eq!(
+            fold(one, &Known::default()),
+            "local r: ResultOk<number, string>"
+        );
+    }
+
+    #[test]
+    fn a_broken_line_union_of_results_folds() {
+        let text = "```luau\nlocal function report(result: (ResultMethods<any, string> & { read _1: any, read __err: string, read __ok: any, tag: \"Ok\", read trace: string? })\n    | (ResultMethods<any, string> & { read _1: string, read __err: string, read __ok: any, tag: \"Err\", read trace: string? })): ()\n```";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "```luau\nlocal function report(result: Result<any, string>): ()\n```"
+        );
+    }
+
+    #[test]
+    fn a_symbol_and_a_nested_enum_read_by_name() {
+        let known = Known {
+            shapes: vec![
+                Shape::Enum {
+                    name: "Shape".into(),
+                    variants: vec![
+                        ("Circle".into(), vec!["number".into()]),
+                        ("Rect".into(), vec!["number".into(), "number".into()]),
+                    ],
+                },
+                Shape::Enum {
+                    name: "Event".into(),
+                    variants: vec![
+                        ("Spawn".into(), vec!["Player".into(), "Vector3".into()]),
+                        ("Hit".into(), vec!["Player".into(), "Shape".into()]),
+                        ("Leave".into(), vec!["Player".into()]),
+                    ],
+                },
+            ],
+        };
+        let text = "local function describe(event: { _1: Player, _2: Vector3, tag: \"Spawn\" } | { _1: Player, _2: { _1: number, _2: number, tag: \"Rect\" } | { _1: number, tag: \"Circle\" }, tag: \"Hit\" } | { _1: Player, tag: \"Leave\" }): string";
+        assert_eq!(
+            fold(text, &known),
+            "local function describe(event: Event): string"
+        );
+        let symbol = "local CHILDREN: { @metatable {\n        __tostring: (...any) -> string\n    },\n    {  } }";
+        assert_eq!(fold(symbol, &Known::default()), "local CHILDREN: Symbol");
+    }
+
+    #[test]
+    fn an_enum_inside_a_type_argument_reads_by_name() {
+        let boost = Known {
+            shapes: vec![Shape::Enum {
+                name: "Boost".into(),
+                variants: vec![
+                    ("None".into(), vec![]),
+                    ("Coins".into(), vec!["number".into()]),
+                    ("Strength".into(), vec!["number".into()]),
+                ],
+            }],
+        };
+        let inside = "function buy(id: string): Result<\"None\" | { _1: number, tag: \"Coins\" } | { _1: number, tag: \"Strength\" }, string>";
+        assert_eq!(
+            fold(inside, &boost),
+            "function buy(id: string): Result<Boost, string>"
+        );
+    }
+
+    #[test]
+    fn a_union_loses_its_repeated_members() {
+        let text = "```luau\nlocal value: number | number\n```";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "```luau\nlocal value: number\n```"
+        );
+        let text = "```luau\nlocal v: string | number\n```";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "```luau\nlocal v: string | number\n```"
+        );
+    }
+
+    #[test]
+    fn a_future_of_nothing_reads_as_unit() {
+        let text = "```luau\nfunction tick(): Future<nil>\n```";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "```luau\nfunction tick(): Future<()>\n```"
         );
     }
 

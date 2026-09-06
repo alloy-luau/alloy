@@ -2884,6 +2884,8 @@ impl Server {
         // A value import of a struct or an enum binds its type too.
         if let Some(path) = uri_to_path(uri) {
             options.import_types = alloy::modules::import_types_for_file(&path, &text);
+            options.import_result_asyncs =
+                alloy::modules::import_result_asyncs_for_file(&path, &text);
             options.import_trait_defaults =
                 alloy::modules::import_trait_defaults_for_file(&path, &text);
         }
@@ -2976,6 +2978,8 @@ impl Server {
 
         if let Some(path) = uri_to_path(uri) {
             options.import_types = alloy::modules::import_types_for_file(&path, &doc.source);
+            options.import_result_asyncs =
+                alloy::modules::import_result_asyncs_for_file(&path, &doc.source);
             options.import_trait_defaults =
                 alloy::modules::import_trait_defaults_for_file(&path, &doc.source);
         }
@@ -4263,7 +4267,11 @@ fn fold_std_shapes(value: &str) -> String {
     let mut out = value.to_string();
 
     // Future: `{ andThen: (self: any, on_resolve: ((T) -> ())?, ... is_settled: (self: any) -> boolean }`.
-    while let Some(i) = out.find("andThen: (self: any, on_resolve: ((") {
+    // A Future that carries `__value` names itself in `shapes::fold`,
+    // where the value type may hold braces of its own.
+    while !out.contains("__value: ")
+        && let Some(i) = out.find("andThen: (self: any, on_resolve: ((")
+    {
         let Some(open) = out[..i].rfind('{') else {
             break;
         };
@@ -4479,7 +4487,16 @@ fn declared_annotation(source: &str, name: &str, at: usize) -> Option<(usize, St
         let after = source[end..].trim_start();
 
         // `v: T` annotates; `v:m()` calls and `v :: T` casts.
-        if bounded && after.starts_with(": ") {
+        // A binding: `local v: T`, `const v: T`, or a parameter. A
+        // field of a table type or a struct names another thing.
+        let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+        let before = source[line_start..start].trim_end();
+        let is_binding = before.ends_with("local")
+            || before.ends_with("const")
+            || before.ends_with('(')
+            || before.ends_with(',');
+
+        if bounded && is_binding && after.starts_with(": ") {
             let text = after[1..].trim_start();
             let mut depth = 0i32;
             let mut stop = text.len();

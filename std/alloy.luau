@@ -75,51 +75,46 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Two shapes under one name, so `r.tag == "Ok"` narrows `r._1` to `T`
--- in a `match` arm and in `if local Ok(v) = r`.
--- The value a `map` or `map_err` yields: the same surface without a
--- further `map`, so the alias does not name itself with other
--- arguments, which the solver rejects as non-uniform recursion.
-export type ResultLite<T, E> = {
-	tag: "Ok" | "Err",
-	read _1: T | E,
-	unwrap: (self: any) -> T,
-	expect: (self: any, message: string) -> T,
-	unwrap_or: (self: any, default: any) -> T,
-	is_ok: (self: any) -> boolean,
-	is_err: (self: any) -> boolean,
-	ok: (self: any) -> T?,
-	trace: string?,
+-- in a `match` arm and in `if local Ok(v) = r`. The methods live in one
+-- alias both shapes meet, so a call on the union sees one function and
+-- infers its generic: two copies of `map` on the two shapes left `U`
+-- as never. Every member reads only, which keeps `Result<T, E>`
+-- covariant, so a `Result<Boost, E>` passes where `Result<any, E>` is
+-- asked. Luau rejects an alias that names itself with other arguments,
+-- so `map` yields `Result2`, the same surface one map deep, whose own
+-- `map` is `any`.
+export type ResultMethods<T, E> = {
+	read unwrap: (self: { read tag: string }) -> T,
+	read expect: (self: { read tag: string }, message: string) -> T,
+	read unwrap_or: <D>(self: { read tag: string }, default: D) -> T | D,
+	read map: <U>(self: { read tag: string }, f: (T) -> U) -> Result2<U, E>,
+	read map_err: <F>(self: { read tag: string }, f: (E) -> F) -> Result2<T, F>,
+	read is_ok: (self: { read tag: string }) -> boolean,
+	read is_err: (self: { read tag: string }) -> boolean,
+	read ok: (self: { read tag: string }) -> T?,
 }
 
-export type ResultOk<T, E> = {
-	tag: "Ok",
-	read _1: T,
-	unwrap: (self: any) -> T,
-	expect: (self: any, message: string) -> T,
-	unwrap_or: (self: any, default: any) -> T,
-	map: <U>(self: any, f: (T) -> U) -> ResultLite<U, E>,
-	map_err: <F>(self: any, f: (E) -> F) -> ResultLite<T, F>,
-	is_ok: (self: any) -> boolean,
-	is_err: (self: any) -> boolean,
-	ok: (self: any) -> T?,
-	trace: string?,
+export type ResultMethods2<T, E> = {
+	read unwrap: (self: { read tag: string }) -> T,
+	read expect: (self: { read tag: string }, message: string) -> T,
+	read unwrap_or: <D>(self: { read tag: string }, default: D) -> T | D,
+	read map: <U>(self: { read tag: string }, f: (T) -> U) -> any,
+	read map_err: <F>(self: { read tag: string }, f: (E) -> F) -> any,
+	read is_ok: (self: { read tag: string }) -> boolean,
+	read is_err: (self: { read tag: string }) -> boolean,
+	read ok: (self: { read tag: string }) -> T?,
 }
 
-export type ResultErr<T, E> = {
-	tag: "Err",
-	read _1: E,
-	unwrap: (self: any) -> T,
-	expect: (self: any, message: string) -> T,
-	unwrap_or: (self: any, default: any) -> T,
-	map: <U>(self: any, f: (T) -> U) -> ResultLite<U, E>,
-	map_err: <F>(self: any, f: (E) -> F) -> ResultLite<T, F>,
-	is_ok: (self: any) -> boolean,
-	is_err: (self: any) -> boolean,
-	ok: (self: any) -> T?,
-	trace: string?,
-}
+-- `__ok` and `__err` exist in the type alone: they carry `T` and `E` as
+-- plain members, so a generic reads them off a Result it is handed
+-- (`try_await_result`), where the methods' own generics stop it.
+export type ResultOk<T, E> = { tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } & ResultMethods<T, E>
+export type ResultErr<T, E> = { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E } & ResultMethods<T, E>
+export type ResultOk2<T, E> = { tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } & ResultMethods2<T, E>
+export type ResultErr2<T, E> = { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E } & ResultMethods2<T, E>
 
 export type Result<T, E> = ResultOk<T, E> | ResultErr<T, E>
+export type Result2<T, E> = ResultOk2<T, E> | ResultErr2<T, E>
 
 local Result = {}
 Result.__index = Result
@@ -219,10 +214,15 @@ end
 -- Future: a memoized task with the awaitable shape `andThen`.
 -- ---------------------------------------------------------------------------
 
+-- Every member reads only, so the type is covariant: a `Future<number>`
+-- sits in a `{ Future<number | string> }`, and `race` over a mixed list
+-- yields the union.
 export type Future<T> = {
-	andThen: (self: any, on_resolve: ((T) -> ())?, on_reject: ((any) -> ())?) -> any,
-	cancel: (self: any) -> (),
-	is_settled: (self: any) -> boolean,
+	-- In the type alone: a generic reads `T` off a Future it is handed.
+	read __value: T,
+	read andThen: (self: any, on_resolve: ((T) -> ())?, on_reject: ((any) -> ())?) -> Future<T>,
+	read cancel: (self: any) -> (),
+	read is_settled: (self: any) -> boolean,
 }
 
 local Future = {}
@@ -309,13 +309,13 @@ function Future.resolve<T>(value: T): Future<T>
 	return (self :: any) :: Future<T>
 end
 
-function Future.reject(err: any): Future<any>
+function Future.reject(err: any): Future<never>
 	local self = new_future()
 	settle(self, REJECTED, err, nil)
 	return (self :: any) :: Future<any>
 end
 
-function Future.delay(seconds: number)
+function Future.delay(seconds: number): Future<nil>
 	return alloy.future(function()
 		task_lib.wait(seconds)
 		return nil
@@ -385,13 +385,28 @@ function alloy.await<T>(target: Future<T>): (T, ...any)
 	error(`cannot await a {typeof(target)}`, 2)
 end
 
---- `try await`: a failed Future becomes an Err instead of a throw.
-function alloy.try_await(target: any): Result<any, any>
+--- `try await`: a failed Future becomes an Err instead of a throw, and
+--- a Result the Future settles with is the Result, not an Ok around it,
+--- so `try await f()` on an async function that returns a Result yields
+--- the value.
+--- `try await`: a failed Future becomes an Err instead of a throw, and
+--- a Result the Future settles with is the Result, not an Ok around it,
+--- so `try await f()` on an async function that returns a Result yields
+--- the value. The compiler calls `try_await_result` where it knows the
+--- function returns a Result, for the type; both run the same code.
+function alloy.try_await<T>(target: Future<T>): Result<T, any>
 	local ok, value = pcall(alloy.await, target)
-	if ok then
-		return Ok(value)
+	if not ok then
+		return Err(value) :: any
 	end
-	return Err(value)
+	if type(value) == "table" and getmetatable(value) == Result then
+		return value :: any
+	end
+	return Ok(value) :: any
+end
+
+function alloy.try_await_result<T, E>(target: { read __value: { read __ok: T, read __err: E } }): Result<T, E>
+	return alloy.try_await(target) :: any
 end
 
 function Future.all<T>(futures: { Future<T> }): Future<{ T }>
@@ -404,7 +419,10 @@ function Future.all<T>(futures: { Future<T> }): Future<{ T }>
 	end) :: any) :: Future<{ T }>
 end
 
-function Future.race(futures: any): Future<any>
+-- A list of one value type races to a Future of it. A mixed list needs
+-- the type written on the elements, `Future<number | string>`: the
+-- solver lands on the meet of the element types otherwise.
+function Future.race<T>(futures: { read [number]: Future<T> }): Future<T>
 	local winner = new_future()
 	for _, f in futures do
 		f:andThen(function(v)
@@ -416,7 +434,7 @@ function Future.race(futures: any): Future<any>
 	return (winner :: any) :: Future<any>
 end
 
-function Future.any(futures: any): Future<any>
+function Future.any<T>(futures: { read [number]: Future<T> }): Future<T>
 	local winner = new_future()
 	local failed = 0
 	for _, f in futures do
@@ -600,7 +618,7 @@ function Array.last(xs)
 	return xs[#xs]
 end
 
-function Array.map<T, U>(xs: Array<T> | { T }, f: (T, number) -> U): Array<U>
+function Array.map<T, U>(xs: { read [number]: T }, f: (T, number) -> U): Array<U>
 	local out = table.create(#xs)
 	for i, v in ipairs(xs) do
 		out[i] = f(v, i)

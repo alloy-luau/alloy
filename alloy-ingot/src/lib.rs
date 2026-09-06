@@ -40,6 +40,8 @@
 //! {"op": "hover", ..., "offset": 12}      // reply {"ok": true, "hover": {"contents": "md", "span": [10, 14]}}
 //! {"op": "complete", ..., "offset": 12}   // reply {"ok": true, "items": [{"label": "x"}]}
 //! {"op": "actions", ..., "span": [0, 4]}  // reply {"ok": true, "actions": [{"title": "t", "edits": [...]}]}
+//! {"op": "colors", ...}                   // reply {"ok": true, "colors": [{"span": [3, 13], "red": 1, "green": 0, "blue": 0, "alpha": 1}]}
+//! {"op": "present", ..., "span": [3, 13], "color": {"red": 1, ...}}  // reply {"ok": true, "labels": ["bg-red-500"]}
 //! {"op": "manifest"}                      // reply {"ok": true, "manifest": "ingot.toml text"}
 //! ```
 //!
@@ -351,6 +353,48 @@ pub struct DiagnosticRef {
     pub lint: Option<String>,
 }
 
+/// A color a file names, for the editor's swatch and picker. The
+/// channels run from 0 to 1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColorInfo {
+    pub span: (u32, u32),
+    pub red: f64,
+    pub green: f64,
+    pub blue: f64,
+    pub alpha: f64,
+}
+
+impl ColorInfo {
+    /// A color from 8 bit channels and an alpha from 0 to 1.
+    pub fn rgb(span: (u32, u32), (r, g, b): (u8, u8, u8), alpha: f64) -> Self {
+        Self {
+            span,
+            red: f64::from(r) / 255.0,
+            green: f64::from(g) / 255.0,
+            blue: f64::from(b) / 255.0,
+            alpha,
+        }
+    }
+}
+
+/// A color the editor picked, sent back for a presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Default)]
+pub struct Color {
+    pub red: f64,
+    pub green: f64,
+    pub blue: f64,
+    pub alpha: f64,
+}
+
+impl Color {
+    /// The 8 bit channels.
+    pub fn rgb8(self) -> (u8, u8, u8) {
+        let c = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+
+        (c(self.red), c(self.green), c(self.blue))
+    }
+}
+
 /// The resolved settings of the project, sent once at init.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Settings {
@@ -444,6 +488,27 @@ pub trait Handler {
         Ok(Vec::new())
     }
 
+    /// The colors a file names, for the editor's swatches. They join the
+    /// host's list.
+    fn colors(&mut self, file: &File) -> Result<Vec<ColorInfo>, String> {
+        let _ = file;
+
+        Ok(Vec::new())
+    }
+
+    /// The texts that name `color` at a span the file colors: the labels
+    /// the picker offers. Empty when the span is not this ingot's.
+    fn present(
+        &mut self,
+        file: &File,
+        span: (u32, u32),
+        color: Color,
+    ) -> Result<Vec<String>, String> {
+        let _ = (file, span, color);
+
+        Ok(Vec::new())
+    }
+
     /// The `ingot.toml` text this binary carries. `cargo install` ships
     /// one binary and no data files; an ingot that returns its manifest
     /// installs from crates.io, and the host writes the text beside the
@@ -496,6 +561,17 @@ enum Request {
         span: (u32, u32),
         #[serde(default)]
         diagnostics: Vec<DiagnosticRef>,
+    },
+    Colors {
+        #[serde(flatten)]
+        file: File,
+    },
+    Present {
+        #[serde(flatten)]
+        file: File,
+        span: (u32, u32),
+        #[serde(default)]
+        color: Color,
     },
     Manifest,
 }
@@ -575,6 +651,14 @@ fn answer(handler: &mut impl Handler, request: Request) -> Vec<u8> {
         } => handler
             .actions(&file, span, &diagnostics)
             .map(|actions| serde_json::json!({ "ok": true, "actions": actions })),
+
+        Request::Colors { file } => handler
+            .colors(&file)
+            .map(|colors| serde_json::json!({ "ok": true, "colors": colors })),
+
+        Request::Present { file, span, color } => handler
+            .present(&file, span, color)
+            .map(|labels| serde_json::json!({ "ok": true, "labels": labels })),
 
         Request::Manifest => match handler.manifest() {
             Some(text) => Ok(serde_json::json!({ "ok": true, "manifest": text })),

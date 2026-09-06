@@ -389,6 +389,57 @@ impl Ingots {
         actions
     }
 
+    /// Every color the ingots find in a file: `{ span, red, green,
+    /// blue, alpha }` each, the channels from 0 to 1.
+    pub fn colors(&self, path: &str, source: &str) -> Vec<Value> {
+        let mut colors = Vec::new();
+
+        for ingot in self.with_hook(Hook::Colors, path) {
+            let mut request = self.file(path, source);
+            request["op"] = json!("colors");
+
+            if let Ok(reply) = ingot.request(&request, EDITOR_TIMEOUT) {
+                colors.extend(reply["colors"].as_array().cloned().unwrap_or_default());
+            }
+        }
+
+        colors
+    }
+
+    /// The labels the ingots offer for a picked color at a span; empty
+    /// when no ingot owns the span.
+    pub fn present(
+        &self,
+        path: &str,
+        source: &str,
+        span: (u32, u32),
+        color: &Value,
+    ) -> Vec<String> {
+        for ingot in self.with_hook(Hook::Colors, path) {
+            let mut request = self.file(path, source);
+            request["op"] = json!("present");
+            request["span"] = json!([span.0, span.1]);
+            request["color"] = color.clone();
+
+            if let Ok(reply) = ingot.request(&request, EDITOR_TIMEOUT) {
+                let labels: Vec<String> = reply["labels"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if !labels.is_empty() {
+                    return labels;
+                }
+            }
+        }
+
+        Vec::new()
+    }
+
     /// The ingots that hold a hook, by name.
     pub fn names_with(&self, hook: Hook) -> Vec<&str> {
         self.list

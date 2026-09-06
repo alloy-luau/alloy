@@ -88,7 +88,13 @@ pub fn completion_items(doc: &Doc, items: &[Value]) -> Vec<Value> {
             }
 
             if let Some(d) = i["documentation"].as_str() {
-                item["documentation"] = json!({ "kind": "markdown", "value": d });
+                // A color item's documentation is its hex value, which the
+                // editor draws as a swatch when it is a plain string.
+                if i["kind"].as_str() == Some("color") && d.starts_with('#') {
+                    item["documentation"] = json!(d);
+                } else {
+                    item["documentation"] = json!({ "kind": "markdown", "value": d });
+                }
             }
 
             let insert = i["insert"].as_str().unwrap_or(label);
@@ -111,6 +117,26 @@ pub fn completion_items(doc: &Doc, items: &[Value]) -> Vec<Value> {
             }
 
             Some(item)
+        })
+        .collect()
+}
+
+/// Colors as LSP color information over the source.
+pub fn colors(doc: &Doc, colors: &[Value]) -> Vec<Value> {
+    colors
+        .iter()
+        .filter_map(|c| {
+            let range = range_of_span(&doc.source, &c["span"])?;
+
+            Some(json!({
+                "range": range,
+                "color": {
+                    "red": c["red"].as_f64().unwrap_or(0.0),
+                    "green": c["green"].as_f64().unwrap_or(0.0),
+                    "blue": c["blue"].as_f64().unwrap_or(0.0),
+                    "alpha": c["alpha"].as_f64().unwrap_or(1.0),
+                },
+            }))
         })
         .collect()
 }

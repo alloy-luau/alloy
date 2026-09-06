@@ -92,19 +92,33 @@ impl Doc {
         };
 
         // For `.alx`, the map speaks lowered positions: same line, the
-        // column through the word under it.
-        let (text, character) = match &out.lowered {
+        // column through the word under it. An ingot's edit sits between
+        // the author's text and the lowering.
+        let (text, line, character) = match &out.lowered {
             Some(low) => {
-                let from = line_text(&self.source, line);
-                let to = line_text(low, line);
+                let (layered, line, character) = match (&out.layer, &out.layered) {
+                    (Some(layer), Some(layered)) => {
+                        let at = offset_of(&self.source, line, character).unwrap_or(0);
+                        let (ls, le) = line_bounds(&self.source, at);
+                        let mapped = (at..=le)
+                            .find_map(|o| layer.to_output(o as u32))
+                            .or_else(|| (ls..at).rev().find_map(|o| layer.to_output(o as u32)))
+                            .unwrap_or(0) as usize;
+                        let (l, c) = position_of(layered, mapped.min(layered.len()));
 
-                (
-                    low.as_str(),
-                    alloy::alx::map_column(from, to, character as usize) as u32,
-                )
+                        (layered.as_str(), l, c)
+                    }
+
+                    _ => (self.source.as_str(), line, character),
+                };
+                let from = line_text(layered, line);
+                let to = line_text(low, line);
+                let col = alloy::alx::map_column(from, to, character as usize) as u32;
+
+                (low.as_str(), line, col)
             }
 
-            None => (self.source.as_str(), character),
+            None => (self.source.as_str(), line, character),
         };
 
         let Some(offset) = offset_of(text, line, character) else {
@@ -142,13 +156,55 @@ impl Doc {
             Some(low) => {
                 let (line, col) = position_of(low, src.min(low.len()));
                 let from = line_text(low, line);
-                let to = line_text(&self.source, line);
 
-                (line, alloy::alx::map_column(from, to, col as usize) as u32)
+                match (&out.layer, &out.layered) {
+                    (Some(layer), Some(layered)) => {
+                        let to = line_text(layered, line);
+                        let col = alloy::alx::map_column(from, to, col as usize) as u32;
+                        let at = offset_of(layered, line, col).unwrap_or(0);
+                        let original = layer.to_source(at as u32) as usize;
+
+                        position_of(&self.source, original.min(self.source.len()))
+                    }
+
+                    _ => {
+                        let to = line_text(&self.source, line);
+
+                        (line, alloy::alx::map_column(from, to, col as usize) as u32)
+                    }
+                }
             }
 
             None => position_of(&self.source, src.min(self.source.len())),
         }
+    }
+
+    /// Whether a shadow position sits in text no author wrote: the
+    /// desugar's, or an ingot's edit behind a `.alx` lowering.
+    pub fn generated_at(&self, line: u32, character: u32) -> bool {
+        let Some(out) = &self.output else {
+            return false;
+        };
+        let Some(offset) = offset_of(&self.shadow, line, character) else {
+            return false;
+        };
+
+        if out.map.is_generated(offset as u32) {
+            return true;
+        }
+
+        let (Some(low), Some(layer), Some(layered)) = (&out.lowered, &out.layer, &out.layered)
+        else {
+            return false;
+        };
+        let src = out.map.to_source(offset as u32) as usize;
+        let (line, col) = position_of(low, src.min(low.len()));
+        let from = line_text(low, line);
+        let to = line_text(layered, line);
+        let col = alloy::alx::map_column(from, to, col as usize) as u32;
+        let at = offset_of(layered, line, col).unwrap_or(0);
+
+        layer.is_generated(at as u32)
     }
 
     /// Applies one LSP content change.

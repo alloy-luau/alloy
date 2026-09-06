@@ -112,6 +112,23 @@ impl State {
         crate::ingots::completion_items(doc, &items)
     }
 
+    /// The colors the ingots find in a document, as LSP color
+    /// information.
+    fn ingot_colors(&self, uri: &str) -> Vec<Value> {
+        let Some(ingots) = &self.ingots else {
+            return Vec::new();
+        };
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return Vec::new();
+        };
+        let colors = ingots.colors(&path.to_string_lossy(), &doc.source);
+
+        crate::ingots::colors(doc, &colors)
+    }
+
     /// The code actions the ingots offer for a range.
     fn ingot_actions(&self, uri: &str, range: ((u32, u32), (u32, u32))) -> Vec<Value> {
         let Some(ingots) = &self.ingots else {
@@ -1804,8 +1821,39 @@ impl Server {
                 }
             }
 
+            // A picked color: an ingot that colored the range names it;
+            // else the child's `Color3` forms.
+            Some("textDocument/colorPresentation") => {
+                let uri = text_document_uri(&message).unwrap_or_default();
+
+                if let Some(id) = message.get("id").cloned()
+                    && self.ingot_presentation(&uri, &message, &id)
+                {
+                    return true;
+                }
+
+                self.forward_request(message, method.as_deref());
+            }
+
             Some(m @ ("textDocument/hover" | "textDocument/completion")) => {
                 let uri = text_document_uri(&message).unwrap_or_default();
+
+                // An ingot's hover comes first: a class in a `.alx` string
+                // is the ingot's, not the markup's. Its completion items
+                // likewise, where it has any.
+                if m == "textDocument/hover"
+                    && let Some(id) = message.get("id").cloned()
+                    && self.ingot_hover(&uri, &message, &id)
+                {
+                    return true;
+                }
+
+                if m == "textDocument/completion"
+                    && let Some(id) = message.get("id").cloned()
+                    && self.ingot_completion(&uri, &message, &id)
+                {
+                    return true;
+                }
 
                 if uri.ends_with(".alx")
                     && let Some(id) = message.get("id").cloned()
@@ -1816,8 +1864,7 @@ impl Server {
 
                 if m == "textDocument/hover"
                     && let Some(id) = message.get("id").cloned()
-                    && (self.ingot_hover(&uri, &message, &id)
-                        || self.field_hover(&uri, &message, &id)
+                    && (self.field_hover(&uri, &message, &id)
                         || self.declaration_hover(&uri, &message, &id)
                         || self.keyword_hover(&uri, &message, &id))
                 {
@@ -2748,6 +2795,18 @@ impl Server {
                         }
                     }
 
+                    // A `Color3` the desugar or an ingot wrote has no place in
+                    // the author's text to put a swatch on.
+                    "textDocument/documentColor" => {
+                        if let Some(colors) = result.as_array_mut() {
+                            colors.retain(|c| {
+                                c.pointer("/range/start")
+                                    .and_then(position_of_value)
+                                    .is_none_or(|(l, ch)| !doc.generated_at(l, ch))
+                            });
+                        }
+                    }
+
                     "textDocument/inlayHint" => {
                         if let Some(hints) = result.as_array_mut() {
                             // A hint attaches to the byte before it, so
@@ -2835,6 +2894,24 @@ impl Server {
             {
                 for d in items.iter_mut() {
                     friendly_message(d, doc, &st);
+                }
+            }
+
+            // The ingots' colors join the child's `Color3` swatches; they
+            // speak source positions already, so they join after the map.
+            if method == "textDocument/documentColor"
+                && let Some(uri) = &ctx
+            {
+                let extra = st.ingot_colors(uri);
+
+                if !extra.is_empty() {
+                    match result {
+                        Value::Array(items) => items.extend(extra),
+
+                        Value::Null => *result = Value::Array(extra),
+
+                        _ => {}
+                    }
                 }
             }
 
@@ -3257,6 +3334,89 @@ impl Server {
         let result = crate::ingots::hover(doc, &hover);
         drop(st);
         self.respond(id, result);
+
+        true
+    }
+
+    /// The completion items an ingot offers at a position, when it has
+    /// any: the list is the ingot's alone, since it owns that spot.
+    fn ingot_completion(&self, uri: &str, message: &Value, id: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+        let trigger = message
+            .pointer("/params/context/triggerCharacter")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let st = self.state.lock().expect("state");
+        let items = st.ingot_items(uri, line, character, trigger.as_deref());
+
+        if items.is_empty() {
+            return false;
+        }
+
+        drop(st);
+        self.respond(id, json!(items));
+
+        true
+    }
+
+    /// The labels an ingot offers for a color the editor picked, when
+    /// the range is one the ingot colored; else the child answers.
+    fn ingot_presentation(&self, uri: &str, message: &Value, id: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some(range) = message.pointer("/params/range").and_then(range_of) else {
+            return false;
+        };
+        let Some(color) = message.pointer("/params/color").cloned() else {
+            return false;
+        };
+        let st = self.state.lock().expect("state");
+        let Some(ingots) = st.ingots.clone() else {
+            return false;
+        };
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+        let (Some(start), Some(end)) = (
+            offset_of(&doc.source, range.0.0, range.0.1),
+            offset_of(&doc.source, range.1.0, range.1.1),
+        ) else {
+            return false;
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return false;
+        };
+        let labels = ingots.present(
+            &path.to_string_lossy(),
+            &doc.source,
+            (start as u32, end as u32),
+            &color,
+        );
+        if labels.is_empty() {
+            return false;
+        }
+
+        let range_value = message
+            .pointer("/params/range")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let result: Vec<Value> = labels
+            .iter()
+            .map(|l| json!({ "label": l, "textEdit": { "range": range_value, "newText": l } }))
+            .collect();
+        drop(st);
+        self.respond(id, json!(result));
 
         true
     }

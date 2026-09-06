@@ -68,6 +68,11 @@ pub struct Output {
     /// For `.alx`: the Alloy text luaux lowered the markup to. The check
     /// artifact's positions are positions in this text, not the source.
     pub lowered: Option<String>,
+    /// For `.alx` an ingot edited: the map from the author's text to the
+    /// edited one, kept apart from `map`, whose source side is the
+    /// lowered text; and that edited text, for the column mapping.
+    pub layer: Option<SpanMap>,
+    pub layered: Option<String>,
 }
 
 /// One `import ... from "path"` of a file, or one data path with the
@@ -231,6 +236,8 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         data_refs: data::references(src),
         tests: rendered.tests,
         lowered: None,
+        layer: None,
+        layered: None,
     })
 }
 
@@ -266,6 +273,10 @@ pub fn compile_file(
                 d.end = map.to_source(d.end).max(d.start);
             }
 
+            // A lint is about the author's code: one inside the text an
+            // ingot wrote has no line to point at.
+            out.lints.retain(|l| !map.is_generated(l.start));
+
             for l in &mut out.lints {
                 l.start = map.to_source(l.start);
                 l.end = map.to_source(l.end).max(l.start);
@@ -287,7 +298,15 @@ pub fn compile_file(
                 i.end = map.to_source(i.end).max(i.start);
             }
 
-            out.map = map.compose(&out.map);
+            if path.ends_with(".alx") {
+                // The desugar map's source side is the lowered text, not
+                // the edited one; the two maps stay apart and the editor
+                // crosses the lowering by line and column between them.
+                out.layer = Some(map);
+                out.layered = Some(layer.text.clone());
+            } else {
+                out.map = map.compose(&out.map);
+            }
         }
 
         out.diagnostics.extend(layer.diagnostics);

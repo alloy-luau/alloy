@@ -30,6 +30,8 @@ pub enum Hook {
     Hover,
     Complete,
     Actions,
+    /// The colors a file names, and the labels for a picked color.
+    Colors,
 }
 
 impl Hook {
@@ -41,6 +43,7 @@ impl Hook {
         Hook::Hover,
         Hook::Complete,
         Hook::Actions,
+        Hook::Colors,
     ];
 
     pub fn name(self) -> &'static str {
@@ -52,6 +55,7 @@ impl Hook {
             Hook::Hover => "hover",
             Hook::Complete => "complete",
             Hook::Actions => "actions",
+            Hook::Colors => "colors",
         }
     }
 }

@@ -27,7 +27,7 @@ pub fn run(args: &[String]) -> ExitCode {
         },
 
         Some("info") => match args.get(1) {
-            Some(dir) => info(Path::new(dir)),
+            Some(dir) => info(&dir_of(dir)),
 
             None => {
                 fail("`alloy ingot info` needs a directory");
@@ -36,7 +36,7 @@ pub fn run(args: &[String]) -> ExitCode {
         },
 
         Some("run") => match (args.get(1), args.get(2)) {
-            (Some(dir), Some(file)) => run_one(Path::new(dir), Path::new(file), &args[3..]),
+            (Some(dir), Some(file)) => run_one(&dir_of(dir), Path::new(file), &args[3..]),
 
             _ => {
                 fail("`alloy ingot run` needs a directory and a file");
@@ -181,6 +181,38 @@ fn main() {{
 }
 
 /// What a manifest declares, without starting the binary.
+/// The directory an argument names: a path that holds `ingot.toml`, or
+/// the name of an ingot under `[ingots]` in the nearest alloy.toml.
+fn dir_of(arg: &str) -> PathBuf {
+    let path = PathBuf::from(arg);
+
+    if path.join(manifest::FILE_NAME).is_file() {
+        return path;
+    }
+
+    let Some(config_path) = alloy::config::Config::find(Path::new(".")) else {
+        return path;
+    };
+    let Ok(config) = alloy::config::Config::load(&config_path) else {
+        return path;
+    };
+    let root = config_path.parent().unwrap_or(Path::new("."));
+
+    match config.ingots.get(arg) {
+        Some(alloy::config::IngotSource::Path(p)) => root.join(p),
+
+        Some(alloy::config::IngotSource::Table(t)) => match (&t.path, &t.repo, &t.version) {
+            (Some(p), _, _) => root.join(p),
+
+            (None, Some(_), Some(v)) => root.join(".alloy").join("ingots").join(arg).join(v),
+
+            _ => path,
+        },
+
+        None => path,
+    }
+}
+
 fn info(dir: &Path) -> ExitCode {
     let p = Painter::for_stdout();
     let manifest = match Manifest::load(&dir.join(manifest::FILE_NAME)) {

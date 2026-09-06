@@ -8,11 +8,12 @@ pub fn logo(color: bool) -> String {
     render_gradient(LOGO, color)
 }
 
-/// The color of one gradient row. The ramp goes from pale lavender,
-/// through the brand purple, to deep violet.
+/// The color of one gradient row. The ramp goes from the brand purple,
+/// through a light lilac at the middle, back to the brand purple.
 pub fn row_color(row: usize, rows: usize) -> (u8, u8, u8) {
-    const TOP: (u8, u8, u8) = (0xEC, 0xE4, 0xFF);
-    const BOTTOM: (u8, u8, u8) = (0x4A, 0x30, 0xA8);
+    const TOP: (u8, u8, u8) = BRAND;
+    const MIDDLE: (u8, u8, u8) = (0xD2, 0xBC, 0xFF);
+    const BOTTOM: (u8, u8, u8) = BRAND;
 
     let last = rows.saturating_sub(1).max(1) as u32;
     let t = row.min(rows.saturating_sub(1)) as u32 * 1000 / last;
@@ -25,15 +26,15 @@ pub fn row_color(row: usize, rows: usize) -> (u8, u8, u8) {
 
     if t <= 500 {
         (
-            mix(TOP.0, BRAND.0, t),
-            mix(TOP.1, BRAND.1, t),
-            mix(TOP.2, BRAND.2, t),
+            mix(TOP.0, MIDDLE.0, t),
+            mix(TOP.1, MIDDLE.1, t),
+            mix(TOP.2, MIDDLE.2, t),
         )
     } else {
         (
-            mix(BRAND.0, BOTTOM.0, t - 500),
-            mix(BRAND.1, BOTTOM.1, t - 500),
-            mix(BRAND.2, BOTTOM.2, t - 500),
+            mix(MIDDLE.0, BOTTOM.0, t - 500),
+            mix(MIDDLE.1, BOTTOM.1, t - 500),
+            mix(MIDDLE.2, BOTTOM.2, t - 500),
         )
     }
 }
@@ -134,7 +135,8 @@ mod tests {
 
     #[test]
     fn gradient_ends_meet_the_ramp() {
-        assert_eq!(row_color(0, 10), (0xEC, 0xE4, 0xFF));
-        assert_eq!(row_color(9, 10), (0x4A, 0x30, 0xA8));
+        assert_eq!(row_color(0, 10), BRAND);
+        assert_eq!(row_color(9, 10), BRAND);
+        assert_eq!(row_color(5, 11), (0xD2, 0xBC, 0xFF));
     }
 }

@@ -94,6 +94,9 @@ pub struct FmtConfig {
     pub space_inside_array: bool,
     /// Alloy's own: the `:` of a struct's fields line up.
     pub align_struct_fields: bool,
+    /// Alloy's own: an `import { }` or `export { }` list with more than
+    /// one name breaks one name per line, whatever its width.
+    pub expand_imports: bool,
     /// Paths the formatter leaves alone. A `*` matches any run of
     /// characters: `"vendor/*"`, `"*.gen.aly"`.
     pub exclude: Vec<String>,
@@ -123,6 +126,7 @@ impl Default for FmtConfig {
             sort_requires: SortRequires::default(),
             space_inside_array: true,
             align_struct_fields: false,
+            expand_imports: false,
             exclude: Vec::new(),
             alx: AlxFmt::default(),
         }

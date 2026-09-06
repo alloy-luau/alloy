@@ -422,6 +422,33 @@ impl<'s> Formatter<'s> {
         false
     }
 
+    /// Whether the `{` at `i` opens the name list of an `import` or an
+    /// `export`: `import {`, `import type {`, `import M, {`, `export {`,
+    /// `export type {`.
+    fn is_import_list(&self, i: usize) -> bool {
+        if !self.items[i].is("{") {
+            return false;
+        }
+
+        let mut j = i;
+
+        while let Some(p) = self.prev_code(j) {
+            let t = &self.items[p];
+
+            if t.is("import") || t.is("export") {
+                return true;
+            }
+
+            if !(t.is("type") || t.is(",") || (t.is_ident() && !is_keyword(&t.text))) {
+                return false;
+            }
+
+            j = p;
+        }
+
+        false
+    }
+
     /// The index of the closer of the opener at `i`.
     fn matching(&self, i: usize) -> usize {
         let mut depth = 0i32;
@@ -1064,8 +1091,12 @@ impl<'s> Formatter<'s> {
                 *pos += 1;
                 elements.push((element, Some(sep)));
 
+                // A trailing comma before the closer keeps the group
+                // expanded when the closer already sat on its own line;
+                // an import list keeps it either way, so `{ a, b, }`
+                // is how a file asks for one name per line.
                 if self.items.get(*pos).is_some_and(|nx| nx.is(closer)) {
-                    magic = self.items[*pos].newlines_before > 0;
+                    magic = self.items[*pos].newlines_before > 0 || self.is_import_list(open);
                 }
 
                 continue;
@@ -1242,6 +1273,10 @@ impl<'s> Formatter<'s> {
         open: usize,
     ) -> bool {
         if magic && self.options.magic_trailing_comma {
+            return true;
+        }
+
+        if self.options.expand_imports && elements.len() > 1 && self.is_import_list(open) {
             return true;
         }
 
@@ -2197,6 +2232,22 @@ mod tests {
     #[test]
     fn leading_zeros_follow_the_option() {
         assert_eq!(fmt("local x = .5\n"), "local x = 0.5\n");
+    }
+
+    #[test]
+    fn import_lists_expand_on_a_trailing_comma_or_when_asked() {
+        let src = "import { world, pair, } from \"@pkg/jecs\"\nimport { x, y } from \"./m\"\nexport { x, y }\nprint(world, pair, x, y)\n";
+        assert_eq!(
+            format(src).unwrap(),
+            "import {\n    world,\n    pair,\n} from \"@pkg/jecs\"\nimport { x, y } from \"./m\"\nexport { x, y }\nprint(world, pair, x, y)\n"
+        );
+
+        let mut o = FmtConfig::default();
+        o.expand_imports = true;
+        assert_eq!(
+            format_with("import a, { x, y } from \"./m\"\nimport { one } from \"./o\"\nexport { x, y }\nprint(a, x, y, one)\n", &o).unwrap(),
+            "import a, {\n    x,\n    y,\n} from \"./m\"\nimport { one } from \"./o\"\nexport {\n    x,\n    y,\n}\nprint(a, x, y, one)\n"
+        );
     }
 
     #[test]

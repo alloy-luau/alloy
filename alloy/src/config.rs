@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The whole file. Unknown tables and keys are errors, so a typo in a key
 /// never passes as a default.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub build: Build,
@@ -25,15 +25,66 @@ pub struct Config {
     /// `path` lands at `mount` in the DataModel, and `@alias/...`
     /// requires it. See `crate::project`.
     pub mount: BTreeMap<String, Mount>,
+    /// The `[ingots]` table: name to source. An ingot is an extension
+    /// that ships as an executable; see `crate::ingot`.
+    pub ingots: BTreeMap<String, IngotSource>,
+    /// The `[ingot.<name>]` tables: the options of one ingot, over the
+    /// defaults its manifest declares. The compiler passes them through
+    /// and never reads them.
+    pub ingot: BTreeMap<String, toml::Table>,
+}
+
+/// Where an ingot comes from: a directory that holds `ingot.toml` and
+/// the binary, or a GitHub release pinned by version.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum IngotSource {
+    /// `name = "ingots/tailwind"`: a path relative to the root.
+    Path(String),
+    Table(IngotTable),
+}
+
+/// The expanded form of an ingot source.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct IngotTable {
+    /// A directory relative to the root.
+    pub path: Option<String>,
+    /// `owner/repo` on GitHub; the release `v<version>` holds the zip.
+    pub repo: Option<String>,
+    pub version: Option<String>,
+    /// The asset name in the release. Unset means
+    /// `<name>-ingot-<target>.zip`, then `<name>-ingot.zip`.
+    pub asset: Option<String>,
+    /// The pass the ingot's transform runs in, over the manifest's word.
+    /// A lower number runs first; the compiler's own desugar sits after
+    /// every pass.
+    pub order: Option<i64>,
+    /// Lints of this ingot switched on or off by name, over the
+    /// manifest's defaults and under the `[lint]` table.
+    pub lints: BTreeMap<String, bool>,
+}
+
+impl IngotSource {
+    pub fn table(&self) -> IngotTable {
+        match self {
+            IngotSource::Path(p) => IngotTable {
+                path: Some(p.clone()),
+                ..IngotTable::default()
+            },
+
+            IngotSource::Table(t) => t.clone(),
+        }
+    }
 }
 
 /// One mount: the path on disk, relative to the root, and the DataModel
 /// location, `@game/Service/Folder`.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Mount(pub String, pub String);
 
 /// The `[project]` table: the Rojo project the mounts describe.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Project {
     /// The name in the generated project files.
@@ -58,7 +109,7 @@ impl Default for Project {
 /// The `[fmt]` table: how Anneal, the formatter behind `alloy fmt`,
 /// lays code out. The names follow larvae and stylua where the option is
 /// theirs, so a config ports over; the Alloy-only options sit last.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FmtConfig {
     /// The width a bracket group breaks past.
@@ -133,21 +184,21 @@ impl Default for FmtConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LineEndings {
     Unix,
     Windows,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum IndentType {
     Spaces,
     Tabs,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum QuoteStyle {
     AutoPreferDouble,
@@ -157,7 +208,7 @@ pub enum QuoteStyle {
     Preserve,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LeadingZero {
     Add,
@@ -165,7 +216,7 @@ pub enum LeadingZero {
     Preserve,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CallParentheses {
     Always,
@@ -175,7 +226,7 @@ pub enum CallParentheses {
     Input,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FunctionNameSpace {
     Never,
@@ -184,7 +235,7 @@ pub enum FunctionNameSpace {
     Always,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Collapse {
     Never,
@@ -193,7 +244,7 @@ pub enum Collapse {
     Always,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BlockGaps {
     Never,
@@ -201,7 +252,7 @@ pub enum BlockGaps {
 }
 
 /// How a chain of method calls lays out.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct CallChains {
     pub style: CallChainStyle,
@@ -219,7 +270,7 @@ impl Default for CallChains {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CallChainStyle {
     Preserve,
@@ -227,14 +278,14 @@ pub enum CallChainStyle {
     Full,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct SortRequires {
     pub enabled: bool,
     pub grouping: RequireGrouping,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RequireGrouping {
     #[default]
@@ -243,7 +294,7 @@ pub enum RequireGrouping {
 }
 
 /// The `[fmt.alx]` table: the markup of `.alx` files, after luaux-worm.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct AlxFmt {
     /// The quotes of an attribute's string; `quote_style` does not govern it.
@@ -273,7 +324,7 @@ impl Default for AlxFmt {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AttributeQuotes {
     Double,
@@ -281,7 +332,7 @@ pub enum AttributeQuotes {
     Preserve,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TextWrap {
     Fill,
@@ -290,7 +341,7 @@ pub enum TextWrap {
 
 /// The `[lint]` table: the level of each lint. A list takes a lint name
 /// or a group name, `pedantic`; a name beats its group.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LintConfig {
     /// Turns the `pedantic` group on, at `warn`.
@@ -306,7 +357,7 @@ pub struct LintConfig {
 /// The `[flux]` table: what `alloy flux` runs beyond the lints, and the
 /// thresholds of the complexity lints. The levels of the lints stay in
 /// `[lint]`.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FluxConfig {
     /// Run luau-lsp over the check artifact and report its type errors
@@ -366,7 +417,7 @@ impl FluxConfig {
 }
 
 /// The `[test]` table: where `alloy test` writes the specs.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct TestConfig {
     /// The folder the specs land in, relative to the root. Each source
@@ -390,7 +441,7 @@ impl Default for TestConfig {
 
 /// The `[emit]` table: the few knobs that change what emitted code does.
 /// Each one is a named exception to the razor, so the list stays short.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Emit {
     /// Seconds passed to every `WaitForChild` that `=>` emits. Unset means
@@ -408,7 +459,7 @@ pub struct Emit {
 }
 
 /// The `[build]` table.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Build {
     /// The source root. Every `.aly` under it compiles.
@@ -425,7 +476,7 @@ pub struct Build {
     pub artifact: Artifact,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Artifact {
     Ship,
@@ -523,6 +574,17 @@ sourcemap = true
 # client = ["src/client", "@game/StarterPlayer/StarterPlayerScripts/Client"]
 # shared = ["src/shared", "@game/ReplicatedStorage/Shared"]
 # pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
+
+[ingots]
+# name = source: an extension that ships as an executable beside its
+# ingot.toml. A path is relative to the root; a release is pinned.
+# `alloy doc ingots` explains them.
+# tailwind = "ingots/tailwind"
+# tailwind = { repo = "alloy-luau/tailwind-ingot", version = "0.1.0" }
+
+# [ingot.tailwind]
+# the options of one ingot, over the defaults its manifest declares
+# sort_classes = true
 "#;
 
 /// The `.luaurc` that `alloy init` writes: strict mode for every file,
@@ -623,6 +685,20 @@ mod tests {
             Mount("Packages".into(), "@game/ReplicatedStorage/Packages".into())
         );
         assert_eq!(c.project.runtime, "@game/ReplicatedStorage/Alloy");
+    }
+
+    #[test]
+    fn an_ingot_is_a_path_or_a_pinned_release() {
+        let c = Config::parse(
+            "[ingots]\na = \"ingots/a\"\nb = { repo = \"o/r\", version = \"1.0.0\", order = -1 }\n\n[ingot.a]\nprefix = \"tw-\"\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        assert_eq!(c.ingots["a"].table().path.as_deref(), Some("ingots/a"));
+        let b = c.ingots["b"].table();
+        assert_eq!(b.repo.as_deref(), Some("o/r"));
+        assert_eq!(b.order, Some(-1));
+        assert_eq!(c.ingot["a"]["prefix"].as_str(), Some("tw-"));
     }
 
     #[test]

@@ -22,6 +22,7 @@ path = "src/main.rs"
 # The fork of luaux 0.2.0 in crates/luaux; see its NOTICE.
 luaux = { package = "alloy-luaux", path = "../luaux" }
 alloy-syntax = { version = "0.1.0-rc.1", path = "../alloy-syntax" }
+alloy-ingot = { version = "0.1.0-rc.1", path = "../alloy-ingot" }
 globset = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "1"

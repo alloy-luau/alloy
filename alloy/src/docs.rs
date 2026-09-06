@@ -492,6 +492,10 @@ pub const TABLE: &[(&str, &str)] = &[
         "**Directives**\n\nA comment that starts with `--@alloy-` silences diagnostics: the compiler's, the lints, and the checker's type errors, which the language server drops on the silenced lines before the editor sees them.\n\n```alloy\n--@alloy-nocheck        this file: nothing is reported\n--@alloy-ignore         the next line with code is silent\nlocal x = y.z --@alloy-ignore   at the end of a line: that line\n```\n\nUse one for a line the new solver gets wrong, and say why in the comment beside it. Luau's own `--!strict`, `--!nonstrict`, and `--!nocheck` pass through and set the checker's mode for the file.\n\nEvery diagnostic carries the book section it belongs to as its code, `Alloy(4.2)`; the number links to the section in the editor, and `alloy doc 4.2` prints it.",
     ),
     (
+        "topic:ingots",
+        "**Ingots**\n\nAn ingot is an Alloy extension. It ships as an executable beside an `ingot.toml`, and the compiler and the language server start it once and keep it alive. Over a framed pipe, one request per file, an ingot can:\n\n  transform   edit the Alloy source before the desugar; the line count holds, and every position maps back\n  output      edit the ship Luau after the desugar\n  lint        report findings under its own lint names, with rewrites\n  format      edit a file after Anneal laid it out\n  hover       answer a hover in the editor\n  complete    add completion items\n  actions     add code actions\n\nName one in alloy.toml. A path is relative to the root; a release is pinned by version and unpacks once into `.alloy/ingots/`:\n\n```toml\n[ingots]\ntailwind = \"ingots/tailwind\"\nlogger = { repo = \"someone/logger-ingot\", version = \"0.2.0\" }\n\n[ingot.tailwind]\n# the ingot's own options, over the defaults its manifest declares\nsort_classes = true\n```\n\nThe manifest names the ingot, the protocol revision, the hooks the host may send, the options with their defaults, and the lints with their levels:\n\n```toml\nname = \"tailwind\"\napi = 1\nhooks = [\"transform\", \"lint\", \"hover\", \"complete\"]\nrun = \"first\"          # the pass its transform runs in: first, last, or a number\nkinds = [\"alx\"]        # the file kinds it wants; unset means all\n\n[options]\nsort_classes = false\n\n[lints.unknown_class]\ndefault = \"warn\"\nsummary = \"a class no utility defines\"\n```\n\nAn ingot's lint is `<ingot>/<lint>` in `[lint]`, and the ingot's name is a group, so `allow = [\"tailwind\"]` silences all of them. `alloy lint --list` shows them under the ingot; `alloy doc tailwind/unknown_class` explains one.\n\nWrite one in Rust with the `alloy-ingot` crate: implement `Handler`, call `serve`. `alloy ingot new <name>` writes the project, `alloy ingot info <dir>` prints what a manifest declares, and `alloy ingot run <dir> <file>` pushes one file through it and reports the line count, because a transform that adds a line breaks the map. An edit is a byte span and its text; the host applies every edit of one reply at once, so no edit sees another's output. An ingot that hangs costs one request: the host kills it after a timeout and reports the loss.\n\nThe design follows larvae's native worms. Nothing is embedded: no interpreter, no wasm.",
+    ),
+    (
         "topic:mount",
         "**Mounts and project files**\n\nOne table in alloy.toml says where each folder lands in the DataModel, and `alloy build` writes every file that follows from it:\n\n```toml\n[project]\nname = \"game\"\nruntime = \"@game/ReplicatedStorage/Alloy\"\n\n[mount]\n# alias = [path, mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nclient = [\"src/client\", \"@game/StarterPlayer/StarterPlayerScripts/Client\"]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\npkg = [\"Packages\", \"@game/ReplicatedStorage/Packages\"]\n```\n\n  default.project.json        a Rojo project over the sources\n  .alloy/build.project.json   the same tree over the compiled output, for `rojo serve` and `rojo build`\n  .alloy/sourcemap.json       the instance tree with the source paths; the language server reads it\n  .luaurc                     gains an alias per mount, so `@pkg/jecs` resolves in the editor\n\nRoblox reads no `.luaurc`, so the ship artifact rewrites `require(\"@pkg/jecs\")` into the relative instance path from the file's mount, `../../ReplicatedStorage/Packages/jecs` from a server script, and requires the runtime the same way. A path under `[build] in` points at its output in the build project; any other path, such as a package folder, is mounted as it is. `.server.` and `.client.` name the script class, `init` names its directory, and a `StarterPlayerScripts` between a service and a leaf keeps its own class.",
     ),
@@ -746,6 +750,12 @@ pub const BOOK: &[Section] = &[
         key: Some("topic:mount"),
     },
     Section {
+        number: "5.11",
+        id: "ingots",
+        title: "Ingots",
+        key: Some("topic:ingots"),
+    },
+    Section {
         number: "6",
         id: "reference",
         title: "Reference",
@@ -814,6 +824,7 @@ pub fn kind_for(message: &str) -> &'static str {
     let m = message.to_ascii_lowercase();
     let rules: &[(&[&str], &str)] = &[
         (&["internal:"], "InternalError"),
+        (&["ingot `"], "IngotError"),
         (&["reserved word"], "ReservedWord"),
         (&["in macro expansion"], "MacroError"),
         (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),

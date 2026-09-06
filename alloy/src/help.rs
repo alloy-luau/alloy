@@ -24,6 +24,7 @@ Commands:
   test [file]     Write a lest spec per source with a @test; --run runs it
   doc [topic]     Explain a keyword, an operator, a lint, an article
   init            Write alloy.toml, .luaurc, and .config.luau
+  ingot           Scaffold, inspect, or run an extension
   self            Install, update, or remove the binaries
   help            Show this screen
 
@@ -44,6 +45,30 @@ Commands:
 Options:
   --dir <path>    Install to, or remove from, <path>
   --version <v>   With update: fetch this release instead of the latest
+";
+
+pub const INGOT_TEXT: &str = "\
+Usage: alloy ingot <command> [options]
+
+An ingot is an Alloy extension: an executable beside an ingot.toml that
+edits source before the desugar, edits the ship Luau after it, lints,
+formats after Anneal, and answers hover, completion, and code actions
+in the editor. `alloy doc ingots` explains them; the alloy-ingot crate
+is the guest side.
+
+Commands:
+  new <name>      Write a Rust project for an ingot in ./<name>
+  info <dir>      Print what the ingot in <dir> declares
+  run <dir> <file> [options]
+                  Push one file through the ingot and print the result
+
+Options of run:
+  --lint          Print the lint findings instead of the transform
+  --output        Run the output hook over the compiled Luau
+  --format        Run the format hook over the file as it is
+  --hover <byte>  Ask for the hover at a byte offset
+  --complete <byte>
+                  Ask for the completions at a byte offset
 ";
 
 pub const BUILD_TEXT: &str = "\

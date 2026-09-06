@@ -1074,3 +1074,119 @@ fn a_compiler_error_line_silences_the_checker() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The `shout` example ingot of the alloy-ingot crate, built on demand.
+fn shout_ingot_dir() -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let bin = workspace.join("target/debug/examples/shout");
+
+    if !bin.is_file() {
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "-p", "alloy-ingot", "--example", "shout"])
+            .current_dir(&workspace)
+            .status()
+            .expect("cargo runs");
+        assert!(status.success(), "the shout example builds");
+    }
+
+    workspace
+        .join("alloy-ingot/examples/shout")
+        .canonicalize()
+        .unwrap()
+}
+
+#[test]
+fn an_ingot_answers_hover_completion_actions_and_lints() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-ingot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        format!(
+            "[build]\nin = \"src\"\n\n[ingots]\nshout = \"{}\"\n",
+            shout_ingot_dir().display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    let src = "local a = $shout(\"hi\")\n-- HELLO THERE\nprint(a)\nlocal z = $\n";
+    let main = dir.join("src/main.aly");
+    std::fs::write(&main, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", main.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // The ingot's lint arrives with the compiler's diagnostics, and the
+    // transform typed: `a` is a string, so nothing reports `$shout`.
+    let diags = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("capitals")));
+    assert!(
+        diags
+            .iter()
+            .all(|d| !d.contains("shout") || d.contains("capitals")),
+        "{diags:#?}"
+    );
+
+    let h = s.hover(&uri, 0, 12);
+    assert!(h.contains("string.upper"), "ingot hover: {h}");
+
+    let labels = s.completion_labels(&uri, 3, 11);
+    assert!(labels.iter().any(|l| l == "$shout"), "{labels:?}");
+
+    let r = s.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 2, "character": 6 }, "end": { "line": 2, "character": 7 } },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    let titles: Vec<String> = r
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| a["title"].as_str().map(str::to_string))
+        .collect();
+    assert!(titles.iter().any(|t| t == "Shout `a`"), "{titles:?}");
+    let shout = r
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["title"] == "Shout `a`")
+        .unwrap();
+    assert_eq!(shout["edit"]["changes"][&uri][0]["newText"], "$shout(a)");
+
+    // The lint's rewrite is a quick fix too.
+    let r = s.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 5 } },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    let titles: Vec<String> = r
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| a["title"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        titles
+            .iter()
+            .any(|t| t.contains("loud_comment") || t.contains("capitals")),
+        "{titles:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -21,6 +21,7 @@ pub mod flux_scan;
 pub mod fmt;
 pub mod fmt_alx;
 pub mod fmt_structure;
+pub mod ingot;
 pub mod lint;
 pub mod luau_config;
 pub mod project;
@@ -201,6 +202,73 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         imports,
         tests: rendered.tests,
     })
+}
+
+/// Compiles one file through the whole pipeline: the ingots' source
+/// transforms, luaux for `.alx`, the desugar, then the ingots' lints and
+/// output edits. Every caller that has a project goes through here, so
+/// the build, the tests, and the editor agree on what a file becomes.
+///
+/// `path` picks the kind and is what the ingots see; `jsx` is the
+/// `luaux.toml` of the project, used for `.alx`.
+pub fn compile_file(
+    path: &str,
+    source: &str,
+    options: &EmitOptions,
+    jsx: Option<&luaux::Config>,
+    ingots: Option<&ingot::Ingots>,
+) -> Result<Output, CompileError> {
+    let ingots = ingots.filter(|i| !i.is_empty());
+    let layer = ingots.map(|i| i.before(path, source));
+    let text = layer.as_ref().map_or(source, |l| l.text.as_str());
+    let mut out = if path.ends_with(".alx") {
+        compile_alx(text, options, jsx.cloned().unwrap_or_default())?.output
+    } else {
+        compile_with(text, options)?
+    };
+
+    if let Some(layer) = layer {
+        if let Some(map) = layer.map {
+            // Everything the compile placed sits in the transformed text;
+            // the author reads positions in their own.
+            for d in &mut out.diagnostics {
+                d.start = map.to_source(d.start);
+                d.end = map.to_source(d.end).max(d.start);
+            }
+
+            for l in &mut out.lints {
+                l.start = map.to_source(l.start);
+                l.end = map.to_source(l.end).max(l.start);
+
+                if let Some(f) = &mut l.fix {
+                    // A fix over transformed bytes cannot apply to the
+                    // author's text; keep the lint and drop the rewrite.
+                    if map.is_generated(f.start) || map.is_generated(f.end.saturating_sub(1)) {
+                        l.fix = None;
+                    } else {
+                        f.start = map.to_source(f.start);
+                        f.end = map.to_source(f.end).max(f.start);
+                    }
+                }
+            }
+
+            for i in &mut out.imports {
+                i.start = map.to_source(i.start);
+                i.end = map.to_source(i.end).max(i.start);
+            }
+
+            out.map = map.compose(&out.map);
+        }
+
+        out.diagnostics.extend(layer.diagnostics);
+        out.diagnostics.sort_by_key(|d| d.start);
+    }
+
+    if let Some(ingots) = ingots {
+        ingots.after(path, source, &mut out);
+    }
+
+    Ok(out)
 }
 
 /// Desugars Alloy source to plain Luau, the ship artifact.

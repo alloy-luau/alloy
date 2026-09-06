@@ -30,6 +30,7 @@ impl Doc {
         version: i64,
         options: &EmitOptions,
         jsx: &alloy::luaux::Config,
+        ingots: Option<&alloy::ingot::Ingots>,
     ) -> Self {
         let mut doc = Self {
             source,
@@ -41,21 +42,24 @@ impl Doc {
             bindings: Vec::new(),
             is_alx: options.file_name.ends_with(".alx"),
         };
-        doc.compile(options, jsx);
+        doc.compile(options, jsx, ingots);
 
         doc
     }
 
     /// Recompiles after an edit.
-    pub fn compile(&mut self, options: &EmitOptions, jsx: &alloy::luaux::Config) {
+    pub fn compile(
+        &mut self,
+        options: &EmitOptions,
+        jsx: &alloy::luaux::Config,
+        ingots: Option<&alloy::ingot::Ingots>,
+    ) {
         self.exports = crate::imports::exports_of(&self.source, self.is_alx);
         self.decls = alloy::declarations::summaries(&self.source, options.definitions);
         self.bindings = alloy::declarations::bindings(&self.source);
-        let compiled = if self.is_alx {
-            alloy::compile_alx(&self.source, options, jsx.clone()).map(|a| a.output)
-        } else {
-            alloy::compile_with(&self.source, options)
-        };
+        // `file_name` is the real path, which is what the ingots see.
+        let compiled =
+            alloy::compile_file(&options.file_name, &self.source, options, Some(jsx), ingots);
 
         match compiled {
             Ok(out) => {
@@ -188,6 +192,7 @@ mod tests {
             1,
             &EmitOptions::default(),
             &alloy::luaux::Config::default(),
+            None,
         );
         assert_eq!(
             doc.shadow,
@@ -219,6 +224,7 @@ mod tests {
             1,
             &EmitOptions::default(),
             &alloy::luaux::Config::default(),
+            None,
         );
         doc.apply_change(Some(((0, 1), (1, 1))), "X");
         assert_eq!(doc.source, "aXd\n");

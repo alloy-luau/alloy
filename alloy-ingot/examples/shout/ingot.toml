@@ -1,0 +1,14 @@
+name = "shout"
+api = 1
+description = "The example ingot: $shout(x) compiles to string.upper(x)."
+binary = "../../../target/debug/examples/shout"
+run = "first"
+hooks = ["transform", "output", "lint", "format", "hover", "complete", "actions"]
+
+[options]
+word = "shout"
+
+[lints.loud_comment]
+default = "warn"
+summary = "a comment written in capitals"
+detail = "Capitals read as shouting. The fix lowers the comment."

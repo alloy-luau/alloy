@@ -84,6 +84,208 @@ impl SpanMap {
         &self.chunks
     }
 
+    /// The output length the map covers.
+    pub fn out_len(&self) -> u32 {
+        self.out_len
+    }
+
+    fn push_copied(&mut self, src_start: u32, src_end: u32) {
+        if src_start >= src_end {
+            return;
+        }
+
+        if let Some(Chunk::Copied { src_end: e, .. }) = self.chunks.last_mut()
+            && *e == src_start
+        {
+            *e = src_end;
+        } else {
+            self.starts.push(self.out_len);
+            self.chunks.push(Chunk::Copied { src_start, src_end });
+        }
+
+        self.out_len += src_end - src_start;
+    }
+
+    fn push_generated(&mut self, anchor: u32, len: u32) {
+        if len == 0 {
+            return;
+        }
+
+        self.starts.push(self.out_len);
+        self.chunks.push(Chunk::Generated { anchor, len });
+        self.out_len += len;
+    }
+
+    /// Composes this map, source to middle, with `inner`, middle to
+    /// output, into one map from source to output. An ingot's edits form
+    /// the outer layer and the desugar the inner one; the editor reads
+    /// the composed map and never sees the middle text.
+    pub fn compose(&self, inner: &SpanMap) -> SpanMap {
+        let mut out = SpanMap::default();
+
+        for (i, chunk) in inner.chunks.iter().enumerate() {
+            match *chunk {
+                Chunk::Generated { anchor, len } => {
+                    out.push_generated(self.to_source(anchor), len);
+                }
+
+                Chunk::Copied {
+                    src_start: mid_start,
+                    src_end: mid_end,
+                } => {
+                    // Walk the outer chunks that cover [mid_start, mid_end).
+                    let mut at = mid_start;
+                    let mut j = self.chunk_at(mid_start);
+
+                    while at < mid_end && j < self.chunks.len() {
+                        let start = self.starts[j];
+                        let len = match self.chunks[j] {
+                            Chunk::Copied { src_start, src_end } => src_end - src_start,
+
+                            Chunk::Generated { len, .. } => len,
+                        };
+                        let end = start + len;
+                        let take_end = end.min(mid_end);
+
+                        if take_end > at {
+                            match self.chunks[j] {
+                                Chunk::Copied { src_start, .. } => {
+                                    let from = src_start + (at - start);
+                                    out.push_copied(from, from + (take_end - at));
+                                }
+
+                                Chunk::Generated { anchor, .. } => {
+                                    out.push_generated(anchor, take_end - at);
+                                }
+                            }
+
+                            at = take_end;
+                        }
+
+                        j += 1;
+                    }
+
+                    // Middle text past the outer map's end: the identity.
+                    if at < mid_end {
+                        let src_end = self.chunks.last().map_or(0, |c| match c {
+                            Chunk::Copied { src_end, .. } => *src_end,
+
+                            Chunk::Generated { anchor, .. } => *anchor,
+                        });
+                        out.push_copied(
+                            src_end + (at - self.out_len),
+                            src_end + (mid_end - self.out_len),
+                        );
+                    }
+                }
+            }
+
+            debug_assert_eq!(out.out_len, inner.starts[i] + inner_len(chunk));
+        }
+
+        out
+    }
+}
+
+fn inner_len(chunk: &Chunk) -> u32 {
+    match chunk {
+        Chunk::Copied { src_start, src_end } => src_end - src_start,
+
+        Chunk::Generated { len, .. } => *len,
+    }
+}
+
+/// One whole span replacement against the source: the start byte, the
+/// end byte, and the new text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub start: u32,
+    pub end: u32,
+    pub text: String,
+}
+
+/// An edit the layer refuses: it leaves the source, overlaps another, or
+/// changes the line count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditError {
+    pub edit: Edit,
+    pub message: String,
+}
+
+/// Applies edits to a source and returns the new text with the map from
+/// the source to it. The line count holds: an edit's text must hold as
+/// many newlines as the span it replaces, and each newline of the text
+/// maps onto the matching newline of the span, so a later layer still
+/// sees every line where the author wrote it. Edits that overlap or
+/// break the rule are returned as errors and skipped.
+pub fn apply_edits(src: &str, edits: &[Edit]) -> (String, SpanMap, Vec<EditError>) {
+    let mut sorted: Vec<&Edit> = edits.iter().collect();
+    sorted.sort_by_key(|e| (e.start, e.end));
+    let mut errors = Vec::new();
+    let mut r = Renderer::new(src);
+    let mut at = 0u32;
+    let len = src.len() as u32;
+
+    for e in sorted {
+        let refuse = |message: &str| EditError {
+            edit: e.clone(),
+            message: message.to_string(),
+        };
+
+        if e.start > e.end || e.end > len {
+            errors.push(refuse("the span leaves the file"));
+            continue;
+        }
+
+        if !src.is_char_boundary(e.start as usize) || !src.is_char_boundary(e.end as usize) {
+            errors.push(refuse("the span splits a character"));
+            continue;
+        }
+
+        if e.start < at {
+            errors.push(refuse("the span overlaps an earlier edit"));
+            continue;
+        }
+
+        let old = &src[e.start as usize..e.end as usize];
+        let old_lines = old.matches('\n').count();
+        let new_lines = e.text.matches('\n').count();
+
+        if old_lines != new_lines {
+            errors.push(refuse(&format!(
+                "the text holds {new_lines} newlines where the span holds {old_lines}; the line count must hold"
+            )));
+            continue;
+        }
+
+        r.copy(at, e.start);
+
+        // Each piece between newlines is generated; the newline itself is
+        // copied from the span, so the renderer's rule holds.
+        let mut newline_at: Vec<u32> = old
+            .match_indices('\n')
+            .map(|(i, _)| e.start + i as u32)
+            .collect();
+        newline_at.reverse();
+
+        for piece in e.text.split('\n') {
+            let _ = r.generate(e.start, piece);
+
+            if let Some(nl) = newline_at.pop() {
+                r.copy(nl, nl + 1);
+            }
+        }
+
+        at = e.end;
+    }
+
+    r.copy(at, len);
+    let (text, map) = r.finish();
+
+    (text, map, errors)
+}
+
+impl SpanMap {
     /// The output offset at which chunk `i` starts.
     pub fn chunk_start(&self, i: usize) -> u32 {
         self.starts[i]
@@ -227,6 +429,104 @@ mod tests {
         assert_eq!(map.to_source(14), 12, "generated text maps to its anchor");
         assert!(map.is_generated(14));
         assert!(!map.is_generated(3));
+    }
+
+    #[test]
+    fn edits_keep_lines_and_map_back() {
+        let src = "local a = 1\nprint(a)\n";
+        let edits = vec![
+            Edit {
+                start: 10,
+                end: 11,
+                text: "22".into(),
+            },
+            Edit {
+                start: 12,
+                end: 17,
+                text: "warn".into(),
+            },
+        ];
+        let (text, map, errors) = apply_edits(src, &edits);
+
+        assert_eq!(text, "local a = 22\nwarn(a)\n");
+        assert!(errors.is_empty());
+        assert_eq!(
+            map.to_source(11),
+            10,
+            "generated text maps to the edit start"
+        );
+        assert_eq!(map.to_source(13), 12);
+        assert_eq!(map.to_source(17), 17, "the `(` after the edit");
+        assert_eq!(map.to_output(6), Some(6));
+        assert_eq!(
+            map.to_output(10),
+            None,
+            "a replaced byte has no output position"
+        );
+    }
+
+    #[test]
+    fn an_edit_that_changes_the_line_count_is_refused() {
+        let src = "a\nb\n";
+        let (text, _, errors) = apply_edits(
+            src,
+            &[Edit {
+                start: 0,
+                end: 1,
+                text: "x\ny".into(),
+            }],
+        );
+
+        assert_eq!(text, src);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("line count"));
+    }
+
+    #[test]
+    fn a_multiline_edit_maps_each_line() {
+        let src = "a\nb\nc";
+        let (text, map, errors) = apply_edits(
+            src,
+            &[Edit {
+                start: 0,
+                end: 3,
+                text: "xx\nyy".into(),
+            }],
+        );
+
+        assert!(errors.is_empty());
+        assert_eq!(text, "xx\nyy\nc");
+        assert_eq!(map.to_source(2), 1, "the newline is copied");
+        assert_eq!(map.to_source(6), 4);
+    }
+
+    #[test]
+    fn composed_maps_reach_the_source() {
+        let src = "local a = 1\nprint(a)\n";
+        let (mid, outer, _) = apply_edits(
+            src,
+            &[Edit {
+                start: 12,
+                end: 17,
+                text: "warn".into(),
+            }],
+        );
+        let mut r = Renderer::new(&mid);
+        r.copy(0, 12);
+        r.generate(12, "-- g ").unwrap();
+        r.copy(12, mid.len() as u32);
+        let (out, inner) = r.finish();
+        let map = outer.compose(&inner);
+
+        assert_eq!(out, "local a = 1\n-- g warn(a)\n");
+        assert_eq!(map.out_len(), out.len() as u32);
+        assert_eq!(map.to_source(0), 0);
+        assert_eq!(map.to_source(13), 12, "generated by the inner layer");
+        assert!(map.is_generated(18), "generated by the outer layer");
+        assert_eq!(map.to_source(18), 12);
+        assert_eq!(map.to_source(21), 17, "the `(` copied through both");
+        assert_eq!(map.to_output(17), Some(21));
+        assert_eq!(map.to_output(12), None);
     }
 
     #[test]

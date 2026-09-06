@@ -104,6 +104,17 @@ fn json() -> String {
     serde_json::to_string_pretty(&value).unwrap_or_default() + "\n"
 }
 
+/// Starts the ingots of the nearest project, so their lints register.
+fn load_project_ingots() {
+    if let Some(path) = alloy::config::Config::find(std::path::Path::new("."))
+        && let Ok(config) = alloy::config::Config::load(&path)
+        && !config.ingots.is_empty()
+    {
+        let root = path.parent().unwrap_or(std::path::Path::new("."));
+        let _ = alloy::ingot::Ingots::load(root, &config);
+    }
+}
+
 /// The page for one topic, or none.
 fn page(topic: &str, color: bool) -> Option<String> {
     // A section number, as a diagnostic's code: `alloy doc 4.2`.
@@ -134,6 +145,28 @@ fn page(topic: &str, color: bool) -> Option<String> {
         );
 
         return Some(render(&body, color));
+    }
+
+    // An ingot's lint, registered by the nearest project's ingots.
+    if topic.contains('/') {
+        load_project_ingots();
+
+        if let Some(l) = alloy::lint::external()
+            .into_iter()
+            .find(|l| l.name == topic)
+        {
+            let level = match l.default {
+                Level::Allow => "allow",
+                Level::Warn => "warn",
+                Level::Deny => "deny",
+            };
+            let body = format!(
+                "**{}**\nIngot: {}. Default: {level}\n\n{}\n\n{}",
+                l.name, l.group, l.summary, l.detail
+            );
+
+            return Some(render(&body, color));
+        }
     }
 
     // A group: its lints.

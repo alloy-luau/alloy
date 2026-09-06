@@ -16,3 +16,6 @@ build/
 
 # lest writes its framework here on each run
 std/.lest/
+
+# The agent harness keeps worktrees here
+.claude/

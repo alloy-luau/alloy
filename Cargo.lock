@@ -12,9 +12,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloy-ingot"
+version = "0.1.0-rc.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "alloy-luau"
 version = "0.1.0-rc.1"
 dependencies = [
+ "alloy-ingot",
  "alloy-luaux",
  "alloy-syntax",
  "dirs",

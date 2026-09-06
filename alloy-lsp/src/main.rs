@@ -26,6 +26,7 @@ mod context;
 mod doc;
 mod extensions;
 mod imports;
+mod ingots;
 mod keywords;
 mod log;
 mod markup;

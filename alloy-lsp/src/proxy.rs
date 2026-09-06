@@ -65,6 +65,9 @@ struct State {
     root: Option<PathBuf>,
     /// Extensions declared anywhere under the root, read at startup.
     extensions: Vec<alloy::extensions::Extension>,
+    /// The ingots of the root's alloy.toml, started at workspace open
+    /// and again when the file changes.
+    ingots: Option<std::sync::Arc<alloy::ingot::Ingots>>,
     /// The mirror workspace the child works in.
     mirror: PathBuf,
     /// Plain Luau documents the editor holds open, by real URI: their
@@ -82,6 +85,55 @@ struct State {
 }
 
 impl State {
+    /// The completion items the ingots offer at a position.
+    fn ingot_items(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        trigger: Option<&str>,
+    ) -> Vec<Value> {
+        let Some(ingots) = &self.ingots else {
+            return Vec::new();
+        };
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return Vec::new();
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return Vec::new();
+        };
+        let items = ingots.complete(&path.to_string_lossy(), &doc.source, offset as u32, trigger);
+
+        crate::ingots::completion_items(doc, &items)
+    }
+
+    /// The code actions the ingots offer for a range.
+    fn ingot_actions(&self, uri: &str, range: ((u32, u32), (u32, u32))) -> Vec<Value> {
+        let Some(ingots) = &self.ingots else {
+            return Vec::new();
+        };
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let (Some(start), Some(end)) = (
+            offset_of(&doc.source, range.0.0, range.0.1),
+            offset_of(&doc.source, range.1.0, range.1.1),
+        ) else {
+            return Vec::new();
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return Vec::new();
+        };
+        let span = (start as u32, end as u32);
+        let diagnostics = crate::ingots::diagnostics_in(doc, span);
+        let actions = ingots.actions(&path.to_string_lossy(), &doc.source, span, &diagnostics);
+
+        crate::ingots::actions(doc, uri, &actions)
+    }
+
     /// The `[lint]` table of the workspace's alloy.toml, or the defaults.
     fn lint_config(&self) -> alloy::config::LintConfig {
         self.root
@@ -1253,7 +1305,14 @@ impl Server {
             return;
         }
 
-        match alloy::fmt::format(&source) {
+        let ingots = self.state.lock().expect("state").ingots.clone();
+        let formatted = alloy::fmt::format(&source).map(|f| match (&ingots, uri_to_path(uri)) {
+            (Some(ingots), Some(path)) => ingots.format(&path.to_string_lossy(), &f).0,
+
+            _ => f,
+        });
+
+        match formatted {
             Ok(formatted) if formatted != source => {
                 let (el, ec) = position_of(&source, source.len());
                 self.respond(
@@ -1491,6 +1550,10 @@ impl Server {
                         .to_string();
                     let kind = change.get("type").and_then(Value::as_i64).unwrap_or(2);
 
+                    if uri.ends_with("/alloy.toml") {
+                        self.load_ingots();
+                    }
+
                     if !is_alloy_uri(&uri) {
                         // A plain file: the mirror copy follows the disk
                         // unless the editor holds the file open.
@@ -1563,7 +1626,8 @@ impl Server {
 
                 if m == "textDocument/hover"
                     && let Some(id) = message.get("id").cloned()
-                    && (self.field_hover(&uri, &message, &id)
+                    && (self.ingot_hover(&uri, &message, &id)
+                        || self.field_hover(&uri, &message, &id)
                         || self.declaration_hover(&uri, &message, &id)
                         || self.keyword_hover(&uri, &message, &id))
                 {
@@ -2078,7 +2142,11 @@ impl Server {
             return false;
         };
 
-        let items = st.context_items(uri, offset, &ctx);
+        let mut items = st.context_items(uri, offset, &ctx);
+        let trigger = message
+            .pointer("/params/context/triggerCharacter")
+            .and_then(Value::as_str);
+        items.extend(st.ingot_items(uri, line, character, trigger));
         drop(st);
         self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": items }));
 
@@ -2520,6 +2588,7 @@ impl Server {
                         && let Some(actions) = result.as_array_mut()
                     {
                         actions.extend(st.lint_actions(uri, range));
+                        actions.extend(st.ingot_actions(uri, range));
                     }
                 }
 
@@ -2594,6 +2663,7 @@ impl Server {
                         let mut extra = st.auto_imports(uri, line, character);
                         extra.extend(st.primitive_completions(uri, line, character, result));
                         extra.extend(st.std_completions(uri, line, character, result));
+                        extra.extend(st.ingot_items(uri, line, character, trigger.as_deref()));
 
                         if !extra.is_empty() {
                             match result {
@@ -2627,8 +2697,13 @@ impl Server {
 
     /// Opens or replaces a document and its shadow.
     fn open_doc(&self, uri: &str, text: String, version: i64, by_editor: bool) {
-        let (options, jsx) = self.state.lock().expect("state").options_for(uri);
-        let doc = Doc::new(text, version, &options, &jsx);
+        let (options, jsx, ingots) = {
+            let st = self.state.lock().expect("state");
+            let (o, j) = st.options_for(uri);
+
+            (o, j, st.ingots.clone())
+        };
+        let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
         let (shadow, existed) = {
             let mut st = self.state.lock().expect("state");
             let shadow = st.child_uri(uri);
@@ -2687,6 +2762,7 @@ impl Server {
     fn change_doc(&self, uri: &str, version: i64, changes: &[Value]) {
         let (options, jsx) = self.state.lock().expect("state").options_for(uri);
         let mut st = self.state.lock().expect("state");
+        let ingots = st.ingots.clone();
 
         let Some(doc) = st.docs.get_mut(uri) else {
             drop(st);
@@ -2712,7 +2788,7 @@ impl Server {
         }
 
         doc.version = version;
-        doc.compile(&options, &jsx);
+        doc.compile(&options, &jsx, ingots.as_deref());
         let shadow_text = doc.shadow.clone();
         let shadow = st.child_uri(uri);
 
@@ -2792,7 +2868,80 @@ impl Server {
 
     /// Opens a shadow for every Alloy file under the root, and one for the
     /// runtime, so requires between them resolve.
+    /// Starts the ingots of the root's alloy.toml, replacing any that
+    /// run. A problem with one is a warning in the editor; the others
+    /// still load.
+    fn load_ingots(&self) {
+        let root = self.state.lock().expect("state").root.clone();
+        let Some(root) = root else {
+            return;
+        };
+        let config = Config::find(&root).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
+        let Some((path, config)) = config else {
+            self.state.lock().expect("state").ingots = None;
+
+            return;
+        };
+
+        if config.ingots.is_empty() {
+            self.state.lock().expect("state").ingots = None;
+
+            return;
+        }
+
+        let base = path.parent().unwrap_or(&root);
+        let ingots = alloy::ingot::Ingots::load(base, &config);
+
+        for p in &ingots.problems {
+            log::warn(&p.to_string());
+            self.to_client(&json!({
+                "jsonrpc": "2.0",
+                "method": "window/showMessage",
+                "params": { "type": 2, "message": p.to_string() },
+            }));
+        }
+
+        log::info(&format!("{} ingots running", ingots.list.len()));
+        self.state.lock().expect("state").ingots = Some(std::sync::Arc::new(ingots));
+    }
+
+    /// A hover an ingot answers; false when none does.
+    fn ingot_hover(&self, uri: &str, message: &Value, id: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+        let st = self.state.lock().expect("state");
+        let Some(ingots) = st.ingots.clone() else {
+            return false;
+        };
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return false;
+        };
+        let Some(hover) = ingots.hover(&path.to_string_lossy(), &doc.source, offset as u32) else {
+            return false;
+        };
+        let result = crate::ingots::hover(doc, &hover);
+        drop(st);
+        self.respond(id, result);
+
+        true
+    }
+
     fn open_workspace(&self) {
+        self.load_ingots();
         let root = self.state.lock().expect("state").root.clone();
         let Some(root) = root else {
             return;
@@ -4545,6 +4694,7 @@ local f = $nameof(RunService.Heartbeat)
                 1,
                 &EmitOptions::default(),
                 &alloy::luaux::Config::default(),
+                None,
             ),
         );
         st.shadows

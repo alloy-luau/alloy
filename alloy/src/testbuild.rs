@@ -444,6 +444,7 @@ pub fn spec(
     root: &Path,
     source_rel: &Path,
     source: &str,
+    ingots: Option<&crate::ingot::Ingots>,
 ) -> Result<Option<(String, Vec<Diagnostic>, usize)>, crate::CompileError> {
     let parsed = alloy_syntax::parse_lenient(source, Default::default()).map_err(|e| {
         crate::CompileError {
@@ -470,7 +471,13 @@ pub fn spec(
         wait_timeout: config.emit.wait_timeout,
         ..EmitOptions::default()
     };
-    let out = crate::compile_with(&sliced, &options)?;
+    let out = crate::compile_file(
+        &source_rel.to_string_lossy(),
+        &sliced,
+        &options,
+        None,
+        ingots,
+    )?;
     let mut text = rewrite_requires(config, root, source_rel, &spec_rel, &out.ship);
     let name = source_rel
         .strip_prefix(&config.build.input)
@@ -527,6 +534,13 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
     let out_dir = root.join(&config.test.out);
     let mut expected: HashSet<PathBuf> = HashSet::new();
     let exclude = crate::build::globs(&config.build.exclude)?;
+    let ingots = crate::ingot::Ingots::load(root, config);
+
+    for p in &ingots.problems {
+        report
+            .failures
+            .push((PathBuf::from(crate::config::FILE_NAME), p.to_string()));
+    }
 
     for path in crate::build::sources(&input)? {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
@@ -541,7 +555,7 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
         let source = std::fs::read_to_string(&path)?;
         let source_rel = config.build.input.join(&rel);
 
-        let built = match spec(config, root, &source_rel, &source) {
+        let built = match spec(config, root, &source_rel, &source, Some(&ingots)) {
             Ok(Some(b)) => b,
 
             Ok(None) => continue,
@@ -742,10 +756,15 @@ mod tests {
     fn the_spec_registers_each_test_and_awaits_the_async_ones() {
         let src = "local function f(): number\n    return 1\nend\n\n@test\nfunction plain()\n    $assert_eq(f(), 1)\nend\n\n@test\nasync function later()\n    local v = await Future.delay(0)\n    $assert(v == nil)\nend\n";
         let config = Config::default();
-        let (text, diagnostics, count) =
-            spec(&config, Path::new("/none"), Path::new("src/m.aly"), src)
-                .unwrap()
-                .unwrap();
+        let (text, diagnostics, count) = spec(
+            &config,
+            Path::new("/none"),
+            Path::new("src/m.aly"),
+            src,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(count, 2);
         assert!(

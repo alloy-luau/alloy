@@ -67,6 +67,7 @@ mod tests {
             1,
             &EmitOptions::default(),
             &alloy::luaux::Config::default(),
+            None,
         );
         // Shadow: `local v = (if a == nil then 0 else a)` / `print(v)`.
         // Tokens: `local` (0,0,5), `nil` inside the generated text (0,18,3),

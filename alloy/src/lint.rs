@@ -567,10 +567,86 @@ pub const LINTS: &[LintInfo] = &[
     },
 ];
 
+/// A lint an ingot declares, registered when the ingot loads. Its name
+/// is `<ingot>/<lint>` and its group is the ingot's name, so `[lint]`
+/// sets a level for one lint or for the whole ingot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalLint {
+    pub name: &'static str,
+    pub group: &'static str,
+    pub default: Level,
+    pub summary: String,
+    pub detail: String,
+}
+
+static EXTERNAL: std::sync::OnceLock<std::sync::Mutex<Vec<ExternalLint>>> =
+    std::sync::OnceLock::new();
+
+/// Registers the lints of one ingot, replacing an earlier registration
+/// of the same group. A loaded ingot calls this once.
+pub fn register_external(group: &str, lints: Vec<ExternalLint>) {
+    let mut all = EXTERNAL
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    all.retain(|l| l.group != group);
+    all.extend(lints);
+    all.sort_by_key(|l| l.name);
+}
+
+/// Every registered ingot lint.
+pub fn external() -> Vec<ExternalLint> {
+    EXTERNAL
+        .get_or_init(Default::default)
+        .lock()
+        .map(|l| l.clone())
+        .unwrap_or_default()
+}
+
+/// A lint name leaked once, so an ingot's lint carries a `&'static str`
+/// like the built-in ones. The set is bounded by the manifests loaded.
+pub fn intern(name: &str) -> &'static str {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<HashSet<&'static str>>> =
+        std::sync::OnceLock::new();
+    let mut set = NAMES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if let Some(n) = set.get(name) {
+        return n;
+    }
+
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    set.insert(leaked);
+
+    leaked
+}
+
 /// The level a lint runs at under a config: its own name in a list
 /// first, then its group's name, then its default. A name the table
-/// lacks is a lint of the type checker, under the `luau` group.
+/// lacks is a lint of the type checker, under the `luau` group. A name
+/// with a `/` is an ingot's, under the ingot's name.
 pub fn level_of(config: &LintConfig, name: &str) -> Level {
+    if let Some((ingot, _)) = name.split_once('/') {
+        let ext = external().into_iter().find(|l| l.name == name);
+        let listed = |key: &str| {
+            if config.allow.iter().any(|n| n == key) {
+                Some(Level::Allow)
+            } else if config.deny.iter().any(|n| n == key) {
+                Some(Level::Deny)
+            } else if config.warn.iter().any(|n| n == key) {
+                Some(Level::Warn)
+            } else {
+                None
+            }
+        };
+
+        return listed(name)
+            .or_else(|| listed(ingot))
+            .unwrap_or_else(|| ext.map(|l| l.default).unwrap_or(Level::Warn));
+    }
+
     let info = LINTS.iter().find(|l| l.name == name);
     let group = info.map(|l| l.group.name()).unwrap_or(LUAU_GROUP);
     let listed = |key: &str| {
@@ -596,8 +672,13 @@ pub fn level_of(config: &LintConfig, name: &str) -> Level {
     }
 }
 
-/// The group of a lint by name; the type checker's lints are `luau`.
+/// The group of a lint by name; the type checker's lints are `luau`,
+/// and an ingot's lints are the ingot's name.
 pub fn group_name(name: &str) -> &'static str {
+    if let Some((ingot, _)) = name.split_once('/') {
+        return intern(ingot);
+    }
+
     LINTS
         .iter()
         .find(|l| l.name == name)
@@ -616,6 +697,9 @@ pub fn unknown_names(config: &LintConfig) -> Vec<String> {
             !LINTS.iter().any(|l| l.name == n.as_str())
                 && Group::from_name(n).is_none()
                 && n.as_str() != LUAU_GROUP
+                && !external()
+                    .iter()
+                    .any(|l| l.name == n.as_str() || l.group == n.as_str())
         })
         .cloned()
         .collect()

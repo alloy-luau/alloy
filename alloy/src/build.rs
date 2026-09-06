@@ -167,6 +167,15 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     // `luaux.toml` beside `alloy.toml` picks the UI library for `.alx`.
     let jsx_config = luaux::Config::load(root).map_err(|e| e.message);
 
+    // The ingots start once per build and see every file.
+    let ingots = crate::ingot::Ingots::load(root, config);
+
+    for p in &ingots.problems {
+        report
+            .failures
+            .push((PathBuf::from(crate::config::FILE_NAME), p.to_string()));
+    }
+
     for path in sources {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
 
@@ -209,21 +218,24 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             ..base_options.clone()
         };
 
-        let compiled = if is_alx {
-            let jsx = match &jsx_config {
-                Ok(c) => c.clone(),
+        let jsx = match (&jsx_config, is_alx) {
+            (Ok(c), _) => Some(c),
 
-                Err(e) => {
-                    report.failures.push((rel, e.clone()));
+            (Err(_), false) => None,
 
-                    continue;
-                }
-            };
+            (Err(e), true) => {
+                report.failures.push((rel, e.clone()));
 
-            crate::compile_alx(&source, &options, jsx).map(|a| a.output)
-        } else {
-            crate::compile_with(&source, &options)
+                continue;
+            }
         };
+        let compiled = crate::compile_file(
+            &path.to_string_lossy(),
+            &source,
+            &options,
+            jsx,
+            Some(&ingots),
+        );
 
         let compiled = match compiled {
             Ok(c) => c,

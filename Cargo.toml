@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["alloy", "alloy-syntax", "alloy-lsp", "luaux"]
+members = ["alloy", "alloy-syntax", "alloy-lsp", "alloy-ingot", "luaux"]
 # `cargo run` with no `-p` runs the `alloy` command.
 default-members = ["alloy"]
 

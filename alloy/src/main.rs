@@ -10,6 +10,7 @@ mod art;
 mod doc_cmd;
 mod help;
 mod highlight;
+mod ingot_cmd;
 mod self_cmd;
 mod ui;
 
@@ -91,11 +92,42 @@ fn main() -> ExitCode {
 
         Some("self") => self_cmd::run(&args[1..]),
 
+        Some("ingot") if wants_help(&args) => command_help(help::INGOT_TEXT),
+
+        Some("ingot") => ingot_cmd::run(&args[1..]),
+
         Some(other) => {
             fail(&format!("unknown command `{other}`"));
             usage()
         }
     }
+}
+
+/// The ingots of the project a file sits in, for a one-file command.
+/// A load problem prints as a warning; the compile goes on without
+/// that ingot.
+fn load_ingots_near(path: &Path) -> Option<alloy::ingot::Ingots> {
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let dir = if dir.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        dir
+    };
+    let config_path = alloy::config::Config::find(&dir)?;
+    let config = alloy::config::Config::load(&config_path).ok()?;
+
+    if config.ingots.is_empty() {
+        return None;
+    }
+
+    let root = config_path.parent().unwrap_or(Path::new("."));
+    let ingots = alloy::ingot::Ingots::load(root, &config);
+
+    for p in &ingots.problems {
+        eprintln!("{}", Painter::for_stderr().warn(&p.to_string()));
+    }
+
+    Some(ingots)
 }
 
 /// Writes `alloy.toml`, and the Luau configuration when the folder has
@@ -592,6 +624,46 @@ fn list_lints() -> ExitCode {
         )
     );
 
+    // The ingots of the nearest project add their lints under their names.
+    if let Some(config_path) = Config::find(Path::new("."))
+        && let Ok(config) = Config::load(&config_path)
+        && !config.ingots.is_empty()
+    {
+        let root = config_path.parent().unwrap_or(Path::new("."));
+        let ingots = alloy::ingot::Ingots::load(root, &config);
+
+        for problem in &ingots.problems {
+            eprintln!("{}", Painter::for_stderr().warn(&problem.to_string()));
+        }
+
+        for ingot in &ingots.list {
+            if ingot.manifest.lints.is_empty() {
+                continue;
+            }
+
+            println!();
+            println!(
+                "{}  {}",
+                p.bold(&ingot.name),
+                p.paint(ui::DIM, &format!("ingot: {}", ingot.manifest.description))
+            );
+
+            for l in lint::external().iter().filter(|l| l.group == ingot.name) {
+                let (level, rgb) = match l.default {
+                    lint::Level::Allow => ("allow", ui::DIM),
+                    lint::Level::Warn => ("warn", ui::AMBER),
+                    lint::Level::Deny => ("deny", ui::RED),
+                };
+                println!(
+                    "  {:<24} {}  {}",
+                    l.name,
+                    p.paint(rgb, &format!("{level:<6}")),
+                    l.summary
+                );
+            }
+        }
+    }
+
     ExitCode::SUCCESS
 }
 
@@ -917,7 +989,9 @@ fn test_once(args: &[String]) -> ExitCode {
             .map(Path::to_path_buf)
             .unwrap_or_else(|_| PathBuf::from(file));
 
-        return match alloy::testbuild::spec(&config, &root, &rel, &source) {
+        let ingots = alloy::ingot::Ingots::load(&root, &config);
+
+        return match alloy::testbuild::spec(&config, &root, &rel, &source, Some(&ingots)) {
             Ok(Some((text, diagnostics, _))) => {
                 for d in &diagnostics {
                     let (line, col) = line_col(&source, d.start as usize);
@@ -1365,6 +1439,11 @@ fn fmt_cmd(args: &[String]) -> ExitCode {
     let mut changed = 0;
     let mut skipped = 0;
     let mut failed = 0;
+    let ingots = alloy::ingot::Ingots::load(&root, &config);
+
+    for problem in &ingots.problems {
+        eprintln!("{}", p.warn(&problem.to_string()));
+    }
 
     for path in &files {
         let name = path.to_string_lossy();
@@ -1401,6 +1480,13 @@ fn fmt_cmd(args: &[String]) -> ExitCode {
                 continue;
             }
         };
+
+        // An ingot's formatter runs over Anneal's layout.
+        let (formatted, problems) = ingots.format(&name, &formatted);
+
+        for problem in problems {
+            eprintln!("{}", p.warn(&format!("{name}: {problem}")));
+        }
 
         if formatted == source {
             continue;
@@ -1493,21 +1579,20 @@ fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> 
         ..alloy::EmitOptions::default()
     };
 
-    let out = if path.ends_with(".alx") {
-        // `luaux.toml` in the working directory picks the UI library.
-        let jsx = match alloy::luaux::Config::load(Path::new(".")) {
-            Ok(c) => c,
+    // `luaux.toml` in the working directory picks the UI library, and
+    // the nearest alloy.toml names the ingots.
+    let jsx = match alloy::luaux::Config::load(Path::new(".")) {
+        Ok(c) => Some(c),
 
-            Err(err) => {
-                fail(&format!("{path}: {}", err.message));
-                return None;
-            }
-        };
+        Err(err) if path.ends_with(".alx") => {
+            fail(&format!("{path}: {}", err.message));
+            return None;
+        }
 
-        alloy::compile_alx(&source, &options, jsx).map(|a| a.output)
-    } else {
-        alloy::compile_with(&source, &options)
+        Err(_) => None,
     };
+    let ingots = load_ingots_near(Path::new(path));
+    let out = alloy::compile_file(path, &source, &options, jsx.as_ref(), ingots.as_ref());
 
     match out {
         Ok(out) => Some((source, out)),

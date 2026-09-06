@@ -1,0 +1,17 @@
+[package]
+name = "alloy-ingot"
+version = "0.1.0-rc.1"
+description = "Guest side of the Alloy ingot protocol, for writing Alloy extensions in Rust"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["luau", "alloy", "plugin", "extension"]
+categories = ["development-tools::build-utils"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

@@ -2,8 +2,10 @@
 
 use std::io::IsTerminal;
 
-/// The brand color of Alloy, #7A58E0, sampled from assets/aly-symbol.png.
-pub const BRAND: (u8, u8, u8) = (0x7A, 0x58, 0xE0);
+/// The brand color of Alloy on a terminal, #8A3DF5: the purple of
+/// assets/aly-symbol.png (#7A58E0), turned a little toward violet and
+/// fully saturated, since a terminal shows the sampled one washed out.
+pub const BRAND: (u8, u8, u8) = (0x8A, 0x3D, 0xF5);
 
 pub const RESET: &str = "\x1b[0m";
 pub const BOLD: &str = "\x1b[1m";

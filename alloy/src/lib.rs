@@ -8,6 +8,7 @@
 pub mod alx;
 pub mod build;
 pub mod config;
+pub mod data;
 pub mod declarations;
 pub mod desugar;
 pub mod directives;
@@ -58,11 +59,15 @@ pub struct Output {
     pub uses_std: bool,
     /// The `import` statements: the path token's range and the path.
     pub imports: Vec<ImportRef>,
+    /// Every `.json` or `.toml` path the source names in an `import`, an
+    /// `import(...)`, or a `require(...)`, with the literal's range.
+    pub data_refs: Vec<ImportRef>,
     /// The `@test` functions, in order: name and whether it is async.
     pub tests: Vec<(String, bool)>,
 }
 
-/// One `import ... from "path"` of a file.
+/// One `import ... from "path"` of a file, or one data path with the
+/// range of its literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportRef {
     pub start: u32,
@@ -157,8 +162,13 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         lints.retain(|l| silence.allows(directives::line_of(src, l.start as usize)));
     }
 
+    // A plain `require("./x.json")` passes through the desugar as it is;
+    // both artifacts drop the extension so the require finds the module
+    // the build writes. The literal only shrinks, so the map holds.
+    let check = data::strip_requires(&check);
+
     // The ship artifact blanks type-only imports, keeping every position.
-    let mut ship = rendered.text.clone().into_bytes();
+    let mut ship = data::strip_requires(&rendered.text).into_bytes();
 
     for (a, b) in &rendered.ship_blanks {
         for byte in ship.iter_mut().take(*b as usize).skip(*a as usize) {
@@ -201,6 +211,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         lints,
         uses_std: rendered.uses_std,
         imports,
+        data_refs: data::references(src),
         tests: rendered.tests,
     })
 }

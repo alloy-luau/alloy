@@ -91,13 +91,24 @@ pub fn from_editor(options: &Value) -> Value {
 }
 
 /// The command line flags for the child from the editor's `fflags`
-/// section: `--flag:Name=value` for each override, and the new solver
-/// unless `enableNewSolver` is false.
+/// section: `--no-flags-enabled` when `enableByDefault` is false,
+/// `--flag:Name=value` for each override, and the new solver unless
+/// `enableNewSolver` is false. The Alloy extension sends its own section
+/// under `fflags`, over the user's luau-lsp one.
 pub fn child_flags(options: &Value) -> Vec<String> {
     let section = options
-        .pointer("/luauLsp/fflags")
-        .or_else(|| options.get("fflags"));
+        .get("fflags")
+        .or_else(|| options.pointer("/luauLsp/fflags"));
     let mut flags = Vec::new();
+
+    let by_default = section
+        .and_then(|f| f.get("enableByDefault"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    if !by_default {
+        flags.push("--no-flags-enabled".to_string());
+    }
 
     let new_solver = section
         .and_then(|f| f.get("enableNewSolver"))
@@ -128,6 +139,24 @@ pub fn child_flags(options: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_flags_section_turns_into_child_arguments() {
+        let flags = child_flags(&json!({
+            "fflags": { "enableByDefault": false, "override": { "LuauTableTypeMaximumStringifierLength": "100", "LuauX": true } }
+        }));
+        assert_eq!(
+            flags,
+            vec![
+                "--no-flags-enabled",
+                "--flag:LuauSolverV2=true",
+                "--flag:LuauTableTypeMaximumStringifierLength=100",
+                "--flag:LuauX=true"
+            ]
+        );
+        assert_eq!(child_flags(&json!({})), vec!["--flag:LuauSolverV2=true"]);
+        assert!(child_flags(&json!({ "fflags": { "enableNewSolver": false } })).is_empty());
+    }
 
     #[test]
     fn fflags_never_reach_the_child_settings() {

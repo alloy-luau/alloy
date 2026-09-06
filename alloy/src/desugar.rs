@@ -463,10 +463,12 @@ struct Compiled {
 impl<'s> Desugar<'s> {
     // --- modules -----------------------------------------------------------
 
-    /// `import` becomes `require` plus locals or type aliases.
+    /// `import` becomes `require` plus locals or type aliases. A data
+    /// path loses its extension: the build writes `data.json` as
+    /// `data.luau`, and `require("./data")` finds it.
     fn import_stmt(&mut self, i: &Import) {
         let anchor = self.byte_start(i.span);
-        let path = self.text_of(i.path).to_string();
+        let path = crate::data::strip_literal(self.text_of(i.path));
 
         match &i.kind {
             ImportKind::Namespace(n) => {
@@ -598,7 +600,7 @@ impl<'s> Desugar<'s> {
             }
 
             Some(path) => {
-                let path = self.text_of(path).to_string();
+                let path = crate::data::strip_literal(self.text_of(path));
                 let temp = self.hoist_text(format!("require({path})"), anchor);
                 let mut types = Vec::new();
 
@@ -4861,7 +4863,16 @@ impl<'s> Desugar<'s> {
                 type_args, args, ..
             })) = links.first()
         {
-            let a = self.args_text(args);
+            // A data path drops its extension, as in `import` statements.
+            let a = match args {
+                CallArgs::Str(s) => crate::data::strip_literal(self.text_of(*s)),
+
+                CallArgs::Paren(list) if list.len() == 1 && matches!(list[0], Expr::String(_)) => {
+                    crate::data::strip_literal(&self.render_to_string(&list[0]))
+                }
+
+                _ => self.args_text(args),
+            };
             let a = if a.starts_with('(') {
                 a
             } else {

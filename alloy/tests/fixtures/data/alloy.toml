@@ -1,0 +1,4 @@
+[build]
+in = "src"
+out = "build"
+clean = true

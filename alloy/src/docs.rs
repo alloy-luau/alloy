@@ -159,7 +159,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "import",
-        "```alloy\nimport { a, b as c, type T } from \"./m\"\nimport * as M from \"./m\"\nimport Name from \"./m\"\nimport M, { a, type T } from \"./m\"\nimport type { T } from \"./m\"\n```\nBrings names from another module into this file. `{ }` picks exports by name, `as` renames one, `* as M` takes the whole module, and a bare name takes its default export. `M, { a }` takes the module and names from it in one line: `local M = require(\"./m\") local a = M.a`. `type` marks a type-only import, which costs nothing at runtime.\n\n`import(\"./m\")` is the expression form: a `require`, typed from the module when the path is a string or an instance chain. `import<<T>>(expr)` gives a dynamic path the type `T`; without it the value is `unknown`.",
+        "```alloy\nimport { a, b as c, type T } from \"./m\"\nimport * as M from \"./m\"\nimport Name from \"./m\"\nimport M, { a, type T } from \"./m\"\nimport type { T } from \"./m\"\n```\nBrings names from another module into this file. `{ }` picks exports by name, `as` renames one, `* as M` takes the whole module, and a bare name takes its default export. `M, { a }` takes the module and names from it in one line: `local M = require(\"./m\") local a = M.a`. `type` marks a type-only import, which costs nothing at runtime.\n\n`import(\"./m\")` is the expression form: a `require`, typed from the module when the path is a string or an instance chain. `import<<T>>(expr)` gives a dynamic path the type `T`; without it the value is `unknown`.\n\nA path that ends in `.json` or `.toml` imports a data file as a table; `alloy doc data` explains.",
     ),
     (
         "export",
@@ -499,6 +499,10 @@ pub const TABLE: &[(&str, &str)] = &[
         "topic:mount",
         "**Mounts and project files**\n\nOne table in alloy.toml says where each folder lands in the DataModel, and `alloy build` writes every file that follows from it:\n\n```toml\n[project]\nname = \"game\"\nruntime = \"@game/ReplicatedStorage/Alloy\"\n\n[mount]\n# alias = [path, mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nclient = [\"src/client\", \"@game/StarterPlayer/StarterPlayerScripts/Client\"]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\npkg = [\"Packages\", \"@game/ReplicatedStorage/Packages\"]\n```\n\n  default.project.json        a Rojo project over the sources\n  .alloy/build.project.json   the same tree over the compiled output, for `rojo serve` and `rojo build`\n  .alloy/sourcemap.json       the instance tree with the source paths; the language server reads it\n  .luaurc                     gains an alias per mount, so `@pkg/jecs` resolves in the editor\n\nRoblox reads no `.luaurc`, so the ship artifact rewrites `require(\"@pkg/jecs\")` into the relative instance path from the file's mount, `../../ReplicatedStorage/Packages/jecs` from a server script, and requires the runtime the same way. A path under `[build] in` points at its output in the build project; any other path, such as a package folder, is mounted as it is. `.server.` and `.client.` name the script class, `init` names its directory, and a `StarterPlayerScripts` between a service and a leaf keeps its own class.",
     ),
+    (
+        "topic:data",
+        "**JSON and TOML data**\n\nA source imports a `.json` or `.toml` file as a table. Three forms name one:\n\n```alloy\nimport data from \"./data.json\"\nimport { coins, pets } from \"./config.toml\"\nlocal limits = import(\"./limits.toml\")\nlocal raw = require(\"./raw.json\")\n```\n\nThe emit drops the extension: `require(\"./data\")`. `alloy build` writes each data file a source names as a Luau module at the same place in the output, `src/data.json` becomes `build/data.luau`, and `clean` keeps it. A file that no source names stays as it is; `alloy.toml` and `default.project.json` never build.\n\nThe module returns the document as a table:\n\n```luau\nreturn {\n    name = \"game\",\n    [\"max-players\"] = 12,\n    pets = {\n        {\n            name = \"cat\",\n            legs = 4,\n        },\n    },\n}\n```\n\nKeys keep the document's order. A key that is not a Luau name, or is a keyword, goes in brackets. A JSON `null` is `nil`, a TOML datetime is a string, and a whole number has no `.0`.\n\nThe type check and the language server write the same module into their mirrors, so hover on `data` shows its table type, `data.` completes its keys, `import { | } from \"./config.toml\"` lists the top-level keys with their types, and go to definition on the path or on a name opens the file.\n\nThree cases are diagnostics on the import: the file is missing, the document does not parse (the message names the line), and the file's stem collides with a module beside it. `x.json` beside `x.aly` or `x.luau` would build the same `x.luau`, so one of them gets a new name. A data path is relative, `./` or `../`, and stays under `[build] in`.",
+    ),
 ];
 
 /// The Markdown for a key.
@@ -751,6 +755,12 @@ pub const BOOK: &[Section] = &[
     },
     Section {
         number: "5.11",
+        id: "data",
+        title: "JSON and TOML data",
+        key: Some("topic:data"),
+    },
+    Section {
+        number: "5.12",
         id: "ingots",
         title: "Ingots",
         key: Some("topic:ingots"),
@@ -834,6 +844,7 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["macro"], "MacroError"),
         (&["`new ", "constructor", "construct"], "ConstructorError"),
         (&["attribute", "derive"], "AttributeError"),
+        (&["data file"], "DataError"),
         (&["import", "export", "require", "module"], "ImportError"),
         (
             &["does not write", "parameters in", "trait"],
@@ -886,6 +897,7 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         ),
         (&["variant", "enum"], "3.4"),
         (&["async", "await", "try", "future"], "3.3"),
+        (&["data file", ".json", ".toml"], "5.11"),
         (&["import", "export", "require", "module"], "3.2"),
         (&["extension", "foreign", "primitive"], "3.9"),
         (

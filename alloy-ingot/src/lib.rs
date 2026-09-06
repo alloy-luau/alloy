@@ -644,21 +644,23 @@ mod tests {
         String::from_utf8(answer(&mut Shout, request)).unwrap()
     }
 
+    fn value(json: &str) -> Value {
+        serde_json::from_str(&reply(json)).unwrap()
+    }
+
     #[test]
     fn a_transform_round_trips_through_answer() {
         assert_eq!(
-            reply(r#"{"op":"transform","path":"a.aly","source":"hi"}"#),
-            r#"{"edits":[[0,2,"HI"]],"ok":true}"#
+            value(r#"{"op":"transform","path":"a.aly","source":"hi"}"#),
+            serde_json::json!({ "ok": true, "edits": [[0, 2, "HI"]] })
         );
     }
 
     #[test]
     fn a_hover_names_the_word() {
-        let r = reply(r#"{"op":"hover","path":"a.aly","source":"local abc","offset":7}"#);
-
         assert_eq!(
-            r,
-            r#"{"hover":{"contents":"word `abc`","span":[6,9]},"ok":true}"#
+            value(r#"{"op":"hover","path":"a.aly","source":"local abc","offset":7}"#),
+            serde_json::json!({ "ok": true, "hover": { "contents": "word `abc`", "span": [6, 9] } })
         );
     }
 

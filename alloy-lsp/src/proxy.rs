@@ -47,6 +47,8 @@ struct Pending {
 enum Asked {
     /// Apply this workspace edit if the answer is the update action.
     Rename(Value),
+    /// The watcher registration; the answer says nothing to act on.
+    Watch,
 }
 
 #[derive(Default)]
@@ -860,7 +862,10 @@ impl State {
                     return items;
                 }
 
-                if !*type_only {
+                let data_format = spec.as_deref().and_then(alloy::data::Format::of);
+
+                // A data file exports no type.
+                if !*type_only && data_format.is_none() {
                     items.push(word(
                         "type",
                         14,
@@ -887,6 +892,24 @@ impl State {
 
                         None => Some(imports::lexical(dir, spec)),
                     };
+                    // A data file lists its top-level keys, each with
+                    // the type its value reads as.
+                    if let Some(format) = data_format {
+                        if let Some(file) = resolved
+                            && !*type_only
+                            && let Ok(text) = std::fs::read_to_string(&file)
+                            && let Ok(keys) = alloy::data::keys(&text, format)
+                        {
+                            for (key, ty) in keys {
+                                let mut item = word(&key, 5, None, from);
+                                item["detail"] = json!(ty);
+                                items.push(item);
+                            }
+                        }
+
+                        return items;
+                    }
+
                     let mut exports: Vec<imports::Export> = Vec::new();
 
                     if let Some(resolved) = resolved {
@@ -1195,7 +1218,7 @@ impl State {
 
         let real = uri_to_path(child)
             .and_then(|p| self.real_path(&p))
-            .map(|p| path_to_uri(&p))
+            .map(|p| path_to_uri(&data_source_of(p)))
             .unwrap_or_else(|| child.to_string());
 
         (real, false)
@@ -1227,7 +1250,8 @@ impl State {
         }
     }
 
-    /// Writes a mirror file, creating its directories.
+    /// Writes a mirror file, creating its directories. A data file also
+    /// writes the module the build makes of it, `x.json` as `x.luau`.
     fn write_mirror(&self, real: &Path, text: &str) {
         let target = self.mirror_path(real);
 
@@ -1238,10 +1262,34 @@ impl State {
         if std::fs::read_to_string(&target).ok().as_deref() != Some(text) {
             let _ = std::fs::write(&target, text);
         }
+
+        if let Some(format) = alloy::data::Format::of_path(real) {
+            self.mirror_data(real, text, format);
+        }
+    }
+
+    /// The module of a data file, into the mirror. A module of the same
+    /// stem beside it wins, as it does in the build. A document that
+    /// does not parse keeps the last good module: a half-typed edit
+    /// would drop every type at once.
+    fn mirror_data(&self, real: &Path, text: &str, format: alloy::data::Format) {
+        if alloy::data::module_beside(real).is_some() {
+            return;
+        }
+
+        if let Ok(luau) = alloy::data::convert(text, format) {
+            self.write_mirror(&real.with_extension("luau"), &luau);
+        }
     }
 
     fn remove_mirror(&self, real: &Path) {
         let _ = std::fs::remove_file(self.mirror_path(real));
+
+        if alloy::data::Format::of_path(real).is_some()
+            && alloy::data::module_beside(real).is_none()
+        {
+            let _ = std::fs::remove_file(self.mirror_path(&real.with_extension("luau")));
+        }
     }
 }
 
@@ -1420,6 +1468,7 @@ impl Server {
             Some("initialized") => {
                 self.to_child(&message);
                 self.open_workspace();
+                self.watch_data_files();
             }
 
             Some("exit") => {
@@ -1541,6 +1590,10 @@ impl Server {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                // The child re-reads a `.luau` it hears about; a data
+                // file's module joins the list under the module's name.
+                let mut modules: Vec<Value> = Vec::new();
+                let mut data_changed: Vec<PathBuf> = Vec::new();
 
                 for change in &changes {
                     let uri = change
@@ -1567,6 +1620,11 @@ impl Server {
 
                                 (_, Ok(text)) => st.write_mirror(&path, &text),
                             }
+
+                            if let Some(module) = data_module_of(&path) {
+                                modules.push(json!({ "uri": path_to_uri(&module), "type": kind }));
+                                data_changed.push(path);
+                            }
                         }
 
                         drop(st);
@@ -1591,7 +1649,18 @@ impl Server {
                     }
                 }
 
+                if let Some(list) = message
+                    .pointer_mut("/params/changes")
+                    .and_then(Value::as_array_mut)
+                {
+                    list.extend(modules);
+                }
+
                 self.forward_plain(message);
+
+                for path in &data_changed {
+                    self.refresh_dependents(path);
+                }
             }
 
             // The mirror is the child's one folder, whatever the editor
@@ -1698,6 +1767,8 @@ impl Server {
                 let asked = self.state.lock().expect("state").asked.remove(&key);
 
                 match asked {
+                    Some(Asked::Watch) => {}
+
                     Some(Asked::Rename(edit)) => {
                         let chosen = message
                             .pointer("/result/title")
@@ -1749,11 +1820,65 @@ impl Server {
             crate::doc::apply_change(&mut text, range, piece);
         }
 
-        if let Some(path) = uri_to_path(uri) {
+        let module = uri_to_path(uri).and_then(|path| {
             st.write_mirror(&path, &text);
-        }
+
+            data_module_of(&path)
+        });
 
         st.plain.insert(uri.to_string(), text);
+        drop(st);
+
+        // The child re-reads the module once it hears the module changed.
+        if let Some(module) = module {
+            self.forward_plain(json!({
+                "jsonrpc": "2.0",
+                "method": "workspace/didChangeWatchedFiles",
+                "params": { "changes": [{ "uri": path_to_uri(&module), "type": 2 }] }
+            }));
+
+            if let Some(path) = uri_to_path(uri) {
+                self.refresh_dependents(&path);
+            }
+        }
+    }
+
+    /// Resends every open document that names a data file, so the child
+    /// checks it against the module it just re-read. A dirty dependency
+    /// alone leaves the next completion on the document empty.
+    fn refresh_dependents(&self, data: &Path) {
+        let data = normalize(data);
+        let messages: Vec<Value> = {
+            let st = self.state.lock().expect("state");
+
+            st.docs
+                .iter()
+                .filter_map(|(uri, doc)| {
+                    let path = uri_to_path(uri)?;
+                    let dir = path.parent()?;
+                    let names = alloy::data::references(&doc.source)
+                        .iter()
+                        .any(|r| normalize(&imports::lexical(dir, &r.path)) == data);
+
+                    if !names || !child_sees(uri) {
+                        return None;
+                    }
+
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didChange",
+                        "params": {
+                            "textDocument": { "uri": st.child_uri(uri), "version": doc.version },
+                            "contentChanges": [{ "text": doc.shadow }]
+                        }
+                    }))
+                })
+                .collect()
+        };
+
+        for message in messages {
+            self.to_child(&message);
+        }
     }
 
     /// Maps a request about an Alloy document into its shadow and
@@ -2057,6 +2182,18 @@ impl Server {
         let Some(offset) = offset_of(&doc.source, line, character) else {
             return false;
         };
+
+        // A data import: the path and each name open the data file, at
+        // the line that defines the key when the file has it.
+        if let Some(result) = uri_to_path(uri)
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .and_then(|dir| data_definition(&doc.source, offset, &dir))
+        {
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
 
         if !keywords::is_word_at(&doc.source, offset) {
             return false;
@@ -3044,6 +3181,35 @@ impl Server {
         log::info("workspace shadows opened");
     }
 
+    /// Asks the editor to report changes to data files, so a saved
+    /// `.json` or `.toml` regenerates its mirror module. The extension's
+    /// own watcher covers `.json`; this one adds `.toml`. An editor
+    /// without dynamic registration answers with an error, which is
+    /// dropped.
+    fn watch_data_files(&self) {
+        let id = {
+            let mut st = self.state.lock().expect("state");
+            let id = st.fresh_id();
+            st.asked.insert(id.clone(), Asked::Watch);
+
+            id
+        };
+        self.to_client(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "alloy-data-files",
+                    "method": "workspace/didChangeWatchedFiles",
+                    "registerOptions": {
+                        "watchers": [{ "globPattern": "**/*.{json,toml}" }]
+                    }
+                }]
+            }
+        }));
+    }
+
     /// Files moved: the shadows follow at once, and the imports that
     /// named the old paths follow after the editor's answer.
     fn renamed(&self, files: &[Value]) {
@@ -3208,8 +3374,104 @@ fn walk(dir: &Path, skip: Option<&Path>, out: &mut Vec<PathBuf>, plain: &mut Vec
     }
 }
 
-/// The mirror directory for a workspace root: stable per root, so a
-/// restart finds the same place and starts it clean.
+/// The definition a position in a data import names: on the path, the
+/// data file's first line; on an imported name, the line of that key.
+/// None when the line holds no data path or the file is not there.
+fn data_definition(source: &str, offset: usize, dir: &Path) -> Option<Value> {
+    let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = source[offset..]
+        .find('\n')
+        .map(|i| offset + i)
+        .unwrap_or(source.len());
+    let line = &source[line_start..line_end];
+    let at = offset - line_start;
+    let reference = alloy::data::references(line).into_iter().next()?;
+    let format = alloy::data::Format::of(&reference.path)?;
+    let file = imports::lexical(dir, &reference.path);
+
+    if !file.is_file() {
+        return None;
+    }
+
+    let on_path = (reference.start as usize..=reference.end as usize).contains(&at);
+    let mut target_line = 0;
+
+    if !on_path {
+        // A name binds to the file only in an `import` statement, and
+        // only before its path; a local in `local x = import("...")`
+        // is the child's to find.
+        let is_statement = line.trim_start().starts_with("import ");
+
+        if !is_statement || at >= reference.start as usize || !keywords::is_word_at(line, at) {
+            return None;
+        }
+
+        let (start, end) = keywords::word_range(line, at);
+        let word = &line[start..end];
+
+        if matches!(word, "import" | "type" | "as" | "from") {
+            return None;
+        }
+
+        // `key as alias`: the key is the word before `as`.
+        let key = match line[..start].trim_end().strip_suffix("as") {
+            Some(head) if head.ends_with(char::is_whitespace) => {
+                let head = head.trim_end();
+                let key_start = head
+                    .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+
+                &head[key_start..]
+            }
+
+            _ => word,
+        };
+
+        // A name in braces names a key; the module name before `from`
+        // or after `import` names the file.
+        let in_braces = line[..start].contains('{') && line[end..].contains('}');
+
+        if in_braces && let Ok(text) = std::fs::read_to_string(&file) {
+            target_line = alloy::data::key_line(&text, format, key).unwrap_or(0);
+        }
+    }
+
+    let position = json!({ "line": target_line, "character": 0 });
+
+    Some(json!([{
+        "uri": path_to_uri(&file),
+        "range": { "start": position, "end": position },
+    }]))
+}
+
+/// The module a data file builds to, `x.json` giving `x.luau`, when
+/// no module of that stem sits beside it.
+fn data_module_of(path: &Path) -> Option<PathBuf> {
+    if alloy::data::Format::of_path(path).is_none() || alloy::data::module_beside(path).is_some() {
+        return None;
+    }
+
+    Some(path.with_extension("luau"))
+}
+
+/// The data file behind a mirror module: the child answers about
+/// `x.luau`, and the editor has `x.json` or `x.toml` when no real
+/// `x.luau` exists.
+fn data_source_of(path: PathBuf) -> PathBuf {
+    if path.extension().is_some_and(|e| e == "luau") && !path.exists() {
+        for ext in ["json", "toml"] {
+            let data = path.with_extension(ext);
+
+            if data.is_file() {
+                return data;
+            }
+        }
+    }
+
+    path
+}
+
 /// A path with its `.` and `..` components folded, so `crates/../examples`
 /// and `examples` name one place.
 fn normalize(path: &Path) -> PathBuf {
@@ -3719,6 +3981,16 @@ fn module_entries(
         if path.is_dir() {
             if seen.insert(name.clone()) {
                 out.push((format!("{name}/"), 19, "directory".to_string()));
+            }
+
+            continue;
+        }
+
+        // A data file keeps its extension: the path names the file, and
+        // the emit drops the extension itself.
+        if let Some(format) = alloy::data::Format::of(&name) {
+            if seen.insert(name.clone()) {
+                out.push((name.clone(), 17, format!("{} data", format.name())));
             }
 
             continue;

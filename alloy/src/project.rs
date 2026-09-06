@@ -190,13 +190,11 @@ pub fn resolve_alias(config: &Config, rel: &Path, alias: &str, rest: &str) -> Op
 }
 
 /// Rewrites every `require("@alias/...")` in an emitted text to the
-/// relative instance path, for the aliases the mount table names. The
-/// text keeps its line count: a replacement holds no newline.
+/// relative instance path, for the aliases the mount table names, and
+/// drops the extension of a data path, `./x.json`, since the build
+/// writes it as `x.luau`. The text keeps its line count: a replacement
+/// holds no newline.
 pub fn rewrite_requires(config: &Config, rel: &Path, text: &str) -> String {
-    if config.mount.is_empty() {
-        return text.to_string();
-    }
-
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
 
@@ -226,7 +224,7 @@ pub fn rewrite_requires(config: &Config, rel: &Path, text: &str) -> String {
 
         out.push_str(&rest[..i + "require(".len()]);
         out.push(q);
-        out.push_str(replaced.as_deref().unwrap_or(path));
+        out.push_str(crate::data::strip_spec(replaced.as_deref().unwrap_or(path)));
         out.push(q);
         rest = &body[end + 1..];
     }
@@ -664,6 +662,14 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         assert_eq!(
             out,
             "local jecs = require(\"../../ReplicatedStorage/Packages/jecs\") local u = require(\"../../ReplicatedStorage/Shared/util\") local x = require(\"./x\")"
+        );
+        assert_eq!(
+            rewrite_requires(
+                &Config::default(),
+                Path::new("src/a.aly"),
+                "local d = require(\"./data.json\") local c = require('../cfg.toml')\n"
+            ),
+            "local d = require(\"./data\") local c = require('../cfg')\n"
         );
         assert_eq!(
             rewrite_requires(&c, Path::new("src/shared/a.aly"), "require(\"@shared/b\")"),

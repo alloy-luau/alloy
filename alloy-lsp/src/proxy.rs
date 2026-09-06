@@ -4507,6 +4507,9 @@ fn declared_annotation(source: &str, name: &str, at: usize) -> Option<(usize, St
 
                     ')' | '}' | ']' | '>' if depth > 0 => depth -= 1,
 
+                    // A comma inside `Signal<Player, number>` is the type's.
+                    ',' | '=' | '\n' if depth > 0 => {}
+
                     ')' | ',' | '=' | '\n' => {
                         stop = j;
 
@@ -5034,6 +5037,23 @@ pub fn path_to_uri(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_declared_annotation_keeps_its_type_arguments() {
+        let src = "local damaged: Signal<Player, number> = Signal.new()\nlocal n: number = 1\nlocal function f(a: { x: number, y: number }, b: string) end\n";
+        assert_eq!(
+            super::declared_annotation(src, "damaged", 6).map(|(_, a)| a),
+            Some("Signal<Player, number>".to_string())
+        );
+        assert_eq!(
+            super::declared_annotation(src, "n", 60).map(|(_, a)| a),
+            Some("number".to_string())
+        );
+        assert_eq!(
+            super::declared_annotation(src, "a", 90).map(|(_, a)| a),
+            Some("{ x: number, y: number }".to_string())
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -4120,6 +4120,14 @@ fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -> Option<St
     let binding = doc.bindings.iter().find(|b| b.name == word)?;
     let rest = value.strip_prefix("```luau\n")?;
 
+    // The child reads a `---` comment the shadow keeps, and the hover
+    // carries it behind a rule. That doc is the binding's own: adding
+    // it again shows it twice.
+    let doc_text = binding
+        .doc
+        .as_deref()
+        .filter(|_| !rest.contains("\n```\n----------\n"));
+
     // A type function hovers as `function<a>(t): type`, nameless: the
     // name goes back in, behind `type function`.
     if (rest.starts_with("function<") || rest.starts_with("function("))
@@ -4131,7 +4139,7 @@ fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -> Option<St
             &rest["function".len()..]
         );
 
-        if let Some(doc) = &binding.doc {
+        if let Some(doc) = doc_text {
             out.push_str("\n\n");
             out.push_str(doc);
         }
@@ -4151,13 +4159,13 @@ fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -> Option<St
         _ => return None,
     };
 
-    if head == binding.prefix && binding.doc.is_none() {
+    if head == binding.prefix && doc_text.is_none() {
         return None;
     }
 
     let mut out = format!("```alloy\n{}{tail}", binding.prefix);
 
-    if let Some(doc) = &binding.doc {
+    if let Some(doc) = doc_text {
         out.push_str("\n\n");
         out.push_str(doc);
     }
@@ -5465,6 +5473,30 @@ mod tests {
         );
         assert!(payload_types("Msg.Quit").is_empty());
         assert!(payload_types("Msg.Unit()").is_empty());
+    }
+
+    #[test]
+    fn a_doc_the_child_read_is_not_added_again() {
+        let src = "--- HUD Component\nexport function Hud(props: number): number\n    return props\nend\n";
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+
+        // The shadow keeps the comment, so the child's hover carries it.
+        let from_child =
+            "```luau\nfunction Hud(props: number): number\n```\n----------\nHUD Component";
+        let restyled = restyle_hover(from_child, &doc, 1, 17).expect("restyled");
+        assert_eq!(restyled.matches("HUD Component").count(), 1);
+        assert!(restyled.starts_with("```alloy\nexport function Hud("));
+
+        // A hover without the doc gets it from the binding.
+        let bare = "```luau\nfunction Hud(props: number): number\n```";
+        let restyled = restyle_hover(bare, &doc, 1, 17).expect("restyled");
+        assert_eq!(restyled.matches("HUD Component").count(), 1);
     }
 
     #[test]

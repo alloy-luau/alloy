@@ -721,7 +721,9 @@ impl Config {
     /// root is the directory that holds it, and every path in the file is
     /// relative to that root.
     pub fn find(start: &Path) -> Option<PathBuf> {
-        let mut dir = Some(start);
+        // A relative start has no parents to walk: `src` ends at `src`.
+        let start = std::path::absolute(start).unwrap_or_else(|_| start.to_path_buf());
+        let mut dir = Some(start.as_path());
 
         while let Some(d) = dir {
             let candidate = d.join(FILE_NAME);

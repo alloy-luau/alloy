@@ -92,6 +92,11 @@ impl Ingots {
     /// Loads every ingot of a config. A problem with one ingot never
     /// stops the others; the problems come back beside the list.
     pub fn load(root: &Path, config: &Config) -> Ingots {
+        // An ingot runs in its own directory and reads the root it is
+        // told: a relative one, `.` from the command line, would name
+        // that directory instead of the project.
+        let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+        let root = root.as_path();
         let mut out = Ingots {
             root: root.to_path_buf(),
             ..Ingots::default()

@@ -131,6 +131,9 @@ fn markup_near(path: &Path) -> Result<alloy::luaux::Config, String> {
 }
 
 fn load_ingots_near(path: &Path) -> Option<alloy::ingot::Ingots> {
+    // The search walks up from the file's directory; a relative path
+    // has no parents to walk, so it is made absolute first.
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let dir = if dir.as_os_str().is_empty() {
         PathBuf::from(".")

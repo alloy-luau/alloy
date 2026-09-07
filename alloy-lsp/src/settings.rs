@@ -16,6 +16,9 @@ pub fn defaults() -> Value {
             "parameterNames": "literals",
             "makeInsertable": true,
             "hideHintsForDuplicateParameterNames": true,
+            // The child cuts a long type with `*TRUNCATED*`; the proxy
+            // folds the type to its name first and shortens what is left.
+            "typeHintMaxLength": 4000,
         },
         "completion": {
             "autocompleteEnd": true,

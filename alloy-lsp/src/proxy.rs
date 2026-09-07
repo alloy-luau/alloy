@@ -2828,17 +2828,20 @@ impl Server {
                             // error type describes the emit, not the source.
                             hints.retain(|h| {
                                 let error_type = hint_label(h).contains("*error-type*");
-                                let generated = h
+                                let offset = h
                                     .get("position")
                                     .and_then(position_of_value)
-                                    .and_then(|(l, c)| offset_of(&doc.shadow, l, c))
-                                    .is_some_and(|o| {
-                                        doc.output.as_ref().is_some_and(|out| {
-                                            out.map.is_generated(o.saturating_sub(1) as u32)
-                                        })
-                                    });
+                                    .and_then(|(l, c)| offset_of(&doc.shadow, l, c));
+                                let generated = offset
+                                    .is_some_and(|o| doc.generated_offset(o.saturating_sub(1)));
+                                // A parameter hint on a call the lowering
+                                // wrote, `create("TextLabel")` behind a tag,
+                                // lands on the tag: the byte before it is
+                                // not the author's.
+                                let lowered_call = h.get("kind").and_then(Value::as_u64) == Some(2)
+                                    && offset.is_some_and(|o| doc.lowering_differs_before(o));
 
-                                !error_type && !generated
+                                !error_type && !generated && !lowered_call
                             });
 
                             // An async function declares the inner type;
@@ -2957,6 +2960,32 @@ impl Server {
                             && hint_label(h).starts_with(':')
                         {
                             h["label"] = json!(text);
+                        }
+
+                        // A type the folds could not name stays long; the
+                        // hint shows its head and inserts nothing, since a
+                        // cut type is no annotation.
+                        let label = hint_label(h);
+
+                        if label.chars().count() > 72 {
+                            let head: String = label.chars().take(69).collect();
+                            h["label"] = json!(format!("{}…", head.trim_end()));
+                            h.as_object_mut().map(|o| o.remove("textEdits"));
+                        } else if h
+                            .get("textEdits")
+                            .and_then(Value::as_array)
+                            .is_none_or(Vec::is_empty)
+                            && label.starts_with(": ")
+                            && !label.contains(" where ")
+                            && !label.contains('…')
+                            && let Some(position) = h.get("position").cloned()
+                        {
+                            // A type the child cut and the fold named is
+                            // whole again: it inserts like any other.
+                            h["textEdits"] = json!([{
+                                "range": { "start": position.clone(), "end": position },
+                                "newText": label,
+                            }]);
                         }
                     }
                 }
@@ -5048,9 +5077,9 @@ fn keep_diagnostic(d: &Value, doc: &Doc, lint_config: &alloy::config::LintConfig
         return false;
     }
 
-    let Some(out) = &doc.output else {
+    if doc.output.is_none() {
         return true;
-    };
+    }
 
     let Some(((sl, sc), (el, ec))) = d.get("range").and_then(range_of) else {
         return true;
@@ -5061,7 +5090,7 @@ fn keep_diagnostic(d: &Value, doc: &Doc, lint_config: &alloy::config::LintConfig
     };
     let end = offset_of(&doc.shadow, el, ec).unwrap_or(doc.shadow.len());
 
-    !(start..end.max(start + 1)).any(|o| out.map.is_generated(o as u32))
+    !(start..end.max(start + 1)).any(|o| doc.generated_offset(o))
 }
 
 /// A child message as the editor should read it: a mirror path reads as

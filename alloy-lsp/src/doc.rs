@@ -182,10 +182,16 @@ impl Doc {
     /// Whether a shadow position sits in text no author wrote: the
     /// desugar's, or an ingot's edit behind a `.alx` lowering.
     pub fn generated_at(&self, line: u32, character: u32) -> bool {
-        let Some(out) = &self.output else {
+        let Some(offset) = offset_of(&self.shadow, line, character) else {
             return false;
         };
-        let Some(offset) = offset_of(&self.shadow, line, character) else {
+
+        self.generated_offset(offset)
+    }
+
+    /// The same, for a shadow byte offset.
+    pub fn generated_offset(&self, offset: usize) -> bool {
+        let Some(out) = &self.output else {
             return false;
         };
 
@@ -205,6 +211,28 @@ impl Doc {
         let at = offset_of(layered, line, col).unwrap_or(0);
 
         layer.is_generated(at as u32)
+    }
+
+    /// For `.alx`: whether the byte before a shadow offset differs from
+    /// the byte before the source position it maps to. A call the
+    /// lowering wrote, `create("Frame")` for `<Frame`, has a quote where
+    /// the source has `<`; a call the author wrote reads the same.
+    pub fn lowering_differs_before(&self, offset: usize) -> bool {
+        let Some(out) = &self.output else {
+            return false;
+        };
+        let Some(low) = &out.lowered else {
+            return false;
+        };
+        let src = out.map.to_source(offset as u32) as usize;
+        let (line, col) = position_of(low, src.min(low.len()));
+        let from = line_text(low, line);
+        let to = line_text(&self.source, line);
+        let mapped = alloy::alx::map_column(from, to, col as usize);
+        let before_low = from[..(col as usize).min(from.len())].chars().next_back();
+        let before_src = to[..mapped.min(to.len())].chars().next_back();
+
+        before_low != before_src
     }
 
     /// Applies one LSP content change.

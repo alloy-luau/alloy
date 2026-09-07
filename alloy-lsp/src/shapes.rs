@@ -129,6 +129,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_full_views(&mut out, known);
     fold_array_alias(&mut out);
     fold_narrowed_primitives(&mut out);
+    fold_cut_array(&mut out);
     out = fold_temp_receiver(&out);
     fold_aliases(&mut out, known);
     // An async body that returns nothing types as `Future<nil>`, since
@@ -525,6 +526,46 @@ fn fold_temp_receiver(text: &str) -> String {
     }
 
     out
+}
+
+/// A hint the child cut short, `: t1 where t1 = { [number]: any, concat:
+/// (read any[], t1) -> t1, ...`, still names an array by its head: the
+/// indexer and the first method are enough.
+fn fold_cut_array(text: &mut String) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(" where ") {
+        let at = from + i;
+        let (head_start, head) = head_of(text, at);
+        let var = head.trim().trim_end_matches('?');
+        let optional = head.trim().ends_with('?');
+        let clause = &text[at + " where ".len()..];
+        let Some(body) = clause.strip_prefix(&format!("{var} = {{ [number]: ")) else {
+            from = at + 1;
+            continue;
+        };
+        let Some(comma) = body.find(", ") else {
+            from = at + 1;
+            continue;
+        };
+        let elem = body[..comma].to_string();
+        let rest = &body[comma + 2..];
+
+        if !(rest.starts_with("concat:") || rest.starts_with("push:") || rest.starts_with("len:")) {
+            from = at + 1;
+            continue;
+        }
+
+        let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+        let name = if elem.contains(' ') || elem.contains('|') {
+            format!("({elem})[]")
+        } else {
+            format!("{elem}[]")
+        };
+        let name = if optional { format!("{name}?") } else { name };
+        text.replace_range(head_start..end, &name);
+        from = head_start + name.len();
+    }
 }
 
 /// `Array<T>` reads as the sugar the source has, `T[]`, when `T` is a
@@ -1933,6 +1974,23 @@ mod tests {
             fold(text, &Known::default()),
             "```luau\nlocal v: string | number\n```"
         );
+    }
+
+    #[test]
+    fn a_cut_hint_still_names_an_array() {
+        let text = ": t1 where t1 = { [number]: any, concat: (read any[], t1) -> t1, ...";
+        assert_eq!(fold(text, &Known::default()), ": any[]");
+        let text = "local xs: t1? where t1 = { [number]: number | string, len: (read (number | string)[]) -> number, ...";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "local xs: (number | string)[]?"
+        );
+    }
+
+    #[test]
+    fn a_hint_of_a_mapped_array_reads_as_an_array() {
+        let text = ": t1 where t1 = { [number]: any, concat: (read any[], t1) -> t1, contains: (read any[], any) -> boolean, filter: (read any[], (any, number) -> boolean) -> t1, find: (read any[], (any, number) -> boolean) -> any?, find_index: (read any[], (any, number) -> boolean) -> number?, first: (read any[]) -> any?, for_each: (read any[], (any, number) -> ()) -> (), index_of: (read any[], any) -> number?, is_empty: (read any[]) -> boolean, join: (read any[], string?) -> string, last: (read any[]) -> any?, len: (read any[]) -> number, map: <U>(read any[], (any, number) -> U) -> any, pop: (read any[]) -> any?, push: (read any[], ...any) -> (), reduce: <U>(read any[], (U, any, number) -> U, U) -> U, reverse: (read any[]) -> t1, slice: (read any[], number, number?) -> t1, sort_by: (read any[], (any, any) -> boolean) -> t1 }";
+        assert_eq!(fold(text, &Known::default()), ": any[]");
     }
 
     #[test]

@@ -1848,6 +1848,18 @@ impl Server {
                     return true;
                 }
 
+                // A closing quote asks for nothing: the editor sends the
+                // quote as a trigger either way, and a list that pops up
+                // there takes the next Enter.
+                if m == "textDocument/completion"
+                    && let Some(id) = message.get("id").cloned()
+                    && self.closes_a_string(&uri, &message)
+                {
+                    self.respond(&id, json!([]));
+
+                    return true;
+                }
+
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
                     && self.ingot_completion(&uri, &message, &id)
@@ -3336,6 +3348,52 @@ impl Server {
         self.respond(id, result);
 
         true
+    }
+
+    /// Whether a completion request came from a quote that closed a
+    /// string: the quote is a trigger character for a require path, and
+    /// the one that ends the string is the same key.
+    fn closes_a_string(&self, uri: &str, message: &Value) -> bool {
+        let Some(trigger) = message
+            .pointer("/params/context/triggerCharacter")
+            .and_then(Value::as_str)
+        else {
+            return false;
+        };
+
+        if !matches!(trigger, "\"" | "'" | "`") {
+            return false;
+        }
+
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+        let st = self.state.lock().expect("state");
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let before = &doc.source[line_start..offset];
+        let quote = trigger.chars().next().unwrap_or('"');
+        let mut open = false;
+        let mut chars = before.chars();
+
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                chars.next();
+            } else if c == quote {
+                open = !open;
+            }
+        }
+
+        // An even count: the quote just typed closed the string.
+        !open
     }
 
     /// The completion items an ingot offers at a position, when it has

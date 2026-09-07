@@ -606,10 +606,13 @@ mod tests {
     #[test]
     fn a_wide_tag_breaks_its_attributes() {
         let src = "local x = <Frame Size={UDim2.fromScale(1, 1)} BackgroundTransparency={1} Position={UDim2.fromScale(0.5, 0.5)} AnchorPoint={Vector2.new(0.5, 0.5)} />\n";
-        let want = "local x = <Frame\n    Size={UDim2.fromScale(1, 1)} BackgroundTransparency={1} Position={UDim2.fromScale(0.5, 0.5)}\n    AnchorPoint={Vector2.new(0.5, 0.5)}\n/>\n";
+        let want = "local x = <Frame\n    Size={UDim2.fromScale(1, 1)}\n    BackgroundTransparency={1}\n    Position={UDim2.fromScale(0.5, 0.5)}\n    AnchorPoint={Vector2.new(0.5, 0.5)}\n/>\n";
         assert_eq!(fmt(src), want);
         let mut o = FmtConfig::default();
-        o.alx.attribute_per_line = true;
+        o.alx.attribute_per_line = false;
+        let want = "local x = <Frame\n    Size={UDim2.fromScale(1, 1)} BackgroundTransparency={1} Position={UDim2.fromScale(0.5, 0.5)}\n    AnchorPoint={Vector2.new(0.5, 0.5)}\n/>\n";
+        assert_eq!(format_alx(src, &o).unwrap(), want);
+        let mut o = FmtConfig::default();
         o.alx.bracket_same_line = true;
         let want = "local x = <Frame\n    Size={UDim2.fromScale(1, 1)}\n    BackgroundTransparency={1}\n    Position={UDim2.fromScale(0.5, 0.5)}\n    AnchorPoint={Vector2.new(0.5, 0.5)} />\n";
         assert_eq!(format_alx(src, &o).unwrap(), want);

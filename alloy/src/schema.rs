@@ -501,8 +501,8 @@ pub const TABLES: &[Table] = &[
             key(
                 "attribute_per_line",
                 BOOL,
-                "false",
-                "A tag that breaks its attributes puts every attribute on its own line, rather than as many as fit.",
+                "true",
+                "A tag that breaks its attributes puts every attribute on its own line, the way Prettier lays JSX out; `false` packs as many as fit.",
             ),
             key(
                 "self_closing_space",

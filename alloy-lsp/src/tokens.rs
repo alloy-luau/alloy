@@ -34,6 +34,22 @@ pub fn remap(data: &[u64], doc: &Doc) -> Vec<u64> {
         }
 
         let (sl, sc) = doc.to_source(l, s);
+
+        // Behind a markup lowering the map goes by word: a token that is
+        // no word, a string or a bracket, may land beside another token.
+        // The source must read the same as the shadow does at the token,
+        // else the token goes.
+        if out.lowered.is_some() {
+            let shadow_text = &doc.shadow[first..=last];
+            let same = offset_of(&doc.source, sl, sc)
+                .and_then(|o| doc.source.get(o..o + shadow_text.len()))
+                .is_some_and(|src| src == shadow_text);
+
+            if !same {
+                continue;
+            }
+        }
+
         tokens.push((sl, sc, len, kind, mods));
     }
 
@@ -75,5 +91,33 @@ mod tests {
         let data = [0, 0, 5, 1, 0, 0, 18, 3, 2, 0, 1, 0, 5, 3, 0];
         let out = remap(&data, &doc);
         assert_eq!(out, vec![0, 0, 5, 1, 0, 1, 0, 5, 3, 0]);
+    }
+
+    #[test]
+    fn markup_tokens_keep_their_words_and_drop_the_rest() {
+        let src = "local function create(c) return function(p) return p end end\nlocal props = { name = \"a\" }\nlocal x = <Frame Name={props.name} Size=\"s\" />\nprint(x)\n";
+        let options = EmitOptions {
+            file_name: "ui.alx".into(),
+            ..EmitOptions::default()
+        };
+        let jsx =
+            alloy::luaux::Config::parse("[factory]\nbackend = \"table\"\ncreate = \"create\"\n")
+                .unwrap();
+        let doc = Doc::new(src.to_string(), 1, &options, &jsx, None);
+        let shadow = doc.shadow.clone();
+        assert!(shadow.contains("create(\"Frame\")"), "{shadow}");
+        // In the shadow's third line: `props` inside the lowered call, and
+        // the string `"s"` after it.
+        let line = shadow.lines().nth(2).unwrap();
+        let col = line.find("props").unwrap() as u64;
+        let str_col = line.find("\"s\"").unwrap() as u64;
+        let data = [1, 6, 5, 8, 0, 1, col, 5, 8, 0, 0, str_col - col, 3, 18, 0];
+        let out = remap(&data, &doc);
+        // `props` on line 2 stays at 6, `props` on line 3 lands on the
+        // hole's `props`, and the string, which no word maps, goes.
+        assert_eq!(out.len(), 10, "{out:?}");
+        assert_eq!(&out[..5], &[1, 6, 5, 8, 0]);
+        let src_col = src.lines().nth(2).unwrap().find("props").unwrap() as u64;
+        assert_eq!(&out[5..], &[1, src_col, 5, 8, 0]);
     }
 }

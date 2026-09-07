@@ -356,7 +356,8 @@ pub struct AlxFmt {
     pub attribute_quotes: AttributeQuotes,
     /// The `>` of a tag that breaks goes after the last attribute.
     pub bracket_same_line: bool,
-    /// One attribute per line at all times.
+    /// A tag that breaks puts one attribute per line, the way Prettier
+    /// lays JSX out; off, it packs as many as fit.
     pub attribute_per_line: bool,
     /// The space in `<Frame />`.
     pub self_closing_space: bool,
@@ -371,7 +372,7 @@ impl Default for AlxFmt {
         Self {
             attribute_quotes: AttributeQuotes::Double,
             bracket_same_line: false,
-            attribute_per_line: false,
+            attribute_per_line: true,
             self_closing_space: true,
             text_wrap: TextWrap::Fill,
             blank_lines: true,
@@ -588,7 +589,7 @@ quote_style = "auto-prefer-double"
 # exclude = ["vendor/*"]
 # sort_requires = { enabled = true, grouping = "by-kind" }
 # [fmt.alx]
-# attribute_per_line = false
+# attribute_per_line = true
 
 [lint]
 # the levels of the lints; a list takes a lint or a group: correctness,

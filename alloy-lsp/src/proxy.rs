@@ -2917,7 +2917,12 @@ impl Server {
             if method == "textDocument/documentColor"
                 && let Some(uri) = &ctx
             {
-                let extra = st.ingot_colors(uri);
+                let mut extra = st.ingot_colors(uri);
+
+                // A `Color3` call the child already colors gets one square.
+                if let Value::Array(items) = result {
+                    extra.retain(|e| !items.iter().any(|i| i.get("range") == e.get("range")));
+                }
 
                 if !extra.is_empty() {
                     match result {

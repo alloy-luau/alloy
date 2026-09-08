@@ -205,7 +205,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "local",
-        "```alloy\nlocal x: T = expr\nlocal { name, hp = health } = player\nlocal [first, ...rest] = xs\nlocal Ok(v) = result else\n    return\nend\n```\nLuau's binding, with three forms of its own. A table pattern takes fields by name, `= alias` renames one. An array pattern takes items by position, and `...rest` takes the tail as an array. A variant or struct pattern binds its payload, and the `else` block runs when the pattern fails: it must leave, with `return`, `break`, `continue`, or an error, so the names hold after it. `const` takes every form too.",
+        "```alloy\nlocal x: T = expr\nlocal { name, hp = health } = player\nlocal [first, ...rest] = xs\nlocal Build(model) = job\nlocal Ok(v) = result else\n    return\nend\n```\nLuau's binding, with three forms of its own. A table pattern takes fields by name, `= alias` renames one. An array pattern takes items by position, and `...rest` takes the tail as an array. A variant or struct pattern binds its payload: `local Build(model) = job` reads the payload of one variant, and a value of another variant raises, naming the pattern and the tag it found. With `else ... end` the block runs instead, and it must leave, with `return`, `break`, `continue`, or an error, so the names hold after it. `const` takes every form too.",
     ),
     (
         "const",

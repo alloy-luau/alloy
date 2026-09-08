@@ -34,7 +34,7 @@ pub mod testbuild;
 pub mod typecheck;
 
 pub use alx::{AlxOutput, compile_alx};
-pub use desugar::{Diagnostic, EmitOptions, MacroSource};
+pub use desugar::{Diagnostic, EmitOptions, MacroSource, StructShape, WireField};
 pub use lint::{Fix, Lint};
 pub use render::SpanMap;
 

@@ -92,6 +92,56 @@ pub fn check(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report>
     run_with(root, &config, false, false)
 }
 
+/// The structs the sources declare, with each field's type and width,
+/// for the wire layout of a remote. A source that does not parse
+/// contributes nothing; its own compile reports the error.
+pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
+    let mut shapes = Vec::new();
+
+    for path in sources {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(parsed) = alloy_syntax::parse_one(&src) else {
+            continue;
+        };
+        let text = |span: alloy_syntax::ast::TokSpan| -> String {
+            let toks = &parsed.lexed.toks;
+            let start = toks[span.start as usize].start as usize;
+            let end = toks[span.end as usize - 1].end as usize;
+
+            src[start..end].to_string()
+        };
+
+        for stmt in &parsed.chunk.block.stmts {
+            let alloy_syntax::ast::Stmt::Struct(st) = stmt else {
+                continue;
+            };
+            let fields = st
+                .fields
+                .iter()
+                .map(|f| crate::WireField {
+                    name: text(f.name),
+                    ty: text(f.ty).trim().to_string(),
+                    width: f.attributes.iter().find_map(|a| {
+                        let n = text(a.name?);
+
+                        crate::desugar::WIRE_WIDTHS
+                            .contains(&n.as_str())
+                            .then_some(n)
+                    }),
+                })
+                .collect();
+            shapes.push(crate::StructShape {
+                name: text(st.name),
+                fields,
+            });
+        }
+    }
+
+    shapes
+}
+
 /// The Alloy sources under `input`, sorted.
 pub fn sources(input: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut list = Vec::new();
@@ -125,6 +175,13 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     sources.sort();
     let mut plain = Vec::new();
     walk_plain(&input, &mut plain)?;
+
+    // The structs of every source, so a remote in one file packs a
+    // struct another file declares.
+    let base_options = EmitOptions {
+        shapes: struct_shapes(&sources),
+        ..base_options
+    };
 
     // A data file builds beside the modules; one that would build to
     // the same `.luau` as a source or a plain file is a diagnostic.

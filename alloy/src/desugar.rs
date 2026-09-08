@@ -60,6 +60,9 @@ pub struct EmitOptions {
     /// Macros visible to an expansion, as source: a nested compile of a
     /// macro body sees the macros of the file it came from.
     pub macros: Vec<MacroSource>,
+    /// The structs of the whole project, for the wire layout of a
+    /// remote that carries one from another file.
+    pub shapes: Vec<StructShape>,
     /// Render the check artifact: a call to an extension method on a
     /// foreign type stays as written, and `self` in such an impl carries
     /// the target type, so the analyzer types both. The ship artifact
@@ -117,6 +120,101 @@ struct FieldType {
     private: bool,
 }
 
+/// A struct another file declares, for the wire layout of a remote
+/// that carries it: each field with its type text and its width.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructShape {
+    pub name: String,
+    pub fields: Vec<WireField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WireField {
+    pub name: String,
+    pub ty: String,
+    pub width: Option<String>,
+}
+
+/// The number widths a parameter or a field may carry.
+pub const WIRE_WIDTHS: &[&str] = &["u8", "u16", "u32", "i8", "i16", "i32", "f32", "f64"];
+
+/// One node of a wire layout: how a value packs.
+#[derive(Debug, Clone, PartialEq)]
+enum Wire {
+    /// `u8`, `f64`, `bool`, `str`, or `any` for what crosses as it is.
+    Scalar { kind: String, optional: bool },
+    /// A record, field by field; `struct` names the local whose
+    /// metatable the reader restores.
+    Table {
+        fields: Vec<(String, Wire)>,
+        struct_name: Option<String>,
+        optional: bool,
+    },
+    /// An array: a count, then each item.
+    Array { item: Box<Wire>, optional: bool },
+}
+
+impl Wire {
+    fn is_any(&self) -> bool {
+        matches!(self, Wire::Scalar { kind, .. } if kind == "any")
+    }
+
+    fn with_optional(mut self, flag: bool) -> Self {
+        match &mut self {
+            Wire::Scalar { optional, .. }
+            | Wire::Table { optional, .. }
+            | Wire::Array { optional, .. } => *optional = *optional || flag,
+        }
+
+        self
+    }
+
+    /// The layout as the Luau table the runtime reads.
+    fn luau(&self) -> String {
+        match self {
+            Wire::Scalar { kind, optional } => {
+                luau_string(&format!("{kind}{}", if *optional { "?" } else { "" }))
+            }
+
+            Wire::Table {
+                fields,
+                struct_name,
+                optional,
+            } => {
+                let fields: Vec<String> = fields
+                    .iter()
+                    .map(|(n, w)| format!("{{ {}, {} }}", luau_string(n), w.luau()))
+                    .collect();
+                let mut out = format!("{{ fields = {{ {} }}", fields.join(", "));
+
+                if let Some(name) = struct_name {
+                    out.push_str(&format!(", struct = {name}"));
+                }
+
+                if *optional {
+                    out.push_str(", optional = true");
+                }
+
+                out.push_str(" }");
+
+                out
+            }
+
+            Wire::Array { item, optional } => {
+                let mut out = format!("{{ item = {}, array = true", item.luau());
+
+                if *optional {
+                    out.push_str(", optional = true");
+                }
+
+                out.push_str(" }");
+
+                out
+            }
+        }
+    }
+}
+
 /// A macro as source text, for expansion in a nested compile.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MacroSource {
@@ -137,6 +235,7 @@ impl Default for EmitOptions {
             definitions: false,
             erase_type_imports: false,
             macros: Vec::new(),
+            shapes: Vec::new(),
             check: false,
             extensions: Vec::new(),
             thresholds: crate::lint::Thresholds::default(),
@@ -228,6 +327,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         inserts: Vec::new(),
         return_at: None,
         struct_field_types: HashMap::new(),
+        struct_wire: HashMap::new(),
         temp_next: 0,
         declared: Vec::new(),
         no_hoist: 0,
@@ -451,6 +551,9 @@ struct Desugar<'s> {
     /// The fields of each struct declared here with their types, for the
     /// mapped types the check artifact expands inline.
     struct_field_types: HashMap<String, Vec<FieldType>>,
+    /// The fields of each struct declared here with their widths, for
+    /// the wire layout of a remote.
+    struct_wire: HashMap<String, Vec<WireField>>,
     /// The next temp index inside the statement under render.
     temp_next: u32,
     /// Per open block: the temp indices already declared in it, and in
@@ -3156,10 +3259,20 @@ impl<'s> Desugar<'s> {
             })
             .collect();
         let attrs = self.attr_table(&r.attributes);
+        // The layout names locals the check artifact need not resolve,
+        // and the checker types the remote by its declaration.
+        let wire = self.wire_layout(r);
+        let wire = if self.options.check || wire.iter().all(Wire::is_any) {
+            String::new()
+        } else {
+            let kinds: Vec<String> = wire.iter().map(Wire::luau).collect();
+
+            format!(", wire = {{ {} }}", kinds.join(", "))
+        };
         let kind = if r.is_function { "function" } else { "event" };
         let std = self.std();
         let value = format!(
-            "{std}.remote({{ name = {}, kind = \"{kind}\", from_client = {}, from_server = {}, params = {{ {} }}, defaults = {{ {} }}, attrs = {attrs} }})",
+            "{std}.remote({{ name = {}, kind = \"{kind}\", from_client = {}, from_server = {}, params = {{ {} }}, defaults = {{ {} }}, attrs = {attrs}{wire} }})",
             luau_string(&name),
             r.from_client,
             r.from_server,
@@ -3181,6 +3294,186 @@ impl<'s> Desugar<'s> {
         if r.exported {
             self.exports.push((name.clone(), name));
         }
+    }
+
+    /// The wire layout of each parameter: a width attribute, `@u8`, on a
+    /// number; else from the type, down into a struct, a table type, or
+    /// an array of those; `any` for what crosses as it is. A `?` type or
+    /// a default marks one that may be nil.
+    fn wire_layout(&mut self, r: &RemoteDecl) -> Vec<Wire> {
+        let mut kinds = Vec::new();
+        let mut from = self.byte_end(r.name);
+
+        for p in &r.params {
+            let gap = self.src[from as usize..self.byte_start(p.name) as usize].to_string();
+            from = self.byte_end(p.name);
+            let width: Option<String> = gap.find('@').map(|at| {
+                gap[at + 1..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect()
+            });
+            let ty =
+                p.ty.map(|t| self.text_of(t).trim().to_string())
+                    .unwrap_or_else(|| "any".to_string());
+            let width = width.filter(|w| WIRE_WIDTHS.contains(&w.as_str()));
+
+            if let Some(w) = &width {
+                let base = ty.trim_end_matches('?').trim();
+
+                if base != "number" && base != "any" {
+                    let pname = self.text_of(p.name).to_string();
+                    self.diagnose(
+                        p.name,
+                        &format!("`@{w}` packs a `number`; parameter `{pname}` is `{base}`"),
+                    );
+                }
+            }
+
+            let wire = self
+                .wire_of_type(&ty, width.as_deref(), 0)
+                .with_optional(p.default.is_some());
+            kinds.push(wire);
+        }
+
+        kinds
+    }
+
+    /// The layout of one type text. A struct declared here or in the
+    /// project opens to its fields; a record type to its members; `T[]`,
+    /// `{ T }`, and `Array<T>` to their item. Anything else is `any`.
+    fn wire_of_type(&self, text: &str, width: Option<&str>, depth: usize) -> Wire {
+        let mut ty = text.trim();
+        let mut optional = false;
+
+        while let Some(inner) = ty.strip_suffix('?') {
+            ty = inner.trim();
+            optional = true;
+        }
+
+        while ty.starts_with('(') && ty.ends_with(')') && group_len(ty, '(', ')') == Some(ty.len())
+        {
+            ty = ty[1..ty.len() - 1].trim();
+        }
+
+        let scalar = |kind: &str| Wire::Scalar {
+            kind: kind.to_string(),
+            optional,
+        };
+
+        if let Some(w) = width
+            && (ty == "number" || ty == "any")
+        {
+            return scalar(w);
+        }
+
+        if depth > 6 {
+            return scalar("any");
+        }
+
+        match ty {
+            "number" => return scalar("f64"),
+            "boolean" => return scalar("bool"),
+            "string" => return scalar("str"),
+            _ => {}
+        }
+
+        let array = |item: &str| Wire::Array {
+            item: Box::new(self.wire_of_type(item, None, depth + 1)),
+            optional,
+        };
+
+        if let Some(item) = ty.strip_suffix("[]") {
+            return array(item);
+        }
+
+        for head in ["Array<", "ReadArray<", "WriteArray<"] {
+            if let Some(rest) = ty.strip_prefix(head)
+                && let Some(item) = rest.strip_suffix('>')
+            {
+                return array(item);
+            }
+        }
+
+        if let Some(inner) = ty.strip_prefix('{')
+            && let Some(inner) = inner.strip_suffix('}')
+        {
+            let inner = inner.trim();
+            let parts = split_top_level(inner, ',');
+
+            if parts.len() == 1 && !inner.contains(':') && !inner.starts_with('[') {
+                return array(inner);
+            }
+
+            let mut fields = Vec::new();
+
+            for part in parts {
+                let part = part.trim();
+                let part = part
+                    .strip_prefix("read ")
+                    .or_else(|| part.strip_prefix("write "))
+                    .unwrap_or(part)
+                    .trim();
+
+                if part.is_empty() {
+                    continue;
+                }
+
+                let Some(colon) = part.find(':') else {
+                    return scalar("any");
+                };
+                let name = part[..colon].trim();
+
+                if name.starts_with('[') || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    return scalar("any");
+                }
+
+                fields.push((
+                    name.to_string(),
+                    self.wire_of_type(&part[colon + 1..], None, depth + 1),
+                ));
+            }
+
+            if fields.is_empty() {
+                return scalar("any");
+            }
+
+            return Wire::Table {
+                fields,
+                struct_name: None,
+                optional,
+            };
+        }
+
+        if ty.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            let declared = self.struct_wire.get(ty).cloned().or_else(|| {
+                self.options
+                    .shapes
+                    .iter()
+                    .find(|sh| sh.name == ty)
+                    .map(|sh| sh.fields.clone())
+            });
+
+            if let Some(declared) = declared {
+                let fields = declared
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.name.clone(),
+                            self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1),
+                        )
+                    })
+                    .collect();
+
+                return Wire::Table {
+                    fields,
+                    struct_name: Some(ty.to_string()),
+                    optional,
+                };
+            }
+        }
+
+        scalar("any")
     }
 
     /// The type of a remote object, from its declaration. The side that
@@ -6165,6 +6458,20 @@ impl<'s> Desugar<'s> {
             .collect();
         self.structs.insert(name.clone());
         self.note_field_types(&name, &st.fields);
+        let wire_fields = st
+            .fields
+            .iter()
+            .map(|f| WireField {
+                name: self.text_of(f.name).to_string(),
+                ty: self.text_of(f.ty).trim().to_string(),
+                width: f.attributes.iter().find_map(|a| {
+                    let n = self.text_of(a.name?).to_string();
+
+                    WIRE_WIDTHS.contains(&n.as_str()).then_some(n)
+                }),
+            })
+            .collect();
+        self.struct_wire.insert(name.clone(), wire_fields);
 
         if st.generics.is_some() {
             self.generic_types.insert(name.clone());
@@ -8284,6 +8591,50 @@ fn list_names(names: &[&str]) -> String {
 /// Why a parameter type cannot cross a remote, or `None` when it can.
 /// Functions and threads never serialize; a `Future` or `Signal` holds
 /// both.
+/// The parts of a type text at a separator of depth zero: the members
+/// of `{ a: T, b: { c: U } }` at its commas.
+fn split_top_level(text: &str, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut from = 0;
+
+    for (i, c) in text.char_indices() {
+        match c {
+            '{' | '(' | '<' | '[' => depth += 1,
+            '}' | ')' | '>' | ']' => depth -= 1,
+            c if c == sep && depth == 0 => {
+                parts.push(&text[from..i]);
+                from = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(&text[from..]);
+
+    parts
+}
+
+/// The length of the bracket group that opens at the start of `text`,
+/// when it closes inside the text.
+fn group_len(text: &str, open: char, close: char) -> Option<usize> {
+    let mut depth = 0i32;
+
+    for (i, c) in text.char_indices() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+
+            if depth == 0 {
+                return Some(i + c.len_utf8());
+            }
+        }
+    }
+
+    None
+}
+
 fn not_wire_type(ty: &str) -> Option<&'static str> {
     if ty.contains("->") {
         return Some("is a function type");

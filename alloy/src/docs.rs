@@ -237,7 +237,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("on", "The targets of an `attribute` declaration."),
     (
         "remote",
-        "```alloy\nremote Name(params) from client\nremote function Name(params): R from server\n```\nA typed channel between server and client. The compiler generates the serializer.\n\nThe object: `fire(...)` sends (to the server from a client; to one player, the first argument, from the server), `fire_all(...)` and `fire_except(player, ...)` send from the server to every client or all but one, `call(...)` asks a remote function and yields `Future<R>`, `on(handler)` and `once(handler)` receive (the connection comes back), `wait()` yields a Future of the next event, and `on_ratelimited(handler)` hears a sender that `@ratelimit` refused. `spec` and `instance` hold the declaration and the RemoteEvent behind it.\n\nThe declaration types the object. The side that fires passes the parameters, and a default makes one optional; a handler gets them filled, and a server handler gets the sender first: `BuySaber.on(function(sender, id) ... end)` types `sender: Player` and `id: string`. `call` on a remote function yields `Future<R>`.",
+        "```alloy\nremote Name(params) from client\nremote function Name(params): R from server\n```\nA typed channel between server and client. The compiler reads a layout off the parameters, and the runtime packs each fire into one `buffer`: a `number` at the width its attribute names, `@u8` to `@f32`, or 64 bits without one; a `boolean` as a byte; a `string` with its length; an optional parameter with a presence byte. A struct opens to its fields, with the widths its fields declare, and the reader restores its metatable; a record type, `{ x: number, y: number }`, opens the same way; `T[]`, `{ T }`, and `Array<T>` pack a count and each item. What none of that covers, a `Player`, an Instance, a map, crosses beside the buffer as it is, and a remote whose parameters are all such stays unpacked. The handler sees the arguments as declared, defaults filled.\n\nThe object: `fire(...)` sends (to the server from a client; to one player, the first argument, from the server), `fire_all(...)` and `fire_except(player, ...)` send from the server to every client or all but one, `call(...)` asks a remote function and yields `Future<R>`, `on(handler)` and `once(handler)` receive (the connection comes back), `wait()` yields a Future of the next event, and `on_ratelimited(handler)` hears a sender that `@ratelimit` refused. `spec` and `instance` hold the declaration and the RemoteEvent behind it.\n\nThe declaration types the object. The side that fires passes the parameters, and a default makes one optional; a handler gets them filled, and a server handler gets the sender first: `BuySaber.on(function(sender, id) ... end)` types `sender: Player` and `id: string`. `call` on a remote function yields `Future<R>`.",
     ),
     (
         "where",
@@ -392,31 +392,31 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@u8",
-        "```alloy\n@u8 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 8-bit unsigned. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
+        "```alloy\nremote Heal(@u8 amount: number) from client\n```\nThe wire width of a `number` on a remote parameter or a struct field: 8-bit unsigned. The remote packs it into the buffer at that width, a field when its struct crosses a remote, and a value that does not fit raises at the fire with the path of the value: `Sync: argument 1.hp: 300 does not fit @u8`. Without a width a number crosses as 64 bits.",
     ),
     (
         "@u16",
-        "```alloy\n@u16 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 16-bit unsigned. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
+        "```alloy\nremote Heal(@u16 amount: number) from client\n```\nThe wire width of a `number` on a remote parameter or a struct field: 16-bit unsigned. The remote packs it into the buffer at that width, a field when its struct crosses a remote, and a value that does not fit raises at the fire with the path of the value: `Sync: argument 1.hp: 300 does not fit @u8`. Without a width a number crosses as 64 bits.",
     ),
     (
         "@u32",
-        "```alloy\n@u32 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 32-bit unsigned. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
+        "```alloy\nremote Heal(@u32 amount: number) from client\n```\nThe wire width of a `number` on a remote parameter or a struct field: 32-bit unsigned. The remote packs it into the buffer at that width, a field when its struct crosses a remote, and a value that does not fit raises at the fire with the path of the value: `Sync: argument 1.hp: 300 does not fit @u8`. Without a width a number crosses as 64 bits.",
     ),
     (
         "@i8",
-        "```alloy\n@i8 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 8-bit signed. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
+        "```alloy\nremote Heal(@i8 amount: number) from client\n```\nThe wire width of a `number` on a remote parameter or a struct field: 8-bit signed. The remote packs it into the buffer at that width, a field when its struct crosses a remote, and a value that does not fit raises at the fire with the path of the value: `Sync: argument 1.hp: 300 does not fit @u8`. Without a width a number crosses as 64 bits.",
     ),
     (
         "@i16",
-        "```alloy\n@i16 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 16-bit signed. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
+        "```alloy\nremote Heal(@i16 amount: number) from client\n```\nThe wire width of a `number` on a remote parameter or a struct field: 16-bit signed. The remote packs it into the buffer at that width, a field when its struct crosses a remote, and a value that does not fit raises at the fire with the path of the value: `Sync: argument 1.hp: 300 does not fit @u8`. Without a width a number crosses as 64 bits.",
     ),
     (
         "@i32",
-        "```alloy\n@i32 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 32-bit signed. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
+        "```alloy\nremote Heal(@i32 amount: number) from client\n```\nThe wire width of a `number` on a remote parameter or a struct field: 32-bit signed. The remote packs it into the buffer at that width, a field when its struct crosses a remote, and a value that does not fit raises at the fire with the path of the value: `Sync: argument 1.hp: 300 does not fit @u8`. Without a width a number crosses as 64 bits.",
     ),
     (
         "@f32",
-        "```alloy\n@f32 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 32-bit float. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
+        "```alloy\nremote Heal(@f32 amount: number) from client\n```\nThe wire width of a `number` on a remote parameter or a struct field: 32-bit float. The remote packs it into the buffer at that width, a field when its struct crosses a remote, and a value that does not fit raises at the fire with the path of the value: `Sync: argument 1.hp: 300 does not fit @u8`. Without a width a number crosses as 64 bits.",
     ),
     (
         "class",
@@ -521,7 +521,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:wire",
-        "**Wire types**\n\nA `remote` carries data across the network. A parameter typed as a function, a `thread`, a `Future`, or a `Signal` cannot be serialized, so the declaration is an error:\n\n```\nremote Ping(cb: () -> ()) from client\n-- remote `Ping`: parameter `cb` has type `() -> ()`, which is a function type; a remote carries only data\n```\n\nSend an id, a name, or a plain table, and keep the callback on the side that owns it. `@u8`, `@u16`, `@i32`, `@f32` and the other width attributes set how a number packs.",
+        "**Wire types**\n\nA `remote` carries data across the network. A parameter typed as a function, a `thread`, a `Future`, or a `Signal` cannot be serialized, so the declaration is an error:\n\n```\nremote Ping(cb: () -> ()) from client\n-- remote `Ping`: parameter `cb` has type `() -> ()`, which is a function type; a remote carries only data\n```\n\nSend an id, a name, or a plain table, and keep the callback on the side that owns it.\n\nWhat crosses is packed: a remote with a `number`, `boolean`, or `string` parameter sends one `buffer` and unpacks it on the other side, so a fire costs its bytes and no names. A width attribute sets a number's size, `@u8`, `@u16`, `@u32`, `@i8`, `@i16`, `@i32`, `@f32`; a number without one takes 64 bits. A value that does not fit its width raises at the fire: `Heal: 300 does not fit @u8`. A struct, a record type, or an array of packable values packs field by field and item by item, down to any depth, and a struct comes back with its metatable. An Instance, a `Player`, or a map is not packed and travels as it is beside the buffer.",
     ),
     (
         "topic:lint",

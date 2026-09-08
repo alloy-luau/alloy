@@ -1,0 +1,12 @@
+-- A remote packs its parameters by width, down into a struct, a record,
+-- and an array; a Player crosses as it is.
+struct Stats as
+    @u8 level: number
+    hp: number
+    title: string?
+end
+
+remote Damage(target: Player, @u16 amount: number, crit: boolean) from client
+remote Toast(message: string, seconds: number = 3) from server
+remote Sync(stats: Stats, tags: string[], pos: { x: number, y: number }) from server
+print(Damage, Toast, Sync)

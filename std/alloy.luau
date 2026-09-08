@@ -2187,6 +2187,240 @@ export type Remote = {
 	wait: () -> Future<any>,
 }
 
+-- ---------------------------------------------------------------------------
+-- The wire: a remote packs its numbers, booleans, and strings into one
+-- buffer, at the width each parameter declares. What the packer cannot
+-- pack, a table or an Instance, travels beside the buffer as it is.
+-- ---------------------------------------------------------------------------
+
+local WIRE_SIZE = { u8 = 1, u16 = 2, u32 = 4, i8 = 1, i16 = 2, i32 = 4, f32 = 4, f64 = 8, bool = 1 }
+local WIRE_RANGE = {
+	u8 = { 0, 255 },
+	u16 = { 0, 65535 },
+	u32 = { 0, 4294967295 },
+	i8 = { -128, 127 },
+	i16 = { -32768, 32767 },
+	i32 = { -2147483648, 2147483647 },
+}
+
+-- A kind is a string, `u8`, `str?`, `any`, or a table: `{ fields = {
+-- { name, kind }, ... }, struct = Metatable? }` for a record, `{ item =
+-- kind }` for an array, each with `optional = true` when nil is fine.
+local function wire_kind(kind: any): (any, boolean)
+	if type(kind) == "string" then
+		if string.sub(kind, -1) == "?" then
+			return string.sub(kind, 1, -2), true
+		end
+		return kind, false
+	end
+	return kind, kind.optional == true
+end
+
+local function wire_check(label: string, base: string, v: any)
+	local range = WIRE_RANGE[base]
+	if range ~= nil then
+		if type(v) ~= "number" or v % 1 ~= 0 or v < range[1] or v > range[2] then
+			error(`{label}: {tostring(v)} does not fit @{base}`, 0)
+		end
+	elseif base == "f32" or base == "f64" then
+		if type(v) ~= "number" then
+			error(`{label}: {tostring(v)} is not a number`, 0)
+		end
+	elseif base == "bool" then
+		if type(v) ~= "boolean" then
+			error(`{label}: {tostring(v)} is not a boolean`, 0)
+		end
+	elseif base == "str" then
+		if type(v) ~= "string" then
+			error(`{label}: {tostring(v)} is not a string`, 0)
+		end
+	elseif type(base) == "table" and type(v) ~= "table" then
+		error(`{label}: {tostring(v)} is not a table`, 0)
+	end
+end
+
+-- The bytes one value takes under a kind; a nil where none is allowed
+-- raises with the path of the value.
+local function wire_measure(kind: any, v: any, label: string): number
+	local base, optional = wire_kind(kind)
+	local size = 0
+	if base == "any" then
+		return 0
+	end
+	if optional then
+		size += 1
+		if v == nil then
+			return size
+		end
+	elseif v == nil then
+		error(`{label}: is nil`, 0)
+	end
+	wire_check(label, base, v)
+	if type(base) == "table" then
+		if base.fields ~= nil then
+			for _, field in base.fields do
+				size += wire_measure(field[2], v[field[1]], `{label}.{field[1]}`)
+			end
+		else
+			size += 4
+			for i = 1, #v do
+				size += wire_measure(base.item, v[i], `{label}[{i}]`)
+			end
+		end
+	elseif base == "str" then
+		size += 4 + #v
+	else
+		size += WIRE_SIZE[base]
+	end
+	return size
+end
+
+local function wire_write(kind: any, v: any, buf: buffer, at: number, rest: { any }): number
+	local base, optional = wire_kind(kind)
+	if base == "any" then
+		rest.n += 1
+		rest[rest.n] = v
+		return at
+	end
+	if optional then
+		buffer.writeu8(buf, at, if v == nil then 0 else 1)
+		at += 1
+		if v == nil then
+			return at
+		end
+	end
+	if type(base) == "table" then
+		if base.fields ~= nil then
+			for _, field in base.fields do
+				at = wire_write(field[2], v[field[1]], buf, at, rest)
+			end
+		else
+			buffer.writeu32(buf, at, #v)
+			at += 4
+			for i = 1, #v do
+				at = wire_write(base.item, v[i], buf, at, rest)
+			end
+		end
+		return at
+	end
+	if base == "u8" then
+		buffer.writeu8(buf, at, v)
+	elseif base == "u16" then
+		buffer.writeu16(buf, at, v)
+	elseif base == "u32" then
+		buffer.writeu32(buf, at, v)
+	elseif base == "i8" then
+		buffer.writei8(buf, at, v)
+	elseif base == "i16" then
+		buffer.writei16(buf, at, v)
+	elseif base == "i32" then
+		buffer.writei32(buf, at, v)
+	elseif base == "f32" then
+		buffer.writef32(buf, at, v)
+	elseif base == "f64" then
+		buffer.writef64(buf, at, v)
+	elseif base == "bool" then
+		buffer.writeu8(buf, at, if v then 1 else 0)
+	elseif base == "str" then
+		buffer.writeu32(buf, at, #v)
+		buffer.writestring(buf, at + 4, v)
+		return at + 4 + #v
+	end
+	return at + WIRE_SIZE[base]
+end
+
+local function wire_read(kind: any, buf: buffer, at: number, rest: { any }, ri: number): (any, number, number)
+	local base, optional = wire_kind(kind)
+	if base == "any" then
+		return rest[ri], at, ri + 1
+	end
+	if optional then
+		local present = buffer.readu8(buf, at)
+		at += 1
+		if present == 0 then
+			return nil, at, ri
+		end
+	end
+	if type(base) == "table" then
+		local t = {}
+		if base.fields ~= nil then
+			for _, field in base.fields do
+				t[field[1]], at, ri = wire_read(field[2], buf, at, rest, ri)
+			end
+			if base.struct ~= nil then
+				setmetatable(t, base.struct)
+			end
+		else
+			local count = buffer.readu32(buf, at)
+			at += 4
+			for i = 1, count do
+				t[i], at, ri = wire_read(base.item, buf, at, rest, ri)
+			end
+			if base.array then
+				setmetatable(t, Array)
+			end
+		end
+		return t, at, ri
+	end
+	local v
+	if base == "u8" then
+		v = buffer.readu8(buf, at)
+	elseif base == "u16" then
+		v = buffer.readu16(buf, at)
+	elseif base == "u32" then
+		v = buffer.readu32(buf, at)
+	elseif base == "i8" then
+		v = buffer.readi8(buf, at)
+	elseif base == "i16" then
+		v = buffer.readi16(buf, at)
+	elseif base == "i32" then
+		v = buffer.readi32(buf, at)
+	elseif base == "f32" then
+		v = buffer.readf32(buf, at)
+	elseif base == "f64" then
+		v = buffer.readf64(buf, at)
+	elseif base == "bool" then
+		v = buffer.readu8(buf, at) == 1
+	elseif base == "str" then
+		local len = buffer.readu32(buf, at)
+		return buffer.readstring(buf, at + 4, len), at + 4 + len, ri
+	end
+	return v, at + WIRE_SIZE[base], ri
+end
+
+local wire = {}
+
+--- Packs the arguments of one fire by the layout: the buffer, then the
+--- values the layout marks `any`, in the order the packer met them.
+function wire.pack(layout: { any }, args: { any }, name: string?): (buffer, { any })
+	local label = name or "remote"
+	local size = 0
+	for i, kind in layout do
+		size += wire_measure(kind, args[i], `{label}: argument {i}`)
+	end
+	local buf = buffer.create(size)
+	local at = 0
+	local rest = { n = 0 }
+	for i, kind in layout do
+		at = wire_write(kind, args[i], buf, at, rest)
+	end
+	return buf, rest
+end
+
+--- Reads the arguments back: the buffer and the `any` values beside it,
+--- as the packer laid them out.
+function wire.unpack(layout: { any }, buf: buffer, rest: { any }): { any }
+	local args = { n = #layout }
+	local at = 0
+	local ri = 1
+	for i, kind in layout do
+		args[i], at, ri = wire_read(kind, buf, at, rest, ri)
+	end
+	return args
+end
+
+alloy.wire = wire
+
 function alloy.remote(spec: any): Remote
 	local is_function = spec.kind == "function"
 	local attrs = spec.attrs or {}
@@ -2233,6 +2467,29 @@ function alloy.remote(spec: any): Remote
 		return args
 	end
 
+	-- The arguments as they cross: packed by the layout, or as given.
+	local layout = spec.wire
+
+	local function outgoing(...)
+		if layout == nil then
+			return table.pack(...)
+		end
+		local buf, rest = wire.pack(layout, fill_defaults(table.pack(...)), spec.name)
+		local out = { n = 1 + rest.n, buf }
+		for i = 1, rest.n do
+			out[i + 1] = rest[i]
+		end
+		return out
+	end
+
+	local function incoming(...)
+		if layout == nil then
+			return fill_defaults(table.pack(...))
+		end
+		local buf = ...
+		return fill_defaults(wire.unpack(layout, buf, { select(2, ...) }))
+	end
+
 	local function accepted(player, ...)
 		if not allowed(player) then
 			return false
@@ -2260,25 +2517,29 @@ function alloy.remote(spec: any): Remote
 
 	if run_service():IsServer() then
 		function remote.fire(player, ...)
-			inst:FireClient(player, ...)
+			local out = outgoing(...)
+			inst:FireClient(player, table.unpack(out, 1, out.n))
 		end
 		function remote.fire_all(...)
-			inst:FireAllClients(...)
+			local out = outgoing(...)
+			inst:FireAllClients(table.unpack(out, 1, out.n))
 		end
 		function remote.fire_except(except, ...)
+			local out = outgoing(...)
 			for _, p in game:GetService("Players"):GetPlayers() do
 				if p ~= except then
-					inst:FireClient(p, ...)
+					inst:FireClient(p, table.unpack(out, 1, out.n))
 				end
 			end
 		end
 		function remote.on(handler)
 			if is_function then
 				inst.OnServerInvoke = function(player, ...)
-					if not accepted(player, ...) then
+					local args = incoming(...)
+					if not accepted(player, table.unpack(args, 1, args.n)) then
 						return nil
 					end
-					local result = handler(player, table.unpack(fill_defaults(table.pack(...))))
+					local result = handler(player, table.unpack(args, 1, args.n))
 					if type(result) == "table" and getmetatable(result) == Future then
 						return alloy.await(result)
 					end
@@ -2287,8 +2548,9 @@ function alloy.remote(spec: any): Remote
 				return
 			end
 			return inst.OnServerEvent:Connect(function(player, ...)
-				if accepted(player, ...) then
-					handler(player, table.unpack(fill_defaults(table.pack(...))))
+				local args = incoming(...)
+				if accepted(player, table.unpack(args, 1, args.n)) then
+					handler(player, table.unpack(args, 1, args.n))
 				end
 			end)
 		end
@@ -2296,30 +2558,33 @@ function alloy.remote(spec: any): Remote
 			on_limited = handler
 		end
 		function remote.call(player, ...)
-			local args = table.pack(...)
+			local out = outgoing(...)
 			return timed(function()
-				return inst:InvokeClient(player, table.unpack(args, 1, args.n))
+				return inst:InvokeClient(player, table.unpack(out, 1, out.n))
 			end)
 		end
 	else
 		function remote.fire(...)
-			inst:FireServer(...)
+			local out = outgoing(...)
+			inst:FireServer(table.unpack(out, 1, out.n))
 		end
 		function remote.on(handler)
 			if is_function then
 				inst.OnClientInvoke = function(...)
-					return handler(...)
+					local args = incoming(...)
+					return handler(table.unpack(args, 1, args.n))
 				end
 				return
 			end
 			return inst.OnClientEvent:Connect(function(...)
-				handler(table.unpack(fill_defaults(table.pack(...))))
+				local args = incoming(...)
+				handler(table.unpack(args, 1, args.n))
 			end)
 		end
 		function remote.call(...)
-			local args = table.pack(...)
+			local out = outgoing(...)
 			return timed(function()
-				return inst:InvokeServer(table.unpack(args, 1, args.n))
+				return inst:InvokeServer(table.unpack(out, 1, out.n))
 			end)
 		end
 	end

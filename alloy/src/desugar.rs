@@ -1267,11 +1267,18 @@ impl<'s> Desugar<'s> {
         let start = self.byte_start(i.span);
         // The header runs to the end of the target, and past `<T>` when
         // the impl declares parameters: Luau has no such header.
-        let header_end = i
+        let head_tok = i
             .generics
             .filter(|g| g.start >= i.target.end)
-            .map(|g| self.byte_end(g))
-            .unwrap_or_else(|| self.byte_end(i.target));
+            .map_or(i.target.end, |g| g.end);
+        // `impl T as`: the header may close with `as`, so the emit
+        // starts after it. Without this the `as` reaches the output.
+        let head_tok = if self.toks[head_tok as usize].text(self.src) == "as" {
+            head_tok + 1
+        } else {
+            head_tok
+        };
+        let header_end = self.toks[head_tok as usize - 1].end;
 
         if self.options.definitions {
             self.blank_lines(start, self.byte_end(i.span));
@@ -4146,8 +4153,13 @@ impl<'s> Desugar<'s> {
                     from.push(format!("{fname} = t.{key}"));
                 }
 
+                // `serialize` is the name the `Serialize` bound asks
+                // for. It calls `to_table`, so a derived struct meets
+                // `T: Serialize` and both names give one table.
+                let ret = if self.options.check { ": any" } else { "" };
+
                 format!(
-                    "function {name}.to_table(self{sn}) return {{ {} }} end function {name}.from_table(t{tn}) return {}({{ {} }}) end",
+                    "function {name}.to_table(self{sn}) return {{ {} }} end function {name}.from_table(t{tn}) return {}({{ {} }}) end function {name}.serialize(self{sn}){ret} return {name}.to_table(self) end",
                     to.join(", "),
                     self.raw_ctor(name),
                     from.join(", ")
@@ -9286,8 +9298,25 @@ impl<'s> Desugar<'s> {
 
         if body.is_async.is_some() {
             let std = self.std();
+            // The lambda carries the declared payload type. Without it
+            // the checker infers the body's result, and a result whose
+            // own type is still open lands on `unknown`: `await` over
+            // `Future.race` is one such result.
+            let payload = match body.ret_type {
+                Some(rt) if !to_nil => {
+                    let text = self.text_of(rt).trim().to_string();
+
+                    match text.as_str() {
+                        "()" => String::new(),
+                        _ => format!(": {}", self.lower_type(&text)),
+                    }
+                }
+
+                _ => String::new(),
+            };
+
             lead.push_str(&format!(
-                " return {}{std}.future(function({})",
+                " return {}{std}.future(function({}){payload}",
                 if to_nil { "(" } else { "" },
                 if has_vararg { "..." } else { "" }
             ));
@@ -10978,14 +11007,14 @@ mod tests {
     /// impl that writes another one breaks the contract.
     #[test]
     fn a_trait_method_keeps_the_return_type_the_trait_declares() {
-        let src = "trait Priced\n    function price(self): number\nend\nstruct Sword as\n    cost: number\nend\nimpl Priced for Sword\n    function price(self): string\n        return \"free\"\n    end\nend\nprint(new Sword { cost = 1 })\n";
+        let src = "trait Priced as\n    function price(self): number\nend\nstruct Sword as\n    cost: number\nend\nimpl Priced for Sword as\n    function price(self): string\n        return \"free\"\n    end\nend\nprint(new Sword { cost = 1 })\n";
         assert_eq!(
             messages(src),
             vec!["the trait method `price` returns number in `Priced`, string here"]
         );
 
         // The same type written with other spacing is the same type.
-        let same = "trait Held\n    function slot(self): Array<number>\nend\nstruct Bag as\n    n: number\nend\nimpl Held for Bag\n    function slot(self): Array< number >\n        return Array.new()\n    end\nend\nprint(new Bag { n = 1 })\n";
+        let same = "trait Held as\n    function slot(self): Array<number>\nend\nstruct Bag as\n    n: number\nend\nimpl Held for Bag as\n    function slot(self): Array< number >\n        return Array.new()\n    end\nend\nprint(new Bag { n = 1 })\n";
         assert!(messages(same).is_empty(), "{:?}", messages(same));
     }
 
@@ -11026,7 +11055,7 @@ mod tests {
 
     #[test]
     fn an_enum_method_and_the_is_test_are_not_variants() {
-        let src = "enum Shape as\n    Circle(number)\nend\nimpl Shape\n    function area(self): number\n        return 1\n    end\nend\nprint(Shape.is(1), Shape.area)\n";
+        let src = "enum Shape as\n    Circle(number)\nend\nimpl Shape as\n    function area(self): number\n        return 1\n    end\nend\nprint(Shape.is(1), Shape.area)\n";
         assert!(messages(src).is_empty(), "{:?}", messages(src));
     }
 
@@ -11412,7 +11441,7 @@ remote function Read() -> HashMap<string, number> from client
 
     #[test]
     fn an_impl_that_leaves_the_parameters_out_reports() {
-        let src = "struct Box<T> as\n    value: T\nend\nimpl Box\n    function get(self): T\n        return self.value\n    end\nend\nprint(Box)\n";
+        let src = "struct Box<T> as\n    value: T\nend\nimpl Box as\n    function get(self): T\n        return self.value\n    end\nend\nprint(Box)\n";
         let out = crate::compile(src).unwrap();
         let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert!(
@@ -11425,7 +11454,7 @@ remote function Read() -> HashMap<string, number> from client
 
     #[test]
     fn an_impl_may_name_the_structs_parameters() {
-        let src = "struct Box<T> as\n    value: T\nend\nimpl Box<T>\n    function get(self): T\n        return self.value\n    end\nend\nprint(Box)\n";
+        let src = "struct Box<T> as\n    value: T\nend\nimpl Box<T> as\n    function get(self): T\n        return self.value\n    end\nend\nprint(Box)\n";
         let out = crate::compile(src).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(
@@ -11559,7 +11588,7 @@ remote function Read() -> HashMap<string, number> from client
 
     #[test]
     fn a_method_insert_maps_back_to_the_method_name() {
-        let src = "type Alias = { z: number }\nimpl Alias\n    function area(self): number\n        return self.z\n    end\nend\nprint(Alias)\n";
+        let src = "type Alias = { z: number }\nimpl Alias as\n    function area(self): number\n        return self.z\n    end\nend\nprint(Alias)\n";
         let options = EmitOptions {
             check: true,
             ..EmitOptions::default()

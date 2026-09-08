@@ -992,7 +992,7 @@ mod tests {
 
     #[test]
     fn an_impl_follows_its_struct() {
-        let src = "struct V as\n    x: number\nend\n\nimpl V\n    function len(self): number\n        return self.x\n    end\nend\n\nstruct W as\n    y: number\nend\n\n@test\nfunction v_len()\n    $assert_eq((new V { x = 2 }):len(), 2)\nend\n";
+        let src = "struct V as\n    x: number\nend\n\nimpl V as\n    function len(self): number\n        return self.x\n    end\nend\n\nstruct W as\n    y: number\nend\n\n@test\nfunction v_len()\n    $assert_eq((new V { x = 2 }):len(), 2)\nend\n";
         let out = sliced(src).unwrap();
         assert!(out.contains("impl V"));
         assert!(!out.contains("struct W"));

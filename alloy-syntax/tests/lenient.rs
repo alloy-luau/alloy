@@ -169,3 +169,63 @@ fn deletions_hold_the_contract() {
         }
     }
 }
+
+/// `as` closes an `impl` and a `trait` header. A header without it
+/// reports on the header, and the body still parses, so the editor
+/// keeps working while the author migrates the file.
+#[test]
+fn a_header_without_as_reports_and_still_parses() {
+    for (src, head) in [
+        ("impl Test\n\tfunction f(self) end\nend\n", "impl Test"),
+        (
+            "impl Shape for Test\n\tfunction f(self) end\nend\n",
+            "impl Shape for Test",
+        ),
+        (
+            "trait Shape\n\tfunction area(self): number\nend\n",
+            "trait Shape",
+        ),
+        ("impl Box<T>\n\tfunction f(self) end\nend\n", "impl Box<T>"),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "one report for {src:?}, got {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics[0].message,
+            format!("`{head}` needs `as` before its body")
+        );
+        assert_eq!(diagnostics[0].offset, 0, "the report sits on the header");
+        assert!(
+            !chunk
+                .block
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Error(_))),
+            "the body still parses for {src:?}"
+        );
+    }
+}
+
+/// The `as` form reports nothing.
+#[test]
+fn a_header_with_as_is_clean() {
+    for src in [
+        "impl Test as\n\tfunction f(self) end\nend\n",
+        "impl Shape for Test as\n\tfunction f(self) end\nend\n",
+        "trait Shape as\n\tfunction area(self): number\nend\n",
+        // An empty body: the header opens and the same line closes it.
+        "impl Test as end\n",
+        "impl Shape for Test as end\n",
+        "export impl Shape for Test as end\n",
+        "trait Test as end\n",
+        "struct Test as end\n",
+        "enum Test as end\n",
+        "interface Test as end\n",
+    ] {
+        assert_eq!(lenient(src), (0, 0), "{src:?}");
+    }
+}

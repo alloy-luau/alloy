@@ -1545,7 +1545,7 @@ fn a_dot_called_method_reads_the_same_as_in_the_terminal() {
         "[build]\nin = \"src\"\nout = \"build\"\n",
     )
     .unwrap();
-    let src = "struct Wallet as\n    balance: number\nend\n\nimpl Wallet\n    function add(self, amount: number): number\n        self.balance += amount\n        return self.balance\n    end\nend\n\nlocal w = new Wallet { balance = 0 }\nw.add(5)\nprint(w)\n";
+    let src = "struct Wallet as\n    balance: number\nend\n\nimpl Wallet as\n    function add(self, amount: number): number\n        self.balance += amount\n        return self.balance\n    end\nend\n\nlocal w = new Wallet { balance = 0 }\nw.add(5)\nprint(w)\n";
     let file = dir.join("src/main.aly");
     std::fs::write(&file, src).unwrap();
 

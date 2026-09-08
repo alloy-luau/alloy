@@ -821,7 +821,7 @@ mod tests {
 
     /// The lints at their default level: the pedantic ones stay out.
     fn names(src: &str) -> Vec<&'static str> {
-        let config = crate::config::LintConfig::default();
+        let config = crate::config::LintConfig::default().without_strict();
 
         lints(src)
             .iter()

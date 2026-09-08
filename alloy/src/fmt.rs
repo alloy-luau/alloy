@@ -96,6 +96,77 @@ pub fn format(src: &str) -> Result<String, String> {
 /// cannot read. A caller tells that case from a real failure by it.
 pub const UNPARSED: &str = "does not parse";
 
+/// The tail of the report for an `impl` or a `trait` header without
+/// `as`, for a caller that reads a diagnostic and wants the rewrite.
+pub const NEEDS_AS: &str = alloy_syntax::parser::NEEDS_AS;
+
+/// The rewrites that write the `as` an `impl` or a `trait` header is
+/// missing, in source order. `alloy flux --fix` and the server's quick
+/// fix apply these, so a file written before `as` migrates in place;
+/// `alloy fmt` writes the same text as part of a whole format.
+pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
+    let Ok(Lexed { toks, .. }) = lex(src) else {
+        return Vec::new();
+    };
+    let text = |i: usize| toks[i].text(src);
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < toks.len() {
+        if !matches!(text(i), "impl" | "trait") || !opens_a_header(src, &toks, i) {
+            i += 1;
+
+            continue;
+        }
+
+        let mut j = i + 1;
+        let mut angle = 0usize;
+
+        while j < toks.len() {
+            let t = text(j);
+
+            if angle > 0 {
+                angle += usize::from(t == "<");
+                angle -= usize::from(t == ">");
+                j += 1;
+            } else if t == "<" {
+                angle += 1;
+                j += 1;
+            } else if t == "." || t == "for" || (toks[j].kind == TokKind::Ident && !is_keyword(t)) {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+
+        if angle == 0 && j > i + 1 && j < toks.len() && text(j) != "as" {
+            let at = toks[j - 1].end;
+            out.push(crate::lint::Fix {
+                start: at,
+                end: at,
+                replacement: " as".to_string(),
+            });
+        }
+
+        i = j.max(i + 1);
+    }
+
+    out
+}
+
+/// Whether the `impl` or `trait` token at `i` opens a declaration: it
+/// starts a line, follows `export`, or opens the file. The same rule
+/// the formatter's `starts_block` uses, over raw tokens.
+fn opens_a_header(src: &str, toks: &[Tok], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+
+    let prev = &toks[i - 1];
+
+    prev.text(src) == "export" || src[prev.end as usize..toks[i].start as usize].contains('\n')
+}
+
 /// The parser's first complaint about a whole file, if it has one. A
 /// `.d.aly` file writes `declare`, so the definition syntax is allowed.
 pub fn parse_error(src: &str) -> Option<String> {
@@ -107,7 +178,14 @@ pub fn parse_error(src: &str) -> Option<String> {
     match alloy_syntax::parse_lenient(src, options) {
         Err(e) => Some(e.message),
 
-        Ok(parsed) => parsed.diagnostics.first().map(|d| d.message.clone()),
+        // An `impl` or a `trait` header without `as` is the one report
+        // the formatter reads past: the tree still covers every token,
+        // and `header_as` writes the `as` the file is missing.
+        Ok(parsed) => parsed
+            .diagnostics
+            .iter()
+            .find(|d| !d.message.ends_with(alloy_syntax::parser::NEEDS_AS))
+            .map(|d| d.message.clone()),
     }
 }
 
@@ -156,7 +234,24 @@ pub fn format_with(src: &str, options: &FmtConfig) -> Result<String, String> {
     f.flush();
     let mut text = f.finish();
 
-    if options.line_endings == LineEndings::Windows {
+    // The source keeps its own endings unless an option names one: a
+    // Windows checkout would otherwise rewrite every line of every file.
+    let windows = match options.line_endings {
+        LineEndings::Windows => true,
+
+        LineEndings::Unix => false,
+
+        LineEndings::Input => src.contains("\r\n"),
+    };
+
+    // A long comment and a long string carry the source's own `\r\n`
+    // through the token stream; the file's endings are one decision, so
+    // they normalize first and the option writes them back.
+    if text.contains('\r') {
+        text = text.replace("\r\n", "\n");
+    }
+
+    if windows {
         text = text.replace('\n', "\r\n");
     }
 
@@ -317,6 +412,78 @@ impl<'s> Formatter<'s> {
         }
 
         self.call_parentheses();
+        self.header_as();
+    }
+
+    /// `impl T end` and `trait T end` write `impl T as end` and
+    /// `trait T as end`. The header then closes the way a `struct`, an
+    /// `enum`, and an `interface` header closes. The parser reads both,
+    /// so a file written before `as` still builds.
+    fn header_as(&mut self) {
+        let mut i = 0;
+
+        while i < self.items.len() {
+            if !(self.items[i].is("impl") || self.items[i].is("trait")) || !self.starts_block(i) {
+                i += 1;
+
+                continue;
+            }
+
+            match self.header_end(i) {
+                Some(at) if !self.items[at].is("as") => {
+                    self.items.insert(
+                        at,
+                        Item {
+                            text: "as".to_string(),
+                            kind: ItemKind::Tok(TokKind::Ident),
+                            newlines_before: 0,
+                            space_before: true,
+                        },
+                    );
+                    i = at + 1;
+                }
+
+                _ => i += 1,
+            }
+        }
+    }
+
+    /// The item after an `impl` or `trait` header: the header holds
+    /// names, `.`, `for`, and a `<...>` group, and nothing else.
+    fn header_end(&self, open: usize) -> Option<usize> {
+        let mut j = open + 1;
+        let mut angle = 0usize;
+
+        while j < self.items.len() {
+            let it = &self.items[j];
+
+            if it.is_comment() {
+                break;
+            }
+
+            if angle > 0 {
+                if it.is("<") {
+                    angle += 1;
+                } else if it.is(">") {
+                    angle -= 1;
+                }
+
+                j += 1;
+
+                continue;
+            }
+
+            if it.is("<") {
+                angle += 1;
+                j += 1;
+            } else if it.is(".") || it.is("for") || (it.is_ident() && !is_keyword(&it.text)) {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+
+        (angle == 0 && j > open + 1 && j < self.items.len()).then_some(j)
     }
 
     /// Whether item `i` can be the callee of a call written without
@@ -2440,6 +2607,85 @@ mod tests {
         );
     }
 
+    /// A CRLF file keeps its endings, and a long comment gains no
+    /// second `\r`. A Windows checkout formats without rewriting every
+    /// line of every file.
+    #[test]
+    fn crlf_round_trips() {
+        let src = "struct T as\r\n    x: number -- a note\r\nend\r\n\r\n--[[ long\r\ncomment ]]\r\nlocal t = new T { x = 1 }\r\nprint(t.x)\r\n";
+        assert_eq!(format(src).unwrap(), src);
+        assert!(!format(src).unwrap().contains("\r\r"));
+
+        // An option that names an ending still writes it.
+        let mut unix = FmtConfig::default();
+        unix.line_endings = LineEndings::Unix;
+        let flat = format_with(src, &unix).unwrap();
+        assert!(!flat.contains('\r'), "{flat:?}");
+
+        let mut windows = FmtConfig::default();
+        windows.line_endings = LineEndings::Windows;
+        let back = format_with(&flat, &windows).unwrap();
+        assert_eq!(back, src);
+    }
+
+    /// The header of an `impl` and of a `trait` closes with `as`, the
+    /// way a `struct` header closes.
+    #[test]
+    fn an_impl_and_a_trait_header_gain_as() {
+        assert_eq!(
+            format("impl Circle\n    function f(self) end\nend\n").unwrap(),
+            "impl Circle as\n    function f(self) end\nend\n"
+        );
+        assert_eq!(
+            format("impl Shape for Circle\n    function f(self) end\nend\n").unwrap(),
+            "impl Shape for Circle as\n    function f(self) end\nend\n"
+        );
+        assert_eq!(
+            format("impl Box<T>\n    function f(self) end\nend\n").unwrap(),
+            "impl Box<T> as\n    function f(self) end\nend\n"
+        );
+        assert_eq!(format("trait Empty end\n").unwrap(), "trait Empty as end\n");
+        assert_eq!(format("impl Empty end\n").unwrap(), "impl Empty as end\n");
+    }
+
+    /// The rewrite `alloy flux --fix` and the server's quick fix apply:
+    /// one insertion per header, at the end of the header.
+    #[test]
+    fn the_header_rewrite_inserts_one_as_per_header() {
+        let src = "impl Circle\n    function f(self) end\nend\ntrait Shape\n    function a(self): number\nend\nimpl Shape for Circle as\nend\n";
+        let fixes = header_as_fixes(src);
+        assert_eq!(fixes.len(), 2, "{fixes:?}");
+        let (text, n) = crate::lint::apply_fixes(
+            src,
+            &fixes
+                .iter()
+                .map(|f| crate::lint::Lint {
+                    name: "header_as",
+                    start: f.start,
+                    end: f.end,
+                    message: String::new(),
+                    fix: Some(f.clone()),
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(n, 2);
+        assert_eq!(
+            text,
+            "impl Circle as\n    function f(self) end\nend\ntrait Shape as\n    function a(self): number\nend\nimpl Shape for Circle as\nend\n"
+        );
+        assert!(parse_error(&text).is_none(), "{text}");
+        assert!(header_as_fixes(&text).is_empty());
+    }
+
+    /// A header that already reads `as` gains no second one.
+    #[test]
+    fn the_as_of_a_header_is_written_once() {
+        let src = "impl Shape for Circle as\n    function f(self) end\nend\n";
+        assert_eq!(format(src).unwrap(), src);
+        let trait_src = "trait Shape as\n    function area(self): number\nend\n";
+        assert_eq!(format(trait_src).unwrap(), trait_src);
+    }
+
     #[test]
     fn struct_fields_align_when_asked() {
         let mut o = FmtConfig::default();
@@ -2448,6 +2694,31 @@ mod tests {
             format_with("struct P as\n    x: number\n    name: string\nend\n", &o).unwrap(),
             "struct P as\n    x:    number\n    name: string\nend\n"
         );
+    }
+
+    /// Drops the `as` that closes an `impl` or a `trait` header, so a
+    /// file written before that form compares with its formatted text.
+    fn drop_header_as(toks: Vec<String>) -> Vec<String> {
+        let mut out = Vec::with_capacity(toks.len());
+        let mut header = false;
+
+        for t in toks {
+            if header {
+                if t == "as" {
+                    header = false;
+
+                    continue;
+                }
+
+                header = !matches!(t.as_str(), "function" | "end" | "@");
+            } else {
+                header = matches!(t.as_str(), "impl" | "trait");
+            }
+
+            out.push(t);
+        }
+
+        out
     }
 
     #[test]
@@ -2470,13 +2741,15 @@ mod tests {
                 assert_eq!(once, twice, "{}", path.display());
                 // The token stream holds, save for the rewrites.
                 let norm = |text: &str| -> Vec<String> {
-                    lex(text)
+                    let toks: Vec<String> = lex(text)
                         .unwrap()
                         .toks
                         .iter()
                         .map(|t| t.text(text).replace('\'', "\""))
                         .filter(|t| !matches!(t.as_str(), "(" | ")" | ","))
-                        .collect()
+                        .collect();
+
+                    drop_header_as(toks)
                 };
                 assert_eq!(norm(&src), norm(&once), "{}", path.display());
             }

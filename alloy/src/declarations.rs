@@ -282,7 +282,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
             Stmt::Trait(d) => {
                 let name = text(d.name);
-                let mut lines = vec![format!("{}trait {name}", export(d.exported))];
+                let mut lines = vec![format!("{}trait {name} as", export(d.exported))];
                 lines.extend(
                     d.methods
                         .iter()
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn struct_with_impls() {
-        let src = "export struct Vec2 as\n    x: number\n    y: number = 0\nend\nimpl Vec2\n    function len(self) end\nend\nimpl Display for Vec2\n    function to_string(self) end\nend\n";
+        let src = "export struct Vec2 as\n    x: number\n    y: number = 0\nend\nimpl Vec2 as\n    function len(self) end\nend\nimpl Display for Vec2 as\n    function to_string(self) end\nend\n";
         let d = summaries(src, false);
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].name, "Vec2");
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn enum_and_trait() {
-        let src = "enum Msg as\n    Quit\n    Move(number, number)\nend\ntrait Shape\n    function area(self): number\nend\n";
+        let src = "enum Msg as\n    Quit\n    Move(number, number)\nend\ntrait Shape as\n    function area(self): number\nend\n";
         let d = summaries(src, false);
         let find = |name: &str| d.iter().find(|x| x.name == name).unwrap();
         assert!(
@@ -455,7 +455,7 @@ mod tests {
         assert!(
             find("Shape")
                 .hover
-                .contains("trait Shape\n    function area(self): number\nend")
+                .contains("trait Shape as\n    function area(self): number\nend")
         );
     }
 }

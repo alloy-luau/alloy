@@ -3,7 +3,7 @@ export struct Slotted<T> as
 	count: number = 1
 end
 
-impl Slotted<T>
+impl Slotted<T> as
 	function new(value: T): Slotted<T>
 		return new Slotted<<T>> { value = value }
 	end
@@ -23,7 +23,7 @@ struct Pair<A, B> as
 	right: B
 end
 
-impl Pair<A, B>
+impl Pair<A, B> as
 	function swap(self): B
 		return self.right
 	end
@@ -34,13 +34,13 @@ struct Swap<A, B> as
 	right: B
 end
 
-impl Swap<A, B>
+impl Swap<A, B> as
 	function flip(self): Swap<B, A>
 		return new Swap<<B, A>> { left = self.right, right = self.left }
 	end
 end
 
-trait Loud
+trait Loud as
 	function shout(self): string
 end
 
@@ -48,7 +48,7 @@ struct Voiced<T> as
 	value: T
 end
 
-impl Loud for Voiced<T>
+impl Loud for Voiced<T> as
 	function shout(self): string
 		return "hi"
 	end

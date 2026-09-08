@@ -141,6 +141,95 @@ pub fn keys_with_prefix(prefix: &str) -> Vec<&'static str> {
 
 pub use alloy::docs::ALLOY_KEYWORDS;
 
+/// Every word Alloy and Luau reserve. A completion whose typed word
+/// begins one of these offers a keyword, not a module: `end` in
+/// `if x then return end` drew `EncodingService` from a package before
+/// the list held `end` itself.
+pub const WORDS: &[&str] = &[
+    "and",
+    "as",
+    "async",
+    "attribute",
+    "await",
+    "band",
+    "bnot",
+    "bor",
+    "break",
+    "bxor",
+    "case",
+    "class",
+    "const",
+    "continue",
+    "declare",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "elseif",
+    "end",
+    "enum",
+    "export",
+    "extends",
+    "extern",
+    "false",
+    "for",
+    "from",
+    "function",
+    "if",
+    "impl",
+    "import",
+    "in",
+    "interface",
+    "is",
+    "local",
+    "macro",
+    "match",
+    "new",
+    "nil",
+    "not",
+    "on",
+    "open",
+    "or",
+    "private",
+    "public",
+    "read",
+    "remote",
+    "repeat",
+    "return",
+    "satisfies",
+    "shl",
+    "shr",
+    "struct",
+    "then",
+    "trait",
+    "true",
+    "try",
+    "type",
+    "until",
+    "where",
+    "while",
+    "with",
+    "write",
+];
+
+/// The keywords a typed word begins, in order.
+pub fn starting_with(word: &str) -> Vec<&'static str> {
+    match word.is_empty() {
+        true => Vec::new(),
+
+        false => WORDS
+            .iter()
+            .copied()
+            .filter(|k| k.starts_with(word))
+            .collect(),
+    }
+}
+
+/// Whether the word is a keyword of its own.
+pub fn is_keyword(word: &str) -> bool {
+    WORDS.contains(&word)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

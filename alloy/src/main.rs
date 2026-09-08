@@ -1,5 +1,6 @@
 //! `alloy` command line entry point.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -322,6 +323,10 @@ fn project(args: &[String]) -> Result<(PathBuf, Config), String> {
                 root
             };
             let config = Config::load(&path).map_err(|e| e.to_string())?;
+
+            for line in config.deprecations() {
+                eprintln!("{}", Painter::for_stderr().warn(&line));
+            }
 
             Ok((root, config))
         }
@@ -719,6 +724,8 @@ fn lint_config_for(
     }
 
     for (level, name) in flags {
+        // The deprecated lists still read, so a flag has to leave them
+        // or the file would beat the command line.
         for list in [
             &mut lint_config.allow,
             &mut lint_config.warn,
@@ -727,18 +734,14 @@ fn lint_config_for(
             list.retain(|n| n != name);
         }
 
-        match level {
-            lint::Level::Allow => lint_config.allow.push(name.clone()),
-            lint::Level::Warn => lint_config.warn.push(name.clone()),
-            lint::Level::Deny => lint_config.deny.push(name.clone()),
-        }
+        lint_config.rules.insert(name.clone(), *level);
     }
 
     for name in lint::unknown_names(&lint_config) {
         eprintln!(
             "{}",
             Painter::for_stderr().warn(&format!(
-                "`{name}` is neither a lint nor a group; `alloy flux --list` has them"
+                "`{name}` is neither a lint nor a group; `alloy lint --list` has them"
             ))
         );
     }
@@ -746,9 +749,37 @@ fn lint_config_for(
     lint_config
 }
 
-/// `--list`: every lint with its group and default level.
+/// One `--list` line: the name and its level as `[lint.rules]` takes
+/// them, then the summary. The padding is counted before the paint, so
+/// the colour codes never move the column.
+fn list_line(p: &Painter, name: &str, level: lint::Level, summary: &str) {
+    let rgb = match level {
+        lint::Level::Allow => ui::DIM,
+        lint::Level::Warn => ui::AMBER,
+        lint::Level::Deny => ui::RED,
+    };
+    let rule = format!("\"{}\"", level.name());
+    let width = name.chars().count() + 3 + rule.chars().count();
+    let pad = " ".repeat(38usize.saturating_sub(width));
+
+    println!("  {name} = {}{pad}  {summary}", p.paint(rgb, &rule));
+}
+
+/// `--list`: every lint with its group and the level a project with no
+/// `[lint.rules]` gives it, written the way that table takes it.
 fn list_lints() -> ExitCode {
     let p = Painter::for_stdout();
+    let defaults = LintConfig::default();
+
+    println!(
+        "{}  {}",
+        p.bold("[lint.rules]"),
+        p.paint(
+            ui::DIM,
+            "a lint name or a group name, at allow, warn, or deny; a name beats its group"
+        )
+    );
+    println!();
 
     for group in lint::Group::ALL {
         println!(
@@ -758,17 +789,7 @@ fn list_lints() -> ExitCode {
         );
 
         for l in lint::LINTS.iter().filter(|l| l.group == *group) {
-            let (level, rgb) = match l.default {
-                lint::Level::Allow => ("allow", ui::DIM),
-                lint::Level::Warn => ("warn", ui::AMBER),
-                lint::Level::Deny => ("deny", ui::RED),
-            };
-            println!(
-                "  {:<24} {}  {}",
-                l.name,
-                p.paint(rgb, &format!("{level:<6}")),
-                l.summary
-            );
+            list_line(&p, l.name, lint::level_of(&defaults, l.name), l.summary);
         }
 
         println!();
@@ -782,6 +803,21 @@ fn list_lints() -> ExitCode {
             "the type checker's own lints, LocalUnused and the rest, under `alloy flux`"
         )
     );
+    println!();
+    println!(
+        "{}  {}",
+        p.bold("alx"),
+        p.paint(ui::DIM, "the markup lints of `.alx` files")
+    );
+
+    for l in lint::ALX_LINTS {
+        list_line(
+            &p,
+            &format!("{}{}", lint::ALX_PREFIX, l.name),
+            l.default,
+            l.summary,
+        );
+    }
 
     // The ingots of the nearest project add their lints under their names.
     if let Some(config_path) = Config::find(Path::new("."))
@@ -808,17 +844,7 @@ fn list_lints() -> ExitCode {
             );
 
             for l in lint::external().iter().filter(|l| l.group == ingot.name) {
-                let (level, rgb) = match l.default {
-                    lint::Level::Allow => ("allow", ui::DIM),
-                    lint::Level::Warn => ("warn", ui::AMBER),
-                    lint::Level::Deny => ("deny", ui::RED),
-                };
-                println!(
-                    "  {:<24} {}  {}",
-                    l.name,
-                    p.paint(rgb, &format!("{level:<6}")),
-                    l.summary
-                );
+                list_line(&p, l.name, l.default, &l.summary);
             }
         }
     }
@@ -869,11 +895,17 @@ fn lint_cmd(args: &[String]) -> ExitCode {
     let input = root.join(&config.build.input);
     print_diagnostics(&input, &report);
     let fix = args.iter().any(|a| a == "--fix");
+    let header_rewrites = if fix {
+        apply_header_as_fixes(&input, &report.diagnostics)
+    } else {
+        0
+    };
     let (rewrites, remaining) = if fix {
         apply_lint_fixes(&input, &report.lints, &lint_config)
     } else {
         (0, report.lints.clone())
     };
+    let rewrites = rewrites + header_rewrites;
     let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
     offer_fixes(&input, &report.lints, &lint_config, fix, "lint");
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
@@ -1078,11 +1110,17 @@ fn flux_once(args: &[String]) -> ExitCode {
     }
 
     let fix = args.iter().any(|a| a == "--fix");
+    let header_rewrites = if fix {
+        apply_header_as_fixes(&input, &report.diagnostics)
+    } else {
+        0
+    };
     let (rewrites, remaining) = if fix {
         apply_lint_fixes(&input, &report.lints, &lint_config)
     } else {
         (0, report.lints.clone())
     };
+    let rewrites = rewrites + header_rewrites;
     let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
     offer_fixes(&input, &report.lints, &lint_config, fix, "flux");
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
@@ -1668,6 +1706,46 @@ fn rewrite_note(source: &str, fix: &alloy::lint::Fix) -> String {
     format!("rewrite: {one_line}")
 }
 
+/// `--fix`: writes the `as` an `impl` or a `trait` header is missing.
+///
+/// The header is a syntax error, and a file the parser reported on has
+/// no lints, so this rewrite rides on the diagnostic instead. It runs
+/// before the lint fixes, which then see a file that parses clean.
+fn apply_header_as_fixes(input: &Path, diagnostics: &[(PathBuf, alloy::Diagnostic)]) -> usize {
+    let mut paths: Vec<&PathBuf> = diagnostics
+        .iter()
+        .filter(|(_, d)| d.message.ends_with(alloy::fmt::NEEDS_AS))
+        .map(|(rel, _)| rel)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let mut rewrites = 0;
+
+    for rel in paths {
+        let path = input.join(rel);
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let fixes = alloy::fmt::header_as_fixes(&source);
+
+        if fixes.is_empty() {
+            continue;
+        }
+
+        let mut text = source;
+
+        for f in fixes.iter().rev() {
+            text.insert_str(f.start as usize, &f.replacement);
+        }
+
+        if fs::write(&path, &text).is_ok() {
+            rewrites += fixes.len();
+        }
+    }
+
+    rewrites
+}
+
 /// `--fix`: applies the rewrites of the lints at `warn` or `deny`, one
 /// file at a time. Returns how many rewrites landed and the lints that
 /// had none, which the caller prints.
@@ -1860,10 +1938,13 @@ fn fmt_cmd(args: &[String]) -> ExitCode {
             }
         };
 
+        // Under `[fmt] recommended = false` the indent is the file's
+        // own, so the options are settled per file.
+        let options = config.fmt.for_source(&source);
         let result = if name.ends_with(".alx") {
-            alloy::fmt_alx::format_alx_file(&source, &config.fmt)
+            alloy::fmt_alx::format_alx_file(&source, &options)
         } else {
-            alloy::fmt::format_file(&source, &config.fmt)
+            alloy::fmt::format_file(&source, &options)
         };
         let formatted = match result {
             Ok(f) => f,

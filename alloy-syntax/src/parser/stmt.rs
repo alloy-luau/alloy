@@ -2144,8 +2144,10 @@ impl<'a> Parser<'a> {
         exported: bool,
     ) -> Result<Stmt, ParseError> {
         let open = self.pos;
+        let head_start = self.pos;
         self.expect("trait")?;
         let name = self.expect_name()?;
+        self.header_as(head_start);
         let mut methods = Vec::new();
 
         while !self.at("end") {
@@ -2498,7 +2500,23 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// `as` closes an `impl` or a `trait` header, the way it closes a
+    /// `struct`, an `enum`, and an `interface` header. A header without
+    /// it reports and the parse goes on, so the editor still reads the
+    /// body while the author migrates the file.
+    fn header_as(&mut self, head_start: usize) {
+        if self.eat("as") {
+            return;
+        }
+
+        let head = &self.src[self.toks[head_start].start as usize
+            ..self.toks[self.pos.max(head_start + 1) - 1].end as usize];
+        let at = self.toks[head_start].start as usize;
+        self.report_at(at, &format!("`{head}` {}", super::NEEDS_AS));
+    }
+
     fn impl_decl(&mut self, start: usize, exported: bool) -> Result<Stmt, ParseError> {
+        let head_start = self.pos;
         self.expect("impl")?;
         let first_start = self.pos;
         self.expect_name()?;
@@ -2534,6 +2552,7 @@ impl<'a> Parser<'a> {
             (None, first)
         };
 
+        self.header_as(head_start);
         let mut methods = Vec::new();
 
         loop {

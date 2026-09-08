@@ -115,6 +115,12 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
 /// bounded amount of work and memory.
 pub const MAX_DIAGNOSTICS: usize = 200;
 
+/// The tail of the report for an `impl` or a `trait` header without
+/// `as`. The header is the only thing missing: the tree still covers
+/// every token, so the formatter reads such a file and writes the `as`
+/// in, and the server offers the same rewrite as a quick fix.
+pub const NEEDS_AS: &str = "needs `as` before its body";
+
 /*
 Parses with recovery. The tree always covers every token: a stretch the
 parser cannot read becomes a `Stmt::Error` that tiles the block like any

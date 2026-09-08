@@ -5,7 +5,7 @@ enum Shape as
     Rect(number, number)
 end
 
-impl Shape
+impl Shape as
     function area(self): number
         return match self with
             case Circle(r) then r * r
@@ -19,7 +19,7 @@ struct Box<T> as
     count: number = 1
 end
 
-impl Box<T>
+impl Box<T> as
     function get(self): T
         return self.value
     end

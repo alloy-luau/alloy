@@ -20,7 +20,7 @@ __alloy.delete(q)
 local function f(a: number?, _p1: P, ...): number local a: number = if a == nil then 1 else a local x, y = _p1.x, _p1.y
 	return a + x + y
 end
-local function load(id: number): __alloy.Future<Profile> return __alloy.future(function()
+local function load(id: number): __alloy.Future<Profile> return __alloy.future(function(): Profile
 	local raw = __alloy.await(fetch(id))
 	return raw
 end) end

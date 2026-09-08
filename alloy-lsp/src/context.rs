@@ -1212,15 +1212,34 @@ fn in_enum_payload(src: &str, line_start: usize, head: &str) -> bool {
 fn declaration_head(head: &str) -> Option<bool> {
     let t = head.trim_start();
     let t = t.strip_prefix("export ").map(str::trim_start).unwrap_or(t);
-    let (rest, interface) = if let Some(r) = t.strip_prefix("struct ") {
-        (r, false)
+    let (rest, interface, is_impl) = if let Some(r) = t.strip_prefix("struct ") {
+        (r, false, false)
     } else if let Some(r) = t.strip_prefix("enum ") {
-        (r, false)
+        (r, false, false)
+    } else if let Some(r) = t.strip_prefix("trait ") {
+        (r, false, false)
+    } else if let Some(r) = t.strip_prefix("impl ") {
+        (r, false, true)
     } else {
-        (t.strip_prefix("interface ")?, true)
+        (t.strip_prefix("interface ")?, true, false)
     };
+    let mut after = declaration_name(rest)?;
+
+    // `impl Trait for Type as`: the target closes the header.
+    if is_impl && let Some(target) = after.trim_start().strip_prefix("for ") {
+        after = declaration_name(target)?;
+    }
+
+    (after.ends_with([' ', '\t']) && after.trim().is_empty()).then_some(interface)
+}
+
+/// The text after a declaration's name and its `<...>` parameters.
+fn declaration_name(rest: &str) -> Option<&str> {
     let rest = rest.trim_start();
-    let name_len = rest.chars().take_while(|c| is_word(*c)).count();
+    let name_len = rest
+        .chars()
+        .take_while(|c| is_word(*c) || *c == '.')
+        .count();
 
     if name_len == 0 {
         return None;
@@ -1233,7 +1252,7 @@ fn declaration_head(head: &str) -> Option<bool> {
         after = &after[close + 1..];
     }
 
-    (after.ends_with([' ', '\t']) && after.trim().is_empty()).then_some(interface)
+    Some(after)
 }
 
 /// The declaration keyword a line starts with, `export` aside.
@@ -2424,7 +2443,7 @@ mod tests {
     #[test]
     fn an_arm_binding_and_a_method_name_take_their_place() {
         let src = concat!(
-            "impl Round\n",
+            "impl Round as\n",
             "    function step(self, msg: Msg): string\n",
             "        match msg with\n",
             "            case Join(pid) then\n",
@@ -2761,13 +2780,13 @@ mod tests {
             })
         );
         assert_eq!(
-            at("impl Box\n    |"),
+            at("impl Box as\n    |"),
             Some(Context::MemberStart {
                 prefix: String::new()
             })
         );
         assert_eq!(
-            at("impl Box\n    function f(self)\n        local x = |"),
+            at("impl Box as\n    function f(self)\n        local x = |"),
             None
         );
         assert_eq!(at("struct Box as\nend\nlocal x = |"), None);
@@ -2892,7 +2911,7 @@ mod tests {
     #[test]
     fn a_trait_body_and_a_closed_body_have_their_own_answers() {
         assert_eq!(
-            at("trait Keyed\n    |"),
+            at("trait Keyed as\n    |"),
             Some(Context::TraitMemberStart {
                 prefix: String::new()
             })
@@ -2902,7 +2921,32 @@ mod tests {
             at("struct Box as\n    x: number\nend|"),
             Some(Context::Nothing)
         );
-        assert_eq!(at("impl Box\nend|"), Some(Context::Nothing));
+        assert_eq!(at("impl Box as\nend|"), Some(Context::Nothing));
+    }
+
+    /// An empty body on one line closes where it opens: the line after
+    /// `impl T as end` is ordinary code, not the member column.
+    #[test]
+    fn a_one_line_body_is_closed() {
+        for head in [
+            "struct T as end",
+            "enum E as end",
+            "interface I as end",
+            "trait U as end",
+            "impl T as end",
+            "impl U for T as end",
+        ] {
+            assert_eq!(at(&format!("{head}\nlocal x = |")), None, "{head}");
+            assert_eq!(at(&format!("{head}\n|")), None, "{head}");
+        }
+
+        // The body a header opens is still open on the next line.
+        assert_eq!(
+            at("impl T as\n    |"),
+            Some(Context::MemberStart {
+                prefix: String::new()
+            })
+        );
     }
 
     /// The fields a struct body or a record type declares.
@@ -2991,10 +3035,10 @@ mod tests {
 
     #[test]
     fn self_takes_the_type_the_impl_is_for() {
-        let one = "impl Msg\n    function tag(self)\n        match self with\n";
+        let one = "impl Msg as\n    function tag(self)\n        match self with\n";
         assert_eq!(impl_target(one, one.len()), Some("Msg".to_string()));
 
-        let two = "impl Shape for Circle\n    function area(self)\n";
+        let two = "impl Shape for Circle as\n    function area(self)\n";
         assert_eq!(impl_target(two, two.len()), Some("Circle".to_string()));
 
         let none = "local function f()\n    match self with\n";
@@ -3062,6 +3106,38 @@ mod tests {
         );
         assert_eq!(at("enum Test as |"), None);
         assert_eq!(at("enum |"), None);
+    }
+
+    /// `impl` and `trait` close their header with `as` too.
+    #[test]
+    fn an_impl_and_a_trait_header_want_as() {
+        for head in [
+            "impl Test |",
+            "impl Box<T> |",
+            "impl Shape for Test |",
+            "impl Shape for Test<T> |",
+            "trait Shape |",
+            "export impl Shape for Test |",
+        ] {
+            assert_eq!(
+                at(head),
+                Some(Context::DeclarationAs {
+                    prefix: String::new(),
+                    interface: false
+                }),
+                "{head}"
+            );
+        }
+
+        assert_eq!(
+            at("impl Test a|"),
+            Some(Context::DeclarationAs {
+                prefix: "a".to_string(),
+                interface: false
+            })
+        );
+        assert_eq!(at("impl Test as |"), None);
+        assert_eq!(at("trait Shape as |"), None);
     }
 
     #[test]

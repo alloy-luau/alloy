@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn methods_and_statics() {
-        let src = "export impl Vector3\n    function flat(self): Vector3\n        return self\n    end\n    function origin(): Vector3\n        return Vector3.zero\n    end\n    function scale(self, by: number, extra = 1)\n    end\nend\nstruct Vec2 as\n    x: number\nend\nimpl Vec2\n    function m(self) end\nend\n";
+        let src = "export impl Vector3 as\n    function flat(self): Vector3\n        return self\n    end\n    function origin(): Vector3\n        return Vector3.zero\n    end\n    function scale(self, by: number, extra = 1)\n    end\nend\nstruct Vec2 as\n    x: number\nend\nimpl Vec2 as\n    function m(self) end\nend\n";
         let exts = collect(src);
         assert_eq!(exts.len(), 3, "{exts:#?}");
         assert_eq!(exts[0].name, "flat");

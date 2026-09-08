@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn an_impl_of_a_trait_writes_every_required_method() {
-        let src = "trait Shape\n    function area(self): number\n    function scale(self, k: number): Shape\n    function name(self): string\n        return \"shape\"\n    end\nend\nstruct Sq as\n    s: number\nend\nimpl Shape for Sq\n    function scale(self): Shape\n        return self\n    end\nend\n";
+        let src = "trait Shape as\n    function area(self): number\n    function scale(self, k: number): Shape\n    function name(self): string\n        return \"shape\"\n    end\nend\nstruct Sq as\n    s: number\nend\nimpl Shape for Sq as\n    function scale(self): Shape\n        return self\n    end\nend\n";
         let got = messages(src);
         assert_eq!(got.len(), 2, "{got:?}");
         assert!(
@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(bad.diagnostics.len(), 5, "{:?}", bad.diagnostics);
         assert!(bad.diagnostics[0].message.contains("reserved"));
 
-        let fine = compile("struct V as\n    x: number\nend\nimpl V\n    function new(): V\n        return new V { x = 1 }\n    end\nend\nlocal make = Instance.new\nfunction V.await() end\nlocal v = new V()\nprint(make, v, V.new)\n").unwrap();
+        let fine = compile("struct V as\n    x: number\nend\nimpl V as\n    function new(): V\n        return new V { x = 1 }\n    end\nend\nlocal make = Instance.new\nfunction V.await() end\nlocal v = new V()\nprint(make, v, V.new)\n").unwrap();
         assert!(fine.diagnostics.is_empty(), "{:?}", fine.diagnostics);
     }
 
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn a_written_constructor_is_the_way_in() {
-        let src = "struct Menu as\n    n: number\nend\nimpl Menu\n    function New(n: number): Menu\n        return new Menu { n = n }\n    end\nend\nlocal a = new Menu(1)\nlocal b = new Menu { n = 2 }\nlocal c = Menu(3)\nlocal d = Menu { n = 4 }\nprint(a, b, c, d)\n";
+        let src = "struct Menu as\n    n: number\nend\nimpl Menu as\n    function New(n: number): Menu\n        return new Menu { n = n }\n    end\nend\nlocal a = new Menu(1)\nlocal b = new Menu { n = 2 }\nlocal c = Menu(3)\nlocal d = Menu { n = 4 }\nprint(a, b, c, d)\n";
         let out = compile(src).unwrap();
         let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(messages.len(), 3, "{messages:?}");
@@ -811,7 +811,7 @@ mod tests {
         );
         assert!(out.check.contains("function(s: V)"), "{}", out.check);
 
-        let own = "struct V as\n    x: number\nend\nimpl V\n    function to_string(self): string\n        return `v{self.x}`\n    end\nend\n@derive(Debug)\nstruct W as\n    x: number\nend\n";
+        let own = "struct V as\n    x: number\nend\nimpl V as\n    function to_string(self): string\n        return `v{self.x}`\n    end\nend\n@derive(Debug)\nstruct W as\n    x: number\nend\n";
         let out = compile(own).unwrap();
         assert!(!out.ship.contains("show_struct"), "{}", out.ship);
         assert!(
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn private_members_leave_the_public_view_of_the_check_artifact() {
-        let src = "struct Counter as\n    read name: string\n    private count: number = 0\nend\nimpl Counter\n    function bump(self): number\n        self.count += 1\n        self:log()\n        return self.count\n    end\n    public function peek(self): number\n        return self.count\n    end\n    private function log(self)\n        print(self.count)\n    end\nend\n";
+        let src = "struct Counter as\n    read name: string\n    private count: number = 0\nend\nimpl Counter as\n    function bump(self): number\n        self.count += 1\n        self:log()\n        return self.count\n    end\n    public function peek(self): number\n        return self.count\n    end\n    private function log(self)\n        print(self.count)\n    end\nend\n";
         let out = compile(src).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         // The ship artifact: every method on the class, no view.

@@ -1095,7 +1095,11 @@ fn impl_line_for(source: &str, line: usize, name: &str) -> Option<usize> {
         .take(line.saturating_sub(1))
         .enumerate()
         .filter(|(_, l)| {
-            l.trim_start().starts_with("impl ") && l.trim_end().ends_with(&format!(" for {name}"))
+            // `impl T for Alias as`: the header may close with `as`.
+            let head = l.trim_end();
+            let head = head.strip_suffix(" as").unwrap_or(head);
+
+            l.trim_start().starts_with("impl ") && head.ends_with(&format!(" for {name}"))
         })
         .map(|(k, _)| k + 1)
         .last()
@@ -1268,16 +1272,32 @@ fn enclosing_call(line: &str, col: usize) -> Option<(char, String, String)> {
 }
 
 /// `await` on a value that is no Future prints the std's own parameter,
-/// `Awaitable<T>`, whose `T` is bound to nothing the reader can see.
+/// `Settled<any>`, whose `__value` is a key of the type and not of the
+/// source. Older spellings of the parameter still reach here.
 fn rewrite_await(message: &str, line: &str) -> Option<String> {
-    let wanted = message.contains("'Awaitable<T>'") || message.contains("'Future<T>'");
+    let bound = message.strip_prefix('`').and_then(|rest| {
+        let (got, tail) = rest.split_once('`')?;
+
+        tail.contains("the bound `Settled<").then_some(got)
+    });
+    let wanted = bound.is_some()
+        || message.contains("'Awaitable<T>'")
+        || message.contains("'Future<T>'")
+        || message.contains("'Settled<");
 
     if !(wanted && line.contains("await ")) {
         return None;
     }
 
-    let got = message.split_once("but got '")?.1;
-    let got = got.split('\'').next()?;
+    let got = match bound {
+        Some(got) => got,
+
+        None => {
+            let rest = message.split_once("but got '")?.1;
+
+            rest.split('\'').next()?
+        }
+    };
     // A narrowed primitive prints as `typeof(string)`; the reader wrote
     // a string.
     let got = got
@@ -2144,7 +2164,7 @@ mod tests {
 
     #[test]
     fn a_private_member_reads_as_private_and_not_as_missing() {
-        let source = "struct Cooldown as\n    read name: string\n    private last: number = 0\nend\n\nimpl Cooldown\n    private function stamp(self)\n    end\nend\n\nprint(c.last)\nc:stamp()\n";
+        let source = "struct Cooldown as\n    read name: string\n    private last: number = 0\nend\n\nimpl Cooldown as\n    private function stamp(self)\n    end\nend\n\nprint(c.last)\nc:stamp()\n";
 
         assert_eq!(
             resited("Type 'Cooldown' does not have key 'last'", source, 11, 7).message,
@@ -2158,7 +2178,7 @@ mod tests {
 
     #[test]
     fn a_method_the_struct_does_not_write_reads_as_a_method() {
-        let source = "struct Sq as side: number end\n\nimpl Sq\n    function area(self): number\n        return 1\n    end\nend\n\nlocal gone = s:perimeter()\n";
+        let source = "struct Sq as side: number end\n\nimpl Sq as\n    function area(self): number\n        return 1\n    end\nend\n\nlocal gone = s:perimeter()\n";
         let got = resited("Type 'Sq' does not have key 'perimeter'", source, 9, 14);
 
         assert_eq!(
@@ -2261,7 +2281,7 @@ mod tests {
 
     #[test]
     fn an_unmet_bound_reads_as_a_bound_on_the_argument() {
-        let source = "trait Named\n    function name(self): string\nend\n\nstruct Plain as\n    n: number\nend\n\nprint(announce(new Plain { n = 1 }))\n";
+        let source = "trait Named as\n    function name(self): string\nend\n\nstruct Plain as\n    n: number\nend\n\nprint(announce(new Plain { n = 1 }))\n";
         let got = resited("Expected this to be 'Named', but got 'Plain'", source, 9, 7);
 
         assert_eq!(got.message, "`Plain` does not satisfy the bound `Named`");
@@ -2362,6 +2382,30 @@ mod tests {
             ),
             "`await` needs a Future; `string` is not one"
         );
+        // The parameter is a bound now, and the bound prints its name.
+        assert_eq!(
+            friendly_type_message(
+                "`number` does not satisfy the bound `Settled<any>`",
+                &known,
+                Some("local nope = await n"),
+                14
+            ),
+            "`await` needs a Future; `number` is not one"
+        );
+    }
+
+    /// `__value` is the key the Future type carries; the source never
+    /// writes it, so the report beside the bound one goes.
+    #[test]
+    fn the_value_key_of_a_future_is_no_report() {
+        assert!(crate::shapes::names_the_emit_key(
+            "Property '\"__value\"' does not exist on type 'number'",
+            "local nope = await n"
+        ));
+        assert!(!crate::shapes::names_the_emit_key(
+            "Property '\"__value\"' does not exist on type 'number'",
+            "local v = f.__value"
+        ));
     }
 
     #[test]
@@ -2537,7 +2581,7 @@ mod tests {
 
     #[test]
     fn an_impl_for_an_alias_reports_on_the_impl_line() {
-        let src = "type Alias = { z: number }\nimpl Shape for Alias\n    function area(self): number\n        return self.z\n    end\nend\n";
+        let src = "type Alias = { z: number }\nimpl Shape for Alias as\n    function area(self): number\n        return self.z\n    end\nend\n";
         assert_eq!(
             rewrite_emitted_name(
                 "Unknown global 'Alias'; consider assigning to it first",

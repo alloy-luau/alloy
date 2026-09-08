@@ -20,7 +20,7 @@ enum Rarity as
 end
 
 -- `impl` on an enum adds methods, as on a struct.
-impl Msg
+impl Msg as
     function player(self): Player
         return match self with
             case Join(p) then p

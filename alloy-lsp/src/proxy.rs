@@ -336,6 +336,83 @@ impl State {
         diagnostics
     }
 
+    /// The quick fixes for an `impl` or a `trait` header without `as`:
+    /// one per header in the range, and one that writes every header of
+    /// the file. A file the parser reported on carries no lint, so this
+    /// rewrite rides on the diagnostic, the way `alloy flux --fix` does.
+    fn header_as_actions(&self, uri: &str, range: ((u32, u32), (u32, u32))) -> Vec<Value> {
+        let mut actions = Vec::new();
+        let Some(doc) = self.docs.get(uri) else {
+            return actions;
+        };
+        let fixes = alloy::fmt::header_as_fixes(&doc.source);
+
+        if fixes.is_empty() {
+            return actions;
+        }
+
+        let ((from_line, _), (to_line, _)) = range;
+        let mut all: Vec<Value> = Vec::new();
+
+        for f in &fixes {
+            let (line, at) = position_of(&doc.source, f.start as usize);
+            let edit = json!({
+                "range": {
+                    "start": { "line": line, "character": at },
+                    "end": { "line": line, "character": at },
+                },
+                "newText": f.replacement,
+            });
+            all.push(edit.clone());
+
+            if line < from_line || line > to_line {
+                continue;
+            }
+
+            let head = doc
+                .output
+                .as_ref()
+                .map(|o| o.diagnostics.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .find(|d| {
+                    d.message.ends_with(alloy::fmt::NEEDS_AS)
+                        && position_of(&doc.source, d.start as usize).0 == line
+                });
+            let mut action = json!({
+                "title": "Write `as` after the header",
+                "kind": "quickfix",
+                "isPreferred": true,
+                "edit": { "changes": { uri: [edit] } },
+            });
+
+            if let Some(d) = head {
+                let (sl, sc) = position_of(&doc.source, d.start as usize);
+                action["diagnostics"] = json!([{
+                    "range": {
+                        "start": { "line": sl, "character": sc },
+                        "end": { "line": line, "character": at },
+                    },
+                    "severity": 1,
+                    "source": "Alloy",
+                    "message": alloy::docs::labeled(&d.message),
+                }]);
+            }
+
+            actions.push(action);
+        }
+
+        if all.len() > 1 {
+            actions.push(json!({
+                "title": format!("Write `as` after every header in this file ({})", all.len()),
+                "kind": "source.fixAll",
+                "edit": { "changes": { uri: all } },
+            }));
+        }
+
+        actions
+    }
+
     /// The code actions of the lints: a quick fix per rewrite whose lint
     /// touches the range, each tied to its diagnostic so the editor's
     /// light bulb finds it, and `source.fixAll` for the whole file.
@@ -2149,7 +2226,7 @@ impl State {
                     "as",
                     14,
                     Some(
-                        "Opens the body: the fields of a struct, the variants of an enum."
+                        "Opens the body: the fields of a struct, the variants of an enum, the methods of an `impl` or a `trait`."
                             .to_string(),
                     ),
                     offset - prefix.len(),
@@ -2371,8 +2448,22 @@ impl State {
                 let mut p = PathBuf::from("_outside");
 
                 for c in real.components() {
-                    if let std::path::Component::Normal(n) = c {
-                        p.push(n);
+                    match c {
+                        // Windows: `C:` becomes one folder name, so the
+                        // drive survives the trip through the mirror
+                        // and `real_path` writes it back.
+                        std::path::Component::Prefix(prefix) => {
+                            let text = prefix.as_os_str().to_string_lossy();
+                            let text = text.trim_end_matches([':', '/', '\\']);
+
+                            if !text.is_empty() {
+                                p.push(text);
+                            }
+                        }
+
+                        std::path::Component::Normal(n) => p.push(n),
+
+                        _ => {}
                     }
                 }
 
@@ -2403,7 +2494,7 @@ impl State {
         let rel = mirror.strip_prefix(&self.mirror).ok()?;
 
         if let Ok(outside) = rel.strip_prefix("_outside") {
-            return Some(Path::new("/").join(outside));
+            return Some(outside_path(outside));
         }
 
         Some(self.root.as_deref()?.join(rel))
@@ -3471,7 +3562,16 @@ impl Server {
         };
         let answer = remote_hover(&doc.source, &word)
             .or_else(imported)
-            .or_else(|| namespace_hover(&doc.source, &word, path.as_deref()));
+            .or_else(|| {
+                let dir = path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .unwrap_or(Path::new("."))
+                    .to_path_buf();
+                let aliases = project_aliases(&dir, st.root.as_deref());
+
+                module_hover(&doc.source, &word, path.as_deref(), &aliases)
+            });
 
         let Some(answer) = answer else {
             return false;
@@ -4524,6 +4624,7 @@ impl Server {
                         && let Some(range) = range
                         && let Some(actions) = result.as_array_mut()
                     {
+                        actions.extend(st.header_as_actions(uri, range));
                         actions.extend(st.lint_actions(uri, range));
                         actions.extend(st.ingot_actions(uri, range));
                     }
@@ -4658,6 +4759,11 @@ impl Server {
                         }
 
                         st.filter_remote_members(uri, line, character, result);
+                        // After the clean: the spec `@pkg/react` is the
+                        // detail, and the clean drops a detail that
+                        // spells no type.
+                        st.rewrite_child_auto_imports(uri, result);
+                        st.keyword_first(uri, line, character, result);
                     }
                 }
 
@@ -5380,8 +5486,242 @@ impl State {
             .filter_map(|(u, d)| uri_to_path(u).map(|p| (p, d.exports.as_slice())))
             .collect();
 
-        imports::auto_import_items(&doc.source, &path, &files, &prefix, &bound)
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let aliases = project_aliases(&dir, self.root.as_deref());
+
+        imports::auto_import_items(&doc.source, &path, &files, &prefix, &bound, &aliases)
     }
+}
+
+impl State {
+    /// The keyword wins while the typed word begins one.
+    ///
+    /// `end` in `if x then return end`, and in a one-line `struct T as
+    /// end`, drew `EncodingService` from the child's auto-imports: the
+    /// editor matched the letters and sorted the module first. So while
+    /// the word begins a keyword the list drops every auto-import and
+    /// every label the word does not begin, holds the keywords the word
+    /// begins, and an exact keyword takes the first row.
+    fn keyword_first(&self, uri: &str, line: u32, character: u32, result: &mut Value) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return;
+        };
+
+        // A member names what a value has, and a string holds no word.
+        if member_position(doc, line, character).is_some()
+            || context::in_string(&doc.source, offset)
+        {
+            return;
+        }
+
+        let word = imports::word_before(&doc.source, offset);
+        let matches = keywords::starting_with(&word);
+
+        if matches.is_empty() {
+            return;
+        }
+
+        let items = match result {
+            Value::Array(v) => v,
+
+            Value::Object(o) => match o.get_mut("items").and_then(Value::as_array_mut) {
+                Some(v) => v,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+        items.retain(|i| {
+            let label = i.get("label").and_then(Value::as_str).unwrap_or_default();
+
+            !is_auto_import(i) && label.starts_with(word.as_str())
+        });
+
+        for keyword in &matches {
+            if !items
+                .iter()
+                .any(|i| i.get("label").and_then(Value::as_str) == Some(*keyword))
+            {
+                items.push(json!({
+                    "label": keyword,
+                    "kind": 14,
+                    "detail": "Alloy keyword",
+                    "sortText": format!("0{keyword}"),
+                }));
+            }
+        }
+
+        if !keywords::is_keyword(&word) {
+            return;
+        }
+
+        for item in items.iter_mut() {
+            if item.get("label").and_then(Value::as_str) == Some(word.as_str()) {
+                item["preselect"] = json!(true);
+                item["filterText"] = json!(word.clone());
+                item["sortText"] = json!(format!("!{word}"));
+            }
+        }
+    }
+
+    /// The child's module auto-imports, as Alloy imports.
+    ///
+    /// luau-lsp offers a module by its instance path and inserts a
+    /// `require`. Alloy writes `import name from "@pkg/name"`, so the
+    /// item carries the module's name, the spec the project's aliases
+    /// give it, and one edit that writes the import under the last one.
+    /// A module a dot folder holds, one no alias and no `[build] in`
+    /// reaches, and one the file already imports are dropped.
+    fn rewrite_child_auto_imports(&self, uri: &str, result: &mut Value) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return;
+        };
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let aliases = project_aliases(&dir, self.root.as_deref());
+        let mounts = self.instance_mounts();
+        let input = self.input_dir();
+        let taken = imports::imported_specs(&doc.source);
+        let source = doc.source.clone();
+        let items = match result {
+            Value::Array(v) => v,
+
+            Value::Object(o) => match o.get_mut("items").and_then(Value::as_array_mut) {
+                Some(v) => v,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+
+        items.retain_mut(|item| {
+            if !is_module_auto_import(item) {
+                return true;
+            }
+
+            let Some(instance) = item.get("detail").and_then(Value::as_str) else {
+                return false;
+            };
+            let Some(file) = module_file_of(instance, &mounts) else {
+                return false;
+            };
+            let Some(spec) = imports::best_spec(&dir, &file, &aliases) else {
+                return false;
+            };
+            let under_input = input.as_ref().is_some_and(|i| file.starts_with(i));
+
+            // A module the file reads is no offer, and a relative spec
+            // outside `[build] in` names a package store the author
+            // never writes.
+            if taken.contains(&spec) || (spec.starts_with('.') && !under_input) {
+                return false;
+            }
+
+            let name = file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let export = imports::Export {
+                name: name.clone(),
+                is_type: false,
+                is_default: true,
+                kind: 9,
+            };
+            item["label"] = json!(name);
+            item["detail"] = json!(spec);
+            item["insertText"] = json!(name);
+            item["additionalTextEdits"] = json!([imports::import_edit(&source, &spec, &export)]);
+
+            true
+        });
+    }
+
+    /// The `[build] in` directory of the project, the one tree whose
+    /// modules an author writes by a relative path.
+    fn input_dir(&self) -> Option<PathBuf> {
+        let root = self.root.as_deref()?;
+        let path = Config::find_within(root, root)?;
+        let config = Config::load(&path).ok()?;
+        let base = path.parent().unwrap_or(Path::new("."));
+
+        Some(config_dir(base, &config.build.input.to_string_lossy()))
+    }
+
+    /// The `[mount]` table as instance path to directory, longest
+    /// instance path first, so a nested mount wins over its parent.
+    fn instance_mounts(&self) -> Vec<(String, PathBuf)> {
+        let Some(root) = self.root.as_deref() else {
+            return Vec::new();
+        };
+        let Some(path) = Config::find_within(root, root) else {
+            return Vec::new();
+        };
+        let Ok(config) = Config::load(&path) else {
+            return Vec::new();
+        };
+        let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let mut out: Vec<(String, PathBuf)> = config
+            .mount
+            .values()
+            .filter_map(|m| {
+                let instance = m.1.strip_prefix("@game/")?.replace('/', ".");
+
+                Some((instance, config_dir(&base, &m.0)))
+            })
+            .collect();
+        out.sort_by_key(|(i, _)| std::cmp::Reverse(i.len()));
+
+        out
+    }
+}
+
+/// Whether an item is the child's auto-import of a module: it inserts a
+/// `require`, so its detail is the instance path of a module file.
+fn is_module_auto_import(item: &Value) -> bool {
+    if !is_auto_import(item) {
+        return false;
+    }
+
+    item.get("additionalTextEdits")
+        .and_then(Value::as_array)
+        .is_some_and(|edits| {
+            edits.iter().any(|e| {
+                e.get("newText")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t.contains("= require("))
+            })
+        })
+}
+
+/// The file an instance path names, through the `[mount]` table:
+/// `ReplicatedStorage.Packages.fluid` under
+/// `pkg = ["packages/roblox", "@game/ReplicatedStorage/Packages"]` is
+/// `packages/roblox/fluid`.
+fn module_file_of(instance: &str, mounts: &[(String, PathBuf)]) -> Option<PathBuf> {
+    for (prefix, dir) in mounts {
+        let Some(tail) = instance
+            .strip_prefix(prefix.as_str())
+            .and_then(|t| t.strip_prefix('.'))
+        else {
+            continue;
+        };
+        let mut file = dir.clone();
+
+        for part in tail.split('.') {
+            file.push(part);
+        }
+
+        return Some(file);
+    }
+
+    None
 }
 
 /// The names bound in a file, with markup blanked for `.alx`.
@@ -6001,7 +6341,13 @@ fn drop_internal_items(result: &mut Value) {
 /// Whether an item is the child's auto-import: a name no binding of the
 /// file holds, offered with the `require` that would bring it in.
 fn is_auto_import(item: &Value) -> bool {
-    if item.get("detail").and_then(Value::as_str) == Some("Auto-import") {
+    // The child writes `Auto-import`; the server's own items write the
+    // import line they would add.
+    if item
+        .get("detail")
+        .and_then(Value::as_str)
+        .is_some_and(|d| d == "Auto-import" || d.starts_with("auto-import: "))
+    {
         return true;
     }
 
@@ -7170,6 +7516,56 @@ fn strict_config(path: &Path, root: &Path, text: String) -> String {
     }
 }
 
+/// The real path a mirror `_outside` folder holds. On Windows the
+/// first segment is the drive `mirror_path` wrote, `C`, which becomes
+/// `C:\`; on every other platform the path is absolute from the root.
+fn outside_path(rel: &Path) -> PathBuf {
+    if cfg!(windows) {
+        let mut parts = rel.components();
+
+        if let Some(std::path::Component::Normal(first)) = parts.next() {
+            let drive = first.to_string_lossy().into_owned();
+
+            if drive.len() == 1 && drive.chars().all(|c| c.is_ascii_alphabetic()) {
+                return PathBuf::from(format!("{drive}:/")).join(parts.as_path());
+            }
+        }
+    }
+
+    Path::new("/").join(rel)
+}
+
+/// A path a configuration file writes, as a directory.
+///
+/// `alloy.toml` and `.luaurc` are written by hand on every platform, so
+/// a mount or an alias may read `packages\\roblox` or `~/shared`. Both
+/// spellings resolve here; nothing else in the server sees them.
+fn config_dir(base: &Path, text: &str) -> PathBuf {
+    config_dir_from(base, text, home_dir().as_deref())
+}
+
+fn config_dir_from(base: &Path, text: &str, home: Option<&Path>) -> PathBuf {
+    let text = text.replace('\\', "/");
+
+    if text == "~" || text.starts_with("~/") {
+        let rest = text.strip_prefix("~/").unwrap_or("");
+
+        if let Some(home) = home {
+            return imports::lexical(home, rest);
+        }
+    }
+
+    imports::lexical(base, &text)
+}
+
+/// The home directory, for a path a configuration writes with `~`.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The aliases a module path can use from `dir`: the Luau
 /// configuration above it, and the `[mount]` table of the nearest
 /// `alloy.toml` while `[project] mount_aliases` stays on. A name the
@@ -7190,7 +7586,7 @@ fn project_aliases(dir: &Path, root: Option<&Path>) -> Vec<(String, PathBuf)> {
 
         for (name, m) in &config.mount {
             if !out.iter().any(|(a, _)| a == name) {
-                out.push((name.clone(), imports::lexical(&base, &m.0)));
+                out.push((name.clone(), config_dir(&base, &m.0)));
             }
         }
     }
@@ -7250,7 +7646,7 @@ fn luaurc_aliases(dir: &Path, root: Option<&Path>) -> Vec<(String, PathBuf)> {
             let mut out: Vec<(String, PathBuf)> = config
                 .aliases
                 .iter()
-                .map(|(k, p)| (k.clone(), imports::lexical(&d, p)))
+                .map(|(k, p)| (k.clone(), config_dir(&d, p)))
                 .collect();
             out.sort();
 
@@ -7657,38 +8053,125 @@ fn remote_spec(source: &str, name: &str) -> Option<RemoteSpec> {
     None
 }
 
-/// The hover of the name an `import * as` binds: the import as written,
-/// and what the module exports.
-fn namespace_hover(source: &str, word: &str, from: Option<&Path>) -> Option<String> {
-    let line = source.lines().find(|l| {
-        let head = l.trim();
+/// The hover of a name an import binds to a whole module: `import * as
+/// Lib`, and the default binding of `import fluid from "@pkg/fluid"`.
+///
+/// The child reads the emitted `require` and prints the module's table,
+/// a `__SCHEDULER_INTERFACE` field and dozens of lines with it. The
+/// import line and the names the module exports say what the reader
+/// asked. A `.luau` module answers the same way.
+fn module_hover(
+    source: &str,
+    word: &str,
+    from: Option<&Path>,
+    aliases: &[(String, PathBuf)],
+) -> Option<String> {
+    let line = source
+        .lines()
+        .find(|l| import_binds_module(l.trim(), word))?;
+    let spec = import_spec(line)?;
 
-        head.starts_with("import * as ") && names_word(head, &format!("as {word}"))
-    })?;
-    let open = line.find('"')? + 1;
-    let spec = line[open..]
-        .find('"')
-        .map(|end| line[open..open + end].to_string())?;
-    let dir = from.and_then(Path::parent);
-    let names: Vec<String> = dir
-        .and_then(|d| imports::module_file(&imports::lexical(d, &spec)))
-        .map(|p| imports::exports_of_file(&p, 0))
-        .unwrap_or_default()
+    // A data file imports as the table the build writes from it; its
+    // type is the answer, not a list of keys.
+    if spec.ends_with(".json") || spec.ends_with(".toml") {
+        return None;
+    }
+
+    // A module the server cannot find is the child's to answer.
+    let file = module_target(&spec, from, aliases)?;
+    let names: Vec<String> = imports::exports_of_file(&file, 0)
         .into_iter()
-        .filter(|e| !e.is_default)
+        // A `__` name is the module's own bookkeeping, not a name the
+        // reader writes.
+        .filter(|e| !e.is_default && !e.name.starts_with("__"))
         .map(|e| match e.is_type {
             true => format!("`type {}`", e.name),
 
             false => format!("`{}`", e.name),
         })
         .collect();
-    let surface = match names.is_empty() {
-        true => String::new(),
+    // A package exports dozens of names; the line stays readable and
+    // the count says how many are left.
+    const SHOWN: usize = 24;
+    let more = names.len().saturating_sub(SHOWN);
+    let listed = names.iter().take(SHOWN).cloned().collect::<Vec<_>>();
+    let surface = match (names.is_empty(), more) {
+        (true, _) => String::new(),
 
-        false => format!("\n\nExports: {}", names.join(", ")),
+        (false, 0) => format!("\n\nExports: {}", listed.join(", ")),
+
+        (false, n) => format!("\n\nExports: {}, and {n} more", listed.join(", ")),
     };
 
     Some(format!("```alloy\n{}\n```{surface}", line.trim()))
+}
+
+/// Whether an import line binds `word` to the whole module: `* as word`
+/// or the default binding. A name in braces is one export, not the
+/// module.
+fn import_binds_module(head: &str, word: &str) -> bool {
+    let Some(rest) = head.strip_prefix("import ") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+
+    if let Some(after) = rest.strip_prefix("* as ") {
+        return after
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .next()
+            == Some(word);
+    }
+
+    if rest.starts_with('{') || rest.starts_with("type ") {
+        return false;
+    }
+
+    let bound: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    bound == word
+}
+
+/// The spec of an import line, whichever quote it uses.
+fn import_spec(line: &str) -> Option<String> {
+    let at = line.rfind(" from ")? + " from ".len();
+    let rest = line[at..].trim();
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let body = &rest[quote.len_utf8()..];
+    let end = body.find(quote)?;
+
+    Some(body[..end].to_string())
+}
+
+/// The file a spec names: an `@alias/tail` through the project's
+/// aliases, anything else relative to the importing file.
+fn module_target(
+    spec: &str,
+    from: Option<&Path>,
+    aliases: &[(String, PathBuf)],
+) -> Option<PathBuf> {
+    let dir = from.and_then(Path::parent);
+    let target = match spec.strip_prefix('@') {
+        Some(rest) => {
+            let (name, tail) = rest.split_once('/').unwrap_or((rest, ""));
+            let base = aliases
+                .iter()
+                .find(|(a, _)| a == name)
+                .map(|(_, p)| p.clone())?;
+
+            match tail.is_empty() {
+                true => base,
+
+                false => imports::lexical(&base, tail),
+            }
+        }
+
+        None => imports::lexical(dir?, spec),
+    };
+
+    imports::module_file(&target)
 }
 
 /// A hover that prints one solver variable, `t3?`, names nothing. The
@@ -10634,12 +11117,16 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
 
     let text = String::from_utf8(out).ok()?;
 
-    // Windows: `file:///C:/x` carries a leading slash before the drive.
-    let text = if text.len() > 2 && text.as_bytes()[0] == b'/' && text.as_bytes()[2] == b':' {
-        text[1..].to_string()
-    } else {
-        text
-    };
+    // Windows: `file:///C:/x` and `file:///c%3A/x` carry a leading
+    // slash before the drive. One letter then a colon is a drive; a
+    // longer first segment with a colon is a file name on Unix.
+    let bytes = text.as_bytes();
+    let drive = bytes.len() > 2
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes.len() == 3 || bytes[3] == b'/' || bytes[3] == b'\\');
+    let text = if drive { text[1..].to_string() } else { text };
 
     Some(PathBuf::from(text))
 }
@@ -10724,7 +11211,7 @@ mod tests {
     #[test]
     fn a_bound_reads_where_the_source_wrote_it() {
         let src = concat!(
-            "export trait Priced\n",
+            "export trait Priced as\n",
             "    function price(self): number\n",
             "end\n",
             "\n",
@@ -10770,7 +11257,7 @@ mod tests {
             "    value: T\n",
             "end\n",
             "\n",
-            "impl Slotted<T>\n",
+            "impl Slotted<T> as\n",
             "    function get(self): T\n",
             "        return self.value\n",
             "    end\n",
@@ -10790,7 +11277,7 @@ mod tests {
     #[test]
     fn a_trait_method_reads_with_its_name_and_its_receiver() {
         let src = concat!(
-            "export trait Describable\n",
+            "export trait Describable as\n",
             "    function label(self): string\n",
             "end\n",
         );
@@ -10842,7 +11329,7 @@ mod tests {
     #[test]
     fn a_foreign_impl_names_its_type() {
         let src = concat!(
-            "export impl string\n",
+            "export impl string as\n",
             "    function trim(self): string\n",
             "        return self\n",
             "    end\n",
@@ -10862,7 +11349,7 @@ mod tests {
             "struct Item as\n",
             "    id: number\n",
             "end\n",
-            "impl Item\n",
+            "impl Item as\n",
             "    function room(self): number\n",
             "        return self.id\n",
             "    end\n",
@@ -10924,6 +11411,102 @@ mod tests {
         );
 
         (st, uri)
+    }
+
+    /// A default import and an `import * as` hover as the module: the
+    /// import line and the public names, not the module's table.
+    #[test]
+    fn a_module_import_hovers_as_the_module() {
+        let dir = std::env::temp_dir().join(format!("alloy-module-hover-{}", std::process::id()));
+        let pkg = dir.join("packages");
+        std::fs::create_dir_all(&pkg).expect("temp dir");
+        std::fs::write(
+            pkg.join("fluid.luau"),
+            "local m = {}\nm.__SCHEDULER_INTERFACE = {}\nfunction m.create(x) return x end\nm.mount = 1\nreturn m\n",
+        )
+        .expect("module");
+        let src = "import fluid from \"@pkg/fluid\"\nimport { create } from \"@pkg/fluid\"\nimport * as f2 from \"./packages/fluid\"\nprint(fluid, create, f2)\n";
+        let from = dir.join("main.aly");
+        let aliases = vec![("pkg".to_string(), pkg.clone())];
+        let hover = module_hover(src, "fluid", Some(&from), &aliases).expect("a module hover");
+        assert!(
+            hover.starts_with("```alloy\nimport fluid from \"@pkg/fluid\"\n```"),
+            "{hover}"
+        );
+        assert!(hover.contains("Exports: `create`, `mount`"), "{hover}");
+        // The module's own bookkeeping is no export.
+        assert!(!hover.contains("__SCHEDULER_INTERFACE"), "{hover}");
+
+        // `import * as` answers the same way, through a relative spec.
+        let namespace = module_hover(src, "f2", Some(&from), &aliases).expect("a namespace hover");
+        assert!(
+            namespace.contains("Exports: `create`, `mount`"),
+            "{namespace}"
+        );
+
+        // A name in braces is one export, not the module.
+        assert_eq!(module_hover(src, "create", Some(&from), &aliases), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A word that begins a keyword drops the child's auto-imports.
+    /// `end` in a guard clause and in a one-line `impl` drew
+    /// `EncodingService`, which the editor sorted first.
+    #[test]
+    fn the_keyword_wins_over_an_auto_import() {
+        let src = "impl T as end\nlocal function f(x: number?): number\n    if x == nil then return 0 end\n    return x\nend\n";
+        let (st, uri) = one_file(src);
+        let child = || {
+            json!([
+                {
+                    "label": "EncodingService",
+                    "kind": 7,
+                    "detail": "Auto-import",
+                    "sortText": "7",
+                    "additionalTextEdits": [{
+                        "newText": "local EncodingService = game:GetService(\"EncodingService\")\n",
+                        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+                    }],
+                },
+                { "label": "endsWith", "kind": 3, "detail": "Auto-import", "sortText": "7" },
+                { "label": "elseif", "kind": 14, "sortText": "0" },
+                { "label": "print", "kind": 3, "sortText": "4" },
+            ])
+        };
+        let labels = |result: &Value| -> Vec<String> {
+            result
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["label"].as_str().unwrap_or("").to_string())
+                .collect()
+        };
+
+        // `impl T as end`, the caret past `end`.
+        let mut result = child();
+        st.keyword_first(uri, 0, 13, &mut result);
+        assert_eq!(labels(&result), ["end"]);
+        assert_eq!(result[0]["preselect"], json!(true));
+        assert_eq!(result[0]["sortText"], json!("!end"));
+
+        // `if x == nil then return 0 end`, the caret past `end`.
+        let mut result = child();
+        st.keyword_first(uri, 2, 33, &mut result);
+        assert_eq!(labels(&result), ["end"]);
+        assert_eq!(result[0]["preselect"], json!(true));
+
+        // Half a keyword keeps the keywords it begins, and no module.
+        let mut result = child();
+        st.keyword_first(uri, 2, 32, &mut result);
+        let mut got = labels(&result);
+        got.sort();
+        assert_eq!(got, ["end", "enum"]);
+
+        // A word that begins no keyword leaves the list alone.
+        let mut result = child();
+        st.keyword_first(uri, 3, 12, &mut result);
+        assert_eq!(labels(&result).len(), 4);
     }
 
     /// A hover on a std member reads the member's own section, not the
@@ -11672,6 +12255,63 @@ local f = $nameof(RunService.Heartbeat)
         assert_eq!(uri_to_path("file:///a%20b/c.aly"), Some(p));
     }
 
+    /// A mount or an alias written by hand: `\` reads as `/`, and a
+    /// leading `~` is the home directory.
+    #[test]
+    fn a_configured_path_reads_backslashes_and_a_tilde() {
+        let base = Path::new("/w");
+        let home = Path::new("/home/t");
+        let at = |text: &str| config_dir_from(base, text, Some(home));
+        assert_eq!(at("packages\\roblox"), PathBuf::from("/w/packages/roblox"));
+        assert_eq!(at("packages/roblox"), PathBuf::from("/w/packages/roblox"));
+        assert_eq!(at("../shared"), PathBuf::from("/shared"));
+        assert_eq!(at("~/pkg"), PathBuf::from("/home/t/pkg"));
+        assert_eq!(at("~"), PathBuf::from("/home/t"));
+        assert_eq!(at("~pkg"), PathBuf::from("/w/~pkg"));
+        // No home: the path stays relative to the project.
+        assert_eq!(
+            config_dir_from(base, "~/pkg", None),
+            PathBuf::from("/w/~/pkg")
+        );
+    }
+
+    /// A Windows URI: the editor writes the drive as `c%3A` and puts a
+    /// slash before it. The path keeps the drive and loses the slash.
+    #[test]
+    fn a_windows_uri_keeps_its_drive() {
+        assert_eq!(
+            uri_to_path("file:///c%3A/Users/a/x.aly"),
+            Some(PathBuf::from("c:/Users/a/x.aly"))
+        );
+        assert_eq!(
+            uri_to_path("file:///C:/Users/a/x.aly"),
+            Some(PathBuf::from("C:/Users/a/x.aly"))
+        );
+        assert_eq!(
+            uri_to_path("file:///c%3A/Program%20Files/x.aly"),
+            Some(PathBuf::from("c:/Program Files/x.aly"))
+        );
+        // A path whose second byte is a colon is a drive only when the
+        // colon sits right after one letter.
+        assert_eq!(
+            uri_to_path("file:///ab:/x.aly"),
+            Some(PathBuf::from("/ab:/x.aly"))
+        );
+        assert_eq!(
+            path_to_uri(Path::new("c:/Users/a/x.aly")),
+            "file:///c:/Users/a/x.aly"
+        );
+        // A path the editor wrote comes back as the same path.
+        for uri in [
+            "file:///c%3A/Users/a/x.aly",
+            "file:///c%3A/a%20b/x.aly",
+            "file:///home/a/x.aly",
+        ] {
+            let path = uri_to_path(uri).expect("a path");
+            assert_eq!(uri_to_path(&path_to_uri(&path)), Some(path), "{uri}");
+        }
+    }
+
     #[test]
     fn results_map_back_to_the_source() {
         let mut st = State {
@@ -12109,7 +12749,7 @@ mod wording_tests {
 
     #[test]
     fn a_range_on_whitespace_moves_to_the_next_token() {
-        let source = "impl Shape for Alias\n    function area(self): number\n";
+        let source = "impl Shape for Alias as\n    function area(self): number\n";
         let mut items = vec![json!({
             "range": { "start": { "line": 1, "character": 12 }, "end": { "line": 1, "character": 13 } },
             "message": "x",
@@ -12135,7 +12775,7 @@ mod wording_tests {
 
     #[test]
     fn a_method_finds_the_impl_that_writes_it() {
-        let source = "impl Counter\n    function bump(self): number\n        return 1\n    end\n\n    function make(): Counter\n    end\nend\n";
+        let source = "impl Counter as\n    function bump(self): number\n        return 1\n    end\n\n    function make(): Counter\n    end\nend\n";
         assert_eq!(method_owner(source, "bump").as_deref(), Some("Counter"));
         assert_eq!(method_owner(source, "make"), None);
     }

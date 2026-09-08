@@ -1,4 +1,4 @@
-trait Sized
+trait Sized as
 	function size(self): number
 end
 
@@ -6,7 +6,7 @@ struct Bag as
 	items: string[]
 end
 
-impl Sized for Bag
+impl Sized for Bag as
 	function size(self): number
 		return self.items:len()
 	end

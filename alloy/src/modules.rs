@@ -262,25 +262,51 @@ pub fn resolve(spec: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Option
     };
     let base = normalize(&base);
 
-    if base.is_file() {
+    if is_file_exact(&base) {
         return Some(base);
     }
 
     for ext in ["aly", "alx", "luau", "lua"] {
         let candidate = base.with_extension(ext);
 
-        if candidate.is_file() {
+        if is_file_exact(&candidate) {
             return Some(candidate);
         }
 
         let init = base.join(format!("init.{ext}"));
 
-        if init.is_file() {
+        if is_file_exact(&init) {
             return Some(init);
         }
     }
 
     None
+}
+
+/// Whether the file exists under exactly this name.
+///
+/// macOS and Windows match a file name without regard to case, so
+/// `import x from "./Foo"` finds `foo.aly` there and then fails in
+/// Roblox, where an instance name is exact. The resolver reads the
+/// directory, so a project resolves the same on every platform. The
+/// read costs one call, and only for a name the file system already
+/// found.
+fn is_file_exact(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return true;
+    };
+
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries.flatten().any(|e| e.file_name() == name),
+
+        // A directory the process cannot list: the file system's own
+        // answer stands.
+        Err(_) => true,
+    }
 }
 
 /// For each `import ... from "spec"` of a source, the type names the
@@ -813,6 +839,28 @@ mod tests {
             .collect()
     }
 
+    /// A spec resolves by the name on disk, letter for letter. macOS
+    /// and Windows would answer `./Item` with `item.aly`, and the
+    /// require that the build writes then fails in Roblox.
+    #[test]
+    fn a_spec_resolves_by_the_exact_file_name() {
+        let dir = std::env::temp_dir().join(format!("alloy-case-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(dir.join("src/item.aly"), "export local a = 1\n").expect("module");
+        let from = dir.join("src/main.aly");
+
+        assert_eq!(
+            resolve("./item", &from, &[]),
+            Some(dir.join("src/item.aly"))
+        );
+        assert_eq!(resolve("./Item", &from, &[]), None);
+        assert_eq!(resolve("./ITEM", &from, &[]), None);
+        assert!(super::is_file_exact(&dir.join("src/item.aly")));
+        assert!(!super::is_file_exact(&dir.join("src/Item.aly")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_type_and_a_value_of_one_name_are_not_a_duplicate_import() {
         let src = "import * as Inv from \"./inv\"\nimport { add, type Inv } from \"./inv\"\nimport type { Item } from \"./inv\"\nprint(add, Inv)\n";
@@ -830,7 +878,7 @@ mod tests {
 
     #[test]
     fn exported_type_names_come_from_the_declarations() {
-        let src = "export struct A as\nend\nexport enum B as C end\nexport interface D as\nend\nexport trait E\nend\nexport type F<T> = { T }\nexport function g() end\nexport const H = 1\nlocal exported = 1\nexport { exported }\n";
+        let src = "export struct A as\nend\nexport enum B as C end\nexport interface D as\nend\nexport trait E as\nend\nexport type F<T> = { T }\nexport function g() end\nexport const H = 1\nlocal exported = 1\nexport { exported }\n";
         // A generic alias carries its parameter list, so a re-export
         // passes the parameters on.
         assert_eq!(exported_types(src), vec!["A", "B", "D", "E", "F<T>"]);
@@ -838,7 +886,7 @@ mod tests {
 
     #[test]
     fn trait_defaults_are_the_methods_with_bodies() {
-        let src = "export trait Describable\n    function describe(self): string\n\n    function label(self): string\n        return `[{self:describe()}]`\n    end\nend\ntrait Local\n    function x(self)\n        return 1\n    end\nend\n";
+        let src = "export trait Describable as\n    function describe(self): string\n\n    function label(self): string\n        return `[{self:describe()}]`\n    end\nend\ntrait Local as\n    function x(self)\n        return 1\n    end\nend\n";
         assert_eq!(
             exported_trait_defaults(src),
             vec![("Describable".to_string(), vec!["label".to_string()])]

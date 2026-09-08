@@ -1,0 +1,15 @@
+@derive(Serialize, Clone)
+struct Point as
+	x: number
+	@rename("label")
+	name: string
+	@skip
+	cache: number = 0
+end
+
+function to_data<T: Serialize>(v: T): any
+	return v:serialize()
+end
+
+local p = new Point { x = 1, name = "a" }
+print(to_data(p), p:to_table(), Point.from_table({ x = 2, label = "b" }))

@@ -434,6 +434,67 @@ pub fn import_edit(src: &str, spec: &str, export: &Export) -> Value {
     })
 }
 
+/// The specs a file already imports, so an auto-import never offers a
+/// module the file reads.
+pub fn imported_specs(src: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+
+    for line in src.lines() {
+        let t = line.trim();
+
+        if !t.starts_with("import ") {
+            continue;
+        }
+
+        if let Some(at) = t.rfind("from ") {
+            let spec = t[at + "from ".len()..].trim();
+
+            if spec.len() >= 2 && spec.starts_with(['"', '\'']) {
+                out.insert(spec[1..spec.len() - 1].to_string());
+            }
+        }
+    }
+
+    out
+}
+
+/// The spec that names `target` from `from_dir`: the shortest alias
+/// path, else the relative one. A target a dot folder holds has no
+/// spec: `packages/.ember/x` is a package's own store, not a module the
+/// author writes.
+pub fn best_spec(from_dir: &Path, target: &Path, aliases: &[(String, PathBuf)]) -> Option<String> {
+    if target
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    {
+        return None;
+    }
+
+    let mut best: Option<String> = None;
+
+    for (name, dir) in aliases {
+        let Ok(rest) = target.strip_prefix(dir) else {
+            continue;
+        };
+        let tail = rest
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        let spec = match tail.is_empty() {
+            true => format!("@{name}"),
+
+            false => format!("@{name}/{tail}"),
+        };
+
+        if best.as_ref().is_none_or(|b| spec.len() < b.len()) {
+            best = Some(spec);
+        }
+    }
+
+    Some(best.unwrap_or_else(|| relative_spec(from_dir, target)))
+}
+
 /// Auto-import completion items: every export of another file whose name
 /// starts with the word under the cursor and is not bound here.
 pub fn auto_import_items(
@@ -442,16 +503,24 @@ pub fn auto_import_items(
     files: &[(PathBuf, &[Export])],
     prefix: &str,
     bound: &HashSet<String>,
+    aliases: &[(String, PathBuf)],
 ) -> Vec<Value> {
     let mut items = Vec::new();
     let from_dir = current.parent().unwrap_or(Path::new("."));
+    let taken = imported_specs(src);
 
     for (path, exports) in files {
         if *path == current {
             continue;
         }
 
-        let spec = relative_spec(from_dir, &module_path(path));
+        let Some(spec) = best_spec(from_dir, &module_path(path), aliases) else {
+            continue;
+        };
+
+        if taken.contains(&spec) {
+            continue;
+        }
 
         for export in exports.iter() {
             if !export.name.starts_with(prefix) || bound.contains(&export.name) {

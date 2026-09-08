@@ -433,7 +433,7 @@ pub fn complete(offset: u32) -> String {
 
             Context::DeclarationAs { prefix, interface } => {
                 let from = offset - prefix.len();
-                items.push(word("as", "keyword", Some("Opens the body: the fields of a struct, the variants of an enum.".to_string()), from));
+                items.push(word("as", "keyword", Some("Opens the body: the fields of a struct, the variants of an enum, the methods of an `impl` or a `trait`.".to_string()), from));
 
                 if *interface {
                     items.push(word("extends", "keyword", Some("The interfaces this one takes its fields from.".to_string()), from));
@@ -657,7 +657,20 @@ pub fn hover(offset: u32) -> String {
         let offset = (offset as usize).min(source.len());
 
         if let Some((start, end, text)) = keywords::hover(source, offset) {
+            // A std type: the overview, then the names a reader can
+            // hover on their own.
+            let text =
+                alloy::docs::type_markdown(&source[start..end]).unwrap_or_else(|| text.to_string());
+
             return json!({ "from": start, "to": end, "markdown": text }).to_string();
+        }
+
+        // A std member: the member's own section, not the type's page.
+        if let Some((key, m)) = std_member_at(source, offset) {
+            let (start, end) = keywords::word_range(source, offset);
+            let markdown = alloy::docs::member_hover(key, m);
+
+            return json!({ "from": start, "to": end, "markdown": markdown }).to_string();
         }
 
         if keywords::is_word_at(source, offset) {
@@ -711,10 +724,48 @@ pub fn fold(text: &str) -> String {
 }
 
 /// The documentation of a std name or a keyword, for a hover the
-/// analyzer answered with a type.
+/// analyzer answered with a type. `HashMap:get` and `HashMap.get` name
+/// one member; a std type name lists its members under the overview.
 #[wasm_bindgen]
 pub fn doc_of(name: &str) -> String {
+    if let Some((key, m)) = alloy::docs::split_member(name) {
+        return alloy::docs::member_hover(key, m);
+    }
+
+    if let Some(text) = alloy::docs::type_markdown(name) {
+        return text;
+    }
+
     keywords::doc(name).unwrap_or("").to_string()
+}
+
+/// The std member the byte sits on: the word after a `.` or a `:` whose
+/// receiver resolves to a std type that documents it.
+fn std_member_at(
+    source: &str,
+    offset: usize,
+) -> Option<(&'static str, &'static alloy::docs::Member)> {
+    let (name, sigil, receiver) = alloy::docs::member_spot(source, offset)?;
+
+    if receiver.is_empty() {
+        return None;
+    }
+
+    let (key, on_type) = match alloy::docs::member_owner(receiver) {
+        Some(key) => (key, true),
+
+        None => {
+            let base = match context::declared(source, sigil, receiver)? {
+                context::Declared::Annotation(t) => alloy::docs::type_head(&t),
+                context::Declared::Init(v) => alloy::docs::value_head(&v),
+            }?;
+
+            (alloy::docs::member_owner(&base)?, false)
+        }
+    };
+    let m = alloy::docs::member(key, name)?;
+
+    alloy::docs::member_fits(m.kind, on_type).then_some((key, m))
 }
 
 /// What a `match` scrutinee resolves to, which decides the arms.
@@ -1062,6 +1113,26 @@ mod tests {
         for name in alloy::directives::NAMES {
             assert!(items.contains(name), "`{name}` is not offered: {items}");
         }
+    }
+
+    /// A hover on a std member answers with the member's own section,
+    /// and `doc_of` takes the qualified name the analyzer has.
+    #[test]
+    fn a_std_member_hovers_as_its_own_section() {
+        let source = "local prices: HashMap<string, number> = HashMap.new()\nlocal price = prices:get(\"a\")\n";
+        super::set_source(source);
+        let at = source.find(":get").unwrap() + 2;
+        let hover: serde_json::Value =
+            serde_json::from_str(&super::hover(at as u32)).expect("hover json");
+
+        assert!(
+            hover["markdown"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("**HashMap:get**")),
+            "{hover}"
+        );
+        assert!(super::doc_of("HashMap:get").starts_with("**HashMap:get**"));
+        assert!(super::doc_of("HashMap").contains("Members: `new`"));
     }
 
     /// `bx?.` and `bx?.na`: the analyzer reads the member the lowering

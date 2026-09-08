@@ -80,7 +80,26 @@ fn json() -> String {
                 .map(|(title, _)| *title)
                 .unwrap_or("Other");
 
-            serde_json::json!({ "key": key, "group": group, "markdown": text })
+            let members: Vec<serde_json::Value> = docs::members(key)
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "name": m.name,
+                        "kind": m.kind.name(),
+                        "signature": m.signature,
+                        "doc": m.doc,
+                        "example": m.example,
+                    })
+                })
+                .collect();
+
+            serde_json::json!({
+                "key": key,
+                "group": group,
+                "markdown": text,
+                "signature": docs::type_signature(key),
+                "members": members,
+            })
         })
         .collect();
     let lints: Vec<serde_json::Value> = LINTS
@@ -131,10 +150,13 @@ fn page(topic: &str, color: bool) -> Option<String> {
     }
 
     if let Some(l) = LINTS.iter().find(|l| l.name == topic) {
-        let level = match l.default {
-            Level::Allow => "off unless `[lint] strict = true`",
-            Level::Warn => "warn",
-            Level::Deny => "deny",
+        let level = match (l.default, l.group) {
+            (Level::Allow, Group::Pedantic) => {
+                "warn, from `[lint] strict = true`; off when the project turns strict off"
+            }
+            (Level::Allow, _) => "off until `[lint.rules]` names it",
+            (Level::Warn, _) => "warn",
+            (Level::Deny, _) => "deny",
         };
         let body = format!(
             "**{}**\nGroup: {}. Default: {level}\n\n{}\n\n{}",
@@ -189,6 +211,11 @@ fn page(topic: &str, color: bool) -> Option<String> {
         ));
     }
 
+    // One member of a std type: `alloy doc HashMap:get`, or `.get`.
+    if let Some((owner, m)) = docs::split_member(topic) {
+        return Some(member_page(owner, m, color));
+    }
+
     let keys = [
         topic.to_string(),
         format!("topic:{topic}"),
@@ -206,18 +233,79 @@ fn page(topic: &str, color: bool) -> Option<String> {
                 format!("{shown}\n")
             };
 
-            return Some(format!("{head}{}", render(text, color)));
+            // A std type heads its page with the type it names.
+            let signature = docs::type_signature(&key)
+                .map(|s| render(&format!("```alloy\n{s}\n```"), color))
+                .unwrap_or_default();
+
+            return Some(
+                format!("{head}{signature}{}", render(text, color)) + &member_sections(&key, color),
+            );
         }
     }
 
     None
 }
 
+/// The member sections of a std entry: the statics, then the methods,
+/// then the plain members, each with its signature, doc, and example.
+fn member_sections(key: &str, color: bool) -> String {
+    let members = docs::members(key);
+
+    if members.is_empty() {
+        return String::new();
+    }
+
+    let mut md = String::new();
+
+    for kind in docs::MEMBER_KINDS {
+        let group: Vec<&docs::Member> = members.iter().filter(|m| m.kind == kind).collect();
+
+        if group.is_empty() {
+            continue;
+        }
+
+        md.push_str(&format!("\n**{}**\n\n", kind.heading()));
+
+        for m in group {
+            md.push_str(&format!("**{}**\n\n", member_head(key, m)));
+            md.push_str(&docs::member_markdown(m));
+            md.push_str("\n\n");
+        }
+    }
+
+    md.push_str(&format!(
+        "`alloy doc {key}:<member>` prints one on its own.\n"
+    ));
+    render(&md, color)
+}
+
+/// A member as a page names it: `HashMap:get`, `HashMap.new`. A plain
+/// member that stands on its own, a trait shape, keeps its bare name,
+/// since that is what the source writes.
+fn member_head(owner: &str, m: &docs::Member) -> String {
+    match m.kind {
+        docs::MemberKind::Static => format!("{owner}.{}", m.name),
+        docs::MemberKind::Method => format!("{owner}:{}", m.name),
+
+        _ if m.signature.starts_with(&format!("{owner}.")) => format!("{owner}.{}", m.name),
+
+        _ => m.name.to_string(),
+    }
+}
+
+/// One member as its own page.
+fn member_page(owner: &str, m: &docs::Member, color: bool) -> String {
+    let head = heading(&member_head(owner, m), color);
+
+    format!("{head}{}", render(&docs::member_markdown(m), color))
+}
+
 /// The lint list as a page, by group.
 fn lints_page(color: bool) -> String {
     let mut out = String::new();
     out.push_str(&heading("Lints", color));
-    out.push_str("`alloy flux` and `alloy lint` run them; `[lint]` in alloy.toml sets `deny`, `warn`, and `allow` lists by lint or by group, and `strict = true` turns the pedantic group on.\n\n");
+    out.push_str("`alloy flux` and `alloy lint` run them; `[lint.rules]` in alloy.toml gives a lint or a group a level, and `[lint] strict = true`, which is on by default, turns the pedantic group on.\n\n");
 
     for group in Group::ALL {
         out.push_str(&format!("**{}**: {}\n", group.name(), group.summary()));

@@ -349,7 +349,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             Ok(c) => c,
 
             Err(e) => {
-                report.failures.push((rel, e.to_string()));
+                report.failures.push((rel, e.located(&source)));
 
                 continue;
             }
@@ -364,6 +364,27 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         imports.push((rel.clone(), compiled.imports.clone()));
+
+        // A module that names no file, a name the module does not
+        // export, and a name imported twice: each fails at runtime, so
+        // each is an error of the build, not of the type check alone.
+        let silence = crate::directives::scan(&source);
+
+        for problem in crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
+        {
+            if !silence.allows(crate::directives::line_of(&source, problem.start as usize)) {
+                continue;
+            }
+
+            report.diagnostics.push((
+                rel.clone(),
+                Diagnostic {
+                    start: problem.start,
+                    end: problem.end,
+                    message: problem.message,
+                },
+            ));
+        }
 
         // Every data file the source names becomes a module in the
         // output; a problem with one is a diagnostic on the literal.

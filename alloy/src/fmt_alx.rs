@@ -10,7 +10,7 @@
 use luaux::markup::{Attribute, AttributeValue, Child, Element, ElementName, Node};
 
 use crate::config::{AttributeQuotes, FmtConfig, IndentType, QuoteStyle, TextWrap};
-use crate::fmt::{format_with, requote};
+use crate::fmt::{format_file, format_with, requote};
 
 /// One printed line of markup: an indentation level, relative to the
 /// line the markup starts on, and the text.
@@ -19,11 +19,24 @@ type Line = (usize, String);
 const PLACEHOLDER: &str = "__ALX";
 
 /// Formats `.alx` source. `Err` carries the first lexer or markup error.
+/// The markup of an expression hole comes through here too, so the code
+/// around it is a fragment, not a whole file.
 pub fn format_alx(src: &str, options: &FmtConfig) -> Result<String, String> {
+    format_alx_inner(src, options, false)
+}
+
+/// Formats a whole `.alx` file: one the parser cannot read keeps its
+/// text, and `Err` starts with `fmt::UNPARSED`.
+pub fn format_alx_file(src: &str, options: &FmtConfig) -> Result<String, String> {
+    format_alx_inner(src, options, true)
+}
+
+fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<String, String> {
+    let code_fmt = if whole { format_file } else { format_with };
     let spans = luaux::compile::markup_spans(src).map_err(|e| e.message)?;
 
     if spans.is_empty() {
-        return format_with(src, options);
+        return code_fmt(src, options);
     }
 
     let mut code = String::with_capacity(src.len());
@@ -45,7 +58,7 @@ pub fn format_alx(src: &str, options: &FmtConfig) -> Result<String, String> {
     }
 
     code.push_str(&src[last..]);
-    let formatted = format_with(&code, options)?;
+    let formatted = code_fmt(&code, options)?;
     Ok(substitute(&formatted, &printed, options))
 }
 

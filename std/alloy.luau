@@ -83,26 +83,20 @@ end
 -- asked. Luau rejects an alias that names itself with other arguments,
 -- so `map` yields `Result2`, the same surface one map deep, whose own
 -- `map` is `any`.
+--
+-- The receiver is the data half of a Result, the two tagged tables
+-- without the methods. `Result<T, E>` itself would close the loop
+-- alias to alias, and the solver gives up on it; the data half reads
+-- back as `Result<T, E>` in a hover, and it binds `T` and `E`.
 export type ResultMethods<T, E> = {
-	read unwrap: (self: { read tag: string }) -> T,
-	read expect: (self: { read tag: string }, message: string) -> T,
-	read unwrap_or: <D>(self: { read tag: string }, default: D) -> T | D,
-	read map: <U>(self: { read tag: string }, f: (T) -> U) -> Result2<U, E>,
-	read map_err: <F>(self: { read tag: string }, f: (E) -> F) -> Result2<T, F>,
-	read is_ok: (self: { read tag: string }) -> boolean,
-	read is_err: (self: { read tag: string }) -> boolean,
-	read ok: (self: { read tag: string }) -> T?,
-}
-
-export type ResultMethods2<T, E> = {
-	read unwrap: (self: { read tag: string }) -> T,
-	read expect: (self: { read tag: string }, message: string) -> T,
-	read unwrap_or: <D>(self: { read tag: string }, default: D) -> T | D,
-	read map: <U>(self: { read tag: string }, f: (T) -> U) -> any,
-	read map_err: <F>(self: { read tag: string }, f: (E) -> F) -> any,
-	read is_ok: (self: { read tag: string }) -> boolean,
-	read is_err: (self: { read tag: string }) -> boolean,
-	read ok: (self: { read tag: string }) -> T?,
+	read unwrap: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T,
+	read expect: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, message: string) -> T,
+	read unwrap_or: <D>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, default: D) -> T | D,
+	read map: <U>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (T) -> U) -> Result2<U, E>,
+	read map_err: <F>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> F) -> Result2<T, F>,
+	read is_ok: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> boolean,
+	read is_err: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> boolean,
+	read ok: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T?,
 }
 
 -- `__ok` and `__err` exist in the type alone: they carry `T` and `E` as
@@ -110,11 +104,23 @@ export type ResultMethods2<T, E> = {
 -- (`try_await_result`), where the methods' own generics stop it.
 export type ResultOk<T, E> = { tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } & ResultMethods<T, E>
 export type ResultErr<T, E> = { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E } & ResultMethods<T, E>
-export type ResultOk2<T, E> = { tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } & ResultMethods2<T, E>
-export type ResultErr2<T, E> = { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E } & ResultMethods2<T, E>
-
 export type Result<T, E> = ResultOk<T, E> | ResultErr<T, E>
-export type Result2<T, E> = ResultOk2<T, E> | ResultErr2<T, E>
+-- `Result2` is one table, not a union of two. A member read off a union
+-- is a union of two identical functions, and a callback's parameter
+-- never solves through one. A mapped Result narrows no further, so the
+-- tag carries both cases and the data half reads back as `Result<T, E>`.
+export type ResultMethods2<T, E> = {
+	read unwrap: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
+	read expect: (self: { read tag: "Ok" | "Err", read _1: T | E }, message: string) -> T,
+	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> T | D,
+	read map: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> U) -> any,
+	read map_err: <F>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> F) -> any,
+	read is_ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
+	read is_err: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
+	read ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T?,
+}
+
+export type Result2<T, E> = { tag: "Ok" | "Err", read _1: T | E, read trace: string?, read __ok: T, read __err: E } & ResultMethods2<T, E>
 
 local Result = {}
 Result.__index = Result
@@ -181,7 +187,7 @@ end
 
 --- The one bridge to throwing APIs. The traceback is captured where the
 --- error happened and stored on the Err.
-function Result.pcall(f: (...any) -> ...any, ...: any): Result<any, string>
+function Result.pcall<T>(f: (...any) -> T, ...: any): Result<T, string>
 	local packed = table.pack(xpcall(f, function(e)
 		return { err = e, trace = debug.traceback(tostring(e), 2) }
 	end, ...))
@@ -220,9 +226,9 @@ end
 export type Future<T> = {
 	-- In the type alone: a generic reads `T` off a Future it is handed.
 	read __value: T,
-	read andThen: (self: any, on_resolve: ((T) -> ())?, on_reject: ((any) -> ())?) -> Future<T>,
-	read cancel: (self: any) -> (),
-	read is_settled: (self: any) -> boolean,
+	read andThen: (self: Future<T>, on_resolve: ((T) -> ...any)?, on_reject: ((any) -> ...any)?) -> Future<T>,
+	read cancel: (self: Future<T>) -> (),
+	read is_settled: (self: Future<T>) -> boolean,
 }
 
 local Future = {}
@@ -346,11 +352,16 @@ function Future.is_settled(self)
 	return self.state ~= PENDING
 end
 
+--- What `await` takes. It is `Future<T>`; the name is what the checker
+--- shows for a value that is not one, and `Awaitable` says what the
+--- operand has to be where the alias `Future` says only what it is.
+export type Awaitable<T> = Future<T>
+
 --- `await`: a Future, or anything with `andThen`. Yields until settled,
 --- returns the value, rethrows a stored error with its trace.
 -- The extra values type as `any`: a `wait` on a remote settles with the
 -- whole payload, and `local a, b = await f` is then no error.
-function alloy.await<T>(target: Future<T>): (T, ...any)
+function alloy.await<T>(target: Awaitable<T>): (T, ...any)
 	if type(target) == "table" and getmetatable(target) == Future then
 		if target.state == PENDING then
 			local thread = coroutine.running()
@@ -394,7 +405,7 @@ end
 --- so `try await f()` on an async function that returns a Result yields
 --- the value. The compiler calls `try_await_result` where it knows the
 --- function returns a Result, for the type; both run the same code.
-function alloy.try_await<T>(target: Future<T>): Result<T, any>
+function alloy.try_await<T>(target: Awaitable<T>): Result<T, any>
 	local ok, value = pcall(alloy.await, target)
 	if not ok then
 		return Err(value) :: any
@@ -409,14 +420,14 @@ function alloy.try_await_result<T, E>(target: { read __value: { read __ok: T, re
 	return alloy.try_await(target) :: any
 end
 
-function Future.all<T>(futures: { Future<T> }): Future<{ T }>
+function Future.all<T>(futures: { Future<T> }): Future<Array<T>>
 	return (alloy.future(function()
 		local out = {}
 		for i, f in futures do
 			out[i] = alloy.await(f)
 		end
-		return out
-	end) :: any) :: Future<{ T }>
+		return setmetatable(out, alloy.Array)
+	end) :: any) :: Future<Array<T>>
 end
 
 -- A list of one value type races to a Future of it. A mixed list needs
@@ -450,14 +461,14 @@ function Future.any<T>(futures: { read [number]: Future<T> }): Future<T>
 	return (winner :: any) :: Future<any>
 end
 
-function Future.all_settled<T>(futures: { Future<T> }): Future<{ Result<T, any> }>
+function Future.all_settled<T>(futures: { Future<T> }): Future<Array<Result2<T, any>>>
 	return (alloy.future(function()
 		local out = {}
 		for i, f in futures do
 			out[i] = alloy.try_await(f)
 		end
-		return out
-	end) :: any) :: Future<{ Result<T, any> }>
+		return setmetatable(out, alloy.Array)
+	end) :: any) :: Future<Array<Result2<T, any>>>
 end
 
 local STATE_NAMES = { [PENDING] = "pending", [RESOLVED] = "resolved", [REJECTED] = "rejected", [CANCELLED] = "cancelled" }
@@ -1019,6 +1030,9 @@ alloy.Symbol = Symbol
 export type SignalConnection = {
 	Connected: boolean,
 	Disconnect: (self: SignalConnection) -> (),
+	-- The snake_case twin the runtime writes beside every method, for
+	-- code that keeps Alloy's own naming.
+	disconnect: (self: SignalConnection) -> (),
 }
 
 export type Signal<T...> = {
@@ -1029,6 +1043,14 @@ export type Signal<T...> = {
 	FireDeferred: (self: Signal<T...>, T...) -> (),
 	DisconnectAll: (self: Signal<T...>) -> (),
 	Destroy: (self: Signal<T...>) -> (),
+	-- The snake_case twins the runtime writes beside the Roblox names.
+	connect: (self: Signal<T...>, handler: (T...) -> ()) -> SignalConnection,
+	once: (self: Signal<T...>, handler: (T...) -> ()) -> SignalConnection,
+	wait: (self: Signal<T...>, timeout: number?) -> T...,
+	fire: (self: Signal<T...>, T...) -> (),
+	fire_deferred: (self: Signal<T...>, T...) -> (),
+	disconnect_all: (self: Signal<T...>) -> (),
+	destroy: (self: Signal<T...>) -> (),
 }
 
 --- Anything with `Connect` or `connect`: a Signal, an RBXScriptSignal, or a
@@ -1359,6 +1381,9 @@ alloy.Queue = Queue
 --- defaults to `<`; pass one for tables: `Heap.new(function(a, b) return
 --- a.cost < b.cost end)`. Iterating pops nothing; `to_array` sorts.
 export type Heap<T> = {
+	-- In the type alone, as `Result.__ok` is: `Queue<T>` has the same
+	-- members, and without this the checker prints one name for both.
+	read __less: (T, T) -> boolean,
 	push: (self: Heap<T>, value: T) -> (),
 	pop: (self: Heap<T>) -> T?,
 	peek: (self: Heap<T>) -> T?,
@@ -1601,7 +1626,7 @@ local function iter_of(next)
 	return setmetatable({ _next = next }, Iter)
 end
 
-function Iter.from<T>(source: any): Iter<T>
+function Iter.from<T>(source: { read [number]: T } | (() -> T?) | Set<T> | Queue<T> | Heap<T> | HashMap<any, T>): Iter<T>
 	if type(source) == "function" then
 		return (iter_of(source) :: any) :: Iter<T>
 	end

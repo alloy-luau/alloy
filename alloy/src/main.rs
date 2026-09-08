@@ -461,6 +461,23 @@ fn build_project(args: &[String]) -> ExitCode {
     }
 }
 
+/// One failure line. A compile that stopped names its position, so the
+/// line reads `path:line:col: message` as every diagnostic does; a
+/// failure with no position keeps the plain `path: message`.
+fn failure_line(path: &str, message: &str) -> String {
+    let digits = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
+    let positioned = message
+        .split_once(':')
+        .and_then(|(line, rest)| rest.split_once(':').map(|(col, _)| (line, col)))
+        .is_some_and(|(line, col)| digits(line) && digits(col));
+
+    if positioned {
+        format!("{path}:{message}")
+    } else {
+        format!("{path}: {message}")
+    }
+}
+
 fn print_diagnostics(input: &Path, report: &alloy::build::Report) {
     let p = Painter::for_stderr();
 
@@ -484,7 +501,10 @@ fn print_diagnostics(input: &Path, report: &alloy::build::Report) {
     for (rel, message) in &report.failures {
         eprintln!(
             "{}",
-            p.fail(&format!("{}: {message}", input.join(rel).display()))
+            p.fail(&failure_line(
+                &input.join(rel).display().to_string(),
+                message
+            ))
         );
     }
 }
@@ -527,7 +547,13 @@ fn check(args: &[String]) -> ExitCode {
     let (warnings, denied) = print_lints(&input, &report.lints, &config.lint, args);
     let counts = p.summary(&[
         (report.written.len(), "files", ui::DIM),
-        (report.diagnostics.len(), "errors", ui::RED),
+        // A compile that stopped leaves a failure, not a diagnostic; it
+        // is still an error the summary counts.
+        (
+            report.diagnostics.len() + report.failures.len(),
+            "errors",
+            ui::RED,
+        ),
         (warnings, "warnings", ui::AMBER),
         (denied, "denied", ui::RED),
     ]);
@@ -768,6 +794,16 @@ fn lint_cmd(args: &[String]) -> ExitCode {
 /// through luau-lsp, and every lint at its `[lint]` level, in one run.
 /// `--fix` applies the rewrites; `-W`, `-A`, and `-D` set a level for
 /// this run; `--explain <lint>` prints its page.
+/// A path on the command line as a path relative to `[build] in`, or
+/// `None` when it names a file outside the project's sources.
+fn relative_to_input(file: &str, root: &Path, config: &Config) -> Option<PathBuf> {
+    let input = root.join(&config.build.input);
+    let full = std::fs::canonicalize(file).ok()?;
+    let input = std::fs::canonicalize(&input).ok()?;
+
+    full.strip_prefix(&input).ok().map(Path::to_path_buf)
+}
+
 fn flux_cmd(args: &[String]) -> ExitCode {
     if args.iter().any(|a| a == "--list") {
         return list_lints();
@@ -810,16 +846,36 @@ fn flux_once(args: &[String]) -> ExitCode {
     };
     let lint_config = lint_config_for(&config, &flags, args);
 
+    // One file named on the command line: the whole project still
+    // compiles, since the type check needs every module the file
+    // imports, and the report is then cut down to that file.
+    let mut only = None;
+
     if let Some(file) = positional.first() {
         if !is_source(file) {
             fail(&format!("{file} is not an .aly file"));
             return usage();
         }
 
-        return lint_one(file, &lint_config, Some("flux"), args);
+        match relative_to_input(file, &root, &config) {
+            Some(rel) => only = Some(rel),
+
+            None => {
+                let p = Painter::for_stderr();
+                eprintln!(
+                    "{}",
+                    p.note(&format!(
+                        "{file} is outside {}; the type check did not run",
+                        root.join(&config.build.input).display()
+                    ))
+                );
+
+                return lint_one(file, &lint_config, Some("flux"), args);
+            }
+        }
     }
 
-    let report = match alloy::build::flux_project(&root, &config) {
+    let mut report = match alloy::build::flux_project(&root, &config) {
         Ok(r) => r,
 
         Err(e) => {
@@ -828,6 +884,14 @@ fn flux_once(args: &[String]) -> ExitCode {
         }
     };
 
+    if let Some(rel) = &only {
+        report.diagnostics.retain(|(r, _)| r == rel);
+        report.failures.retain(|(r, _)| r == rel);
+        report.lints.retain(|(r, _)| r == rel);
+        report.written.retain(|r| r == rel);
+    }
+
+    let report = report;
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
     print_diagnostics(&input, &report);
@@ -847,6 +911,10 @@ fn flux_once(args: &[String]) -> ExitCode {
                 }
 
                 for d in &analysis.diagnostics {
+                    if only.as_ref().is_some_and(|rel| &d.rel != rel) {
+                        continue;
+                    }
+
                     let path = input.join(&d.rel).display().to_string();
                     let level = if d.is_error() {
                         type_errors += 1;
@@ -876,7 +944,7 @@ fn flux_once(args: &[String]) -> ExitCode {
                             d.line,
                             d.col,
                             level,
-                            Some("luau"),
+                            Some(d.code().unwrap_or("luau")),
                             &format!("{}: {}", d.kind, d.message)
                         )
                     );
@@ -896,7 +964,7 @@ fn flux_once(args: &[String]) -> ExitCode {
     let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
     offer_fixes(&report.lints, &lint_config, fix, "flux");
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
-    let errors = report.diagnostics.len() + type_errors;
+    let errors = report.diagnostics.len() + report.failures.len() + type_errors;
     let warnings = warnings + type_warnings;
     let denied = denied + type_denied;
     let counts = p.summary(&[
@@ -1109,7 +1177,10 @@ fn test_once(args: &[String]) -> ExitCode {
     for (rel, message) in &report.failures {
         eprintln!(
             "{}",
-            p.fail(&format!("{}: {message}", input.join(rel).display()))
+            p.fail(&failure_line(
+                &input.join(rel).display().to_string(),
+                message
+            ))
         );
     }
 
@@ -1198,9 +1269,25 @@ fn lint_one(
     summary: Option<&str>,
     args: &[String],
 ) -> ExitCode {
-    let Some((source, out)) = compile_file(path, args) else {
+    let Some((source, mut out)) = compile_file(path, args) else {
         return ExitCode::FAILURE;
     };
+
+    // The project build reports these too; a single file names the
+    // module it could not find, and the name it could not import.
+    let silence = alloy::directives::scan(&source);
+
+    for problem in alloy::modules::import_problems_for_file(Path::new(path), &source) {
+        if silence.allows(alloy::directives::line_of(&source, problem.start as usize)) {
+            out.diagnostics.push(alloy::Diagnostic {
+                start: problem.start,
+                end: problem.end,
+                message: problem.message,
+            });
+        }
+    }
+
+    out.diagnostics.sort_by_key(|d| d.start);
 
     let p = Painter::for_stderr();
 
@@ -1494,12 +1581,19 @@ fn fmt_cmd(args: &[String]) -> ExitCode {
         };
 
         let result = if name.ends_with(".alx") {
-            alloy::fmt_alx::format_alx(&source, &config.fmt)
+            alloy::fmt_alx::format_alx_file(&source, &config.fmt)
         } else {
-            alloy::fmt::format_with(&source, &config.fmt)
+            alloy::fmt::format_file(&source, &config.fmt)
         };
         let formatted = match result {
             Ok(f) => f,
+
+            Err(e) if e.starts_with(alloy::fmt::UNPARSED) => {
+                eprintln!("{}", p.warn(&format!("{name}: skipped, it {e}")));
+                skipped += 1;
+
+                continue;
+            }
 
             Err(e) => {
                 eprintln!("{}", p.fail(&format!("{name}: {e}")));
@@ -1636,7 +1730,7 @@ fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> 
         Ok(out) => Some((source, out)),
 
         Err(err) => {
-            fail(&format!("{path}: {err}"));
+            fail(&format!("{path}:{}", err.located(&source)));
             None
         }
     }

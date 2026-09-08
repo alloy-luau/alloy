@@ -17,13 +17,27 @@ pub struct Directives {
     pub nocheck: bool,
     /// Silenced lines, zero-based.
     ignored: HashSet<usize>,
-    /// Lines that must hold an error, each with its directive's line.
-    expected: BTreeMap<usize, usize>,
+    /// Lines that must hold an error, each with the lines of the
+    /// directives that cover it. Two stacked directives both report.
+    expected: BTreeMap<usize, Vec<usize>>,
+    /// Every `--@alloy-` comment that names no directive: the line and
+    /// the word the author wrote.
+    pub unknown: Vec<(usize, String)>,
 }
 
 const IGNORE: &str = "--@alloy-ignore";
 const NOCHECK: &str = "--@alloy-nocheck";
 pub const EXPECT: &str = "--@alloy-expect-error";
+
+/// The prefix every directive shares.
+const PREFIX: &str = "--@alloy-";
+
+/// The message for a `--@alloy-` comment that names no directive.
+pub fn unknown_message(word: &str) -> String {
+    format!(
+        "`{word}` is no directive; the directives are `--@alloy-ignore`, `--@alloy-expect-error`, and `--@alloy-nocheck`"
+    )
+}
 
 /// The message of an `--@alloy-expect-error` that covers a clean line.
 pub const UNMET: &str = "the `--@alloy-expect-error` directive covers a line with no error";
@@ -32,17 +46,21 @@ pub const UNMET: &str = "the `--@alloy-expect-error` directive covers a line wit
 pub fn scan(src: &str) -> Directives {
     let mut out = Directives::default();
     let mut pending = false;
-    let mut expecting = None;
+    let mut expecting: Vec<usize> = Vec::new();
 
     for (i, line) in src.lines().enumerate() {
         let trimmed = line.trim();
+
+        if let Some(word) = unknown_directive(line) {
+            out.unknown.push((i, word));
+        }
 
         if trimmed.starts_with(NOCHECK) {
             out.nocheck = true;
         }
 
         if trimmed.starts_with(EXPECT) {
-            expecting = Some(i);
+            expecting.push(i);
 
             continue;
         }
@@ -63,18 +81,34 @@ pub fn scan(src: &str) -> Directives {
             pending = false;
         }
 
-        if let Some(at) = expecting.take() {
-            out.expected.insert(i, at);
+        if !expecting.is_empty() {
+            out.expected
+                .entry(i)
+                .or_default()
+                .append(&mut std::mem::take(&mut expecting));
         }
 
         if line.contains(EXPECT) {
-            out.expected.insert(i, i);
+            out.expected.entry(i).or_default().push(i);
         } else if line.contains(IGNORE) {
             out.ignored.insert(i);
         }
     }
 
     out
+}
+
+/// The word of a `--@alloy-` comment that names no directive, or `None`
+/// when the line carries a known one or none at all.
+fn unknown_directive(line: &str) -> Option<String> {
+    let at = line.find(PREFIX)?;
+    let rest = &line[at..];
+    let word: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '@')
+        .collect();
+
+    (word != IGNORE && word != NOCHECK && word != EXPECT).then_some(word)
 }
 
 impl Directives {
@@ -94,13 +128,16 @@ impl Directives {
         self.expected
             .iter()
             .filter(|(line, _)| !errored.contains(line))
-            .map(|(_, at)| *at)
+            .flat_map(|(_, at)| at.iter().copied())
             .collect()
     }
 
     /// Whether any directive is present, so a caller can skip the work.
     pub fn is_empty(&self) -> bool {
-        !self.nocheck && self.ignored.is_empty() && self.expected.is_empty()
+        !self.nocheck
+            && self.ignored.is_empty()
+            && self.expected.is_empty()
+            && self.unknown.is_empty()
     }
 }
 
@@ -143,6 +180,20 @@ mod tests {
         assert_eq!(d.unmet(&HashSet::from([1])), vec![2]);
         assert_eq!(d.unmet(&HashSet::from([1, 2])), Vec::<usize>::new());
         assert_eq!(span_of_line("a\n  --@alloy-expect-error\n", 1), (4, 25));
+    }
+
+    #[test]
+    fn two_stacked_expect_directives_both_report() {
+        let d = scan("--@alloy-expect-error\n--@alloy-expect-error\nlocal c = 2\n");
+        assert_eq!(d.unmet(&HashSet::new()), vec![0, 1]);
+        assert_eq!(d.unmet(&HashSet::from([2])), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_directive_no_one_declared_is_named() {
+        let d = scan("--@alloy-bogus-directive\nlocal a = 1 --@alloy-ignore\n");
+        assert_eq!(d.unknown, vec![(0, "--@alloy-bogus-directive".to_string())]);
+        assert!(scan("--@alloy-nocheck\n").unknown.is_empty());
     }
 
     #[test]

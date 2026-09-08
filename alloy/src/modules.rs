@@ -345,12 +345,243 @@ fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
     (from, aliases)
 }
 
+/// The import problems of a file under the nearest `alloy.toml`.
+pub fn import_problems_for_file(path: &Path, source: &str) -> Vec<ImportProblem> {
+    let (from, aliases) = file_context(path);
+
+    import_problems(source, path, &from, &aliases)
+}
+
 /// The import types of a file under the nearest `alloy.toml`, or none
 /// when the file sits in no project.
 pub fn import_types_for_file(path: &Path, source: &str) -> Vec<(String, Vec<String>)> {
     let (from, aliases) = file_context(path);
 
     import_types(source, &from, &aliases)
+}
+
+/// One problem with an import: the module, a name the module does not
+/// export, or a name the file imports twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportProblem {
+    /// Byte offsets into the source, over the path or the name.
+    pub start: u32,
+    pub end: u32,
+    pub kind: &'static str,
+    pub message: String,
+}
+
+/// The names a module exposes to an `import { ... }`: every declaration
+/// the source marks `export`, and every name an `export { ... }` list
+/// carries. The order is the order of the file.
+pub fn exported_names(source: &str) -> Vec<String> {
+    use alloy_syntax::ast::Stmt;
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| -> String {
+        let a = toks[span.start as usize].start as usize;
+        let b = toks[(span.end as usize)
+            .saturating_sub(1)
+            .max(span.start as usize)]
+        .end as usize;
+
+        source[a..b].to_string()
+    };
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        match stmt {
+            Stmt::Struct(d) if d.exported => out.push(text(d.name)),
+            Stmt::Enum(d) if d.exported => out.push(text(d.name)),
+            Stmt::Trait(d) if d.exported => out.push(text(d.name)),
+            Stmt::Interface(d) if d.exported => out.push(text(d.name)),
+            Stmt::Class(d) if d.exported => out.push(text(d.name)),
+            Stmt::TypeAlias(d) if d.exported => out.push(text(d.name)),
+            Stmt::Remote(d) if d.exported => out.push(text(d.name)),
+            Stmt::Macro(d) if d.exported => out.push(text(d.name)),
+            Stmt::LocalFunction(d) if d.exported => out.push(text(d.name)),
+
+            Stmt::Function(d) if d.exported => {
+                if let Some(first) = d.path.first() {
+                    out.push(text(*first));
+                }
+            }
+
+            Stmt::Local(d) if d.exported => {
+                for b in &d.names {
+                    out.push(text(b.name));
+                }
+            }
+
+            Stmt::ExportList(list) => {
+                for spec in &list.specs {
+                    out.push(text(spec.alias.unwrap_or(spec.name)));
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    out.retain(|n| !n.is_empty());
+    out.dedup();
+    out
+}
+
+/// `a`, `b` and `c` as `` `a`, `b` and `c` ``, for a message that lists
+/// what a module exports.
+fn and_list(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+
+    match quoted.split_last() {
+        None => "nothing".to_string(),
+
+        Some((last, [])) => last.clone(),
+
+        Some((last, head)) => format!("{} and {last}", head.join(", ")),
+    }
+}
+
+/// Every problem the imports of one source have: a module that names no
+/// file, a name the module does not export, and a name imported twice.
+/// `rel` is the source's path for the message, relative to the root.
+pub fn import_problems(
+    source: &str,
+    rel: &Path,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<ImportProblem> {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let range = |span: alloy_syntax::ast::TokSpan| -> (u32, u32) {
+        let a = toks[span.start as usize].start;
+        let b = toks[(span.end as usize)
+            .saturating_sub(1)
+            .max(span.start as usize)]
+        .end;
+
+        (a, b)
+    };
+    let text = |span: alloy_syntax::ast::TokSpan| -> &str {
+        let (a, b) = range(span);
+
+        &source[a as usize..b as usize]
+    };
+    let mut out = Vec::new();
+    let mut exports: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    // Every name the file binds through an import, with where it bound it.
+    let mut bound: Vec<String> = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Import(node) = stmt else {
+            continue;
+        };
+        let spec = text(node.path).trim_matches(['"', '\'']).to_string();
+
+        // A `.json` or `.toml` import builds a module of its own; the
+        // build reports what is wrong with one.
+        if crate::data::Format::of(&spec).is_some() {
+            continue;
+        }
+
+        let (path_start, path_end) = range(node.path);
+        // A module that names no file is reported, and its names still
+        // bind here, so a second import of one is a duplicate.
+        let target = resolve(&spec, from, aliases);
+
+        if target.is_none() {
+            out.push(ImportProblem {
+                start: path_start,
+                end: path_end,
+                kind: "UnknownModule",
+                message: crate::typecheck::unknown_module_message(&spec, rel),
+            });
+        }
+        let specs = match &node.kind {
+            ImportKind::Namespace(name) => {
+                let local = text(*name).to_string();
+
+                if bound.contains(&local) {
+                    let (a, b) = range(*name);
+                    out.push(ImportProblem {
+                        start: a,
+                        end: b,
+                        kind: "ImportError",
+                        message: format!("`{local}` is already imported in this file"),
+                    });
+                }
+
+                bound.push(local);
+
+                continue;
+            }
+
+            ImportKind::Both(name, list) => {
+                bound.push(text(*name).to_string());
+
+                list
+            }
+
+            ImportKind::Named(list) | ImportKind::TypeOnly(list) => list,
+        };
+        // A plain Luau module returns a table; its keys are not
+        // declarations, so only an Alloy module's names are checked.
+        let alloy_module = target
+            .as_ref()
+            .is_some_and(|t| t.extension().is_some_and(|e| e == "aly" || e == "alx"));
+        let names = match &target {
+            Some(target) => exports
+                .entry(target.clone())
+                .or_insert_with(|| {
+                    std::fs::read_to_string(target)
+                        .map(|t| exported_names(&t))
+                        .unwrap_or_default()
+                })
+                .clone(),
+
+            None => Vec::new(),
+        };
+
+        for item in specs {
+            let name = text(item.name).to_string();
+            let local = text(item.alias.unwrap_or(item.name)).to_string();
+            let (a, b) = range(item.name);
+
+            if alloy_module && !names.contains(&name) {
+                out.push(ImportProblem {
+                    start: a,
+                    end: b,
+                    kind: "ImportError",
+                    message: format!(
+                        "\"{spec}\" does not export `{name}`; it exports {}",
+                        and_list(&names)
+                    ),
+                });
+            } else if bound.contains(&local) {
+                out.push(ImportProblem {
+                    start: a,
+                    end: b,
+                    kind: "ImportError",
+                    message: format!("`{local}` is already imported in this file"),
+                });
+            }
+
+            bound.push(local);
+        }
+    }
+
+    out
 }
 
 /// The quoted path of every `import ... from "..."` and `export ... from "..."`.

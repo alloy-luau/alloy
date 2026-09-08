@@ -5,6 +5,10 @@
 //! position map. It does not own a type solver; luau-lsp checks the emitted
 //! Luau.
 
+// `shapes.rs` names the crate as `alloy`, since the language server
+// includes it the same way. Inside the crate that name needs an alias.
+extern crate self as alloy;
+
 pub mod alx;
 pub mod build;
 pub mod config;
@@ -30,6 +34,12 @@ pub mod project;
 pub mod render;
 pub mod roblox_classes;
 pub mod schema;
+/// The fold that turns the checker's printed types back into the names
+/// the source wrote. The language server owns the file; the CLI reads
+/// it so the terminal and the editor say the same thing.
+#[allow(dead_code)]
+#[path = "../../alloy-lsp/src/shapes.rs"]
+pub mod shapes;
 pub mod testbuild;
 pub mod typecheck;
 
@@ -100,6 +110,26 @@ impl std::fmt::Display for CompileError {
     }
 }
 
+impl CompileError {
+    /// The error the way every other diagnostic reads: `line:col:
+    /// message`, a one-based line and a one-based column into `src`.
+    /// `Display` cannot say this, since it holds no source; every
+    /// printer that has the source calls this instead.
+    pub fn located(&self, src: &str) -> String {
+        let mut at = self.offset.min(src.len());
+
+        while at > 0 && !src.is_char_boundary(at) {
+            at -= 1;
+        }
+
+        let before = &src[..at];
+        let line = before.matches('\n').count() + 1;
+        let col = before.rsplit('\n').next().map_or(0, str::len) + 1;
+
+        format!("{line}:{col}: {}", self.message)
+    }
+}
+
 /// Compiles Alloy source to Luau.
 ///
 /// Parse errors do not stop the compile: the lenient parser keeps the rest
@@ -165,7 +195,24 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         })
         .collect();
 
+    let parsed_clean = diagnostics.is_empty();
     diagnostics.extend(rendered.diagnostics);
+
+    // A directive the compiler does not know silences nothing, so it
+    // reads as a working one and is not.
+    for (line, word) in &directives::scan(src).unknown {
+        let (start, end) = directives::span_of_line(src, *line);
+        diagnostics.push(Diagnostic {
+            start: start as u32,
+            end: end as u32,
+            message: directives::unknown_message(word),
+        });
+    }
+
+    // One mistake reaches the parser through several rules, so the same
+    // sentence lands on one position more than once.
+    diagnostics.sort_by_key(|d| d.start);
+    diagnostics.dedup_by(|a, b| a.start == b.start && a.message == b.message);
 
     let mut lints = lint::run(
         src,
@@ -175,6 +222,15 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         &options.thresholds,
     );
     lints.extend(rendered.lints);
+
+    // A file the parser reported on has a tree its recovery invented:
+    // a statement lands in the block the parser could close, not the
+    // one the author wrote, so a lint over it describes code no one
+    // wrote. The parse error is the one thing to fix first.
+    if !parsed_clean {
+        lints.clear();
+    }
+
     lints.sort_by_key(|l| (l.start, l.name));
     // A node the desugar renders twice reports its lint twice.
     lints.dedup();
@@ -405,6 +461,24 @@ mod tests {
     fn a_spread_turns_the_missing_field_check_off() {
         let src = "struct P as\n    x: number\nend\nlocal a = new P { x = 1 }\nlocal b = new P { ...a }\n";
         assert!(messages(src).is_empty());
+    }
+
+    #[test]
+    fn a_compile_error_reads_as_a_position() {
+        let src = "local a = 1\nlocal b = <TextLabel />\n";
+        let e = CompileError {
+            offset: src.find('<').unwrap(),
+            message: "markup: `React` is not in scope".to_string(),
+        };
+        assert_eq!(e.located(src), "2:11: markup: `React` is not in scope");
+        assert_eq!(
+            CompileError {
+                offset: 0,
+                message: "boom".to_string(),
+            }
+            .located(""),
+            "1:1: boom"
+        );
     }
 
     #[test]

@@ -52,6 +52,18 @@ describe("Future", function()
 		end).toThrow("two")
 	end)
 
+	it("all and all_settled hand back an Array", function()
+		local values = alloy.await(Future.all({ Future.resolve(1), Future.resolve(2) }))
+		expect(getmetatable(values)).toBe(alloy.Array)
+		expect(values:len()).toBe(2)
+		expect(values:map(function(n)
+			return n * 2
+		end):join(",")).toBe("2,4")
+		local settled = alloy.await(Future.all_settled({ Future.resolve(1) }))
+		expect(getmetatable(settled)).toBe(alloy.Array)
+		expect(settled:len()).toBe(1)
+	end)
+
 	it("all_settled keeps both sides as Results", function()
 		local settled = alloy.await(Future.all_settled({ Future.resolve(1), Future.reject("e") }))
 		expect(settled[1]:unwrap()).toBe(1)

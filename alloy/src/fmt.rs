@@ -87,9 +87,41 @@ enum Node {
     },
 }
 
-/// Formats Alloy source with the default options.
+/// Formats a whole file with the default options.
 pub fn format(src: &str) -> Result<String, String> {
-    format_with(src, &FmtConfig::default())
+    format_file(src, &FmtConfig::default())
+}
+
+/// The head of the error `format_file` returns for a source the parser
+/// cannot read. A caller tells that case from a real failure by it.
+pub const UNPARSED: &str = "does not parse";
+
+/// The parser's first complaint about a whole file, if it has one. A
+/// `.d.aly` file writes `declare`, so the definition syntax is allowed.
+pub fn parse_error(src: &str) -> Option<String> {
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+
+    match alloy_syntax::parse_lenient(src, options) {
+        Err(e) => Some(e.message),
+
+        Ok(parsed) => parsed.diagnostics.first().map(|d| d.message.clone()),
+    }
+}
+
+/// Formats a whole file. The layout moves a statement into the block the
+/// parser gives it, so a source with a missing `end` would come out as
+/// another program: such a file keeps its text, and the error says so.
+/// `format_with` skips this check, for the fragments an `.alx` hole
+/// holds.
+pub fn format_file(src: &str, options: &FmtConfig) -> Result<String, String> {
+    match parse_error(src) {
+        Some(message) => Err(format!("{UNPARSED}: {message}")),
+
+        None => format_with(src, options),
+    }
 }
 
 /// Formats Alloy source. `Err` carries the lexer's message: a file that
@@ -185,11 +217,10 @@ fn merge_operators(items: Vec<Item>) -> Vec<Item> {
 
                 (a == "?" && matches!(b, "." | ":" | "[" | "(" | "?"))
                     || (a == "??" && b == "=")
-                    || (a == "<"
-                        && b == "<"
-                        && out.len() >= 2
-                        && out[out.len() - 2].is_ident()
-                        && !last.space_before)
+                    // Luau has no `<<` operator, so two `<` with nothing
+                    // between them after a name are the type-argument
+                    // bracket, whatever stands before the first one.
+                    || (a == "<" && b == "<" && out.len() >= 2 && out[out.len() - 2].is_ident())
                     || (a == ">" && b == ">" && open_shl > 0)
             }
 
@@ -1003,14 +1034,24 @@ impl<'s> Formatter<'s> {
         for i in 0..self.items.len() {
             let it = &self.items[i];
 
-            if !(it.is("<") || it.is("<<")) || it.space_before {
+            // `a < b` compares, so a `<` with a space before it opens no
+            // type arguments. `<<` is the bracket wherever it stands.
+            if !(it.is("<") || it.is("<<")) || (it.space_before && !it.is("<<")) {
                 continue;
             }
 
             let opens_generic = self.prev_code(i).is_some_and(|p| {
                 let t = &self.items[p];
+                // `Signal.new` and `Result.ok` end in a word the lexer
+                // also uses as a keyword. After a `.` or a `:` the word
+                // is a field name, so `<<` there opens type arguments.
+                let field = self.prev_code(p).is_some_and(|q| {
+                    let before = &self.items[q];
 
-                (t.is_ident() && !is_keyword(&t.text)) || t.is(">")
+                    before.is(".") || before.is(":") || before.is("?.") || before.is("?:")
+                });
+
+                (t.is_ident() && (field || !is_keyword(&t.text))) || t.is(">")
             });
 
             if !opens_generic {
@@ -1416,7 +1457,7 @@ impl<'s> Formatter<'s> {
             "{" => self.options.space_inside_braces,
             "(" | "?(" => self.options.space_inside_parens,
             "[" | "?[" => {
-                if self.is_index(open) {
+                if self.is_index(open) || self.in_macro_brackets(open) {
                     self.options.space_inside_brackets
                 } else {
                     self.options.space_inside_array
@@ -1424,6 +1465,22 @@ impl<'s> Formatter<'s> {
             }
             _ => false,
         }
+    }
+
+    /// A pair of `$map[["a", 1], ["b", 2]]`: the macro's brackets and the
+    /// pairs inside them are one literal, so they take one spacing rule.
+    fn in_macro_brackets(&self, open: usize) -> bool {
+        let Some(outer) = self.enclosing_open(open) else {
+            return false;
+        };
+
+        if !self.items[outer].is("[") {
+            return false;
+        }
+
+        self.prev_code(outer)
+            .and_then(|name| self.prev_code(name))
+            .is_some_and(|sigil| self.items[sigil].is("$"))
     }
 
     /// `[` that indexes, as opposed to an array literal or a type's
@@ -2253,6 +2310,40 @@ mod tests {
             fmt("local p = new P { x = 1 }\n"),
             "local p = new P { x = 1 }\n"
         );
+    }
+
+    #[test]
+    fn explicit_type_arguments_after_a_dot_stay_tight() {
+        let src = "local damaged = Signal.new<<Player, number>>()\n";
+        assert_eq!(fmt(src), src);
+        // A second pass changes nothing: the `<<` did not split.
+        assert_eq!(fmt(&fmt(src)), src);
+        assert_eq!(fmt("local c = a < b\n"), "local c = a < b\n");
+        assert_eq!(fmt("local d = t.x < y\n"), "local d = t.x < y\n");
+    }
+
+    #[test]
+    fn a_map_literal_keeps_its_pairs_tight() {
+        let src = "local prices = $map[[\"sword\", 10], [\"pet\", 25]]\n";
+        assert_eq!(fmt(src), src);
+        assert_eq!(
+            fmt("local s = $set[\"a\", \"b\"]\n"),
+            "local s = $set[\"a\", \"b\"]\n"
+        );
+        // A plain array of arrays keeps the array spacing.
+        assert_eq!(
+            fmt("local g = [[1, 2], [3, 4]]\n"),
+            "local g = [ [ 1, 2 ], [ 3, 4 ] ]\n"
+        );
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_left_alone() {
+        let src = "local function alpha(n: number): number\n    if n > 0 then\n        return n\n    return 0\nend\n";
+        let e = format_file(src, &FmtConfig::default()).unwrap_err();
+        assert!(e.starts_with(UNPARSED), "{e}");
+        // A `.d.aly` writes `declare`, and still parses.
+        assert!(parse_error("declare plugin: Plugin\n").is_none());
     }
 
     #[test]

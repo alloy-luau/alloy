@@ -41,17 +41,28 @@ pub struct TypeDiag {
     /// One-based.
     pub line: usize,
     pub col: usize,
-    /// `TypeError`, `SyntaxError`, or a lint name such as `LocalUnused`.
+    /// `TypeError`, `SyntaxError`, `UnknownModule`, `DirectiveError`, or
+    /// a lint name such as `LocalUnused`.
     pub kind: String,
     pub message: String,
 }
 
 impl TypeDiag {
+    /// The book section the kind belongs to, for a report Alloy raised
+    /// itself; `None` leaves the report to the checker's own `luau`.
+    pub fn code(&self) -> Option<&'static str> {
+        match self.kind.as_str() {
+            "UnknownModule" => Some("3.2"),
+            "DirectiveError" => Some("4.4"),
+            _ => None,
+        }
+    }
+
     /// A type or syntax error, as opposed to one of the checker's lints.
     pub fn is_error(&self) -> bool {
         matches!(
             self.kind.as_str(),
-            "TypeError" | "SyntaxError" | "UnknownModule" | "ExpectError"
+            "TypeError" | "SyntaxError" | "UnknownModule" | "DirectiveError"
         )
     }
 }
@@ -432,6 +443,7 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     let text = String::from_utf8_lossy(&output.stdout).into_owned()
         + &String::from_utf8_lossy(&output.stderr);
 
+    let known = known_shapes(files);
     // A message may run over several lines; the extra lines join the
     // report before them.
     let mut last: Option<usize> = None;
@@ -542,18 +554,414 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
                 rel: f.rel.clone(),
                 line: at + 1,
                 col: 1,
-                kind: "ExpectError".to_string(),
+                kind: "DirectiveError".to_string(),
                 message: crate::directives::UNMET.to_string(),
             });
         }
     }
 
+    for d in &mut analysis.diagnostics {
+        if d.kind == "TypeError" || d.kind == "SyntaxError" {
+            let source = files
+                .iter()
+                .find(|f| f.rel == d.rel)
+                .and_then(|f| f.source.lines().nth(d.line.saturating_sub(1)));
+            d.message = friendly_type_message(&d.message, &known, source, d.col);
+        }
+    }
+
+    // A `.` where a `:` belongs draws the arity error and then every
+    // mismatch that follows from the shifted arguments. The one
+    // sentence that names the mistake stands alone.
+    let typo_lines: Vec<(PathBuf, usize)> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("` is a method; call it with `"))
+        .map(|d| (d.rel.clone(), d.line))
+        .collect();
+
+    analysis.diagnostics.retain(|d| {
+        d.message.contains("` is a method; call it with `")
+            || !typo_lines.contains(&(d.rel.clone(), d.line))
+    });
+
     analysis
         .diagnostics
         .sort_by(|a, b| (&a.rel, a.line, a.col).cmp(&(&b.rel, b.line, b.col)));
     analysis.diagnostics.dedup();
+    keep_innermost(&mut analysis.diagnostics);
 
     Ok(analysis)
+}
+
+/// The names the fold may use: every struct, enum, mapped alias, and
+/// interface the project declares.
+pub fn known_shapes(files: &[CheckSource]) -> crate::shapes::Known {
+    crate::shapes::Known {
+        shapes: files
+            .iter()
+            .flat_map(|f| crate::declarations::shapes(&f.source))
+            .collect(),
+        interfaces: files
+            .iter()
+            .flat_map(|f| crate::shapes::interfaces(&f.source))
+            .collect(),
+    }
+}
+
+/// The runtime's own names taken out of a printed type: the require
+/// binding, the mapped-type functions, and the `__all` suffix an
+/// exported table carries.
+fn strip_std_prefix(text: &str) -> String {
+    if !(text.contains("__alloy") || text.contains("__mapped_") || text.contains("__all")) {
+        return text.to_string();
+    }
+
+    let mut out = text.to_string();
+
+    for primitive in crate::desugar::PRIMITIVES {
+        out = out.replace(&format!("__alloy_{primitive}."), &format!("{primitive}."));
+    }
+
+    out.replace("__alloy.", "")
+        .replace("__all", "")
+        .replace("__mapped_optional<", "Partial<")
+        .replace("__mapped_read<", "Readonly<")
+        .replace("__mapped_write<", "Sink<")
+}
+
+/// A checker message as a reader of the source should see it: the
+/// runtime's names go, a struct's private view folds to the struct,
+/// `Array<T>` reads `T[]`, and the tail that walks the emitted shape is
+/// cut. The language server runs the same pass, so the terminal and the
+/// editor say one thing.
+pub fn friendly_type_message(
+    message: &str,
+    known: &crate::shapes::Known,
+    line: Option<&str>,
+    col: usize,
+) -> String {
+    // The shared pass writes a kind of its own; the caller prints the
+    // report's kind, so one of the two goes.
+    let cut = crate::shapes::friendly_text(message);
+    let cut = cut
+        .split_once(": ")
+        .filter(|(kind, _)| kind.ends_with("Error") && !kind.contains(' '))
+        .map_or(cut.as_str(), |(_, rest)| rest);
+    let stripped = strip_std_prefix(cut);
+    let folded = drop_result_methods(&crate::shapes::fold(&stripped, known));
+    let Some(line) = line else {
+        return folded;
+    };
+
+    // The remote rewrite reads the surface the checker printed, so it
+    // runs on the text before the fold names it as well as after.
+    if let Some(better) = rewrite_remote_key(&stripped, line)
+        .or_else(|| rewrite_remote_key(&folded, line))
+        .or_else(|| rewrite_await(&folded, line))
+        .or_else(|| rewrite_arity(&folded, line, col))
+    {
+        return better;
+    }
+
+    match constructor_field(line, col) {
+        Some((field, name)) => format!("field `{field}` of `{name}`: {folded}"),
+
+        None => folded,
+    }
+}
+
+/// The std holds a Result's methods in an alias of their own, so the
+/// checker prints `ResultMethods<T, E> & Result<T, E>`. The methods are
+/// part of what `Result` is; the name for them is not the reader's.
+fn drop_result_methods(text: &str) -> String {
+    let mut out = text.to_string();
+
+    while let Some(at) = out.find("ResultMethods") {
+        let rest = &out[at..];
+        let Some(open) = rest.find('<') else {
+            break;
+        };
+        let Some(close) = rest[open..].find("> & ").map(|i| open + i + "> & ".len()) else {
+            break;
+        };
+
+        out.replace_range(at..at + close, "");
+    }
+
+    out
+}
+
+/// The call that starts at a column: `:` or `.`, the receiver as the
+/// source writes it, and the name after the separator.
+fn call_head(line: &str, col: usize) -> Option<(char, String, String)> {
+    let start = col.saturating_sub(1);
+    let rest = line.get(start..)?;
+    let head = &rest[..rest.find('(')?];
+    let sep = head.rfind([':', '.'])?;
+    let member = head[sep + 1..].trim();
+    let name = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+    if !name(member) {
+        return None;
+    }
+
+    let receiver = head[..sep].trim();
+
+    (!receiver.is_empty()).then(|| {
+        (
+            head.as_bytes()[sep] as char,
+            receiver.to_string(),
+            member.to_string(),
+        )
+    })
+}
+
+/// The counts of an argument-count message: what the function takes and
+/// what the call passed. A range, `1 to 2`, gives its lower bound.
+fn arity_counts(message: &str) -> Option<(usize, usize)> {
+    let after = message.split_once("expects ")?.1;
+    let expects: usize = after
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)?;
+    let rest = message.split_once(", but ")?.1;
+    let word = rest.trim_start_matches("only ").split_whitespace().next()?;
+    let given = if word == "none" {
+        0
+    } else {
+        word.parse().ok()?
+    };
+
+    Some((expects, given))
+}
+
+/// The argument-count message the source earns. A `:` call passes the
+/// receiver as the first argument, which the reader did not write, so
+/// both counts lose it. A `.` call of a method is one argument short
+/// for that same reason, and that mistake reads better named.
+fn rewrite_arity(message: &str, line: &str, col: usize) -> Option<String> {
+    if !message.contains("Function expects") {
+        return None;
+    }
+
+    let (expects, given) = arity_counts(message)?;
+    let (sep, receiver, member) = call_head(line, col)?;
+
+    if sep == '.' {
+        // `expects 1 to 2 arguments` is a range: the call is short of
+        // the lower bound, which says nothing about the separator.
+        let ranged = message.contains(" to ");
+        // A capitalized receiver names a module, a type, or a remote,
+        // and each of those takes its `.`.
+        let value = receiver.starts_with(|c: char| c.is_lowercase() || c == '_');
+
+        return (!ranged && value && given + 1 == expects).then(|| {
+            format!(
+                "`{member}` is a method; call it with `{receiver}:{member}(...)`, not `{receiver}.{member}(...)`"
+            )
+        });
+    }
+
+    if given == 0 {
+        return None;
+    }
+
+    let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+    let (expects, given) = (expects - 1, given - 1);
+    let tail = if given < expects {
+        format!(
+            "but only {given} {} specified",
+            if given == 1 { "is" } else { "are" }
+        )
+    } else {
+        format!(
+            "but {given} {} specified",
+            if given == 1 { "is" } else { "are" }
+        )
+    };
+
+    Some(format!(
+        "Argument count mismatch. `{member}` takes {expects} {}, {tail}",
+        plural(expects)
+    ))
+}
+
+/// `await` on a value that is no Future prints the std's own parameter,
+/// `Awaitable<T>`, whose `T` is bound to nothing the reader can see.
+fn rewrite_await(message: &str, line: &str) -> Option<String> {
+    let wanted = message.contains("'Awaitable<T>'") || message.contains("'Future<T>'");
+
+    if !(wanted && line.contains("await ")) {
+        return None;
+    }
+
+    let got = message.split_once("but got '")?.1;
+    let got = got.split('\'').next()?;
+    // A narrowed primitive prints as `typeof(string)`; the reader wrote
+    // a string.
+    let got = got
+        .strip_prefix("typeof(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(got);
+
+    Some(format!("`await` needs a Future; `{got}` is not one"))
+}
+
+/// A remote's whole surface reaches a missing-member message. The
+/// reader knows it by the name they declared.
+fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
+    let key = message.strip_prefix("Key '")?.split('\'').next()?;
+    let table = message.split_once("' not found in table '")?.1;
+    // Every side of a remote carries `instance` and at least one of the
+    // verbs; the fold may have named the whole surface already.
+    let surface = table.contains("instance: Instance?")
+        && ["on:", "fire", "call:", "wait:"]
+            .iter()
+            .any(|verb| table.contains(verb));
+
+    if !(table.starts_with("Remote'") || surface) {
+        return None;
+    }
+
+    let at = line.find(&format!(".{key}"))?;
+    let receiver: String = line[..at]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    if receiver.is_empty() {
+        return None;
+    }
+
+    let members: Vec<&str> = table
+        .trim_start_matches('{')
+        .split(',')
+        .filter_map(|part| part.split_once(':').map(|(k, _)| k.trim()))
+        .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .collect();
+    let near = members
+        .iter()
+        .map(|m| (edit_distance(m, key), *m))
+        .filter(|(d, _)| *d <= 2)
+        .min();
+
+    Some(match near {
+        Some((_, m)) => format!("remote `{receiver}` has no `{key}`; did you mean `{m}`?"),
+
+        None => format!("remote `{receiver}` has no `{key}`"),
+    })
+}
+
+/// The edit distance of two names, for a "did you mean".
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+
+    for (i, ca) in a.iter().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            let next = (row[j] + 1).min(row[j + 1] + 1).min(previous + cost);
+            previous = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+
+    row[b.len()]
+}
+
+/// The constructor field a column falls in: `new Plain { a = "x" }` at
+/// the column of `"x"` gives `("a", "Plain")`. The checker reports the
+/// value alone, and the reader wants to know which field it was for.
+fn constructor_field(line: &str, col: usize) -> Option<(String, String)> {
+    let at = line.find("new ")?;
+    let rest = &line[at + 4..];
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    if name.is_empty() {
+        return None;
+    }
+
+    let open = at + 4 + rest.find('{')?;
+    let target = col.checked_sub(1)?;
+
+    if target <= open {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut field: Option<String> = None;
+    let mut key_start = open + 1;
+
+    for (i, c) in line.char_indices().skip(open) {
+        match c {
+            '{' | '(' | '[' => depth += 1,
+
+            '}' | ')' | ']' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    break;
+                }
+            }
+
+            ',' if depth == 1 => key_start = i + 1,
+
+            '=' if depth == 1 => {
+                let key = line[key_start..i].trim();
+
+                if key.chars().all(|c| c.is_alphanumeric() || c == '_') && !key.is_empty() {
+                    field = Some(key.to_string());
+                }
+            }
+
+            _ => {}
+        }
+
+        if i == target {
+            return field.map(|f| (f, name));
+        }
+    }
+
+    None
+}
+
+/// One mistake reaches the checker through several nested ranges, so
+/// one sentence lands on a line as many times as there are ranges. The
+/// innermost is the one that points at the mistake, and on a line it
+/// starts last, so the greatest column of a repeated sentence wins.
+fn keep_innermost(diagnostics: &mut Vec<TypeDiag>) {
+    let mut best: HashMap<(PathBuf, usize, String), usize> = HashMap::new();
+
+    for d in diagnostics.iter() {
+        let key = (d.rel.clone(), d.line, d.message.clone());
+        let col = best.entry(key).or_insert(d.col);
+        *col = (*col).max(d.col);
+    }
+
+    let mut seen: HashSet<(PathBuf, usize, String)> = HashSet::new();
+
+    diagnostics.retain(|d| {
+        let key = (d.rel.clone(), d.line, d.message.clone());
+
+        if best.get(&key) != Some(&d.col) {
+            return false;
+        }
+
+        seen.insert(key)
+    });
 }
 
 /// The `UnknownModule` report for a require the checker could not
@@ -768,6 +1176,154 @@ mod tests {
             quoted_on_line("import { a } from \"./x\"\nlocal y = 1\n", 0),
             Some("./x".to_string())
         );
+    }
+
+    #[test]
+    fn await_on_a_plain_value_names_that_value() {
+        let known = crate::shapes::Known::default();
+        assert_eq!(
+            friendly_type_message(
+                "Expected this to be 'Awaitable<T>', but got 'number'",
+                &known,
+                Some("local nope = await n"),
+                14
+            ),
+            "`await` needs a Future; `number` is not one"
+        );
+        // A narrowed primitive prints as `typeof(string)`.
+        assert_eq!(
+            friendly_type_message(
+                "Expected this to be 'Awaitable<T>', but got 'typeof(string)'",
+                &known,
+                Some("local nope = await s"),
+                14
+            ),
+            "`await` needs a Future; `string` is not one"
+        );
+    }
+
+    #[test]
+    fn a_mapped_result_reads_as_a_result() {
+        let known = crate::shapes::Known::default();
+        let message = "Expected this to be 'number', but got 'ResultMethods2<number, string> & { read _1: number | string, read __err: string, read __ok: number, tag: \"Err\" | \"Ok\", read trace: string? }'";
+        assert_eq!(
+            friendly_type_message(message, &known, None, 0),
+            "Expected this to be 'number', but got 'Result<number, string>'"
+        );
+    }
+
+    #[test]
+    fn a_method_call_message_leaves_out_self() {
+        let known = crate::shapes::Known::default();
+        let line = "local b = xs:len(1, 2)";
+        assert_eq!(
+            friendly_type_message(
+                "Argument count mismatch. Function expects 1 argument, but 3 are specified",
+                &known,
+                Some(line),
+                11
+            ),
+            "Argument count mismatch. `len` takes 0 arguments, but 2 are specified"
+        );
+        assert_eq!(
+            friendly_type_message(
+                "Argument count mismatch. Function expects 3 arguments, but only 2 are specified",
+                &known,
+                Some("local c = xs:reduce(f)"),
+                11
+            ),
+            "Argument count mismatch. `reduce` takes 2 arguments, but only 1 is specified"
+        );
+    }
+
+    #[test]
+    fn a_dot_call_of_a_method_names_the_colon() {
+        let known = crate::shapes::Known::default();
+        assert_eq!(
+            friendly_type_message(
+                "Argument count mismatch. Function expects 1 argument, but none are specified",
+                &known,
+                Some("local a = c.bump()"),
+                11
+            ),
+            "`bump` is a method; call it with `c:bump(...)`, not `c.bump(...)`"
+        );
+        // A range of counts says nothing about the separator.
+        assert!(
+            friendly_type_message(
+                "Argument count mismatch. Function expects 1 to 2 arguments, but none are specified",
+                &known,
+                Some("Toast.fire_all()"),
+                1
+            )
+            .contains("Function expects 1 to 2")
+        );
+    }
+
+    #[test]
+    fn a_remote_surface_reads_as_the_remote() {
+        let known = crate::shapes::Known::default();
+        let message = "Key 'blast' not found in table '{ call: (Player, string) -> Future<any>, fire: (Player, string) -> (), instance: Instance?, spec: any }'";
+        assert_eq!(
+            friendly_type_message(message, &known, Some("Toast.blast(\"x\")"), 1),
+            "remote `Toast` has no `blast`"
+        );
+        assert_eq!(
+            friendly_type_message(
+                "Key 'fira' not found in table 'Remote'",
+                &known,
+                Some("Toast.fira(\"x\")"),
+                1
+            ),
+            "remote `Toast` has no `fira`"
+        );
+    }
+
+    #[test]
+    fn a_constructor_message_names_the_field() {
+        let known = crate::shapes::Known::default();
+        let line = "local bad4 = new Plain { a = \"not a number\", b = \"x\" }";
+        assert_eq!(
+            friendly_type_message(
+                "Expected this to be 'number', but got 'string'",
+                &known,
+                Some(line),
+                30
+            ),
+            "field `a` of `Plain`: Expected this to be 'number', but got 'string'"
+        );
+        assert_eq!(
+            constructor_field(line, 30),
+            Some(("a".into(), "Plain".into()))
+        );
+        assert_eq!(
+            constructor_field(line, 50),
+            Some(("b".into(), "Plain".into()))
+        );
+        assert_eq!(constructor_field("local p = { a = 1 }", 13), None);
+    }
+
+    #[test]
+    fn a_repeated_sentence_keeps_the_innermost_range() {
+        let mut diagnostics = vec![
+            TypeDiag {
+                rel: PathBuf::from("a.aly"),
+                line: 11,
+                col: 12,
+                kind: "TypeError".into(),
+                message: "Operator '+' could not be applied".into(),
+            },
+            TypeDiag {
+                rel: PathBuf::from("a.aly"),
+                line: 11,
+                col: 55,
+                kind: "TypeError".into(),
+                message: "Operator '+' could not be applied".into(),
+            },
+        ];
+        keep_innermost(&mut diagnostics);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].col, 55);
     }
 
     #[test]

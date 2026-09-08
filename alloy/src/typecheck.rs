@@ -972,6 +972,8 @@ pub fn paired_lint(kind: &str) -> Option<&'static [&'static str]> {
 
         "TableOperations" => &["table_insert_position", "manual_push"],
 
+        "UnreachableCode" => &["unreachable_code"],
+
         _ => return None,
     })
 }
@@ -2487,6 +2489,7 @@ mod tests {
     fn a_checker_lint_pairs_with_the_alloy_one() {
         assert_eq!(paired_lint("TableLiteral"), Some(&["duplicate_key"][..]));
         assert_eq!(paired_lint("LocalUnused"), Some(&["unused_variable"][..]));
+        assert_eq!(paired_lint("UnreachableCode"), Some(&["unreachable_code"][..]));
         assert_eq!(paired_lint("TypeError"), None);
     }
 

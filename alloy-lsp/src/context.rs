@@ -79,6 +79,11 @@ pub enum Context {
     /// The member column of an `impl` or `trait` body: `function`,
     /// `async`, `private`, `public`, an attribute, or the `end`.
     MemberStart { prefix: String },
+    /// The member column of a `trait` body, which takes no visibility:
+    /// every method a trait declares is public.
+    TraitMemberStart { prefix: String },
+    /// `new Stats { |`: a field of the struct the literal fills.
+    StructField { prefix: String, target: String },
 }
 
 /// What the declaration of a name says about the name's type.
@@ -98,6 +103,7 @@ enum Body {
     Struct,
     Enum,
     Impl,
+    Trait,
 }
 
 /// The declaration body around `line_start`: the nearest line at the
@@ -131,7 +137,8 @@ fn enclosing_body(src: &str, line_start: usize) -> Option<Body> {
                 Some(Body::Struct)
             }
             Some("enum") if decl.contains(" as") => Some(Body::Enum),
-            Some("impl" | "trait") if depth <= 0 => Some(Body::Impl),
+            Some("impl") if depth <= 0 => Some(Body::Impl),
+            Some("trait") if depth <= 0 => Some(Body::Trait),
             _ => None,
         };
     }
@@ -190,13 +197,32 @@ fn inside_string(before: &str) -> bool {
     open.is_some()
 }
 
-/// Whether the cursor names a function's parameter: inside the
-/// parenthesis of a `function` head, not after a `:` of the parameter.
+/// Whether the caret sits inside a quoted string on its own line.
+pub fn in_string(src: &str, offset: usize) -> bool {
+    let offset = offset.min(src.len());
+    let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+
+    inside_string(&src[line_start..offset])
+}
+
+/// Whether the cursor names a parameter: inside the parenthesis of a
+/// `function` head or of a `remote` declaration, not after a `:` of the
+/// parameter. A remote's parameters are names the author is choosing,
+/// the way a function's are.
 fn names_a_parameter(head: &str) -> bool {
-    let Some(f) = head.rfind("function") else {
+    let trimmed = head.trim_start();
+    let statement = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let remote = statement
+        .starts_with("remote ")
+        .then(|| head.len() - statement.len() + "remote".len());
+    let Some(f) = head
+        .rfind("function")
+        .map(|f| f + "function".len())
+        .or(remote)
+    else {
         return false;
     };
-    let after = &head[f + "function".len()..];
+    let after = &head[f..];
     let Some(open) = after.find('(') else {
         return false;
     };
@@ -211,13 +237,57 @@ fn names_a_parameter(head: &str) -> bool {
     !last.contains(':') && !last.contains('=')
 }
 
-/// The base expression and the typed prefix of a member completion
-/// right after `?.`: `bx?.na` answers `("bx", 2)`. `None` when the
-/// cursor sits somewhere else.
-pub fn optional_member_at(src: &str, offset: usize) -> Option<(String, usize)> {
+/// The guard a member access carries before its separator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// `a.b` and `a:b`: the emit copies the access.
+    Plain,
+    /// `a?.b`, which lowers to `(if a == nil then nil else a.b)`.
+    Optional,
+    /// `a!.b`, which lowers to `(if a == nil then error(..) else a).b`.
+    Asserted,
+}
+
+impl Access {
+    /// The text between the receiver and the separator in the source.
+    fn source_guard(self) -> &'static str {
+        match self {
+            Access::Plain => "",
+            Access::Optional => "?",
+            Access::Asserted => "!",
+        }
+    }
+
+    /// The same in the lowered text: `!` closes the guard expression
+    /// before the separator, and the other two write nothing.
+    fn shadow_guard(self) -> &'static str {
+        match self {
+            Access::Asserted => ")",
+            _ => "",
+        }
+    }
+}
+
+/// The receiver, the guard, the separator, and the typed prefix of a
+/// member completion. `bx?.na` answers `("bx", Optional, '.', 2)`.
+/// `None` when the cursor sits somewhere else.
+pub fn member_at(src: &str, offset: usize) -> Option<(String, Access, char, usize)> {
     let head = src.get(..offset)?;
     let word = head.len() - head.trim_end_matches(is_word_byte).len();
-    let before = head[..head.len() - word].strip_suffix("?.")?;
+    let before = &head[..head.len() - word];
+    let sep = before.chars().next_back()?;
+
+    if !matches!(sep, '.' | ':') {
+        return None;
+    }
+
+    let before = &before[..before.len() - sep.len_utf8()];
+    let (before, access) = match before.chars().next_back() {
+        Some('?') => (&before[..before.len() - 1], Access::Optional),
+        Some('!') => (&before[..before.len() - 1], Access::Asserted),
+        Some('.' | ':') => return None,
+        _ => (before, Access::Plain),
+    };
     let start = before
         .char_indices()
         .rev()
@@ -226,32 +296,56 @@ pub fn optional_member_at(src: &str, offset: usize) -> Option<(String, usize)> {
         .map(|(i, _)| i)?;
     let base = &before[start..];
 
-    (!base.is_empty() && !base.ends_with('.')).then(|| (base.to_string(), word))
+    (!base.is_empty() && !base.ends_with('.') && !base.starts_with(|c: char| c.is_numeric()))
+        .then(|| (base.to_string(), access, sep, word))
 }
 
 fn is_word_byte(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Where the member of an optional access sits on the lowered line.
-/// `a?.b` lowers to `(if a == nil then nil else a.b)`, all of it text
-/// the compiler wrote, so the member has no position of its own; the
-/// one the lowering wrote is where completion belongs.
-pub fn optional_member_column(line: &str, base: &str, prefix: usize) -> Option<usize> {
-    let needle = format!("{base}.");
-    let at = line
-        .match_indices(&needle)
+/// Every byte offset in `line` where `needle` starts a whole access:
+/// the byte before it names no word. A `.` before it is allowed, since
+/// the emit qualifies a std name as `__alloy.Name`.
+fn access_starts(line: &str, needle: &str) -> Vec<usize> {
+    line.match_indices(needle)
         .filter(|(i, _)| {
             line[..*i]
                 .chars()
                 .next_back()
-                .is_none_or(|c| !is_word_byte(c) && c != '.')
+                .is_none_or(|c| !is_word_byte(c))
         })
         .map(|(i, _)| i)
-        .last()?;
-    let col = at + needle.len() + prefix;
+        .collect()
+}
 
-    (col <= line.len()).then_some(col)
+/// Where the member of an access sits on the lowered line. The emit
+/// moves the receiver: `await Future.all(p)` becomes
+/// `__alloy.await(__alloy.Future.all(p))`, and `a!.b` becomes a guarded
+/// expression, so the member the author types has no position of its
+/// own. The nth access on the source line is the nth on the lowered
+/// one, which keeps a line with two accesses to the same receiver
+/// apart.
+pub fn member_column(
+    source_line: &str,
+    shadow_line: &str,
+    base: &str,
+    access: Access,
+    sep: char,
+    prefix: usize,
+    source_column: usize,
+) -> Option<usize> {
+    let typed = format!("{base}{}{sep}", access.source_guard());
+    let nth = access_starts(source_line, &typed)
+        .into_iter()
+        .filter(|i| i + typed.len() <= source_column)
+        .count()
+        .checked_sub(1)?;
+    let lowered = format!("{base}{}{sep}", access.shadow_guard());
+    let at = *access_starts(shadow_line, &lowered).get(nth)?;
+    let col = at + lowered.len() + prefix;
+
+    (col <= shadow_line.len()).then_some(col)
 }
 
 /// The string a module path is being typed in, when the cursor is inside
@@ -513,33 +607,79 @@ fn scrutinee_of(line: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// The expression the `match` around the caret takes. The scan counts
-/// the blocks upward, so the nearest open `match` wins and an inner one
-/// shadows an outer.
-fn match_scrutinee(src: &str, offset: usize) -> Option<String> {
+/// The line the `match` around the caret opens on, as a byte offset,
+/// with the expression that `match` takes. The scan counts the blocks
+/// upward, so the nearest open `match` wins and an inner one shadows an
+/// outer.
+fn match_head(src: &str, offset: usize) -> Option<(usize, String)> {
+    let head = &src[..offset.min(src.len())];
     let mut depth = 0i32;
+    let mut cursor = head.len();
 
-    for line in src[..offset.min(src.len())].lines().rev() {
+    loop {
+        let start = head[..cursor].rfind('\n').map_or(0, |i| i + 1);
+        let line = &head[start..cursor];
         let t = line.trim();
 
-        if t.is_empty() || t.starts_with("--") {
-            continue;
+        if !(t.is_empty() || t.starts_with("--")) {
+            depth += block_closers(t);
+
+            let opens = block_openers(t);
+
+            // More opened here than the scan closed below: this line
+            // opens the block the caret sits in.
+            if opens > depth {
+                return scrutinee_of(t).map(|s| (start, s));
+            }
+
+            depth -= opens;
         }
 
-        depth += block_closers(t);
-
-        let opens = block_openers(t);
-
-        // More opened here than the scan closed below: this line opens
-        // the block the caret sits in.
-        if opens > depth {
-            return scrutinee_of(t);
+        if start == 0 {
+            return None;
         }
 
-        depth -= opens;
+        cursor = start - 1;
+    }
+}
+
+/// The expression the `match` around the caret takes.
+fn match_scrutinee(src: &str, offset: usize) -> Option<String> {
+    match_head(src, offset).map(|(_, s)| s)
+}
+
+/// The name each arm of the `match` around the caret opens with:
+/// `case Ok(v)` answers `Ok`. An arm already written says what the
+/// scrutinee is when its declaration does not.
+pub fn match_arms(src: &str, offset: usize) -> Vec<String> {
+    let Some((at, _)) = match_head(src, offset) else {
+        return Vec::new();
+    };
+    let opener = src[at..].lines().next().unwrap_or("");
+    let indent = opener.len() - opener.trim_start().len();
+    let mut out = Vec::new();
+
+    for line in src[at..].lines().skip(1) {
+        let t = line.trim_start();
+
+        if t == "end" && line.len() - t.len() <= indent {
+            break;
+        }
+
+        if let Some(rest) = t.strip_prefix("case ") {
+            let word: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| is_word(*c))
+                .collect();
+
+            if !word.is_empty() {
+                out.push(word);
+            }
+        }
     }
 
-    None
+    out
 }
 
 /// Whether the text before a name binds it: a `local` or a `const`, or
@@ -570,8 +710,18 @@ fn in_parameters(before: &str) -> bool {
 fn type_text(rest: &str) -> String {
     let mut depth = 0i32;
     let mut end = rest.len();
+    let mut prev = ' ';
 
     for (i, c) in rest.char_indices() {
+        // `->` carries a `>` that closes nothing.
+        if c == '>' && prev == '-' {
+            prev = c;
+
+            continue;
+        }
+
+        prev = c;
+
         match c {
             '<' | '(' | '[' | '{' => depth += 1,
 
@@ -596,6 +746,241 @@ fn type_text(rest: &str) -> String {
     }
 
     rest[..end].trim().to_string()
+}
+
+/// Whether a `>` closes a bracket or carries an arrow.
+fn closes_bracket(c: char, prev: char) -> bool {
+    matches!(c, ')' | ']' | '}') || (c == '>' && prev != '-')
+}
+
+/// One entry of a record type or of a struct body: the field name, the
+/// type it declares, and whether the body keeps it private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    pub name: String,
+    pub ty: String,
+    pub private: bool,
+}
+
+/// The fields a struct body or a record type declares, from the text a
+/// declaration hover or an inline annotation holds. A struct body reads
+/// line by line, a record type comma by comma; both end each entry at
+/// the top level, so a nested `{ }` or a `->` stays inside its field.
+pub fn record_entries(text: &str) -> Vec<Field> {
+    let body = text.trim();
+    let body = body
+        .strip_prefix("```alloy")
+        .and_then(|rest| rest.split_once("```").map(|(head, _)| head))
+        .unwrap_or(body);
+    // A record annotation, or the body a `type X = { ... }` names.
+    let body = match (body.find('{'), body.rfind('}')) {
+        (Some(open), Some(close)) if close > open => &body[open + 1..close],
+        _ => body,
+    };
+    let mut out = Vec::new();
+    let mut entry = String::new();
+    let mut depth = 0i32;
+    let mut prev = ' ';
+
+    for c in body.chars().chain(std::iter::once('\n')) {
+        if c == '<' || c == '(' || c == '[' || c == '{' {
+            depth += 1;
+        } else if closes_bracket(c, prev) {
+            depth -= 1;
+        }
+
+        prev = c;
+
+        if (c == ',' || c == '\n') && depth <= 0 {
+            if let Some(field) = field_entry(&entry) {
+                out.push(field);
+            }
+
+            entry.clear();
+
+            continue;
+        }
+
+        entry.push(c);
+    }
+
+    out
+}
+
+/// One `name: Type` of a record or a struct body, its modifiers read.
+fn field_entry(entry: &str) -> Option<Field> {
+    let mut t = entry.trim();
+    let mut private = false;
+
+    loop {
+        let mut cut = None;
+
+        for modifier in ["export ", "public ", "read ", "write ", "private "] {
+            if let Some(rest) = t.strip_prefix(modifier) {
+                private = private || modifier == "private ";
+                cut = Some(rest.trim_start());
+
+                break;
+            }
+        }
+
+        match cut {
+            Some(rest) => t = rest,
+
+            None => break,
+        }
+    }
+
+    let (name, rest) = t.split_once(':')?;
+    let name = name.trim();
+
+    if name.is_empty() || !name.chars().all(is_word) {
+        return None;
+    }
+
+    let ty = type_text(rest).trim_end_matches(',').trim().to_string();
+
+    (!ty.is_empty()).then_some(Field {
+        name: name.to_string(),
+        ty,
+        private,
+    })
+}
+
+/// Whether the caret sits in the type-argument list of a named type:
+/// `Result<|`, `HashMap<string, |`. The name must touch its `<`, so a
+/// comparison never reads as one.
+fn in_type_arguments(head: &str) -> bool {
+    let mut depth = 0i32;
+    let mut open = None;
+    let mut prev = ' ';
+
+    for (i, c) in head.char_indices() {
+        match c {
+            '<' => {
+                depth += 1;
+
+                if depth == 1 {
+                    open = Some(i);
+                }
+            }
+
+            '>' if prev != '-' => {
+                depth -= 1;
+
+                if depth <= 0 {
+                    depth = 0;
+                    open = None;
+                }
+            }
+
+            '(' | ')' | ';' | '"' | '\'' => {
+                depth = 0;
+                open = None;
+            }
+
+            _ => {}
+        }
+
+        prev = c;
+    }
+
+    let Some(open) = open else {
+        return false;
+    };
+    let before = &head[..open];
+    let start = before.len() - before.trim_end_matches(is_word).len();
+
+    start > 0
+        && before[before.len() - start..].starts_with(|c: char| c.is_uppercase())
+        && head[open + 1..]
+            .chars()
+            .all(|c| is_word(c) || " ,<>?[]{}:.&|".contains(c))
+}
+
+/// Whether a type goes at the caret: after a `:` that annotates, after
+/// a `->`, or inside a type-argument list. A `::` is a cast the child
+/// reads, and a `:` with no space is a method call.
+fn takes_a_type(head: &str) -> bool {
+    if in_type_arguments(head) {
+        return true;
+    }
+
+    if head.ends_with("-> ") {
+        return true;
+    }
+
+    let annotation = head.ends_with(": ")
+        || head.ends_with(": read ")
+        || head.ends_with(": write ")
+        || head.ends_with(": ...");
+
+    annotation && !head.trim_end().ends_with("::")
+}
+
+/// The struct a literal at the caret fills: the name before the `{`
+/// that is still open, as `new Stats { |` writes it, or the type the
+/// binding a bare `{ |` initialises declares.
+fn struct_literal_target(src: &str, offset: usize) -> Option<String> {
+    let head = &src[..offset];
+    let mut opens: Vec<usize> = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut chars = head.char_indices();
+
+    while let Some((i, c)) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                }
+            }
+
+            None => match c {
+                '"' | '\'' | '`' => quote = Some(c),
+                '-' if head[i..].starts_with("--") => {
+                    let end = head[i..].find('\n').map_or(head.len(), |n| i + n);
+
+                    while chars.as_str().len() > head.len() - end {
+                        chars.next();
+                    }
+                }
+                '{' => opens.push(i),
+                '}' => {
+                    opens.pop();
+                }
+                _ => {}
+            },
+        }
+    }
+
+    let open = *opens.last()?;
+    // A field slot takes a name until its `=`.
+    let entry = head[open + 1..].rsplit([',', '\n']).next()?;
+
+    if entry.contains('=') {
+        return None;
+    }
+
+    let before = head[..open].trim_end();
+    let name: String = {
+        let start = before.len() - before.trim_end_matches(is_word).len();
+
+        before[before.len() - start..].to_string()
+    };
+
+    if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
+        return Some(name);
+    }
+
+    // `local l: Loadout = { |`: the annotation of the binding names it.
+    let assigned = before.strip_suffix('=')?;
+    let line = assigned.rsplit('\n').next()?;
+    let colon = line.rfind(':')?;
+    let declared = type_text(&line[colon + 1..]);
+
+    (!declared.is_empty() && declared.starts_with(|c: char| c.is_uppercase())).then_some(declared)
 }
 
 fn declared_in_line(line: &str, name: &str) -> Option<Declared> {
@@ -793,6 +1178,15 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         return Some(Context::Nothing);
     }
 
+    // The field name of a struct literal. The child sees a table the
+    // emit passes to a constructor, so it lists the globals instead.
+    if let Some(target) = struct_literal_target(src, offset - prefix.len()) {
+        return Some(Context::StructField {
+            prefix: prefix.to_string(),
+            target,
+        });
+    }
+
     // The body of a declaration.
     match enclosing_body(src, line_start) {
         Some(Body::Struct) => {
@@ -805,6 +1199,12 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             }
 
             if at_column {
+                // The `end` the author just typed closes the body, so
+                // the body's words no longer belong on the line.
+                if prefix == "end" {
+                    return Some(Context::Nothing);
+                }
+
                 return Some(Context::FieldStart {
                     prefix: prefix.to_string(),
                 });
@@ -827,13 +1227,39 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             let at_column = head.trim().is_empty();
 
             if at_column {
+                if prefix == "end" {
+                    return Some(Context::Nothing);
+                }
+
                 return Some(Context::MemberStart {
                     prefix: prefix.to_string(),
                 });
             }
         }
 
+        Some(Body::Trait) => {
+            let at_column = head.trim().is_empty();
+
+            if at_column {
+                if prefix == "end" {
+                    return Some(Context::Nothing);
+                }
+
+                return Some(Context::TraitMemberStart {
+                    prefix: prefix.to_string(),
+                });
+            }
+        }
+
         None => {}
+    }
+
+    // A type annotation, a return type, or a type argument. Every one
+    // of them takes the same list, and the child mixes values into it.
+    if takes_a_type(head) {
+        return Some(Context::TypeSlot {
+            prefix: prefix.to_string(),
+        });
     }
 
     if let Some(interface) = declaration_head(head) {
@@ -946,8 +1372,14 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             }
 
             let inside = &rest[open + 1..];
-            let after_name = inside.trim_end().chars().last().is_some_and(is_word)
-                && inside.ends_with(' ')
+            // The entry the caret sits in: `type` opens a type-only
+            // name, so the list holds the module's types alone.
+            let entry = inside.rsplit(',').next().unwrap_or(inside);
+            let entry_type_only = entry.trim_start().starts_with("type ") || entry.trim() == "type";
+            let type_only = type_only || entry_type_only;
+            let after_name = !entry_type_only
+                && entry.trim_end().chars().last().is_some_and(is_word)
+                && entry.ends_with(' ')
                 && prefix.is_empty();
             // The path in either quote.
             let spec = line
@@ -1003,27 +1435,83 @@ mod tests {
     /// where the member sits on the lowered line.
     #[test]
     fn an_optional_member_reads_its_base_and_its_prefix() {
+        use super::Access;
+
         let src = "local deep = bx?.na";
         assert_eq!(
-            super::optional_member_at(src, src.len()),
-            Some(("bx".to_string(), 2))
+            super::member_at(src, src.len()),
+            Some(("bx".to_string(), Access::Optional, '.', 2))
         );
         let dangling = "local deep = bx?.";
         assert_eq!(
-            super::optional_member_at(dangling, dangling.len()),
-            Some(("bx".to_string(), 0))
+            super::member_at(dangling, dangling.len()),
+            Some(("bx".to_string(), Access::Optional, '.', 0))
         );
-        assert_eq!(super::optional_member_at("local x = bx.na", 15), None);
+        assert_eq!(
+            super::member_at("local x = bx.na", 15),
+            Some(("bx".to_string(), Access::Plain, '.', 2))
+        );
+        assert_eq!(super::member_at("local x = bx", 12), None);
 
+        let source = "local deep = bx?.name";
         let line = "local deep = (if bx == nil then nil else bx.name)";
         assert_eq!(
-            super::optional_member_column(line, "bx", 0),
+            super::member_column(source, line, "bx", Access::Optional, '.', 0, 17),
             Some(line.find("else bx.").unwrap() + 8)
         );
         // A base that only ends another name does not match.
         assert_eq!(
-            super::optional_member_column("local q = abx.name", "bx", 0),
+            super::member_column(
+                "local q = bx?.name",
+                "local q = abx.name",
+                "bx",
+                Access::Optional,
+                '.',
+                0,
+                13
+            ),
             None
+        );
+    }
+
+    /// `!.` closes its guard before the separator, and a receiver the
+    /// emit qualified is still the same access.
+    #[test]
+    fn an_asserted_member_and_a_moved_receiver_find_their_column() {
+        use super::Access;
+
+        let src = "    print(profile!.stats.kills)";
+        let at = src.find("!.").unwrap() + 2;
+        assert_eq!(
+            super::member_at(src, at),
+            Some(("profile".to_string(), Access::Asserted, '.', 0))
+        );
+
+        let shadow = "    print((if profile == nil then error(\"profile is nil\") else profile).stats.kills)";
+        assert_eq!(
+            super::member_column(src, shadow, "profile", Access::Asserted, '.', 0, at),
+            Some(shadow.find("else profile).").unwrap() + "else profile).".len())
+        );
+
+        // `await Future.all(p)` lowers to `__alloy.await(__alloy.Future.all(p))`.
+        let awaited = "    local s = await Future.all(p)";
+        let lowered = "    local s = __alloy.await(__alloy.Future.all(p))";
+        let col = awaited.find("Future.").unwrap() + "Future.".len();
+        assert_eq!(
+            super::member_at(awaited, col),
+            Some(("Future".to_string(), Access::Plain, '.', 0))
+        );
+        assert_eq!(
+            super::member_column(awaited, lowered, "Future", Access::Plain, '.', 0, col),
+            Some(lowered.find("Future.").unwrap() + "Future.".len())
+        );
+
+        // Two accesses to one receiver on a line keep their order.
+        let twice = "local v = Future.all(Future.race(p))";
+        let second = twice.rfind("Future.").unwrap() + "Future.".len();
+        assert_eq!(
+            super::member_column(twice, twice, "Future", Access::Plain, '.', 0, second),
+            Some(second)
         );
     }
 
@@ -1048,8 +1536,8 @@ mod tests {
         assert_eq!(at("@ratelimit(2|"), Some(Context::Nothing));
         assert_eq!(at("struct Holder as\n    read na|"), Some(Context::Nothing));
         assert_eq!(at("enum Kind as\n    Al|"), Some(Context::Nothing));
-        assert_eq!(at("function f(a: |"), None);
         assert_eq!(at("for k, v in pa|"), None);
+        assert_eq!(at("remote Test(nam|"), Some(Context::Nothing));
     }
 
     #[test]
@@ -1160,6 +1648,118 @@ mod tests {
 
         // No match above: the proxy keeps its full list.
         assert_eq!(scrutinee("local x = 1\ncase |"), None);
+    }
+
+    /// Every slot that takes a type reads as one list.
+    #[test]
+    fn every_type_slot_reads_as_one() {
+        let ty = |p: &str| {
+            Some(Context::TypeSlot {
+                prefix: p.to_string(),
+            })
+        };
+        assert_eq!(at("local function f(a: |"), ty(""));
+        assert_eq!(at("local function f(a: number): |"), ty(""));
+        assert_eq!(at("export local function f() -> Res|"), ty("Res"));
+        assert_eq!(at("local v: Result<|"), ty(""));
+        assert_eq!(at("local v: HashMap<string, |"), ty(""));
+        assert_eq!(at("local function k<T: |"), ty(""));
+        assert_eq!(at("remote Damage(target: |"), ty(""));
+
+        // A comparison is no type argument, and a cast is the child's.
+        assert_eq!(at("if a < |"), None);
+        assert_eq!(at("local v = x :: |"), None);
+    }
+
+    /// The fields of a struct literal, and the struct the caret fills.
+    #[test]
+    fn a_struct_literal_lists_the_fields_of_its_struct() {
+        let field = |p: &str, t: &str| {
+            Some(Context::StructField {
+                prefix: p.to_string(),
+                target: t.to_string(),
+            })
+        };
+        assert_eq!(at("local s = new Stats { |"), field("", "Stats"));
+        assert_eq!(at("local s = new Stats { heal|"), field("heal", "Stats"));
+        assert_eq!(
+            at("local s = new Stats { health = 1, |"),
+            field("", "Stats")
+        );
+        assert_eq!(at("local l: Loadout = { |"), field("", "Loadout"));
+
+        // Past the `=` the value is an expression, and a plain table
+        // names no struct.
+        assert_eq!(at("local s = new Stats { health = |"), None);
+        assert_eq!(at("local t = { |"), None);
+    }
+
+    /// A trait body takes no visibility word.
+    #[test]
+    fn a_trait_body_and_a_closed_body_have_their_own_answers() {
+        assert_eq!(
+            at("trait Keyed\n    |"),
+            Some(Context::TraitMemberStart {
+                prefix: String::new()
+            })
+        );
+        // The `end` just typed closes the body; nothing follows it.
+        assert_eq!(
+            at("struct Box as\n    x: number\nend|"),
+            Some(Context::Nothing)
+        );
+        assert_eq!(at("impl Box\nend|"), Some(Context::Nothing));
+    }
+
+    /// The fields a struct body or a record type declares.
+    #[test]
+    fn record_entries_read_a_body_and_a_record() {
+        let hover = concat!(
+            "```alloy\n",
+            "export struct Profile as\n",
+            "    public read id: ProfileId\n",
+            "    public stats: Stats\n",
+            "    private coins: number = 0\n",
+            "end\n",
+            "```"
+        );
+        let fields = record_entries(hover);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["id", "stats", "coins"]);
+        assert_eq!(fields[0].ty, "ProfileId");
+        assert!(!fields[1].private);
+        assert!(fields[2].private);
+
+        // A record type, whose `->` closes no bracket.
+        let record = "type RowProps = { entry: Entry, rank: number, on_pick: ((Entry) -> ())? }";
+        let fields = record_entries(record);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["entry", "rank", "on_pick"]);
+        assert_eq!(fields[2].ty, "((Entry) -> ())?");
+    }
+
+    /// The arms already written, for a scrutinee nothing else names.
+    #[test]
+    fn the_arms_of_a_match_read_back() {
+        let src = concat!(
+            "for _, result in settled do\n",
+            "    match result with\n",
+            "        case Ok(profile) then f(profile)\n",
+            "        case Err(message) then warn(message)\n",
+            "    end\n",
+            "end\n"
+        );
+        let at = src.find("case Ok").unwrap() + "case ".len();
+        assert_eq!(match_arms(src, at), ["Ok", "Err"]);
+        assert!(match_arms("local x = 1\n", 5).is_empty());
+    }
+
+    /// A string takes no list of the proxy's own.
+    #[test]
+    fn a_string_is_no_place_for_a_name() {
+        let src = "local m = map:get(\"rare\")\n";
+        assert!(in_string(src, src.find("rare").unwrap() + 2));
+        assert!(!in_string(src, src.find("map").unwrap() + 1));
     }
 
     #[test]
@@ -1331,7 +1931,7 @@ mod tests {
                 prefix: "fr".to_string()
             })
         );
-        assert_eq!(at("remote Test(|"), None);
+        assert_eq!(at("remote Test(|"), Some(Context::Nothing));
         assert_eq!(at("local from = 1 |"), None);
     }
 
@@ -1411,7 +2011,12 @@ mod tests {
                 prefix: "en".to_string()
             })
         );
-        assert_eq!(at("attribute icon(asset: |"), None);
+        assert_eq!(
+            at("attribute icon(asset: |"),
+            Some(Context::TypeSlot {
+                prefix: String::new()
+            })
+        );
     }
 
     #[test]

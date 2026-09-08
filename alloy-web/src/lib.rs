@@ -141,27 +141,61 @@ pub fn to_source(check_offset: u32) -> u32 {
     })
 }
 
-/// The check-artifact offset of a member the author types after `?.`.
-/// The lowering of an optional access is text the compiler wrote, so
-/// the member has no offset of its own; the member the lowering wrote
-/// is the one the analyzer can read.
-fn optional_member_offset(source: &str, check: &str, offset: usize) -> Option<usize> {
-    let (base, prefix) = context::optional_member_at(source, offset)?;
+/// The check-artifact offset of a member the author types after `.`,
+/// `?.`, `!.`, or `:`. A guarded access and an `await` receiver lower
+/// to text the compiler wrote, so the member has no offset of its own;
+/// the member the lowering wrote is the one the analyzer can read.
+fn member_offset(source: &str, check: &str, offset: usize) -> Option<usize> {
+    let (base, access, sep, prefix) = context::member_at(source, offset)?;
     // The emit keeps every line, so the member sits on the same one.
     let line = source.get(..offset)?.matches('\n').count();
     let mut start = 0;
+    let mut source_start = 0;
 
     for _ in 0..line {
         start += check.get(start..)?.find('\n')? + 1;
+        source_start += source.get(source_start..)?.find('\n')? + 1;
     }
 
     let end = check
         .get(start..)?
         .find('\n')
         .map_or(check.len(), |i| start + i);
-    let column = context::optional_member_column(check.get(start..end)?, &base, prefix)?;
+    let source_end = source
+        .get(source_start..)?
+        .find('\n')
+        .map_or(source.len(), |i| source_start + i);
+    let column = context::member_column(
+        source.get(source_start..source_end)?,
+        check.get(start..end)?,
+        &base,
+        access,
+        sep,
+        prefix,
+        offset - source_start,
+    )?;
 
     Some(start + column)
+}
+
+/// Whether the map's own answer already puts the offset right after the
+/// same access. The emit copies most of them, and moving one that
+/// landed right would cost the member list it already answers.
+fn lands_on_member(source: &str, check: &str, offset: usize, mapped: usize) -> bool {
+    let Some((base, access, sep, prefix)) = context::member_at(source, offset) else {
+        return true;
+    };
+
+    if access != context::Access::Plain {
+        return false;
+    }
+
+    let head = &check[..mapped.min(check.len())];
+    let head = &head[..head.len() - prefix.min(head.len())];
+    let receiver = base.rsplit('.').next().unwrap_or(&base);
+
+    head.strip_suffix(sep)
+        .is_some_and(|h| h.ends_with(receiver))
 }
 
 /// A byte offset in the source as one in the check artifact, or -1 for
@@ -173,8 +207,13 @@ pub fn to_check(source_offset: u32) -> i32 {
         let Some(out) = s.output.as_ref() else {
             return -1;
         };
-        let at = optional_member_offset(&s.source, &out.check, source_offset as usize)
-            .or_else(|| out.map.to_output(source_offset).map(|o| o as usize));
+        // The map answers a plain access the emit copied; the member
+        // offset answers the rest.
+        let at = match out.map.to_output(source_offset).map(|o| o as usize) {
+            Some(m) if lands_on_member(&s.source, &out.check, source_offset as usize, m) => Some(m),
+
+            other => member_offset(&s.source, &out.check, source_offset as usize).or(other),
+        };
 
         at.map_or(-1, |o| i32::try_from(o).unwrap_or(-1))
     })
@@ -426,6 +465,11 @@ pub fn complete(offset: u32) -> String {
                     items.push(word(name, "type", keywords::doc(name).map(str::to_string), from));
                 }
 
+                // The traits a bound and an `impl` take.
+                for name in ["Display", "Debug", "Clone", "Eq", "PartialEq", "Ord", "Serialize", "Deletable", "Add", "Sub", "Mul", "Div"] {
+                    items.push(word(name, "type", keywords::doc(name).map(str::to_string), from));
+                }
+
                 for name in alloy::roblox_classes::INSTANCE_CLASSES.iter().chain(alloy::roblox_classes::DATATYPES) {
                     items.push(word(name, "class", None, from));
                 }
@@ -492,7 +536,7 @@ pub fn complete(offset: u32) -> String {
                             }
                         }
 
-                        for name in ["Ok", "Err", "_"] {
+                        for name in ["Ok", "Err", "Enum", "_"] {
                             items.push(word(name, "keyword", None, from));
                         }
                     }
@@ -514,6 +558,32 @@ pub fn complete(offset: u32) -> String {
 
                 for name in ["function", "async function", "private function", "public", "end"] {
                     items.push(word(name, "keyword", None, from));
+                }
+            }
+
+            // A trait declares a contract; every method in it is public.
+            Context::TraitMemberStart { prefix } => {
+                let from = offset - prefix.len();
+
+                for name in ["function", "async function", "end"] {
+                    items.push(word(name, "keyword", None, from));
+                }
+            }
+
+            Context::StructField { prefix, target } => {
+                let from = offset - prefix.len();
+                let inside = context::impl_target(source, offset).as_deref() == Some(target.as_str());
+                let body = s.decls.iter().find(|d| d.name == *target).map(|d| d.hover.clone());
+
+                for field in body.map(|h| context::record_entries(&h)).unwrap_or_default() {
+                    if !inside && field.private {
+                        continue;
+                    }
+
+                    let mut item = word(&field.name, "field", Some(format!("A field of `{target}`.")), from);
+                    item["detail"] = json!(format!("{}: {}", field.name, field.ty));
+                    item["insert"] = json!(format!("{} = ${{1:{}}}", field.name, field.name));
+                    items.push(item);
                 }
             }
 
@@ -697,12 +767,27 @@ fn kind_of_value(text: &str, decls: &[Declaration]) -> MatchKind {
 /// A variant inserts its name, and opens a payload slot when it takes
 /// one.
 fn variant_insert(variant: &str, signature: &str) -> String {
-    match signature.find('(') {
+    let payload = match signature.find('(') {
         Some(open) if !signature[open + 1..].trim_start().starts_with(')') => {
-            format!("{variant}($1)")
+            let close = signature[open..]
+                .find(')')
+                .map_or(signature.len(), |i| open + i);
+
+            signature[open + 1..close].split(',').count()
         }
 
-        _ => variant.to_string(),
+        _ => 0,
+    };
+
+    match payload {
+        0 => variant.to_string(),
+
+        // One tab stop per value the variant carries.
+        n => {
+            let slots: Vec<String> = (1..=n).map(|i| format!("${i}")).collect();
+
+            format!("{variant}({})", slots.join(", "))
+        }
     }
 }
 
@@ -818,6 +903,53 @@ mod tests {
         // The offset lands right after the `.` the lowering wrote.
         let out = super::set_source(source);
         assert!(out.contains("bx.Name"), "{out}");
+    }
+
+    /// `await X.m()` moves the receiver into the call the emit wrote,
+    /// and `p!.f` closes its guard before the separator.
+    #[test]
+    fn an_awaited_and_an_asserted_receiver_map_into_the_lowering() {
+        let source = concat!(
+            "local async function f()\n",
+            "    local s = await Future.all([])\n",
+            "end\n"
+        );
+        super::set_source(source);
+
+        let at = source.find("Future.").unwrap() + "Future.".len();
+        let check = super::to_check(at as u32);
+        assert!(check >= 0, "no check offset for the awaited receiver");
+
+        let text = super::SESSION.with(|s| {
+            s.borrow()
+                .output
+                .as_ref()
+                .map(|o| o.check.clone())
+                .unwrap_or_default()
+        });
+        assert!(
+            text[..check as usize].ends_with("Future."),
+            "the offset lands past the receiver: {}",
+            &text[..check as usize]
+        );
+    }
+
+    /// A struct literal lists the fields of its struct.
+    #[test]
+    fn a_struct_literal_lists_its_own_fields() {
+        let source = concat!(
+            "struct Stats as\n",
+            "    health: number\n",
+            "    private kills: number\n",
+            "end\n",
+            "local s = new Stats { \n"
+        );
+        super::set_source(source);
+        let at = source.rfind("{ ").unwrap() + 2;
+        let items = super::complete(at as u32);
+        assert!(items.contains("health"), "{items}");
+        assert!(!items.contains("kills"), "{items}");
+        assert!(!items.contains("Workspace"), "{items}");
     }
 
     #[test]

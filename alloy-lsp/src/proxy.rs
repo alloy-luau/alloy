@@ -3875,6 +3875,14 @@ impl Server {
             .pointer("/params/context/triggerCharacter")
             .and_then(Value::as_str);
 
+        // The child lists a newline as a trigger for its `end`
+        // completion. That request is the child's alone: a context list
+        // answered here would open on every Enter, and the next Enter
+        // would accept its first item.
+        if trigger == Some("\n") {
+            return false;
+        }
+
         let Some(ctx) = context::detect(&doc.source, offset) else {
             // `(` opens an attribute's argument list; anywhere else the
             // editor asked on it for nothing, and the child would list
@@ -4434,13 +4442,9 @@ impl Server {
                     friendly_message(d, doc, &st);
                 }
 
-                // A pull answers with the same set as a push: the
-                // compile errors, the markup errors, the directive
-                // errors and the lints, then the child's reports. An
-                // editor on pull diagnostics sees no Alloy diagnostic
-                // without this.
-                let mine = st.alloy_diagnostics(uri);
-                items.splice(0..0, mine);
+                // Alloy's own reports travel by push alone: a push
+                // overwrites the set an earlier server left on the file,
+                // and a pull that repeated them would show each twice.
 
                 // A rewrite may move two reports onto one line, the
                 // `impl` an alias names among them; they collapse after
@@ -4572,12 +4576,13 @@ impl Server {
                                 .and_then(Value::as_str)
                                 .map(str::to_string);
 
+                            // Alloy's own reports travel by push alone.
                             if let Some(uri) = uri
                                 && st.docs.contains_key(&uri)
                                 && let Some(items) =
                                     report.get_mut("items").and_then(Value::as_array_mut)
                             {
-                                items.extend(st.alloy_diagnostics(&uri));
+                                collapse_diagnostics(items);
                             }
                         }
                     }

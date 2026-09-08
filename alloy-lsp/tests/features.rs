@@ -1472,7 +1472,7 @@ fn an_ingot_answers_hover_completion_actions_and_lints() {
 /// directive errors, the compile errors and the lints, not the child's
 /// reports alone.
 #[test]
-fn pulled_diagnostics_carry_the_alloy_reports() {
+fn alloy_reports_travel_by_push_alone() {
     let Some(child) = luau_lsp() else {
         eprintln!("luau-lsp not found; skipping");
         return;
@@ -1511,10 +1511,17 @@ fn pulled_diagnostics_carry_the_alloy_reports() {
         .filter_map(|d| d["message"].as_str().map(str::to_string))
         .collect();
 
+    // Alloy's reports travel by push alone: a push overwrites the set
+    // an earlier server left on the file, and a pull that repeated them
+    // would show each twice in an editor that does both.
     for want in ["no_such_lint", "unused_variable", "leaves `ammo` unset"] {
         assert!(
-            pulled.iter().any(|d| d.contains(want)),
-            "pull is missing {want}: {pulled:#?} (push: {pushed:#?})"
+            pushed.iter().any(|d| d.contains(want)),
+            "push is missing {want}: {pushed:#?}"
+        );
+        assert!(
+            !pulled.iter().any(|d| d.contains(want)),
+            "pull repeats {want}: {pulled:#?}"
         );
     }
 

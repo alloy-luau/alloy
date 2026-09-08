@@ -185,6 +185,12 @@ fn enclosing_body(src: &str, line_start: usize) -> Option<Body> {
         let decl = trimmed.strip_prefix("export ").unwrap_or(trimmed);
         let decl = decl.strip_prefix("@").map_or(decl, |_| "");
 
+        // A declaration that closes on its own line, `struct T as end`
+        // or `impl T end`, opens no body below it.
+        if decl.split_whitespace().last() == Some("end") {
+            return None;
+        }
+
         return match decl.split_whitespace().next() {
             Some("struct" | "interface") if decl.contains(" as") || decl.ends_with("as") => {
                 Some(Body::Struct)
@@ -2696,6 +2702,19 @@ mod tests {
         assert_eq!(
             super::member_column(source, shadow, "\"abc\"", Access::Wrapped, ':', 0, 16),
             Some(shadow.find("):upper").unwrap() + 2)
+        );
+    }
+
+    #[test]
+    fn a_body_closed_on_its_own_line_opens_nothing_below() {
+        assert_eq!(at("struct Test as end\n|"), None);
+        assert_eq!(at("impl Test end\n|"), None);
+        assert_eq!(at("struct Test as x: number end\nlocal a = |"), None);
+        assert_eq!(
+            at("struct Test as\n    |"),
+            Some(Context::FieldStart {
+                prefix: String::new()
+            })
         );
     }
 

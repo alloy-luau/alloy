@@ -116,6 +116,15 @@ pub fn completion_items(doc: &Doc, items: &[Value]) -> Vec<Value> {
                 None => {}
             }
 
+            // A prefix, `hover:`, is half a word: the list opens again
+            // behind it for the rest.
+            if insert.ends_with(':') {
+                item["command"] = json!({
+                    "title": "Suggest",
+                    "command": "editor.action.triggerSuggest",
+                });
+            }
+
             Some(item)
         })
         .collect()
@@ -194,4 +203,34 @@ pub fn diagnostics_in(doc: &Doc, span: (u32, u32)) -> Vec<Value> {
     }
 
     list
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::EmitOptions;
+
+    #[test]
+    fn a_prefix_item_opens_the_list_again() {
+        let doc = Doc::new(
+            "local x = <Frame ClassName=\"hov\" />\n".to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let items = completion_items(
+            &doc,
+            &[
+                json!({ "label": "hover:", "insert": "hover:", "span": [28, 31] }),
+                json!({ "label": "hidden", "insert": "hidden", "span": [28, 31] }),
+            ],
+        );
+        assert_eq!(
+            items[0]["command"]["command"],
+            "editor.action.triggerSuggest"
+        );
+        assert_eq!(items[0]["textEdit"]["newText"], "hover:");
+        assert!(items[1].get("command").is_none());
+    }
 }

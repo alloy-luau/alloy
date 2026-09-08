@@ -362,9 +362,89 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_array_alias(&mut out);
     fold_read_arrays(&mut out);
     fold_deletable(&mut out);
+    fold_iter_shapes(&mut out);
+    out = fold_call_receivers(&out);
     fold_quoted_types(&mut out, known);
 
     out
+}
+
+/// An `Iter` two maps deep prints as its shape, `{ next: (self: any) ->
+/// T? }`, since the std spells it under a second name. It reads as
+/// `Iter<T>`.
+fn fold_iter_shapes(text: &mut String) {
+    const HEAD: &str = "{ next: (self: any) -> ";
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(HEAD) {
+        let at = from + i;
+        let Some(len) = group_len(&text[at..], '{', '}') else {
+            break;
+        };
+        let inner = &text[at + HEAD.len()..at + len - 1];
+        let Some(element) = inner.trim_end().strip_suffix('?') else {
+            from = at + 1;
+
+            continue;
+        };
+        // The shape holds `next` alone when the child cut the print; a
+        // second member means another table with a `next` field.
+        if element.contains(',') || element.contains('(') {
+            from = at + 1;
+
+            continue;
+        }
+
+        let name = format!("Iter<{}>", element.trim());
+        text.replace_range(at..at + len, &name);
+        from = at + name.len();
+    }
+}
+
+/// A method hovered at the end of a call chain names the chain,
+/// `function Iter.from(xs):map(f):collect(self: Iter<number>)`. The
+/// receiver's type stands in for the chain.
+fn fold_call_receivers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+
+    for (k, line) in text.split('\n').enumerate() {
+        if k > 0 {
+            out.push('\n');
+        }
+
+        out.push_str(&fold_call_receiver_line(line).unwrap_or_else(|| line.to_string()));
+    }
+
+    out
+}
+
+fn fold_call_receiver_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("function ")?;
+    let open = rest.find("(self: ")?;
+    let colon = rest[..open].rfind(':')?;
+    let receiver = &rest[..colon];
+
+    if !receiver.contains('(') {
+        return None;
+    }
+
+    let after = &rest[open + "(self: ".len()..];
+    let end = after.find([',', ')']).unwrap_or(after.len());
+    let self_type = after[..end].trim();
+    let name_len = self_type
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .count();
+
+    if name_len == 0 || self_type.starts_with('{') {
+        return None;
+    }
+
+    Some(format!(
+        "function {}{}",
+        &self_type[..name_len],
+        &rest[colon..]
+    ))
 }
 
 /// A message prints a type between quotes, `not found in table '{ ... }'`.
@@ -2597,6 +2677,21 @@ fn match_loose(text: &str, pattern: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_chain_method_hover_names_the_receiver_type() {
+        let known = Known::default();
+        let text = "function Iter.from(xs):filter(function(n) return n > 1 end):map(function(n) return n * 2 end):collect(self: { next: (self: any) -> number? }): number[]";
+
+        assert_eq!(
+            fold(text, &known),
+            "function Iter:collect(self: Iter<number>): number[]"
+        );
+        assert_eq!(
+            fold("function xs:map(self: read number[]): number[]", &known),
+            "function xs:map(self: read number[]): number[]"
+        );
+    }
+
     use super::*;
 
     fn known() -> Known {

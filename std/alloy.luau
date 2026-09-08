@@ -796,7 +796,13 @@ function HashMap.values(self)
 end
 
 function HashMap.entries(self)
-	return pairs(self._items)
+	local items = self._items
+	local key = nil
+	return function()
+		local k, v = next(items, key)
+		key = k
+		return k, v
+	end
 end
 
 function HashMap.get_or_insert(self, key, default)
@@ -829,7 +835,7 @@ end
 alloy.HashMap = HashMap
 
 export type Set<T> = {
-	add: (self: Set<T>, value: T) -> boolean,
+	add: (self: Set<T>, value: T) -> Set<T>,
 	has: (self: Set<T>, value: T) -> boolean,
 	remove: (self: Set<T>, value: T) -> boolean,
 	len: (self: Set<T>) -> number,
@@ -1152,7 +1158,7 @@ function Signal.Wait(self, timeout)
 			coroutine.resume(thread, ...)
 		end
 	end)
-	if timeout ~= nil and task ~= nil then
+	if timeout ~= nil and task_lib ~= nil then
 		task_lib.delay(timeout, function()
 			if settled then
 				return
@@ -2011,7 +2017,7 @@ function Attributes.of(target: any): any
 	return (a and a.own) or {}
 end
 
---- Iterates the fields of a struct that carry an attribute.
+--- The fields of a struct that carry an attribute, each with its value.
 function Attributes.fields<T>(struct: any, attr: Attribute<T>): { [string]: T }
 	local a = type(struct) == "table" and rawget(struct, "__attrs")
 	local fields = (a and a.fields) or {}
@@ -2022,7 +2028,7 @@ function Attributes.fields<T>(struct: any, attr: Attribute<T>): { [string]: T }
 			out[name] = v
 		end
 	end
-	return pairs(out)
+	return out
 end
 
 alloy.Attributes = Attributes
@@ -2178,16 +2184,22 @@ export type Remote = {
 	on: (handler: (...any) -> ...any) -> any,
 	once: (handler: (...any) -> ...any) -> any,
 	on_ratelimited: (handler: (...any) -> ...any) -> any,
-	wait: (...any) -> Future<any>,
+	wait: () -> Future<any>,
 }
 
 function alloy.remote(spec: any): Remote
 	local is_function = spec.kind == "function"
-	local inst = remote_instance(spec.name, if is_function then "RemoteFunction" else "RemoteEvent")
+	local attrs = spec.attrs or {}
+	-- `@unreliable` picks the event class that may drop or reorder.
+	local class = if is_function then "RemoteFunction" elseif attrs.unreliable then "UnreliableRemoteEvent" else "RemoteEvent"
+	local inst = remote_instance(spec.name, class)
 	local remote = { spec = spec, instance = inst }
-	local limiter = spec.attrs and spec.attrs.ratelimit
-	local buckets = setmetatable({}, { __mode = "k" })
-	local on_limited = nil
+	local limiter = attrs.ratelimit
+	-- `@validate(fn)`: the server runs it on the sender and the
+	-- arguments; a false drops the event, or answers a call with nil.
+	local validate = attrs.validate and attrs.validate[1]
+	-- `@timeout(seconds)`: a call that gets no answer in time rejects.
+	local timeout = attrs.timeout and attrs.timeout[1]
 
 	local function allowed(player)
 		if not limiter then
@@ -2221,6 +2233,31 @@ function alloy.remote(spec: any): Remote
 		return args
 	end
 
+	local function accepted(player, ...)
+		if not allowed(player) then
+			return false
+		end
+		if validate ~= nil and not validate(player, ...) then
+			return false
+		end
+		return true
+	end
+
+	local function timed(f)
+		if timeout == nil then
+			return alloy.future(f)
+		end
+		return Future.race({
+			alloy.future(f),
+			alloy.future(function()
+				task_lib.wait(timeout)
+				error(`{spec.name}: no answer in {timeout}s`)
+			end),
+		})
+	end
+	local buckets = setmetatable({}, { __mode = "k" })
+	local on_limited = nil
+
 	if run_service():IsServer() then
 		function remote.fire(player, ...)
 			inst:FireClient(player, ...)
@@ -2238,7 +2275,7 @@ function alloy.remote(spec: any): Remote
 		function remote.on(handler)
 			if is_function then
 				inst.OnServerInvoke = function(player, ...)
-					if not allowed(player) then
+					if not accepted(player, ...) then
 						return nil
 					end
 					local result = handler(player, table.unpack(fill_defaults(table.pack(...))))
@@ -2250,7 +2287,7 @@ function alloy.remote(spec: any): Remote
 				return
 			end
 			return inst.OnServerEvent:Connect(function(player, ...)
-				if allowed(player) then
+				if accepted(player, ...) then
 					handler(player, table.unpack(fill_defaults(table.pack(...))))
 				end
 			end)
@@ -2260,7 +2297,7 @@ function alloy.remote(spec: any): Remote
 		end
 		function remote.call(player, ...)
 			local args = table.pack(...)
-			return alloy.future(function()
+			return timed(function()
 				return inst:InvokeClient(player, table.unpack(args, 1, args.n))
 			end)
 		end
@@ -2281,7 +2318,7 @@ function alloy.remote(spec: any): Remote
 		end
 		function remote.call(...)
 			local args = table.pack(...)
-			return alloy.future(function()
+			return timed(function()
 				return inst:InvokeServer(table.unpack(args, 1, args.n))
 			end)
 		end

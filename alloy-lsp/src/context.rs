@@ -14,6 +14,8 @@ pub enum Context {
     },
     /// `@derive(Eq, De|`: a derive name.
     DeriveArg { prefix: String },
+    /// `@cfg(ser|`: a condition, or a word that joins them.
+    CfgArg { prefix: String },
     /// `$dg|`: an intrinsic or a macro. `sigil` is the byte offset of `$`.
     Macro { prefix: String, sigil: usize },
     /// `remote X(...) from cl|`: a side. `after` narrows to `or` or to
@@ -327,6 +329,16 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         });
     }
 
+    // `any(` and `all(` nest, so the parenthesis is open while more
+    // opened than closed.
+    if let Some(i) = head.rfind("@cfg(")
+        && head[i..].matches('(').count() > head[i..].matches(')').count()
+    {
+        return Some(Context::CfgArg {
+            prefix: prefix.to_string(),
+        });
+    }
+
     if let Some(interface) = declaration_head(head) {
         return Some(Context::DeclarationAs {
             prefix: prefix.to_string(),
@@ -583,6 +595,13 @@ mod tests {
             })
         );
         assert_eq!(at("@derive(Eq) |"), None);
+        assert_eq!(
+            at("@cfg(any(server, cl|"),
+            Some(Context::CfgArg {
+                prefix: "cl".to_string()
+            })
+        );
+        assert_eq!(at("@cfg(server) |"), None);
     }
 
     #[test]

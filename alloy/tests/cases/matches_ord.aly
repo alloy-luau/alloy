@@ -1,0 +1,11 @@
+-- `$matches` tests a pattern; `@derive(Ord)` compares field by field.
+@derive(Ord, Eq)
+struct V as
+    x: number
+    y: number
+end
+
+local r: Result<number, string> = Ok(1)
+local hit = $matches(r, Ok(_))
+local pair = $matches([1, 2], [a, b])
+print(hit, pair, new V { x = 1, y = 2 } < new V { x = 2, y = 0 })

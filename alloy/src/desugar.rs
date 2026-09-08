@@ -2840,6 +2840,20 @@ impl<'s> Desugar<'s> {
                 format!("{name}.__eq = function(a{sn}, b{sn}) return {body} end")
             }
 
+            // Field by field, in declaration order: the first field that
+            // differs decides, as a tuple compares.
+            "Ord" => {
+                let steps: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("if a.{f} ~= b.{f} then return a.{f} < b.{f} end"))
+                    .collect();
+                let steps = steps.join(" ");
+
+                format!(
+                    "{name}.__lt = function(a{sn}, b{sn}) {steps} return false end {name}.__le = function(a{sn}, b{sn}) {steps} return true end"
+                )
+            }
+
             "Debug" => {
                 let parts: Vec<String> = fields
                     .iter()
@@ -3545,6 +3559,14 @@ impl<'s> Desugar<'s> {
         };
 
         // The nested compile sees this file's macros, one level down.
+        self.compile_fragment(&nested_src, anchor, as_expr)
+    }
+
+    /// Compiles a piece of Alloy on its own and splices the Luau in: the
+    /// body of a macro with its arguments in place, or the match an
+    /// intrinsic builds. The piece sees globals and what it names; it
+    /// lands in the calling scope, where the names resolve.
+    fn compile_fragment(&mut self, nested_src: &str, anchor: u32, as_expr: bool) -> String {
         let macros: Vec<MacroSource> = self
             .macros
             .iter()
@@ -3568,7 +3590,7 @@ impl<'s> Desugar<'s> {
         }
 
         match crate::compile_with(
-            &nested_src,
+            nested_src,
             &EmitOptions {
                 file_name: self.options.file_name.clone(),
                 macros,
@@ -3589,18 +3611,26 @@ impl<'s> Desugar<'s> {
                 }
 
                 let text = out.ship.replace('\n', " ");
+                let prefix = format!(
+                    "local __alloy = require({}) ",
+                    luau_string(&self.options.std_require)
+                );
                 let text = text
-                    .strip_prefix("local __alloy = require(\"@alloy\") ")
+                    .strip_prefix(&prefix)
                     .unwrap_or(&text)
+                    .trim()
                     .to_string();
 
-                if as_expr {
-                    text.trim()
-                        .strip_prefix("return ")
-                        .unwrap_or(text.trim())
-                        .to_string()
-                } else {
-                    text.trim().to_string()
+                if !as_expr {
+                    return text;
+                }
+
+                match text.strip_prefix("return ") {
+                    Some(value) => value.to_string(),
+
+                    // Statements before the value, a hoisted temp: a
+                    // closure keeps them in expression position.
+                    None => format!("(function() {text} end)()"),
                 }
             }
 
@@ -4776,6 +4806,16 @@ impl<'s> Desugar<'s> {
                 self.function_with_header(stmt.span(), &f.body);
             }
 
+            // `class` parses for the classes RFC and has no lowering yet:
+            // a diagnostic, and the text goes, so the output stays Luau.
+            Stmt::Class(c) => {
+                self.diagnose(
+                    c.span,
+                    "`class` is parsed and not compiled yet; a `struct` with an `impl` is the form that runs",
+                );
+                self.blank_lines(self.byte_start(c.span), self.byte_end(c.span));
+            }
+
             Stmt::GenericFor(f) if for_needs_rewrite(f) => self.generic_for(stmt.span(), f),
 
             _ => {
@@ -5520,6 +5560,18 @@ impl<'s> Desugar<'s> {
             ("stringify", 1) => luau_string(&sources[0]),
 
             ("bnot", 1) => format!("bit32.bnot({})", rendered[0]),
+
+            // `$matches(value, Pattern)`: the match with one arm, as a
+            // boolean. The pattern is the second argument's text, read
+            // by the match parser.
+            ("matches", 2) => {
+                let nested = format!(
+                    "return match {} with case {} then true default false end",
+                    sources[0], sources[1]
+                );
+
+                self.compile_fragment(&nested, at, true)
+            }
 
             // `$set[a, b]` or `$set(a, b)`: a Set of the values.
             ("set", _) => {

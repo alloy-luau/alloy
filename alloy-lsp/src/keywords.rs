@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn unknown_tokens_have_none() {
-        assert!(hover("local x = 1", 0).is_none());
+        assert!(hover("foo = 1", 0).is_none());
         assert!(hover("a + b", 2).is_none());
         assert!(is_word_at("a + b", 0));
         assert!(!is_word_at("a + b", 2));

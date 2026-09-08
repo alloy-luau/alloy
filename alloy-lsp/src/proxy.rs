@@ -912,6 +912,37 @@ impl State {
                 }
             }
 
+            Context::CfgArg { prefix } => {
+                let from = offset - prefix.len();
+                let conditions = [
+                    ("server", "RunService:IsServer()"),
+                    ("client", "RunService:IsClient()"),
+                    ("studio", "RunService:IsStudio()"),
+                    ("edit", "RunService:IsEdit()"),
+                    ("running", "RunService:IsRunning()"),
+                    ("test", "an `alloy test` run"),
+                ];
+
+                for (name, what) in conditions {
+                    items.push(word(
+                        name,
+                        21,
+                        Some(format!("`@cfg({name})` holds under {what}.")),
+                        from,
+                    ));
+                }
+
+                for (name, what) in [
+                    ("not", "the condition after it fails"),
+                    ("and", "both hold"),
+                    ("or", "either holds"),
+                    ("any(", "any of the list holds"),
+                    ("all(", "all of the list hold"),
+                ] {
+                    items.push(word(name, 14, Some(format!("`{name}`: {what}.")), from));
+                }
+            }
+
             Context::RemoteSide { prefix, after } => {
                 let from = offset - prefix.len();
                 let sides: Vec<(&str, &str)> = match after.as_deref() {
@@ -2471,14 +2502,25 @@ impl Server {
             return true;
         }
 
+        let trigger = message
+            .pointer("/params/context/triggerCharacter")
+            .and_then(Value::as_str);
+
         let Some(ctx) = context::detect(&doc.source, offset) else {
+            // `(` opens an attribute's argument list; anywhere else the
+            // editor asked on it for nothing, and the child would list
+            // globals.
+            if trigger == Some("(") {
+                drop(st);
+                self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": [] }));
+
+                return true;
+            }
+
             return false;
         };
 
         let mut items = st.context_items(uri, offset, &ctx);
-        let trigger = message
-            .pointer("/params/context/triggerCharacter")
-            .and_then(Value::as_str);
         items.extend(st.ingot_items(uri, line, character, trigger));
         drop(st);
         self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": items }));
@@ -5111,7 +5153,7 @@ fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
 
         "@test" | "@native" | "@checked" | "@deprecated" | "@inline" | "@noinline" => &["function"],
 
-        "@unreliable" | "@ratelimit" | "@timeout" | "@immediate" | "@validate" => &["remote"],
+        "@unreliable" | "@ratelimit" | "@timeout" | "@validate" => &["remote"],
 
         "@u8" | "@u16" | "@u32" | "@i8" | "@i16" | "@i32" | "@f32" => &["param", "field"],
 
@@ -5437,15 +5479,16 @@ fn edit_capabilities(message: &mut Value) {
         tokens.insert("full".to_string(), Value::Bool(true));
     }
 
-    // `@` and `$` open an attribute and a macro or intrinsic: the editor
-    // asks on them only when the server lists them.
+    // `@` and `$` open an attribute and a macro or intrinsic, and `(`
+    // an attribute's arguments: the editor asks on them only when the
+    // server lists them.
     if let Some(Value::Object(completion)) = caps.get_mut("completionProvider") {
         let list = completion
             .entry("triggerCharacters")
             .or_insert_with(|| json!([]));
 
         if let Some(chars) = list.as_array_mut() {
-            for c in ["@", "$"] {
+            for c in ["@", "$", "("] {
                 if !chars.iter().any(|v| v == c) {
                     chars.push(json!(c));
                 }

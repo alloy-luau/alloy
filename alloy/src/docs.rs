@@ -8,28 +8,45 @@
 /// The Alloy keywords a plain completion offers. The child lists Luau's
 /// own; these are the words the emit removes.
 pub const ALLOY_KEYWORDS: &[&str] = &[
-    "struct",
-    "enum",
-    "trait",
-    "impl",
-    "interface",
-    "remote",
-    "macro",
-    "attribute",
-    "match",
-    "case",
-    "default",
-    "const",
+    "as",
     "async",
+    "attribute",
     "await",
-    "try",
-    "new",
+    "band",
+    "bnot",
+    "bor",
+    "bxor",
+    "case",
+    "class",
+    "const",
+    "declare",
+    "default",
     "delete",
-    "import",
+    "enum",
     "export",
-    "where",
     "extends",
+    "from",
+    "impl",
+    "import",
+    "in",
+    "interface",
+    "is",
+    "macro",
+    "match",
+    "new",
+    "on",
+    "private",
+    "public",
     "read",
+    "remote",
+    "satisfies",
+    "shl",
+    "shr",
+    "struct",
+    "trait",
+    "try",
+    "where",
+    "with",
     "write",
 ];
 
@@ -41,7 +58,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         ":",
-        "```alloy\nc ? a : b\n```\nThe else of a ternary. Touching a name it is a method call, `obj:method()`; after a name with a space it starts a type, `x: T`.",
+        "```alloy\nc ? a : b\n```\nThe else of a ternary. Touching a name it is a method call, `obj:method()`; without the call, `obj:method` is the method bound to `obj`, a function to pass along; after a name with a space it starts a type, `x: T`.",
     ),
     (
         "??=",
@@ -74,6 +91,18 @@ pub const TABLE: &[(&str, &str)] = &[
     (
         "=>",
         "```alloy\na=>b\n```\nBlocking child lookup: `a:WaitForChild(\"b\")`. With `wait_timeout` under `[emit]` in alloy.toml the call takes that timeout and can return nil.",
+    ),
+    (
+        "[",
+        "```alloy\nlocal xs = [ 1, 2, 3 ]\nlocal grid = [[1, 2], [3, 4]]\nlocal [head, ...tail] = xs\n```\nAn array literal: `Array<T>` with its metatable, so `xs:map(f)` works on it. Items separate with `,` or `;`, and `[[` opens a nested one; a long string is `[=[ ... ]=]`. In a `local` or a pattern the bracket destructures, and `...rest` takes the tail. `$set[ ]` and `$map[ ]` build the other collections.",
+    ),
+    (
+        "<<",
+        "```alloy\nlocal atom = charm.atom<<number>>(0)\nlocal m = import<<Module>>(path)\nnew Stack<<string>>()\n```\nExplicit type arguments on a call, a method call, `new`, or `import`. Luau reads none at a call, so the emit casts the result instead. A pack generic, `Signal.new<T...>`, takes none.",
+    ),
+    (
+        "<T: Bound>",
+        "```alloy\nfunction largest<T: Ord>(xs: T[]): T\nfunction show<T: Display & Debug>(v: T)\n```\nA bound on a generic: the argument must have the trait's methods. `&` asks for several. A std shape, `Display`, `Eq`, `Ord`, `Add`, resolves to the runtime's type; a trait the file declares resolves to its own. The bound is the type the parameter carries in the body.",
     ),
     (
         "!",
@@ -126,7 +155,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "trait",
-        "```alloy\ntrait Name\n    function m(self): T\nend\n```\nA behavior contract: method signatures, with a body as a default. `impl Trait for Name` implements it and `<T: Trait>` bounds a generic. Operator traits map to metamethods: `Add`, `Eq`, `Ord`, `Call`, `Display`.\n\nEmits a type with the method signatures.",
+        "```alloy\ntrait Name\n    function m(self): T\nend\n```\nA behavior contract: method signatures, with a body as a default. `impl Trait for Name` implements it and `<T: Trait>` bounds a generic; `<T: A & B>` asks for both.\n\nAn `impl` of an operator trait writes the metamethod: `Add` (`add`, `__add`), `Sub`, `Mul`, `Div`, `Eq` (`eq`, `__eq`), `Lt` and `Le` (`__lt`, `__le`), `Display` (`to_string`, `__tostring`), `Call` (`call`, `__call`), `Len`, `Concat`, and `Drop` (`drop`, which `delete` runs as `Destroy`). A bound names a shape the std exports, `Display`, `Debug`, `Clone`, `Eq`, `PartialEq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Serialize`; a file's own trait of the same name wins. `alloy doc Traits` lists them.\n\nEmits a type with the method signatures.",
     ),
     (
         "interface",
@@ -138,7 +167,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "match",
-        "```alloy\nmatch expr with\n    case Pat then ...\n    default ...\nend\n```\nPattern match, as a statement or an expression. A pattern binds payloads, `_` matches anything, `or` joins alternatives, and `and expr` is a guard. An exhaustive match needs no `default`.\n\nEmits an if-chain on the tag.",
+        "```alloy\nmatch expr with\n    case Pat then ...\n    default ...\nend\n```\nPattern match, as a statement or an expression; `match a, b with` matches several values at once, each arm with as many patterns.\n\nThe patterns: a variant with its payload, `Ok(v)`, `Move(x, y)`; a bare name or `_` for anything (a name binds); a literal, `1`, `\"a\"`, `true`, `nil`, `-1`; a dotted path, `Color.Red`; a struct, `Vec2 { x = 0, y }`, where `y` alone binds the field; an array, `[first, ...rest]`, with `...rest` for the tail. `or` joins alternatives, `and expr` is a guard, and `if local Pat = e` and `local Pat = e else ... end` use the same patterns outside a match. An exhaustive match needs no `default`.\n\nEmits an if-chain on the tag.",
     ),
     ("with", "Opens the arms of a `match`."),
     (
@@ -163,11 +192,15 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "export",
-        "```alloy\nexport local x = 1\nexport function f() end\nexport { a, b as c }\nexport default expr\n```\nAdds a name to the table the module returns at the end of its scope.",
+        "```alloy\nexport local x = 1\nexport function f() end\nexport struct Vec2 as ... end\nexport { a, b as c }\nexport type { T }\nexport default expr\n```\nAdds a name to the table the module returns at the end of its scope. Any declaration takes it: `local`, `const`, `function`, `async function`, `struct`, `enum`, `trait`, `interface`, `remote`, `attribute`, `macro`, `impl`. `export { }` names bindings after the fact, `as` renames one on the way out, and `export type { }` exports types alone. `export default` is what `import Name from` reads.",
     ),
     (
         "from",
-        "The module path of an `import` or `export`, or the side that fires a `remote`: `from client`, `from server`.",
+        "The module path of an `import` or `export`, or the side that fires a `remote`: `from client`, `from server`, or `from client or server` for one both sides fire.",
+    ),
+    (
+        "local",
+        "```alloy\nlocal x: T = expr\nlocal { name, hp = health } = player\nlocal [first, ...rest] = xs\nlocal Ok(v) = result else\n    return\nend\n```\nLuau's binding, with three forms of its own. A table pattern takes fields by name, `= alias` renames one. An array pattern takes items by position, and `...rest` takes the tail as an array. A variant or struct pattern binds its payload, and the `else` block runs when the pattern fails: it must leave, with `return`, `break`, `continue`, or an error, so the names hold after it. `const` takes every form too.",
     ),
     (
         "const",
@@ -195,20 +228,20 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "delete",
-        "```alloy\ndelete expr\n```\nDestroys the value: an Instance, a connection, a thread, a function, or a table with a `Destroy` or `Disconnect` method. `delete t.field` and `delete t[key]` then set the slot to nil, so the table holds nothing destroyed.",
+        "```alloy\ndelete expr\n```\nDestroys the value: an Instance, a connection, a thread, a function, or a table with a `Destroy`, `Disconnect`, `destroy`, or `disconnect` method; the Roblox spelling wins when a table has both. The std names that shape `Deletable`. `delete t.field` and `delete t[key]` then set the slot to nil, so the table holds nothing destroyed.",
     ),
     (
         "attribute",
-        "```alloy\nattribute name(params) on target, ...\n```\nDeclares an attribute: metadata the compiler reads and `Attributes` reads at runtime. Targets: function, struct, enum, variant, field, param, remote, interface, type, local. The built-in ones: `@derive`, `@test`, `@cfg`, `@deprecated`, and Luau's `@native`, `@checked`, `@inline`, `@noinline`.",
+        "```alloy\nattribute name(params) on target, ...\n```\nDeclares an attribute: metadata the compiler reads and `Attributes` reads at runtime. Targets: function, struct, enum, variant, field, param, remote, interface, type, local.\n\nThe built-in ones: `@derive` and `@sealed` on a struct or an enum; `@test` and `@cfg` on a function, `@cfg` on a local too; `@rename` and `@skip` on a field; `@unreliable`, `@ratelimit`, `@timeout`, and `@validate` on a remote; `@u8` to `@f32` on a parameter or a field; and Luau's own `@native`, `@checked`, `@deprecated`, `@inline`, `@noinline`, which pass through.",
     ),
     ("on", "The targets of an `attribute` declaration."),
     (
         "remote",
-        "```alloy\nremote Name(params) from client\nremote function Name(params): R from server\n```\nA typed channel between server and client. The compiler generates the serializer. Use `.fire`, `.fire_all`, `.on`, and `.call`.\n\nThe declaration types the object. The side that fires passes the parameters, and a default makes one optional; a handler gets them filled, and a server handler gets the sender first: `BuySaber.on(function(sender, id) ... end)` types `sender: Player` and `id: string`. `call` on a remote function yields `Future<R>`.",
+        "```alloy\nremote Name(params) from client\nremote function Name(params): R from server\n```\nA typed channel between server and client. The compiler generates the serializer.\n\nThe object: `fire(...)` sends (to the server from a client; to one player, the first argument, from the server), `fire_all(...)` and `fire_except(player, ...)` send from the server to every client or all but one, `call(...)` asks a remote function and yields `Future<R>`, `on(handler)` and `once(handler)` receive (the connection comes back), `wait()` yields a Future of the next event, and `on_ratelimited(handler)` hears a sender that `@ratelimit` refused. `spec` and `instance` hold the declaration and the RemoteEvent behind it.\n\nThe declaration types the object. The side that fires passes the parameters, and a default makes one optional; a handler gets them filled, and a server handler gets the sender first: `BuySaber.on(function(sender, id) ... end)` types `sender: Player` and `id: string`. `call` on a remote function yields `Future<R>`.",
     ),
     (
         "where",
-        "```alloy\nfor x in xs where cond do\nif local x = f() where cond then\n```\nA filter. In a loop it emits `if not (cond) then continue end` on the `do` line.",
+        "```alloy\nfor x in xs where cond do\nif local x = f() where cond then\nwhile local job = queue:pop() where job.ready do\n```\nA filter on a loop or a conditional binding. In a loop it emits `if not (cond) then continue end` on the `do` line; on `if local` and `while local` the binding holds only when the condition does. Bindings chain with `;`, `if local p = a; local c = p.Character then`, each seen by the next, and `if not local x = f() then return end` is the guard form, with `x` in scope after it.",
     ),
     (
         "satisfies",
@@ -224,11 +257,11 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "read",
-        "```alloy\nread x: T\n```\nA read-only field. `read T[]` is `ReadArray<T>`.",
+        "```alloy\nread x: T\n```\nA read-only field. `read T[]` is `ReadArray<T>`, the array without its writers.",
     ),
     (
         "write",
-        "```alloy\nwrite x: T\n```\nA write-only field. `write T[]` is `WriteArray<T>`.",
+        "```alloy\nwrite x: T\n```\nA write-only field. `write T[]` is `WriteArray<T>`, the array with `push` alone.",
     ),
     // Intrinsics
     (
@@ -269,7 +302,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "$matches",
-        "```alloy\n$matches(e, Pat(_))\n```\nA pattern test without a `match`: `e.tag == \"Pat\"`.",
+        "```alloy\n$matches(e, Ok(_))\n$matches(xs, [first, ...rest])\n```\nA pattern test without a `match`: true when the value fits the pattern. Any pattern a `case` takes; a name in it binds nothing here.",
     ),
     (
         "$bnot",
@@ -283,6 +316,10 @@ pub const TABLE: &[(&str, &str)] = &[
     (
         "derive:PartialEq",
         "```alloy\n@derive(PartialEq)\n```\nThe same `__eq` as `Eq`, under the name Rust uses. Luau has one equality, so the two derive the same method.",
+    ),
+    (
+        "derive:Ord",
+        "```alloy\n@derive(Ord)\n```\nGenerates `__lt` and `__le`: the fields compare in declaration order, and the first that differs decides, as a tuple compares. `<`, `<=`, `>`, `>=`, and `table.sort` then work on the values.",
     ),
     (
         "derive:Debug",
@@ -299,7 +336,7 @@ pub const TABLE: &[(&str, &str)] = &[
     // Attributes
     (
         "@derive",
-        "```alloy\n@derive(Eq, Debug, Clone)\n```\nGenerates methods from the field list: `Eq` is `__eq`, `Ord` is `__lt` and `__le`, `Debug` is `debug` and `__tostring`, `Clone` is `clone`, `Serialize` is `to_table` and `from_table`. Any trait whose methods all have defaults derives too.",
+        "```alloy\n@derive(Eq, Debug, Clone)\n```\nGenerates methods from the field list: `Eq` or `PartialEq` is `__eq`, `Ord` is `__lt` and `__le` over the fields in order, `Debug` is `debug` and `__tostring`, `Clone` is `clone`, `Serialize` is `to_table` and `from_table`. On an enum, `Eq`, `PartialEq`, and `Clone` derive; `Debug` is every enum's own.",
     ),
     (
         "@cfg",
@@ -339,7 +376,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@unreliable",
-        "```alloy\n@unreliable\nremote ...\n```\nAn UnreliableRemoteEvent. An error when the packed size can pass 900 bytes.",
+        "```alloy\n@unreliable\nremote ...\n```\nAn UnreliableRemoteEvent behind the remote: a fire may drop or arrive out of order, which suits state the next fire replaces. Roblox drops a payload over 900 bytes.",
     ),
     (
         "@ratelimit",
@@ -347,68 +384,76 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@timeout",
-        "```alloy\n@timeout(seconds)\n```\nRejects the caller's Future after the window, on a `remote function`.",
-    ),
-    (
-        "@immediate",
-        "```alloy\n@immediate\n```\nSends the remote at once, outside the per-frame batch.",
+        "```alloy\n@timeout(seconds)\n```\nOn a `remote function`: a `call` that gets no answer in the window rejects, with the remote's name and the seconds in the error.",
     ),
     (
         "@validate",
-        "```alloy\n@validate(fn)\n```\nA server-side predicate on the decoded arguments, after the shape check.",
+        "```alloy\n@validate(fn)\n```\nA server-side predicate, `fn(sender, ...args)`, run before the handler: a false drops the event, or answers the call with nil, and the handler never sees it. Defaults fill in after it.",
     ),
     (
         "@u8",
-        "The wire width of a `number` parameter on a `remote`: 8-bit unsigned.",
+        "```alloy\n@u8 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 8-bit unsigned. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
     ),
     (
         "@u16",
-        "The wire width of a `number` parameter on a `remote`: 16-bit unsigned.",
+        "```alloy\n@u16 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 16-bit unsigned. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
     ),
     (
         "@u32",
-        "The wire width of a `number` parameter on a `remote`: 32-bit unsigned.",
+        "```alloy\n@u32 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 32-bit unsigned. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
     ),
     (
         "@i8",
-        "The wire width of a `number` parameter on a `remote`: 8-bit signed.",
+        "```alloy\n@i8 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 8-bit signed. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
     ),
     (
         "@i16",
-        "The wire width of a `number` parameter on a `remote`: 16-bit signed.",
+        "```alloy\n@i16 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 16-bit signed. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
     ),
     (
         "@i32",
-        "The wire width of a `number` parameter on a `remote`: 32-bit signed.",
+        "```alloy\n@i32 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 32-bit signed. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
     ),
     (
         "@f32",
-        "The wire width of a `number` parameter on a `remote`: 32-bit float. The default is f64.",
+        "```alloy\n@f32 hp: number\n```\nThe wire width of a `number` on a `remote` parameter or a field: 32-bit float. The checker accepts it where it belongs; the packer that reads it is not in this build, so the value crosses as a Luau number.",
+    ),
+    (
+        "class",
+        "```alloy\nclass Name\n    public hp: number\n    function heal(self) end\nend\n```\nThe classes RFC, parsed ahead of Luau: `class`, `open class`, `extends`, `public` fields, and the metamethods the RFC allows. It does not compile yet: the compiler reports it and blanks the block. A `struct` with an `impl` is the form that runs today.",
     ),
     (
         "declare",
-        "```alloy\ndeclare function name(params): R\ndeclare extern type Name with ... end\ndeclare name: T\n```\nA definition-file statement. Luau's own definition syntax, in a `.d.aly`, which compiles to `.d.luau` and joins the analyzer's definitions; no runtime.",
+        "```alloy\ndeclare function name(params): R\ndeclare name: T\ndeclare extern type Name with ... end\ndeclare class Name extends Base ... end\n```\nA definition-file statement. Luau's own definition syntax, in a `.d.aly`, which compiles to `.d.luau` and joins the analyzer's definitions; no runtime. A class or an extern type lists members: `name: T`, `read name: T`, `write name: T`, a method `function name(self, ...): R`, and an indexer `[K]: V`; `extends` names the base.",
     ),
     // The std: ambient names, no import. The child sees `__alloy.Name`.
     (
         "HashMap",
-        "```alloy\nlocal m = HashMap.new()\nm:set(key, value)\nlocal v = m:get(key)\n```\nA map with methods, from the std. `HashMap.from(t)` wraps a table.\n\nMethods: `get`, `set`, `has`, `remove`, `len`, `keys`, `values`, `entries`, `get_or_insert`, `clear`.",
+        "```alloy\nlocal prices = $map[[\"sword\", 10], [\"pet\", 25]]\nlocal m: HashMap<string, number> = HashMap.new()\nm:set(\"gem\", 5)\nfor key, value in m:entries() do end\n```\nA map with methods, from the std. Any value that is not nil is a key. `HashMap.new()` is empty, `HashMap.from(t)` copies a table's pairs, and `$map[[k, v], ...]` is the literal.\n\n| | |\n|---|---|\n| `get(key)` | The value under `key`, or nil. |\n| `set(key, value)` | Stores the value; returns the map, so calls chain. |\n| `has(key)` | Whether the key is present. |\n| `remove(key)` | Removes the key and returns its value, or nil. |\n| `len()` | The number of keys. |\n| `keys()` | The keys as an array, in no set order. |\n| `values()` | The values as an array, in the same order as `keys()`. |\n| `entries()` | An iterator of `key, value` pairs, for a `for` loop. |\n| `get_or_insert(key, default)` | The value under `key`, storing `default` first when there is none. |\n| `clear()` | Removes every key. |",
     ),
     (
         "Set",
-        "```alloy\nlocal s = Set.new()\ns:add(value)\n```\nA set with methods, from the std. `Set.from(t)` wraps an array.\n\nMethods: `add`, `has`, `remove`, `len`, `union`, `intersection`, `difference`, `to_array`.",
+        "```alloy\nlocal seen = $set[1, 2, 3]\nlocal s: Set<string> = Set.new()\nif s:add(\"a\"):has(\"a\") then end\n```\nA set with methods, from the std. Any value that is not nil is a member. `Set.new()` is empty, `Set.from(t)` takes an array's items, and `$set[a, b]` is the literal.\n\n| | |\n|---|---|\n| `add(value)` | Adds the value; returns the set, so calls chain. |\n| `has(value)` | Whether the value is a member. |\n| `remove(value)` | Removes it; true when it was there. |\n| `len()` | The number of members. |\n| `union(other)` | A new set of both. |\n| `intersection(other)` | A new set of the members in both. |\n| `difference(other)` | A new set of this one's members not in `other`. |\n| `to_array()` | The members as an array, in no set order. |",
     ),
     (
         "Array",
-        "```alloy\nlocal xs = [ 1, 2, 3 ]\nlocal ys: Array<number> = xs:map(f)\n```\nThe array type of the std. An array literal carries its metatable, so methods work on it. `T[]` and `Array<T>` name the same type. `[[1, 2], [3, 4]]` is a nested array: in Alloy `[[` opens one, and a long string keeps Luau's leveled form, `[=[ ... ]=]`. `$set[1, 2]` and `$map[[k, v]]` build a `Set` and a `HashMap` the same way.\n\nMethods: `len`, `is_empty`, `push`, `pop`, `first`, `last`, `map`, `filter`, `find`, `find_index`, `contains`, `index_of`, `for_each`, `reduce`, `slice`, `concat`, `reverse`, `sort_by`, `join`.\n\nLuau rejects an alias that names itself with other arguments, so `map` returns the same shape under a second name, and the third `map` in one chain is `any`. Annotate the accumulator of `reduce` when its body uses it: `xs:reduce(function(acc: number, x) return acc + x end, 0)`.",
+        "```alloy\nlocal xs = [ 1, 2, 3 ]\nlocal doubled = xs:map(function(x) return x * 2 end)\nlocal grid = [[1, 2], [3, 4]]\n```\nThe array type of the std: a Luau array with the methods below on its metatable. An array literal carries it, `T[]` and `Array<T>` name the same type, and a plain table becomes one with `Array.from(t)`, in place. `[[` opens a nested array; a long string keeps Luau's leveled form, `[=[ ... ]=]`. A `read T[]` is `ReadArray<T>`, the readers alone, and a `write T[]` is `WriteArray<T>`, `push` alone.\n\n**Statics**\n\n| | |\n|---|---|\n| `Array.new()` | An empty array. |\n| `Array.with_capacity(n)` | An empty array with room for `n` items. |\n| `Array.from(t)` | The table `t` as an array: it gains the metatable and stays the same table. |\n\n**Methods**\n\n| | |\n|---|---|\n| `len()` | The number of items. |\n| `is_empty()` | Whether there are none. |\n| `push(...values)` | Appends the values in order. |\n| `pop()` | Removes and returns the last item, or nil when empty. |\n| `first()`, `last()` | The first or the last item, or nil. |\n| `map(f)` | A new array of `f(item, index)` for each item. |\n| `filter(f)` | A new array of the items where `f(item, index)` holds. |\n| `find(f)` | The first item where `f(item, index)` holds, or nil. |\n| `find_index(f)` | Its index, or nil. |\n| `contains(value)` | Whether an item equals `value`. |\n| `index_of(value)` | The index of the first item that equals `value`, or nil. |\n| `for_each(f)` | Calls `f(item, index)` for each item. |\n| `reduce(f, init)` | Folds: `acc = f(acc, item, index)` from `init`, and returns the last `acc`. |\n| `slice(from, to?)` | A new array of the items from `from` to `to`, inclusive; `to` defaults to the end. |\n| `concat(other)` | A new array of this one followed by `other`. |\n| `reverse()` | A new array in the other order. |\n| `sort_by(less)` | Sorts in place with `less(a, b)`, and returns the same array. |\n| `join(sep?)` | The items as strings, joined by `sep`, a comma and a space by default. |\n\nLuau rejects an alias that names itself with other arguments, so `map` returns the same shape under a second name, and the third `map` in one chain is `any`. Annotate the accumulator of `reduce` when its body uses it: `xs:reduce(function(acc: number, x) return acc + x end, 0)`. `$set[ ]` and `$map[ ]` build a `Set` and a `HashMap` the way `[ ]` builds an array.",
+    ),
+    (
+        "ReadArray",
+        "```alloy\nlocal function total(xs: read number[]): number\n    return xs:reduce(function(acc, x) return acc + x end, 0)\nend\n```\nThe array a `read T[]` names: every reader of `Array<T>` and none of its writers. Methods: `len`, `is_empty`, `first`, `last`, `map`, `filter`, `find`, `find_index`, `contains`, `index_of`, `for_each`, `reduce`, `slice`, `concat`, `join`. An `Array<T>` passes where one is asked.",
+    ),
+    (
+        "WriteArray",
+        "```alloy\nlocal function log_to(sink: write string[])\n    sink:push(\"line\")\nend\n```\nThe array a `write T[]` names: `push` and the index, nothing that reads. An `Array<T>` passes where one is asked.",
     ),
     (
         "Future",
-        "```alloy\nlocal f = Future.delay(1)\nlocal v = await f\n```\nA memoized task, from the std. `async function` returns one; `await` yields until it settles.\n\nStatics: `resolve`, `reject`, `delay`, `all`, `race`, `any`, `all_settled`. Methods: `cancel`, `is_settled`, `andThen`.\n\nThe type is covariant: `race` and `any` over a list of `Future<number>` and `Future<string>` yield `Future<number | string>`. `delay` is `Future<()>`, `reject` is `Future<never>`, and an `async function` without a return type and without a `return` value is `Future<()>` too.",
+        "```alloy\nasync function load(id: number): Profile\n    return await fetch(id)\nend\nlocal profiles = await Future.all([load(1), load(2)])\nlocal first = await Future.race([load(1), Future.delay(5)])\n```\nA memoized task, from the std: it runs once, settles once, and every `await` after that reads the same value. An `async function` returns one and its body runs on `task.spawn` under `xpcall`; `await` yields until it settles, then returns the value or rethrows; `try await` gives a Result instead.\n\n**Statics**\n\n| | |\n|---|---|\n| `Future.resolve(value)` | A settled Future. |\n| `Future.reject(error)` | A failed one, `Future<never>`. |\n| `Future.delay(seconds)` | Settles after the wait, `Future<()>`. |\n| `Future.all(futures)` | An array of every value, in order; the first failure fails it. |\n| `Future.race(futures)` | The first to settle, value or failure. |\n| `Future.any(futures)` | The first to succeed; fails when all fail. |\n| `Future.all_settled(futures)` | An array of `Result`s, one per Future, none of which fails it. |\n\n**Methods**\n\n| | |\n|---|---|\n| `andThen(on_resolve?, on_reject?)` | Runs a callback when it settles, and returns the Future for chaining. |\n| `cancel()` | Closes the task; an `await` on it raises. |\n| `is_settled()` | Whether it has a value or a failure. |\n\nThe type is covariant: `race` and `any` over a list of `Future<number>` and `Future<string>` yield `Future<number | string>`. An `async function` without a return type and without a `return` value is `Future<()>`.",
     ),
     (
         "Result",
-        "```alloy\nlocal r: Result<number, string> = Ok(1)\nlocal v = r:unwrap_or(0)\n```\n`Ok(value)` or `Err(error)`, from the std. `try` turns a throw into an Err; `?` returns an Err early.\n\nMethods: `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `is_ok`, `is_err`, `ok`. `Result.pcall(f, ...)` wraps a throwing call.\n\n`unwrap_or(d)` is `T | D`, so `r:unwrap_or(nil)` is `T?`. `map` and `map_err` yield a Result of the same surface whose own `map` is `any`: Luau rejects an alias that names itself with other arguments. `Result<T, E>` is covariant, so a `Result<Boost, E>` passes where `Result<any, E>` is asked.",
+        "```alloy\nlocal r: Result<number, string> = Ok(1)\nlocal v = r:unwrap_or(0)\nmatch r with\n    case Ok(n) then print(n)\n    case Err(e) then warn(e)\nend\n```\n`Ok(value)` or `Err(error)`, from the std. A function that can fail returns one, and the caller reads it with a `match`, an `if local Ok(v) = r`, or the methods. `try expr` inside a function that returns a Result returns the `Err` early; `try do ... end` turns a throw into an Err; `try await` does the same for a Future.\n\n| | |\n|---|---|\n| `unwrap()` | The value; an Err raises, with its trace under the message. |\n| `expect(message)` | The value; an Err raises with `message`. |\n| `unwrap_or(default)` | The value, or `default`: the type is `T \\| D`, so `r:unwrap_or(nil)` is `T?`. |\n| `map(f)` | `Ok(f(value))`, or the same Err. |\n| `map_err(f)` | `Err(f(error))`, or the same Ok. |\n| `is_ok()`, `is_err()` | Which case it is. |\n| `ok()` | The value, or nil for an Err. |\n| `Result.pcall(f, ...)` | Calls `f`; `Ok` of what it returns, or `Err` of what it threw, with the traceback in `trace`. |\n\nAn `Err` carries `trace`, a traceback `Result.pcall` and `try` fill in and `Err(e, trace)` sets by hand. `map` and `map_err` yield a Result of the same surface whose own `map` is `any`: Luau rejects an alias that names itself with other arguments. `Result<T, E>` is covariant, so a `Result<Boost, E>` passes where `Result<any, E>` is asked.",
     ),
     (
         "Ok",
@@ -416,31 +461,35 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Err",
-        "```alloy\nErr(error)\n```\nThe failure case of a `Result`.",
+        "```alloy\nErr(error)\nErr(error, trace)\n```\nThe failure case of a `Result`. The second argument is a traceback, which `unwrap` and `expect` print under the error; `try` and `Result.pcall` fill it in.",
     ),
     (
         "Queue",
-        "```alloy\nlocal q = Queue.new()\nq:push(job)\nlocal next = q:pop()\n```\nA first-in, first-out queue, from the std. `Queue.from(t)` fills one from an array; a `for` loop reads it front to back without a pop.\n\nMethods: `push`, `pop`, `peek`, `len`, `is_empty`, `clear`, `to_array`.",
+        "```alloy\nlocal jobs: Queue<Job> = Queue.new()\njobs:push(job)\nwhile local next = jobs:pop() do\n    run(next)\nend\n```\nA first-in, first-out queue over a ring of indices, from the std: `push` at the back costs the same at any size, and so does `pop` at the front. `Queue.from(t)` fills one from an array. A `for` loop reads it front to back without a pop.\n\n| | |\n|---|---|\n| `push(value)` | Appends at the back. |\n| `pop()` | Removes and returns the front item, or nil when empty. |\n| `peek()` | The front item without removing it, or nil. |\n| `len()` | The number of items. |\n| `is_empty()` | Whether there are none. |\n| `clear()` | Removes every item. |\n| `to_array()` | The items front to back, as an array. |",
     ),
     (
         "Heap",
-        "```alloy\nlocal open = Heap.new(function(a, b) return a.cost < b.cost end)\nopen:push(node)\nlocal nearest = open:pop()\n```\nA binary heap, from the std: `pop` yields the least value under `less`, which defaults to `<`. A `for` loop reads it in order without a pop; `to_array` sorts.\n\nMethods: `push`, `pop`, `peek`, `len`, `is_empty`, `clear`, `to_array`.",
+        "```alloy\nlocal open = Heap.new(function(a, b) return a.cost < b.cost end)\nopen:push(node)\nlocal nearest = open:pop()\n```\nA binary heap, from the std: `pop` yields the least value under `less`, which defaults to `<`, so numbers and strings need no comparator and tables take one. `Heap.from(t, less)` builds one from an array. A `for` loop reads it least first without a pop; `to_array` returns the items sorted.\n\n| | |\n|---|---|\n| `push(value)` | Adds a value. |\n| `pop()` | Removes and returns the least value, or nil when empty. |\n| `peek()` | The least value without removing it, or nil. |\n| `len()` | The number of values. |\n| `is_empty()` | Whether there are none. |\n| `clear()` | Removes every value. |\n| `to_array()` | The values sorted under `less`, as an array. |",
     ),
     (
         "Scope",
-        "```alloy\nlocal scope = Scope.new()\nscope:add(part.Touched:Connect(on_touch))\nscope:add(function() print(\"bye\") end)\ndelete scope\n```\nA cleanup bag, from the std. `add` takes anything `delete` accepts, or a function, and gives it back. `clean` runs them newest first and empties the bag; `delete scope` does the same, and `extend` makes a child scope inside this one.\n\nMethods: `add`, `remove`, `clean`, `extend`, `len`, `Destroy`.",
+        "```alloy\nlocal scope = Scope.new()\nscope:add(part.Touched:Connect(on_touch))\nscope:add(function() print(\"bye\") end)\ndelete scope\n```\nA cleanup bag, from the std. `add` takes anything `delete` accepts, an Instance, a connection, a thread, a table with `Destroy` or `Disconnect`, or a function, and gives it back, so `local conn = scope:add(signal:Connect(f))` reads as before. `clean` runs the cleanups newest first and empties the bag; `delete scope` does the same through `Destroy`. A scope may hold another scope.\n\n| | |\n|---|---|\n| `add(item)` | Adds a cleanup and returns `item`. |\n| `remove(item)` | Takes it out without running it; true when it was there. |\n| `clean()` | Runs every cleanup, newest first, and empties the bag. |\n| `extend()` | A child scope, added to this one, so cleaning the parent cleans it. |\n| `len()` | The number of cleanups held. |\n| `Destroy()` | The same as `clean`, which is what `delete` calls. |",
     ),
     (
         "Iter",
-        "```alloy\nlocal names = Iter.from(players):filter(function(p) return p.Team == team end):map(function(p) return p.Name end):take(5):collect()\n```\nA lazy iterator, from the std. Nothing runs until `collect`, `for_each`, or a `for` loop pulls. `Iter.from` takes an array, a function, or anything with `__iter`; `Iter.range(a, b, step)` counts.\n\nMethods: `next`, `map`, `filter`, `take`, `skip`, `take_while`, `chain`, `collect`, `for_each`, `count`, `any`, `all`, `find`, `reduce`, `first`, `last`.",
+        "```alloy\nlocal names = Iter.from(players)\n    :filter(function(p) return p.Team == team end)\n    :map(function(p) return p.Name end)\n    :take(5)\n    :collect()\nfor i in Iter.range(1, 10, 2) do end\n```\nA lazy iterator, from the std: each step wraps the last, and nothing runs until `collect`, `for_each`, a reducer, or a `for` loop pulls. `Iter.from` takes an array, a function that returns the next value or nil, or anything with `__iter`; `Iter.range(from, to, step?)` counts, inclusive.\n\n| | |\n|---|---|\n| `next()` | The next value, or nil at the end. |\n| `map(f)` | Each value as `f(value)`. |\n| `filter(f)` | The values where `f(value)` holds. |\n| `take(n)` | The first `n` values. |\n| `skip(n)` | Everything after the first `n`. |\n| `take_while(f)` | Values until `f(value)` fails. |\n| `chain(other)` | This iterator, then `other`. |\n| `collect()` | The values as an array. |\n| `for_each(f)` | Calls `f(value)` for each. |\n| `count()` | The number of values. |\n| `any(f)`, `all(f)` | Whether `f` holds for some value, or for every value. |\n| `find(f)` | The first value where `f` holds, or nil. |\n| `reduce(f, init)` | Folds: `acc = f(acc, value)` from `init`. |\n| `first()`, `last()` | The first or the last value, or nil. |\n\nAs with `Array`, `map` returns the same shape under a second name, and the third `map` in one chain is `any`.",
     ),
     (
         "Symbol",
-        "```alloy\nlocal key = Symbol.new(\"name\")\n```\nA unique key that no string can collide with, from the std.",
+        "```alloy\nlocal key = Symbol.new(\"name\")\nlocal t = { [key] = 1 }\n```\nA unique key that no string can collide with, from the std: a frozen table that prints as `Symbol(name)`. Use one for a private table slot, or a sentinel a value cannot forge.",
     ),
     (
         "Signal",
-        "```alloy\nlocal changed = Signal.new()\nlocal conn = changed:Connect(function(id, value) end)\nchanged:Fire(1, 2)\n```\nA typed signal, from the std. `Signal.new<T...>()` fires `T...`; handlers run on reused threads, in order, and may disconnect during a fire.\n\nMethods: `Connect`, `Once`, `Wait`, `Fire`, `FireDeferred`, `DisconnectAll`, `Destroy`. A connection has `Connected` and `Disconnect`.\n\n`Signal.collect(source)` turns any signal with `Connect` or `connect`, a Roblox one included, into an iterator that drains the queued events in order, plus the connection: `for id, value in Signal.collect(changed) do`. `Signal.wrap(source)` gives a Signal that fires with the source.",
+        "```alloy\nlocal damaged = Signal.new<<Player, number>>()\nlocal conn = damaged:Connect(function(player, amount) end)\ndamaged:Fire(player, 10)\nlocal who, amount = damaged:Wait(5)\n```\nA typed signal, from the std, with the shape of `RBXScriptSignal`, so code that takes one takes the other. `Signal.new<T...>()` fires `T...`; handlers run in connection order, each on a reused thread, and a handler may disconnect any connection during a fire.\n\n| | |\n|---|---|\n| `Connect(handler)` | Runs `handler` on every fire; returns the connection. |\n| `Once(handler)` | Runs it on the next fire alone. |\n| `Wait(timeout?)` | Yields until the next fire and returns its values; with a timeout, returns nothing when the time runs out. |\n| `Fire(...)` | Runs every handler now. |\n| `FireDeferred(...)` | Runs them on the next resumption point, through `task.defer`. |\n| `DisconnectAll()` | Drops every connection. |\n| `Destroy()` | Disconnects all and marks the signal dead. |\n\nEach has a snake_case twin, `connect`, `once`, `wait`, `fire`, `fire_deferred`, `disconnect_all`, `destroy`. A connection has `Connected`, `Disconnect`, and `disconnect`. `Signal.is(value)` says whether a value is one.\n\n`Signal.collect(source)` turns any signal with `Connect` or `connect`, the shape `Signalish<T...>`, a Roblox one included, into an iterator that drains the queued events in order, plus the connection: `for id, value in Signal.collect(changed) do`. `Signal.wrap(source)` gives a Signal that fires with the source.",
+    ),
+    (
+        "Traits",
+        "```alloy\nfunction largest<T: Ord>(xs: T[]): T\nimpl Display for Vec2\n    function to_string(self): string\n        return `({self.x}, {self.y})`\n    end\nend\n```\nThe trait shapes the std exports, for a bound and for `impl X for Struct`. Each is a table type of the methods it asks for; a struct that has them passes.\n\n| | |\n|---|---|\n| `Display` | `to_string(self): string`; an impl sets `__tostring`. |\n| `Debug` | `debug(self): string`, what `@derive(Debug)` writes. |\n| `Clone` | `clone(self): T`, what `@derive(Clone)` writes. |\n| `Eq`, `PartialEq` | `eq(self, other): boolean`; an impl sets `__eq`. |\n| `Ord` | `lt(self, other)` and `le(self, other)`; `@derive(Ord)` writes `__lt` and `__le`. |\n| `Add`, `Sub`, `Mul`, `Div` | `add(self, other)` and the rest; an impl sets the metamethod. |\n| `Serialize` | `to_table(self)` and `from_table(t)`, what `@derive(Serialize)` writes. |\n\nAn `impl` may also name `Lt`, `Le`, `Call`, `Len`, `Concat`, and `Drop`, which write `__lt`, `__le`, `__call`, `__len`, `__concat`, and `Destroy`. A trait the file declares with one of these names wins over the std's.",
     ),
     (
         "Partial",
@@ -456,7 +505,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Attributes",
-        "```alloy\nlocal value = Attributes.get(Target, attr)\n```\nDeclared metadata, readable at runtime. `get`, `field`, `variant`, `of`, and `fields` read what `@attr` declared.",
+        "```alloy\nattribute icon(asset: string) on struct, variant\n\n@icon(\"rbxassetid://1\")\nstruct Sword as ... end\n\nlocal asset = Attributes.get(Sword, icon)\n```\nDeclared metadata, readable at runtime. An `attribute` declaration binds its name to an `Attribute<T>` value, so `attr` below is the name as written, not a string.\n\n| | |\n|---|---|\n| `Attributes.get(target, attr)` | The attribute's value on a function, a struct, or an enum, or nil. |\n| `Attributes.field(struct, name, attr)` | Its value on one field of a struct. |\n| `Attributes.variant(enum, name, attr)` | Its value on one variant of an enum. |\n| `Attributes.fields(struct, attr)` | The fields that carry it, as a table of field name to value. |\n| `Attributes.of(target)` | Everything declared on the target, as the compiler wrote it. |\n\nAn attribute with one parameter reads as that value; with several, as a table of them in order.",
     ),
     (
         "@sealed",
@@ -476,7 +525,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:lint",
-        "**alloy lint**\n\nRuns the lints over the project, or over one file, and nothing else; `alloy flux` runs them with the compile and the type check. A lint is advice: the code runs, and the lint names a habit that costs bugs. The lints are Flux's, in seven groups:\n\n  correctness   code that is wrong, or cannot run\n  suspicious    code that is probably not what the author meant\n  style         a Luau habit with an Alloy form: `a and a.b` for `a?.b`, `typeof(x) == \"T\"` for `x is T`\n  complexity    a simple thing done in a hard way; the limits sit in `[flux]`\n  perf          code that runs slower than the plain form\n  roblox        a Roblox API that is deprecated or misused\n  pedantic      strict rules, off until `[lint] strict = true`\n  naming        the case of names, off until `warn = [\"naming\"]`\n\nA lint whose rewrite keeps the program the same carries it, and `--fix` applies those; in the editor each one is a quick fix, and `source.fixAll` applies every rewrite of the file.\n\n```\nalloy lint                 the project of the nearest alloy.toml\nalloy lint src/game.aly    one file\nalloy lint --fix           apply the rewrites that keep the program the same\nalloy lint -W pedantic     a level for this run: -W warns, -A allows, -D denies\nalloy lint --deny-warnings fail on any hit\nalloy lint --list          every lint with its group and default level\n```\n\nThe `[lint]` table of alloy.toml sets the levels. A list takes a lint name or a group name, and a name beats its group:\n\n```toml\n[lint]\nstrict = true\ndeny = [\"correctness\"]\nwarn = [\"pedantic\"]\nallow = [\"concat_interpolation\", \"luau\"]\n```\n\n`luau` is the group of the type checker's own lints, `LocalUnused` and the rest, which `alloy flux` reports. `alloy doc lints` lists every lint; `alloy doc <name>` explains one, and `alloy doc <group>` lists a group. The language server shows the same lints as warnings, with the rewrite in the message.",
+        "**alloy lint**\n\nRuns the lints over the project, or over one file, and nothing else; `alloy flux` runs them with the compile and the type check. A lint is advice: the code runs, and the lint names a habit that costs bugs. The lints are Flux's, in eight groups:\n\n  correctness   code that is wrong, or cannot run\n  suspicious    code that is probably not what the author meant\n  style         a Luau habit with an Alloy form: `a and a.b` for `a?.b`, `typeof(x) == \"T\"` for `x is T`\n  complexity    a simple thing done in a hard way; the limits sit in `[flux]`\n  perf          code that runs slower than the plain form\n  roblox        a Roblox API that is deprecated or misused\n  pedantic      strict rules, off until `[lint] strict = true`\n  naming        the case of names, off until `warn = [\"naming\"]`\n\nA lint whose rewrite keeps the program the same carries it, and `--fix` applies those; in the editor each one is a quick fix, and `source.fixAll` applies every rewrite of the file.\n\n```\nalloy lint                 the project of the nearest alloy.toml\nalloy lint src/game.aly    one file\nalloy lint --fix           apply the rewrites that keep the program the same\nalloy lint -W pedantic     a level for this run: -W warns, -A allows, -D denies\nalloy lint --deny-warnings fail on any hit\nalloy lint --list          every lint with its group and default level\n```\n\nThe `[lint]` table of alloy.toml sets the levels. A list takes a lint name or a group name, and a name beats its group:\n\n```toml\n[lint]\nstrict = true\ndeny = [\"correctness\"]\nwarn = [\"pedantic\"]\nallow = [\"concat_interpolation\", \"luau\"]\n```\n\n`luau` is the group of the type checker's own lints, `LocalUnused` and the rest, which `alloy flux` reports. `alloy doc lints` lists every lint; `alloy doc <name>` explains one, and `alloy doc <group>` lists a group. The language server shows the same lints as warnings, with the rewrite in the message.",
     ),
     (
         "topic:flux",
@@ -509,6 +558,10 @@ pub const TABLE: &[(&str, &str)] = &[
     (
         "topic:directives",
         "**Directives**\n\nA comment that starts with `--@alloy-` silences diagnostics: the compiler's, the lints, and the checker's type errors, which the language server drops on the silenced lines before the editor sees them. The editor lists the directives after `--`, `--@`, or `--!`, and on an empty line.\n\n```alloy\n--@alloy-nocheck        this file: nothing is reported\n--@alloy-ignore         the next line with code is silent\nlocal x = y.z --@alloy-ignore   at the end of a line: that line\n--@alloy-expect-error   the next line must hold an error; a clean line is the error\n```\n\nUse `ignore` for a line the new solver gets wrong, and say why in the comment beside it. Use `expect-error` where the error is the point, a test of a lint or a contract: it silences the line, and reports when the line comes clean, so a fix that makes the directive stale shows. Luau's own `--!strict`, `--!nonstrict`, and `--!nocheck` pass through and set the checker's mode for the file.\n\nEvery diagnostic carries the book section it belongs to as its code, `Alloy(4.2)`; the number links to the section in the editor, and `alloy doc 4.2` prints it.",
+    ),
+    (
+        "topic:markup",
+        "**Markup**\n\nAn `.alx` file is Alloy with markup in it: tags, attributes, fragments, and text, the way JSX sits in TypeScript. The markup lowers to calls on a factory the project names, and the Alloy around it compiles as in any `.aly`.\n\n```alloy\nlocal function Row(props: { item: Item })\n    return (\n        <TextButton Size={UDim2.new(1, 0, 0, 24)} Activated={props.on_pick}>\n            {props.item.name} x{props.item.count}\n        </TextButton>\n    )\nend\n```\n\nA tag names a Roblox class or a component in scope; a component starts with a capital and is called with its props. An attribute is `Name={expr}` or `Name=\"text\"`; an event name takes a function. `{expr}` in a body is a child, and text with `{holes}` interpolates. `<> ... </>` is a fragment, `<!-- -->` a comment. A child that depends on a condition wraps in a function, `{function() return if open then <Menu /> else nil end}`, so a reactive library re-runs it; a bare conditional child is built once, and the `static_conditional_child` lint says so.\n\nThe `[alx]` table of alloy.toml sets the lowering:\n\n```toml\n[alx.factory]\nbackend = \"table\"        # table: create(name)(props); element: create(name, props, children)\ncreate = \"create\"        # the function a tag calls; a bare name must be in scope\nchildren = \"Children\"    # the key children go under; unset, they are numeric entries\nevent = \"OnEvent\"        # wraps an event name: OnEvent(\"Activated\"), or React.Event\ncompute = \"computed\"     # wraps interpolated text; `use` names the reader inside it\nfragment = \"Fragment\"    # the component a fragment builds with; a plain table unset\ninterpolate = \"concat\"   # how text with holes joins\nmerge = \"merge\"          # how a spread group `{...props}` combines\n\n[alx.elements]\nall = \"camel\"            # a naming scheme for every class, or one alias per name\n\n[alx.properties]\nText = \"text\"            # an alias for a property, everywhere or per class\n\n[alx.lints]\nstatic_conditional_child = \"warn\"\n```\n\nWith no `[alx]`, the lowering is the table form with `create` in scope. `[fmt.alx]` sets how `alloy fmt` lays a tag out. An ingot may read a markup attribute, `ClassName` for Enamel, and rewrite the tag before the lowering.\n\nIn the editor a tag and an attribute hover and complete from the Roblox API, and the semantic tokens of the lowered code stay out of the markup.",
     ),
     (
         "topic:ingots",
@@ -668,7 +721,7 @@ pub const BOOK: &[Section] = &[
         number: "3.13",
         id: "markup",
         title: "Markup",
-        key: None,
+        key: Some("topic:markup"),
     },
     Section {
         number: "3.14",

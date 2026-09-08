@@ -1,6 +1,8 @@
 -- `$set` and `$map` build the std collections; `[[` opens a nested array.
 local tags = $set["a", "b"]
-local prices = $map[["sword", 10], ["pet", 25]]
-local grid = [[1, 2], [3, 4]]
+local prices = $map[[ "sword", 10 ], [ "pet", 25 ]]
+local grid = [ [ 1, 2 ], [ 3, 4 ] ]
 local note = [=[a long string keeps its leveled form]=]
-print(tags, prices, grid, note, $set(1, 2), $map(["k", true]))
+print(tags, prices, grid, note, $set(1, 2), $map([ "k", true ]))
+
+local test = $set[1, 2, 3]

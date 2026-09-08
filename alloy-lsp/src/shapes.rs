@@ -137,6 +137,8 @@ pub fn fold(text: &str, known: &Known) -> String {
     out = out.replace("Future<nil>", "Future<()>");
     fold_union_dupes(&mut out);
     fold_array_parens(&mut out);
+    // `Array<number[] | number[]>` is one array once the union folds.
+    fold_array_alias(&mut out);
     fold_read_arrays(&mut out);
 
     out
@@ -598,8 +600,22 @@ fn fold_cut_array(text: &mut String) {
 }
 
 /// `Array<T>` reads as the sugar the source has, `T[]`, when `T` is a
-/// name or a dotted path; a compound argument keeps the alias.
+/// name, a dotted path, or an array of one, `Array<number[]>`; a
+/// compound argument keeps the alias.
 fn fold_array_alias(text: &mut String) {
+    // The inner alias of `Array<Array<number>>` folds on the first
+    // pass and the outer on the next.
+    for _ in 0..4 {
+        let before = text.len();
+        fold_array_alias_once(text);
+
+        if text.len() == before {
+            break;
+        }
+    }
+}
+
+fn fold_array_alias_once(text: &mut String) {
     let mut from = 0;
 
     while let Some(i) = text[from..].find("Array<") {
@@ -614,9 +630,9 @@ fn fold_array_alias(text: &mut String) {
         match text[inner_start..].find('>') {
             Some(n)
                 if !prefixed
-                    && text[inner_start..inner_start + n]
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '?') =>
+                    && text[inner_start..inner_start + n].chars().all(|c| {
+                        c.is_alphanumeric() || matches!(c, '_' | '.' | '?' | '[' | ']')
+                    }) =>
             {
                 let elem = text[inner_start..inner_start + n].to_string();
                 text.replace_range(start..inner_start + n + 1, &format!("{elem}[]"));
@@ -1851,6 +1867,23 @@ mod tests {
     }
 
     #[test]
+    fn an_array_alias_of_an_array_folds_to_the_sugar() {
+        let mut text = ": Array<number[]>".to_string();
+        fold_array_alias(&mut text);
+        assert_eq!(text, ": number[][]");
+        let mut text = ": Array<Array<number>>".to_string();
+        fold_array_alias(&mut text);
+        assert_eq!(text, ": number[][]");
+        assert_eq!(
+            fold(": Array<Array<number> | Array<number>>", &Known::default()),
+            ": number[][]"
+        );
+        let mut text = ": Array<number | string>".to_string();
+        fold_array_alias(&mut text);
+        assert_eq!(text, ": Array<number | string>");
+    }
+
+    #[test]
     fn a_nested_array_of_two_array_types_reads_once() {
         let text = "local g: t1 where t1 = {\n    [number]: t2 | t3,\n    concat: (self: {read t2 | t3}, other: t1) -> t1,\n    push: (self: t1, value: t2 | t3) -> ()\n} ; t2 = {\n    [number]: number,\n    concat: (self: {read number}, other: t2) -> t2,\n    push: (self: t2, value: number) -> ()\n} ; t3 = {\n    [number]: number,\n    concat: (self: {read number}, other: t3) -> t3,\n    push: (self: t3, value: number) -> ()\n}";
         assert_eq!(fold(text, &known()), "local g: number[][]");
@@ -2040,10 +2073,7 @@ mod tests {
     #[test]
     fn a_union_of_one_type_reads_once() {
         let k = Known::default();
-        assert_eq!(
-            fold(": Array<number[] | number[]>", &k),
-            ": Array<number[]>"
-        );
+        assert_eq!(fold(": Array<number[] | number[]>", &k), ": number[][]");
         assert_eq!(fold("local n: number | number", &k), "local n: number");
         assert_eq!(
             fold("f: (a: number | string) -> (number | number)", &k),

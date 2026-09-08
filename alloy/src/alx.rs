@@ -46,7 +46,13 @@ pub fn compile_alx(
         }
     }
     .map_err(|e| CompileError {
-        offset: e.offset,
+        // luaux reports a scope error against the whole file; the first
+        // tag is the place the reader can act on.
+        offset: if e.offset == 0 {
+            spans.first().map_or(0, |(at, _)| *at)
+        } else {
+            e.offset
+        },
         message: markup_message(&e.message, e.help.as_deref()),
     })?;
 
@@ -90,10 +96,19 @@ pub fn compile_alx(
 }
 
 fn markup_message(message: &str, help: Option<&str>) -> String {
-    match help {
-        Some(h) => format!("markup: {message} ({h})"),
+    // luaux names its own `luaux.toml` tables; an Alloy project writes
+    // the same keys under `[alx]`.
+    let alloy_keys = |text: &str| {
+        text.replace("[factory]", "[alx.factory]")
+            .replace("[lints]", "[alx.lints]")
+            .replace("[build]", "[alx.build]")
+            .replace("luaux.toml", "alloy.toml")
+    };
 
-        None => format!("markup: {message}"),
+    match help {
+        Some(h) => format!("markup: {} ({})", alloy_keys(message), alloy_keys(h)),
+
+        None => format!("markup: {}", alloy_keys(message)),
     }
 }
 

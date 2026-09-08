@@ -169,7 +169,7 @@ impl<'a> Parser<'a> {
 
             "function" => {
                 self.bump();
-                let body = self.function_body()?;
+                let body = self.function_body(start)?;
                 Expr::Function {
                     attributes: Vec::new(),
                     body: Box::new(body),
@@ -180,7 +180,7 @@ impl<'a> Parser<'a> {
             "@" => {
                 let attributes = self.attributes()?;
                 self.expect("function")?;
-                let body = self.function_body()?;
+                let body = self.function_body(start)?;
                 Expr::Function {
                     attributes,
                     body: Box::new(body),
@@ -197,7 +197,7 @@ impl<'a> Parser<'a> {
             "async" if self.text_at(1) == "function" && !self.newline_after(0) => {
                 let is_async = Some(TokSpan::new(self.bump(), self.pos));
                 self.bump();
-                let mut body = self.function_body()?;
+                let mut body = self.function_body(start)?;
                 body.is_async = is_async;
                 Expr::Function {
                     attributes: Vec::new(),
@@ -349,6 +349,16 @@ impl<'a> Parser<'a> {
                 return Err(self.err("unterminated array literal"));
             }
 
+            // `$matches(xs, [ first, ...rest ])`: the argument is a
+            // pattern, and the match parser reads it from the source.
+            if self.pattern_arg > 0 && self.at("...") && self.name_at(1) {
+                let at = self.pos;
+                self.pos += 2;
+                items.push(Expr::Vararg(TokSpan::new(at, self.pos)));
+
+                break;
+            }
+
             items.push(self.bracketed(|p| p.expr())?);
 
             if !self.eat(",") && !self.eat(";") {
@@ -443,11 +453,18 @@ impl<'a> Parser<'a> {
         }
 
         self.expect("(")?;
+        // `$matches` takes a pattern as its second argument.
+        let pattern_arg = self.src[self.toks[name.start as usize].start as usize
+            ..self.toks[name.end as usize - 1].end as usize]
+            == *"matches";
+        self.pattern_arg += u32::from(pattern_arg);
         let args = if self.at(")") {
-            Vec::new()
+            Ok(Vec::new())
         } else {
-            self.expr_list()?
+            self.expr_list()
         };
+        self.pattern_arg -= u32::from(pattern_arg);
+        let args = args?;
         self.expect(")")?;
 
         Ok(Expr::Macro {

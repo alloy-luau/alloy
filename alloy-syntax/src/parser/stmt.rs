@@ -140,7 +140,7 @@ impl<'a> Parser<'a> {
                 let cond = self.cond()?;
                 self.expect("do")?;
                 let block = self.block()?;
-                self.expect("end")?;
+                self.expect_end(start)?;
                 Ok(Stmt::While(While {
                     cond,
                     block,
@@ -151,7 +151,7 @@ impl<'a> Parser<'a> {
             "do" => {
                 self.bump();
                 let block = self.block()?;
-                self.expect("end")?;
+                self.expect_end(start)?;
                 Ok(Stmt::Do(DoBlock {
                     block,
                     span: TokSpan::new(start, self.pos),
@@ -192,7 +192,10 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Call(call, TokSpan::new(start, self.pos)))
             }
 
-            "delete" if self.prefix_word_here() && self.name_at(1) => {
+            // `delete` is reserved, so anything an expression can start
+            // with follows it: a string or a table gets the same message
+            // a number does.
+            "delete" if !self.newline_after(0) && self.delete_operand_at(1) => {
                 self.bump();
                 let expr = self.suffixed_expr()?;
 
@@ -653,6 +656,17 @@ impl<'a> Parser<'a> {
 
     /// `continue` is contextual. It is the keyword only when no token that
     /// would continue an expression follows it.
+    /// Reports if the token `n` ahead can begin the operand of `delete`.
+    fn delete_operand_at(&self, n: usize) -> bool {
+        // `delete(x)` stays a call: plain Luau reads it that way, and a
+        // file that binds `delete` as a name still parses.
+        self.name_at(n)
+            || matches!(
+                self.kind_at(n),
+                Some(TokKind::Str { .. } | TokKind::Number | TokKind::InterpStr)
+            )
+    }
+
     pub(super) fn continue_is_keyword(&self) -> bool {
         !matches!(
             self.text_at(1),
@@ -811,7 +825,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        self.expect("end")?;
+        self.expect_end(start)?;
         Ok(Stmt::If(If {
             branches,
             else_block,
@@ -835,7 +849,7 @@ impl<'a> Parser<'a> {
 
             self.expect("do")?;
             let block = self.block()?;
-            self.expect("end")?;
+            self.expect_end(start)?;
 
             return Ok(Stmt::NumericFor(NumericFor {
                 var: first,
@@ -864,7 +878,7 @@ impl<'a> Parser<'a> {
         };
         self.expect("do")?;
         let block = self.block()?;
-        self.expect("end")?;
+        self.expect_end(start)?;
         Ok(Stmt::GenericFor(GenericFor {
             vars,
             exprs,
@@ -907,9 +921,10 @@ impl<'a> Parser<'a> {
             self.expect("=")?;
             let value = self.expr()?;
             let else_block = if self.at("else") {
+                let open = self.pos;
                 self.bump();
                 let block = self.block()?;
-                self.expect("end")?;
+                self.expect_end(open)?;
 
                 Some(block)
             } else {
@@ -959,7 +974,7 @@ impl<'a> Parser<'a> {
 
         let name = self.expect_name()?;
         self.reject_reserved(name);
-        let body = self.function_body()?;
+        let body = self.function_body(start)?;
 
         Ok(Stmt::LocalFunction(LocalFunction {
             attributes,
@@ -1001,7 +1016,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let body = self.function_body()?;
+        let body = self.function_body(start)?;
         Ok(Stmt::Function(Function {
             attributes,
             attrs: Vec::new(),
@@ -1014,7 +1029,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    pub(super) fn function_body(&mut self) -> Result<FunctionBody, ParseError> {
+    pub(super) fn function_body(&mut self, opener: usize) -> Result<FunctionBody, ParseError> {
         let start = self.pos;
         let generics = if self.at("<") {
             Some(self.angle_span()?)
@@ -1083,7 +1098,7 @@ impl<'a> Parser<'a> {
         };
 
         let block = self.block()?;
-        self.expect("end")?;
+        self.expect_end(opener)?;
         // A `:` inside the list is a bound; `<T: Shape>` has no Luau form.
         let has_bounds = generics
             .is_some_and(|g| (g.start..g.end).any(|i| self.toks[i as usize].text(self.src) == ":"));
@@ -1288,7 +1303,7 @@ impl<'a> Parser<'a> {
             // `type function f() ... end` is a user-defined type function.
             self.bump();
             let name = self.expect_name()?;
-            self.function_body()?;
+            self.function_body(start)?;
 
             return Ok(Stmt::TypeAlias(TypeAlias {
                 exported,
@@ -1315,6 +1330,12 @@ impl<'a> Parser<'a> {
     pub(super) fn expr_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
         // `new X(...) { }`, `try f()`, and `await f()` stand alone as
         // statements: their value is dropped, the way a call's is.
+        // `local n = v as number` leaves `as number` behind: the parser
+        // reaches it as a statement of its own.
+        if self.at("as") {
+            return Err(self.err("`as` is not a cast here; use `::`"));
+        }
+
         if matches!(self.text(), "new" | "try" | "await") && self.prefix_word_here() {
             let e = self.expr()?;
 
@@ -2025,6 +2046,7 @@ impl<'a> Parser<'a> {
         attributes: Vec<Attr>,
         exported: bool,
     ) -> Result<Stmt, ParseError> {
+        let open = self.pos;
         self.expect("struct")?;
         let name = self.expect_name()?;
         let generics = if self.at("<") {
@@ -2034,7 +2056,7 @@ impl<'a> Parser<'a> {
         };
         self.expect("as")?;
         let fields = self.fields()?;
-        self.expect("end")?;
+        self.expect_end(open)?;
 
         Ok(Stmt::Struct(StructDecl {
             attributes,
@@ -2047,6 +2069,7 @@ impl<'a> Parser<'a> {
     }
 
     fn interface_decl(&mut self, start: usize, exported: bool) -> Result<Stmt, ParseError> {
+        let open = self.pos;
         self.expect("interface")?;
         let name = self.expect_name()?;
         let generics = if self.at("<") {
@@ -2066,7 +2089,7 @@ impl<'a> Parser<'a> {
 
         self.expect("as")?;
         let fields = self.fields()?;
-        self.expect("end")?;
+        self.expect_end(open)?;
 
         // An interface is a shape other code sees whole: a field of it
         // has no visibility.
@@ -2098,6 +2121,7 @@ impl<'a> Parser<'a> {
         attributes: Vec<Attr>,
         exported: bool,
     ) -> Result<Stmt, ParseError> {
+        let open = self.pos;
         self.expect("trait")?;
         let name = self.expect_name()?;
         let mut methods = Vec::new();
@@ -2125,7 +2149,7 @@ impl<'a> Parser<'a> {
             let body = if has_body {
                 let b_start = self.pos;
                 let block = self.block()?;
-                self.expect("end")?;
+                self.expect_end(m_start)?;
 
                 Some(FunctionBody {
                     is_async: None,
@@ -2150,7 +2174,7 @@ impl<'a> Parser<'a> {
             });
         }
 
-        self.expect("end")?;
+        self.expect_end(open)?;
 
         Ok(Stmt::Trait(TraitDecl {
             attributes,
@@ -2314,6 +2338,7 @@ impl<'a> Parser<'a> {
 
     /// `macro name(params) {stat} [exp] end`.
     fn macro_decl(&mut self, start: usize, exported: bool) -> Result<Stmt, ParseError> {
+        let open = self.pos;
         self.expect("macro")?;
         let name = self.expect_name()?;
         let params = self.param_list()?;
@@ -2352,7 +2377,7 @@ impl<'a> Parser<'a> {
                     .unwrap_or(self.pos),
             ),
         };
-        self.expect("end")?;
+        self.expect_end(open)?;
 
         Ok(Stmt::Macro(MacroDecl {
             exported,
@@ -2367,6 +2392,7 @@ impl<'a> Parser<'a> {
     // --- enum and impl -----------------------------------------------------
 
     fn enum_decl(&mut self, start: usize, exported: bool) -> Result<Stmt, ParseError> {
+        let open = self.pos;
         self.expect("enum")?;
         let name = self.expect_name()?;
         self.expect("as")?;
@@ -2415,7 +2441,7 @@ impl<'a> Parser<'a> {
             let _ = self.eat(",") || self.eat(";");
         }
 
-        self.expect("end")?;
+        self.expect_end(open)?;
 
         Ok(Stmt::Enum(EnumDecl {
             attributes: Vec::new(),
@@ -2436,6 +2462,12 @@ impl<'a> Parser<'a> {
         }
 
         let first = TokSpan::new(first_start, self.pos);
+        // `impl Box<T>`: the parameters the methods name.
+        let mut generics = if self.at("<") {
+            Some(self.angle_span()?)
+        } else {
+            None
+        };
 
         let (trait_name, target) = if self.eat("for") {
             let t_start = self.pos;
@@ -2445,7 +2477,13 @@ impl<'a> Parser<'a> {
                 self.pos += 2;
             }
 
-            (Some(first), TokSpan::new(t_start, self.pos))
+            let target = TokSpan::new(t_start, self.pos);
+
+            if self.at("<") {
+                generics = Some(self.angle_span()?);
+            }
+
+            (Some(first), target)
         } else {
             (None, first)
         };
@@ -2503,6 +2541,7 @@ impl<'a> Parser<'a> {
             exported,
             trait_name,
             target,
+            generics,
             methods,
             span: TokSpan::new(start, self.pos),
         }))

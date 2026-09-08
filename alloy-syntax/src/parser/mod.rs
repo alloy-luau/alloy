@@ -95,6 +95,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         type_edits: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
+        pattern_arg: 0,
     };
 
     let block = p.block()?;
@@ -138,6 +139,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         type_edits: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
+        pattern_arg: 0,
     };
 
     let mut stmts = Vec::new();
@@ -195,6 +197,7 @@ pub fn parse_expr(src: &str, toks: &[Tok]) -> Result<Expr, ParseError> {
         type_edits: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
+        pattern_arg: 0,
     };
 
     let expr = p.expr()?;
@@ -227,6 +230,9 @@ struct Parser<'a> {
     /// Above zero inside a match arm, where `case` and `default` end a
     /// block the way `end` and `else` do.
     in_match_arm: u32,
+    /// Inside the pattern argument of `$matches`, where an array literal
+    /// reads as an array pattern and takes a `...rest`.
+    pattern_arg: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -279,6 +285,35 @@ impl<'a> Parser<'a> {
         } else {
             false
         }
+    }
+
+    /*
+    The `end` that closes a block, reported against the keyword that
+    opened it.
+
+    A lenient parse closes the block where it stands instead of unwinding.
+    Unwinding sends the recovery back to the start of the outer statement,
+    which then reads the same tokens again and reports the same sentence
+    once per level of nesting.
+    */
+    fn expect_end(&mut self, opener: usize) -> Result<usize, ParseError> {
+        if self.at("end") {
+            return Ok(self.bump());
+        }
+
+        let tok = self.toks[opener.min(self.toks.len().saturating_sub(1))];
+        let word = &self.src[tok.start as usize..tok.end as usize];
+        let line = self.src[..tok.start as usize].matches('\n').count() + 1;
+        let message = format!("`{word}` on line {line} needs an `end`");
+        let offset = tok.start as usize;
+
+        if self.lenient {
+            self.report_at(offset, &message);
+
+            return Ok(self.pos);
+        }
+
+        Err(ParseError { offset, message })
     }
 
     fn expect(&mut self, s: &str) -> Result<usize, ParseError> {

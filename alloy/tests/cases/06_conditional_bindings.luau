@@ -5,7 +5,7 @@ local Players = game:GetService("Players")
 local Job = {} Job.__index = Job
     function Job.Build(_1) return setmetatable({ tag = "Build", _1 = _1 }, Job) end
     function Job.Move(_1) return setmetatable({ tag = "Move", _1 = _1 }, Job) end
-function Job.is(v) return (type(v) == "table" and getmetatable(v) == Job) end Job.__tostring = function(v) return __alloy.show_variant("Job", v) end type Job = { tag: "Build", _1: string } | { tag: "Move", _1: Vector3 }
+function Job.is(v) return (type(v) == "table" and getmetatable(v) == Job) end Job.__tostring = function(v) return __alloy.show_variant("Job", v) end type Job = typeof(setmetatable({} :: { tag: "Build", _1: string }, Job)) | typeof(setmetatable({} :: { tag: "Move", _1: Vector3 }, Job))
 
 local function first_player(): Player?
     return Players:GetPlayers()[1]

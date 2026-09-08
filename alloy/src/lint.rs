@@ -1027,6 +1027,104 @@ pub fn run(
         }
     }
 
+    // optional_access: a local annotated `T?` indexed with nothing
+    // guarding it, the same shape the parameter rule reads.
+    let mut optional_locals: Vec<(usize, usize)> = Vec::new();
+
+    for i in 0..toks.len() {
+        if text(i) != "local" && text(i) != "const" {
+            continue;
+        }
+
+        let mut j = i + 1;
+
+        while j + 1 < toks.len() && toks[j].kind == TokKind::Ident {
+            let name_at = j;
+            j += 1;
+
+            // `local a: T?`: the type runs to the next `,` or `=` of
+            // this statement.
+            if j < toks.len() && text(j) == ":" {
+                j += 1;
+                let mut depth = 0i32;
+                let mut last = j;
+
+                while j < toks.len() {
+                    let t = text(j);
+
+                    if matches!(t, "(" | "[" | "{" | "<") {
+                        depth += 1;
+                    } else if matches!(t, ")" | "]" | "}" | ">") {
+                        depth -= 1;
+                    } else if depth == 0 && matches!(t, "," | "=") {
+                        break;
+                    }
+
+                    last = j;
+                    j += 1;
+                }
+
+                if last < toks.len() && text(last) == "?" {
+                    optional_locals.push((name_at, j));
+                }
+            }
+
+            if j >= toks.len() || text(j) != "," {
+                break;
+            }
+
+            j += 1;
+        }
+    }
+
+    for (name_at, from) in optional_locals {
+        let name = text(name_at);
+        let mut guarded = false;
+        let mut first_access: Option<usize> = None;
+
+        for i in from..toks.len() {
+            if toks[i].kind != TokKind::Ident
+                || text(i) != name
+                || matches!(i.checked_sub(1).map(text), Some("." | ":" | "?." | "?:"))
+            {
+                continue;
+            }
+
+            let prev = i.checked_sub(1).map(text);
+            let next = toks.get(i + 1).map(|t| t.text(src));
+            let guard_after = next.is_some_and(|n| {
+                matches!(n, "and" | "or" | "==" | "~=" | "=" | "??" | "!" | "," | ")")
+                    || n.starts_with('?')
+            });
+            let guard_before = matches!(
+                prev,
+                Some("if" | "elseif" | "not" | "while" | "until" | "assert")
+            );
+
+            if guard_after || guard_before {
+                guarded = true;
+
+                break;
+            }
+
+            if matches!(next, Some("." | ":" | "[")) && first_access.is_none() {
+                first_access = Some(i);
+            }
+        }
+
+        if let (false, Some(i)) = (guarded, first_access) {
+            lints.push(Lint {
+                name: "optional_access",
+                start: toks[i].start,
+                end: toks[i].end,
+                message: format!(
+                    "`{name}` may be nil and nothing checks it; guard it with `if {name} then`, or index with `?.`"
+                ),
+                fix: None,
+            });
+        }
+    }
+
     // optional_access: `f().x` where `f` returns `T?`.
     let optional_fns: HashSet<&str> = fns
         .iter()

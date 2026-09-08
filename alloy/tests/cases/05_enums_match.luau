@@ -6,7 +6,7 @@ local Msg = {} Msg.__index = Msg
     function Msg.Join(_1) return setmetatable({ tag = "Join", _1 = _1 }, Msg) end
     function Msg.Chat(_1, _2) return setmetatable({ tag = "Chat", _1 = _1, _2 = _2 }, Msg) end
     function Msg.Leave(_1) return setmetatable({ tag = "Leave", _1 = _1 }, Msg) end
-function Msg.is(v) return (type(v) == "table" and getmetatable(v) == Msg) end Msg.__tostring = function(v) return __alloy.show_variant("Msg", v) end type Msg = { tag: "Join", _1: Player } | { tag: "Chat", _1: Player, _2: string } | { tag: "Leave", _1: Player }
+function Msg.is(v) return (type(v) == "table" and getmetatable(v) == Msg) end Msg.__tostring = function(v) return __alloy.show_variant("Msg", v) end type Msg = typeof(setmetatable({} :: { tag: "Join", _1: Player }, Msg)) | typeof(setmetatable({} :: { tag: "Chat", _1: Player, _2: string }, Msg)) | typeof(setmetatable({} :: { tag: "Leave", _1: Player }, Msg))
 
 -- A unit enum emits a string literal union plus a table.
 -- Color.Red == "Red" at runtime, so it serializes for free.
@@ -94,6 +94,6 @@ local parsed: __alloy.Result<number, string> = __alloy.Ok(1)
 do local _m1 = parsed
     if type(_m1) == "table" and _m1.tag == "Ok" then local n = _m1._1 print(n)
     elseif type(_m1) == "table" and _m1.tag == "Err" then local e = _m1._1 warn(e)
-end end
+else error("match: no arm covers this value", 2) end end
 
 print(describe, handle, is_join, hex(Color.Red), leap(2024), Msg.Join)

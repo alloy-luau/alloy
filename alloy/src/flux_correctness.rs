@@ -186,15 +186,19 @@ impl<'s> Scan<'s> {
 
                     if let Some((k, at)) = key {
                         if let Some((_, first)) = keys.iter().find(|(n, _)| *n == k) {
+                            // On one line the reader sees both values, so
+                            // naming the line adds nothing.
+                            let lost = if self.line_of(*first) == self.line_of(at) {
+                                String::new()
+                            } else {
+                                format!("; the value on line {} is lost", self.line_of(*first) + 1)
+                            };
                             self.lint(
                                 out,
                                 "duplicate_key",
                                 at,
                                 at,
-                                format!(
-                                    "`{k}` is set twice in this table; the value on line {} is lost",
-                                    self.line_of(*first) + 1
-                                ),
+                                format!("`{k}` is set twice in this table{lost}"),
                                 None,
                             );
                         } else {
@@ -413,6 +417,11 @@ impl<'s> Scan<'s> {
     /// Whether the tokens `a..b` yield a boolean: a comparison, `not`,
     /// or `is` at depth zero.
     fn is_boolean_expr(&self, a: usize, b: usize) -> bool {
+        // One name, declared `boolean`: a parameter or a local says so.
+        if b == a + 1 && self.declared_boolean(self.t(a)) {
+            return true;
+        }
+
         let mut depth = 0i32;
 
         for j in a..b {
@@ -433,6 +442,17 @@ impl<'s> Scan<'s> {
         }
 
         false
+    }
+
+    /// Reports if a name carries a `: boolean` annotation anywhere in the
+    /// file, as a parameter or as a local.
+    fn declared_boolean(&self, name: &str) -> bool {
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return false;
+        }
+
+        (0..self.toks.len().saturating_sub(2))
+            .any(|j| self.t(j) == name && self.t(j + 1) == ":" && self.t(j + 2) == "boolean")
     }
 
     /// `if c then return a else return b end`: a boolean by hand, or a
@@ -502,6 +522,10 @@ impl<'s> Scan<'s> {
                         Some(form.clone()),
                     );
                 }
+
+                // `identical_branches` covers two returns of one value;
+                // a ternary of the same value on both sides is no fix.
+                (x, y) if x == y => {}
 
                 _ => {
                     let rewrite = format!("return {cond} ? {a} : {b}");
@@ -1104,13 +1128,27 @@ mod tests {
 
     /// The lints of a source, without the unused ones: the sources
     /// here bind names to show a shape, not to read them.
+    /// The lints of one source, straight from the lint pass.
+    ///
+    /// These lints read the token stream, so they fire on a source the
+    /// parser rejects too, and `compile` drops the lints of such a file.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        crate::compile(src)
-            .unwrap()
-            .lints
-            .into_iter()
-            .filter(|l| !matches!(l.name, "unused_variable" | "unused_function"))
-            .collect()
+        let Ok(parsed) =
+            alloy_syntax::parse_lenient(src, alloy_syntax::parser::ParseOptions::default())
+        else {
+            panic!("the source does not lex");
+        };
+
+        crate::lint::run(
+            src,
+            &parsed.lexed.toks,
+            &parsed.chunk,
+            false,
+            &crate::lint::Thresholds::default(),
+        )
+        .into_iter()
+        .filter(|l| !matches!(l.name, "unused_variable" | "unused_function"))
+        .collect()
     }
 
     fn fixed(src: &str) -> String {

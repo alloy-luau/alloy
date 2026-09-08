@@ -362,6 +362,8 @@ pub struct ImplDecl {
     pub trait_name: Option<TokSpan>,
     /// The dotted target name.
     pub target: TokSpan,
+    /// `impl Box<T>`: the parameters the methods may name.
+    pub generics: Option<TokSpan>,
     pub methods: Vec<Function>,
     pub span: TokSpan,
 }

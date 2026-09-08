@@ -1,0 +1,40 @@
+-- Golden case for the compiler-semantics sweep: a payload enum with an
+-- impl, a generic struct, an exhaustive match statement, and a spread.
+enum Shape as
+    Circle(number)
+    Rect(number, number)
+end
+
+impl Shape
+    function area(self): number
+        return match self with
+            case Circle(r) then r * r
+            case Rect(w, h) then w * h
+        end
+    end
+end
+
+struct Box<T> as
+    value: T
+    count: number = 1
+end
+
+impl Box<T>
+    function get(self): T
+        return self.value
+    end
+end
+
+local function describe(s: Shape)
+    match s with
+        case Circle(r) then
+            print("circle", r)
+        case Rect(w, h) then
+            print("rect", w, h)
+    end
+end
+
+local base = { x = 1, y = 2 }
+local merged = { ...base, z = 3 }
+local b = new Box<<number>> { value = 5 }
+print(Shape.Rect(2, 3):area(), describe, merged, b:get())

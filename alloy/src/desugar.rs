@@ -95,7 +95,9 @@ pub struct EmitOptions {
 /// annotation is `None`: a `Signal<T...>` takes a pack, which explicit
 /// arguments cannot name, and the annotation alone types it.
 fn generic_head(ty: &str) -> Option<(String, String)> {
-    let ty = ty.trim();
+    // `T[]` is `Array<T>`, so the bracket form names the same head.
+    let named = array_types(ty);
+    let ty = named.trim();
     let open = ty.find('<')?;
     let base = ty[..open].trim();
 
@@ -119,6 +121,10 @@ struct FieldType {
     ty: TokSpan,
     private: bool,
 }
+
+/// One `attribute name(params) on targets` the file declares: the
+/// targets it takes, and each parameter's name and type.
+type AttrDecl = (Vec<String>, Vec<(String, Option<String>)>);
 
 /// A struct another file declares, for the wire layout of a remote
 /// that carries it: each field with its type text and its width.
@@ -342,6 +348,12 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             "Result".to_string(),
             vec![("Ok".to_string(), 1), ("Err".to_string(), 1)],
         )]),
+        attr_decls: HashMap::new(),
+        imported_names: HashSet::new(),
+        ret_types: Vec::new(),
+        result_aliases: HashSet::new(),
+        enum_decls: HashMap::new(),
+        impl_methods: HashMap::new(),
         renames: Vec::new(),
         ship_blanks: Vec::new(),
         structs: HashSet::new(),
@@ -382,6 +394,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
     d.scan_reduce_inserts(&chunk.block);
+    d.scan_static_checks(&chunk.block);
 
     // Leading trivia, the block, trailing trivia: the printer's shape. The
     // std require, when the file needs one, goes on the first line after
@@ -580,6 +593,26 @@ struct Desugar<'s> {
     has_default_export: bool,
     /// Declared enums: name to (variant, payload count) list.
     enums: HashMap<String, Vec<(String, usize)>>,
+    /// Attributes the file declares: name to (targets, parameter names
+    /// and types). An attribute check reads it beside the built-in list.
+    attr_decls: HashMap<String, AttrDecl>,
+    /// Names an `import` brings in. An attribute of an imported name is
+    /// not checked here; this file cannot see its targets.
+    imported_names: HashSet<String>,
+    /// The declared return type of each function body under render,
+    /// innermost last. `try` reads it: it compiles only inside a function
+    /// that returns a Result.
+    ret_types: Vec<Option<String>>,
+    /// Type aliases the file declares whose value is a `Result`, so a
+    /// function that returns one still takes `try`.
+    result_aliases: HashSet<String>,
+    /// The enums this file declares, from the prescan, so a use before
+    /// the declaration still checks. `enums` also holds `Result`, which
+    /// the std owns and whose table carries more than its variants.
+    enum_decls: HashMap<String, Vec<(String, usize)>>,
+    /// Method and static names an `impl` block writes, by target. An enum
+    /// member check reads it so a method call is not a missing variant.
+    impl_methods: HashMap<String, HashSet<String>>,
     /// Pattern bindings under substitution in expression arms, innermost
     /// last: a binding name maps to the access path it stands for.
     renames: Vec<HashMap<String, String>>,
@@ -996,8 +1029,10 @@ impl<'s> Desugar<'s> {
                     vs,
                     &format!("function {name}.{vname}({plist}){ret} return {value} end"),
                 );
+                // The alias carries the metatable, so a method an `impl`
+                // writes on the enum resolves on a payload value.
                 types.push(format!(
-                    "{{ tag: \"{vname}\", {} }}",
+                    "typeof(setmetatable({{}} :: {{ tag: \"{vname}\", {} }}, {name}))",
                     field_types.join(", ")
                 ));
             }
@@ -1039,6 +1074,7 @@ impl<'s> Desugar<'s> {
             .map(|v| v.payload.len())
             .max()
             .unwrap_or(0);
+        let mut derived: HashSet<String> = HashSet::new();
 
         for a in &e.attributes {
             let Some(aname) = a.name else { continue };
@@ -1048,7 +1084,15 @@ impl<'s> Desugar<'s> {
             }
 
             for arg in &a.args {
-                match self.text_of(arg.span()) {
+                let which = self.text_of(arg.span()).to_string();
+                // `Eq` and `PartialEq` write the same `__eq`.
+                let key = if which == "PartialEq" { "Eq" } else { &which };
+
+                if !derived.insert(key.to_string()) {
+                    continue;
+                }
+
+                match which.as_str() {
                     "Eq" | "PartialEq" => {
                         let slots: Vec<String> = (1..=max_arity)
                             .map(|i| format!(" and a._{i} == b._{i}"))
@@ -1108,7 +1152,13 @@ impl<'s> Desugar<'s> {
     fn impl_decl(&mut self, i: &ImplDecl) {
         let target_name = self.text_of(i.target).to_string();
         let start = self.byte_start(i.span);
-        let header_end = self.byte_end(i.target);
+        // The header runs to the end of the target, and past `<T>` when
+        // the impl declares parameters: Luau has no such header.
+        let header_end = i
+            .generics
+            .filter(|g| g.start >= i.target.end)
+            .map(|g| self.byte_end(g))
+            .unwrap_or_else(|| self.byte_end(i.target));
 
         if self.options.definitions {
             self.blank_lines(start, self.byte_end(i.span));
@@ -1146,7 +1196,13 @@ impl<'s> Desugar<'s> {
             || self.enums.contains_key(&target_name))
             && !self.generic_types.contains(&target_name);
 
-        let types_self = self.options.check && (foreign || local_type);
+        // `impl Box<T>`: the parameters go on each method, so its body
+        // and its signature may name them.
+        let impl_generics = i
+            .generics
+            .map(|g| strip_bounds(self.text_of(g)))
+            .unwrap_or_default();
+        let types_self = self.options.check && (foreign || local_type || !impl_generics.is_empty());
         // A struct with private members: a private method lands on
         // `Target__private` in the check artifact, and a public method
         // rebinds `self` to the full view on its first line.
@@ -1161,7 +1217,7 @@ impl<'s> Desugar<'s> {
                 self.self_type = Some(if split && is_private {
                     format!("{target_name}__all")
                 } else {
-                    target_name.clone()
+                    format!("{target_name}{impl_generics}")
                 });
             }
 
@@ -1200,7 +1256,20 @@ impl<'s> Desugar<'s> {
             } else {
                 target.clone()
             };
-            self.generate(fn_tok_end, &format!(" {owner}.{mname}"));
+            // The insert anchors on the method's own name, not on the
+            // gap after `function`: a diagnostic the checker puts on the
+            // inserted owner then lands on a name the source shows.
+            // A method of a generic impl carries the impl's parameters,
+            // unless it declares its own.
+            let method_generics = if m.body.generics.is_none() {
+                impl_generics.as_str()
+            } else {
+                ""
+            };
+            self.generate(
+                self.byte_start(name_span),
+                &format!(" {owner}.{mname}{method_generics}"),
+            );
             let after_name = self.byte_end(name_span);
             let rest = TokSpan::new(name_span.end as usize, m.span.end as usize);
             let _ = after_name;
@@ -1271,7 +1340,7 @@ impl<'s> Desugar<'s> {
                         None => self.diagnose(
                             t,
                             &format!(
-                                "`impl {trait_name} for {target_name}` does not write `{m}`; the trait requires it"
+                                "`impl {trait_name} for {target_name}` does not write `{m}`; the trait declares it"
                             ),
                         ),
 
@@ -1282,7 +1351,7 @@ impl<'s> Desugar<'s> {
                             self.diagnose(
                                 f.path[0],
                                 &format!(
-                                    "`{m}` takes {} parameter{} in `{trait_name}`, {} here",
+                                    "the trait method `{m}` takes {} parameter{} in `{trait_name}`, {} here",
                                     arity,
                                     if arity == 1 { "" } else { "s" },
                                     f.body.params.len()
@@ -1502,6 +1571,100 @@ impl<'s> Desugar<'s> {
         (test, c)
     }
 
+    /// Checks the variant patterns of a match against the enum they name.
+    ///
+    /// A pattern whose variant belongs to a known enum must bind the
+    /// payload the variant carries. A name no enum owns is a missing
+    /// variant of the enum the other arms name.
+    fn check_variant_patterns(&mut self, arms: &[&[Pattern]]) -> bool {
+        let mut reported = false;
+        let mut flat: Vec<(TokSpan, usize)> = Vec::new();
+
+        for pats in arms {
+            let mut stack: Vec<&Pattern> = pats.iter().collect();
+
+            while let Some(p) = stack.pop() {
+                match p {
+                    Pattern::Or(a, b, _) => {
+                        stack.push(a);
+                        stack.push(b);
+                    }
+
+                    Pattern::Variant { name, args, .. } => {
+                        flat.push((*name, args.len()));
+
+                        for a in args {
+                            stack.push(a);
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+
+        // The enum of the match: the first variant name a declared enum
+        // owns. A name none owns is then a variant that enum lacks.
+        let owner = flat.iter().find_map(|(name, _)| {
+            let vname = self.text_of(*name);
+
+            self.enums
+                .iter()
+                .find(|(_, vs)| vs.iter().any(|(v, _)| v == vname))
+                .map(|(e, _)| e.clone())
+        });
+
+        for (name, binds) in flat {
+            let vname = self.text_of(name).to_string();
+            let found = self
+                .enums
+                .iter()
+                .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                .map(|(e, vs)| {
+                    (
+                        e.clone(),
+                        vs.iter()
+                            .find(|(v, _)| *v == vname)
+                            .map(|(_, n)| *n)
+                            .unwrap_or(0),
+                    )
+                });
+
+            match found {
+                Some((_, arity)) if arity != binds => {
+                    let message = format!(
+                        "the variant `{vname}` carries {}, the arm binds {binds}",
+                        if arity == 1 {
+                            "1 value".to_string()
+                        } else {
+                            format!("{arity} values")
+                        }
+                    );
+                    self.diagnose(name, &message);
+                    reported = true;
+                }
+
+                Some(_) => {}
+
+                None => {
+                    if let Some(e) = &owner
+                        && let Some(vs) = self.enum_decls.get(e)
+                    {
+                        let names: Vec<&str> = vs.iter().map(|(v, _)| v.as_str()).collect();
+                        let message = format!(
+                            "`{e}` has no variant `{vname}`; its variants are {}",
+                            list_names(&names)
+                        );
+                        self.diagnose(name, &message);
+                        reported = true;
+                    }
+                }
+            }
+        }
+
+        reported
+    }
+
     /// Checks single-level exhaustiveness over a known enum.
     fn match_is_exhaustive(&self, arms: &[&[Pattern]], guards: &[bool]) -> bool {
         // One scrutinee; a guarded arm proves nothing.
@@ -1584,6 +1747,20 @@ impl<'s> Desugar<'s> {
                         {
                             enum_name.get_or_insert(e.to_string());
                             named.push(v.to_string());
+                        }
+                    }
+
+                    // `case "Red"` matches a unit variant: the emit
+                    // compares the same string.
+                    Pattern::Literal(v) => {
+                        if let Expr::String(span) = v.as_ref() {
+                            let text = self.text_of(*span);
+                            let name = text.trim_matches(|c| c == '"' || c == '\'').to_string();
+
+                            if let Some(e) = self.unit_variant_of(&name) {
+                                enum_name.get_or_insert(e);
+                                named.push(name);
+                            }
                         }
                     }
 
@@ -1820,15 +1997,13 @@ impl<'s> Desugar<'s> {
         let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
 
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
+        // A rejected pattern makes the arm list unreliable, so the
+        // exhaustiveness message would name the wrong variant.
+        let bad_arm = self.check_variant_patterns(&pats);
 
-        if m.default.is_none() && !exhaustive {
+        if m.default.is_none() && !exhaustive && !bad_arm {
             let msg = self.not_exhaustive_message(&pats);
             self.diagnose(m.span, &msg);
-        }
-
-        if m.default.is_some() {
-            let arms_end = m.arms.last().map_or(m.span.start, |a| a.span.end);
-            self.default_lints(m.span, arms_end, exhaustive, false);
         }
 
         if let Some(d) = &m.default {
@@ -1901,6 +2076,17 @@ impl<'s> Desugar<'s> {
 
         let end_tok = self.toks[m.span.end as usize - 1];
         self.copy(cursor, end_tok.start);
+
+        // Every variant has an arm, so the chain has no `else` and the
+        // checker reads a path that falls through. The raise closes it,
+        // and an exhaustive match whose arms all return counts as one.
+        if m.default.is_none() && exhaustive && !m.arms.is_empty() {
+            self.generate(
+                end_tok.start,
+                "else error(\"match: no arm covers this value\", 2) ",
+            );
+        }
+
         self.copy(end_tok.start, end_tok.end);
         self.generate(end_tok.end, " end");
     }
@@ -1919,10 +2105,19 @@ impl<'s> Desugar<'s> {
         let pats: Vec<&[Pattern]> = m.arms.iter().map(|a| a.patterns.as_slice()).collect();
         let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
+        // A rejected pattern makes the arm list unreliable, so the
+        // exhaustiveness message would name the wrong variant.
+        let bad_arm = self.check_variant_patterns(&pats);
 
-        if m.default.is_none() && !exhaustive {
+        if m.default.is_none() && !exhaustive && !bad_arm {
             let msg = self.not_exhaustive_message(&pats);
             self.diagnose(m.span, &msg);
+        }
+
+        if let Some(d) = &m.default {
+            let arms_end = m.arms.last().map_or(m.span.start, |a| a.span.end);
+            let empty = matches!(d.as_ref(), Expr::Nil(_));
+            self.default_lints(m.span, arms_end, exhaustive, empty);
         }
 
         let with_end = self.toks[m
@@ -2325,6 +2520,256 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// Walks the file for checks the emit does not need. A statement that
+    /// desugars to itself is copied whole, so its expressions never reach
+    /// `expr`; this pass sees them all.
+    fn scan_static_checks(&mut self, block: &Block) {
+        for stmt in &block.stmts {
+            self.check_stmt_attrs(stmt);
+            self.check_children_of(stmt_children(stmt));
+        }
+    }
+
+    /// The attributes of one declaration, against the target each one
+    /// takes.
+    fn check_stmt_attrs(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Function(f) => self.check_attrs(&f.attrs, "function"),
+
+            Stmt::LocalFunction(f) => self.check_attrs(&f.attrs, "function"),
+
+            Stmt::Local(l) => self.check_attrs(&l.attrs, "local"),
+
+            Stmt::Remote(r) => self.check_attrs(&r.attributes, "remote"),
+
+            Stmt::Struct(st) => {
+                self.check_attrs(&st.attributes, "struct");
+                let name = self.text_of(st.name).to_string();
+                let mut seen: HashSet<String> = HashSet::new();
+
+                for f in &st.fields {
+                    self.check_attrs(&f.attributes, "field");
+                    let fname = self.text_of(f.name).to_string();
+
+                    if !seen.insert(fname.clone()) {
+                        let message = format!("`{name}` declares the field `{fname}` twice");
+                        self.diagnose(f.name, &message);
+                    }
+                }
+            }
+
+            Stmt::Enum(e) => {
+                self.check_attrs(&e.attributes, "enum");
+
+                for v in &e.variants {
+                    self.check_attrs(&v.attributes, "variant");
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    /// One attribute list: every name is declared, takes this target, and
+    /// carries the arguments it declares.
+    fn check_attrs(&mut self, attrs: &[Attr], target: &str) {
+        let mut inline: Option<TokSpan> = None;
+        let mut noinline: Option<TokSpan> = None;
+
+        for a in attrs {
+            let Some(n) = a.name else { continue };
+            let name = self.text_of(n).to_string();
+
+            match name.as_str() {
+                "inline" => inline = Some(a.span),
+                "noinline" => noinline = Some(a.span),
+                _ => {}
+            }
+
+            let declared = self.attr_decls.get(&name).cloned();
+            let targets: Vec<String> = match (builtin_attr_targets(&name), &declared) {
+                (Some(t), _) => t.iter().map(|s| (*s).to_string()).collect(),
+
+                (None, Some((t, _))) => t.clone(),
+
+                (None, None) => {
+                    // An imported attribute keeps its targets in the
+                    // module that declares it.
+                    if !self.imported_names.contains(&name) {
+                        let message = format!(
+                            "no attribute named `{name}`; `attribute {name} on {target}` declares one"
+                        );
+                        self.diagnose(a.span, &message);
+                    }
+
+                    continue;
+                }
+            };
+
+            if !targets.iter().any(|t| t == target) {
+                let list: Vec<&str> = targets.iter().map(String::as_str).collect();
+                let message = format!(
+                    "the attribute `{name}` has no meaning on a {target}; it goes on {}",
+                    list_names(&list)
+                );
+                self.diagnose(a.span, &message);
+
+                continue;
+            }
+
+            self.check_attr_args(a, &name, declared.as_ref().map(|(_, p)| p.as_slice()));
+        }
+
+        if let (Some(_), Some(at)) = (inline, noinline) {
+            self.diagnose(
+                at,
+                "the attributes `inline` and `noinline` ask for opposite things; keep one",
+            );
+        }
+    }
+
+    /// The arguments of one attribute: the count a built-in takes, and the
+    /// count and the literal types a declared one takes.
+    fn check_attr_args(
+        &mut self,
+        a: &Attr,
+        name: &str,
+        params: Option<&[(String, Option<String>)]>,
+    ) {
+        const NO_ARGS: &[&str] = &[
+            "native",
+            "checked",
+            "inline",
+            "noinline",
+            "test",
+            "sealed",
+            "skip",
+            "unreliable",
+            "immediate",
+            "u8",
+            "u16",
+            "u32",
+            "i8",
+            "i16",
+            "i32",
+            "f32",
+        ];
+
+        if NO_ARGS.contains(&name) && !a.args.is_empty() {
+            let message = format!("the attribute `{name}` takes no argument");
+            self.diagnose(a.span, &message);
+
+            return;
+        }
+
+        if name == "deprecated" && a.args.len() > 1 {
+            let message = format!(
+                "the attribute `deprecated` takes one message, {} given",
+                a.args.len()
+            );
+            self.diagnose(a.span, &message);
+
+            return;
+        }
+
+        let Some(params) = params else {
+            return;
+        };
+
+        if a.args.len() != params.len() {
+            let message = format!(
+                "the attribute `{name}` takes {} argument{}, {} given",
+                params.len(),
+                if params.len() == 1 { "" } else { "s" },
+                a.args.len()
+            );
+            self.diagnose(a.span, &message);
+
+            return;
+        }
+
+        for (arg, (pname, ty)) in a.args.iter().zip(params) {
+            let Some(want) = ty.as_deref() else { continue };
+            let Some(got) = literal_kind(arg) else {
+                continue;
+            };
+
+            if want != got {
+                let message =
+                    format!("the attribute `{name}` takes {want} for `{pname}`, {got} given");
+                self.diagnose(arg.span(), &message);
+            }
+        }
+    }
+
+    fn check_children_of(&mut self, children: Vec<Child<'_>>) {
+        for child in children {
+            match child {
+                Child::Expr(e) => {
+                    self.check_enum_member(e);
+                    self.check_await(e);
+                    self.check_children_of(expr_children(e));
+                }
+
+                Child::Block(b) => self.scan_static_checks(b),
+
+                Child::Function(f) => self.scan_static_checks(&f.block),
+            }
+        }
+    }
+
+    /// `await 5`: the operand is a literal no Future can be.
+    fn check_await(&mut self, e: &Expr) {
+        let Expr::Await { operand, span } = e else {
+            return;
+        };
+        let Some(kind) = literal_kind(operand) else {
+            return;
+        };
+        let message = format!("`await` takes a Future or an awaitable, not a {kind}");
+        self.diagnose(*span, &message);
+    }
+
+    /// `Shape.Triangle` on an enum the file declares: the member is a
+    /// variant, a method the impl writes, or nothing at all.
+    fn check_enum_member(&mut self, e: &Expr) {
+        const BUILT_IN: &[&str] = &["is", "clone", "__index", "__tostring", "__eq", "__call"];
+
+        let Expr::Index {
+            object,
+            key: IndexKey::Field(field),
+            ..
+        } = e
+        else {
+            return;
+        };
+        let Expr::Name(n) = object.as_ref() else {
+            return;
+        };
+        let ename = self.text_of(*n).to_string();
+        let Some(variants) = self.enum_decls.get(&ename) else {
+            return;
+        };
+        let member = self.text_of(*field).to_string();
+
+        if BUILT_IN.contains(&member.as_str())
+            || variants.iter().any(|(v, _)| *v == member)
+            || self
+                .impl_methods
+                .get(&ename)
+                .is_some_and(|m| m.contains(&member))
+        {
+            return;
+        }
+
+        let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
+        let message = format!(
+            "`{ename}` has no variant `{member}`; its variants are {}",
+            list_names(&names)
+        );
+        self.diagnose(*field, &message);
+    }
+
     fn scan_expr_for_reduce(&mut self, e: &Expr) {
         if let Expr::Call {
             method: Some(m),
@@ -2385,6 +2830,13 @@ impl<'s> Desugar<'s> {
                 _ => {}
             }
 
+            if let Stmt::TypeAlias(t) = stmt
+                && let Some((_, value)) = self.text_of(t.span).split_once('=')
+                && value.trim_start().starts_with("Result")
+            {
+                self.result_aliases.insert(self.text_of(t.name).to_string());
+            }
+
             let declared = match stmt {
                 Stmt::TypeAlias(t) => Some(t.name),
 
@@ -2404,8 +2856,69 @@ impl<'s> Desugar<'s> {
             }
 
             match stmt {
+                Stmt::Attribute(a) => {
+                    let name = self.text_of(a.name).to_string();
+                    let targets: Vec<String> = a
+                        .targets
+                        .iter()
+                        .map(|t| self.text_of(*t).to_string())
+                        .collect();
+                    let params: Vec<(String, Option<String>)> = a
+                        .params
+                        .iter()
+                        .map(|p| {
+                            (
+                                self.text_of(p.name).to_string(),
+                                p.ty.map(|t| self.text_of(t).trim().to_string()),
+                            )
+                        })
+                        .collect();
+                    self.attr_decls.insert(name, (targets, params));
+                }
+
+                Stmt::Import(i) => match &i.kind {
+                    ImportKind::Namespace(n) => {
+                        self.imported_names.insert(self.text_of(*n).to_string());
+                    }
+
+                    ImportKind::Both(n, specs) => {
+                        self.imported_names.insert(self.text_of(*n).to_string());
+
+                        for sp in specs {
+                            let name = sp.alias.unwrap_or(sp.name);
+                            self.imported_names.insert(self.text_of(name).to_string());
+                        }
+                    }
+
+                    ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
+                        for sp in specs {
+                            let name = sp.alias.unwrap_or(sp.name);
+                            self.imported_names.insert(self.text_of(name).to_string());
+                        }
+                    }
+                },
+
+                Stmt::Enum(e) => {
+                    let name = self.text_of(e.name).to_string();
+                    let variants: Vec<(String, usize)> = e
+                        .variants
+                        .iter()
+                        .map(|v| (self.text_of(v.name).to_string(), v.payload.len()))
+                        .collect();
+                    self.enum_decls.insert(name, variants);
+                }
+
                 Stmt::Impl(i) => {
                     let target = self.text_of(i.target).to_string();
+                    let names: HashSet<String> = i
+                        .methods
+                        .iter()
+                        .filter_map(|m| m.path.first().map(|n| self.text_of(*n).to_string()))
+                        .collect();
+                    self.impl_methods
+                        .entry(target.clone())
+                        .or_default()
+                        .extend(names);
 
                     if i.methods.iter().any(|m| {
                         m.path
@@ -2756,11 +3269,18 @@ impl<'s> Desugar<'s> {
         // form calls `__new`, a typed raw constructor, instead of the
         // class. A generic struct stays untyped, its parameters being out
         // of scope.
-        let typed = self.options.check && generics.is_empty();
+        // A generic struct types its constructor too: the parameters go
+        // on the function, so the field types and the result name them.
+        let typed = self.options.check && (generics.is_empty() || !split);
+        let fn_generics = if generics.is_empty() {
+            String::new()
+        } else {
+            generics.clone()
+        };
         let (param, ret) = if typed {
             (
                 format!("f: {{ {} }}", param_types.join(", ")),
-                format!(": {name}"),
+                format!(": {name}{fn_generics}"),
             )
         } else {
             ("f".to_string(), String::new())
@@ -2770,7 +3290,9 @@ impl<'s> Desugar<'s> {
             let new_fn = if self.structs_with_new.contains_key(&name) {
                 String::new()
             } else {
-                format!(" function {name}.new({param}){ret} return {name}.__new(f) end")
+                format!(
+                    " function {name}.new{fn_generics}({param}){ret} return {name}.__new(f) end"
+                )
             };
 
             let private_table = if split {
@@ -2780,7 +3302,7 @@ impl<'s> Desugar<'s> {
             };
 
             format!(
-                "local {name} = {{}} {name}.__index = {name}{private_table} function {name}.__new({param}){ret} {d} return (setmetatable(f, {name}) :: any) end{new_fn}"
+                "local {name} = {{}} {name}.__index = {name}{private_table} function {name}.__new{fn_generics}({param}){ret} {d} return (setmetatable(f, {name}) :: any) end{new_fn}"
             )
         } else {
             format!(
@@ -2796,6 +3318,7 @@ impl<'s> Desugar<'s> {
         // Derives and attributes on the `end` line.
         let mut tail = type_line;
         let mut derives_debug = false;
+        let mut derived: HashSet<String> = HashSet::new();
 
         for a in &st.attributes {
             let Some(aname) = a.name else { continue };
@@ -2804,8 +3327,27 @@ impl<'s> Desugar<'s> {
                 for arg in &a.args {
                     let which = self.text_of(arg.span()).to_string();
                     derives_debug |= which == "Debug";
+
+                    // `Eq` and `PartialEq` write the same `__eq`; naming
+                    // both must not write it twice.
+                    let key = if which == "PartialEq" {
+                        "Eq".to_string()
+                    } else {
+                        which.clone()
+                    };
+
+                    if !derived.insert(key) {
+                        continue;
+                    }
+
                     tail.push(' ');
-                    tail.push_str(&self.derive_struct(&name, &which, &field_names, &st.fields));
+                    tail.push_str(&self.derive_struct(
+                        &name,
+                        &which,
+                        arg.span(),
+                        &field_names,
+                        &st.fields,
+                    ));
                 }
             }
         }
@@ -2921,6 +3463,7 @@ impl<'s> Desugar<'s> {
         &mut self,
         name: &str,
         which: &str,
+        at: TokSpan,
         fields: &[String],
         decls: &[Field],
     ) -> String {
@@ -2968,8 +3511,10 @@ impl<'s> Desugar<'s> {
                     parts.join(" .. \", \" .. ")
                 };
 
+                let ret = if self.options.check { ": string" } else { "" };
+
                 format!(
-                    "{name}.__tostring = function(s{sn}) return \"{name} {{ \" .. {inner} .. \" }}\" end"
+                    "{name}.__tostring = function(s{sn}) return \"{name} {{ \" .. {inner} .. \" }}\" end function {name}.debug(self{sn}){ret} return tostring(self) end"
                 )
             }
 
@@ -2981,9 +3526,9 @@ impl<'s> Desugar<'s> {
                 } else {
                     String::new()
                 };
-                let value = self.any_cast(&format!("setmetatable(table.clone(s), {name})"));
+                let value = self.any_cast(&format!("setmetatable(table.clone(self), {name})"));
 
-                format!("function {name}.clone(s{sn}){ret} return {value} end")
+                format!("function {name}.clone(self{sn}){ret} return {value} end")
             }
 
             "Serialize" => {
@@ -3008,12 +3553,12 @@ impl<'s> Desugar<'s> {
                         .and_then(|a| a.args.first())
                         .map(|e| self.text_of(e.span()).trim_matches('"').to_string())
                         .unwrap_or(fname.clone());
-                    to.push(format!("{key} = s.{fname}"));
+                    to.push(format!("{key} = self.{fname}"));
                     from.push(format!("{fname} = t.{key}"));
                 }
 
                 format!(
-                    "function {name}.to_table(s{sn}) return {{ {} }} end function {name}.from_table(t{tn}) return {}({{ {} }}) end",
+                    "function {name}.to_table(self{sn}) return {{ {} }} end function {name}.from_table(t{tn}) return {}({{ {} }}) end",
                     to.join(", "),
                     self.raw_ctor(name),
                     from.join(", ")
@@ -3021,11 +3566,8 @@ impl<'s> Desugar<'s> {
             }
 
             other => {
-                self.diagnostics.push(Diagnostic {
-                    start: 0,
-                    end: 0,
-                    message: format!("unknown derive `{other}`"),
-                });
+                let message = format!("unknown derive `{other}`");
+                self.diagnose(at, &message);
 
                 String::new()
             }
@@ -3230,14 +3772,16 @@ impl<'s> Desugar<'s> {
             let Some(ty) = p.ty else { continue };
             let text = self.text_of(ty).to_string();
 
-            if let Some(why) = not_wire_type(&text) {
+            if let Some((field, bad, why)) = wire_offender(&text) {
                 let pname = self.text_of(p.name).to_string();
+                let what = match field {
+                    Some(f) => format!("parameter `{pname}` has field `{f}` of type `{bad}`"),
+
+                    None => format!("parameter `{pname}` has type `{bad}`"),
+                };
                 self.diagnose(
                     ty,
-                    &format!(
-                        "remote `{name}`: parameter `{pname}` has type `{}`, which {why}; a remote carries only data",
-                        text.trim()
-                    ),
+                    &format!("remote `{name}`: {what}, which {why}; a remote carries only data"),
                 );
             }
         }
@@ -3547,14 +4091,62 @@ impl<'s> Desugar<'s> {
             (false, true) => server,
             _ => format!("({client}) & ({server})"),
         };
-        let fire_ty = pick(client_fire, server_fire);
-        let on_ty = pick(server_on, client_on);
-        let call_ty = pick(client_call, server_call);
+        // A `.client.aly` or `.server.aly` file sees one side of the
+        // remote. Every other file is shared and sees both, as a module
+        // that branches on `RunService` does.
+        let side = file_side(&self.options.file_name);
+        let client_fires = r.from_client && side != Some(Side::Server);
+        let server_fires = r.from_server && side != Some(Side::Client);
+        let client_handles = r.from_server && side != Some(Side::Server);
+        let server_handles = r.from_client && side != Some(Side::Client);
+        let mut members = vec!["spec: any".to_string(), "instance: Instance?".to_string()];
 
-        format!(
-            "{{ spec: any, instance: Instance?, fire: {fire_ty}, fire_all: ({fire}) -> (), fire_except: ({}) -> (), call: {call_ty}, on: {on_ty}, once: {on_ty}, on_ratelimited: (handler: (player: Player) -> ()) -> (), wait: () -> {std}.Future<any> }}",
-            with_player("except: Player", &fire)
-        )
+        match (client_fires, server_fires) {
+            (false, false) => {}
+
+            (a, b) => {
+                let ty = match (a, b) {
+                    (true, false) => client_fire,
+                    (false, true) => server_fire,
+                    _ => pick(client_fire, server_fire),
+                };
+                let call = match (a, b) {
+                    (true, false) => client_call,
+                    (false, true) => server_call,
+                    _ => pick(client_call, server_call),
+                };
+                members.push(format!("fire: {ty}"));
+                members.push(format!("call: {call}"));
+            }
+        }
+
+        // Only the server reaches every client.
+        if server_fires {
+            members.push(format!("fire_all: ({fire}) -> ()"));
+            members.push(format!(
+                "fire_except: ({}) -> ()",
+                with_player("except: Player", &fire)
+            ));
+        }
+
+        if client_handles || server_handles {
+            let ty = match (client_handles, server_handles) {
+                (true, false) => client_on,
+                (false, true) => server_on,
+                _ => pick(server_on, client_on),
+            };
+            members.push(format!("on: {ty}"));
+            members.push(format!("once: {ty}"));
+            members.push(format!("wait: () -> {std}.Future<any>"));
+        }
+
+        // The rate limit guards the client-to-server direction, so only
+        // the server hears a sender it refused.
+        if server_handles {
+            members.push("on_ratelimited: (handler: (player: Player) -> ()) -> ()".to_string());
+        }
+
+        format!("{{ {} }}", members.join(", "))
     }
 
     // --- attributes ------------------------------------------------------------
@@ -3650,7 +4242,15 @@ impl<'s> Desugar<'s> {
                     Err(message) => self.diagnose(a.span, &message),
                 },
 
-                Some(n @ ("native" | "checked" | "deprecated" | "inline" | "noinline")) => {
+                // Luau has no `@inline` or `@noinline`; the emit would
+                // report an invalid attribute on the declaration's line.
+                Some("inline" | "noinline") => {}
+
+                // The count check reports on the attribute; the emit
+                // would report again, on the declaration's line.
+                Some("deprecated") if a.args.len() > 1 => {}
+
+                Some(n @ ("native" | "checked" | "deprecated")) => {
                     if a.args.is_empty() {
                         upstream.push(format!("@{n}"));
                     } else {
@@ -4600,9 +5200,23 @@ impl<'s> Desugar<'s> {
         self.barrier = self.declared.len();
         self.scopes.push(HashSet::new());
         self.declare_params(body);
+        self.ret_types
+            .push(body.ret_type.map(|t| self.text_of(t).trim().to_string()));
         self.block(&body.block);
+        self.ret_types.pop();
         self.scopes.pop();
         self.barrier = saved;
+    }
+
+    /// Reports if the function under render returns a `Result`, which is
+    /// what `try` needs.
+    fn in_result_function(&self) -> bool {
+        let Some(Some(ty)) = self.ret_types.last() else {
+            return false;
+        };
+        let head = ty.split(['<', '?']).next().unwrap_or(ty).trim();
+
+        head == "Result" || self.result_aliases.contains(head)
     }
 
     fn stmt(&mut self, stmt: &Stmt) {
@@ -4966,13 +5580,10 @@ impl<'s> Desugar<'s> {
 
                             Err(message) => self.diagnose(a.span, &message),
                         }
-                    } else {
-                        self.diagnose(
-                            a.span,
-                            &format!("`@{name}` has no meaning on a local binding; attributes go on a function, a struct, an enum, a field, a remote, or a remote parameter"),
-                        );
                     }
 
+                    // The target check runs in `check_attrs`, over every
+                    // declaration at once.
                     self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
                 }
 
@@ -5403,6 +6014,21 @@ impl<'s> Desugar<'s> {
                 self.generate(anchor, &text);
             }
 
+            // `Signal.new<<A, B>>()`: the std types the statics with a
+            // type pack, which takes one parenthesized argument.
+            Expr::Call {
+                func,
+                method: None,
+                type_args: Some(t),
+                args,
+                ..
+            } if self.is_signal_new(func) => {
+                let std = self.std();
+                let targs = pack_type_args(&type_args_text(self.text_of(*t)));
+                let a = self.args_text(args);
+                self.generate(anchor, &format!("{std}.Signal.new{targs}{a}"));
+            }
+
             Expr::Index { .. } | Expr::Call { .. } | Expr::Child { .. } | Expr::NonNil { .. }
                 if chain_has_alloy(e)
                     || self.chain_has_ext(e)
@@ -5611,6 +6237,22 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// `Signal.new` on the std `Signal`, not on a local of that name.
+    fn is_signal_new(&self, func: &Expr) -> bool {
+        let Expr::Index {
+            object,
+            key: IndexKey::Field(f),
+            ..
+        } = func
+        else {
+            return false;
+        };
+
+        matches!(object.as_ref(), Expr::Name(n)
+            if self.text_of(*n) == "Signal" && !self.is_local("Signal"))
+            && self.text_of(*f) == "new"
+    }
+
     fn is_coalesce(&self, op: TokSpan) -> bool {
         op.end - op.start == 2 && self.text_of(op) == "??"
     }
@@ -5705,6 +6347,17 @@ impl<'s> Desugar<'s> {
     /// `try expr`: hoist the Result, return it on Err, yield the payload.
     fn try_expr(&mut self, operand: &Expr, span: TokSpan) -> String {
         let anchor = self.byte_start(span);
+
+        // At the top level `return` leaves the module, which the emit
+        // still writes; inside a function the return type must take an
+        // Err.
+        if !self.ret_types.is_empty() && !self.in_result_function() {
+            self.diagnose(
+                span,
+                "`try` works only inside a function that returns Result; it returns the Err from that function",
+            );
+        }
+
         let value = match operand {
             Expr::Await { operand: inner, .. } => {
                 let x = self.render_to_string(inner);
@@ -5968,7 +6621,7 @@ impl<'s> Desugar<'s> {
         let ctor = self.constructor_of(name);
         let n = self.render_to_string(name);
         let t = type_args
-            .map(|s| self.text_of(s).to_string())
+            .map(|s| type_args_text(self.text_of(s)))
             .unwrap_or_else(|| self.expected_args_for(name));
 
         match (args, init) {
@@ -6004,24 +6657,39 @@ impl<'s> Desugar<'s> {
     fn spread_table(&mut self, span: TokSpan, fields: &[TableField]) {
         let anchor = self.byte_start(span);
         let std = self.std();
-        self.generate(anchor, &format!("{std}.spread("));
+        let open = if self.options.check { "(" } else { "" };
+        self.generate(anchor, &format!("{open}{std}.spread("));
 
         let open_end = self.toks[span.start as usize].end;
         let close_start = self.toks[span.end as usize - 1].start;
         let mut cursor = open_end;
         let mut in_group = false;
+        // The parts of the merged type, in order, for the check artifact.
+        let mut parts: Vec<String> = Vec::new();
+        let mut group: Vec<String> = Vec::new();
+        let mut spread_seen = false;
 
         for (i, field) in fields.iter().enumerate() {
             let (fs, fe) = self.field_bytes(field);
             let is_spread = matches!(field, TableField::Spread(_));
             let last = i + 1 == fields.len();
+            let text = one_line(&self.src[fs as usize..fe as usize]);
 
             // The gap before a field carries the comma and the newlines.
             self.copy(cursor, fs);
 
             if let TableField::Spread(e) = field {
+                spread_seen = true;
                 self.expr(e);
+                parts.push(format!("typeof({})", text.trim_start_matches("...").trim()));
             } else {
+                if spread_seen && let TableField::Positional(v) = field {
+                    self.diagnose(
+                        v.span(),
+                        "a positional entry after a spread has no place to go; name it, or move it in front of the spread",
+                    );
+                }
+
                 if !in_group {
                     self.generate(fs, "{ ");
                     in_group = true;
@@ -6029,12 +6697,14 @@ impl<'s> Desugar<'s> {
 
                 let children = field_children(field);
                 self.stitch_between(fs, fe, &children);
-
+                group.push(text);
                 let next_is_spread = matches!(fields.get(i + 1), Some(TableField::Spread(_)));
 
                 if next_is_spread || last {
                     self.generate(fe, " }");
                     in_group = false;
+                    parts.push(format!("typeof({{ {} }})", group.join(", ")));
+                    group.clear();
                 }
             }
 
@@ -6054,7 +6724,14 @@ impl<'s> Desugar<'s> {
             None => self.copy(cursor, close_start),
         }
 
-        self.generate(close_start, ")");
+        // The runtime merge answers a bare table, so the check artifact
+        // says what the parts add up to: a key no part names is an error.
+        let cast = match (self.options.check, parts.is_empty()) {
+            (true, false) => format!(") :: {})", parts.join(" & ")),
+            (true, true) => "))".to_string(),
+            (false, _) => ")".to_string(),
+        };
+        self.generate(close_start, &cast);
     }
 
     fn field_bytes(&self, field: &TableField) -> (u32, u32) {
@@ -6158,11 +6835,12 @@ impl<'s> Desugar<'s> {
                 CallArgs::Table(_) => false,
             };
             let ty = type_args.map(|s| {
-                self.text_of(s)
-                    .trim_start_matches('<')
-                    .trim_end_matches('>')
-                    .trim()
-                    .to_string()
+                array_types(
+                    self.text_of(s)
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .trim(),
+                )
             });
             inner = match ty {
                 Some(t) => format!("(require{a} :: {t})"),
@@ -6194,9 +6872,11 @@ impl<'s> Desugar<'s> {
             let method = self.text_of(*f).to_string();
             let a = self.args_text(args);
 
+            let targs = type_args_text(&format!("<<{args_text}>>"));
+
             return ChainParts {
                 guard: None,
-                inner: format!("{inner}.{method}<<{args_text}>>{a}"),
+                inner: format!("{inner}.{method}{targs}{a}"),
             };
         }
 
@@ -6322,8 +7002,15 @@ impl<'s> Desugar<'s> {
                     None => String::new(),
                 };
                 let t = type_args
-                    .map(|s| self.text_of(s).to_string())
+                    .map(|s| type_args_text(self.text_of(s)))
                     .unwrap_or_default();
+                // `Signal.new<T...>` takes a type pack, not a list of
+                // type parameters, so its arguments go in parentheses.
+                let t = if prefix == "__alloy.Signal.new" {
+                    pack_type_args(&t)
+                } else {
+                    t
+                };
                 let a = self.args_text(args);
 
                 format!("{prefix}{m}{t}{a}")
@@ -6567,7 +7254,7 @@ impl<'s> Desugar<'s> {
     fn expected_args_for(&self, name: &Expr) -> String {
         match (name, &self.expected_generic) {
             (Expr::Name(n), Some((base, args))) if self.text_of(*n) == base => {
-                format!("<<{args}>>")
+                type_args_text(&format!("<<{args}>>"))
             }
 
             _ => String::new(),
@@ -7271,7 +7958,7 @@ impl<'s> Desugar<'s> {
         let ctor = self.constructor_of(name);
         let n = self.render_to_string(name);
         let t = type_args
-            .map(|s| self.text_of(s).to_string())
+            .map(|s| type_args_text(self.text_of(s)))
             .unwrap_or_default();
         // With no arguments the name is one this file did not declare:
         // the runtime constructs it, and the check artifact types the
@@ -8577,6 +9264,129 @@ fn apply_bounds(ty: &str, bounds: &[(String, String)]) -> String {
     out
 }
 
+/// A `<<A, B>>` list with every argument in Luau's own spelling. The
+/// annotation the type edits rewrite never reaches here, so the list
+/// carries the source text and needs the same rewrite.
+fn type_args_text(text: &str) -> String {
+    let Some(inner) = text.strip_prefix("<<").and_then(|t| t.strip_suffix(">>")) else {
+        return text.to_string();
+    };
+    let parts: Vec<String> = split_top_level(inner, ',')
+        .iter()
+        .map(|p| array_types(p))
+        .collect();
+
+    format!("<<{}>>", parts.join(", "))
+}
+
+/// One type with `T[]` written as `Array<T>`, at every depth. The
+/// bracket form is Alloy's own; Luau reads the named form alone.
+fn array_types(text: &str) -> String {
+    let text = text.trim();
+
+    if let Some(inner) = text.strip_suffix('?') {
+        return format!("{}?", array_types(inner));
+    }
+
+    if let Some(inner) = text.strip_suffix("[]") {
+        return format!("Array<{}>", array_types(inner));
+    }
+
+    // `Name<A, B>`: each argument takes the same rewrite.
+    if let Some(open) = text.find('<')
+        && text.ends_with('>')
+        && open > 0
+    {
+        let parts: Vec<String> = split_top_level(&text[open + 1..text.len() - 1], ',')
+            .iter()
+            .map(|p| array_types(p))
+            .collect();
+
+        return format!("{}<{}>", &text[..open], parts.join(", "));
+    }
+
+    text.to_string()
+}
+
+/// `<<A, B>>` as one type pack, `<<(A, B)>>`. Text already wrapped, or
+/// empty, comes back unchanged.
+fn pack_type_args(text: &str) -> String {
+    let Some(inner) = text
+        .strip_prefix("<<")
+        .and_then(|t| t.strip_suffix(">>"))
+        .map(str::trim)
+    else {
+        return text.to_string();
+    };
+
+    if inner.is_empty() || inner.starts_with('(') {
+        return text.to_string();
+    }
+
+    format!("<<({inner})>>")
+}
+
+/// The targets a built-in attribute takes, or `None` when the name is
+/// not one. The list mirrors `builtin_attribute_targets` in alloy-lsp.
+fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name {
+        "derive" | "sealed" => &["struct", "enum"],
+
+        "cfg" => &["function", "local"],
+
+        "test" | "native" | "checked" | "deprecated" | "inline" | "noinline" => &["function"],
+
+        "unreliable" | "ratelimit" | "timeout" | "validate" | "immediate" => &["remote"],
+
+        "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" => &["param", "field"],
+
+        "rename" | "skip" => &["field"],
+
+        _ => return None,
+    })
+}
+
+/// The type name of a literal argument, for an attribute's parameter
+/// type. Anything else reads `None`: only a literal checks here.
+fn literal_kind(e: &Expr) -> Option<&'static str> {
+    match e {
+        Expr::Number(_) => Some("number"),
+        Expr::String(_) => Some("string"),
+        Expr::True(_) | Expr::False(_) => Some("boolean"),
+        _ => None,
+    }
+}
+
+/// Which side of a remote a file sees, from its name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Client,
+    Server,
+}
+
+/// The side a file name declares: `ui.client.aly` is the client, and
+/// `main.server.aly` is the server. Any other name is shared.
+fn file_side(file: &str) -> Option<Side> {
+    let stem = file
+        .strip_suffix(".aly")
+        .or_else(|| file.strip_suffix(".alx"))
+        .unwrap_or(file);
+
+    if stem.ends_with(".client") {
+        Some(Side::Client)
+    } else if stem.ends_with(".server") {
+        Some(Side::Server)
+    } else {
+        None
+    }
+}
+
+/// A source slice with every run of whitespace as one space, so it fits
+/// on the line the generated text sits on.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Backticked names joined with commas and a final `and`.
 fn list_names(names: &[&str]) -> String {
     let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
@@ -8635,6 +9445,48 @@ fn group_len(text: &str, open: char, close: char) -> Option<usize> {
     None
 }
 
+/// The part of a remote parameter that cannot cross the wire: the field
+/// path that holds it when the type is a record, the type, and why.
+fn wire_offender(ty: &str) -> Option<(Option<String>, String, &'static str)> {
+    let mut trimmed = ty.trim();
+
+    while let Some(t) = trimmed
+        .strip_suffix('?')
+        .or_else(|| trimmed.strip_suffix("[]"))
+    {
+        trimmed = t.trim();
+    }
+
+    if let Some(inner) = trimmed.strip_prefix('{').and_then(|t| t.strip_suffix('}')) {
+        for part in split_top_level(inner, ',') {
+            let part = part.trim();
+            let Some((name, value)) = part.split_once(':') else {
+                continue;
+            };
+            let Some((deeper, bad, why)) = wire_offender(value) else {
+                continue;
+            };
+            let name = name
+                .trim()
+                .strip_prefix("read ")
+                .or_else(|| name.trim().strip_prefix("write "))
+                .unwrap_or(name.trim())
+                .trim();
+            let path = match deeper {
+                Some(d) => format!("{name}.{d}"),
+
+                None => name.to_string(),
+            };
+
+            return Some((Some(path), bad, why));
+        }
+
+        return None;
+    }
+
+    not_wire_type(trimmed).map(|why| (None, trimmed.to_string(), why))
+}
+
 fn not_wire_type(ty: &str) -> Option<&'static str> {
     if ty.contains("->") {
         return Some("is a function type");
@@ -8652,4 +9504,409 @@ fn not_wire_type(ty: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::EmitOptions;
+
+    fn messages(src: &str) -> Vec<String> {
+        crate::compile(src)
+            .unwrap()
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    fn lint_names(src: &str) -> Vec<&'static str> {
+        crate::compile(src)
+            .unwrap()
+            .lints
+            .iter()
+            .map(|l| l.name)
+            .collect()
+    }
+
+    #[test]
+    fn a_payload_enum_alias_carries_the_metatable() {
+        let src = "enum Shape as\n    Circle(number)\n    Rect(number, number)\nend\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.check.contains(
+                "type Shape = typeof(setmetatable({} :: { tag: \"Circle\", _1: number }, Shape))"
+            ),
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn a_match_arm_binds_the_payload_the_variant_carries() {
+        let src = "enum Shape as\n    Circle(number)\n    Rect(number, number)\nend\nlocal s = Shape.Circle(1)\nlocal n = match s with\n    case Circle(r, extra) then r\n    case Rect(w) then w\nend\nprint(n)\n";
+        let got = messages(src);
+        assert!(
+            got.iter()
+                .any(|m| m == "the variant `Circle` carries 1 value, the arm binds 2"),
+            "{got:?}"
+        );
+        assert!(
+            got.iter()
+                .any(|m| m == "the variant `Rect` carries 2 values, the arm binds 1"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_match_arm_names_a_variant_the_enum_has() {
+        let src = "enum Msg as\n    Join(number)\n    Chat(number, string)\nend\nlocal m = Msg.Join(1)\nlocal t = match m with\n    case Join(p) then \"j\"\n    case Chat(p, s) then \"c\"\n    case Quit(p) then \"q\"\nend\nprint(t)\n";
+        let got = messages(src);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            got[0],
+            "`Msg` has no variant `Quit`; its variants are `Join` and `Chat`"
+        );
+    }
+
+    #[test]
+    fn an_enum_member_that_is_no_variant_reports() {
+        let src = "enum Shape as\n    Circle(number)\n    Rect(number, number)\n    Empty\nend\nlocal nope = Shape.Triangle(1)\nprint(nope)\n";
+        let got = messages(src);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            got[0],
+            "`Shape` has no variant `Triangle`; its variants are `Circle`, `Rect` and `Empty`"
+        );
+    }
+
+    #[test]
+    fn an_enum_method_and_the_is_test_are_not_variants() {
+        let src = "enum Shape as\n    Circle(number)\nend\nimpl Shape\n    function area(self): number\n        return 1\n    end\nend\nprint(Shape.is(1), Shape.area)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
+    #[test]
+    fn try_needs_a_function_that_returns_result() {
+        let bad = "local function g(): number\n    local v = try Ok(1)\n    return v + 1\nend\nprint(g)\n";
+        assert!(
+            messages(bad)
+                .iter()
+                .any(|m| m.starts_with("`try` works only inside a function that returns Result")),
+            "{:?}",
+            messages(bad)
+        );
+
+        let none = "local function g()\n    local v = try Ok(1)\n    return v\nend\nprint(g)\n";
+        assert!(
+            messages(none)
+                .iter()
+                .any(|m| m.starts_with("`try` works only inside a function that returns Result")),
+            "{:?}",
+            messages(none)
+        );
+
+        let fine = "local function g(): Result<number, string>\n    local v = try Ok(1)\n    return Ok(v + 1)\nend\nprint(g)\n";
+        assert!(messages(fine).is_empty(), "{:?}", messages(fine));
+
+        let alias = "type R = Result<number, string>\nlocal function g(): R\n    local v = try Ok(1)\n    return Ok(v + 1)\nend\nprint(g)\n";
+        assert!(messages(alias).is_empty(), "{:?}", messages(alias));
+    }
+
+    #[test]
+    fn signal_new_takes_its_type_arguments_as_a_pack() {
+        let out = crate::compile("local s = Signal.new<<Player, number>>()\nprint(s)\n").unwrap();
+        assert!(
+            out.check
+                .contains("__alloy.Signal.new<<(Player, number)>>()"),
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn an_attribute_checks_its_name_its_target_and_its_arguments() {
+        let unknown = "@bogus\nlocal function one() end\nprint(one)\n";
+        assert!(
+            messages(unknown)
+                .iter()
+                .any(|m| m.starts_with("no attribute named `bogus`")),
+            "{:?}",
+            messages(unknown)
+        );
+
+        let target = "@derive(Clone)\nlocal function four() end\nprint(four)\n";
+        assert!(
+            messages(target)
+                .iter()
+                .any(|m| m == "the attribute `derive` has no meaning on a function; it goes on `struct` and `enum`"),
+            "{:?}",
+            messages(target)
+        );
+
+        let both = "@inline\n@noinline\nlocal function seven() end\nprint(seven)\n";
+        assert!(
+            messages(both).iter().any(|m| m.contains("opposite things")),
+            "{:?}",
+            messages(both)
+        );
+
+        let count = "@deprecated(1, 2, 3)\nlocal function six() end\nprint(six)\n";
+        assert!(
+            messages(count)
+                .iter()
+                .any(|m| m == "the attribute `deprecated` takes one message, 3 given"),
+            "{:?}",
+            messages(count)
+        );
+
+        let wrong =
+            "attribute tag(name: string) on struct\n@tag(5)\nstruct S as x: number end\nprint(S)\n";
+        assert!(
+            messages(wrong)
+                .iter()
+                .any(|m| m == "the attribute `tag` takes string for `name`, number given"),
+            "{:?}",
+            messages(wrong)
+        );
+
+        let fine = "attribute range(min: number, max: number) on field\nstruct S as\n    @range(0, 1)\n    x: number\nend\nprint(S)\n";
+        assert!(messages(fine).is_empty(), "{:?}", messages(fine));
+    }
+
+    #[test]
+    fn inline_and_noinline_never_reach_the_emit() {
+        let out = crate::compile(
+            "@inline\nlocal function small(): number\n    return 1\nend\nprint(small())\n",
+        )
+        .unwrap();
+        assert!(!out.ship.contains("@inline"), "{}", out.ship);
+        assert!(!out.check.contains("@inline"), "{}", out.check);
+    }
+
+    #[test]
+    fn a_struct_declares_each_field_once() {
+        let src = "struct S as\n    a: number\n    a: string\nend\nprint(S)\n";
+        assert!(
+            messages(src)
+                .iter()
+                .any(|m| m == "`S` declares the field `a` twice"),
+            "{:?}",
+            messages(src)
+        );
+    }
+
+    #[test]
+    fn await_on_a_literal_reports() {
+        let src = "local bad = await 5\nprint(bad)\n";
+        assert!(
+            messages(src)
+                .iter()
+                .any(|m| m == "`await` takes a Future or an awaitable, not a number"),
+            "{:?}",
+            messages(src)
+        );
+    }
+
+    #[test]
+    fn derive_debug_writes_a_debug_method() {
+        let out =
+            crate::compile("@derive(Debug)\nstruct V as\n    x: number\nend\nprint(V)\n").unwrap();
+        assert!(out.ship.contains("function V.debug(self)"), "{}", out.ship);
+        assert!(out.ship.contains("V.__tostring = "), "{}", out.ship);
+    }
+
+    #[test]
+    fn derive_eq_and_partial_eq_write_one_metamethod() {
+        let out =
+            crate::compile("@derive(Eq, PartialEq)\nstruct V as\n    x: number\nend\nprint(V)\n")
+                .unwrap();
+        assert_eq!(out.ship.matches("V.__eq = ").count(), 1, "{}", out.ship);
+    }
+
+    #[test]
+    fn an_unknown_derive_lands_on_the_derive_name() {
+        let src = "@derive(Sparkle)\nstruct A as\n    x: number\nend\nprint(A)\n";
+        let out = crate::compile(src).unwrap();
+        assert_eq!(out.diagnostics.len(), 1, "{:?}", out.diagnostics);
+        assert_eq!(
+            &src[out.diagnostics[0].start as usize..out.diagnostics[0].end as usize],
+            "Sparkle"
+        );
+    }
+
+    #[test]
+    fn an_exhaustive_match_statement_closes_its_chain() {
+        let src = "enum Shape as\n    Circle(number)\n    Rect(number, number)\nend\nlocal function area(s: Shape): number\n    match s with\n        case Circle(r) then\n            return r\n        case Rect(w, h) then\n            return w * h\n    end\nend\nprint(area)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship
+                .contains("else error(\"match: no arm covers this value\", 2)"),
+            "{}",
+            out.ship
+        );
+    }
+
+    #[test]
+    fn a_spread_keeps_the_types_of_its_parts() {
+        let out = crate::compile(
+            "local base = { x = 1, y = 2 }\nlocal merged = { ...base, z = 3 }\nprint(merged)\n",
+        )
+        .unwrap();
+        assert!(
+            out.check.contains(":: typeof(base) & typeof({ z = 3 })"),
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn a_positional_entry_after_a_spread_reports() {
+        let src = "local base = { x = 1 }\nlocal t = { ...base, 7 }\nprint(t)\n";
+        assert!(
+            messages(src)
+                .iter()
+                .any(|m| m.starts_with("a positional entry after a spread")),
+            "{:?}",
+            messages(src)
+        );
+    }
+
+    #[test]
+    fn a_wire_message_names_the_field_that_holds_the_function() {
+        let src = "remote Deep(payload: { name: string, cb: (number) -> () }) from client\n";
+        assert!(
+            messages(src).iter().any(|m| m
+                == "remote `Deep`: parameter `payload` has field `cb` of type `(number) -> ()`, which is a function type; a remote carries only data"),
+            "{:?}",
+            messages(src)
+        );
+    }
+
+    #[test]
+    fn an_unreachable_default_fires_on_a_match_expression() {
+        let src = "enum Color as Red, Green, Blue end\nlocal function full(c: Color): string\n    return match c with\n        case Color.Red then \"r\"\n        case Color.Green then \"g\"\n        case Color.Blue then \"b\"\n        default \"?\"\n    end\nend\nprint(full)\n";
+        assert!(
+            lint_names(src).contains(&"unreachable_default"),
+            "{:?}",
+            lint_names(src)
+        );
+    }
+
+    #[test]
+    fn a_generic_struct_types_its_constructor() {
+        let out = crate::compile(
+            "struct Box<T> as\n    value: T\n    count: number = 1\nend\nlocal b = new Box<<number>> { value = 5 }\nprint(b)\n",
+        )
+        .unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("function Box.__new<T>(f: { value: T, count: number? }): Box<T>"),
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn an_impl_may_name_the_structs_parameters() {
+        let src = "struct Box<T> as\n    value: T\nend\nimpl Box<T>\n    function get(self): T\n        return self.value\n    end\nend\nprint(Box)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("function Box.get<T>(self: Box<T>): T"),
+            "{}",
+            out.check
+        );
+        // The header has no Luau form and never reaches the output.
+        assert!(!out.ship.contains("impl"), "{}", out.ship);
+    }
+
+    #[test]
+    fn a_remote_shows_one_side_in_a_side_named_file() {
+        let src = "export remote Damage(target: Player, amount: number) from client\n";
+        let client = EmitOptions {
+            check: true,
+            file_name: "src/ui.client.aly".to_string(),
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &client).unwrap();
+        assert!(out.check.contains("fire: "), "{}", out.check);
+        assert!(!out.check.contains("on: "), "{}", out.check);
+
+        let server = EmitOptions {
+            check: true,
+            file_name: "src/main.server.aly".to_string(),
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &server).unwrap();
+        assert!(out.check.contains("on: "), "{}", out.check);
+        assert!(!out.check.contains("fire: "), "{}", out.check);
+
+        // A shared module branches on `RunService` and sees both.
+        let shared = EmitOptions {
+            check: true,
+            file_name: "src/remotes.aly".to_string(),
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &shared).unwrap();
+        assert!(out.check.contains("fire: "), "{}", out.check);
+        assert!(out.check.contains("on: "), "{}", out.check);
+    }
+
+    #[test]
+    fn a_type_argument_list_writes_arrays_by_name() {
+        // `T[]` is Alloy's spelling; a `<<...>>` list is read as Luau.
+        let src = "local g: HashMap<string, number[]> = HashMap.new()\nlocal h: Array<number[][]> = Array.new()\nlocal i: Array<HashMap<string, number[]>> = Array.new()\nlocal j = new Array<<number[]>>()\nprint(g, h, i, j)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("HashMap.new<<string, Array<number>>>()"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("Array.new<<Array<Array<number>>>>()"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("Array.new<<HashMap<string, Array<number>>>>()"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("Array.new<<Array<number>>>()"),
+            "{}",
+            out.check
+        );
+
+        // The annotation may use the bracket form as well.
+        let out =
+            crate::compile("local b: HashMap<string, number>[] = Array.new()\nprint(b)\n").unwrap();
+        assert!(
+            out.check.contains("Array.new<<HashMap<string, number>>>()"),
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn a_method_insert_maps_back_to_the_method_name() {
+        let src = "type Alias = { z: number }\nimpl Alias\n    function area(self): number\n        return self.z\n    end\nend\nprint(Alias)\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        let at = out.check.find("Alias.area").unwrap() as u32;
+        let want = src.find("area(self)").unwrap() as u32;
+
+        // Every offset of the inserted `Alias.area` maps to the name the
+        // source wrote, never to the space after `function`.
+        for i in 0..u32::try_from("Alias.area".len()).unwrap() {
+            assert_eq!(out.map.to_source(at + i), want, "offset {i}");
+        }
+    }
 }

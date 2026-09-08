@@ -25,6 +25,7 @@ pub const ALLOY_KEYWORDS: &[&str] = &[
     "enum",
     "export",
     "extends",
+    "for",
     "from",
     "impl",
     "import",
@@ -199,6 +200,10 @@ pub const TABLE: &[(&str, &str)] = &[
         "The module path of an `import` or `export`, or the side that fires a `remote`: `from client`, `from server`, or `from client or server` for one both sides fire.",
     ),
     (
+        "for",
+        "```alloy\nfor _, { x, y } in points do\nfor i, [ a, b ] in pairs do\nfor _, player in Players:GetPlayers() where player.Team ~= nil do\n```\nLuau\'s loop, with two additions. A name in the head may be a table or an array pattern, `{ x, y }` or `[ a, b ]`, which destructures each item on the `do` line, and `where cond` after the iterator skips the items the condition rejects, with the names in scope. `for` reads a `Queue`, a `Heap`, and an `Iter` of the std as it reads a table.",
+    ),
+    (
         "local",
         "```alloy\nlocal x: T = expr\nlocal { name, hp = health } = player\nlocal [first, ...rest] = xs\nlocal Ok(v) = result else\n    return\nend\n```\nLuau's binding, with three forms of its own. A table pattern takes fields by name, `= alias` renames one. An array pattern takes items by position, and `...rest` takes the tail as an array. A variant or struct pattern binds its payload, and the `else` block runs when the pattern fails: it must leave, with `return`, `break`, `continue`, or an error, so the names hold after it. `const` takes every form too.",
     ),
@@ -241,7 +246,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "where",
-        "```alloy\nfor x in xs where cond do\nif local x = f() where cond then\nwhile local job = queue:pop() where job.ready do\n```\nA filter on a loop or a conditional binding. In a loop it emits `if not (cond) then continue end` on the `do` line; on `if local` and `while local` the binding holds only when the condition does. Bindings chain with `;`, `if local p = a; local c = p.Character then`, each seen by the next, and `if not local x = f() then return end` is the guard form, with `x` in scope after it.",
+        "```alloy\nfor x in xs where cond do\nfor _, { x, y } in points where x > 0 do\nif local x = f() where cond then\nwhile local job = queue:pop() where job.ready do\n```\nA filter on a loop or a conditional binding. In a loop it emits `if not (cond) then continue end` on the `do` line, and the condition sees the loop\'s names, destructured ones included; on `if local` and `while local` the binding holds only when the condition does. Bindings chain with `;`, `if local p = a; local c = p.Character then`, each seen by the next, and `if not local x = f() then return end` is the guard form, with `x` in scope after it.",
     ),
     (
         "satisfies",

@@ -2313,6 +2313,25 @@ impl Server {
         let (start, end) = keywords::word_range(&doc.source, offset);
         let word = &doc.source[start..end];
 
+        // A field where it is declared, `read hp: number = 1` in a struct
+        // body: the child sees the constructor's table, where a default
+        // makes the field optional, so the declaration answers itself.
+        if let Some(answer) = declared_field_hover(doc, start, end) {
+            let (sl, sc) = position_of(&doc.source, start);
+            let (el, ec) = position_of(&doc.source, end);
+            let result = json!({
+                "contents": { "kind": "markdown", "value": answer },
+                "range": {
+                    "start": { "line": sl, "character": sc },
+                    "end": { "line": el, "character": ec }
+                }
+            });
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         // The key sits before `=` inside the braces of `Name { ... }`.
         if !doc.source[end..].trim_start().starts_with('=')
             || doc.source[end..].trim_start().starts_with("==")
@@ -2896,6 +2915,15 @@ impl Server {
                                 !error_type && !generated && !lowered_call
                             });
 
+                            // A label the child sends in parts folds as
+                            // one text, the way its edit does; the parts'
+                            // locations point into the emit anyway.
+                            for h in hints.iter_mut() {
+                                if h.get("label").is_some_and(Value::is_array) {
+                                    h["label"] = json!(hint_label(h));
+                                }
+                            }
+
                             // An async function declares the inner type;
                             // the child infers the Future around it.
                             for h in hints.iter_mut() {
@@ -3027,6 +3055,10 @@ impl Server {
                         if label.chars().count() > 72 {
                             let head: String = label.chars().take(69).collect();
                             h["label"] = json!(format!("{}…", head.trim_end()));
+                            h.as_object_mut().map(|o| o.remove("textEdits"));
+                        } else if label.contains("__") {
+                            // A name of the emit, `Name__private`, is no
+                            // annotation the source can hold.
                             h.as_object_mut().map(|o| o.remove("textEdits"));
                         } else if h
                             .get("textEdits")
@@ -5091,6 +5123,61 @@ fn unmet_expectations(doc: &Doc, child: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// The hover of a struct field at its declaration: the line as written,
+/// under the struct it belongs to, with the comment above it. `None`
+/// when the word is not a field of a struct body.
+fn declared_field_hover(doc: &Doc, start: usize, end: usize) -> Option<String> {
+    let after = doc.source[end..].trim_start();
+
+    if !after.starts_with(':') || after.starts_with("::") {
+        return None;
+    }
+
+    let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let lead = doc.source[line_start..start].trim();
+
+    if !lead
+        .split_whitespace()
+        .all(|w| matches!(w, "read" | "write" | "private" | "public"))
+    {
+        return None;
+    }
+
+    // The nearest struct above, still open: no `end` at the margin
+    // between its name and the field.
+    let owner = doc
+        .decls
+        .iter()
+        .filter(|d| {
+            d.offset < start
+                && d.hover
+                    .lines()
+                    .nth(1)
+                    .is_some_and(|l| l.trim_start_matches("export ").starts_with("struct "))
+        })
+        .max_by_key(|d| d.offset)?;
+
+    if doc.source[owner.offset..start].lines().any(|l| l == "end") {
+        return None;
+    }
+
+    let line_end = doc.source[start..]
+        .find('\n')
+        .map_or(doc.source.len(), |i| start + i);
+    let field_line = doc.source[line_start..line_end].trim();
+    let mut out = format!(
+        "```alloy\n{field_line}\n```\nA field of `struct {}`.",
+        owner.name
+    );
+
+    if let Some(comment) = alloy::declarations::doc_before(&doc.source, line_start) {
+        out.push_str("\n\n");
+        out.push_str(&comment);
+    }
+
+    Some(out)
+}
+
 /// Whether `offset` sits in a name a declaring keyword introduces: the
 /// word before the one at the cursor is `enum`, `struct`, `function`,
 /// `local`, and the rest.
@@ -5668,6 +5755,32 @@ mod tests {
         assert!(!declares_a_name_at(src, 36));
         assert!(declares_a_name_at(src, 45));
         assert!(!declares_a_name_at(src, src.len() - 2));
+    }
+
+    #[test]
+    fn a_hint_in_parts_folds_as_one_label() {
+        let mut result = json!([{
+            "position": { "line": 8, "character": 18 },
+            "kind": 1,
+            "label": [{ "value": ": " }, { "value": "Swinger", "location": {} }, { "value": " & " }, { "value": "Swinger__private" }, { "value": " & { last: number, scope: Scope }" }]
+        }]);
+        let joined = hint_label(&result[0]);
+        result[0]["label"] = json!(joined);
+        crate::shapes::fold_value(&mut result, &crate::shapes::Known::default());
+        assert_eq!(result[0]["label"], ": Swinger");
+    }
+
+    #[test]
+    fn a_private_view_hint_folds_through_the_result_path() {
+        let mut result = json!([{
+            "position": { "line": 8, "character": 18 },
+            "kind": 1,
+            "label": ": Swinger & Swinger__private & { last: number, scope: Scope }",
+            "textEdits": [{ "range": { "start": { "line": 8, "character": 18 }, "end": { "line": 8, "character": 18 } }, "newText": ": Swinger & Swinger__private & { last: number, scope: Scope }" }]
+        }]);
+        strip_std_prefix(&mut result);
+        crate::shapes::fold_value(&mut result, &crate::shapes::Known::default());
+        assert_eq!(result[0]["label"], ": Swinger");
     }
 
     #[test]

@@ -1884,6 +1884,18 @@ mod tests {
     }
 
     #[test]
+    fn a_private_view_hint_reads_as_the_struct() {
+        let text = ": Swinger & Swinger__private & { last: number, scope: Scope }";
+        assert_eq!(fold(text, &Known::default()), ": Swinger");
+        let known = Known {
+            shapes: alloy::declarations::shapes(
+                "export struct Swinger as\n    read requested: Signal<> = Signal.new()\n    private last: number = 0\n    private scope: Scope = Scope.new()\nend\n",
+            ),
+        };
+        assert_eq!(fold(text, &known), ": Swinger");
+    }
+
+    #[test]
     fn a_nested_array_of_two_array_types_reads_once() {
         let text = "local g: t1 where t1 = {\n    [number]: t2 | t3,\n    concat: (self: {read t2 | t3}, other: t1) -> t1,\n    push: (self: t1, value: t2 | t3) -> ()\n} ; t2 = {\n    [number]: number,\n    concat: (self: {read number}, other: t2) -> t2,\n    push: (self: t2, value: number) -> ()\n} ; t3 = {\n    [number]: number,\n    concat: (self: {read number}, other: t3) -> t3,\n    push: (self: t3, value: number) -> ()\n}";
         assert_eq!(fold(text, &known()), "local g: number[][]");

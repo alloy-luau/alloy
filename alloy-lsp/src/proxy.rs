@@ -176,7 +176,7 @@ impl State {
             interfaces: here
                 .into_iter()
                 .chain(rest.map(|(_, d)| d))
-                .flat_map(|d| d.interfaces.iter().cloned())
+                .flat_map(|d| d.interfaces.iter().chain(&d.import_interfaces).cloned())
                 .collect(),
         }
     }
@@ -464,7 +464,8 @@ impl State {
             return;
         }
 
-        let is_enum = doc.decls.iter().any(|d| {
+        let decls = self.decls_in_scope(uri);
+        let is_enum = decls.iter().any(|d| {
             d.name == enum_name && d.hover.lines().nth(1).is_some_and(|l| l.contains("enum "))
         });
 
@@ -490,7 +491,20 @@ impl State {
             };
             let full = format!("{enum_name}.{label}");
 
-            if let Some(d) = doc.decls.iter().find(|d| d.name == full) {
+            // The emit writes `is(v)` with no annotation, so the child
+            // prints the solver's own `unknown`.
+            if label == "is" {
+                item["kind"] = json!(3);
+                item["detail"] = json!("(any) -> boolean");
+                item["documentation"] = json!({
+                    "kind": "markdown",
+                    "value": format!("Whether a value is a `{enum_name}`."),
+                });
+
+                continue;
+            }
+
+            if let Some(d) = decls.iter().find(|d| d.name == full) {
                 let signature = d
                     .hover
                     .lines()
@@ -659,7 +673,16 @@ impl State {
         // at the start of a line inside one.
         let mut items = Vec::new();
 
-        if !before.ends_with(['.', ':'])
+        // Only at the start of a line: `end` opens no statement and
+        // follows no expression, so the middle of one never wants it.
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let at_column = doc.source[line_start..offset]
+            .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_')
+            .trim()
+            .is_empty();
+
+        if at_column
+            && !before.ends_with(['.', ':'])
             && before.ends_with(['\n', ' ', '\t'])
             && !labels.contains(&"end")
             && crate::block_end::open_before(&doc.source, offset)
@@ -904,7 +927,7 @@ impl State {
         let mut items = Vec::new();
         let mut seen: HashSet<String> = labels.iter().map(|l| l.to_string()).collect();
         let mut push = |name: &str, kind: u64, detail: &str, doc_text: Option<String>| {
-            if seen.insert(name.to_string()) {
+            if !is_internal_name(name) && seen.insert(name.to_string()) {
                 let mut item = json!({ "label": name, "kind": kind, "detail": detail });
 
                 if let Some(d) = doc_text {
@@ -940,6 +963,14 @@ impl State {
             }
         }
 
+        // The type parameters the file declares: `<T: Keyed>` puts `T`
+        // in every type slot of that head and its body.
+        if let Some(doc) = self.docs.get(uri) {
+            for name in declared_type_parameters(&doc.source) {
+                push(&name, 25, "type parameter", None);
+            }
+        }
+
         for name in [
             "Future",
             "Result",
@@ -961,6 +992,29 @@ impl State {
                 name,
                 7,
                 "alloy:std",
+                keywords::doc(name).map(str::to_string),
+            );
+        }
+
+        // The traits a bound and an `impl` take, which the std declares.
+        for name in [
+            "Display",
+            "Debug",
+            "Clone",
+            "Eq",
+            "PartialEq",
+            "Ord",
+            "Serialize",
+            "Deletable",
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+        ] {
+            push(
+                name,
+                8,
+                "alloy:std trait",
                 keywords::doc(name).map(str::to_string),
             );
         }
@@ -1015,8 +1069,21 @@ impl State {
         let name = scrutinee.trim();
 
         // Two scrutinees, a call, or an operator: the proxy reads none.
-        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        {
             return MatchKind::Unknown;
+        }
+
+        // `self.phase` and `props.phase`: the field of a value, whose
+        // own type the owner's declaration gives.
+        if let Some((owner, field)) = name.rsplit_once('.') {
+            return self
+                .value_type(source, offset, owner)
+                .and_then(|t| self.field_type(uri, &t, field))
+                .map_or(MatchKind::Unknown, |t| self.kind_of_type(uri, &t));
         }
 
         // `self` in an `impl` body is the type the block is for.
@@ -1032,6 +1099,29 @@ impl State {
 
             None => self.kind_of_name(uri, name),
         }
+    }
+
+    /// What the arms already written say the scrutinee is, when nothing
+    /// else did: `case Ok(` names a `Result`, and a variant names its
+    /// own enum.
+    fn kind_of_arms(&self, uri: &str, source: &str, offset: usize) -> MatchKind {
+        for arm in context::match_arms(source, offset) {
+            if matches!(arm.as_str(), "Ok" | "Err") {
+                return MatchKind::Result;
+            }
+
+            if let Some(d) = self
+                .decls_in_scope(uri)
+                .into_iter()
+                .find(|d| d.name.ends_with(&format!(".{arm}")))
+                && let Some((owner, _)) = d.name.split_once('.')
+                && matches!(self.kind_of_name(uri, owner), MatchKind::Enum(_))
+            {
+                return MatchKind::Enum(owner.to_string());
+            }
+        }
+
+        MatchKind::Unknown
     }
 
     /// What a type annotation names.
@@ -1104,32 +1194,188 @@ impl State {
         }
     }
 
-    /// The declarations a file sees: its own, and what other files
-    /// export. A local of another file is not in scope here.
+    /// The declarations a file sees: its own, and the exports of the
+    /// modules it imports, under the names the `import` binds. A name no
+    /// import brought in is not in scope, so a list never offers a type
+    /// the file cannot write.
     fn decls_in_scope(&self, uri: &str) -> Vec<&alloy::declarations::Declaration> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
+        let imported: HashSet<String> = self
+            .docs
+            .get(uri)
+            .map(|d| imports::bound_names(&d.source).into_iter().collect())
+            .unwrap_or_default();
         // The file's own declarations come first, so a name it declares
         // wins over the same name in another file.
         let mine = self.docs.get(uri).into_iter().map(|d| (uri, d));
 
+        // A variant reads as `Enum.Variant`, and a sigil name as
+        // `@clamp`: the enum's plain name is the one an import binds.
+        let bound_name = |name: &str| {
+            name.split('.')
+                .next()
+                .unwrap_or(name)
+                .trim_start_matches(['@', '$'])
+                .to_string()
+        };
+
         for (u, doc) in mine.chain(self.docs.iter().map(|(u, d)| (u.as_str(), d))) {
             let own = u == uri;
+            let exports: HashSet<String> = doc
+                .decls
+                .iter()
+                .filter(|d| {
+                    d.hover
+                        .lines()
+                        .nth(1)
+                        .is_some_and(|l| l.starts_with("export "))
+                })
+                .map(|d| bound_name(&d.name))
+                .collect();
 
             for d in &doc.decls {
-                let exported = d
-                    .hover
-                    .lines()
-                    .nth(1)
-                    .is_some_and(|l| l.starts_with("export "));
+                let bound = bound_name(&d.name);
+                let reachable = own || (exports.contains(&bound) && imported.contains(&bound));
 
-                if (own || exported || d.name.contains('.')) && seen.insert(d.name.clone()) {
+                if reachable && seen.insert(d.name.clone()) {
                     out.push(d);
                 }
             }
         }
 
         out
+    }
+
+    /// The fields a struct or a record type declares, read from the
+    /// declaration's hover. A private field stays out unless the caret
+    /// sits in the impl of that same type.
+    fn struct_fields(&self, uri: &str, name: &str, inside: bool) -> Vec<context::Field> {
+        self.decls_in_scope(uri)
+            .into_iter()
+            .find(|d| d.name == name)
+            .map(|d| context::record_entries(&d.hover))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| inside || !f.private)
+            .collect()
+    }
+
+    /// The type a name has at a position: its annotation, the type its
+    /// first value constructs, or the declaration it names.
+    fn value_type(&self, source: &str, offset: usize, name: &str) -> Option<String> {
+        if name == "self" {
+            return context::impl_target(source, offset);
+        }
+
+        match context::declared(source, offset, name) {
+            Some(context::Declared::Annotation(t)) => Some(t),
+
+            Some(context::Declared::Init(v)) => {
+                let v = v.trim();
+                let head = v.strip_prefix("new ").unwrap_or(v).trim_start();
+                let word: String = head
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+
+                (!word.is_empty()).then_some(word)
+            }
+
+            None => None,
+        }
+    }
+
+    /// The type a field of a type holds: `self.phase` under `impl Round`
+    /// reads `Phase`. The owner may be a struct, a record alias, or the
+    /// record text of an inline annotation.
+    fn field_type(&self, uri: &str, owner: &str, field: &str) -> Option<String> {
+        let owner = owner.trim().trim_end_matches('?').trim();
+        let text = match owner.starts_with('{') {
+            true => owner.to_string(),
+
+            false => {
+                let name = owner.split('<').next().unwrap_or(owner).trim();
+
+                self.decls_in_scope(uri)
+                    .into_iter()
+                    .find(|d| d.name == name)?
+                    .hover
+                    .clone()
+            }
+        };
+
+        context::record_entries(&text)
+            .into_iter()
+            .find(|f| f.name == field)
+            .map(|f| f.ty)
+    }
+
+    /// Narrows a remote's member list to what the file may reach. The
+    /// emit types one surface for both sides, so `Toast.fire` is in the
+    /// list of a `.client.aly` file that cannot reach it; the
+    /// declaration and the file's side say which members stand.
+    fn filter_remote_members(&self, uri: &str, line: u32, character: u32, result: &mut Value) {
+        let items = match result {
+            Value::Array(items) => items,
+
+            Value::Object(obj) => match obj.get_mut("items").and_then(Value::as_array_mut) {
+                Some(items) => items,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+        let labels: HashSet<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        // Every remote carries these two; no other value in the
+        // language does.
+        if !(labels.contains("spec") && labels.contains("instance")) {
+            return;
+        }
+
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return;
+        };
+        let Some((base, _, '.', _)) = context::member_at(&doc.source, offset) else {
+            return;
+        };
+
+        if base.contains('.') {
+            return;
+        }
+
+        let here = remote_spec(&doc.source, &base);
+        let spec = match here {
+            Some(spec) => Some(spec),
+
+            // The declaration sits in the module the file imports it
+            // from; a name no import bound is not this remote.
+            None => imports::bound_names(&doc.source)
+                .contains(&base)
+                .then(|| {
+                    self.docs
+                        .values()
+                        .find_map(|d| remote_spec(&d.source, &base))
+                })
+                .flatten(),
+        };
+        let Some(spec) = spec else {
+            return;
+        };
+        let side = uri_to_path(uri)
+            .map(|p| p.to_string_lossy().into_owned())
+            .and_then(|name| alloy::directives::effective_side(&doc.source, &name));
+
+        items.retain(|i| {
+            i["label"]
+                .as_str()
+                .is_none_or(|label| spec.holds(label, side))
+        });
     }
 
     /// The items for a completion context. A sigil item replaces the
@@ -1481,6 +1727,13 @@ impl State {
                 let kind = scrutinee.as_deref().map_or(MatchKind::Unknown, |s| {
                     self.match_kind(uri, &doc.source, offset, s)
                 });
+                // Nothing named the scrutinee: the arms already written
+                // still do.
+                let kind = match kind {
+                    MatchKind::Unknown => self.kind_of_arms(uri, &doc.source, offset),
+
+                    other => other,
+                };
 
                 match &kind {
                     // The variants of the enum being matched, and only
@@ -1489,10 +1742,18 @@ impl State {
                         for d in self.enum_variants(uri, name) {
                             let variant = &d.name[name.len() + 1..];
                             let signature = d.hover.lines().nth(1).unwrap_or(&d.name);
-                            let insert = if payload_types(signature).is_empty() {
-                                variant.to_string()
-                            } else {
-                                format!("{variant}($1)")
+                            let payload = payload_types(signature);
+                            let insert = match payload.is_empty() {
+                                true => variant.to_string(),
+
+                                // One tab stop per value the variant
+                                // carries, so the arity reads right.
+                                false => {
+                                    let slots: Vec<String> =
+                                        (1..=payload.len()).map(|i| format!("${i}")).collect();
+
+                                    format!("{variant}({})", slots.join(", "))
+                                }
                             };
                             items.push(snippet(
                                 variant,
@@ -1545,8 +1806,8 @@ impl State {
                     // the child cannot list those.
                     MatchKind::Literal => {}
 
-                    // Nothing named the scrutinee: every variant in
-                    // scope stays.
+                    // Nothing named the scrutinee: the variants this
+                    // file declares or imports stay, and no other.
                     MatchKind::Unknown => {
                         let mut seen = HashSet::new();
 
@@ -1560,13 +1821,14 @@ impl State {
                             }
                         }
 
-                        for (name, what) in [
-                            ("Ok", "The success case of a `Result`."),
-                            ("Err", "The failure case of a `Result`."),
-                            ("_", "Matches anything without binding it."),
+                        for (name, kind, what) in [
+                            ("Ok", 20, "The success case of a `Result`."),
+                            ("Err", 20, "The failure case of a `Result`."),
+                            ("Enum", 7, "The engine's enums: `case Enum.KeyCode.W then`."),
+                            ("_", 14, "Matches anything without binding it."),
                         ] {
                             if seen.insert(name.to_string()) {
-                                items.push(word(name, 14, Some(what.to_string()), from));
+                                items.push(word(name, kind, Some(what.to_string()), from));
                             }
                         }
                     }
@@ -1605,6 +1867,38 @@ impl State {
                     ("end", "Closes the body."),
                 ] {
                     items.push(word(name, 14, Some(what.to_string()), from));
+                }
+            }
+
+            // A trait declares a contract; every method in it is public,
+            // so no visibility word belongs here.
+            Context::TraitMemberStart { prefix } => {
+                let from = offset - prefix.len();
+
+                for (name, what) in [
+                    ("function", "A method the impl must write."),
+                    ("async function", "A method that returns a Future."),
+                    ("end", "Closes the body."),
+                ] {
+                    items.push(word(name, 14, Some(what.to_string()), from));
+                }
+            }
+
+            Context::StructField { prefix, target } => {
+                let from = offset - prefix.len();
+                let inside = context::impl_target(&doc.source, offset).as_deref() == Some(target);
+
+                for field in self.struct_fields(uri, target, inside) {
+                    let mut item = snippet(
+                        &field.name,
+                        &format!("{} = ${{1:{}}}", field.name, field.name),
+                        5,
+                        &format!("{}: {}", field.name, field.ty),
+                        Some(format!("A field of `{target}`.")),
+                        from,
+                    );
+                    item["sortText"] = json!(format!("0{}", field.name));
+                    items.push(item);
                 }
             }
 
@@ -1723,15 +2017,22 @@ impl State {
                     .and_then(Value::as_str)
                     .unwrap_or("sourcemap.json");
 
+                // A module never imports itself.
+                let own = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+
                 for (label, kind, detail) in
                     module_entries(dir, self.root.as_deref(), head, sourcemap)
                 {
+                    if head.is_empty() && Some(&label) == own.as_ref() {
+                        continue;
+                    }
+
                     let mut item = word(&label, kind, None, start + cut);
                     item["detail"] = json!(detail);
 
                     // A sibling module resolves as `./name`; a bare name
                     // is an alias the project has to declare.
-                    if head.is_empty() && !label.starts_with('@') {
+                    if head.is_empty() && !label.starts_with(['@', '.']) {
                         item["textEdit"]["newText"] = json!(format!("./{label}"));
                     }
 
@@ -2425,7 +2726,8 @@ impl Server {
 
                 if m == "textDocument/hover"
                     && let Some(id) = message.get("id").cloned()
-                    && (self.field_hover(&uri, &message, &id)
+                    && (self.case_binding_hover(&uri, &message, &id)
+                        || self.field_hover(&uri, &message, &id)
                         || self.source_binding_hover(&uri, &message, &id)
                         || self.declaration_hover(&uri, &message, &id)
                         || self.keyword_hover(&uri, &message, &id))
@@ -2440,9 +2742,9 @@ impl Server {
                     return true;
                 }
 
-                // `bx?.` and `bx?.na`: the lowering owns the member.
+                // `bx?.`, `p!.`, `await X.`: the lowering owns the member.
                 if m == "textDocument/completion"
-                    && let Some(home) = self.optional_member_home(&uri, &message)
+                    && let Some(home) = self.member_home(&uri, &message)
                 {
                     self.forward_request_at(message, method.as_deref(), home);
 
@@ -2709,6 +3011,20 @@ impl Server {
             && let Some(doc) = st.docs.get(ctx)
             && let Some(params) = message.get_mut("params")
         {
+            // A markup hole that opens with a keyword lowers to the
+            // keyword itself, where the child completes nothing. The
+            // expression after it is the same scope, and the editor
+            // still inserts where the caret is.
+            if method == Some("textDocument/completion")
+                && ctx.ends_with(".alx")
+                && let Some((l, c)) = position
+                && let Some(at) = offset_of(&doc.source, l, c)
+                && let Some(moved) = markup::hole_expression_start(&doc.source, at)
+            {
+                let (ml, mc) = position_of(&doc.source, moved);
+                params["position"] = json!({ "line": ml, "character": mc });
+            }
+
             map_into_shadow(params, doc);
 
             if let Some((line, character)) = shadow {
@@ -2771,11 +3087,13 @@ impl Server {
         }
     }
 
-    /// The shadow position a completion after `?.` belongs at. The
-    /// lowering of an optional access is text the compiler wrote, so the
-    /// member the author is typing maps nowhere; the member the lowering
-    /// wrote is the one with a type behind it.
-    fn optional_member_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
+    /// The shadow position a member completion belongs at. `a?.b` and
+    /// `a!.b` lower to text the compiler wrote, and `await X.m()` moves
+    /// the receiver into a call, so the member the author is typing maps
+    /// nowhere; the member the lowering wrote is the one with a type
+    /// behind it. A plain access the child already reads keeps its own
+    /// position.
+    fn member_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
         if !is_alloy_uri(uri) {
             return None;
         }
@@ -2792,9 +3110,26 @@ impl Server {
         }
 
         let offset = offset_of(&doc.source, line, character)?;
-        let (base, prefix) = context::optional_member_at(&doc.source, offset)?;
+        let (base, access, sep, prefix) = context::member_at(&doc.source, offset)?;
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let source_line = doc.source.lines().nth(line as usize)?;
         let shadow_line = doc.shadow.lines().nth(line as usize)?;
-        let column = context::optional_member_column(shadow_line, &base, prefix)?;
+
+        if access == context::Access::Plain
+            && lands_on_member(doc, line, character, &base, sep, prefix)
+        {
+            return None;
+        }
+
+        let column = context::member_column(
+            source_line,
+            shadow_line,
+            &base,
+            access,
+            sep,
+            prefix,
+            offset - line_start,
+        )?;
 
         Some((line, shadow_line[..column].chars().count() as u32))
     }
@@ -2830,7 +3165,16 @@ impl Server {
         let (start, end) = keywords::word_range(&doc.source, offset);
         let word = doc.source[start..end].to_string();
         let path = uri_to_path(uri);
+        // A `remote` or an exported `const` the file imported is
+        // declared somewhere else; the child reads the emitted local
+        // and calls it a `local`.
+        let imported = || {
+            doc.import_sources
+                .iter()
+                .find_map(|text| remote_hover(text, &word).or_else(|| const_hover(text, &word)))
+        };
         let answer = remote_hover(&doc.source, &word)
+            .or_else(imported)
             .or_else(|| namespace_hover(&doc.source, &word, path.as_deref()));
 
         let Some(answer) = answer else {
@@ -2938,6 +3282,57 @@ impl Server {
         true
     }
 
+    /// A `case` pattern's binding hovers as the payload it names. A
+    /// match lowers to one expression, so the binding has no local of
+    /// its own and the child answers the arm's result instead.
+    fn case_binding_hover(&self, uri: &str, message: &Value, id: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+
+        let st = self.state.lock().expect("state");
+
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        if !keywords::is_word_at(&doc.source, offset) {
+            return false;
+        }
+
+        let (start, end) = keywords::word_range(&doc.source, offset);
+        let word = doc.source[start..end].to_string();
+        let known = st.known_shapes_at(Some(uri));
+
+        let Some(answer) = case_binding_text(doc, line as usize, start, &word, &known) else {
+            return false;
+        };
+        let (sl, sc) = position_of(&doc.source, start);
+        let (el, ec) = position_of(&doc.source, end);
+        let result = json!({
+            "contents": { "kind": "markdown", "value": answer },
+            "range": {
+                "start": { "line": sl, "character": sc },
+                "end": { "line": el, "character": ec }
+            }
+        });
+        drop(st);
+        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+        true
+    }
+
     /// A key in a struct's raw constructor, `Menu { button = ... }`, hovers
     /// as the struct's field. The child sees a table key and answers with
     /// the key's string type.
@@ -2973,7 +3368,9 @@ impl Server {
         // A field where it is declared, `read hp: number = 1` in a struct
         // body: the child sees the constructor's table, where a default
         // makes the field optional, so the declaration answers itself.
-        if let Some(answer) = declared_field_hover(doc, start, end) {
+        if let Some(answer) = declared_field_hover(doc, start, end)
+            .or_else(|| remote_parameter_hover(doc, start, end))
+        {
             let (sl, sc) = position_of(&doc.source, start);
             let (el, ec) = position_of(&doc.source, end);
             let result = json!({
@@ -2999,7 +3396,12 @@ impl Server {
         let Some(open) = enclosing_brace(&doc.source, start) else {
             return false;
         };
+        // `new Slotted<<T>> { value = ... }`: the arguments stand between
+        // the name and the brace.
         let head = doc.source[..open].trim_end();
+        let head = head.strip_suffix(">>").map_or(head, |h| {
+            h.rfind("<<").map_or(head, |i| doc.source[..i].trim_end())
+        });
 
         if !head.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
             return false;
@@ -3015,15 +3417,7 @@ impl Server {
             .find_map(|d| {
                 d.hover
                     .lines()
-                    .find(|l| {
-                        let t = l.trim_start();
-                        let t = t
-                            .strip_prefix("read ")
-                            .or_else(|| t.strip_prefix("write "))
-                            .unwrap_or(t);
-
-                        t.starts_with(&format!("{word}:"))
-                    })
+                    .find(|l| field_key(l) == Some(word))
                     .map(|l| l.trim().to_string())
             });
 
@@ -3545,7 +3939,15 @@ impl Server {
                             // which the Luau one drops.
                             text = text.replace("```luau", "```alloy");
 
-                            if text != value {
+                            // `type Player = Player` restates the token
+                            // under the cursor and says nothing, and
+                            // `string (5 bytes)` measures the key the
+                            // emit wrote, not the name the source has.
+                            if restates_itself(&text)
+                                || (is_byte_count(&text) && names_a_key(doc, line, character))
+                            {
+                                *result = Value::Null;
+                            } else if text != value {
                                 result["contents"]["value"] = json!(text);
                             }
                         }
@@ -3676,12 +4078,21 @@ impl Server {
             map_from_shadow(result, ctx.as_deref(), &st);
 
             if method == "textDocument/diagnostic"
-                && let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u))
+                && let Some(uri) = ctx.as_deref()
+                && let Some(doc) = st.docs.get(uri)
                 && let Some(items) = result.get_mut("items").and_then(Value::as_array_mut)
             {
                 for d in items.iter_mut() {
                     friendly_message(d, doc, &st);
                 }
+
+                // A pull answers with the same set as a push: the
+                // compile errors, the markup errors, the directive
+                // errors and the lints, then the child's reports. An
+                // editor on pull diagnostics sees no Alloy diagnostic
+                // without this.
+                let mine = st.alloy_diagnostics(uri);
+                items.splice(0..0, mine);
 
                 // A rewrite may move two reports onto one line, the
                 // `impl` an alias names among them; they collapse after
@@ -3832,18 +4243,32 @@ impl Server {
                             .docs
                             .get(uri)
                             .is_some_and(|d| member_position(d, line, character).is_some());
+                        // Inside a string the child answers alone: it
+                        // knows the class names `Instance.new("` and
+                        // `GetService("` take, and nothing else belongs
+                        // between quotes.
+                        let quoted = st
+                            .docs
+                            .get(uri)
+                            .and_then(|d| offset_of(&d.source, line, character))
+                            .zip(st.docs.get(uri))
+                            .is_some_and(|(at, d)| context::in_string(&d.source, at));
                         // A member list names what the value has; an
                         // auto-import is a new name, which cannot follow
                         // a `.` or a `:`.
-                        let mut extra = match member {
+                        let mut extra = match member || quoted {
                             true => Vec::new(),
 
                             false => st.auto_imports(uri, line, character),
                         };
-                        extra.extend(st.primitive_completions(uri, line, character, result));
-                        extra.extend(st.std_completions(uri, line, character, result));
+
+                        if !quoted {
+                            extra.extend(st.primitive_completions(uri, line, character, result));
+                            extra.extend(st.std_completions(uri, line, character, result));
+                            extra.extend(st.directive_completions(uri, line, character));
+                        }
+
                         extra.extend(st.ingot_items(uri, line, character, trigger.as_deref()));
-                        extra.extend(st.directive_completions(uri, line, character));
 
                         if !extra.is_empty() {
                             match result {
@@ -3864,8 +4289,10 @@ impl Server {
                         }
 
                         if let Some(doc) = st.docs.get(uri) {
-                            clean_completion(result, doc, line, character);
+                            clean_completion(result, doc, line, character, st.snippets);
                         }
+
+                        st.filter_remote_members(uri, line, character, result);
                     }
                 }
 
@@ -3891,6 +4318,7 @@ impl Server {
         // A value import of a struct or an enum binds its type too.
         if let Some(path) = uri_to_path(uri) {
             options.import_types = alloy::modules::import_types_for_file(&path, &text);
+            options.import_enums = alloy::modules::import_enums_for_file(&path, &text);
             options.import_privates = alloy::modules::import_privates_for_file(&path, &text);
             options.import_result_asyncs =
                 alloy::modules::import_result_asyncs_for_file(&path, &text);
@@ -3986,6 +4414,7 @@ impl Server {
 
         if let Some(path) = uri_to_path(uri) {
             options.import_types = alloy::modules::import_types_for_file(&path, &doc.source);
+            options.import_enums = alloy::modules::import_enums_for_file(&path, &doc.source);
             options.import_privates = alloy::modules::import_privates_for_file(&path, &doc.source);
             options.import_result_asyncs =
                 alloy::modules::import_result_asyncs_for_file(&path, &doc.source);
@@ -5052,9 +5481,27 @@ pub fn is_internal_name(label: &str) -> bool {
             .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
     };
 
+    // The std splits a few types so the solver can follow them; the
+    // numbered halves are names no source writes.
+    const STD_HELPERS: &[&str] = &[
+        "Array2",
+        "Array3",
+        "Iter2",
+        "Iter3",
+        "Result2",
+        "ResultMethods",
+        "ResultMethods2",
+        "ResultOk",
+        "ResultErr",
+        "ReadArray",
+        "WriteArray",
+        "Awaitable",
+    ];
+
     // Metamethods and the emit's helpers share the `__` prefix, and
     // neither is a name to complete.
-    label.starts_with("__")
+    STD_HELPERS.contains(&label)
+        || label.starts_with("__")
         || label == "__impl"
         || label.ends_with("__private")
         || label.ends_with("__all")
@@ -5109,7 +5556,7 @@ fn hint_label(hint: &Value) -> String {
 /// list holds members alone, each without the receiver its signature
 /// carries. A detail the reader cannot write goes, and an empty
 /// documentation, which opens an empty panel, goes too.
-fn clean_completion(result: &mut Value, doc: &Doc, line: u32, character: u32) {
+fn clean_completion(result: &mut Value, doc: &Doc, line: u32, character: u32, snippets: bool) {
     let items = match result {
         Value::Array(v) => v,
 
@@ -5124,10 +5571,39 @@ fn clean_completion(result: &mut Value, doc: &Doc, line: u32, character: u32) {
     let colon = member_position(doc, line, character) == Some(':');
 
     if colon {
-        // `new` takes no `self`, so `x:new()` passes the value as the
-        // first field; the list offers what a colon can call.
-        items.retain(|i| i.get("label").and_then(Value::as_str) != Some("new"));
+        // `new` and `from_table` take no `self`, so a colon would pass
+        // the value as their first argument; the list offers what a
+        // colon can call.
+        items.retain(|i| {
+            !matches!(
+                i.get("label").and_then(Value::as_str),
+                Some("new") | Some("from_table")
+            )
+        });
     }
+
+    // A unit enum lowers to a union of strings. `"Playing"` is the
+    // lowered form; `Phase.Playing` is what the source writes.
+    let enums: HashSet<&str> = doc
+        .shapes
+        .iter()
+        .chain(doc.import_shapes.iter())
+        .filter(|s| matches!(s, alloy::declarations::Shape::Enum { .. }))
+        .map(|s| s.name())
+        .collect();
+
+    items.retain(|i| {
+        let quoted = i
+            .get("label")
+            .and_then(Value::as_str)
+            .is_some_and(|l| l.starts_with('"'));
+
+        !quoted
+            || !i
+                .get("detail")
+                .and_then(Value::as_str)
+                .is_some_and(|d| enums.contains(d))
+    });
 
     // One row per name: the definitions file declares a few globals
     // twice, and the editor shows two identical rows.
@@ -5179,24 +5655,207 @@ fn clean_completion(result: &mut Value, doc: &Doc, line: u32, character: u32) {
             continue;
         }
 
-        if item.get("label").and_then(Value::as_str) == Some("new") {
-            let public = hide_private(&detail, &private);
-            item["detail"] = json!(public);
+        let label = item
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        // `new` and the derived table pair print every field, private
+        // ones included, which names what the type hides.
+        let detail = match label.as_str() {
+            "new" => hide_private(&detail, &private),
+
+            "to_table" | "from_table" => hide_record(&detail, &private),
+
+            _ => detail,
+        };
+        // A colon passes the receiver, so the signature drops it.
+        let detail = match colon {
+            true => drop_receiver(&detail).unwrap_or(detail),
+
+            false => detail,
+        };
+        item["detail"] = json!(detail);
+        set_call(item, &label, &detail, snippets);
+    }
+}
+
+/// Gives an item the call its signature describes, when it carries no
+/// insert of its own: `earn(${1:amount})$0`, or `alive()` for a
+/// signature with no argument.
+fn set_call(item: &mut Value, label: &str, detail: &str, snippets: bool) {
+    if item.get("insertText").is_some() || item.pointer("/textEdit/newText").is_some() {
+        return;
+    }
+
+    let Some(insert) = call_snippet(label, detail) else {
+        return;
+    };
+
+    match snippets {
+        true => {
+            item["insertText"] = json!(insert);
+            item["insertTextFormat"] = json!(2);
+        }
+
+        // With no snippet support the placeholders would land as
+        // literal text; an empty pair is what the editor can take.
+        false => item["insertText"] = json!(format!("{label}()")),
+    }
+}
+
+/// The snippet a signature calls for: one placeholder per parameter,
+/// named the way the signature names it.
+fn call_snippet(label: &str, detail: &str) -> Option<String> {
+    let rest = match detail.strip_prefix('<') {
+        Some(after) => &detail[after.find('>')? + 2..],
+
+        None => detail,
+    };
+    let inner = rest.strip_prefix('(')?;
+    let mut depth = 0i32;
+    let mut prev = ' ';
+    let mut end = None;
+
+    for (i, c) in inner.char_indices() {
+        if c == '>' && prev == '-' {
+            prev = c;
 
             continue;
         }
 
-        if colon && let Some(rest) = drop_receiver(&detail) {
-            item["detail"] = json!(rest);
+        prev = c;
 
-            // A colon call is always a call.
-            if item.get("insertText").is_none()
-                && let Some(label) = item.get("label").and_then(Value::as_str)
-            {
-                item["insertText"] = json!(format!("{label}()"));
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+            ')' if depth == 0 => {
+                end = Some(i);
+
+                break;
             }
+            ')' | '}' | ']' | '>' => depth -= 1,
+            _ => {}
         }
     }
+
+    let params = &inner[..end?];
+
+    if params.trim().is_empty() {
+        return Some(format!("{label}()"));
+    }
+
+    let mut slots = Vec::new();
+    let mut depth = 0i32;
+    let mut prev = ' ';
+    let mut part = String::new();
+
+    for c in params.chars().chain(std::iter::once(',')) {
+        if c == '>' && prev == '-' {
+            prev = c;
+            part.push(c);
+
+            continue;
+        }
+
+        prev = c;
+
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+            ')' | '}' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                // A vararg takes as many arguments as the caller has,
+                // so it fills no slot of its own.
+                if part.trim_start().starts_with("...") {
+                    part.clear();
+
+                    continue;
+                }
+
+                let name = part
+                    .split(':')
+                    .next()
+                    .unwrap_or(&part)
+                    .trim()
+                    .trim_end_matches('?')
+                    .to_string();
+                let name = match name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !name.is_empty()
+                {
+                    true => name,
+
+                    false => format!("v{}", slots.len() + 1),
+                };
+                slots.push(format!("${{{}:{name}}}", slots.len() + 1));
+                part.clear();
+
+                continue;
+            }
+            _ => {}
+        }
+
+        part.push(c);
+    }
+
+    match slots.is_empty() {
+        true => Some(format!("{label}()")),
+
+        false => Some(format!("{label}({})$0", slots.join(", "))),
+    }
+}
+
+/// A record type without the fields the struct keeps private: the
+/// detail of `to_table` prints every one, which names what the type
+/// hides from a reader outside the impl.
+fn hide_record(detail: &str, private: &HashSet<String>) -> String {
+    let Some(open) = detail.find("{ ") else {
+        return detail.to_string();
+    };
+    let Some(close) = detail[open..].find(" }") else {
+        return detail.to_string();
+    };
+    let body = &detail[open + 2..open + close];
+    let kept: Vec<&str> = body
+        .split(", ")
+        .filter(|part| {
+            let name = part.split(':').next().unwrap_or(part).trim();
+
+            !private.contains(name.trim_end_matches('?'))
+        })
+        .collect();
+
+    format!(
+        "{}{{ {} }}{}",
+        &detail[..open],
+        kept.join(", "),
+        &detail[open + close + 2..]
+    )
+}
+
+/// Whether the child's own mapping already puts the caret after the
+/// same access. The emit copies most of them, and moving one that
+/// landed right would cost the member list it already answers.
+fn lands_on_member(
+    doc: &Doc,
+    line: u32,
+    character: u32,
+    base: &str,
+    sep: char,
+    prefix: usize,
+) -> bool {
+    let (sl, sc) = doc.to_shadow(line, character);
+    let Some(text) = doc.shadow.lines().nth(sl as usize) else {
+        return false;
+    };
+    let Some(at) = offset_of(text, 0, sc) else {
+        return false;
+    };
+    let head = &text[..at.min(text.len())];
+    let head = &head[..head.len() - prefix.min(head.len())];
+    let receiver = base.rsplit('.').next().unwrap_or(base);
+
+    head.strip_suffix(sep)
+        .is_some_and(|h| h.ends_with(receiver))
 }
 
 /// The separator a member access at the caret uses, `.` or `:`, when
@@ -5226,8 +5885,19 @@ fn drop_receiver(detail: &str) -> Option<String> {
     let inner = rest.strip_prefix('(')?;
     let mut depth = 0i32;
     let mut cut = None;
+    let mut prev = ' ';
 
     for (k, c) in inner.char_indices() {
+        // The `>` of a `->` closes nothing; reading it as a bracket
+        // walks the depth below zero and cuts the wrong parameter.
+        if c == '>' && prev == '-' {
+            prev = c;
+
+            continue;
+        }
+
+        prev = c;
+
         match c {
             '(' | '{' | '[' | '<' => depth += 1,
             ')' if depth == 0 => {
@@ -5350,6 +6020,15 @@ fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
 
         h["label"] = json!(label);
 
+        // A generic struct prints without its arguments: Luau names a
+        // metatable type and carries none. `: Slotted` would not
+        // compile, so the hint reads and inserts nothing.
+        if generic_struct(doc, label[2..].trim()) {
+            h.as_object_mut().map(|o| o.remove("textEdits"));
+
+            continue;
+        }
+
         if truncate_hint(h, &label) {
             h.as_object_mut().map(|o| o.remove("textEdits"));
 
@@ -5363,6 +6042,20 @@ fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
             }]);
         }
     }
+}
+
+/// Whether a printed type is the bare name of a struct that takes type
+/// parameters. The file, or a module it imports, declares it.
+fn generic_struct(doc: &Doc, text: &str) -> bool {
+    if text.is_empty() || !text.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return false;
+    }
+
+    let head = format!("struct {text}<");
+
+    std::iter::once(&doc.source)
+        .chain(doc.import_sources.iter())
+        .any(|src| src.contains(&head))
 }
 
 /// A label too long for the gutter shows its head alone. True when the
@@ -5396,6 +6089,11 @@ fn writable_type(text: &str) -> bool {
         && !text.contains('…')
         && !text.contains("__")
         && !text.contains("CYCLE")
+        // The child cuts a long table with `... N more ...`.
+        && !text.contains(" more ...")
+        // `_1` and `_2` are the payload slots of a tagged enum.
+        && !text.contains("_1:")
+        && !text.contains("_2:")
 }
 
 /// A solver variable the file never declares, `a` or `T`: no
@@ -5511,6 +6209,35 @@ fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String> {
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect();
 
+    // `Signal.new<<Effect>>()`: a std constructor with the arguments
+    // the source wrote. Nothing else names them.
+    if name.starts_with(|c: char| c.is_ascii_uppercase())
+        && let Some(args) = rest[name.len()..]
+            .strip_prefix(".new<<")
+            .and_then(|a| a.find(">>").map(|e| a[..e].to_string()))
+        && !args.is_empty()
+    {
+        return Some(format!("{name}<{args}>"));
+    }
+
+    // `local burn = Effect.Damage(20, Element.Fire)`: a variant with a
+    // payload is a value of its enum, and the child prints the tagged
+    // table it lowers to.
+    if let Some(after) = rest[name.len()..].strip_prefix('.') {
+        let variant: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let holds = doc.shapes.iter().chain(doc.import_shapes.iter()).any(|s| {
+            matches!(s, alloy::declarations::Shape::Enum { name: n, variants }
+                if *n == name && variants.iter().any(|(v, _)| *v == variant))
+        });
+
+        if holds {
+            return Some(name);
+        }
+    }
+
     (declares(&name) && rest[name.len()..].starts_with(".new(")).then_some(name)
 }
 
@@ -5605,6 +6332,7 @@ fn module_entries(
             19,
             "this file's directory".to_string(),
         ));
+        out.push(("../".to_string(), 19, "the parent directory".to_string()));
 
         for (name, target) in luaurc_aliases(dir, root) {
             out.push((
@@ -6127,6 +6855,137 @@ fn remote_hover(source: &str, word: &str) -> Option<String> {
     None
 }
 
+/// The declaration line of an exported `const`, with the comment above
+/// it. A `const` cannot be reassigned, and `local` says the opposite.
+fn const_hover(source: &str, word: &str) -> Option<String> {
+    let mut at = 0;
+
+    for line in source.lines() {
+        let text = line.trim();
+
+        if let Some(rest) = text.strip_prefix("export const ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            if name == word {
+                // The value is the module's, not the reader's.
+                let head = text.split_once(" = ").map_or(text, |(h, _)| h);
+                let doc_text = alloy::declarations::doc_before(source, at)
+                    .map(|d| format!("\n\n{d}"))
+                    .unwrap_or_default();
+
+                return Some(format!("```alloy\n{head}\n```{doc_text}"));
+            }
+        }
+
+        at += line.len() + 1;
+    }
+
+    None
+}
+
+/// What a `remote` declaration says: whether it answers, which sides
+/// fire it, and whether it carries `@ratelimit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemoteSpec {
+    answers: bool,
+    from_client: bool,
+    from_server: bool,
+    ratelimited: bool,
+}
+
+impl RemoteSpec {
+    /// Whether a file on `side` may fire the remote. A file with no
+    /// side of its own sees both surfaces.
+    fn fires(&self, side: Option<alloy::directives::Side>) -> bool {
+        match side {
+            Some(alloy::directives::Side::Client) => self.from_client,
+            Some(alloy::directives::Side::Server) => self.from_server,
+            None => true,
+        }
+    }
+
+    /// Whether a file on `side` may handle the remote.
+    fn handles(&self, side: Option<alloy::directives::Side>) -> bool {
+        match side {
+            Some(alloy::directives::Side::Client) => self.from_server,
+            Some(alloy::directives::Side::Server) => self.from_client,
+            None => true,
+        }
+    }
+
+    /// Whether the surface holds a member. The emit types every member
+    /// on every remote, so the declaration and the file's side are what
+    /// tell them apart.
+    fn holds(&self, member: &str, side: Option<alloy::directives::Side>) -> bool {
+        match member {
+            "spec" | "instance" => true,
+            "fire" => self.fires(side),
+            "call" => self.answers && self.fires(side),
+            "fire_all" | "fire_except" => self.from_server && self.fires(side),
+            "on" | "once" | "wait" => self.handles(side),
+            "on_ratelimited" => self.ratelimited && self.handles(side),
+            _ => true,
+        }
+    }
+}
+
+/// The `remote` declaration a source writes for `name`, with the
+/// attributes above it.
+fn remote_spec(source: &str, name: &str) -> Option<RemoteSpec> {
+    let lines: Vec<&str> = source.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        let text = line.trim();
+        let head = text.strip_prefix("export ").unwrap_or(text);
+        let Some(rest) = head.strip_prefix("remote ") else {
+            continue;
+        };
+        let answers = rest.starts_with("function ");
+        let rest = rest.strip_prefix("function ").unwrap_or(rest);
+        let word: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        if word != name {
+            continue;
+        }
+
+        let tail = text.rfind(" from ").map_or("", |at| &text[at..]);
+        let mut ratelimited = false;
+
+        // The attribute lines the declaration carries sit right above
+        // it, comments aside; a blank line ends them.
+        for above in lines[..i].iter().rev() {
+            let t = above.trim();
+
+            if t.starts_with('@') {
+                ratelimited = ratelimited || t.starts_with("@ratelimit");
+
+                continue;
+            }
+
+            if t.starts_with("--") {
+                continue;
+            }
+
+            break;
+        }
+
+        return Some(RemoteSpec {
+            answers,
+            from_client: names_word(tail, "client"),
+            from_server: names_word(tail, "server"),
+            ratelimited,
+        });
+    }
+
+    None
+}
+
 /// The hover of the name an `import * as` binds: the import as written,
 /// and what the module exports.
 fn namespace_hover(source: &str, word: &str, from: Option<&Path>) -> Option<String> {
@@ -6411,7 +7270,7 @@ fn unmet_expectations(doc: &Doc, child: &[Value]) -> Vec<Value> {
     silence
         .unmet(&errored)
         .into_iter()
-        .map(|(at, reason)| {
+        .map(|(at, _col, reason)| {
             let (s, e) = alloy::directives::span_of_line(&doc.source, at);
             let (sl, sc) = position_of(&doc.source, s);
             let (el, ec) = position_of(&doc.source, e);
@@ -6435,6 +7294,340 @@ fn unmet_expectations(doc: &Doc, child: &[Value]) -> Vec<Value> {
             item
         })
         .collect()
+}
+
+/// The hover of a `case` pattern's binding at `line`: the name with the
+/// type the pattern gives it. `None` when the line is in no arm, or the
+/// word is no binding of it.
+fn case_binding_text(
+    doc: &Doc,
+    line: usize,
+    start: usize,
+    word: &str,
+    known: &crate::shapes::Known,
+) -> Option<String> {
+    let lines: Vec<&str> = doc.source.lines().collect();
+    let mut at = line.min(lines.len().saturating_sub(1));
+
+    // The arm the line belongs to: the nearest `case` above it, and no
+    // `end` or `match` head between.
+    let case_line = loop {
+        let text = lines.get(at)?.trim();
+
+        if text.starts_with("case ") {
+            break at;
+        }
+
+        if text == "end" || text.ends_with(" with") {
+            return None;
+        }
+
+        at = at.checked_sub(1)?;
+    };
+    let pattern = case_pattern(lines[case_line])?;
+    let bindings = pattern_bindings(&pattern, known, || array_element(&lines, case_line));
+
+    // `b.amount` reads a field of what `case Buff(b)` bound; the child
+    // sees the payload slot and answers `any`.
+    if let Some(head) = doc.source[..start].strip_suffix('.')
+        && keywords::is_word_at(&doc.source, head.len().checked_sub(1)?)
+    {
+        let (rs, re) = keywords::word_range(&doc.source, head.len() - 1);
+        let receiver = &doc.source[rs..re];
+        let (_, ty, _) = bindings.iter().find(|(n, _, _)| n == receiver)?;
+
+        return field_of_struct(doc, ty, word);
+    }
+
+    let (_, ty, owner) = bindings.into_iter().find(|(n, _, _)| n == word)?;
+
+    Some(format!(
+        "```alloy\n{word}: {ty}\n```\nA binding of {owner}."
+    ))
+}
+
+/// The hover of one field of a named struct, from the declaration index.
+fn field_of_struct(doc: &Doc, name: &str, field: &str) -> Option<String> {
+    let line = doc
+        .decls
+        .iter()
+        .filter(|d| d.name == name && d.hover.contains("struct "))
+        .find_map(|d| {
+            d.hover
+                .lines()
+                .find(|l| field_key(l) == Some(field))
+                .map(|l| l.trim().to_string())
+        })?;
+
+    Some(format!(
+        "```alloy\n{line}\n```\nA field of `struct {name}`."
+    ))
+}
+
+/// The pattern of a `case` line: what stands between `case` and the
+/// arm's `then`, or the guard's `and`.
+fn case_pattern(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("case ")?;
+    let end = [rest.find(" then"), rest.find(" and ")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(rest.len());
+
+    Some(rest[..end].trim().to_string())
+}
+
+/// The names a pattern binds, each with its type and what it comes
+/// from. A payload reads its type off the enum's declaration; an array
+/// pattern reads the element type of what the match runs over.
+fn pattern_bindings(
+    pattern: &str,
+    known: &crate::shapes::Known,
+    element: impl Fn() -> Option<String>,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+
+    if let Some(inner) = pattern.strip_prefix('[').and_then(|p| p.strip_suffix(']')) {
+        let Some(elem) = element() else {
+            return out;
+        };
+
+        for item in inner.split(',') {
+            let item = item.trim();
+
+            match item.strip_prefix("...") {
+                Some(rest) if is_binding(rest) => {
+                    out.push((
+                        rest.to_string(),
+                        format!("{elem}[]"),
+                        "the array pattern".into(),
+                    ));
+                }
+
+                _ if is_binding(item) => {
+                    out.push((item.to_string(), elem.clone(), "the array pattern".into()));
+                }
+
+                _ => {}
+            }
+        }
+
+        return out;
+    }
+
+    let Some(open) = pattern.find('(') else {
+        return out;
+    };
+    let head = pattern[..open].trim();
+    let variant = head.rsplit('.').next().unwrap_or(head);
+    let args = pattern[open + 1..].trim_end().trim_end_matches(')');
+
+    let found = known.shapes.iter().find_map(|s| match s {
+        alloy::declarations::Shape::Enum { name, variants } => variants
+            .iter()
+            .find(|(v, _)| v == variant)
+            .map(|(_, payload)| (name.clone(), payload.clone())),
+
+        _ => None,
+    });
+
+    let Some((enum_name, payload)) = found else {
+        return out;
+    };
+
+    for (k, item) in split_top(args).into_iter().enumerate() {
+        let item = item.trim();
+
+        if !is_binding(item) {
+            continue;
+        }
+
+        let Some(ty) = payload.get(k) else {
+            continue;
+        };
+        out.push((
+            item.to_string(),
+            ty.clone(),
+            format!("`{enum_name}.{variant}`"),
+        ));
+    }
+
+    out
+}
+
+/// Whether a pattern item is a name the arm binds, and not `_` or a
+/// literal.
+fn is_binding(text: &str) -> bool {
+    !text.is_empty()
+        && text != "_"
+        && text
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && text.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// The members of a pattern's argument list, split at the commas that
+/// stand outside every bracket.
+fn split_top(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (k, c) in text.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&text[start..k]);
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+
+    out.push(&text[start..]);
+
+    out
+}
+
+/// The element type the match runs over, for an array pattern: the
+/// annotation of the name the `match` head reads.
+fn array_element(lines: &[&str], case_line: usize) -> Option<String> {
+    let head = lines[..case_line]
+        .iter()
+        .rev()
+        .find(|l| l.trim_end().ends_with(" with"))?;
+    let at = head.find("match ")? + "match ".len();
+    let name = head[at..].trim_end().trim_end_matches("with").trim();
+
+    if !is_binding(name) {
+        return None;
+    }
+
+    let needle = format!("{name}: ");
+
+    for line in lines[..case_line].iter().rev() {
+        let Some(i) = line.find(&needle) else {
+            continue;
+        };
+        let rest = &line[i + needle.len()..];
+        let end = rest.find([',', ')']).unwrap_or(rest.len());
+        let ty = rest[..end].trim();
+
+        return ty.strip_suffix("[]").map(str::to_string);
+    }
+
+    None
+}
+
+/// Whether a hover is a type alias to itself, `type Player = Player`.
+/// The child writes one for a name it has no definition for.
+fn restates_itself(text: &str) -> bool {
+    let Some((_, body)) = text.split_once('\n') else {
+        return false;
+    };
+    let Some(inner) = body.trim().strip_suffix("```") else {
+        return false;
+    };
+    let Some(rest) = inner.trim().strip_prefix("type ") else {
+        return false;
+    };
+
+    match rest.split_once(" = ") {
+        Some((head, value)) => head.trim() == value.trim() && !head.contains('\n'),
+
+        None => false,
+    }
+}
+
+/// The field a struct body's line declares: the name before the colon,
+/// past its visibility and its modifier. `None` when the line declares
+/// no field.
+fn field_key(line: &str) -> Option<&str> {
+    let mut text = line.trim();
+
+    for word in ["public ", "private ", "read ", "write "] {
+        text = text.strip_prefix(word).unwrap_or(text);
+    }
+
+    let name = text.split_once(':')?.0.trim();
+
+    (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(name)
+}
+
+/// A parameter of a `remote` declaration. The emit writes the name as a
+/// string key of the wire table, and the child answers with its length.
+fn remote_parameter_hover(doc: &Doc, start: usize, end: usize) -> Option<String> {
+    let after = doc.source[end..].trim_start();
+
+    if !after.starts_with(':') || after.starts_with("::") {
+        return None;
+    }
+
+    let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = doc.source[start..]
+        .find('\n')
+        .map_or(doc.source.len(), |i| start + i);
+    let line = doc.source[line_start..line_end].trim();
+    let head = line.strip_prefix("export ").unwrap_or(line);
+    let rest = head.strip_prefix("remote ")?;
+    let rest = rest.strip_prefix("function ").unwrap_or(rest);
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    // The parameter as the line writes it, its wire attribute included.
+    let from = doc.source[line_start..start].rfind(['(', ','])? + line_start + 1;
+    let to = doc.source[end..line_end]
+        .find([',', ')'])
+        .map_or(line_end, |i| end + i);
+    let param = doc.source[from..to].trim();
+
+    Some(format!(
+        "```alloy\n{param}\n```\nA parameter of `remote {name}`."
+    ))
+}
+
+/// Whether a hover is the byte length of a string, `string (5 bytes)`.
+fn is_byte_count(text: &str) -> bool {
+    let Some((_, body)) = text.split_once('\n') else {
+        return false;
+    };
+    let Some(inner) = body.trim().strip_suffix("```") else {
+        return false;
+    };
+    let Some(rest) = inner.trim().strip_prefix("string (") else {
+        return false;
+    };
+
+    match rest
+        .strip_suffix(" bytes)")
+        .or_else(|| rest.strip_suffix(" byte)"))
+    {
+        Some(count) => !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()),
+
+        None => false,
+    }
+}
+
+/// Whether the position sits on a name outside every string literal of
+/// its line. The emit turns such a name into a key, and the child then
+/// answers about the key's own text.
+fn names_a_key(doc: &Doc, line: u32, character: u32) -> bool {
+    let Some(offset) = offset_of(&doc.source, line, character) else {
+        return false;
+    };
+
+    if !keywords::is_word_at(&doc.source, offset) {
+        return false;
+    }
+
+    let (start, _) = keywords::word_range(&doc.source, offset);
+    let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let head = &doc.source[line_start..start];
+
+    head.matches('"').count() % 2 == 0 && head.matches('\'').count() % 2 == 0
 }
 
 /// The hover of a struct field at its declaration: the line as written,
@@ -6494,7 +7687,11 @@ fn declared_field_hover(doc: &Doc, start: usize, end: usize) -> Option<String> {
 
 /// Whether `offset` sits in a name a declaring keyword introduces: the
 /// word before the one at the cursor is `enum`, `struct`, `function`,
-/// `local`, and the rest.
+/// `local`, and the rest. The name is the author's, so no list belongs
+/// there, at the first column of the name as much as mid-word.
+///
+/// `impl` and `class` take a type, not a new name, and an `import`
+/// names nothing of its own but the alias of `* as M`.
 fn declares_a_name_at(source: &str, offset: usize) -> bool {
     const DECLARERS: &[&str] = &[
         "enum",
@@ -6508,9 +7705,6 @@ fn declares_a_name_at(source: &str, offset: usize) -> bool {
         "macro",
         "attribute",
         "remote",
-        "impl",
-        "class",
-        "import",
     ];
     let offset = offset.min(source.len());
     let bytes = source.as_bytes();
@@ -6521,9 +7715,39 @@ fn declares_a_name_at(source: &str, offset: usize) -> bool {
         start -= 1;
     }
 
-    // The cursor is in a word, or right where one would begin.
-    if offset < bytes.len() && is_word(bytes[offset]) && start == offset {
-        return false;
+    let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let statement = source[line_start..offset].trim_start();
+    let import = statement
+        .strip_prefix("import")
+        .is_some_and(|rest| !rest.starts_with(|c: char| is_word(c as u8)));
+
+    // Every name in an `import` comes from the module; the alias of
+    // `* as M` and a default binding are the author's own.
+    if import {
+        let head = source[line_start..start].trim_end();
+
+        if head
+            .strip_suffix("as")
+            .is_some_and(|h| h.trim_end().ends_with('*'))
+        {
+            return true;
+        }
+
+        let mut word_end = start;
+
+        while word_end < bytes.len() && is_word(bytes[word_end]) {
+            word_end += 1;
+        }
+
+        let after_keyword = head
+            .trim_start()
+            .strip_prefix("import")
+            .map(str::trim)
+            .unwrap_or("-");
+
+        return after_keyword.is_empty()
+            && word_end > start
+            && source[word_end..].trim_start().starts_with("from");
     }
 
     let mut end = start;
@@ -6702,6 +7926,53 @@ fn collapse_diagnostics(items: &mut Vec<Value>) {
             .iter()
             .any(|(other, span)| other == message && *span != range && covers(range, *span))
     });
+
+    // A nil base makes every key on it unknown. `could be nil` names
+    // the problem; the key report sends the reader after a typo that is
+    // not there.
+    let nil_lines: Vec<u32> = items
+        .iter()
+        .filter(|d| {
+            d.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains("could be nil"))
+        })
+        .filter_map(|d| Some(d.get("range").and_then(range_of)?.0.0))
+        .collect();
+
+    items.retain(|d| {
+        let key = d
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.contains(": Key '"));
+
+        !key || d
+            .get("range")
+            .and_then(range_of)
+            .is_none_or(|r| !nil_lines.contains(&r.0.0))
+    });
+
+    // A `.` where a `:` belongs shifts every argument, so the checker
+    // reports the arity and then each mismatch that follows. The one
+    // sentence that names the mistake stands alone on its line.
+    let typo_lines: Vec<u32> = items
+        .iter()
+        .filter(|d| {
+            d.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains(alloy::typecheck::DOT_FOR_COLON))
+        })
+        .filter_map(|d| Some(d.get("range").and_then(range_of)?.0.0))
+        .collect();
+
+    items.retain(|d| {
+        d.get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.contains(alloy::typecheck::DOT_FOR_COLON))
+            || d.get("range")
+                .and_then(range_of)
+                .is_none_or(|r| !typo_lines.contains(&r.0.0))
+    });
 }
 
 /// A range in LSP terms: the start and the end, each a line and a
@@ -6725,6 +7996,27 @@ fn keep_diagnostic(
     lint_config: &alloy::config::LintConfig,
 ) -> bool {
     let message = d.get("message").and_then(Value::as_str).unwrap_or_default();
+
+    // Alloy owns the unused-name lints, in the words of what the source
+    // wrote; the checker's copy says the same thing twice.
+    if let Some(kind) = message.split_once(": ").map(|(k, _)| k)
+        && alloy::typecheck::owned_lint(kind)
+    {
+        return false;
+    }
+
+    // A half-typed member access leaves the checker with no name, and
+    // it reports its own stand-in. The parser already names the gap.
+    if crate::shapes::names_only_the_emit(message) {
+        return false;
+    }
+
+    // The child reads the Alloy source when the compile stopped, and
+    // reads none of it: every line draws a syntax error or an unknown
+    // global. The compile error alone says what is wrong.
+    if doc.output.is_none() {
+        return false;
+    }
 
     // `--@alloy-nocheck`, `--@alloy-ignore`, and an ignored region
     // silence the checker too. The shadow keeps the source's lines, so
@@ -6860,12 +8152,6 @@ fn keep_diagnostic(
         return false;
     }
 
-    // The child sees the Alloy source when the compile stopped, and
-    // reads none of it. The compile error alone says what is wrong.
-    if doc.output.is_none() {
-        return false;
-    }
-
     let Some(((sl, sc), (el, ec))) = d.get("range").and_then(range_of) else {
         return true;
     };
@@ -6975,10 +8261,10 @@ fn alloy_wording(d: &mut Value, doc: &Doc) {
     let Some(line) = doc.source.lines().nth(sl as usize) else {
         return;
     };
-    let kind = match message.split_once(": ") {
-        Some((k, _)) if !k.contains(' ') => k.to_string(),
+    let (kind, body) = match message.split_once(": ") {
+        Some((k, rest)) if !k.contains(' ') => (k.to_string(), rest.to_string()),
 
-        _ => "TypeError".to_string(),
+        _ => ("TypeError".to_string(), message.clone()),
     };
     let span: String = line
         .chars()
@@ -7016,17 +8302,40 @@ fn alloy_wording(d: &mut Value, doc: &Doc) {
         return;
     }
 
+    // A `{ ... }` where an Array belongs: the checker answers with the
+    // nineteen methods the table lacks, and the mistake is the bracket.
+    if let Some(hint) = crate::shapes::plain_table_hint(&body) {
+        d["message"] = json!(format!("{kind}: {hint}"));
+
+        return;
+    }
+
+    // A `.` where a `:` belongs, and the arity of a method call the
+    // source writes without `self`. The compiler writes both sentences,
+    // so the terminal and the editor say one thing.
+    if let Some(better) = alloy::typecheck::rewrite_dot_call(&body, line, sc as usize + 1) {
+        d["message"] = json!(format!("{kind}: {better}"));
+
+        return;
+    }
+
     if !message.contains("Function expects ") {
         return;
     }
 
-    // `c.bump()` on a method: the receiver has to go through the colon.
-    if let Some((_, tail)) = span.rsplit_once('.')
+    // `c.bump()` on a method the checker gave a wider arity: the
+    // receiver still has to go through the colon. The sentence is the
+    // compiler's, so both tools read alike.
+    if let Some((receiver, tail)) = span.rsplit_once('.')
         && !span.contains(':')
-        && let Some(owner) = method_owner(&doc.source, tail)
+        && method_owner(&doc.source, tail).is_some()
     {
+        let receiver = receiver
+            .rsplit(['.', ' ', '(', ','])
+            .next()
+            .unwrap_or(receiver);
         d["message"] = json!(format!(
-            "{kind}: `{tail}` is a method of `{owner}`; call it with `:`"
+            "{kind}: `{tail}` is a method; call it with `{receiver}:{tail}(...)`, not `{receiver}.{tail}(...)`"
         ));
 
         return;
@@ -7182,6 +8491,35 @@ fn plain_snippet(insert: &str) -> String {
                 .unwrap_or(after.len());
             rest = &after[end..];
         }
+    }
+
+    out.push_str(rest);
+
+    collapse_empty_arguments(&out)
+}
+
+/// `Score($1, $2)` loses both placeholders in a plain insert; the
+/// separators they stood between would read as empty arguments.
+fn collapse_empty_arguments(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+
+    while let Some(open) = rest.find('(') {
+        let Some(close) = rest[open..].find(')').map(|i| open + i) else {
+            break;
+        };
+        let inner = &rest[open + 1..close];
+        out.push_str(&rest[..=open]);
+
+        if !inner
+            .trim_matches(|c: char| c == ',' || c.is_whitespace())
+            .is_empty()
+        {
+            out.push_str(inner);
+        }
+
+        out.push(')');
+        rest = &rest[close + 1..];
     }
 
     out.push_str(rest);
@@ -7593,6 +8931,252 @@ mod tests {
         assert_eq!(
             items[0]["textEdit"]["newText"],
             "[ ${1:first}, ...${2:rest} ]"
+        );
+    }
+
+    /// `await X.m()` moves the receiver into a call the emit wrote, so
+    /// the child's own mapping lands past the member.
+    #[test]
+    fn an_awaited_receiver_keeps_its_member_list() {
+        let src = "local function f(p: Future<number>)\n    local s = await Future.all(p)\nend\n";
+        let (st, uri) = one_file(src);
+        let doc = st.docs.get(uri).unwrap();
+        let line = 1u32;
+        let column = "    local s = await Future.".len() as u32;
+
+        // The emit wrote `__alloy.await(__alloy.Future.all(p))`, and the
+        // child's mapping no longer sits after `Future.`.
+        assert!(!lands_on_member(doc, line, column, "Future", '.', 0));
+
+        let shadow_line = doc.shadow.lines().nth(line as usize).unwrap();
+        let at = context::member_column(
+            doc.source.lines().nth(line as usize).unwrap(),
+            shadow_line,
+            "Future",
+            context::Access::Plain,
+            '.',
+            0,
+            column as usize,
+        )
+        .expect("a member column");
+        assert!(shadow_line[..at].ends_with("Future."));
+
+        // A plain access the emit copied keeps its own position.
+        let plain = "local t = { a = 1 }\nlocal v = t.a\n";
+        let (st, uri) = one_file(plain);
+        let doc = st.docs.get(uri).unwrap();
+        assert!(lands_on_member(
+            doc,
+            1,
+            "local v = t.".len() as u32,
+            "t",
+            '.',
+            0
+        ));
+    }
+
+    /// A remote's surface follows the file's side and the declaration.
+    #[test]
+    fn a_remote_offers_the_members_its_side_reaches() {
+        use alloy::directives::Side;
+
+        let src = concat!(
+            "@ratelimit(10, 1)\n",
+            "export remote Chat(text: string) from client\n",
+            "export remote Toast(message: string) from server\n",
+            "export remote function Fetch(id: number) -> number from client\n"
+        );
+        let chat = remote_spec(src, "Chat").expect("Chat");
+        let toast = remote_spec(src, "Toast").expect("Toast");
+        let fetch = remote_spec(src, "Fetch").expect("Fetch");
+
+        assert!(chat.ratelimited);
+        assert!(!toast.ratelimited);
+        assert!(fetch.answers);
+        assert!(!chat.answers);
+
+        // The client fires `Chat`; the server handles it.
+        assert!(chat.holds("fire", Some(Side::Client)));
+        assert!(!chat.holds("on", Some(Side::Client)));
+        assert!(!chat.holds("call", Some(Side::Client)));
+        assert!(chat.holds("on", Some(Side::Server)));
+        assert!(chat.holds("on_ratelimited", Some(Side::Server)));
+
+        // The server fires `Toast`, and only a server fire reaches all.
+        assert!(toast.holds("fire_all", Some(Side::Server)));
+        assert!(!toast.holds("fire_all", Some(Side::Client)));
+        assert!(toast.holds("wait", Some(Side::Client)));
+        assert!(!toast.holds("on_ratelimited", Some(Side::Server)));
+
+        // A `remote function` answers, so the firing side may call it.
+        assert!(fetch.holds("call", Some(Side::Client)));
+        assert!(!fetch.holds("call", Some(Side::Server)));
+
+        // A file with no side of its own sees both surfaces.
+        assert!(chat.holds("fire", None) && chat.holds("on", None));
+        assert!(!chat.holds("call", None));
+    }
+
+    /// A match lowers to one expression, so a `case` binding has no
+    /// local; the pattern says what it holds.
+    #[test]
+    fn a_case_binding_reads_its_payload() {
+        const SRC: &str = "struct Boost as\n    stat: string\n    amount: number\nend\n\nenum Effect as\n    Heal(number)\n    Buff(Boost)\nend\n\nlocal function s(e: Effect): number\n    return match e with\n        case Heal(n) then n\n        case Buff(b) then b.amount\n    end\nend\nprint(s)\n";
+        let (st, uri) = one_file(SRC);
+        let doc = st.docs.get(uri).expect("doc");
+        let known = st.known_shapes_at(Some(uri));
+        let at = |needle: &str| SRC.find(needle).expect("needle");
+        let line_of = |o: usize| position_of(SRC, o).0 as usize;
+        let heal = at("case Heal(n) then n") + "case Heal(".len();
+        let used = at("then n\n") + "then ".len();
+        let bound = at("case Buff(b)") + "case Buff(".len();
+        let field = at("b.amount") + "b.".len();
+
+        assert_eq!(
+            case_binding_text(doc, line_of(heal), heal, "n", &known),
+            Some("```alloy\nn: number\n```\nA binding of `Effect.Heal`.".to_string())
+        );
+        assert_eq!(
+            case_binding_text(doc, line_of(used), used, "n", &known),
+            Some("```alloy\nn: number\n```\nA binding of `Effect.Heal`.".to_string())
+        );
+        assert_eq!(
+            case_binding_text(doc, line_of(bound), bound, "b", &known),
+            Some("```alloy\nb: Boost\n```\nA binding of `Effect.Buff`.".to_string())
+        );
+        assert_eq!(
+            case_binding_text(doc, line_of(field), field, "amount", &known),
+            Some("```alloy\namount: number\n```\nA field of `struct Boost`.".to_string())
+        );
+    }
+
+    /// The key of a struct's raw constructor names the field, past the
+    /// visibility the declaration writes.
+    #[test]
+    fn a_field_key_reads_past_its_visibility() {
+        assert_eq!(field_key("    public read id: number"), Some("id"));
+        assert_eq!(field_key("    write notes: string = \"\""), Some("notes"));
+        assert_eq!(field_key("end"), None);
+    }
+
+    /// A remote's parameter reads as the line declares it; the child
+    /// measures the string key the emit writes for it.
+    #[test]
+    fn a_remote_parameter_reads_as_it_is_written() {
+        const SRC: &str = "export remote PickUp(@u32 id: number, @u8 count: number) from client\n";
+        let (st, uri) = one_file(SRC);
+        let doc = st.docs.get(uri).expect("doc");
+        let at = SRC.find("id:").expect("id");
+
+        assert_eq!(
+            remote_parameter_hover(doc, at, at + 2),
+            Some("```alloy\n@u32 id: number\n```\nA parameter of `remote PickUp`.".to_string())
+        );
+        let second = SRC.find("count:").expect("count");
+
+        assert_eq!(
+            remote_parameter_hover(doc, second, second + 5),
+            Some("```alloy\n@u8 count: number\n```\nA parameter of `remote PickUp`.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_byte_count_is_the_keys_own_text() {
+        assert!(is_byte_count("```alloy\nstring (5 bytes)\n```"));
+        assert!(is_byte_count("```luau\nstring (1 byte)\n```"));
+        assert!(!is_byte_count("```alloy\nstring\n```"));
+    }
+
+    /// A hover that restates the token under the cursor says nothing.
+    #[test]
+    fn a_type_alias_to_itself_is_no_hover() {
+        assert!(restates_itself("```alloy\ntype Player = Player\n```"));
+        assert!(restates_itself("```alloy\ntype keyof<T> = keyof<T>\n```"));
+        assert!(!restates_itself(
+            "```alloy\ntype Profile = { name: string }\n```"
+        ));
+    }
+
+    /// A file sees its own declarations and what it imports, no more.
+    #[test]
+    fn a_type_list_holds_what_the_file_can_write() {
+        let (st, uri) = one_file(MATCH_FILE);
+        let labels: Vec<String> = st
+            .type_completions(uri, &[])
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or("").to_string())
+            .collect();
+
+        assert!(labels.contains(&"Msg".to_string()));
+        assert!(labels.contains(&"Answer".to_string()));
+        // The std traits a bound takes, and none of the std's own
+        // numbered halves.
+        assert!(labels.contains(&"Display".to_string()));
+        for internal in ["Iter2", "Array3", "ResultMethods2", "Awaitable"] {
+            assert!(!labels.contains(&internal.to_string()), "{internal}");
+        }
+    }
+
+    /// A struct literal lists the fields of its struct, and hides the
+    /// private ones outside the impl.
+    #[test]
+    fn a_struct_literal_lists_its_own_fields() {
+        let src = concat!(
+            "struct Round as\n",
+            "    public phase: Phase\n",
+            "    private ready: number\n",
+            "end\n",
+            "local r = new Round { \n"
+        );
+        let (st, uri) = one_file(src);
+        let offset = src.rfind("{ ").unwrap() + 2;
+        let ctx = context::detect(src, offset).expect("a field slot");
+        let items = st.context_items(uri, offset, &ctx);
+        let labels: Vec<&str> = items
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, ["phase"]);
+        assert_eq!(items[0]["textEdit"]["newText"], "phase = ${1:phase}");
+    }
+
+    /// A signature reads its parameters, `->` and all.
+    #[test]
+    fn a_signature_drops_its_receiver_and_names_its_arguments() {
+        assert_eq!(
+            drop_receiver("({ next: (any) -> number? }, (number) -> boolean) -> boolean"),
+            Some("((number) -> boolean) -> boolean".to_string())
+        );
+        assert_eq!(
+            call_snippet("earn", "(self: Profile, amount: number) -> number"),
+            Some("earn(${1:self}, ${2:amount})$0".to_string())
+        );
+        assert_eq!(
+            call_snippet("alive", "(Profile) -> boolean"),
+            Some("alive(${1:Profile})$0".to_string())
+        );
+        assert_eq!(
+            call_snippet("history", "() -> string[]"),
+            Some("history()".to_string())
+        );
+        // A vararg fills no slot of its own.
+        assert_eq!(
+            call_snippet("flush", "(...any) -> { Event }"),
+            Some("flush()".to_string())
+        );
+        assert_eq!(plain_snippet("Score($1, $2)"), "Score()");
+    }
+
+    /// A derived table pair prints no field the struct keeps private.
+    #[test]
+    fn a_derived_table_hides_the_private_fields() {
+        let private: HashSet<String> = ["coins", "log"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            hide_record(
+                "(Profile) -> { coins: number, id: number, log: string[], name: string }",
+                &private
+            ),
+            "(Profile) -> { id: number, name: string }"
         );
     }
 

@@ -1261,7 +1261,11 @@ end
 --- order, plus the connection that feeds it. A system reads them once per
 --- step: `for id, value in Signal.collect(changed) do`. The loop stops at
 --- an event whose first value is nil, as any iterator does.
-function Signal.collect<T...>(source: Signalish<T...>): (() -> T..., SignalConnection)
+---
+--- The iterator takes `...any` and reads none of it. A generic `for`
+--- calls its iterator with the state and the control value, so one that
+--- took `()` would not fit the loop the line above writes.
+function Signal.collect<T...>(source: Signalish<T...>): ((...any) -> T..., SignalConnection)
 	local queue: { any } = {}
 	local head = 1
 	local tail = 0
@@ -1278,7 +1282,7 @@ function Signal.collect<T...>(source: Signalish<T...>): (() -> T..., SignalConne
 		head += 1
 		return table.unpack(event, 1, event.n)
 	end
-	return (next_event :: any) :: () -> T..., (connection :: any) :: SignalConnection
+	return (next_event :: any) :: (...any) -> T..., (connection :: any) :: SignalConnection
 end
 
 alloy.Signal = Signal
@@ -2199,8 +2203,22 @@ end
 --- The object a `remote` declaration binds. `fire` and `call` take the
 --- player first on the server; `on` takes the handler; `wait` yields
 --- for the next event's payload.
+--- The declaration the compiler writes for a remote: what it is called,
+--- which side may fire it, the parameter names, the defaults, the
+--- attributes, and the wire layout when the payload packs.
+export type RemoteSpec = {
+	name: string,
+	kind: string,
+	from_client: boolean,
+	from_server: boolean,
+	params: { string },
+	defaults: { [string]: any },
+	attrs: { [string]: { any } },
+	wire: { any }?,
+}
+
 export type Remote = {
-	spec: any,
+	spec: RemoteSpec,
 	instance: Instance?,
 	fire: (...any) -> (),
 	fire_all: (...any) -> (),

@@ -28,6 +28,12 @@ pub struct Doc {
     /// The interfaces the file declares, so a printed intersection
     /// reads by the name the source gave it.
     pub interfaces: Vec<crate::shapes::Interface>,
+    /// The interfaces of the modules the file imports. A file names an
+    /// interface it took from another module.
+    pub import_interfaces: Vec<crate::shapes::Interface>,
+    /// The text of those modules, for a declaration the file uses but
+    /// does not hold: a `remote`, an exported `const`.
+    pub import_sources: Vec<String>,
     /// The error that stopped the compile, when one did. The child then
     /// sees the Alloy source, which it cannot read.
     pub error: Option<alloy::CompileError>,
@@ -60,6 +66,8 @@ impl Doc {
             shapes: Vec::new(),
             import_shapes: Vec::new(),
             interfaces: Vec::new(),
+            import_interfaces: Vec::new(),
+            import_sources: Vec::new(),
             error: None,
             is_alx: options.file_name.ends_with(".alx"),
         };
@@ -84,6 +92,15 @@ impl Doc {
             std::path::Path::new(&options.file_name),
             &self.source,
         );
+        self.import_sources = alloy::modules::import_sources_for_file(
+            std::path::Path::new(&options.file_name),
+            &self.source,
+        );
+        self.import_interfaces = self
+            .import_sources
+            .iter()
+            .flat_map(|text| crate::shapes::interfaces(text))
+            .collect();
         // `file_name` is the real path, which is what the ingots see.
         let compiled =
             alloy::compile_file(&options.file_name, &self.source, options, Some(jsx), ingots);

@@ -1394,3 +1394,102 @@ fn an_ingot_answers_hover_completion_actions_and_lints() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A pull report carries the same set as a push notification: the
+/// directive errors, the compile errors and the lints, not the child's
+/// reports alone.
+#[test]
+fn pulled_diagnostics_carry_the_alloy_reports() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-pull-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    let src = "--@alloy-lint no_such_lint=allow\nlocal unread = 1\nstruct Kit as\n    ammo: number\nend\nlocal k = new Kit { }\nprint(k)\n";
+    let file = dir.join("src/main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+    let pushed = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("no_such_lint")));
+
+    let report = s.request(
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let pulled: Vec<String> = report["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|d| d["message"].as_str().map(str::to_string))
+        .collect();
+
+    for want in ["no_such_lint", "unused_variable", "leaves `ammo` unset"] {
+        assert!(
+            pulled.iter().any(|d| d.contains(want)),
+            "pull is missing {want}: {pulled:#?} (push: {pushed:#?})"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The editor and the terminal say one sentence for a `.` where a `:`
+/// belongs, and say it once per line.
+#[test]
+fn a_dot_called_method_reads_the_same_as_in_the_terminal() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-dotcall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    let src = "struct Wallet as\n    balance: number\nend\n\nimpl Wallet\n    function add(self, amount: number): number\n        self.balance += amount\n        return self.balance\n    end\nend\n\nlocal w = new Wallet { balance = 0 }\nw.add(5)\nprint(w)\n";
+    let file = dir.join("src/main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+    let diags = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("is a method")));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("`add` is a method; call it with `w:add(...)`, not `w.add(...)`")),
+        "{diags:#?}"
+    );
+    // The shifted arguments draw their own reports; the one sentence
+    // that names the mistake stands alone on its line.
+    assert_eq!(
+        diags.iter().filter(|d| d.contains("Wallet")).count(),
+        0,
+        "{diags:#?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

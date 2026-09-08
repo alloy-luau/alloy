@@ -108,6 +108,18 @@ describe("Signal", function()
 		end).toThrow("no Connect or connect")
 	end)
 
+	it("collect drives the generic for loop the doc writes", function()
+		local c = Signal.new()
+		local drain = Signal.collect(c)
+		c:Fire(1, "one")
+		c:Fire(2, "two")
+		local seen = {}
+		for id, word in drain do
+			table.insert(seen, { id, word })
+		end
+		expect(seen).toEqual({ { 1, "one" }, { 2, "two" } })
+	end)
+
 	it("wrap follows the source until Destroy", function()
 		local source = Signal.new()
 		local wrapped = Signal.wrap(source)

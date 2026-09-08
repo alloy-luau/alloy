@@ -23,8 +23,77 @@ pub struct Interface {
     pub fields: Vec<String>,
 }
 
-/// The interfaces a source declares, with their bases and fields.
+/// The interfaces a source declares, with their bases and fields, and
+/// the `type` aliases over a record. Both print as the table they hold,
+/// and both have a name the source wrote.
 pub fn interfaces(source: &str) -> Vec<Interface> {
+    let mut out = declared_interfaces(source);
+    out.extend(record_aliases(source));
+
+    out
+}
+
+/// `export type Profile = { name: string, level: number }`: the alias
+/// with the keys of its record.
+fn record_aliases(source: &str) -> Vec<Interface> {
+    let mut out = Vec::new();
+    let mut rest = source;
+
+    while let Some(i) = rest.find("type ") {
+        let head = &rest[i..];
+        let before = rest[..i].trim_end();
+        let opens = i == 0
+            || before.is_empty()
+            || before.ends_with('\n')
+            || before.ends_with("export")
+            || before.ends_with("local");
+        rest = &rest[i + "type ".len()..];
+
+        if !opens {
+            continue;
+        }
+
+        let after = &head["type ".len()..];
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        if name.is_empty() {
+            continue;
+        }
+
+        let Some(body) = after[name.len()..].trim_start().strip_prefix("= ") else {
+            continue;
+        };
+        let body = body.trim_start();
+
+        if !body.starts_with('{') {
+            continue;
+        }
+
+        let Some(len) = group_len(body, '{', '}') else {
+            continue;
+        };
+        let fields: Vec<String> = members(&body[..len])
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .collect();
+
+        if !fields.is_empty() {
+            out.push(Interface {
+                name,
+                bases: Vec::new(),
+                fields,
+            });
+        }
+    }
+
+    out
+}
+
+fn declared_interfaces(source: &str) -> Vec<Interface> {
     let mut out: Vec<Interface> = Vec::new();
     let mut open: Option<Interface> = None;
 
@@ -99,7 +168,10 @@ impl Interface {
             match part.starts_with('{') {
                 true => keys.extend(members(part).into_iter().map(|(k, _)| k)),
 
-                false => bases.push(part.to_string()),
+                // The print qualifies a base with the module it came
+                // from, `Core.Named` or `_m1.Named`; the name is the
+                // tail, and the source wrote that alone.
+                false => bases.push(part.rsplit('.').next().unwrap_or(part).to_string()),
             }
         }
 
@@ -168,7 +240,8 @@ fn split_intersection(text: &str) -> Vec<&str> {
 pub fn fold_value(value: &mut Value, known: &Known) {
     match value {
         Value::String(s) => {
-            if s.contains(" where ")
+            if s.contains(" & ")
+                || s.contains(" where ")
                 || s.contains("tag: \"")
                 || s.contains("\" | \"")
                 || s.contains("__private")
@@ -188,6 +261,44 @@ pub fn fold_value(value: &mut Value, known: &Known) {
 
         _ => {}
     }
+}
+
+/// Whether a message names something the reader never wrote, so it says
+/// nothing they can act on.
+///
+/// `%error-id%` is the checker's stand-in for a name a half-typed member
+/// access has yet to give. The parser already reports the missing name.
+pub fn names_only_the_emit(message: &str) -> bool {
+    // The checker names the two emitted files of an import cycle;
+    // `circular_import` names the two the author wrote.
+    message.contains("%error-id%") || message.contains("Cyclic module dependency")
+}
+
+/// A `{ ... }` where an Array belongs, as the mistake reads. The checker
+/// answers with the nineteen methods the table lacks; the reader wrote
+/// the wrong bracket.
+pub fn plain_table_hint(message: &str) -> Option<String> {
+    const HEAD: &str = "Table type '";
+    const MIDDLE: &str = "' not compatible with type '";
+
+    if !message.contains("missing fields") {
+        return None;
+    }
+
+    let at = message.find(HEAD)? + HEAD.len();
+    let mid = message[at..].find(MIDDLE)? + at;
+    let after = mid + MIDDLE.len();
+    let end = message[after..].find('\'')? + after;
+    let want = &message[after..end];
+    let named = want.trim_end_matches('?');
+
+    if !(named.ends_with("[]") || named.starts_with("Array<")) {
+        return None;
+    }
+
+    Some(format!(
+        "a `{{ ... }}` is a plain table, not a `{want}`; an Array literal is `[ ... ]`"
+    ))
 }
 
 /// A checker message as a reader should get it: a failed bound reads as
@@ -336,6 +447,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     // Whatever the Result folds could not pair keeps its data half; the
     // method table is the same for every Result and names nothing.
     out = drop_result_methods(&out);
+    fold_inline_result_methods(&mut out);
     fold_results(&mut out);
     fold_symbols(&mut out);
 
@@ -352,6 +464,9 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_enum_unions(&mut out, known);
     out = fold_private_views(&out);
     fold_full_views(&mut out, known);
+    fold_interfaces(&mut out, known);
+    fold_name_parens(&mut out);
+    fold_signalish(&mut out);
     fold_array_alias(&mut out);
     fold_narrowed_primitives(&mut out);
     fold_cut_array(&mut out);
@@ -407,48 +522,99 @@ fn fold_iter_shapes(text: &mut String) {
 
 /// A method hovered at the end of a call chain names the chain,
 /// `function Iter.from(xs):map(f):collect(self: Iter<number>)`. The
-/// receiver's type stands in for the chain.
+/// receiver's type stands in for the chain. A chain wraps, so the head
+/// runs over as many lines as the source did; the whole of it goes.
 fn fold_call_receivers(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
+    let mut from = 0;
 
-    for (k, line) in text.split('\n').enumerate() {
-        if k > 0 {
-            out.push('\n');
+    while let Some(i) = text[from..].find(SIGNATURE) {
+        let at = from + i;
+        let head = at + SIGNATURE.len();
+
+        // A signature opens a line; `-> function` names a type instead.
+        match (at == 0 || text[..at].ends_with('\n'))
+            .then(|| fold_call_receiver_at(&text[at..]))
+            .flatten()
+        {
+            Some((len, folded)) => {
+                out.push_str(&text[from..at]);
+                out.push_str(&folded);
+                from = at + len;
+            }
+
+            None => {
+                out.push_str(&text[from..head]);
+                from = head;
+            }
         }
-
-        out.push_str(&fold_call_receiver_line(line).unwrap_or_else(|| line.to_string()));
     }
+
+    out.push_str(&text[from..]);
 
     out
 }
 
-fn fold_call_receiver_line(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("function ")?;
-    let open = rest.find("(self: ")?;
-    let colon = rest[..open].rfind(':')?;
-    let receiver = &rest[..colon];
+const SIGNATURE: &str = "function ";
 
-    if !receiver.contains('(') {
-        return None;
+/// The head `function <receiver>:<name>(self: T` at the start of the
+/// text: how far it runs, and the same head with the receiver replaced
+/// by the name of `T`. `None` when the receiver is already a name, or
+/// when the self type has none.
+fn fold_call_receiver_at(text: &str) -> Option<(usize, String)> {
+    // The head stops at the fence or the blank line that closes the
+    // signature; a bracket left open past either is not part of it.
+    let limit = [text.find("\n```"), text.find("\n\n")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(text.len());
+    let span = &text[..limit];
+    let mut depth = 0i32;
+    let mut colon = None;
+    let mut open = None;
+
+    for (k, c) in span[SIGNATURE.len()..].char_indices() {
+        let k = k + SIGNATURE.len();
+
+        match c {
+            '(' if depth == 0 && span[k + 1..].starts_with("self: ") => {
+                open = Some(k);
+
+                break;
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ':' if depth == 0 => colon = Some(k),
+            _ => {}
+        }
     }
 
-    let after = &rest[open + "(self: ".len()..];
-    let end = after.find([',', ')']).unwrap_or(after.len());
-    let self_type = after[..end].trim();
-    let name_len = self_type
+    let open = open?;
+    let colon = colon?;
+    let receiver = &span[SIGNATURE.len()..colon];
+    let after = &span[open + "(self: ".len()..];
+    let name_len = after
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .count();
 
-    if name_len == 0 || self_type.starts_with('{') {
+    if name_len == 0 {
         return None;
     }
 
-    Some(format!(
-        "function {}{}",
-        &self_type[..name_len],
-        &rest[colon..]
-    ))
+    let name = &after[..name_len];
+
+    // A receiver that is a name already, `Iter:filter`, is the type.
+    // `self:markup` and `x:describe` name the variable the call went
+    // through; the type is what the reader wants there, and only a
+    // type name stands in for it. `read number[]` and `any` are not
+    // names, and `self: read T[]` would read as `read`.
+    if !receiver.contains('(') && !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return None;
+    }
+
+    Some((open, format!("{SIGNATURE}{name}{}", &span[colon..open])))
 }
 
 /// A message prints a type between quotes, `not found in table '{ ... }'`.
@@ -546,7 +712,9 @@ fn fold_read_arrays(text: &mut String) {
         };
         let inner = text[at + 6..at + len - 1].trim().to_string();
 
-        if inner.contains('{') || inner.contains(' ') {
+        // One element type, `Result<Profile, any>` included; a space
+        // outside the type arguments means the group holds more.
+        if inner.contains('{') || outside_angles(&inner, ' ') {
             from = at + 6;
             continue;
         }
@@ -914,6 +1082,47 @@ pub fn drop_result_methods(text: &str) -> String {
     }
 
     out
+}
+
+/// `Result<T, E> & { read expect: ..., read map: ... }`: the method
+/// table printed in place, where the alias did not reach the print. It
+/// is the same for every Result and names nothing.
+fn fold_inline_result_methods(text: &mut String) {
+    const KEYS: [&str; 8] = [
+        "expect",
+        "is_err",
+        "is_ok",
+        "map",
+        "map_err",
+        "ok",
+        "unwrap",
+        "unwrap_or",
+    ];
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(" & {") {
+        let at = from + i;
+        let open = at + " & ".len();
+
+        let Some(len) = balanced_len(&text[open..]) else {
+            break;
+        };
+        let mut keys: Vec<String> = members(&text[open..open + len])
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        keys.sort();
+        keys.dedup();
+
+        if keys == KEYS {
+            text.replace_range(at..open + len, "");
+            from = at;
+
+            continue;
+        }
+
+        from = open;
+    }
 }
 
 /// A struct value printed in place, `{ @metatable t1, { x: number } }`,
@@ -1396,15 +1605,23 @@ fn fold_array_alias_once(text: &mut String) {
             .next_back()
             .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
 
-        match text[inner_start..].find('>') {
-            Some(n)
-                if !prefixed
-                    && text[inner_start..inner_start + n].chars().all(|c| {
-                        c.is_alphanumeric() || matches!(c, '_' | '.' | '?' | '[' | ']')
-                    }) =>
+        // The element carries its own arguments, `Result<Profile, any>`;
+        // a union or an intersection under the array keeps the form it
+        // came with, since `A | B[]` reads the other way.
+        match group_len(&text[inner_start - 1..], '<', '>') {
+            Some(len)
+                if !prefixed && {
+                    let elem = &text[inner_start..inner_start + len - 2];
+
+                    !elem.is_empty()
+                        && !elem.contains('{')
+                        && !outside_angles(elem, '|')
+                        && !outside_angles(elem, '&')
+                        && !outside_angles(elem, ',')
+                } =>
             {
-                let elem = text[inner_start..inner_start + n].to_string();
-                text.replace_range(start..inner_start + n + 1, &format!("{elem}[]"));
+                let elem = text[inner_start..inner_start + len - 2].to_string();
+                text.replace_range(start..inner_start + len - 1, &format!("{elem}[]"));
                 from = start + elem.len() + 2;
             }
 
@@ -1625,30 +1842,49 @@ fn replace_var(text: &str, var: &str, name: &str) -> String {
 fn resolve(bindings: &[Binding], known: &Known) -> Vec<(String, String)> {
     let mut resolved: Vec<(String, String)> = Vec::new();
 
-    loop {
-        let mut changed = false;
+    // A name that still holds another binding's variable waits for it.
+    // `t1 = { Connect: (self: t1, handler: (t4) -> ()) -> t6 }` names
+    // itself `Signal<t4>` on sight; `t4` is an enum, and the reader
+    // wants `Signal<Effect>`. The second round takes what is left.
+    for strict in [true, false] {
+        loop {
+            let mut changed = false;
 
-        for b in bindings {
-            if resolved.iter().any(|(v, _)| *v == b.var) {
-                continue;
-            }
+            for b in bindings {
+                if resolved.iter().any(|(v, _)| *v == b.var) {
+                    continue;
+                }
 
-            let mut body = b.body.clone();
+                let mut body = b.body.clone();
 
-            for (v, name) in &resolved {
-                body = replace_var(&body, v, name);
-            }
+                for (v, name) in &resolved {
+                    body = replace_var(&body, v, name);
+                }
 
-            if let Some(name) = name_of_body(&body, known) {
+                let Some(name) = name_of_body(&body, known) else {
+                    continue;
+                };
+                let waits = bindings.iter().any(|o| {
+                    o.var != b.var
+                        && !resolved.iter().any(|(v, _)| *v == o.var)
+                        && mentions(&name, &o.var)
+                });
+
+                if strict && waits {
+                    continue;
+                }
+
                 resolved.push((b.var.clone(), name));
                 changed = true;
             }
-        }
 
-        if !changed {
-            return resolved;
+            if !changed {
+                break;
+            }
         }
     }
+
+    resolved
 }
 
 /// The members of a table body split at the commas of depth one, with
@@ -1836,6 +2072,12 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
             .is_some_and(|c| c.is_ascii_alphabetic())
     {
         return Some(trimmed.to_string());
+    }
+
+    // A payload enum prints as the union of its variants, and a unit
+    // variant prints as its own name in quotes. One name covers it.
+    if let Some(name) = union_name(trimmed, known) {
+        return Some(name);
     }
 
     let m = members(trimmed);
@@ -2037,7 +2279,9 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
                     .map(|e| sig[i + 7..i + 7 + e].to_string())
             })
             .unwrap_or_else(|| "any".to_string());
-        let kind = if has("less") || has("sift_up") {
+        // A Heap keeps the comparison it was built with; a Queue has
+        // no such member. The std spells it `__less`.
+        let kind = if has("__less") || has("less") || has("sift_up") {
             "Heap"
         } else {
             "Queue"
@@ -2048,13 +2292,272 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
 
     if has("next") && has("take_while") && has("collect") {
         let t = get("next")
-            .and_then(|sig| {
-                sig.find("-> ")
-                    .map(|i| sig[i + 3..].trim_end_matches('?').to_string())
-            })
+            .and_then(return_type)
+            .map(|t| t.trim_end_matches('?').to_string())
             .unwrap_or_else(|| "any".to_string());
 
         return Some(format!("Iter<{t}>"));
+    }
+
+    None
+}
+
+/// The one name a union carries: every member names the same shape, or
+/// is the string a unit variant of it prints as.
+fn union_name(body: &str, known: &Known) -> Option<String> {
+    let parts = union_parts(body)?;
+    let mut name: Option<String> = None;
+
+    for part in parts {
+        let part = part.trim();
+        let found = match part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+            Some(unit) => enum_of_unit(unit, known)?,
+
+            None => name_of_body(part, known)?,
+        };
+
+        match &name {
+            Some(had) if *had != found => return None,
+
+            _ => name = Some(found),
+        }
+    }
+
+    name
+}
+
+/// The members of a union at depth zero, or `None` when the text holds
+/// no `|` of its own.
+fn union_parts(body: &str) -> Option<Vec<&str>> {
+    let bytes = body.as_bytes();
+    let mut depth = 0i32;
+    let mut angle = 0i32;
+    let mut in_string = false;
+    let mut start = 0;
+    let mut parts: Vec<&str> = Vec::new();
+
+    for (k, c) in body.char_indices() {
+        if in_string {
+            if c == '"' {
+                in_string = false;
+            }
+
+            continue;
+        }
+
+        match c {
+            '"' => in_string = true,
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth -= 1,
+            '<' => angle += 1,
+            '>' if k > 0 && bytes[k - 1] != b'-' => angle -= 1,
+            '|' if depth == 0 && angle == 0 => {
+                parts.push(&body[start..k]);
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    parts.push(&body[start..]);
+
+    Some(parts)
+}
+
+/// The enum a unit variant belongs to, by the name it prints as.
+fn enum_of_unit(unit: &str, known: &Known) -> Option<String> {
+    known.shapes.iter().find_map(|s| match s {
+        Shape::Enum { name, variants }
+            if variants.iter().any(|(v, p)| v == unit && p.is_empty()) =>
+        {
+            Some(name.clone())
+        }
+
+        _ => None,
+    })
+}
+
+/// An interface prints as its bases met with a table of the fields it
+/// adds. The name the source wrote reads everywhere the print does, not
+/// only after a `: `.
+fn fold_interfaces(text: &mut String, known: &Known) {
+    if known.interfaces.is_empty() {
+        return;
+    }
+
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find('{') {
+        let open = from + i;
+        let start = base_before(text, open).unwrap_or(open);
+
+        // A member inside a longer intersection folds with its head.
+        let inner =
+            text[..start].trim_end().ends_with('&') || intersection_len(&text[start..]).is_none();
+
+        if inner {
+            from = open + 1;
+
+            continue;
+        }
+
+        let len = intersection_len(&text[start..]).expect("intersection");
+        let body = text[start..start + len].to_string();
+
+        match known
+            .interfaces
+            .iter()
+            .find(|f| f.matches(&body, &known.interfaces))
+        {
+            Some(iface) => {
+                let name = iface.name.clone();
+                text.replace_range(start..start + len, &name);
+                from = start + name.len();
+            }
+
+            None => from = open + 1,
+        }
+    }
+}
+
+/// The start of the name that opens `Named & { ... }`, when the table
+/// at `open` follows one.
+fn base_before(text: &str, open: usize) -> Option<usize> {
+    let head = text[..open].strip_suffix("& ")?.trim_end();
+    let len = head
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .count();
+
+    (len > 0).then(|| head.len() - len)
+}
+
+/// How far an intersection runs from the start of the text: one member,
+/// then every ` & ` member after it.
+fn intersection_len(text: &str) -> Option<usize> {
+    let mut at = member_len(text)?;
+
+    loop {
+        let rest = &text[at..];
+        let pad = rest.len() - rest.trim_start().len();
+
+        let Some(after) = rest.trim_start().strip_prefix("& ") else {
+            return Some(at);
+        };
+        let gap = after.len() - after.trim_start().len();
+        let next = at + pad + 2 + gap;
+
+        let Some(len) = member_len(&text[next..]) else {
+            return Some(at);
+        };
+
+        at = next + len;
+    }
+}
+
+/// Whether a character stands in the text outside every bracket.
+fn outside_angles(text: &str, want: char) -> bool {
+    let bytes = text.as_bytes();
+    let mut depth = 0i32;
+
+    for (k, c) in text.char_indices() {
+        match c {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' if k > 0 && bytes[k - 1] == b'-' => {}
+            '>' | ')' | ']' | '}' => depth -= 1,
+            _ if c == want && depth == 0 => return true,
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// `(Slot)?` is `Slot?`: the parentheses held an intersection that now
+/// reads as one name.
+fn fold_name_parens(text: &mut String) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find('(') {
+        let open = from + i;
+
+        let Some(len) = group_len(&text[open..], '(', ')') else {
+            break;
+        };
+        let inner = text[open + 1..open + len - 1].to_string();
+        // One named type, its arguments included. A union, an
+        // intersection, an arrow, or a list needs the parentheses.
+        let plain = inner.chars().next().is_some_and(char::is_alphabetic)
+            && !inner.contains("->")
+            && !outside_angles(&inner, ',')
+            && !outside_angles(&inner, '|')
+            && !outside_angles(&inner, '&');
+        // A `?` or a `[]` after the group is what the parentheses were
+        // for; anywhere else they may be a parameter list.
+        let suffix = matches!(text[open + len..].chars().next(), Some('?') | Some('['));
+
+        if plain && suffix {
+            text.replace_range(open..open + len, &inner);
+            from = open + inner.len();
+
+            continue;
+        }
+
+        from = open + 1;
+    }
+}
+
+/// `Signalish<T...>` prints as the four sources it takes. The doc names
+/// the union, so the reader gets the name.
+fn fold_signalish(text: &mut String) {
+    const HEAD: &str = "RBXScriptSignal<";
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(HEAD) {
+        let at = from + i;
+        let Some(len) = group_len(&text[at + HEAD.len() - 1..], '<', '>') else {
+            break;
+        };
+        let arg = text[at + HEAD.len()..at + HEAD.len() - 1 + len - 1].to_string();
+        let tail = format!(
+            " | Signal<{arg}> | {{ Connect: (self: any, handler: ({arg}) -> ()) -> any }} | {{ connect: (self: any, handler: ({arg}) -> ()) -> any }}"
+        );
+        let end = at + HEAD.len() - 1 + len;
+
+        if !text[end..].starts_with(&tail) {
+            from = at + HEAD.len();
+
+            continue;
+        }
+
+        let name = format!("Signalish<{arg}>");
+        text.replace_range(at..end + tail.len(), &name);
+        from = at + name.len();
+    }
+}
+
+/// The return type of a function type: what follows the first arrow
+/// that stands outside every bracket. `Iter`'s own `next` takes an
+/// `Iter` as its `self`, so the first arrow in the text is the nested
+/// one and reading it cuts the type in half.
+fn return_type(sig: &str) -> Option<&str> {
+    let bytes = sig.as_bytes();
+    let mut depth = 0i32;
+
+    for (k, c) in sig.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '-' if depth == 0 && bytes.get(k + 1) == Some(&b'>') => {
+                return Some(sig[k + 2..].trim());
+            }
+            _ => {}
+        }
     }
 
     None
@@ -2693,6 +3196,127 @@ mod tests {
         assert_eq!(
             fold("function xs:map(self: read number[]): number[]", &known),
             "function xs:map(self: read number[]): number[]"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_chain_hover_names_the_receiver_type() {
+        let known = Known::default();
+        let text = "```luau\nfunction Iter.from(self.items:values())\n            :filter(function(i: Item) return i.count > 0 end)\n            :map(function(i: Item) return i.name end):collect(self: { next: (self: any) -> string? }): string[]\n```";
+
+        assert_eq!(
+            fold(text, &known),
+            "```luau\nfunction Iter:collect(self: Iter<string>): string[]\n```"
+        );
+        // A self type with no name of its own keeps the head it had.
+        assert_eq!(
+            fold("function f(x):go(self: { a: number }): ()", &known),
+            "function f(x):go(self: { a: number }): ()"
+        );
+    }
+
+    #[test]
+    fn an_interface_and_a_record_alias_read_by_name() {
+        let source = "export interface Named as\n    name: string\nend\n\nexport interface Slot extends Named as\n    read id: number\n    count: number\nend\n\nexport type Profile = { name: string, level: number }\n";
+        let known = Known {
+            shapes: Vec::new(),
+            interfaces: interfaces(source),
+        };
+
+        assert_eq!(
+            fold(
+                "local s: Named & { count: number, read id: number }",
+                &known
+            ),
+            "local s: Slot"
+        );
+        // A module prefix on the base is still the base.
+        assert_eq!(
+            fold(
+                "local s: _m1.Named & { count: number, read id: number }",
+                &known
+            ),
+            "local s: Slot"
+        );
+        // One table with every field, under an array, keeps the array.
+        assert_eq!(
+            fold(
+                "{ count: number, read id: number } & { name: string }[]",
+                &known
+            ),
+            "Slot[]"
+        );
+        assert_eq!(
+            fold("local all: { level: number, name: string }[]", &known),
+            "local all: Profile[]"
+        );
+    }
+
+    #[test]
+    fn a_result_printed_with_its_methods_reads_as_the_result() {
+        let known = Known::default();
+        let text = "local r: (Result<Profile, any> & { read expect: (self: any, message: string) -> Profile, read is_err: (self: any) -> boolean, read is_ok: (self: any) -> boolean, read map: (self: any) -> any, read map_err: (self: any) -> any, read ok: (self: any) -> Profile?, read unwrap: (self: any) -> Profile, read unwrap_or: (self: any) -> any })[]";
+
+        assert_eq!(fold(text, &known), "local r: Result<Profile, any>[]");
+    }
+
+    #[test]
+    fn one_array_receiver_spelling() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "function Array:len(self: {read Result<Profile, any>}): number",
+                &known
+            ),
+            "function Array:len(self: read Result<Profile, any>[]): number"
+        );
+    }
+
+    #[test]
+    fn a_signal_source_reads_as_signalish() {
+        let known = Known::default();
+        let text = "function Signal.collect<T...>(source: RBXScriptSignal<T...> | Signal<T...> | { Connect: (self: any, handler: (T...) -> ()) -> any } | { connect: (self: any, handler: (T...) -> ()) -> any }): ((...any) -> T..., SignalConnection)";
+
+        assert_eq!(
+            fold(text, &known),
+            "function Signal.collect<T...>(source: Signalish<T...>): ((...any) -> T..., SignalConnection)"
+        );
+    }
+
+    #[test]
+    fn a_method_through_a_variable_names_the_type() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold("function self:markup(self: Item): number", &known),
+            "function Item:markup(self: Item): number"
+        );
+        // No name to put there: the print stays as it came.
+        assert_eq!(
+            fold("function a:price(self: any): number", &known),
+            "function a:price(self: any): number"
+        );
+    }
+
+    #[test]
+    fn an_iter_return_reads_past_the_nested_arrow() {
+        let known = Known::default();
+        let body = "{ collect: (self: { next: (self: any) -> U? }) -> Array<U>, next: (self: { next: (self: any) -> U? }) -> U?, take_while: (self: { next: (self: any) -> U? }, f: (U) -> boolean) -> any }";
+
+        assert_eq!(name_of_body(body, &known), Some("Iter<U>".to_string()));
+    }
+
+    #[test]
+    fn a_heap_is_not_a_queue() {
+        let known = Known::default();
+        let heap = "{ read __less: (number, number) -> boolean, clear: (self: t2) -> (), is_empty: (self: t2) -> boolean, len: (self: t2) -> number, peek: (self: t2) -> number?, pop: (self: t2) -> number?, push: (self: t2, value: number) -> (), to_array: (self: t2) -> t1 }";
+        let queue = "{ clear: (self: t2) -> (), is_empty: (self: t2) -> boolean, len: (self: t2) -> number, peek: (self: t2) -> number?, pop: (self: t2) -> number?, push: (self: t2, value: number) -> () }";
+
+        assert_eq!(name_of_body(heap, &known), Some("Heap<number>".to_string()));
+        assert_eq!(
+            name_of_body(queue, &known),
+            Some("Queue<number>".to_string())
         );
     }
 

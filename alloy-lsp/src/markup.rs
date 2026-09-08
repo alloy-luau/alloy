@@ -22,6 +22,9 @@ pub enum Spot {
         prefix: String,
         existing: Vec<String>,
     },
+    /// The text of an element body, between the tags. Text is text, so
+    /// nothing completes there.
+    Text,
 }
 
 /// Reports if `<` at `lt` opens markup rather than a comparison, by the
@@ -50,16 +53,17 @@ fn opens_markup(src: &str, lt: usize) -> bool {
 /// The spot for a completion: text-based, so an unfinished tag counts.
 pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
     let offset = offset.min(src.len());
+    let text = || in_markup_text(src, offset).then_some(Spot::Text);
     let lt = src[..offset].rfind('<')?;
 
     if !opens_markup(src, lt) {
-        return None;
+        return text();
     }
 
     let tag = &src[lt + 1..offset];
 
     if tag.starts_with('/') {
-        return None;
+        return text();
     }
 
     // Past the opening tag, or inside an expression hole: not ours.
@@ -71,7 +75,7 @@ pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
 
             '}' => depth -= 1,
 
-            '>' if depth == 0 => return None,
+            '>' if depth == 0 => return text(),
 
             _ => {}
         }
@@ -100,6 +104,88 @@ pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
         prefix,
         existing,
     })
+}
+
+/// Where the child can complete a `{ }` hole that opens with a keyword.
+/// The hole lowers to its expression alone, so the cursor lands on the
+/// keyword and the child answers nothing there. The expression after
+/// the keyword carries the same scope the whole hole takes.
+pub fn hole_expression_start(src: &str, offset: usize) -> Option<usize> {
+    let offset = offset.min(src.len());
+    let open = enclosing_hole(src, offset)?;
+
+    if !src[open + 1..offset].chars().all(char::is_whitespace) {
+        return None;
+    }
+
+    let rest = src.get(offset..)?;
+    let word: String = rest.chars().take_while(char::is_ascii_alphabetic).collect();
+
+    if !matches!(
+        word.as_str(),
+        "if" | "for" | "while" | "match" | "not" | "function"
+    ) {
+        return None;
+    }
+
+    let after = &rest[word.len()..];
+    let gap = after.len() - after.trim_start_matches([' ', '\t']).len();
+
+    (gap > 0).then_some(offset + word.len() + gap)
+}
+
+/// The `{` of the innermost hole still open at an offset inside markup.
+fn enclosing_hole(src: &str, offset: usize) -> Option<usize> {
+    let spans = alloy::luaux::compile::markup_spans(src).ok()?;
+    let (start, _) = spans
+        .iter()
+        .copied()
+        .find(|(s, e)| *s <= offset && offset < *e)?;
+    let mut open: Vec<usize> = Vec::new();
+
+    for (k, c) in src[start..offset].char_indices() {
+        match c {
+            '{' => open.push(start + k),
+
+            '}' => {
+                open.pop();
+            }
+
+            _ => {}
+        }
+    }
+
+    open.pop()
+}
+
+/// Whether the cursor sits in the text of an element body: inside a
+/// markup region, outside every tag, and outside every `{ }` hole. The
+/// child would answer such a spot with the whole value scope.
+fn in_markup_text(src: &str, offset: usize) -> bool {
+    let Ok(spans) = alloy::luaux::compile::markup_spans(src) else {
+        return false;
+    };
+    let Some((start, _)) = spans
+        .iter()
+        .copied()
+        .find(|(s, e)| *s <= offset && offset < *e)
+    else {
+        return false;
+    };
+    let mut depth = 0i32;
+    let mut in_tag = false;
+
+    for c in src[start..offset].chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            '<' if depth == 0 => in_tag = true,
+            '>' if depth == 0 => in_tag = false,
+            _ => {}
+        }
+    }
+
+    depth == 0 && !in_tag
 }
 
 /// The prop names a component takes, read from its parameter type: the
@@ -218,7 +304,72 @@ fn attribute_names(tag: &str) -> Vec<String> {
 /// The spot for a hover: the parsed tree, and the text for a tag the
 /// tree does not hold.
 pub fn hover_spot(src: &str, offset: usize) -> Option<Spot> {
-    tree_spot(src, offset).or_else(|| tag_name_at(src, offset))
+    // The `<` itself is punctuation. The child reads the factory the
+    // markup lowers to and answers with that, which is emit detail.
+    if src[offset..].starts_with('<') && opens_markup(src, offset) {
+        return Some(Spot::Text);
+    }
+
+    tree_spot(src, offset)
+        .or_else(|| tag_name_at(src, offset))
+        .or_else(|| attribute_at(src, offset))
+}
+
+/// An attribute name read from the text, for a tag the tree holds no
+/// element for: a tag inside a `{ }` hole is one expression there.
+fn attribute_at(src: &str, offset: usize) -> Option<Spot> {
+    let lt = src.get(..offset)?.rfind('<')?;
+
+    if !opens_markup(src, lt) || src[lt..].starts_with("</") {
+        return None;
+    }
+
+    let mut depth = 0i32;
+
+    for c in src[lt + 1..offset].chars() {
+        match c {
+            '{' => depth += 1,
+
+            '}' => depth -= 1,
+
+            '>' if depth == 0 => return None,
+
+            _ => {}
+        }
+    }
+
+    if depth != 0 {
+        return None;
+    }
+
+    let class: String = src[lt + 1..offset]
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+
+    if class.is_empty() {
+        return None;
+    }
+
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let start = src[..offset]
+        .rfind(|c: char| !is_word(c))
+        .map_or(0, |i| i + 1);
+    let end = offset + src[offset..].find(|c: char| !is_word(c)).unwrap_or(0);
+    let name = &src[start..end];
+
+    // The tag's own name is not one of its attributes.
+    if name.is_empty() || start <= lt + class.len() {
+        return None;
+    }
+
+    src[end..]
+        .trim_start()
+        .starts_with('=')
+        .then(|| Spot::Attribute {
+            class,
+            name: name.to_string(),
+        })
 }
 
 /// The tag name under the cursor, read from the text. A tag inside a
@@ -372,7 +523,9 @@ pub fn hover(spot: &Spot, bound: &HashSet<String>) -> Option<Value> {
         }
 
         Spot::Attribute { class, name } => {
-            if !roblox::is_class(class) {
+            if alloy::alx::FREE_PROPS.contains(&name.as_str()) {
+                format!("`{name}`: the markup reads it itself; it never reaches `{class}`.")
+            } else if !roblox::is_class(class) {
                 format!("`{name}`: a prop of component `{class}`.")
             } else if roblox::is_event(class, name) {
                 format!("`{name}`: event of `{class}`. The value is the handler.")
@@ -456,6 +609,21 @@ pub fn completions(spot: &Spot, bound: &HashSet<String>, src: &str) -> Vec<Value
                             "insertText": format!("{prop}={{$1}}"),
                             "insertTextFormat": 2,
                             "sortText": format!("1{prop}"),
+                        }));
+                    }
+                }
+
+                // The framework reads `key` itself, so a tag may set it
+                // on any component and no declaration lists it.
+                for prop in alloy::alx::FREE_PROPS {
+                    if prop.starts_with(prefix.as_str()) && !taken.contains(prop) {
+                        items.push(json!({
+                            "label": prop,
+                            "kind": 10,
+                            "detail": "prop of the markup",
+                            "insertText": format!("{prop}={{$1}}"),
+                            "insertTextFormat": 2,
+                            "sortText": format!("2{prop}"),
                         }));
                     }
                 }
@@ -622,6 +790,66 @@ mod tests {
         );
     }
 
+    /// A tag inside a `{ }` hole has no element in the tree, so its
+    /// attributes read from the text.
+    #[test]
+    fn an_attribute_of_a_tag_in_a_hole_hovers() {
+        let src = "local function V(xs)\n    return <Frame>{xs:map(function(x)\n        return <Row key={x.id} slot={x} />\n    end)}</Frame>\nend\n";
+        let at = src.find("key=").expect("key");
+
+        assert_eq!(
+            hover_spot(src, at),
+            Some(Spot::Attribute {
+                class: "Row".into(),
+                name: "key".into(),
+            })
+        );
+        let value = hover(
+            &Spot::Attribute {
+                class: "Row".into(),
+                name: "key".into(),
+            },
+            &HashSet::new(),
+        )
+        .expect("hover");
+
+        assert!(
+            value["contents"]["value"]
+                .as_str()
+                .is_some_and(|t| t.contains("never reaches `Row`")),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn markup_text_completes_nothing() {
+        let src = "local function V()\n    return <TextLabel>hello there</TextLabel>\nend\n";
+        let at = src.find("there").expect("text");
+
+        assert_eq!(completion_spot(src, at), Some(Spot::Text));
+        assert!(completions(&Spot::Text, &HashSet::new(), src).is_empty());
+        // A hole is code, and the child answers it.
+        let hole = "local function V()\n    return <TextLabel>{x}</TextLabel>\nend\n";
+        let inside = hole.find("x}").expect("hole");
+
+        assert_eq!(completion_spot(hole, inside), None);
+    }
+
+    #[test]
+    fn a_hole_that_opens_with_a_keyword_completes_past_it() {
+        let src = "local function V()\n    return <Frame>{if n == 0 then a else b}</Frame>\nend\n";
+        let open = src.find("{if").expect("hole") + 1;
+
+        assert_eq!(hole_expression_start(src, open), src.find("n == 0"));
+        // A hole that names a value needs no move.
+        let plain = "local function V()\n    return <Frame>{rows}</Frame>\nend\n";
+
+        assert_eq!(
+            hole_expression_start(plain, plain.find("rows").expect("hole")),
+            None
+        );
+    }
+
     #[test]
     fn a_component_offers_the_props_it_declares() {
         let src = "type Props = { title: string, count: number }\nlocal function Panel(props: Props) end\nlocal function Badge(props: { label: string }) end";
@@ -640,7 +868,9 @@ mod tests {
             &HashSet::new(),
             src,
         );
-        assert_eq!(items.len(), 1);
+        // The declared prop, then `key`, which the markup reads itself.
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0]["label"], "label");
+        assert_eq!(items[1]["label"], "key");
     }
 }

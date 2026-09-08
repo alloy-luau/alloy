@@ -1,0 +1,20 @@
+-- `@cfg` on a function opens the body with the check.
+@cfg(server)
+function save(player: Player)
+    print(player)
+end
+
+@cfg(client and not studio)
+local function hud()
+end
+
+-- `@cfg` on a local reads the value only where it holds.
+@cfg(server)
+const store = game:GetService("DataStoreService")
+
+@cfg(any(studio, test))
+local verbose = {
+    level = 2,
+}
+
+print(save, hud, store, verbose)

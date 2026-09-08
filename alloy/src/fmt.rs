@@ -2313,7 +2313,7 @@ mod tests {
 
     #[test]
     fn long_strings_and_comments_keep_their_text() {
-        let src = "local s = [[\n  keep\n\tthis  \n]]\nprint(s) -- note\n";
+        let src = "local s = [=[\n  keep\n\tthis  \n]=]\nprint(s) -- note\n";
         assert_eq!(fmt(src), src);
     }
 

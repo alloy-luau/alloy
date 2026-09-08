@@ -277,7 +277,7 @@ mod tests {
     use crate::lexer::lex;
 
     fn spec(src: &str) -> Vec<String> {
-        let toks = lex(src).unwrap().toks;
+        let toks = crate::lexer::lex_luau(src).unwrap().toks;
         scan(src, &toks)
             .sites
             .iter()

@@ -8,6 +8,7 @@
 //! root, the root's Luau configuration, and a link to every other
 //! folder. The language server does the same for open files.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,6 +28,9 @@ pub struct CheckSource {
     /// One-based lines that carry a compiler diagnostic; the checker's
     /// reports there describe an unreliable emit and stay out.
     pub error_lines: Vec<usize>,
+    /// Zero-based lines an `--@alloy-expect-error` covers that the
+    /// compiler or a lint reported on.
+    pub expected_hits: Vec<usize>,
 }
 
 /// One report of the checker, on a source.
@@ -47,7 +51,7 @@ impl TypeDiag {
     pub fn is_error(&self) -> bool {
         matches!(
             self.kind.as_str(),
-            "TypeError" | "SyntaxError" | "UnknownModule"
+            "TypeError" | "SyntaxError" | "UnknownModule" | "ExpectError"
         )
     }
 }
@@ -431,6 +435,10 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     // A message may run over several lines; the extra lines join the
     // report before them.
     let mut last: Option<usize> = None;
+    // The lines an `--@alloy-expect-error` covers that the checker
+    // reported on, by source; the rest of the directives are errors.
+    let mut expected_hits: HashMap<PathBuf, HashSet<usize>> = HashMap::new();
+    let mut directives: HashMap<PathBuf, crate::directives::Directives> = HashMap::new();
 
     for line in text.lines() {
         let Some(report) = parse_line(line) else {
@@ -469,6 +477,17 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         };
 
+        let silence = directives
+            .entry(f.rel.clone())
+            .or_insert_with(|| crate::directives::scan(&f.source));
+
+        if silence.expects(line_no.saturating_sub(1)) {
+            expected_hits
+                .entry(f.rel.clone())
+                .or_default()
+                .insert(line_no.saturating_sub(1));
+        }
+
         let is_error = kind == "TypeError" || kind == "SyntaxError";
         let Some(mapped) = map_position(f, line_no, col, is_error, message) else {
             continue;
@@ -506,6 +525,27 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             message,
         });
         last = Some(analysis.diagnostics.len() - 1);
+    }
+
+    for f in files {
+        let silence = directives
+            .entry(f.rel.clone())
+            .or_insert_with(|| crate::directives::scan(&f.source));
+        let mut errored: HashSet<usize> = f.expected_hits.iter().copied().collect();
+
+        if let Some(hits) = expected_hits.get(&f.rel) {
+            errored.extend(hits);
+        }
+
+        for at in silence.unmet(&errored) {
+            analysis.diagnostics.push(TypeDiag {
+                rel: f.rel.clone(),
+                line: at + 1,
+                col: 1,
+                kind: "ExpectError".to_string(),
+                message: crate::directives::UNMET.to_string(),
+            });
+        }
     }
 
     analysis
@@ -751,6 +791,7 @@ mod tests {
             map: out.map,
             unused_lines: Vec::new(),
             error_lines: Vec::new(),
+            expected_hits: Vec::new(),
         };
         assert_eq!(map_position(&f, 1, 19, true, "Expected"), Some((1, 19)));
         let silenced = CheckSource {

@@ -895,6 +895,7 @@ export type Display = { read to_string: (self: any) -> string }
 export type Debug = { read debug: (self: any) -> string }
 export type Clone<T = any> = { read clone: (self: any) -> T }
 export type Eq = { read eq: (self: any, other: any) -> boolean }
+export type PartialEq = Eq
 export type Ord = { read lt: (self: any, other: any) -> boolean, read le: (self: any, other: any) -> boolean }
 export type Add<T = any> = { read add: (self: any, other: any) -> T }
 export type Sub<T = any> = { read sub: (self: any, other: any) -> T }
@@ -2104,6 +2105,40 @@ end
 
 local function replicated_storage()
 	return game:GetService("ReplicatedStorage")
+end
+
+-- ---------------------------------------------------------------------------
+-- `@cfg`: the conditions a build cannot decide, read when the code runs.
+-- ---------------------------------------------------------------------------
+
+local testing = false
+
+--- `@cfg(server)` and the rest. Each asks RunService when it runs, so
+--- the module loads where `game` does not exist.
+alloy.cfg = {
+	server = function(): boolean
+		return run_service():IsServer()
+	end,
+	client = function(): boolean
+		return run_service():IsClient()
+	end,
+	studio = function(): boolean
+		return run_service():IsStudio()
+	end,
+	edit = function(): boolean
+		return run_service():IsEdit()
+	end,
+	running = function(): boolean
+		return run_service():IsRunning()
+	end,
+	test = function(): boolean
+		return testing
+	end,
+}
+
+--- `alloy test` marks the run, so `@cfg(test)` holds in a spec.
+function alloy.set_testing(value: boolean)
+	testing = value
 end
 
 local function remote_instance(name: string, class: string)

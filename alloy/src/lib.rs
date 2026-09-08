@@ -65,6 +65,9 @@ pub struct Output {
     pub data_refs: Vec<ImportRef>,
     /// The `@test` functions, in order: name and whether it is async.
     pub tests: Vec<(String, bool)>,
+    /// Zero-based lines an `--@alloy-expect-error` covers that the
+    /// compiler or a lint reported on.
+    pub expected_hits: Vec<usize>,
     /// For `.alx`: the Alloy text luaux lowered the markup to. The check
     /// artifact's positions are positions in this text, not the source.
     pub lowered: Option<String>,
@@ -177,9 +180,27 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     lints.dedup();
 
     // `--@alloy-nocheck` and `--@alloy-ignore` silence their lines.
+    // `--@alloy-expect-error` silences too, and remembers the lines it
+    // covered that reported: the checker's pass adds its own and
+    // reports each directive left over.
     let silence = directives::scan(src);
+    let mut expected_hits = Vec::new();
 
     if !silence.is_empty() {
+        for line in diagnostics
+            .iter()
+            .map(|d| directives::line_of(src, d.start as usize))
+            .chain(
+                lints
+                    .iter()
+                    .map(|l| directives::line_of(src, l.start as usize)),
+            )
+        {
+            if silence.expects(line) && !expected_hits.contains(&line) {
+                expected_hits.push(line);
+            }
+        }
+
         diagnostics.retain(|d| silence.allows(directives::line_of(src, d.start as usize)));
         lints.retain(|l| silence.allows(directives::line_of(src, l.start as usize)));
     }
@@ -235,6 +256,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         imports,
         data_refs: data::references(src),
         tests: rendered.tests,
+        expected_hits,
         lowered: None,
         layer: None,
         layered: None,

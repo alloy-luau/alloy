@@ -350,6 +350,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
                 map: compiled.map.clone(),
                 unused_lines,
                 error_lines,
+                expected_hits: compiled.expected_hits.clone(),
             });
         }
 
@@ -746,7 +747,7 @@ fn skipped_dir(path: &Path, top: bool) -> bool {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    name.starts_with('.')
+    (name.starts_with('.') && name != ".ember")
         || matches!(name.as_str(), "node_modules" | "target")
         || (!top && path.join(crate::config::FILE_NAME).is_file())
 }

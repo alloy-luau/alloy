@@ -713,6 +713,8 @@ pub fn spec(
     }
 
     text.push_str("\nlocal __lest = require(\"@lest\")\n");
+    // `@cfg(test)` holds while the spec runs.
+    text.push_str("__alloy.set_testing(true)\n");
     text.push_str(&format!(
         "__lest.describe({}, function()\n",
         luau_string(&name)

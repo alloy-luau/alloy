@@ -946,7 +946,7 @@ impl<'s> Desugar<'s> {
 
             for arg in &a.args {
                 match self.text_of(arg.span()) {
-                    "Eq" => {
+                    "Eq" | "PartialEq" => {
                         let slots: Vec<String> = (1..=max_arity)
                             .map(|i| format!(" and a._{i} == b._{i}"))
                             .collect();
@@ -2414,6 +2414,7 @@ impl<'s> Desugar<'s> {
             "Debug",
             "Clone",
             "Eq",
+            "PartialEq",
             "Ord",
             "Add",
             "Sub",
@@ -2801,7 +2802,7 @@ impl<'s> Desugar<'s> {
 
             if matches!(
                 name.as_str(),
-                "derive" | "test" | "native" | "checked" | "deprecated"
+                "derive" | "test" | "native" | "checked" | "deprecated" | "cfg"
             ) {
                 continue;
             }
@@ -2828,7 +2829,7 @@ impl<'s> Desugar<'s> {
         };
         let tn = if self.options.check { ": any" } else { "" };
         match which {
-            "Eq" => {
+            "Eq" | "PartialEq" => {
                 let cmp: Vec<String> = fields.iter().map(|f| format!("a.{f} == b.{f}")).collect();
                 let body = if cmp.is_empty() {
                     "true".to_string()
@@ -3330,10 +3331,17 @@ impl<'s> Desugar<'s> {
         let mut upstream = Vec::new();
         let mut user = Vec::new();
         let mut is_test = false;
+        let mut cfg = None;
 
         for a in attrs {
             match a.name.map(|n| self.text_of(n)) {
                 Some("test") => is_test = true,
+
+                Some("cfg") => match self.cfg_condition(&a.args) {
+                    Ok(cond) => cfg = Some((cond, self.text_of(a.span).to_string())),
+
+                    Err(message) => self.diagnose(a.span, &message),
+                },
 
                 Some(n @ ("native" | "checked" | "deprecated" | "inline" | "noinline")) => {
                     if a.args.is_empty() {
@@ -3380,6 +3388,31 @@ impl<'s> Desugar<'s> {
         self.blank_lines(start, decl_start);
         self.generate(decl_start, &lead);
         let rest = TokSpan::new(first_tok as usize, span.end as usize);
+
+        // `@cfg(server)`: the function stays, typed as written, and its
+        // body opens with the check. A shared module loads on both
+        // sides, so the condition is read when the function runs.
+        if let Some((cond, text)) = cfg {
+            // An empty body puts the check behind the header; a body
+            // with statements puts it before the first.
+            let (at, pad) = if body.block.span.is_empty() {
+                (self.toks[span.end as usize - 2].end, (" ", ""))
+            } else {
+                (self.byte_start(body.block.span), ("", " "))
+            };
+            let what = fname
+                .as_deref()
+                .map_or("this function".to_string(), |f| format!("`{f}`"));
+            self.inserts.push((
+                at,
+                format!(
+                    "{}if not ({cond}) then error({}, 2) end{}",
+                    pad.0,
+                    luau_string(&format!("{what} is {text} and cannot run here")),
+                    pad.1
+                ),
+            ));
+        }
 
         if function_needs_rewrite(body) {
             self.function_with_header(rest, body);
@@ -3832,6 +3865,75 @@ impl<'s> Desugar<'s> {
         }
 
         true
+    }
+
+    /// The Luau of a `@cfg` condition: names the runtime reads, joined
+    /// by `not`, `and`, `or`, or by `any(...)` and `all(...)`.
+    fn cfg_condition(&mut self, args: &[Expr]) -> Result<String, String> {
+        let [arg] = args else {
+            return Err("`@cfg` takes one condition: `@cfg(server)`, `@cfg(not client)`, `@cfg(server and studio)`".to_string());
+        };
+        let std = self.std();
+
+        self.cfg_expr(arg, std)
+    }
+
+    fn cfg_expr(&self, e: &Expr, std: &str) -> Result<String, String> {
+        const FLAGS: &[&str] = &["server", "client", "studio", "edit", "running", "test"];
+
+        match e {
+            Expr::Name(t) => {
+                let name = self.text_of(*t);
+
+                if FLAGS.contains(&name) {
+                    Ok(format!("{std}.cfg.{name}()"))
+                } else {
+                    Err(format!(
+                        "`@cfg({name})`: the conditions are {}",
+                        FLAGS.join(", ")
+                    ))
+                }
+            }
+
+            Expr::Paren { inner, .. } => Ok(format!("({})", self.cfg_expr(inner, std)?)),
+
+            Expr::Unary { op, operand, .. } if self.text_of(*op) == "not" => {
+                Ok(format!("not {}", self.cfg_expr(operand, std)?))
+            }
+
+            Expr::Binary { op, lhs, rhs, .. } if matches!(self.text_of(*op), "and" | "or") => {
+                Ok(format!(
+                    "({} {} {})",
+                    self.cfg_expr(lhs, std)?,
+                    self.text_of(*op),
+                    self.cfg_expr(rhs, std)?
+                ))
+            }
+
+            Expr::Call {
+                func,
+                method: None,
+                args: CallArgs::Paren(args),
+                ..
+            } if matches!(&**func, Expr::Name(f) if matches!(self.text_of(*f), "any" | "all")) => {
+                let Expr::Name(f) = &**func else {
+                    unreachable!()
+                };
+                let joiner = if self.text_of(*f) == "any" { " or " } else { " and " };
+                let parts = args
+                    .iter()
+                    .map(|a| self.cfg_expr(a, std))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                if parts.is_empty() {
+                    return Err(format!("`@cfg({}())` names no condition", self.text_of(*f)));
+                }
+
+                Ok(format!("({})", parts.join(joiner)))
+            }
+
+            _ => Err("`@cfg` takes names joined by `not`, `and`, `or`, `any(...)`, or `all(...)`: `@cfg(server and not studio)`".to_string()),
+        }
     }
 
     fn diagnose(&mut self, span: TokSpan, message: &str) {
@@ -4526,15 +4628,28 @@ impl<'s> Desugar<'s> {
                 self.expr(e);
             }
 
-            // An attribute on a local has nothing to attach to: a
-            // diagnostic, and the text goes so the output stays Luau.
+            // `@cfg` on a local guards its value; any other attribute
+            // has nothing to attach to: a diagnostic, and the text goes
+            // so the output stays Luau.
             Stmt::Local(l) if !l.attrs.is_empty() => {
+                let mut cfg = None;
+
                 for a in &l.attrs {
                     let name = a.name.map(|n| self.text_of(n)).unwrap_or("").to_string();
-                    self.diagnose(
-                        a.span,
-                        &format!("`@{name}` has no meaning on a local binding; attributes go on a function, a struct, an enum, a field, a remote, or a remote parameter"),
-                    );
+
+                    if name == "cfg" {
+                        match self.cfg_condition(&a.args) {
+                            Ok(cond) => cfg = Some(cond),
+
+                            Err(message) => self.diagnose(a.span, &message),
+                        }
+                    } else {
+                        self.diagnose(
+                            a.span,
+                            &format!("`@{name}` has no meaning on a local binding; attributes go on a function, a struct, an enum, a field, a remote, or a remote parameter"),
+                        );
+                    }
+
                     self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
                 }
 
@@ -4546,6 +4661,39 @@ impl<'s> Desugar<'s> {
                     .map(|a| self.byte_end(a.span))
                     .max()
                     .unwrap_or(0);
+
+                // The value is read only when the condition holds; the
+                // binding keeps the value's type, so the code that uses
+                // it reads as before. `typeof` sees the value, it does
+                // not run it.
+                if let Some(cond) = cfg {
+                    let plain = l.names.len() == 1
+                        && l.values.len() == 1
+                        && !self.text_of(l.names[0].name).starts_with(['{', '[']);
+
+                    if plain {
+                        let value = &l.values[0];
+                        let vs = self.byte_start(value.span());
+                        let ve = self.byte_end(value.span());
+                        // The copy in `typeof` sits on one line: each
+                        // line of the value loses its indent.
+                        let shape = self
+                            .render_to_string(value)
+                            .lines()
+                            .map(str::trim)
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        self.copy(after_attrs, vs);
+                        self.generate(vs, &format!("(if {cond} then "));
+                        self.expr(value);
+                        self.generate(ve, &format!(" else nil) :: typeof({shape})"));
+                        self.copy(ve, self.byte_end(l.span));
+
+                        return;
+                    }
+
+                    self.diagnose(l.span, "`@cfg` goes on a local with one name and one value");
+                }
 
                 if local_needs_rewrite(l) {
                     self.local_stmt(l);
@@ -5372,6 +5520,75 @@ impl<'s> Desugar<'s> {
             ("stringify", 1) => luau_string(&sources[0]),
 
             ("bnot", 1) => format!("bit32.bnot({})", rendered[0]),
+
+            // `$set[a, b]` or `$set(a, b)`: a Set of the values.
+            ("set", _) => {
+                let std = self.std();
+                let items: Vec<String> = match args {
+                    [Expr::Array { items, .. }] => {
+                        items.iter().map(|e| self.render_to_string(e)).collect()
+                    }
+
+                    _ => rendered,
+                };
+
+                format!("{std}.Set.from({{ {} }})", items.join(", "))
+            }
+
+            // `$map[[k, v], ...]` or `$map([k, v], ...)`: a HashMap of
+            // the pairs.
+            ("map", _) => {
+                let std = self.std();
+                let pairs: &[Expr] = match args {
+                    [Expr::Array { items, .. }]
+                        if items.iter().all(|e| matches!(e, Expr::Array { .. })) =>
+                    {
+                        items
+                    }
+
+                    _ => args,
+                };
+                let mut fields = Vec::new();
+                // A table literal with string keys reads as a record, so
+                // the checker learns `K` and `V` from a cast: the types
+                // of the first pair, a literal's own or `typeof` of the
+                // expression.
+                let mut shape = None;
+
+                for pair in pairs {
+                    match pair {
+                        Expr::Array { items, .. } if items.len() == 2 => {
+                            let k = self.render_to_string(&items[0]);
+                            let v = self.render_to_string(&items[1]);
+
+                            if shape.is_none() {
+                                let kt = literal_type(&items[0])
+                                    .unwrap_or_else(|| format!("typeof({k})"));
+                                let vt = literal_type(&items[1])
+                                    .unwrap_or_else(|| format!("typeof({v})"));
+                                shape = Some(format!("{{ [{kt}]: {vt} }}"));
+                            }
+
+                            fields.push(format!("[{k}] = {v}"));
+                        }
+
+                        other => {
+                            self.diagnose(
+                                other.span(),
+                                "`$map` takes pairs: `$map[[key, value], [key, value]]`",
+                            );
+                        }
+                    }
+                }
+
+                match shape {
+                    Some(shape) => {
+                        format!("{std}.HashMap.from({{ {} }} :: {shape})", fields.join(", "))
+                    }
+
+                    None => format!("{std}.HashMap.from({{}})"),
+                }
+            }
 
             _ => {
                 self.diagnose(

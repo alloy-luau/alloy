@@ -622,10 +622,14 @@ impl State {
         let (_, start_char) = position_of(&doc.source, edit_start);
         let alloy_only = typed.starts_with('@');
         let luau_only = typed.starts_with('!');
-        let directives: [(&str, &str); 5] = [
+        let directives: [(&str, &str); 6] = [
             (
                 "--@alloy-ignore",
                 "Silences the next line that holds code, or this line when it sits at the end of one: the compiler's, the lints, and the checker's diagnostics.",
+            ),
+            (
+                "--@alloy-expect-error",
+                "Silences the next line that holds code the way `--@alloy-ignore` does, and is an error itself when that line has none.",
             ),
             (
                 "--@alloy-nocheck",
@@ -1853,7 +1857,8 @@ impl Server {
                 // there takes the next Enter.
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
-                    && self.closes_a_string(&uri, &message)
+                    && (self.closes_a_string(&uri, &message)
+                        || self.names_a_declaration(&uri, &message))
                 {
                     self.respond(&id, json!([]));
 
@@ -2646,6 +2651,7 @@ impl Server {
                                 let mut out: Vec<Value> = Vec::new();
 
                                 let lint_config = st.lint_config();
+                                let unmet = unmet_expectations(doc, &diagnostics);
 
                                 for mut d in diagnostics {
                                     if !keep_diagnostic(&d, doc, &lint_config) {
@@ -2663,6 +2669,8 @@ impl Server {
                                         out.push(d);
                                     }
                                 }
+
+                                out.extend(unmet);
 
                                 out
                             }
@@ -2803,7 +2811,9 @@ impl Server {
                     "textDocument/diagnostic" => {
                         if let Some(items) = result.get_mut("items").and_then(Value::as_array_mut) {
                             let lint_config = st.lint_config();
+                            let unmet = unmet_expectations(doc, items);
                             items.retain(|d| keep_diagnostic(d, doc, &lint_config));
+                            items.extend(unmet);
                         }
                     }
 
@@ -3387,6 +3397,29 @@ impl Server {
     /// Whether a completion request came from a quote that closed a
     /// string: the quote is a trigger character for a require path, and
     /// the one that ends the string is the same key.
+    /// Whether the cursor writes the name of a new declaration, `enum
+    /// Col|`: the name is the author's to choose, so no list fits. Luau
+    /// answers a binding name with nothing for the same reason; the
+    /// shadow's shape differs for an Alloy declaration, so the source
+    /// decides.
+    fn names_a_declaration(&self, uri: &str, message: &Value) -> bool {
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+        let st = self.state.lock().expect("state");
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        declares_a_name_at(&doc.source, offset)
+    }
+
     fn closes_a_string(&self, uri: &str, message: &Value) -> bool {
         let Some(trigger) = message
             .pointer("/params/context/triggerCharacter")
@@ -3792,9 +3825,10 @@ fn walk(dir: &Path, skip: Option<&Path>, out: &mut Vec<PathBuf>, plain: &mut Vec
 
         if path.is_dir() {
             // A dot directory holds tooling state, `.lest` or the test
-            // modules, not sources; `.alloy` keeps the build's sourcemap.
+            // modules, not sources; `.alloy` keeps the build's sourcemap,
+            // and `.ember` holds the packages a `packages/` stub requires.
             if matches!(name.as_str(), "node_modules" | "target")
-                || (name.starts_with('.') && name != ".alloy")
+                || (name.starts_with('.') && !matches!(name.as_str(), ".alloy" | ".ember"))
                 || Some(path.as_path()) == skip
             {
                 continue;
@@ -4963,10 +4997,117 @@ fn narrowed_between(text: &str, name: &str) -> bool {
     false
 }
 
+/// The `--@alloy-expect-error` directives that cover a line nothing
+/// reported on, each as a diagnostic on the directive. `child` holds the
+/// checker's reports before the filter, in shadow lines, which the
+/// source shares; the compiler's own hits come with the output.
+fn unmet_expectations(doc: &Doc, child: &[Value]) -> Vec<Value> {
+    let silence = alloy::directives::scan(&doc.source);
+
+    if silence.is_empty() {
+        return Vec::new();
+    }
+
+    let mut errored: HashSet<usize> = doc
+        .output
+        .as_ref()
+        .map(|o| o.expected_hits.iter().copied().collect())
+        .unwrap_or_default();
+
+    for d in child {
+        if let Some(((sl, _), _)) = d.get("range").and_then(range_of)
+            && d.get("severity").and_then(Value::as_u64).unwrap_or(1) <= 2
+        {
+            errored.insert(sl as usize);
+        }
+    }
+
+    silence
+        .unmet(&errored)
+        .into_iter()
+        .map(|at| {
+            let (s, e) = alloy::directives::span_of_line(&doc.source, at);
+            let (sl, sc) = position_of(&doc.source, s);
+            let (el, ec) = position_of(&doc.source, e);
+            let message = alloy::directives::UNMET;
+            let mut item = json!({
+                "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                "severity": 1,
+                "source": "Alloy",
+                "message": alloy::docs::labeled(message),
+            });
+
+            if let Some(code) = alloy::docs::code_for(message)
+                && let Some(url) = alloy::docs::book_url(code)
+            {
+                item["code"] = json!(code);
+                item["codeDescription"] = json!({ "href": url });
+            }
+
+            item
+        })
+        .collect()
+}
+
+/// Whether `offset` sits in a name a declaring keyword introduces: the
+/// word before the one at the cursor is `enum`, `struct`, `function`,
+/// `local`, and the rest.
+fn declares_a_name_at(source: &str, offset: usize) -> bool {
+    const DECLARERS: &[&str] = &[
+        "enum",
+        "struct",
+        "trait",
+        "interface",
+        "type",
+        "function",
+        "local",
+        "const",
+        "macro",
+        "attribute",
+        "remote",
+        "impl",
+        "class",
+        "import",
+    ];
+    let offset = offset.min(source.len());
+    let bytes = source.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut start = offset;
+
+    while start > 0 && is_word(bytes[start - 1]) {
+        start -= 1;
+    }
+
+    // The cursor is in a word, or right where one would begin.
+    if offset < bytes.len() && is_word(bytes[offset]) && start == offset {
+        return false;
+    }
+
+    let mut end = start;
+
+    while end > 0 && bytes[end - 1] == b' ' {
+        end -= 1;
+    }
+
+    if end == start {
+        return false;
+    }
+
+    let mut word_start = end;
+
+    while word_start > 0 && is_word(bytes[word_start - 1]) {
+        word_start -= 1;
+    }
+
+    DECLARERS.contains(&&source[word_start..end])
+}
+
 /// What a built-in attribute goes on.
 fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
     match key {
         "@derive" => &["struct", "enum"],
+
+        "@cfg" => &["function", "local"],
 
         "@test" | "@native" | "@checked" | "@deprecated" | "@inline" | "@noinline" => &["function"],
 
@@ -5473,6 +5614,17 @@ mod tests {
         );
         assert!(payload_types("Msg.Quit").is_empty());
         assert!(payload_types("Msg.Unit()").is_empty());
+    }
+
+    #[test]
+    fn a_new_name_after_a_declaring_keyword_completes_to_nothing() {
+        let src = "enum Col\nlocal x = fo\nfunction hud(a\nimport x from \"./x\"\nprint(x)\n";
+        assert!(declares_a_name_at(src, 8));
+        assert!(declares_a_name_at(src, 6));
+        assert!(!declares_a_name_at(src, 21));
+        assert!(!declares_a_name_at(src, 36));
+        assert!(declares_a_name_at(src, 45));
+        assert!(!declares_a_name_at(src, src.len() - 2));
     }
 
     #[test]

@@ -429,6 +429,19 @@ impl<'a> Parser<'a> {
         }
 
         let name = TokSpan::new(name_start, self.pos);
+
+        // `$set[1, 2]`: the bracket form hands the array as the one
+        // argument.
+        if self.at("[") {
+            let array = self.array_expr()?;
+
+            return Ok(Expr::Macro {
+                name,
+                args: vec![array],
+                span: TokSpan::new(start, self.pos),
+            });
+        }
+
         self.expect("(")?;
         let args = if self.at(")") {
             Vec::new()

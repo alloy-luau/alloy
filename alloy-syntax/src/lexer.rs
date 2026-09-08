@@ -90,7 +90,25 @@ fn past_escape(b: &[u8], at: usize) -> usize {
     i
 }
 
+/// The language a source is in. Alloy opens a nested array with `[[`;
+/// Luau opens a long string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    Alloy,
+    Luau,
+}
+
+/// Lexes an Alloy source.
 pub fn lex(src: &str) -> Result<Lexed, LexError> {
+    lex_with(src, Dialect::Alloy)
+}
+
+/// Lexes a Luau source: `[[ ... ]]` is a long string.
+pub fn lex_luau(src: &str) -> Result<Lexed, LexError> {
+    lex_with(src, Dialect::Luau)
+}
+
+pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
     let b = src.as_bytes();
     let mut toks = Vec::with_capacity(src.len() / 6);
     let mut comments: Vec<(u32, u32)> = Vec::new();
@@ -128,6 +146,14 @@ pub fn lex(src: &str) -> Result<Lexed, LexError> {
                 }
 
                 comments.push((start as u32, i as u32));
+            }
+
+            // `[[` opens a nested array, `[[1, 2], [3]]`; a long string
+            // keeps Luau's leveled form, `[=[ ... ]=]`. Both begin the
+            // same way, and the array is the one an Alloy file writes.
+            b'[' if dialect == Dialect::Alloy && level_of(b, i) == 0 => {
+                toks.push(single(TokKind::Symbol, i));
+                i += 1;
             }
 
             b'[' => match try_long_bracket(b, i) {
@@ -579,8 +605,21 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_array_is_not_a_long_string() {
+        let src = "[[1, 2], [3]]";
+        let toks = lex(src).unwrap().toks;
+        assert!(toks.iter().all(|t| !matches!(t.kind, TokKind::Str { .. })));
+        assert_eq!(&src[toks[0].start as usize..toks[0].end as usize], "[");
+        assert_eq!(kinds("--[[ a ]] x"), vec![TokKind::Ident]);
+        assert!(matches!(
+            lex_luau("[[hello]]").unwrap().toks[0].kind,
+            TokKind::Str { .. }
+        ));
+    }
+
+    #[test]
     fn long_strings() {
-        let src = "[[hello]]";
+        let src = "[=[hello]=]";
         let toks = lex(src).unwrap().toks;
 
         let TokKind::Str {

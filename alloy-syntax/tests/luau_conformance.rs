@@ -36,7 +36,7 @@ fn every_conformance_file_round_trips() {
         let bytes = std::fs::read(&path).expect("reads");
         let (src, _) = alloy_syntax::stand_in::utf8_stand_in(bytes);
 
-        let lexed = match lexer::lex(&src) {
+        let lexed = match lexer::lex_luau(&src) {
             Ok(l) => l,
 
             Err(e) => {

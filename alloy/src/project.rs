@@ -364,7 +364,9 @@ fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<Map<String, 
             .unwrap_or("")
             .to_string();
 
-        if fname.starts_with('.') || fname == "node_modules" {
+        // `.ember` holds the packages a `packages/` stub requires by
+        // relative path, so it belongs in the tree.
+        if (fname.starts_with('.') && fname != ".ember") || fname == "node_modules" {
             continue;
         }
 

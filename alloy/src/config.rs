@@ -738,6 +738,32 @@ impl Config {
 
         None
     }
+
+    /// The nearest `alloy.toml` at or above `start`, with the walk
+    /// stopped at `stop`. The language server passes the workspace root
+    /// as `stop`, so one project never reads the configuration of
+    /// another that shares a parent directory.
+    pub fn find_within(start: &Path, stop: &Path) -> Option<PathBuf> {
+        let start = std::path::absolute(start).unwrap_or_else(|_| start.to_path_buf());
+        let stop = std::path::absolute(stop).unwrap_or_else(|_| stop.to_path_buf());
+        let mut dir = Some(start.as_path());
+
+        while let Some(d) = dir {
+            let candidate = d.join(FILE_NAME);
+
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+
+            if d == stop {
+                return None;
+            }
+
+            dir = d.parent();
+        }
+
+        None
+    }
 }
 
 #[cfg(test)]

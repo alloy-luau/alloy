@@ -26,8 +26,28 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.unused_variable(&mut out);
     s.naming(&mut out);
     s.private_access(&mut out);
+    s.const_mutation(&mut out);
+    s.duplicate_function(&mut out);
     out
 }
+
+/// The std methods that change the value they are called on. `const`
+/// freezes the binding, so a call of one of these on a constant is the
+/// write the keyword did not stop.
+const MUTATING_METHODS: &[&str] = &[
+    "push",
+    "pop",
+    "insert",
+    "remove",
+    "clear",
+    "set",
+    "add",
+    "sort",
+    "sort_by",
+    "reverse",
+    "extend",
+    "get_or_insert",
+];
 
 /// `playerCount`: starts lowercase, has a capital, has no underscore.
 fn is_camel_case(name: &str) -> bool {
@@ -871,6 +891,243 @@ impl<'s> Scan<'s> {
                 None,
             );
         }
+
+        self.private_constructor_keys(&members, out);
+    }
+
+    /// `new Vault { code = 7 }` outside the impl of `Vault`, where
+    /// `code` is private and carries a default. A private field without
+    /// a default has to be set at construction, so that one stays.
+    fn private_constructor_keys(&self, members: &[(&'s str, &'s str)], out: &mut Vec<Lint>) {
+        for i in 0..self.toks.len() {
+            if !self.at(i, "new") || !self.is_name(i + 1) {
+                continue;
+            }
+
+            let owner = self.t(i + 1);
+
+            if self.enclosing_owner(i) == Some(owner) {
+                continue;
+            }
+
+            // `new Name<<T>> { }` and `new Name(args) { }`: the table
+            // comes after the group the head carries.
+            let mut j = i + 2;
+
+            while matches!(self.t(j), "(" | "<") {
+                match self.matching(j) {
+                    Some(close) => j = close + 1,
+
+                    None => break,
+                }
+            }
+
+            if !self.at(j, "{") {
+                continue;
+            }
+
+            let Some(close) = self.matching(j) else {
+                continue;
+            };
+            let mut k = j + 1;
+
+            while k < close {
+                if self.is_name(k)
+                    && self.at(k + 1, "=")
+                    && members.iter().any(|(m, o)| *m == self.t(k) && *o == owner)
+                    && self.field_has_default(self.t(k), owner)
+                {
+                    let name = self.t(k);
+                    self.lint(
+                        out,
+                        "private_access",
+                        k,
+                        k,
+                        format!("`{name}` is private to `{owner}`; only its impl sets it"),
+                        None,
+                    );
+                }
+
+                k += 1;
+            }
+        }
+    }
+
+    /// A field of `owner` declared with a default value: an `=` on the
+    /// line the field name opens.
+    fn field_has_default(&self, field: &str, owner: &str) -> bool {
+        for i in 0..self.toks.len() {
+            if !self.is_name(i) || self.t(i) != field || !self.at(i + 1, ":") {
+                continue;
+            }
+
+            if self.enclosing_owner(i) != Some(owner) {
+                continue;
+            }
+
+            let line = self.line_of(i);
+            let mut j = i + 2;
+
+            while j < self.toks.len() && self.line_of(j) == line {
+                if self.at(j, "=") {
+                    return true;
+                }
+
+                j += 1;
+            }
+        }
+
+        false
+    }
+
+    /// One name given a `function` body twice in one scope. The second
+    /// body replaces the first, so the first never runs. The checker
+    /// reports it as `DuplicateFunction`, in the emit's names; this one
+    /// names the path the source wrote.
+    fn duplicate_function(&self, out: &mut Vec<Lint>) {
+        let mut seen: Vec<(String, usize)> = Vec::new();
+
+        for i in 0..self.toks.len() {
+            if !self.at(i, "function") {
+                continue;
+            }
+
+            let mut head = i;
+
+            while head > 0
+                && matches!(
+                    self.t(head - 1),
+                    "local" | "export" | "async" | "private" | "public"
+                )
+            {
+                head -= 1;
+            }
+
+            if !self.statement_start(head) || !self.is_name(i + 1) {
+                continue;
+            }
+
+            // A `@cfg` pair declares one name per build, so the two
+            // bodies never stand together.
+            if self.attributed(head) {
+                continue;
+            }
+
+            let start = i + 1;
+            let mut j = start + 1;
+
+            while matches!(self.t(j), "." | ":") && self.is_name(j + 1) {
+                j += 2;
+            }
+
+            let path = self.slice(start, j);
+            let owner = self.enclosing_owner(start).unwrap_or("");
+            let key = format!("{owner}.{path}");
+
+            match seen.iter().find(|(k, _)| *k == key) {
+                Some((_, first)) => {
+                    let line = self.line_of(*first) + 1;
+                    self.lint(
+                        out,
+                        "duplicate_function",
+                        start,
+                        j - 1,
+                        format!(
+                            "`{path}` already has a body, on line {line}; this one replaces it"
+                        ),
+                        None,
+                    );
+                }
+
+                None => seen.push((key, start)),
+            }
+        }
+    }
+
+    /// Whether an attribute line stands right above the token.
+    fn attributed(&self, i: usize) -> bool {
+        let at = self.start(i) as usize;
+        let from = self.src[..at].rfind('\n').map_or(0, |n| n + 1);
+        let above = self.src[..from].trim_end();
+        let above = &above[above.rfind('\n').map_or(0, |n| n + 1)..];
+
+        above.trim_start().starts_with('@')
+    }
+
+    /// A write into the value a `const` holds: `X.field = v`, `X[k] = v`,
+    /// or a call of a method that changes it. `const` freezes the
+    /// binding alone, which the keyword does not say.
+    fn const_mutation(&self, out: &mut Vec<Lint>) {
+        let mut names: Vec<&'s str> = Vec::new();
+
+        for i in 0..self.toks.len() {
+            if !self.at(i, "const")
+                || !self.statement_start(if self.at(i.wrapping_sub(1), "local") {
+                    i - 1
+                } else {
+                    i
+                })
+            {
+                continue;
+            }
+
+            for j in self.local_names(i) {
+                names.push(self.t(j));
+            }
+        }
+
+        if names.is_empty() {
+            return;
+        }
+
+        for i in 0..self.toks.len() {
+            if !self.is_name(i) || !names.contains(&self.t(i)) || !self.statement_start(i) {
+                continue;
+            }
+
+            // `X.a.b = v` and `X[k] = v`: the binding stands, the value
+            // does not.
+            let assigned = match self.path_end(i) {
+                Some(end) if end > i + 1 && self.at(end, "=") => true,
+
+                _ => {
+                    self.at(i + 1, "[") && self.matching(i + 1).is_some_and(|c| self.at(c + 1, "="))
+                }
+            };
+
+            if assigned {
+                let name = self.t(i);
+                self.lint(
+                    out,
+                    "const_mutation",
+                    i,
+                    i,
+                    format!(
+                        "`{name}` is a `const`; the binding is fixed and this writes into its value"
+                    ),
+                    None,
+                );
+
+                continue;
+            }
+
+            if self.at(i + 1, ":")
+                && self.is_name(i + 2)
+                && MUTATING_METHODS.contains(&self.t(i + 2))
+            {
+                let (name, method) = (self.t(i), self.t(i + 2));
+                self.lint(
+                    out,
+                    "const_mutation",
+                    i,
+                    i + 2,
+                    format!(
+                        "`{name}` is a `const`; `{method}` changes the value the binding holds"
+                    ),
+                    None,
+                );
+            }
+        }
     }
 
     /// The names a `local` at `i` binds, with their tokens. A destructure
@@ -1626,6 +1883,67 @@ mod tests {
         // A receiver the file does not type still fires.
         let bare = "struct Profile as\n    private coins: number\nend\n\nlocal p = make()\nprint(p.coins)\n";
         assert_eq!(names(bare), vec!["private_access"]);
+    }
+
+    /// A private field with a default need not be set, so a `new`
+    /// outside the impl that names it reaches past the visibility.
+    #[test]
+    fn a_constructor_key_reads_the_visibility() {
+        let src = "struct Vault as\n    owner: string\n    private code: number = 0\nend\n\nlocal v = new Vault { owner = \"ana\", code = 7 }\nprint(v)\n";
+        assert_eq!(names(src), vec!["private_access"]);
+
+        // A private field with no default has to be set at construction.
+        let required = "struct Vault as\n    owner: string\n    private code: number\nend\n\nlocal v = new Vault { owner = \"ana\", code = 7 }\nprint(v)\n";
+        assert_eq!(names(required), Vec::<&str>::new());
+
+        // Inside the impl the field is the struct's own.
+        let inside = "struct Vault as\n    owner: string\n    private code: number = 0\nend\n\nimpl Vault\n    function new(owner: string): Vault\n        return new Vault { owner = owner, code = 1 }\n    end\nend\nprint(Vault)\n";
+        assert_eq!(names(inside), Vec::<&str>::new());
+    }
+
+    /// `const` freezes the binding, not the value. The pedantic lint
+    /// says so on a field write, an index write, and a mutating call.
+    #[test]
+    fn a_write_into_a_const_value_fires() {
+        let pedantic = |src: &str| -> Vec<&'static str> {
+            lints(src)
+                .iter()
+                .map(|l| l.name)
+                .filter(|n| *n == "const_mutation")
+                .collect()
+        };
+        assert_eq!(
+            pedantic("const LIMITS = { hp = 100 }\nLIMITS.hp = 1\nprint(LIMITS)\n"),
+            vec!["const_mutation"]
+        );
+        assert_eq!(
+            pedantic("const NAMES = [ \"ana\" ]\nNAMES:push(\"bo\")\nprint(NAMES)\n"),
+            vec!["const_mutation"]
+        );
+        assert_eq!(
+            pedantic("const T = { a = 1 }\nT[\"a\"] = 2\nprint(T)\n"),
+            vec!["const_mutation"]
+        );
+        // A read of a const is no write, and a plain local is not a const.
+        assert_eq!(
+            pedantic("const T = { a = 1 }\nprint(T.a)\nlocal u = { a = 1 }\nu.a = 2\nprint(u)\n"),
+            Vec::<&str>::new()
+        );
+    }
+
+    /// One name given a body twice: the second replaces the first, and
+    /// the checker's `DuplicateFunction` gives way to this one.
+    #[test]
+    fn a_second_body_for_one_name_fires() {
+        assert_eq!(
+            names(
+                "local function twice()\n    return 1\nend\n\nlocal function twice()\n    return 2\nend\nprint(twice())\n"
+            ),
+            vec!["duplicate_function"]
+        );
+        // Two impls may write one method name; the owner tells them apart.
+        let two = "struct A as\n    x: number\nend\nstruct B as\n    x: number\nend\nimpl A\n    function get(self): number\n        return self.x\n    end\nend\nimpl B\n    function get(self): number\n        return self.x\n    end\nend\nprint(A, B)\n";
+        assert_eq!(names(two), Vec::<&str>::new());
     }
 
     /// An `if` expression in a `case` arm has no `end`; counting one

@@ -1,0 +1,22 @@
+-- Every type-argument list, written or inferred, lowers the same way:
+-- `T[]` becomes `Array<T>` and a std name takes the runtime prefix.
+struct Pair<A, B> as
+    first: A
+    second: B
+end
+
+-- 1. a written list that holds an Alloy spelling
+local written = HashMap.new<<string, number[]>>()
+
+-- 2. a written list with a nested list inside it
+local nested = HashMap.new<<string, Pair<number, string[]>[]>>()
+
+-- 3. a list the annotation infers
+local inferred: HashMap<string, number[]> = HashMap.new()
+
+-- 4. a list the return type infers
+function make(): HashMap<string, number[]>
+    return HashMap.new()
+end
+
+print(written, nested, inferred, make())

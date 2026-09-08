@@ -25,8 +25,13 @@ pub fn collect(files: &[PathBuf]) -> Vec<Extension> {
     out
 }
 
-fn cache_dir() -> PathBuf {
-    std::env::temp_dir().join("alloy-lsp")
+/// The cache directory of one workspace. It carries the root, so the
+/// definitions of one project never reach another project's analyzer.
+/// It sits beside the mirror, which the proxy empties at startup.
+fn cache_dir(root: Option<&Path>) -> PathBuf {
+    std::env::temp_dir()
+        .join("alloy-lsp-definitions")
+        .join(crate::proxy::root_key(root))
 }
 
 /// A definitions file with the extensions injected, written to the
@@ -35,9 +40,10 @@ pub fn apply(
     path: &Path,
     exts: &[Extension],
     done: &mut HashSet<usize>,
+    root: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let before = done.len();
-    let target = alloy::extensions::apply(path, exts, done, &cache_dir())?;
+    let target = alloy::extensions::apply(path, exts, done, &cache_dir(root))?;
 
     if done.len() > before {
         log::info(&format!(
@@ -55,8 +61,9 @@ pub fn apply(
 pub fn primitives_file(
     exts: &[Extension],
     done: &mut HashSet<usize>,
+    root: Option<&Path>,
 ) -> Result<Option<PathBuf>, String> {
-    let target = alloy::extensions::primitives_file(exts, done, &cache_dir())?;
+    let target = alloy::extensions::primitives_file(exts, done, &cache_dir(root))?;
 
     if let Some(t) = &target {
         log::info(&format!(

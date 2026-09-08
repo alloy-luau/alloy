@@ -209,7 +209,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "const",
-        "```alloy\nconst x = expr\n```\nA binding that cannot be reassigned; the value stays mutable. Luau has `const` of its own, so the keyword passes through and a reassignment is a compile error there too.",
+        "```alloy\nconst x = expr\nconst LIMITS = { hp = 100 }\nLIMITS.hp = 1        -- allowed: the value is not frozen\n```\nA binding that cannot be reassigned. Luau has `const` of its own, so the keyword passes through and a reassignment is a compile error there too.\n\nThe freeze is shallow: it holds the name to one value, and that value stays mutable. A field of a `const` table takes an assignment, an index takes one, and `NAMES:push(x)` grows a `const` array. The pedantic lint `const_mutation` reports each of those, so a project that reads `const` as deep can turn it on.",
     ),
     (
         "async",
@@ -254,7 +254,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "private",
-        "```alloy\nstruct Counter as\n    read name: string\n    private count: number = 0\nend\n\nimpl Counter\n    function bump(self): number\n        self.count += 1\n        return self.count\n    end\n\n    private function reset(self)\n        self.count = 0\n    end\nend\n```\nA field or an `impl` method that only the struct's own methods reach. The word compiles to nothing at runtime: the check artifact keeps the private members out of the struct's public type, so `c.count` and `c:reset()` in other code are type errors in the editor and under `alloy flux`, and the `private_access` lint reports them in the same file. A private field may still be set in `new Counter { }`. A struct with type parameters keeps one view. `public` is the default and needs no word.",
+        "```alloy\nstruct Counter as\n    read name: string\n    private count: number = 0\nend\n\nimpl Counter\n    function bump(self): number\n        self.count += 1\n        return self.count\n    end\n\n    private function reset(self)\n        self.count = 0\n    end\nend\n```\nA field or an `impl` method that only the struct's own methods reach. The word compiles to nothing at runtime: the check artifact keeps the private members out of the struct's public type, so `c.count` and `c:reset()` in other code are type errors in the editor and under `alloy flux`, and the `private_access` lint reports them in the same file. A private field with no default has to be set in `new Counter { }`, so that one stays; a private field that carries a default draws `private_access` when a `new` outside the impl names it. A struct with type parameters keeps one view. `public` is the default and needs no word.",
     ),
     (
         "public",
@@ -454,7 +454,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Future",
-        "```alloy\nasync function load(id: number): Profile\n    return await fetch(id)\nend\nlocal profiles = await Future.all([load(1), load(2)])\nlocal first = await Future.race([load(1), Future.delay(5)])\n```\nA memoized task, from the std: it runs once, settles once, and every `await` after that reads the same value. An `async function` returns one and its body runs on `task.spawn` under `xpcall`; `await` yields until it settles, then returns the value or rethrows; `try await` gives a Result instead.\n\n**Statics**\n\n| | |\n|---|---|\n| `Future.resolve(value)` | A settled Future. |\n| `Future.reject(error)` | A failed one, `Future<never>`. |\n| `Future.delay(seconds)` | Settles after the wait, `Future<()>`. |\n| `Future.all(futures)` | `Future<Array<T>>`: every value in order, with the Array methods on it; the first failure fails it. |\n| `Future.race(futures)` | The first to settle, value or failure. |\n| `Future.any(futures)` | The first to succeed; fails when all fail. |\n| `Future.all_settled(futures)` | An `Array` of `Result`s, one per Future, none of which fails it. |\n\n**Methods**\n\n| | |\n|---|---|\n| `andThen(on_resolve?, on_reject?)` | Runs a callback when it settles, and returns the Future for chaining. A callback may return a value; the Future keeps its own. |\n| `cancel()` | Closes the task; an `await` on it raises. |\n| `is_settled()` | Whether it has a value or a failure. |\n\nThe type is covariant: `race` and `any` over a list of `Future<number>` and `Future<string>` yield `Future<number | string>`. An `async function` without a return type and without a `return` value is `Future<()>`.",
+        "```alloy\nasync function load(id: number): Profile\n    return await fetch(id)\nend\nlocal profiles = await Future.all([load(1), load(2)])\nlocal first = await Future.race([load(1), Future.delay(5)])\n```\nA memoized task, from the std: it runs once, settles once, and every `await` after that reads the same value. An `async function` returns one and its body runs on `task.spawn` under `xpcall`; `await` yields until it settles, then returns the value or rethrows; `try await` gives a Result instead.\n\n**Statics**\n\n| | |\n|---|---|\n| `Future.resolve(value)` | A settled Future. |\n| `Future.reject(error)` | A failed one, `Future<never>`. |\n| `Future.delay(seconds)` | Settles after the wait, `Future<()>`. |\n| `Future.all(futures)` | `Future<Array<T>>`: every value in order, with the Array methods on it; the first failure fails it. |\n| `Future.race(futures)` | The first to settle, value or failure. |\n| `Future.any(futures)` | The first to succeed; fails when all fail. |\n| `Future.all_settled(futures)` | `Future<Array<Result<T, any>>>`: one Result per Future, in order, and no failure fails it. The error side is `any` because a rejection carries whatever it was rejected with, which the list's element type cannot name. |\n\n**Methods**\n\n| | |\n|---|---|\n| `f:andThen(on_resolve?, on_reject?)` | Runs a callback when it settles, and returns the Future for chaining. A callback may return a value; the Future keeps its own. |\n| `f:and_then(on_resolve?, on_reject?)` | The same function under a snake_case name. `andThen` is the one camelCase name the std carries, so a file that keeps to one spelling writes this. |\n| `f:cancel()` | Closes the task; an `await` on it raises. |\n| `f:is_settled()` | Whether it has a value or a failure. |\n\nThe type is covariant: `race` and `any` over a list of `Future<number>` and `Future<string>` yield `Future<number | string>`. An `async function` without a return type and without a `return` value is `Future<()>`.",
     ),
     (
         "Result",
@@ -1053,4 +1053,46 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         .iter()
         .find(|(words, _)| words.iter().any(|w| m.contains(w)))
         .map(|(_, code)| *code)
+}
+
+#[cfg(test)]
+mod tests {
+    /// The `Future` topic names every member the std declares. The two
+    /// drift apart the moment the std grows a method, and the doc is
+    /// the only place a reader looks.
+    #[test]
+    fn the_future_topic_names_every_member_of_the_std() {
+        let doc = super::lookup("Future").expect("Future topic");
+        let mut names: Vec<&str> = Vec::new();
+
+        // The members of the type: `read name: (...) -> ...`.
+        let at = crate::RUNTIME
+            .find("export type Future<T> = {")
+            .expect("Future type");
+        let body = &crate::RUNTIME[at..];
+        let end = body.find("\n}").expect("end of the type");
+
+        for line in body[..end].lines() {
+            if let Some(rest) = line.trim().strip_prefix("read ")
+                && let Some(name) = rest.split(':').next()
+                && !name.starts_with("__")
+            {
+                names.push(name);
+            }
+        }
+
+        // The statics: `function Future.name<T>(...)`.
+        for line in crate::RUNTIME.lines() {
+            if let Some(rest) = line.strip_prefix("function Future.")
+                && let Some(name) = rest.split(['<', '(']).next()
+                && !name.starts_with("__")
+            {
+                names.push(name);
+            }
+        }
+
+        for name in names {
+            assert!(doc.contains(name), "the std has `{name}`; the doc does not");
+        }
+    }
 }

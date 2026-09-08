@@ -134,6 +134,7 @@ fn main() -> ExitCode {
     };
 
     let mut exts = Vec::new();
+    let mut workspace_root: Option<PathBuf> = None;
 
     if let Some(root) = first
         .pointer("/params/rootUri")
@@ -149,6 +150,7 @@ fn main() -> ExitCode {
         exts = extensions::collect(&workspace_files(&root, |n| {
             n.ends_with(".aly") && !n.ends_with(".d.aly")
         }));
+        workspace_root = Some(root);
     }
 
     let mut child_args: Vec<String> = vec!["lsp".to_string(), "--stdio".to_string()];
@@ -170,14 +172,16 @@ fn main() -> ExitCode {
     let mut injected = std::collections::HashSet::new();
 
     for path in &definitions {
-        match prepare_definitions(path).and_then(|p| extensions::apply(&p, &exts, &mut injected)) {
+        match prepare_definitions(path)
+            .and_then(|p| extensions::apply(&p, &exts, &mut injected, workspace_root.as_deref()))
+        {
             Ok(p) => child_args.push(format!("--definitions={}", p.display())),
 
             Err(e) => log::error(&format!("definitions {}: {e}", path.display())),
         }
     }
 
-    match extensions::primitives_file(&exts, &mut injected) {
+    match extensions::primitives_file(&exts, &mut injected, workspace_root.as_deref()) {
         Ok(Some(p)) => child_args.push(format!("--definitions={}", p.display())),
 
         Ok(None) => {}
@@ -283,7 +287,9 @@ fn workspace_definitions(root: &Path) -> Vec<PathBuf> {
 /// Every file under a workspace root whose name passes `keep`, outside
 /// the build output, `.git`, `node_modules`, and `target`.
 fn workspace_files(root: &Path, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
-    let out = alloy::config::Config::find(root).and_then(|p| {
+    // The climb stops at the workspace root, so a project never reads
+    // the build directory of a sibling under the same parent.
+    let out = alloy::config::Config::find_within(root, root).and_then(|p| {
         alloy::config::Config::load(&p)
             .ok()
             .map(|c| p.parent().unwrap_or(root).join(&c.build.out))

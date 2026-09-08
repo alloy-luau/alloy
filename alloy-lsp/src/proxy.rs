@@ -185,7 +185,7 @@ impl State {
     fn lint_config(&self) -> alloy::config::LintConfig {
         self.root
             .as_deref()
-            .and_then(alloy::config::Config::find)
+            .and_then(|r| alloy::config::Config::find_within(r, r))
             .and_then(|p| alloy::config::Config::load(&p).ok())
             .map(|c| c.lint)
             .unwrap_or_default()
@@ -2124,7 +2124,14 @@ impl State {
     fn options_for(&self, uri: &str) -> (EmitOptions, alloy::luaux::Config) {
         let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let config = Config::find(&dir).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
+        // The climb stops at the workspace root: a sibling project
+        // under the same parent must not lend its configuration.
+        let found = match &self.root {
+            Some(root) => Config::find_within(&dir, root),
+
+            None => Config::find(&dir),
+        };
+        let config = found.and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
         let file_name = path.to_string_lossy().into_owned();
         let definitions = file_name.ends_with(".d.aly");
         let config_dir = config
@@ -4694,7 +4701,8 @@ impl Server {
         let Some(root) = root else {
             return;
         };
-        let config = Config::find(&root).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
+        let config =
+            Config::find_within(&root, &root).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
         let Some((path, config)) = config else {
             self.state.lock().expect("state").ingots = None;
 
@@ -4917,16 +4925,17 @@ impl Server {
             return;
         };
 
-        let (input, out) =
-            match Config::find(&root).and_then(|p| Config::load(&p).ok().map(|c| (p, c))) {
-                Some((p, c)) => {
-                    let base = p.parent().unwrap_or(&root).to_path_buf();
+        let (input, out) = match Config::find_within(&root, &root)
+            .and_then(|p| Config::load(&p).ok().map(|c| (p, c)))
+        {
+            Some((p, c)) => {
+                let base = p.parent().unwrap_or(&root).to_path_buf();
 
-                    (base.join(&c.build.input), Some(base.join(&c.build.out)))
-                }
+                (base.join(&c.build.input), Some(base.join(&c.build.out)))
+            }
 
-                None => (root.clone(), None),
-            };
+            None => (root.clone(), None),
+        };
 
         let mut files = Vec::new();
         let mut plain = Vec::new();
@@ -5331,7 +5340,9 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-fn mirror_dir(root: Option<&Path>) -> PathBuf {
+/// One workspace root as a directory name. Two servers run at once, one
+/// per project, and neither may write where the other reads.
+pub fn root_key(root: Option<&Path>) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -5339,9 +5350,11 @@ fn mirror_dir(root: Option<&Path>) -> PathBuf {
         .unwrap_or_default()
         .hash(&mut hasher);
 
-    std::env::temp_dir()
-        .join("alloy-lsp")
-        .join(format!("{:016x}", hasher.finish()))
+    format!("{:016x}", hasher.finish())
+}
+
+fn mirror_dir(root: Option<&Path>) -> PathBuf {
+    std::env::temp_dir().join("alloy-lsp").join(root_key(root))
 }
 
 /// Moves every URI in a message from the workspace into the mirror.
@@ -8917,6 +8930,28 @@ fn declared_type_parameters_of(line: &str) -> Option<(String, &'static str, Vec<
     (!name.is_empty() && !params.is_empty()).then_some((name, kind, params))
 }
 
+/// The keyword of a declaration that carries fields: `struct`,
+/// `interface`, or a `type` whose body is a record. Anything else has no
+/// field to name.
+fn declared_field_owner(decl: &alloy::declarations::Declaration) -> Option<&'static str> {
+    let line = decl.hover.lines().nth(1)?.trim_start_matches("export ");
+
+    for keyword in ["struct ", "interface ", "type "] {
+        if line.starts_with(keyword) {
+            let keyword = keyword.trim_end();
+
+            // `type Name = number` names no field.
+            if keyword == "type" && !line.contains('{') {
+                return None;
+            }
+
+            return Some(keyword);
+        }
+    }
+
+    None
+}
+
 fn declared_field_hover(doc: &Doc, start: usize, end: usize) -> Option<String> {
     let after = doc.source[end..].trim_start();
 
@@ -8936,30 +8971,37 @@ fn declared_field_hover(doc: &Doc, start: usize, end: usize) -> Option<String> {
         return None;
     }
 
-    // The nearest struct above, still open: no `end` at the margin
-    // between its name and the field.
+    // The nearest record above, still open: a `struct` or an `interface`
+    // with no `end` at the margin yet, or a `type` whose braces have not
+    // closed. A `type` body carries fields the same way a struct does.
     let owner = doc
         .decls
         .iter()
-        .filter(|d| {
-            d.offset < start
-                && d.hover
-                    .lines()
-                    .nth(1)
-                    .is_some_and(|l| l.trim_start_matches("export ").starts_with("struct "))
-        })
+        .filter(|d| d.offset < start && declared_field_owner(d).is_some())
         .max_by_key(|d| d.offset)?;
+    let keyword = declared_field_owner(owner)?;
 
-    if doc.source[owner.offset..start].lines().any(|l| l == "end") {
+    if keyword == "type" {
+        // The field is inside the alias body, so a brace is still open.
+        let body = &doc.source[owner.offset..start];
+        let depth = body.matches('{').count() as i64 - body.matches('}').count() as i64;
+
+        if depth <= 0 {
+            return None;
+        }
+    } else if doc.source[owner.offset..start].lines().any(|l| l == "end") {
         return None;
     }
 
     let line_end = doc.source[start..]
         .find('\n')
         .map_or(doc.source.len(), |i| start + i);
-    let field_line = doc.source[line_start..line_end].trim();
+    let field_line = doc.source[line_start..line_end]
+        .trim()
+        .trim_end_matches(',')
+        .trim_end();
     let mut out = format!(
-        "```alloy\n{field_line}\n```\nA field of `struct {}`.",
+        "```alloy\n{field_line}\n```\nA field of `{keyword} {}`.",
         owner.name
     );
 
@@ -10643,6 +10685,41 @@ mod tests {
             case_binding_text(doc, line_of(field), field, "amount", &known),
             Some("```alloy\namount: number\n```\nA field of `struct Boost`.".to_string())
         );
+    }
+
+    /// A record field of a `type` body hovers as the line declares it.
+    /// The child sees a table key and answers with an unnamed function
+    /// type, which says nothing about the field.
+    #[test]
+    fn a_type_body_field_reads_as_it_is_written() {
+        const SRC: &str = "export type HudProps = {\n    on_swing: () -> (),\n    label: string,\n}\nprint(nil :: HudProps)\n";
+        let (st, uri) = one_file(SRC);
+        let doc = st.docs.get(uri).expect("doc");
+        let at = SRC.find("on_swing").expect("on_swing");
+
+        assert_eq!(
+            declared_field_hover(doc, at, at + "on_swing".len()),
+            Some("```alloy\non_swing: () -> ()\n```\nA field of `type HudProps`.".to_string())
+        );
+        let label = SRC.find("label").expect("label");
+
+        assert_eq!(
+            declared_field_hover(doc, label, label + "label".len()),
+            Some("```alloy\nlabel: string\n```\nA field of `type HudProps`.".to_string())
+        );
+    }
+
+    /// A `type` that names no record has no field to answer for, and a
+    /// name below the closed body belongs to nothing.
+    #[test]
+    fn a_field_hover_stops_at_the_end_of_the_body() {
+        const SRC: &str =
+            "type Id = number\ntype Props = {\n    a: number,\n}\nlocal b: number = 1\nprint(b)\n";
+        let (st, uri) = one_file(SRC);
+        let doc = st.docs.get(uri).expect("doc");
+        let at = SRC.rfind("b: number").expect("b");
+
+        assert_eq!(declared_field_hover(doc, at, at + 1), None);
     }
 
     /// The key of a struct's raw constructor names the field, past the

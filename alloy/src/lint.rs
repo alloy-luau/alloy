@@ -292,6 +292,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "A member marked `private` belongs to the struct's own methods. This access sits outside every `impl` of that struct, in the same file; in the editor and under `alloy flux` the type checker reports it as an error, since the public type of the struct has no such member. The lint reads names, so a plain table with a field of the same name fires it too; `--@alloy-ignore` silences that line.",
     },
     LintInfo {
+        name: "duplicate_function",
+        group: Group::Correctness,
+        default: Level::Warn,
+        summary: "one name given a `function` body twice",
+        detail: "The second body replaces the first, so the first never runs. Either the two were meant to have different names, or one is a leftover from an edit. A `@cfg` pair is exempt: only one of the two reaches a build.",
+    },
+    LintInfo {
         name: "circular_import",
         group: Group::Correctness,
         default: Level::Warn,
@@ -590,6 +597,13 @@ pub const LINTS: &[LintInfo] = &[
         default: Level::Allow,
         summary: "a `print` call",
         detail: "Pedantic. A `print` left over from debugging writes to the output of every player. Remove it, or route it through a logger the project can turn off.",
+    },
+    LintInfo {
+        name: "const_mutation",
+        group: Group::Pedantic,
+        default: Level::Allow,
+        summary: "a write into the value a `const` holds",
+        detail: "Pedantic. `const` freezes the binding, not the value: `const LIMITS = { hp = 100 }` still allows `LIMITS.hp = 1`, and `NAMES:push(x)` still grows the array. The lint reports a field assignment, an index assignment, and a call of a method that changes the value, so a name written as a constant reads as one.",
     },
     LintInfo {
         name: "missing_doc",

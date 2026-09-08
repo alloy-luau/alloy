@@ -718,8 +718,18 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_iter_shapes(&mut out);
     out = fold_call_receivers(&out);
     fold_quoted_types(&mut out, known);
+    fold_generic_arity(&mut out);
 
     out
+}
+
+/// The arity report names a declaration, not a value: `Array<T>` is the
+/// alias the source has to give one argument to, and the `T[]` sugar
+/// reads there as the type of a value instead.
+fn fold_generic_arity(text: &mut String) {
+    if text.contains("Generic type '") && text.contains("type argument") {
+        *text = text.replace("Generic type 'T[]'", "Generic type 'Array<T>'");
+    }
 }
 
 /// An `Iter` two maps deep prints as its shape, `{ next: (self: any) ->
@@ -3685,6 +3695,35 @@ fn match_loose(text: &str, pattern: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    /// The arity report names the alias the source has to give an
+    /// argument to. `T[]` there reads as a value's type, not a
+    /// declaration, and there is nothing to write arguments on.
+    #[test]
+    fn the_arity_report_names_the_alias() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "Generic type 'Array<T>' expects 1 type argument, but 2 are specified",
+                &known
+            ),
+            "Generic type 'Array<T>' expects 1 type argument, but 2 are specified"
+        );
+        // The editor keeps the checker's kind in front of the sentence.
+        assert_eq!(
+            fold(
+                "TypeError: Generic type 'Array<T>' expects 1 type argument, but 2 are specified",
+                &known
+            ),
+            "TypeError: Generic type 'Array<T>' expects 1 type argument, but 2 are specified"
+        );
+        // A value's type still reads as the sugar the source writes.
+        assert_eq!(
+            fold("Expected this to be 'Array<number>'", &known),
+            "Expected this to be 'number[]'"
+        );
+    }
+
     #[test]
     fn a_chain_method_hover_names_the_receiver_type() {
         let known = Known::default();

@@ -158,6 +158,20 @@ impl Session {
             .collect()
     }
 
+    /// Reads every message that arrives inside `window`, so a later
+    /// assertion can look at the whole batch.
+    fn drain(&mut self, window: Duration) {
+        let deadline = Instant::now() + window;
+
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match self.rx.recv_timeout(left) {
+                Ok(m) => self.seen.push(m),
+
+                Err(_) => return,
+            }
+        }
+    }
+
     /// Waits for a diagnostics batch for the URI that satisfies `want`.
     /// The server publishes its own empty batch before the child has
     /// analyzed anything, so the first batch proves little.
@@ -840,6 +854,65 @@ fn a_multi_root_workspace_answers_hover() {
 
     let h = s.hover(&uri, 1, 6);
     assert!(h.contains("Array") || h.contains("xs"), "{h}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Two projects under one parent: the server opened on one of them
+/// never reads the other's files. The parent carries an alloy.toml, so
+/// a walk that passes the root would take the parent's input and reach
+/// both projects.
+#[test]
+fn a_sibling_project_stays_out_of_the_workspace() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let base = std::env::temp_dir().join(format!("alloy-lsp-siblings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let mine = base.join("mine");
+    let other = base.join("other");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    // The parent names itself as the input, the shape that used to pull
+    // both projects in.
+    std::fs::write(
+        base.join("alloy.toml"),
+        "[build]\nin = \".\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    let src = "local n: number = 1\nprint(n)\n";
+    let file = mine.join("main.aly");
+    std::fs::write(&file, src).unwrap();
+    // The sibling holds an error, so a server that reads it says so.
+    std::fs::write(other.join("sibling.aly"), "local broken = 1 +\n").unwrap();
+
+    let mut s = start(&child, &mine);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // A hover round trip proves the child is up and the workspace has
+    // loaded; the sibling's shadow would be open by then.
+    let h = s.hover(&uri, 0, 6);
+    assert!(!h.is_empty(), "{h}");
+    s.drain(Duration::from_secs(3));
+
+    let leaked: Vec<&Value> = s
+        .seen
+        .iter()
+        .filter(|m| m["method"] == "textDocument/publishDiagnostics")
+        .filter(|m| {
+            m["params"]["uri"]
+                .as_str()
+                .is_some_and(|u| u.contains("/other/"))
+        })
+        .collect();
+    assert!(leaked.is_empty(), "{leaked:#?}");
 
     let _ = std::fs::remove_dir_all(&base);
 }

@@ -964,6 +964,8 @@ pub fn paired_lint(kind: &str) -> Option<&'static [&'static str]> {
 
         "TableLiteral" => &["duplicate_key"],
 
+        "DuplicateFunction" => &["duplicate_function"],
+
         "ComparisonPrecedence" => &["misplaced_not", "bool_comparison"],
 
         "DeprecatedApi" => &["deprecated_global", "deprecated_method"],

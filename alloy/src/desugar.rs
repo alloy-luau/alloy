@@ -316,6 +316,27 @@ pub const AMBIENT: &[&str] = &[
     "Iter",
 ];
 
+/// The std type names that are ambient in a type position. The list
+/// mirrors the ambient check in alloy-syntax's type parser, which marks
+/// the same names for the runtime prefix.
+pub const AMBIENT_TYPES: &[&str] = &[
+    "Future",
+    "Result",
+    "Array",
+    "HashMap",
+    "Set",
+    "Signal",
+    "SignalConnection",
+    "Signalish",
+    "Partial",
+    "Readonly",
+    "Sink",
+    "Queue",
+    "Heap",
+    "Scope",
+    "Iter",
+];
+
 pub const PRIMITIVES: &[&str] = &[
     "boolean", "number", "string", "table", "function", "thread", "buffer", "vector", "userdata",
 ];
@@ -664,9 +685,10 @@ struct Desugar<'s> {
     declared_types: HashSet<String>,
     /// Declared trait names with their default-method names.
     traits: HashMap<String, Vec<String>>,
-    /// Declared trait names with the methods an impl must write: name and
-    /// parameter count, `self` included.
-    trait_required: HashMap<String, Vec<(String, usize)>>,
+    /// Declared trait names with the methods an impl must write: name,
+    /// parameter count with `self` included, and the return type the
+    /// signature declares.
+    trait_required: HashMap<String, Vec<(String, usize, Option<String>)>>,
     /// Declared struct fields by struct name: field name and whether it
     /// carries a default.
     struct_fields: HashMap<String, Vec<(String, bool)>>,
@@ -1404,7 +1426,7 @@ impl<'s> Desugar<'s> {
             // A trait declared in this file is a contract: every method
             // without a body appears in the impl, with the same arity.
             if let Some(required) = self.trait_required.get(&trait_name).cloned() {
-                for (m, arity) in required {
+                for (m, arity, ret) in required {
                     let written = i.methods.iter().find(|f| self.text_of(f.path[0]) == m);
 
                     match written {
@@ -1430,7 +1452,24 @@ impl<'s> Desugar<'s> {
                             );
                         }
 
-                        _ => {}
+                        // The trait declares the return type, so an impl
+                        // that writes another one breaks the contract.
+                        // The checker sees two unrelated functions and
+                        // says nothing about the trait.
+                        Some(f) => {
+                            if let (Some(want), Some(t)) = (&ret, f.body.ret_type) {
+                                let got = self.text_of(t).trim().to_string();
+
+                                if !same_type_text(want, &got) {
+                                    self.diagnose(
+                                        t,
+                                        &format!(
+                                            "the trait method `{m}` returns {want} in `{trait_name}`, {got} here"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2880,6 +2919,20 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        // Luau takes a string for `@deprecated` and reports anything
+        // else on the declaration below, which is not the line the
+        // author wrote it on.
+        if name == "deprecated"
+            && let Some(arg) = a.args.first()
+            && let Some(got) = literal_kind(arg)
+            && got != "string"
+        {
+            let message = format!("the attribute `deprecated` takes a string message, {got} given");
+            self.diagnose(arg.span(), &message);
+
+            return;
+        }
+
         let Some(params) = params else {
             return;
         };
@@ -3237,7 +3290,13 @@ impl<'s> Desugar<'s> {
                         .methods
                         .iter()
                         .filter(|m| m.body.is_none())
-                        .map(|m| (self.text_of(m.name).to_string(), m.params.len()))
+                        .map(|m| {
+                            (
+                                self.text_of(m.name).to_string(),
+                                m.params.len(),
+                                signature_ret_type(self.text_of(m.signature)).map(str::to_string),
+                            )
+                        })
                         .collect();
                     self.traits.insert(name.clone(), defaults);
                     self.trait_required.insert(name, required);
@@ -4549,9 +4608,15 @@ impl<'s> Desugar<'s> {
                 // report an invalid attribute on the declaration's line.
                 Some("inline" | "noinline") => {}
 
-                // The count check reports on the attribute; the emit
-                // would report again, on the declaration's line.
-                Some("deprecated") if a.args.len() > 1 => {}
+                // The count and the type checks report on the
+                // attribute; the emit would report again, on the
+                // declaration's line.
+                Some("deprecated")
+                    if a.args.len() > 1
+                        || a.args
+                            .first()
+                            .and_then(literal_kind)
+                            .is_some_and(|k| k != "string") => {}
 
                 Some(n @ ("native" | "checked" | "deprecated")) => {
                     if a.args.is_empty() {
@@ -5193,6 +5258,148 @@ impl<'s> Desugar<'s> {
 
             "__alloy."
         }
+    }
+
+    /// One `<<A, B>>` type-argument list in Luau's own spelling. The
+    /// type edits rewrite an annotation, and a list never reaches them,
+    /// so every list, written or inferred, comes through here instead.
+    fn lower_type_args(&mut self, text: &str) -> String {
+        let trimmed = text.trim();
+        let Some(inner) = trimmed
+            .strip_prefix("<<")
+            .and_then(|t| t.strip_suffix(">>"))
+        else {
+            return text.to_string();
+        };
+        let parts: Vec<String> = split_top_level(inner, ',')
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect();
+        let parts: Vec<String> = parts.iter().map(|p| self.lower_type(p)).collect();
+
+        format!("<<{}>>", parts.join(", "))
+    }
+
+    /// One type as Luau spells it: `T[]` is `Array<T>`, and an ambient
+    /// std name takes the runtime prefix. The rewrite reaches every
+    /// depth, so a name inside a table, a union, or another list is
+    /// written the same way.
+    fn lower_type(&mut self, text: &str) -> String {
+        let text = text.trim();
+
+        if text.is_empty() {
+            return String::new();
+        }
+
+        // A function type: the parameters and the result each lower on
+        // their own, so `->` is the first split.
+        if let Some(i) = top_level_find(text, "->") {
+            let left = self.lower_type(&text[..i]);
+            let right = self.lower_type(&text[i + 2..]);
+
+            return format!("{left} -> {right}");
+        }
+
+        for sep in ['|', '&'] {
+            let parts: Vec<String> = split_top_level(text, sep)
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect();
+
+            if parts.len() > 1 {
+                let parts: Vec<String> = parts.iter().map(|p| self.lower_type(p)).collect();
+
+                return parts.join(&format!(" {sep} "));
+            }
+        }
+
+        if let Some(inner) = text.strip_suffix('?') {
+            return format!("{}?", self.lower_type(inner));
+        }
+
+        if let Some(inner) = text.strip_suffix("[]") {
+            let std = self.type_std();
+
+            return format!("{std}Array<{}>", self.lower_type(inner));
+        }
+
+        if text.starts_with('(')
+            && text.ends_with(')')
+            && group_len(text, '(', ')') == Some(text.len())
+        {
+            let parts: Vec<String> = split_top_level(&text[1..text.len() - 1], ',')
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect();
+            let parts: Vec<String> = parts.iter().map(|p| self.lower_field(p)).collect();
+
+            return format!("({})", parts.join(", "));
+        }
+
+        // A table type: each field keeps its name and lowers its type.
+        if text.starts_with('{')
+            && text.ends_with('}')
+            && group_len(text, '{', '}') == Some(text.len())
+        {
+            let parts: Vec<String> = split_top_level(&text[1..text.len() - 1], ',')
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect();
+            let parts: Vec<String> = parts.iter().map(|p| self.lower_field(p)).collect();
+
+            return format!("{{ {} }}", parts.join(", "));
+        }
+
+        // `Name<A, B>`: the head takes the prefix, the arguments the
+        // whole rewrite again.
+        if let Some(open) = text.find('<')
+            && text.ends_with('>')
+            && open > 0
+        {
+            let head = self.lower_type_name(&text[..open]);
+            let parts: Vec<String> = split_top_level(&text[open + 1..text.len() - 1], ',')
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect();
+            let parts: Vec<String> = parts.iter().map(|p| self.lower_type(p)).collect();
+
+            return format!("{head}<{}>", parts.join(", "));
+        }
+
+        self.lower_type_name(text)
+    }
+
+    /// One `name: T` pair of a table type or a parameter list. Text with
+    /// no name is a type on its own.
+    fn lower_field(&mut self, text: &str) -> String {
+        let text = text.trim();
+
+        match top_level_find(text, ":") {
+            Some(i) => {
+                let ty = self.lower_type(&text[i + 1..]);
+
+                format!("{}: {ty}", text[..i].trim())
+            }
+
+            None => self.lower_type(text),
+        }
+    }
+
+    /// A bare type name, with the runtime prefix when it is an ambient
+    /// std name this file does not shadow.
+    fn lower_type_name(&mut self, text: &str) -> String {
+        let name = text.trim();
+
+        if !AMBIENT_TYPES.contains(&name)
+            || self.is_local(name)
+            || self.declared_types.contains(name)
+        {
+            return name.to_string();
+        }
+
+        let std = self.type_std();
+
+        format!("{std}{name}")
     }
 
     /*
@@ -5972,6 +6179,22 @@ impl<'s> Desugar<'s> {
 
             Stmt::Local(l) if local_needs_rewrite(l) => self.local_stmt(l),
 
+            // `return HashMap.new()` under a declared `HashMap<K, V>`
+            // return type: the same rule as the annotated local below.
+            Stmt::Return(r) if self.returned_constructor(&r.values).is_some() => {
+                self.expected_generic = self.returned_constructor(&r.values);
+                let span = stmt.span();
+                let children = stmt_children(stmt);
+                self.stitch(span, &children, |d, child| match child {
+                    Child::Expr(e) => d.expr(e),
+
+                    Child::Block(b) => d.block(b),
+
+                    Child::Function(b) => d.function_block(b),
+                });
+                self.expected_generic = None;
+            }
+
             // `local m: HashMap<K, V> = HashMap.new()`: the call takes the
             // annotation's arguments, since the solver infers none.
             Stmt::Local(l) if self.annotated_constructor(l).is_some() => {
@@ -6348,13 +6571,15 @@ impl<'s> Desugar<'s> {
                 ..
             } if self.is_signal_new(func) => {
                 let std = self.std();
-                let targs = pack_type_args(&type_args_text(self.text_of(*t)));
+                let text = self.text_of(*t).to_string();
+                let targs = pack_type_args(&self.lower_type_args(&text));
                 let a = self.args_text(args);
                 self.generate(anchor, &format!("{std}.Signal.new{targs}{a}"));
             }
 
             Expr::Index { .. } | Expr::Call { .. } | Expr::Child { .. } | Expr::NonNil { .. }
                 if chain_has_alloy(e)
+                    || chain_has_type_args(e)
                     || self.chain_has_ext(e)
                     || self.is_struct_call(e)
                     || self.is_import_call(e)
@@ -6861,11 +7086,31 @@ impl<'s> Desugar<'s> {
             // the pairs.
             ("map", _) => {
                 let std = self.std();
+                // `$map[...]` holds the pairs in one bracket list;
+                // `$map(...)` passes each pair as an argument, so a lone
+                // `[key, value]` there is one pair.
+                let head = self.text_of(span);
+                let bracket = head
+                    .find(['[', '('])
+                    .is_some_and(|i| head.as_bytes()[i] == b'[');
                 let pairs: &[Expr] = match args {
-                    [Expr::Array { items, .. }]
-                        if items.iter().all(|e| matches!(e, Expr::Array { .. })) =>
-                    {
-                        items
+                    [
+                        Expr::Array {
+                            items, span: list, ..
+                        },
+                    ] if bracket => {
+                        if items.iter().all(|e| matches!(e, Expr::Array { .. })) {
+                            items
+                        } else {
+                            // `$map["k", v]`: a flat list names one key
+                            // and one value where a pair belongs.
+                            self.diagnose(
+                                *list,
+                                "`$map` takes pairs: `$map[[key, value], [key, value]]`",
+                            );
+
+                            &[]
+                        }
                     }
 
                     _ => args,
@@ -6944,9 +7189,15 @@ impl<'s> Desugar<'s> {
         self.check_new(name, args, init, whole);
         let ctor = self.constructor_of(name);
         let n = self.render_to_string(name);
-        let t = type_args
-            .map(|s| type_args_text(self.text_of(s)))
-            .unwrap_or_else(|| self.expected_args_for(name));
+        let t = match type_args {
+            Some(s) => {
+                let text = self.text_of(s).to_string();
+
+                self.lower_type_args(&text)
+            }
+
+            None => self.expected_args_for(name),
+        };
 
         match (args, init) {
             (Some(a), None) => {
@@ -7159,12 +7410,14 @@ impl<'s> Desugar<'s> {
                 CallArgs::Table(_) => false,
             };
             let ty = type_args.map(|s| {
-                array_types(
-                    self.text_of(s)
-                        .trim_start_matches('<')
-                        .trim_end_matches('>')
-                        .trim(),
-                )
+                let text = self
+                    .text_of(s)
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .trim()
+                    .to_string();
+
+                self.lower_type(&text)
             });
             inner = match ty {
                 Some(t) => format!("(require{a} :: {t})"),
@@ -7196,7 +7449,7 @@ impl<'s> Desugar<'s> {
             let method = self.text_of(*f).to_string();
             let a = self.args_text(args);
 
-            let targs = type_args_text(&format!("<<{args_text}>>"));
+            let targs = self.lower_type_args(&format!("<<{args_text}>>"));
 
             return ChainParts {
                 guard: None,
@@ -7339,9 +7592,15 @@ impl<'s> Desugar<'s> {
 
                     None => String::new(),
                 };
-                let t = type_args
-                    .map(|s| type_args_text(self.text_of(s)))
-                    .unwrap_or_default();
+                let t = match type_args {
+                    Some(s) => {
+                        let text = self.text_of(*s).to_string();
+
+                        self.lower_type_args(&text)
+                    }
+
+                    None => String::new(),
+                };
                 // `Signal.new<T...>` takes a type pack, not a list of
                 // type parameters, so its arguments go in parentheses.
                 let t = if prefix == "__alloy.Signal.new" {
@@ -7603,19 +7862,41 @@ impl<'s> Desugar<'s> {
         }
 
         let head = generic_head(self.text_of(l.names[0].ty?))?;
-        let value = &l.values[0];
 
-        let is_ctor = match value {
+        self.is_constructor_call(&l.values[0], &head.0)
+            .then_some(head)
+    }
+
+    /// The return type's base and arguments when a `return` hands back
+    /// that container's constructor call: `return HashMap.new()` under
+    /// `function f(): HashMap<K, V>`. The solver infers no arguments for
+    /// the call, so the annotation's arguments go on it.
+    fn returned_constructor(&self, values: &[Expr]) -> Option<(String, String)> {
+        if values.len() != 1 {
+            return None;
+        }
+
+        let ty = self.ret_types.last()?.clone()?;
+        let head = generic_head(&ty)?;
+
+        self.is_constructor_call(&values[0], &head.0)
+            .then_some(head)
+    }
+
+    /// A call that builds `base` and nothing else: `Base.new()`,
+    /// `Base.from(x)`, `Base.with_capacity(n)`, or `new Base()`.
+    fn is_constructor_call(&self, value: &Expr, base_name: &str) -> bool {
+        match value {
             Expr::New {
                 name,
                 type_args: None,
                 ..
-            } => matches!(name.as_ref(), Expr::Name(n) if self.text_of(*n) == head.0),
+            } => matches!(name.as_ref(), Expr::Name(n) if self.text_of(*n) == base_name),
 
             _ => {
                 let (base, links) = flatten(value);
 
-                matches!(base, Expr::Name(n) if self.text_of(*n) == head.0)
+                matches!(base, Expr::Name(n) if self.text_of(*n) == base_name)
                     && matches!(
                         links.as_slice(),
                         [
@@ -7628,20 +7909,18 @@ impl<'s> Desugar<'s> {
                         ] if matches!(self.text_of(*f), "new" | "from" | "with_capacity")
                     )
             }
-        };
-
-        is_ctor.then_some(head)
+        }
     }
 
     /// `<K, V>` for `new Base(...)` under an annotation `Base<K, V>`.
-    fn expected_args_for(&self, name: &Expr) -> String {
-        match (name, &self.expected_generic) {
-            (Expr::Name(n), Some((base, args))) if self.text_of(*n) == base => {
-                type_args_text(&format!("<<{args}>>"))
-            }
+    fn expected_args_for(&mut self, name: &Expr) -> String {
+        let args = match (name, &self.expected_generic) {
+            (Expr::Name(n), Some((base, args))) if self.text_of(*n) == base => args.clone(),
 
-            _ => String::new(),
-        }
+            _ => return String::new(),
+        };
+
+        self.lower_type_args(&format!("<<{args}>>"))
     }
 
     fn note_field_types(&mut self, name: &str, fields: &[Field]) {
@@ -8373,9 +8652,15 @@ impl<'s> Desugar<'s> {
         self.check_new(name, args, Some(init), whole);
         let ctor = self.constructor_of(name);
         let n = self.render_to_string(name);
-        let t = type_args
-            .map(|s| type_args_text(self.text_of(s)))
-            .unwrap_or_default();
+        let t = match type_args {
+            Some(s) => {
+                let text = self.text_of(s).to_string();
+
+                self.lower_type_args(&text)
+            }
+
+            None => String::new(),
+        };
         // With no arguments the name is one this file did not declare:
         // the runtime constructs it, and the check artifact types the
         // constructor call so the field lines below check against it.
@@ -8991,6 +9276,25 @@ fn flatten(e: &Expr) -> (&Expr, Vec<Link<'_>>) {
 
 /// Reports if a chain holds any link that is not plain Luau, or a base
 /// that Luau cannot index directly.
+/// A chain with a written turbofish on one of its calls. The list has
+/// to lower, and the chain rewrite is what lowers it.
+fn chain_has_type_args(e: &Expr) -> bool {
+    let (_, links) = flatten(e);
+
+    links.iter().any(|l| {
+        matches!(
+            l,
+            Link::Plain(Step::Call {
+                type_args: Some(_),
+                ..
+            }) | Link::Optional(Step::Call {
+                type_args: Some(_),
+                ..
+            })
+        )
+    })
+}
+
 fn chain_has_alloy(e: &Expr) -> bool {
     let (base, links) = flatten(e);
 
@@ -9761,21 +10065,6 @@ fn apply_bounds(ty: &str, bounds: &[(String, String)]) -> String {
     out
 }
 
-/// A `<<A, B>>` list with every argument in Luau's own spelling. The
-/// annotation the type edits rewrite never reaches here, so the list
-/// carries the source text and needs the same rewrite.
-fn type_args_text(text: &str) -> String {
-    let Some(inner) = text.strip_prefix("<<").and_then(|t| t.strip_suffix(">>")) else {
-        return text.to_string();
-    };
-    let parts: Vec<String> = split_top_level(inner, ',')
-        .iter()
-        .map(|p| array_types(p))
-        .collect();
-
-    format!("<<{}>>", parts.join(", "))
-}
-
 /// One type with `T[]` written as `Array<T>`, at every depth. The
 /// bracket form is Alloy's own; Luau reads the named form alone.
 fn array_types(text: &str) -> String {
@@ -9896,6 +10185,65 @@ fn split_top_level(text: &str, sep: char) -> Vec<&str> {
     parts.push(&text[from..]);
 
     parts
+}
+
+/// The return type a trait method's signature declares. The signature
+/// starts at `(`; the type follows the closing `)` after a `:` or a
+/// `->`.
+fn signature_ret_type(sig: &str) -> Option<&str> {
+    let mut depth = 0i32;
+    let mut after = None;
+
+    for (i, c) in sig.char_indices() {
+        match c {
+            '(' => depth += 1,
+
+            ')' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    after = Some(i + 1);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let rest = sig[after?..].trim();
+    let rest = rest.strip_prefix("->").or_else(|| rest.strip_prefix(':'))?;
+    let rest = rest.trim();
+
+    (!rest.is_empty()).then_some(rest)
+}
+
+/// Two type spellings that name one type. The comparison drops the
+/// spacing, which the author is free to write either way.
+fn same_type_text(a: &str, b: &str) -> bool {
+    let strip = |t: &str| -> String { t.chars().filter(|c| !c.is_whitespace()).collect() };
+
+    strip(a) == strip(b)
+}
+
+/// The byte offset of `needle` outside every bracket group, or `None`.
+fn top_level_find(text: &str, needle: &str) -> Option<usize> {
+    let mut depth = 0i32;
+
+    for (i, c) in text.char_indices() {
+        match c {
+            '{' | '(' | '<' | '[' => depth += 1,
+            '}' | ')' | '>' | ']' => depth -= 1,
+            _ => {}
+        }
+
+        if depth == 0 && text[i..].starts_with(needle) {
+            return Some(i);
+        }
+    }
+
+    None
 }
 
 /// The length of the bracket group that opens at the start of `text`,
@@ -10135,6 +10483,51 @@ mod tests {
                 .any(|m| m == "the variant `Rect` carries 2 values, the arm binds 1"),
             "{got:?}"
         );
+    }
+
+    /// Luau takes a string for `@deprecated` and reports anything else
+    /// on the declaration below, which is not the line the author wrote.
+    #[test]
+    fn a_deprecated_attribute_takes_a_string() {
+        let got = messages(
+            "@deprecated(7)\nlocal function old(): number\n    return 1\nend\nprint(old())\n",
+        );
+        assert_eq!(
+            got,
+            vec!["the attribute `deprecated` takes a string message, number given"]
+        );
+        assert!(
+            messages("@deprecated(\"use `new`\")\nlocal function old(): number\n    return 1\nend\nprint(old())\n")
+                .is_empty()
+        );
+    }
+
+    /// A trait names the return type of every method it declares, so an
+    /// impl that writes another one breaks the contract.
+    #[test]
+    fn a_trait_method_keeps_the_return_type_the_trait_declares() {
+        let src = "trait Priced\n    function price(self): number\nend\nstruct Sword as\n    cost: number\nend\nimpl Priced for Sword\n    function price(self): string\n        return \"free\"\n    end\nend\nprint(new Sword { cost = 1 })\n";
+        assert_eq!(
+            messages(src),
+            vec!["the trait method `price` returns number in `Priced`, string here"]
+        );
+
+        // The same type written with other spacing is the same type.
+        let same = "trait Held\n    function slot(self): Array<number>\nend\nstruct Bag as\n    n: number\nend\nimpl Held for Bag\n    function slot(self): Array< number >\n        return Array.new()\n    end\nend\nprint(new Bag { n = 1 })\n";
+        assert!(messages(same).is_empty(), "{:?}", messages(same));
+    }
+
+    /// `$map` takes pairs. A flat list reads as one pair and built a
+    /// map of one entry in silence.
+    #[test]
+    fn a_flat_map_literal_is_an_error() {
+        let got = messages("local m = $map[\"sword\", 10]\nprint(m)\n");
+        assert_eq!(
+            got,
+            vec!["`$map` takes pairs: `$map[[key, value], [key, value]]`"]
+        );
+        assert!(messages("local m = $map[[\"sword\", 10]]\nprint(m)\n").is_empty());
+        assert!(messages("local m = $map[]\nprint(m)\n").is_empty());
     }
 
     #[test]
@@ -10611,23 +11004,25 @@ remote function Read() -> HashMap<string, number> from client
         let out = crate::compile(src).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(
-            out.check.contains("HashMap.new<<string, Array<number>>>()"),
+            out.check
+                .contains("HashMap.new<<string, __alloy.Array<number>>>()"),
             "{}",
             out.check
         );
         assert!(
-            out.check.contains("Array.new<<Array<Array<number>>>>()"),
+            out.check
+                .contains("Array.new<<__alloy.Array<__alloy.Array<number>>>>()"),
             "{}",
             out.check
         );
         assert!(
             out.check
-                .contains("Array.new<<HashMap<string, Array<number>>>>()"),
+                .contains("Array.new<<__alloy.HashMap<string, __alloy.Array<number>>>>()"),
             "{}",
             out.check
         );
         assert!(
-            out.check.contains("Array.new<<Array<number>>>()"),
+            out.check.contains("Array.new<<__alloy.Array<number>>>()"),
             "{}",
             out.check
         );
@@ -10636,10 +11031,58 @@ remote function Read() -> HashMap<string, number> from client
         let out =
             crate::compile("local b: HashMap<string, number>[] = Array.new()\nprint(b)\n").unwrap();
         assert!(
-            out.check.contains("Array.new<<HashMap<string, number>>>()"),
+            out.check
+                .contains("Array.new<<__alloy.HashMap<string, number>>>()"),
             "{}",
             out.check
         );
+    }
+
+    #[test]
+    fn a_written_type_argument_list_lowers_like_an_annotation() {
+        // A turbofish the author writes holds Alloy spellings, so it
+        // takes the same lowering an annotation takes.
+        let src = "struct Pair<A, B> as\n    first: A\n    second: B\nend\nlocal a = HashMap.new<<string, number[]>>()\nlocal b = HashMap.new<<string, Pair<number, string[]>[]>>()\nprint(a, b)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("HashMap.new<<string, __alloy.Array<number>>>()"),
+            "{}",
+            out.check
+        );
+        // The nested list keeps its own arguments, each lowered.
+        assert!(
+            out.check.contains(
+                "HashMap.new<<string, __alloy.Array<Pair<number, __alloy.Array<string>>>>>()"
+            ),
+            "{}",
+            out.check
+        );
+        assert!(!out.check.contains("[]"), "{}", out.check);
+    }
+
+    #[test]
+    fn a_returned_constructor_takes_the_return_type_arguments() {
+        // `return HashMap.new()` infers nothing on its own, so the
+        // declared return type names the arguments.
+        let src = "function make(): HashMap<string, number[]>\n    return HashMap.new()\nend\nprint(make())\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("HashMap.new<<string, __alloy.Array<number>>>()"),
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn a_shadowed_std_name_keeps_its_own_spelling() {
+        // A type the file declares wins over the ambient std name.
+        let src = "type Iter = { at: number }\nlocal xs = Array.new<<Iter>>()\nprint(xs)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.check.contains("Array.new<<Iter>>()"), "{}", out.check);
     }
 
     #[test]

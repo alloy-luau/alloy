@@ -88,6 +88,10 @@ pub struct EmitOptions {
     /// `try await f()` on one is the Result itself. See
     /// `crate::modules::import_result_asyncs`.
     pub import_result_asyncs: Vec<String>,
+    /// Per struct an imported module declares, its private field names,
+    /// so `private_access` reports a read across a module boundary. See
+    /// `crate::modules::import_privates`.
+    pub import_privates: Vec<(String, Vec<String>)>,
 }
 
 /// `HashMap<string, number>` as `("HashMap", "string, number")`, for the
@@ -249,6 +253,7 @@ impl Default for EmitOptions {
             import_types: Vec::new(),
             import_trait_defaults: Vec::new(),
             import_result_asyncs: Vec::new(),
+            import_privates: Vec::new(),
         }
     }
 }
@@ -1016,11 +1021,19 @@ impl<'s> Desugar<'s> {
                     .enumerate()
                     .map(|(i, t)| format!("_{}: {}", i + 1, self.copy_type_to_string(*t)))
                     .collect();
-                // The check artifact types the constructor, so its value
-                // is the variant's member of the union and `tag` stays a
-                // literal, not a string.
+                // The alias carries the metatable, so a method an `impl`
+                // writes on the enum resolves on a payload value.
+                let variant_type = format!(
+                    "typeof(setmetatable({{}} :: {{ tag: \"{vname}\", {} }}, {name}))",
+                    field_types.join(", ")
+                );
+                // The check artifact types the constructor as this one
+                // variant, not as the whole enum: a mixed enum's union
+                // holds strings, and a method call on it would read one.
+                // The variant is a subtype, so a `{name}` annotation
+                // still takes the value.
                 let (plist, ret) = if self.options.check {
-                    (field_types.join(", "), format!(": {name}"))
+                    (field_types.join(", "), format!(": {variant_type}"))
                 } else {
                     (params.join(", "), String::new())
                 };
@@ -1033,12 +1046,7 @@ impl<'s> Desugar<'s> {
                     vs,
                     &format!("function {name}.{vname}({plist}){ret} return {value} end"),
                 );
-                // The alias carries the metatable, so a method an `impl`
-                // writes on the enum resolves on a payload value.
-                types.push(format!(
-                    "typeof(setmetatable({{}} :: {{ tag: \"{vname}\", {} }}, {name}))",
-                    field_types.join(", ")
-                ));
+                types.push(variant_type);
             }
 
             // An attribute line above the variant keeps its newline.
@@ -1434,6 +1442,90 @@ impl<'s> Desugar<'s> {
             .iter()
             .find(|(_, vs)| vs.iter().any(|(v, n)| v == name && *n == 0))
             .map(|(e, _)| e.clone())
+    }
+
+    /// The enum a scrutinee column names, when this file declares it.
+    /// A variant pattern or a unit variant in any arm answers.
+    fn column_enum(&self, arms: &[&[Pattern]], col: usize) -> Option<String> {
+        for pats in arms {
+            let Some(top) = pats.get(col) else { continue };
+            let mut stack = vec![top];
+
+            while let Some(p) = stack.pop() {
+                // A bare name is a variant only when it carries nothing;
+                // otherwise it binds the value under its own name.
+                let (name, unit) = match p {
+                    Pattern::Or(a, b, _) => {
+                        stack.push(a);
+                        stack.push(b);
+                        continue;
+                    }
+
+                    Pattern::Variant { name, .. } => (self.text_of(*name), false),
+
+                    Pattern::Bind(name) => (self.text_of(*name), true),
+
+                    _ => continue,
+                };
+                let found = self
+                    .enum_decls
+                    .iter()
+                    .find(|(_, vs)| vs.iter().any(|(v, n)| v == name && (!unit || *n == 0)));
+
+                if let Some((e, _)) = found {
+                    return Some(e.clone());
+                }
+            }
+        }
+
+        None
+    }
+
+    /// A fresh local for a match scrutinee in the check artifact, cast
+    /// to the enum its arms name. `type(x) == "table"` reads a lone
+    /// variant type wrong, and a value the code just built has one; read
+    /// through the enum it narrows right. The ship artifact keeps the
+    /// scrutinee as it is.
+    fn scrutinee_local(&mut self, value: String, ename: &str, anchor: u32) -> String {
+        self.temp_next += 1;
+        let name = format!("_v{}", self.temp_next);
+        self.hoists.push(Hoist::Fresh {
+            name: name.clone(),
+            value: format!("({value}) :: {ename}"),
+            anchor,
+        });
+
+        name
+    }
+
+    /// The path each scrutinee reads through: a name or a temp, and in
+    /// the check artifact a local typed as the enum the arms name.
+    fn scrutinee_paths(&mut self, scrutinees: &[Expr], arms: &[&[Pattern]]) -> Vec<String> {
+        let mut paths = Vec::new();
+
+        for (col, sc) in scrutinees.iter().enumerate() {
+            let ename = if self.options.check && self.no_hoist == 0 {
+                self.column_enum(arms, col)
+            } else {
+                None
+            };
+
+            match ename {
+                Some(e) => {
+                    let anchor = self.byte_start(sc.span());
+                    let value = self.render_to_string(sc);
+                    let path = self.scrutinee_local(value, &e, anchor);
+                    paths.push(path);
+                }
+
+                None => {
+                    let path = self.reusable(sc);
+                    paths.push(path);
+                }
+            }
+        }
+
+        paths
     }
 
     /// Compiles a pattern against an access path.
@@ -1993,12 +2085,26 @@ impl<'s> Desugar<'s> {
             - 1]
         .end;
 
+        let pats: Vec<&[Pattern]> = m.arms.iter().map(|a| a.patterns.as_slice()).collect();
+
         // `match a, b with` becomes `do local _1 = a local _2 = b`.
         let mut paths = Vec::new();
         let mut header = String::from("do");
 
-        for sc in &m.scrutinees {
+        for (col, sc) in m.scrutinees.iter().enumerate() {
             let value = self.render_to_string(sc);
+            // The check artifact reads the scrutinee as the enum the arms
+            // name; see `scrutinee_local`.
+            let value = match self
+                .options
+                .check
+                .then(|| self.column_enum(&pats, col))
+                .flatten()
+            {
+                Some(e) => format!("({value}) :: {e}"),
+
+                None => value,
+            };
             self.temp_next += 1;
             let index = self.temp_next;
             header.push_str(&format!(" local _m{index} = {value}"));
@@ -2007,8 +2113,6 @@ impl<'s> Desugar<'s> {
 
         self.generate(start, &header);
         let mut cursor = with_end;
-
-        let pats: Vec<&[Pattern]> = m.arms.iter().map(|a| a.patterns.as_slice()).collect();
         let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
 
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
@@ -2110,14 +2214,8 @@ impl<'s> Desugar<'s> {
     /// substituted, arms staying on their lines.
     fn match_expr(&mut self, m: &MatchExpr) {
         let start = self.byte_start(m.span);
-        let mut paths = Vec::new();
-
-        for sc in &m.scrutinees {
-            let p = self.reusable(sc);
-            paths.push(p);
-        }
-
         let pats: Vec<&[Pattern]> = m.arms.iter().map(|a| a.patterns.as_slice()).collect();
+        let paths = self.scrutinee_paths(&m.scrutinees, &pats);
         let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
@@ -2154,14 +2252,21 @@ impl<'s> Desugar<'s> {
             self.copy(cursor, arm_start);
             let (test, c) = self.arm_test(&arm.patterns, &paths, arm.guard.as_ref());
             let is_last_without_default = m.default.is_none() && i == last_index && exhaustive;
-            let keyword = if is_last_without_default {
+            // One arm that covers every value has nothing to branch on.
+            // `(else v)` is not Luau, so the value stands alone.
+            let keyword = if is_last_without_default && i == 0 {
+                String::new()
+            } else if is_last_without_default {
                 "else".to_string()
             } else if i == 0 {
                 format!("if {test} then")
             } else {
                 format!("elseif {test} then")
             };
-            self.generate(arm_start, &keyword);
+
+            if !keyword.is_empty() {
+                self.generate(arm_start, &keyword);
+            }
             let then_tok = self.find_tok_after(
                 arm.patterns
                     .last()
@@ -2556,7 +2661,15 @@ impl<'s> Desugar<'s> {
 
             Stmt::LocalFunction(f) => self.check_attrs(&f.attrs, "function"),
 
-            Stmt::Local(l) => self.check_attrs(&l.attrs, "local"),
+            Stmt::Local(l) => {
+                self.check_attrs(&l.attrs, "local");
+
+                // Luau reports this as a syntax error in the emit, which
+                // only `alloy flux` runs. The source says it first.
+                if l.is_const && l.values.is_empty() {
+                    self.diagnose(l.keyword, "`const` needs a value");
+                }
+            }
 
             Stmt::Remote(r) => self.check_attrs(&r.attributes, "remote"),
 
@@ -6077,7 +6190,7 @@ impl<'s> Desugar<'s> {
                     || self.expected_generic.is_some() =>
             {
                 let text = self.chain_expr(e);
-                self.generate(anchor, &text);
+                self.generate_chain(anchor, &text, e);
             }
 
             Expr::Ternary {
@@ -7097,6 +7210,45 @@ impl<'s> Desugar<'s> {
 
             CallArgs::Str(s) => self.text_of(*s).to_string(),
         }
+    }
+
+    /// Emits a lowered chain, copying the field name it ends with. The
+    /// lowering is generated text, and a generated byte has no output
+    /// position, so completion and hover on the member of an `a?.b` had
+    /// nowhere to land. The copied name gives them one.
+    fn generate_chain(&mut self, anchor: u32, text: &str, e: &Expr) {
+        let Expr::Index {
+            key: IndexKey::Field(name),
+            ..
+        } = e
+        else {
+            self.generate(anchor, text);
+
+            return;
+        };
+        let word = self.text_of(*name).to_string();
+        let start = self.byte_start(*name);
+        let end = self.byte_end(*name);
+
+        // The name has to be the source's own and end the lowering's
+        // last field access, or the copy would map bytes out of order.
+        let named = self.src.get(start as usize..end as usize) == Some(word.as_str());
+        let split = text.rfind(&format!(".{word}")).filter(|at| {
+            named
+                && text[at + 1 + word.len()..]
+                    .chars()
+                    .all(|c| c == ')' || c == ' ')
+        });
+
+        let Some(at) = split else {
+            self.generate(anchor, text);
+
+            return;
+        };
+
+        self.generate(anchor, &text[..=at]);
+        self.copy(start, end);
+        self.generate(anchor, &text[at + 1 + word.len()..]);
     }
 
     /// A chain in expression position.
@@ -9558,6 +9710,85 @@ mod tests {
             .iter()
             .map(|l| l.name)
             .collect()
+    }
+
+    #[test]
+    fn one_arm_that_covers_every_value_needs_no_branch() {
+        // `(else v)` is not Luau, so a match expression with one arm and
+        // no default writes the value alone.
+        let src = "enum Msg as\n    Join(number)\nend\nlocal function h(m: Msg): number\n    return match m with\n        case Join(n) then n\n    end\nend\nprint(h)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(!out.ship.contains("else"), "{}", out.ship);
+        assert!(!out.check.contains("else"), "{}", out.check);
+    }
+
+    #[test]
+    fn a_rejected_arm_still_writes_a_branch_that_parses() {
+        let src = "enum Msg as\n    Join(number)\nend\nlocal function h(m: Msg): number\n    return match m with\n        case Join() then 0\n    end\nend\nprint(h)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(!out.diagnostics.is_empty());
+        assert!(
+            out.ship.contains("return (\n         0\n    )"),
+            "{}",
+            out.ship
+        );
+    }
+
+    #[test]
+    fn a_const_without_a_value_is_an_error() {
+        let got = messages("const ZEB\nprint(ZEB)\n");
+        assert!(got.iter().any(|m| m == "`const` needs a value"), "{got:?}");
+        assert!(messages("const ZEB = 1\nprint(ZEB)\n").is_empty());
+        // `local` without a value stays legal.
+        assert!(messages("local a\nprint(a)\n").is_empty());
+    }
+
+    #[test]
+    fn a_top_level_try_returns_the_err_from_the_chunk() {
+        let src = "local function one(): Result<number, string>\n    return Ok(1)\nend\nlocal top = try one()\nprint(top)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship
+                .contains("if _1.tag == \"Err\" then return _1 end local top = _1._1"),
+            "{}",
+            out.ship
+        );
+    }
+
+    #[test]
+    fn a_payload_constructor_returns_its_own_variant() {
+        // A mixed enum's union holds strings, so a method call on the
+        // whole union reports. The constructor gives back one variant,
+        // which carries the metatable and the impl methods.
+        let src = "enum Shape as\n    Circle(number)\n    Rect(number, number)\n    Empty\nend\nprint(Shape.Rect(1, 2))\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.check.contains(
+                "function Shape.Rect(_1: number, _2: number): typeof(setmetatable({} :: { tag: \"Rect\", _1: number, _2: number }, Shape))"
+            ),
+            "{}",
+            out.check
+        );
+        // The ship artifact keeps the untyped constructor.
+        assert!(
+            out.ship.contains("function Shape.Rect(_1, _2) return"),
+            "{}",
+            out.ship
+        );
+    }
+
+    #[test]
+    fn a_match_reads_its_scrutinee_as_the_enum_in_the_check_artifact() {
+        let src = "enum Shape as\n    Circle(number)\n    Rect(number, number)\n    Empty\nend\nlocal s = Shape.Rect(1, 2)\nlocal n = match s with\n    case Circle(r) then r\n    case Rect(w, h) then w\n    case Empty then 0\nend\nprint(n)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.check.contains("local _v1 = (s) :: Shape"),
+            "{}",
+            out.check
+        );
+        // The ship artifact reads the scrutinee where it stands.
+        assert!(!out.ship.contains(":: Shape"), "{}", out.ship);
     }
 
     #[test]

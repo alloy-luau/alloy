@@ -491,6 +491,7 @@ fn write_modules(
             wait_timeout: config.emit.wait_timeout,
             extensions: extensions.to_vec(),
             import_types: crate::modules::import_types(&source, &path, &aliases),
+            import_privates: crate::modules::import_privates(&source, &path, &aliases),
             import_result_asyncs: crate::modules::import_result_asyncs(&source, &path, &aliases),
             import_trait_defaults: crate::modules::import_trait_defaults(&source, &path, &aliases),
             ..EmitOptions::default()
@@ -673,6 +674,7 @@ pub fn spec(
         wait_timeout: config.emit.wait_timeout,
         extensions: extensions.to_vec(),
         import_types: crate::modules::import_types(source, &root.join(source_rel), &aliases),
+        import_privates: crate::modules::import_privates(source, &root.join(source_rel), &aliases),
         import_result_asyncs: crate::modules::import_result_asyncs(
             source,
             &root.join(source_rel),

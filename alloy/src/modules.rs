@@ -321,6 +321,42 @@ pub fn import_shapes(
     out
 }
 
+/// The private fields of every struct a module the source imports
+/// declares: the struct's name with its private field names. The
+/// `private_access` lint reads a field of an imported struct through it.
+pub fn import_privates(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+
+    for shape in import_shapes(source, from, aliases) {
+        let crate::declarations::Shape::Struct { name, fields } = shape else {
+            continue;
+        };
+        let private: Vec<String> = fields
+            .into_iter()
+            .filter(|(_, p)| *p)
+            .map(|(n, _)| n)
+            .collect();
+
+        if !private.is_empty() && !out.iter().any(|(n, _)| *n == name) {
+            out.push((name, private));
+        }
+    }
+
+    out
+}
+
+/// The private fields of the imported structs of a file under the
+/// nearest `alloy.toml`.
+pub fn import_privates_for_file(path: &Path, source: &str) -> Vec<(String, Vec<String>)> {
+    let (from, aliases) = file_context(path);
+
+    import_privates(source, &from, &aliases)
+}
+
 /// The import shapes of a file under the nearest `alloy.toml`.
 pub fn import_shapes_for_file(path: &Path, source: &str) -> Vec<crate::declarations::Shape> {
     let (from, aliases) = file_context(path);

@@ -12,6 +12,9 @@ pub(crate) struct Scan<'s> {
     pub(crate) src: &'s str,
     pub(crate) toks: &'s [Tok],
     pub(crate) st: &'s Structure,
+    /// Per struct an imported module declares, its private field names.
+    /// The file's own privates come from its tokens instead.
+    pub(crate) privates: &'s [(String, Vec<String>)],
 }
 
 pub(crate) const KEYWORDS: &[&str] = &[
@@ -50,7 +53,18 @@ pub(crate) struct IfParts {
 
 impl<'s> Scan<'s> {
     pub(crate) fn new(src: &'s str, toks: &'s [Tok], st: &'s Structure) -> Self {
-        Self { src, toks, st }
+        Self {
+            src,
+            toks,
+            st,
+            privates: &[],
+        }
+    }
+
+    /// The same scan, with the private fields of the imported structs.
+    pub(crate) fn with_privates(mut self, privates: &'s [(String, Vec<String>)]) -> Self {
+        self.privates = privates;
+        self
     }
 
     pub(crate) fn t(&self, i: usize) -> &'s str {

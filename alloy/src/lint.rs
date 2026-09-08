@@ -824,6 +824,7 @@ pub fn run(
     chunk: &Chunk,
     definitions: bool,
     thresholds: &Thresholds,
+    import_privates: &[(String, Vec<String>)],
 ) -> Vec<Lint> {
     let mut lints = Vec::new();
 
@@ -1325,7 +1326,7 @@ pub fn run(
         }
     }
 
-    let scan = crate::flux_scan::Scan::new(src, toks, &st);
+    let scan = crate::flux_scan::Scan::new(src, toks, &st).with_privates(import_privates);
     lints.extend(crate::flux::run(&scan));
     lints.extend(crate::flux_correctness::run(&scan));
     lints.extend(crate::flux_complexity::run(&scan, thresholds));

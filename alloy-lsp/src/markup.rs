@@ -215,9 +215,41 @@ fn attribute_names(tag: &str) -> Vec<String> {
     out
 }
 
-/// The spot for a hover: the parsed tree, so the name and attributes are
-/// exact.
+/// The spot for a hover: the parsed tree, and the text for a tag the
+/// tree does not hold.
 pub fn hover_spot(src: &str, offset: usize) -> Option<Spot> {
+    tree_spot(src, offset).or_else(|| tag_name_at(src, offset))
+}
+
+/// The tag name under the cursor, read from the text. A tag inside a
+/// `{ }` hole is one expression to the markup parser, so the tree has
+/// no element for it and the hover would fall through to the function
+/// the component is.
+fn tag_name_at(src: &str, offset: usize) -> Option<Spot> {
+    let lt = src.get(..offset)?.rfind('<')?;
+
+    if !opens_markup(src, lt) {
+        return None;
+    }
+
+    let after = src.get(lt + 1..)?;
+    let after = after.strip_prefix('/').unwrap_or(after);
+    let start = src.len() - after.len();
+    let name: String = after
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+
+    if name.is_empty() || offset < start || offset > start + name.len() {
+        return None;
+    }
+
+    Some(Spot::Tag { name })
+}
+
+/// The spot for a hover from the parsed tree, so the name and attributes
+/// are exact.
+fn tree_spot(src: &str, offset: usize) -> Option<Spot> {
     let spans = alloy::luaux::compile::markup_spans(src).ok()?;
     let (start, _) = spans
         .iter()
@@ -467,6 +499,24 @@ pub fn completions(spot: &Spot, bound: &HashSet<String>, src: &str) -> Vec<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tag inside a `{ }` hole is one expression to the markup
+    /// parser, so the text has to name it.
+    #[test]
+    fn a_tag_inside_a_hole_hovers_as_the_tag() {
+        let src =
+            "local e = <Frame>{rows:map(function(s) return <Badge label={s} /> end)}</Frame>\n";
+        let at = src.find("<Badge").unwrap() + 2;
+        assert_eq!(
+            hover_spot(src, at),
+            Some(Spot::Tag {
+                name: "Badge".into()
+            })
+        );
+        // A hole's own expression is not a tag.
+        let inner = src.find("rows").unwrap() + 1;
+        assert_eq!(hover_spot(src, inner), None);
+    }
 
     #[test]
     fn slots_come_from_the_open_tag_text() {

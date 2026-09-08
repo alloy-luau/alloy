@@ -740,7 +740,17 @@ impl<'s> Scan<'s> {
     /// `x.count` or `x:reset()` outside the impl of the struct that
     /// declared `count` or `reset` private.
     fn private_access(&self, out: &mut Vec<Lint>) {
-        let members = self.private_members();
+        let mut members = self.private_members();
+
+        // A struct another module declares reaches this file through an
+        // import; its private fields come with the shape, not the tokens.
+        for (owner, fields) in self.privates {
+            for field in fields {
+                if !members.iter().any(|(m, o)| *m == field && *o == owner) {
+                    members.push((field.as_str(), owner.as_str()));
+                }
+            }
+        }
 
         if members.is_empty() {
             return;
@@ -1145,6 +1155,7 @@ mod tests {
             &parsed.chunk,
             false,
             &crate::lint::Thresholds::default(),
+            &[],
         )
         .into_iter()
         .filter(|l| !matches!(l.name, "unused_variable" | "unused_function"))
@@ -1466,6 +1477,36 @@ mod tests {
         assert_eq!(hits.len(), 2, "{hits:?}");
         assert!(hits[0].contains("`count` is private to `C`"));
         assert!(hits[1].contains("`log` is private to `C`"));
+    }
+
+    #[test]
+    fn a_private_field_of_an_imported_struct_fires() {
+        // The lint reads tokens, so a struct another module declares
+        // reaches it through the shape the import carries.
+        let src = "import { Item } from \"./lib\"\nlocal it: Item = make(1)\nlocal leak = it.secret\nprint(leak)\n";
+        let privates = vec![("Item".to_string(), vec!["secret".to_string()])];
+        let Ok(parsed) =
+            alloy_syntax::parse_lenient(src, alloy_syntax::parser::ParseOptions::default())
+        else {
+            panic!("the source does not lex");
+        };
+        let hits: Vec<String> = crate::lint::run(
+            src,
+            &parsed.lexed.toks,
+            &parsed.chunk,
+            false,
+            &crate::lint::Thresholds::default(),
+            &privates,
+        )
+        .into_iter()
+        .filter(|l| l.name == "private_access")
+        .map(|l| l.message)
+        .collect();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].contains("`secret` is private to `Item`"),
+            "{hits:?}"
+        );
     }
 
     #[test]

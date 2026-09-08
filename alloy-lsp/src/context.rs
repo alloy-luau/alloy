@@ -211,6 +211,49 @@ fn names_a_parameter(head: &str) -> bool {
     !last.contains(':') && !last.contains('=')
 }
 
+/// The base expression and the typed prefix of a member completion
+/// right after `?.`: `bx?.na` answers `("bx", 2)`. `None` when the
+/// cursor sits somewhere else.
+pub fn optional_member_at(src: &str, offset: usize) -> Option<(String, usize)> {
+    let head = src.get(..offset)?;
+    let word = head.len() - head.trim_end_matches(is_word_byte).len();
+    let before = head[..head.len() - word].strip_suffix("?.")?;
+    let start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word_byte(*c) || *c == '.')
+        .last()
+        .map(|(i, _)| i)?;
+    let base = &before[start..];
+
+    (!base.is_empty() && !base.ends_with('.')).then(|| (base.to_string(), word))
+}
+
+fn is_word_byte(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Where the member of an optional access sits on the lowered line.
+/// `a?.b` lowers to `(if a == nil then nil else a.b)`, all of it text
+/// the compiler wrote, so the member has no position of its own; the
+/// one the lowering wrote is where completion belongs.
+pub fn optional_member_column(line: &str, base: &str, prefix: usize) -> Option<usize> {
+    let needle = format!("{base}.");
+    let at = line
+        .match_indices(&needle)
+        .filter(|(i, _)| {
+            line[..*i]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_word_byte(c) && c != '.')
+        })
+        .map(|(i, _)| i)
+        .last()?;
+    let col = at + needle.len() + prefix;
+
+    (col <= line.len()).then_some(col)
+}
+
 /// The string a module path is being typed in, when the cursor is inside
 /// one after `from`, `require(`, or `import(`.
 fn import_spec(src: &str, line_start: usize, offset: usize) -> Option<Context> {
@@ -956,6 +999,34 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
 
 #[cfg(test)]
 mod tests {
+    /// The base and the typed prefix of a completion after `?.`, and
+    /// where the member sits on the lowered line.
+    #[test]
+    fn an_optional_member_reads_its_base_and_its_prefix() {
+        let src = "local deep = bx?.na";
+        assert_eq!(
+            super::optional_member_at(src, src.len()),
+            Some(("bx".to_string(), 2))
+        );
+        let dangling = "local deep = bx?.";
+        assert_eq!(
+            super::optional_member_at(dangling, dangling.len()),
+            Some(("bx".to_string(), 0))
+        );
+        assert_eq!(super::optional_member_at("local x = bx.na", 15), None);
+
+        let line = "local deep = (if bx == nil then nil else bx.name)";
+        assert_eq!(
+            super::optional_member_column(line, "bx", 0),
+            Some(line.find("else bx.").unwrap() + 8)
+        );
+        // A base that only ends another name does not match.
+        assert_eq!(
+            super::optional_member_column("local q = abx.name", "bx", 0),
+            None
+        );
+    }
+
     use super::*;
 
     fn at(src: &str) -> Option<Context> {

@@ -2440,6 +2440,15 @@ impl Server {
                     return true;
                 }
 
+                // `bx?.` and `bx?.na`: the lowering owns the member.
+                if m == "textDocument/completion"
+                    && let Some(home) = self.optional_member_home(&uri, &message)
+                {
+                    self.forward_request_at(message, method.as_deref(), home);
+
+                    return true;
+                }
+
                 // A binding the desugar moved, `if local c = ...`, maps
                 // to a byte the child knows nothing about. The name has
                 // a home in the shadow; the child answers there.
@@ -2760,6 +2769,34 @@ impl Server {
 
             false => shadow_home(&doc.shadow, line, word),
         }
+    }
+
+    /// The shadow position a completion after `?.` belongs at. The
+    /// lowering of an optional access is text the compiler wrote, so the
+    /// member the author is typing maps nowhere; the member the lowering
+    /// wrote is the one with a type behind it.
+    fn optional_member_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
+        if !is_alloy_uri(uri) {
+            return None;
+        }
+
+        let (line, character) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+
+        // A `.alx` lowering moves columns of its own; leave it alone.
+        if doc.is_alx {
+            return None;
+        }
+
+        let offset = offset_of(&doc.source, line, character)?;
+        let (base, prefix) = context::optional_member_at(&doc.source, offset)?;
+        let shadow_line = doc.shadow.lines().nth(line as usize)?;
+        let column = context::optional_member_column(shadow_line, &base, prefix)?;
+
+        Some((line, shadow_line[..column].chars().count() as u32))
     }
 
     /// The hover of a name the source declares and the child sees only
@@ -3854,6 +3891,7 @@ impl Server {
         // A value import of a struct or an enum binds its type too.
         if let Some(path) = uri_to_path(uri) {
             options.import_types = alloy::modules::import_types_for_file(&path, &text);
+            options.import_privates = alloy::modules::import_privates_for_file(&path, &text);
             options.import_result_asyncs =
                 alloy::modules::import_result_asyncs_for_file(&path, &text);
             options.import_trait_defaults =
@@ -3948,6 +3986,7 @@ impl Server {
 
         if let Some(path) = uri_to_path(uri) {
             options.import_types = alloy::modules::import_types_for_file(&path, &doc.source);
+            options.import_privates = alloy::modules::import_privates_for_file(&path, &doc.source);
             options.import_result_asyncs =
                 alloy::modules::import_result_asyncs_for_file(&path, &doc.source);
             options.import_trait_defaults =

@@ -1776,6 +1776,7 @@ fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> 
         file_name: path.to_string(),
         definitions: path.ends_with(".d.aly"),
         import_types: alloy::modules::import_types_for_file(Path::new(path), &source),
+        import_privates: alloy::modules::import_privates_for_file(Path::new(path), &source),
         import_result_asyncs: alloy::modules::import_result_asyncs_for_file(
             Path::new(path),
             &source,

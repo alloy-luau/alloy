@@ -52,6 +52,7 @@ fn main() {
         &parsed.chunk,
         false,
         &Default::default(),
+        &[],
     );
     println!(
         "lint::run        {:>7.1} ms  ({} lints)",

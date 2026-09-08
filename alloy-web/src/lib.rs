@@ -141,16 +141,42 @@ pub fn to_source(check_offset: u32) -> u32 {
     })
 }
 
+/// The check-artifact offset of a member the author types after `?.`.
+/// The lowering of an optional access is text the compiler wrote, so
+/// the member has no offset of its own; the member the lowering wrote
+/// is the one the analyzer can read.
+fn optional_member_offset(source: &str, check: &str, offset: usize) -> Option<usize> {
+    let (base, prefix) = context::optional_member_at(source, offset)?;
+    // The emit keeps every line, so the member sits on the same one.
+    let line = source.get(..offset)?.matches('\n').count();
+    let mut start = 0;
+
+    for _ in 0..line {
+        start += check.get(start..)?.find('\n')? + 1;
+    }
+
+    let end = check
+        .get(start..)?
+        .find('\n')
+        .map_or(check.len(), |i| start + i);
+    let column = context::optional_member_column(check.get(start..end)?, &base, prefix)?;
+
+    Some(start + column)
+}
+
 /// A byte offset in the source as one in the check artifact, or -1 for
 /// a byte the emit dropped.
 #[wasm_bindgen]
 pub fn to_check(source_offset: u32) -> i32 {
     SESSION.with(|s| {
-        s.borrow()
-            .output
-            .as_ref()
-            .and_then(|o| o.map.to_output(source_offset))
-            .map_or(-1, |o| i32::try_from(o).unwrap_or(-1))
+        let s = s.borrow();
+        let Some(out) = s.output.as_ref() else {
+            return -1;
+        };
+        let at = optional_member_offset(&s.source, &out.check, source_offset as usize)
+            .or_else(|| out.map.to_output(source_offset).map(|o| o as usize));
+
+        at.map_or(-1, |o| i32::try_from(o).unwrap_or(-1))
     })
 }
 
@@ -774,6 +800,24 @@ mod tests {
         for name in alloy::directives::NAMES {
             assert!(items.contains(name), "`{name}` is not offered: {items}");
         }
+    }
+
+    /// `bx?.` and `bx?.na`: the analyzer reads the member the lowering
+    /// wrote, since the one the author typed is inside generated text.
+    #[test]
+    fn a_member_after_an_optional_access_maps_into_the_lowering() {
+        let source = "local bx: Part? = nil\nlocal deep = bx?.Name\nprint(bx, deep)\n";
+        super::set_source(source);
+        let dot = source.find("?.").unwrap() + 2;
+
+        for at in [dot, dot + 4] {
+            let check = super::to_check(at as u32);
+            assert!(check >= 0, "no check offset for {at}");
+        }
+
+        // The offset lands right after the `.` the lowering wrote.
+        let out = super::set_source(source);
+        assert!(out.contains("bx.Name"), "{out}");
     }
 
     #[test]

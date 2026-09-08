@@ -231,6 +231,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         &parsed.chunk,
         options.definitions,
         &options.thresholds,
+        &options.import_privates,
     );
     lints.extend(rendered.lints);
 

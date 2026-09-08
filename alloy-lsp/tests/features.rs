@@ -732,6 +732,76 @@ fn code_actions_offer_the_lint_rewrites() {
 
 /// A multi-root workspace: the editor names several folders, and a file
 /// in a folder other than the first still hovers.
+/// The names a binding introduces: `if local`, a `case` pattern, and a
+/// method call's result. Each is a generated local in the shadow, so the
+/// hover has to reach the source position the binding was written at.
+const BINDINGS: &str = "\
+struct Node as
+    name: string
+    child: Node?
+end
+
+enum Event as
+    Key(string)
+    Quit
+end
+
+local root = new Node { name = \"root\", child = nil }
+if local c = root.child then
+    print(c.name)
+end
+
+local function handle(e: Event): string
+    match e with
+        case Key(k) then
+            return k
+        case Quit then
+            return \"q\"
+    end
+end
+
+local function parse(): Result<number, string>
+    return Ok(1)
+end
+local r = parse()
+local o = r:ok()
+print(root, handle, o)
+";
+
+#[test]
+fn a_binding_hovers_where_it_was_written() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-bindings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("bindings.aly");
+    std::fs::write(&file, BINDINGS).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": BINDINGS } } }),
+    );
+
+    // `if local c = root.child then`: the name is `c`, the type `Node`.
+    let h = s.hover(&uri, 11, 9);
+    assert!(h.contains("c") && h.contains("Node"), "if local: {h}");
+    // `case Key(k) then`: the payload binds `k` as a string.
+    let h = s.hover(&uri, 17, 17);
+    assert!(h.contains("k") && h.contains("string"), "case bind: {h}");
+    // `local o = r:ok()`: the method's result.
+    let h = s.hover(&uri, 28, 6);
+    assert!(h.contains("number"), "method result: {h}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_multi_root_workspace_answers_hover() {
     let Some(child) = luau_lsp() else {

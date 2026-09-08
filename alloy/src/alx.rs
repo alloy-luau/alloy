@@ -34,7 +34,8 @@ pub fn compile_alx(
         message: e.message,
     })?;
     let blanked = luaux::resolve::blank_luaux_regions(src, &spans);
-    config.extra_bound = bound_names(&blanked);
+    let bound = bound_names(&blanked);
+    config.extra_bound = bound.clone();
 
     let compiled = match config.backend {
         luaux::config::BackendKind::Table => {
@@ -81,6 +82,10 @@ pub fn compile_alx(
         });
     }
 
+    for d in component_props_problems(src, &bound) {
+        output.diagnostics.push(d);
+    }
+
     for w in compiled.warnings {
         output.diagnostics.push(Diagnostic {
             start: w.offset as u32,
@@ -93,6 +98,346 @@ pub fn compile_alx(
     output.lowered = Some(lowered.clone());
 
     Ok(AlxOutput { output, lowered })
+}
+
+/// One prop a component declares.
+struct Prop {
+    name: String,
+    ty: String,
+    optional: bool,
+}
+
+/// The props a tag may set without the component declaring them: React
+/// reads `key` itself, and it never reaches the component.
+const FREE_PROPS: &[&str] = &["key"];
+
+/// The attributes of every component tag, against the props the
+/// component declares: a prop it does not take, a required prop the tag
+/// leaves out, and a literal of the wrong type.
+fn component_props_problems(src: &str, bound: &HashSet<String>) -> Vec<Diagnostic> {
+    let Ok(spans) = luaux::compile::markup_spans(src) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    for (start, _) in spans {
+        let Ok((node, _)) = luaux::markup::parse_node(src, start) else {
+            continue;
+        };
+        check_node(&node, src, bound, &mut out);
+    }
+
+    out.sort_by_key(|d| d.start);
+    out.dedup_by(|a, b| a.start == b.start && a.message == b.message);
+
+    out
+}
+
+fn check_node(
+    node: &luaux::markup::Node,
+    src: &str,
+    bound: &HashSet<String>,
+    out: &mut Vec<Diagnostic>,
+) {
+    use luaux::markup::{Child, Node};
+
+    let children = match node {
+        Node::Element(e) => {
+            check_element(e, src, bound, out);
+            &e.children
+        }
+
+        Node::Fragment(f) => &f.children,
+    };
+
+    for child in children {
+        match child {
+            Child::Node(n) => check_node(n, src, bound, out),
+
+            // A tag inside a hole is one expression to the markup
+            // parser, so its own region is parsed from the text.
+            Child::Expression { expression, span } => {
+                let mut at = span.start;
+
+                while let Some(lt) = src.get(at..span.end).and_then(|t| t.find('<')) {
+                    at += lt;
+
+                    match luaux::markup::parse_node(src, at) {
+                        Ok((inner, next)) => {
+                            check_node(&inner, src, bound, out);
+                            at = next.max(at + 1);
+                        }
+
+                        Err(_) => at += 1,
+                    }
+                }
+
+                let _ = expression;
+            }
+
+            _ => {}
+        }
+    }
+}
+
+fn check_element(
+    element: &luaux::markup::Element,
+    src: &str,
+    bound: &HashSet<String>,
+    out: &mut Vec<Diagnostic>,
+) {
+    use luaux::markup::Attribute;
+
+    let name = element.name.as_written();
+
+    if luaux::roblox::is_class(&name) || !bound.contains(&name) {
+        return;
+    }
+
+    let Some(props) = component_props(src, &name) else {
+        return;
+    };
+    let mut set: Vec<String> = Vec::new();
+    let mut spread = false;
+
+    for attribute in &element.attributes {
+        let (attr, span, value) = match attribute {
+            Attribute::Named { name, span, value } => (name.clone(), *span, Some(value)),
+
+            Attribute::Inferred { expression, span } => {
+                let last = expression.rsplit('.').next().unwrap_or(expression).trim();
+
+                if last.is_empty() || !last.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+
+                (last.to_string(), *span, None)
+            }
+
+            Attribute::Spread { .. } => {
+                spread = true;
+                continue;
+            }
+        };
+        set.push(attr.clone());
+
+        if FREE_PROPS.contains(&attr.as_str()) {
+            continue;
+        }
+
+        let Some(prop) = props.iter().find(|p| p.name == attr) else {
+            let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+            let message = match nearest(&attr, &names) {
+                Some(m) => format!("markup: {name} has no prop named {attr} (did you mean {m}?)"),
+
+                None => format!("markup: {name} has no prop named {attr}"),
+            };
+            out.push(Diagnostic {
+                start: span.start as u32,
+                end: (span.start + attr.len()) as u32,
+                message,
+            });
+            continue;
+        };
+
+        let Some(got) = value.and_then(literal_type) else {
+            continue;
+        };
+        let want = prop.ty.trim().trim_end_matches('?');
+
+        if matches!(want, "string" | "number" | "boolean") && want != got {
+            out.push(Diagnostic {
+                start: span.start as u32,
+                end: (span.start + attr.len()) as u32,
+                message: format!(
+                    "markup: prop {attr} of {name} is {}, not {got}",
+                    prop.ty.trim()
+                ),
+            });
+        }
+    }
+
+    if spread {
+        return;
+    }
+
+    let missing: Vec<&str> = props
+        .iter()
+        .filter(|p| !p.optional && !set.contains(&p.name))
+        .map(|p| p.name.as_str())
+        .collect();
+
+    if !missing.is_empty() {
+        let tag = element.span.start + 1;
+        out.push(Diagnostic {
+            start: tag as u32,
+            end: (tag + name.len()) as u32,
+            message: format!(
+                "markup: <{name}> leaves the prop {} unset",
+                missing.join(", ")
+            ),
+        });
+    }
+}
+
+/// The nearest name within an edit distance of two.
+fn nearest(word: &str, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .map(|n| (edit_distance(n, word), *n))
+        .filter(|(d, _)| *d <= 2)
+        .min()
+        .map(|(_, n)| n.to_string())
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+
+    for (i, ca) in a.iter().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            let next = (row[j] + 1).min(row[j + 1] + 1).min(previous + cost);
+            previous = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+
+    row[b.len()]
+}
+
+/// The type of an attribute value the reader can name without the
+/// checker: a literal. Anything else is `None`.
+fn literal_type(value: &luaux::markup::AttributeValue) -> Option<&'static str> {
+    use luaux::markup::AttributeValue;
+
+    let text = match value {
+        AttributeValue::StringLiteral(_) => return Some("string"),
+
+        AttributeValue::Boolean => return Some("boolean"),
+
+        AttributeValue::Expression(e) => e.trim(),
+    };
+
+    if text.starts_with('"') || text.starts_with('\'') || text.starts_with('`') {
+        return Some("string");
+    }
+
+    if text == "true" || text == "false" {
+        return Some("boolean");
+    }
+
+    text.parse::<f64>().is_ok().then_some("number")
+}
+
+/// The props a component declares, from the record its parameter names.
+/// `None` when the file does not declare the component, or it writes no
+/// parameter type: there is then nothing to check against.
+fn component_props(src: &str, name: &str) -> Option<Vec<Prop>> {
+    let at = src.find(&format!("function {name}("))?;
+    let rest = &src[at..];
+    let open = rest.find('(')?;
+    let close = rest.find(')')?;
+    let (_, declared) = rest.get(open + 1..close)?.split_once(':')?;
+    let declared = declared.trim();
+
+    let record = match declared.starts_with('{') {
+        true => balanced_record(declared)?.to_string(),
+
+        // `props: Props`, where `type Props = { ... }`.
+        false => {
+            let alias = src.find(&format!("type {declared} ="))?;
+            let body = src[alias..].split_once('=')?.1.trim_start();
+
+            balanced_record(body)?.to_string()
+        }
+    };
+
+    Some(record_props(&record))
+}
+
+/// The text from `{` to the `}` that closes it.
+fn balanced_record(text: &str) -> Option<&str> {
+    if !text.starts_with('{') {
+        return None;
+    }
+
+    let mut depth = 0i32;
+
+    for (i, c) in text.char_indices() {
+        match c {
+            '{' => depth += 1,
+
+            '}' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(&text[..=i]);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// `{ label: string, size: number? }` as its fields.
+fn record_props(record: &str) -> Vec<Prop> {
+    let inner = record
+        .trim()
+        .strip_prefix('{')
+        .and_then(|t| t.strip_suffix('}'))
+        .unwrap_or("");
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut field = String::new();
+
+    for c in inner.chars() {
+        match c {
+            '{' | '(' | '[' | '<' => depth += 1,
+
+            '}' | ')' | ']' | '>' => depth -= 1,
+
+            ',' | ';' if depth == 0 => {
+                push_prop(&field, &mut out);
+                field.clear();
+                continue;
+            }
+
+            _ => {}
+        }
+
+        field.push(c);
+    }
+
+    push_prop(&field, &mut out);
+
+    out
+}
+
+fn push_prop(field: &str, out: &mut Vec<Prop>) {
+    let Some((name, ty)) = field.split_once(':') else {
+        return;
+    };
+    let name = name.trim();
+    let ty = ty.trim();
+    let optional = name.ends_with('?') || ty.ends_with('?');
+    let name = name.trim_end_matches('?');
+
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return;
+    }
+
+    out.push(Prop {
+        name: name.to_string(),
+        ty: ty.to_string(),
+        optional,
+    });
 }
 
 fn markup_message(message: &str, help: Option<&str>) -> String {
@@ -308,6 +653,85 @@ mod tests {
         }
 
         assert!(!names.contains("from"));
+    }
+
+    /// The props of a component tag: a name it does not take, a
+    /// required one it leaves out, and a literal of the wrong type.
+    #[test]
+    fn a_component_tag_checks_its_props() {
+        let src = "import * as React from \"@packages/react\" --@alloy-ignore\n\
+local function Badge(props: { label: string, size: number? })\n\
+    return (<TextLabel Text={props.label} />)\n\
+end\n\
+\n\
+local function Bad(props: { title: string })\n\
+    return (\n\
+        <Frame>\n\
+            <Badge title={props.title} />\n\
+            <Badge label={7} />\n\
+            <Badge label=\"ok\" />\n\
+        </Frame>\n\
+    )\n\
+end\n\
+\n\
+return Bad\n";
+        let out = compile_alx(src, &EmitOptions::default(), luaux::Config::default())
+            .expect("the markup compiles");
+        let messages: Vec<&str> = out
+            .output
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(
+            messages.contains(&"markup: Badge has no prop named title"),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&"markup: <Badge> leaves the prop label unset"),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&"markup: prop label of Badge is string, not number"),
+            "{messages:?}"
+        );
+        // An optional prop left out, and a good tag, say nothing.
+        assert_eq!(messages.len(), 3, "{messages:?}");
+    }
+
+    /// A tag inside a `{ }` hole is checked too, and `key` is React's.
+    #[test]
+    fn a_component_tag_inside_a_hole_checks_its_props() {
+        let src = "import * as React from \"@packages/react\" --@alloy-ignore\n\
+local function Badge(props: { label: string })\n\
+    return (<TextLabel Text={props.label} />)\n\
+end\n\
+\n\
+local function List(props: { rows: string[] })\n\
+    return (\n\
+        <Frame>\n\
+            {props.rows:map(function(s) return <Badge key={s} lable={s} /> end)}\n\
+        </Frame>\n\
+    )\n\
+end\n\
+\n\
+return List\n";
+        let out = compile_alx(src, &EmitOptions::default(), luaux::Config::default())
+            .expect("the markup compiles");
+        let messages: Vec<&str> = out
+            .output
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(
+            messages.contains(&"markup: Badge has no prop named lable (did you mean label?)"),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("key")),
+            "`key` is React's own: {messages:?}"
+        );
     }
 
     #[test]

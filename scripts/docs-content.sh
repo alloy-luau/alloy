@@ -12,3 +12,5 @@ if [ ! -d "../docs/content" ]; then
 fi
 cargo run -q --bin alloy -- doc --json > "$out"
 echo "wrote $out"
+# Each piece of content keeps the day it last changed.
+(cd ../docs && node scripts/stamp-updated.mjs)

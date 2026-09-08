@@ -3,13 +3,13 @@
 //! The schema goes to `~/.alloy/alloy.schema.json`, beside the `bin`
 //! directory of the install. Each editor's `settings.json` then gains the
 //! association that points its TOML language server at that file. The
-//! edits go through `crate::jsonc`, so the comments in the file stay.
+//! edits go through `alloy::jsonc`, so the comments in the file stay.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::jsonc::{self, Edit};
 use crate::ui::{self, Painter};
+use alloy::jsonc::{self, Edit};
 
 /// The regex a taplo association matches against the document URI. The
 /// backslash is for a URI that carries a Windows path as given.

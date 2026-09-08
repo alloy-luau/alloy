@@ -193,7 +193,7 @@ pub const TABLES: &[Table] = &[
             unset(
                 "std_require",
                 STR,
-                "The string emitted code passes to `require` for the runtime. Unset means a relative path to the `alloy.luau` the build writes, or the instance path through the mounts.",
+                "The string emitted code passes to `require` for the runtime. Unset means a relative path to the `alloy.luau` the build writes, or the runtime's instance path when the tree holds the file.",
             ),
             key(
                 "erase_type_imports",
@@ -527,19 +527,35 @@ pub const TABLES: &[Table] = &[
     },
     Table {
         name: "project",
-        doc: "The Rojo project the mounts describe.",
+        doc: "The DataModel tree: which project file describes it, and what `alloy build` writes from it.",
         keys: &[
             key(
                 "name",
                 STR,
                 r#""game""#,
-                "The name in `default.project.json` and `.alloy/build.project.json`.",
+                "The name in the project files Alloy writes. A project file at the root carries its own name, which wins.",
             ),
-            key(
+            unset(
+                "file",
+                STR,
+                "The Rojo or Argon project file to read, relative to this file. Unset means `default.project.json`, then the one `*.project.json` at the root. Its tree says where each folder lands; a `[mount]` table here wins over it.",
+            ),
+            unset(
                 "runtime",
                 STR,
-                r#""@game/ReplicatedStorage/Alloy""#,
-                "Where `alloy.luau` mounts. Emitted code requires it by a relative instance path from each file's mount.",
+                "Where `alloy.luau` lands, as `@game/Service/Folder`. Emitted code requires it by an instance path. Unset means the place the project file already gives it, then the node that mounts `[build] out`, then `@game/ReplicatedStorage/Alloy`.",
+            ),
+            key(
+                "source_of_truth",
+                BOOL,
+                "true",
+                "The `[mount]` table is the tree: `alloy build` writes `default.project.json` and `.alloy/build.project.json` from it. Off, Alloy writes neither file, and the table only rewrites an `@alias` require into an instance path in the ship artifact, for a sync tool that owns the tree itself.",
+            ),
+            key(
+                "mount_aliases",
+                BOOL,
+                "true",
+                "The `[mount]` table names aliases too: the compiler and the language server serve them beside the ones `.config.luau` or `.luaurc` declares, so `@shared/x` completes and resolves. A name in the Luau configuration wins. Off, only the Luau configuration names aliases.",
             ),
             key(
                 "sourcemap",
@@ -552,7 +568,7 @@ pub const TABLES: &[Table] = &[
     },
     Table {
         name: "mount",
-        doc: "Where each folder lands in the DataModel: `alias = [path, mount]`. The folder at `path` lands at `mount`, `require(\"@alias/x\")` resolves through it, and with one or more mounts `alloy build` writes `default.project.json` over the sources and `.alloy/build.project.json` over the output.",
+        doc: "Where each folder lands in the DataModel: `alias = [path, mount]`. A tool that reads a Rojo or Argon project file needs no table here; Alloy reads `default.project.json`. A tool with its own format describes the tree here, and this table then wins over any project file. With it, `alloy build` also writes `default.project.json` over the sources.",
         keys: &[],
         open: Some(mount_value),
     },
@@ -938,6 +954,8 @@ mod tests {
         config.emit.wait_timeout = Some(5.0);
         config.emit.std_require = Some("@alloy".into());
         config.flux.luau_lsp = Some("luau-lsp".into());
+        config.project.file = Some("default.project.json".into());
+        config.project.runtime = Some("@game/ReplicatedStorage/Alloy".into());
         config.alx.factory = crate::config::AlxFactory {
             backend: Some("table".into()),
             create: Some("create".into()),

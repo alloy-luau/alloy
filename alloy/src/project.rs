@@ -1,20 +1,27 @@
-//! The `[mount]` table: where each folder lands in the DataModel.
+//! The DataModel tree: where each folder lands, and what follows.
 //!
-//! One table drives three files and one rewrite. `default.project.json`
-//! is a Rojo project over the sources, for the tools that read one.
-//! `.alloy/build.project.json` is the same tree over the compiled
-//! output, the one `rojo serve` and `rojo build` take. `.alloy/
-//! sourcemap.json` is the instance tree with the source paths, which
-//! the language server maps onto its mirror. And a `require("@alias/
-//! x")` in the ship artifact becomes a relative instance path, because
-//! Roblox reads no `.luaurc`.
+//! Two things can describe the tree. A `[mount]` table in alloy.toml
+//! names the folders and their places, for a sync tool with its own
+//! format; a Rojo or Argon project file at the root, read by
+//! `crate::rojo`, names them for a tool that reads one. The table wins
+//! when the project writes one.
+//!
+//! Either way the tree drives the same four things. `.alloy/
+//! build.project.json` is the tree over the compiled output, the one
+//! `rojo serve` and `rojo build` take. `.alloy/sourcemap.json` is the
+//! instance tree with the source paths, which the language server maps
+//! onto its mirror. A `require("@alias/x")` in the ship artifact
+//! becomes an instance path, because Roblox reads no `.luaurc`. And
+//! `alloy.luau` lands at the runtime's place. The mount table also
+//! writes `default.project.json`; a root with a project file keeps the
+//! one it wrote.
 
-use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::config::{Config, Mount};
+use crate::config::Config;
+use crate::rojo::{Mounted, ProjectFile};
 
 /// The DataModel path of a mount, split: `@game/A/B` is `["A", "B"]`.
 /// `None` when the string does not start with `@game/`.
@@ -29,24 +36,138 @@ pub fn segments(mount: &str) -> Option<Vec<String>> {
     if parts.is_empty() { None } else { Some(parts) }
 }
 
-/// A mount whose path holds `rel`, the longest such path, with the
-/// remainder of `rel` under it.
-fn mount_of<'a>(config: &'a Config, rel: &Path) -> Option<(&'a str, &'a Mount, PathBuf)> {
-    let mut best: Option<(&str, &Mount, PathBuf)> = None;
+/// The tree of one project, read once per build.
+#[derive(Debug, Clone, Default)]
+pub struct Tree {
+    /// The name in the generated project files.
+    pub name: String,
+    /// Each folder or file on disk, relative to the root, with the
+    /// instance path it lands at.
+    pub mounts: Vec<Mounted>,
+    /// Where `alloy.luau` lands, as instance names. Empty when the
+    /// project names no place for it.
+    pub runtime: Vec<String>,
+    /// Alias to the folder it names, relative to the root: the Luau
+    /// configuration of the root, then the `[mount]` table while
+    /// `[project] mount_aliases` stays on. A name in the Luau
+    /// configuration wins.
+    pub aliases: Vec<(String, PathBuf)>,
+    /// The project file, when it is the tree.
+    pub project: Option<ProjectFile>,
+    /// Whether `alloy build` writes the Rojo projects of the mount
+    /// table. A project file always writes the build project alone.
+    source_of_truth: bool,
+    input: PathBuf,
+    out: PathBuf,
+}
 
-    for (alias, m) in &config.mount {
-        let base = Path::new(&m.0);
-
-        if let Ok(rest) = rel.strip_prefix(base)
-            && best.as_ref().is_none_or(|(_, b, _)| {
-                Path::new(&b.0).components().count() < base.components().count()
+impl Tree {
+    /// Reads the tree of a root: the `[mount]` table when the project
+    /// wrote one, else the project file at the root, else nothing.
+    pub fn load(root: &Path, config: &Config) -> Self {
+        let input = config.build.input.clone();
+        let out = config.build.out.clone();
+        let luau: Vec<(String, PathBuf)> = crate::luau_config::read_dir(root)
+            .map(|(_, c)| {
+                c.aliases
+                    .into_iter()
+                    .map(|(a, p)| (a, PathBuf::from(p.replace('\\', "/"))))
+                    .collect()
             })
-        {
-            best = Some((alias.as_str(), m, rest.to_path_buf()));
+            .unwrap_or_default();
+
+        // The Luau configuration names the aliases; the mount table adds
+        // the names it lacks, so `@shared/x` still resolves in a project
+        // that declares its tree in alloy.toml alone.
+        let mut aliases = luau;
+
+        if config.project.mount_aliases {
+            for (name, m) in &config.mount {
+                if !aliases.iter().any(|(a, _)| a == name) {
+                    aliases.push((name.clone(), PathBuf::from(m.0.replace('\\', "/"))));
+                }
+            }
+        }
+
+        if !config.mount.is_empty() {
+            return Self {
+                name: config.project.name.clone(),
+                mounts: config
+                    .mount
+                    .values()
+                    .filter_map(|m| {
+                        Some(Mounted {
+                            place: segments(&m.1)?,
+                            disk: PathBuf::from(m.0.replace('\\', "/")),
+                        })
+                    })
+                    .collect(),
+                runtime: segments(config.project.runtime()).unwrap_or_default(),
+                aliases,
+                project: None,
+                source_of_truth: config.project.source_of_truth,
+                input,
+                out,
+            };
+        }
+
+        let project = crate::rojo::load(root, config.project.file.as_deref());
+        let mounts = project
+            .as_ref()
+            .map(ProjectFile::mounts)
+            .unwrap_or_default();
+        // The runtime lands where the project says, else where the tree
+        // already puts `alloy.luau`, else inside the node that mounts
+        // the output folder, else at the default place.
+        let runtime = match (&config.project.runtime, &project) {
+            (Some(r), _) => segments(r).unwrap_or_default(),
+
+            (None, Some(p)) => p
+                .place_of(&out.join("alloy.luau"))
+                .or_else(|| {
+                    p.place_of(&out).map(|mut place| {
+                        place.push("alloy".to_string());
+                        place
+                    })
+                })
+                .or_else(|| segments(crate::config::DEFAULT_RUNTIME))
+                .unwrap_or_default(),
+
+            (None, None) => segments(crate::config::DEFAULT_RUNTIME).unwrap_or_default(),
+        };
+
+        Self {
+            name: project
+                .as_ref()
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| config.project.name.clone()),
+            mounts,
+            runtime,
+            aliases,
+            project,
+            source_of_truth: true,
+            input,
+            out,
         }
     }
 
-    best
+    /// The mount that holds `rel`, the one with the longest disk path,
+    /// with the rest of `rel` under it.
+    fn holder(&self, rel: &Path) -> Option<(&Mounted, PathBuf)> {
+        let mut best: Option<(&Mounted, PathBuf)> = None;
+
+        for m in &self.mounts {
+            if let Ok(rest) = rel.strip_prefix(&m.disk)
+                && best
+                    .as_ref()
+                    .is_none_or(|(b, _)| b.disk.components().count() < m.disk.components().count())
+            {
+                best = Some((m, rest.to_path_buf()));
+            }
+        }
+
+        best
+    }
 }
 
 /// The instance name of a script file: the stem with `.server`,
@@ -78,9 +199,22 @@ fn instance_name(file: &str) -> Option<String> {
     }
 }
 
+/// The instance name of the last part of a path: a script's name, or
+/// the part itself when it names a folder. `None` for an `init` file,
+/// which names the folder that is already there.
+fn leaf_name(part: &str) -> Option<String> {
+    instance_name(part).or_else(|| {
+        if part.contains('.') {
+            None
+        } else {
+            Some(part.to_string())
+        }
+    })
+}
+
 /// The class of a node between a service and a leaf: a folder, except
 /// the containers Roblox names, which are their own class.
-fn container_class(name: &str) -> &str {
+pub(crate) fn container_class(name: &str) -> &str {
     match name {
         "StarterPlayerScripts" | "StarterCharacterScripts" | "StarterCharacter" => name,
 
@@ -89,7 +223,7 @@ fn container_class(name: &str) -> &str {
 }
 
 /// The Roblox class of a script file.
-fn script_class(file: &str) -> &'static str {
+pub(crate) fn script_class(file: &str) -> &'static str {
     if file.contains(".server.") {
         "Script"
     } else if file.contains(".client.") {
@@ -99,27 +233,37 @@ fn script_class(file: &str) -> &'static str {
     }
 }
 
-/// The DataModel path of a source file, relative to the project root:
-/// the mount's segments, the directories under it, and the instance
-/// name. `None` when no mount holds the file.
-pub fn instance_path(config: &Config, rel: &Path) -> Option<Vec<String>> {
-    let (_, m, rest) = mount_of(config, rel)?;
-    let mut out = segments(&m.1)?;
+/// The instance path of a path under a mount: the mount's place, the
+/// folders under it, and the leaf's instance name.
+fn place_of(tree: &Tree, rel: &Path) -> Option<Vec<String>> {
+    let (m, rest) = tree.holder(rel)?;
+    let mut out = m.place.clone();
+    let parts: Vec<&str> = rest
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => n.to_str(),
 
-    for c in rest.components() {
-        let Component::Normal(n) = c else { continue };
-        let n = n.to_string_lossy();
+            _ => None,
+        })
+        .collect();
 
-        if Some(n.as_ref()) == rest.file_name().and_then(|f| f.to_str()) {
-            if let Some(name) = instance_name(&n) {
+    for (i, part) in parts.iter().enumerate() {
+        if i + 1 == parts.len() {
+            if let Some(name) = leaf_name(part) {
                 out.push(name);
             }
         } else {
-            out.push(n.into_owned());
+            out.push((*part).to_string());
         }
     }
 
     Some(out)
+}
+
+/// The DataModel path of a source file, relative to the project root.
+/// `None` when the tree holds no folder above the file.
+pub fn instance_path(tree: &Tree, rel: &Path) -> Option<Vec<String>> {
+    place_of(tree, rel)
 }
 
 /// The relative require path from the parent of `from` to `to`: `./`
@@ -149,72 +293,77 @@ fn relative(from_parent: &[String], to: &[String]) -> String {
 }
 
 /// The parent of a file's instance, for a relative require from it.
-fn parent_of(config: &Config, rel: &Path) -> Option<Vec<String>> {
-    let mut path = instance_path(config, rel)?;
-
-    if instance_name(rel.file_name()?.to_str()?).is_some() {
-        path.pop();
-    } else {
-        // An `init` file is its directory; requires resolve from the
-        // directory's parent.
-        path.pop();
-    }
+/// An `init` file is its directory, so both cases drop one name.
+fn parent_of(tree: &Tree, rel: &Path) -> Option<Vec<String>> {
+    let mut path = instance_path(tree, rel)?;
+    path.pop();
 
     Some(path)
 }
 
-/// The require string for the runtime in the ship artifact of a file
-/// under a mount: the runtime's own `@game/...` path, which Luau takes
-/// as it is. `None` when the file is under no mount, or the runtime is
-/// not under `@game/`.
-pub fn std_require_for(config: &Config, rel: &Path) -> Option<String> {
-    instance_path(config, rel)?;
-    segments(&config.project.runtime)?;
+/// The require string for the runtime in the ship artifact of a file in
+/// the tree: the runtime's own `@game/...` path, which Luau takes as it
+/// is. `None` when the file is outside the tree, or the tree names no
+/// place for the runtime.
+pub fn std_require_for(tree: &Tree, rel: &Path) -> Option<String> {
+    instance_path(tree, rel)?;
 
-    Some(config.project.runtime.clone())
+    if tree.runtime.is_empty() {
+        return None;
+    }
+
+    Some(format!("@game/{}", tree.runtime.join("/")))
 }
 
 /// The require string for the runtime from a file, as a relative
 /// instance path. The analyzer resolves a require in the sourcemap's
 /// tree, and knows `./` and `../` there.
-pub fn std_require_relative_for(config: &Config, rel: &Path) -> Option<String> {
-    let parent = parent_of(config, rel)?;
-    let runtime = segments(&config.project.runtime)?;
+pub fn std_require_relative_for(tree: &Tree, rel: &Path) -> Option<String> {
+    let parent = parent_of(tree, rel)?;
 
-    Some(relative(&parent, &runtime))
+    if tree.runtime.is_empty() {
+        return None;
+    }
+
+    Some(relative(&parent, &tree.runtime))
 }
 
-/// The require string for `@alias/rest`: the mount's `@game/...` path
-/// with the rest of the way down as instance names.
-pub fn resolve_alias(config: &Config, _rel: &Path, alias: &str, rest: &str) -> Option<String> {
-    let m = config.mount.get(alias)?;
-    segments(&m.1)?;
-    let mut target = vec![m.1.trim_end_matches('/').to_string()];
+/// The require string for `@alias/rest`: the alias names a folder on
+/// disk, the tree says where that folder lands, and the rest of the way
+/// down becomes instance names.
+pub fn resolve_alias(tree: &Tree, alias: &str, rest: &str) -> Option<String> {
+    let (_, dir) = tree.aliases.iter().find(|(a, _)| a == alias)?;
+    let joined = normalize(&dir.join(rest.trim_start_matches('/')));
+    let place = place_of(tree, &joined)?;
 
-    for part in rest.split('/').filter(|p| !p.is_empty()) {
-        let name = instance_name(part).or_else(|| {
-            if part.contains('.') {
-                None
-            } else {
-                Some(part.to_string())
+    Some(format!("@game/{}", place.join("/")))
+}
+
+/// A path with `.` and `..` folded, no file system access.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+
+            Component::ParentDir => {
+                out.pop();
             }
-        });
 
-        // `init` at the end names the directory already pushed.
-        if let Some(n) = name {
-            target.push(n);
+            other => out.push(other),
         }
     }
 
-    Some(target.join("/"))
+    out
 }
 
 /// Rewrites every `require("@alias/...")` in an emitted text to the
-/// `@game/...` instance path, for the aliases the mount table names, and
-/// drops the extension of a data path, `./x.json`, since the build
-/// writes it as `x.luau`. The text keeps its line count: a replacement
-/// holds no newline.
-pub fn rewrite_requires(config: &Config, rel: &Path, text: &str) -> String {
+/// `@game/...` instance path, for the aliases the Luau configuration
+/// names, and drops the extension of a data path, `./x.json`, since the
+/// build writes it as `x.luau`. The text keeps its line count: a
+/// replacement holds no newline.
+pub fn rewrite_requires(tree: &Tree, text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
 
@@ -239,7 +388,7 @@ pub fn rewrite_requires(config: &Config, rel: &Path, text: &str) -> String {
         let replaced = path.strip_prefix('@').and_then(|p| {
             let (alias, tail) = p.split_once('/').unwrap_or((p, ""));
 
-            resolve_alias(config, rel, alias, tail)
+            resolve_alias(tree, alias, tail)
         });
 
         out.push_str(&rest[..i + "require(".len()]);
@@ -255,7 +404,7 @@ pub fn rewrite_requires(config: &Config, rel: &Path, text: &str) -> String {
 
 /// A path as the project file sees it: relative to `base`, the
 /// directory the file lives in, given both are under `root`.
-fn from_base(root: &Path, base: &Path, path: &Path) -> String {
+pub(crate) fn from_base(root: &Path, base: &Path, path: &Path) -> String {
     let depth = base
         .strip_prefix(root)
         .map(|r| r.components().count())
@@ -272,7 +421,7 @@ fn from_base(root: &Path, base: &Path, path: &Path) -> String {
 
 /// Inserts `leaf` at the DataModel path `segs` of a Rojo tree. The
 /// first segment is a service, the ones between are folders.
-fn insert(tree: &mut Map<String, Value>, segs: &[String], leaf: Value) {
+pub(crate) fn insert(tree: &mut Map<String, Value>, segs: &[String], leaf: Value) {
     let mut node = tree;
 
     for (i, seg) in segs.iter().enumerate() {
@@ -301,39 +450,37 @@ fn insert(tree: &mut Map<String, Value>, segs: &[String], leaf: Value) {
     }
 }
 
-/// A Rojo project over the mounts. `compiled` points the paths at the
-/// build output for a source under `[build] in`; `base` is the
+/// A Rojo project over the mount table. `compiled` points the paths at
+/// the build output for a folder under `[build] in`; `base` is the
 /// directory the file will live in.
-pub fn rojo_project(config: &Config, root: &Path, base: &Path, compiled: bool) -> Value {
-    let mut tree = Map::new();
-    tree.insert("$className".into(), Value::String("DataModel".into()));
+pub fn rojo_project(tree: &Tree, root: &Path, base: &Path, compiled: bool) -> Value {
+    let mut out = Map::new();
+    out.insert("$className".into(), Value::String("DataModel".into()));
 
-    for m in config.mount.values() {
-        let Some(segs) = segments(&m.1) else { continue };
-        let path = Path::new(&m.0);
-        let shown = match (compiled, path.strip_prefix(&config.build.input)) {
-            (true, Ok(rest)) => config.build.out.join(rest),
+    for m in &tree.mounts {
+        let shown = match (compiled, m.disk.strip_prefix(&tree.input)) {
+            (true, Ok(rest)) => tree.out.join(rest),
 
-            _ => path.to_path_buf(),
+            _ => m.disk.clone(),
         };
         let leaf = json!({ "$path": from_base(root, base, &shown) });
-        insert(&mut tree, &segs, leaf);
+        insert(&mut out, &m.place, leaf);
     }
 
-    if let Some(segs) = segments(&config.project.runtime) {
-        let runtime = config.build.out.join("alloy.luau");
+    if !tree.runtime.is_empty() {
+        let runtime = tree.out.join("alloy.luau");
         insert(
-            &mut tree,
-            &segs,
+            &mut out,
+            &tree.runtime,
             json!({ "$path": from_base(root, base, &runtime) }),
         );
     }
 
-    json!({ "name": config.project.name, "tree": Value::Object(tree) })
+    json!({ "name": tree.name, "tree": Value::Object(out) })
 }
 
 /// One node of a sourcemap.
-fn node(name: &str, class: &str, file: Option<String>) -> Map<String, Value> {
+pub(crate) fn node(name: &str, class: &str, file: Option<String>) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("name".into(), Value::String(name.to_string()));
     m.insert("className".into(), Value::String(class.to_string()));
@@ -347,7 +494,7 @@ fn node(name: &str, class: &str, file: Option<String>) -> Map<String, Value> {
 
 /// The sourcemap node for a directory on disk, with the source paths
 /// relative to `root`. An `init` file makes the directory a script.
-fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<Map<String, Value>> {
+pub(crate) fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<Map<String, Value>> {
     let mut children: Vec<Value> = Vec::new();
     let mut class = "Folder".to_string();
     let mut file: Option<String> = None;
@@ -408,9 +555,13 @@ fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<Map<String, 
     Ok(m)
 }
 
-/// The sourcemap of the mounts: the instance tree, each script with the
+/// The sourcemap of the tree: the instance tree, each script with the
 /// path of its source, relative to `root`.
-pub fn sourcemap(config: &Config, root: &Path) -> std::io::Result<Value> {
+pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
+    if let Some(project) = &tree.project {
+        return project.sourcemap(root, &tree.runtime, &tree.out);
+    }
+
     let mut game = node("game", "DataModel", None);
     let mut children: Vec<Value> = Vec::new();
 
@@ -459,39 +610,41 @@ pub fn sourcemap(config: &Config, root: &Path) -> std::io::Result<Value> {
         }
     };
 
-    for m in config.mount.values() {
-        let Some(segs) = segments(&m.1) else { continue };
-        let path = root.join(&m.0);
-        let name = segs.last().cloned().unwrap_or_default();
+    for m in &tree.mounts {
+        let path = root.join(&m.disk);
+        let name = m.place.last().cloned().unwrap_or_default();
 
         let leaf = if path.is_dir() {
             dir_node(root, &path, &name)?
         } else if path.is_file() {
             let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-            let mut n = node(&name, script_class(fname), Some(m.0.clone()));
+            let mut n = node(
+                &name,
+                script_class(fname),
+                Some(m.disk.to_string_lossy().replace('\\', "/")),
+            );
             n.insert("children".into(), json!([]));
             n
         } else {
             continue;
         };
 
-        place(&segs, leaf);
+        place(&m.place, leaf);
     }
 
-    if let Some(segs) = segments(&config.project.runtime) {
-        let file = config
-            .build
+    if !tree.runtime.is_empty() {
+        let file = tree
             .out
             .join("alloy.luau")
             .to_string_lossy()
             .replace('\\', "/");
         let mut n = node(
-            segs.last().map(String::as_str).unwrap_or("Alloy"),
+            tree.runtime.last().map(String::as_str).unwrap_or("Alloy"),
             "ModuleScript",
             Some(file),
         );
         n.insert("children".into(), json!([]));
-        place(&segs, n);
+        place(&tree.runtime, n);
     }
 
     game.insert("children".into(), Value::Array(children));
@@ -499,143 +652,62 @@ pub fn sourcemap(config: &Config, root: &Path) -> std::io::Result<Value> {
     Ok(Value::Object(game))
 }
 
-/// The files `alloy build` writes for a project with mounts, as
-/// (path relative to root, text).
-pub fn files(config: &Config, root: &Path) -> std::io::Result<Vec<(PathBuf, String)>> {
-    if config.mount.is_empty() {
+/// The files `alloy build` writes for the tree, as (path relative to
+/// the root, text). A root whose tree is its own project file keeps
+/// that file: Alloy writes only the build project and the sourcemap.
+pub fn files(tree: &Tree, config: &Config, root: &Path) -> std::io::Result<Vec<(PathBuf, String)>> {
+    if tree.mounts.is_empty() {
         return Ok(Vec::new());
     }
 
     let alloy_dir = root.join(".alloy");
     let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default() + "\n";
-    let mut out = vec![
-        (
-            PathBuf::from("default.project.json"),
-            pretty(&rojo_project(config, root, root, false)),
-        ),
-        (
+    let mut out = Vec::new();
+
+    match &tree.project {
+        // The root wrote the project file, so Alloy writes only the
+        // build project beside it.
+        Some(p) => out.push((
             PathBuf::from(".alloy/build.project.json"),
-            pretty(&rojo_project(config, root, &alloy_dir, true)),
-        ),
-        (
-            PathBuf::from(".alloy/.gitignore"),
-            "sourcemap.json\n".to_string(),
-        ),
-    ];
+            pretty(&p.build_tree(root, &alloy_dir, &tree.input, &tree.out, &tree.runtime)),
+        )),
+
+        // The mount table is the tree only while the project says so; a
+        // sync tool with its own format writes the project files itself.
+        None if tree.source_of_truth => {
+            out.push((
+                PathBuf::from("default.project.json"),
+                pretty(&rojo_project(tree, root, root, false)),
+            ));
+            out.push((
+                PathBuf::from(".alloy/build.project.json"),
+                pretty(&rojo_project(tree, root, &alloy_dir, true)),
+            ));
+        }
+
+        None => {}
+    }
+
+    out.push((
+        PathBuf::from(".alloy/.gitignore"),
+        "sourcemap.json\n".to_string(),
+    ));
 
     if config.project.sourcemap {
         out.push((
             PathBuf::from(".alloy/sourcemap.json"),
-            pretty(&sourcemap(config, root)?),
+            pretty(&sourcemap(tree, root)?),
         ));
     }
 
     Ok(out)
 }
 
-/// The aliases the Luau configuration should carry for the mounts:
-/// each alias to its path. Returns the ones the root's `.luaurc` lacks
-/// after adding them, and, for a `.config.luau`, the ones to add by
-/// hand.
-pub fn sync_aliases(config: &Config, root: &Path) -> std::io::Result<Vec<String>> {
-    let mut notes = Vec::new();
-
-    if config.mount.is_empty() {
-        return Ok(notes);
-    }
-
-    let wanted: BTreeMap<&str, &str> = config
-        .mount
-        .iter()
-        .map(|(k, m)| (k.as_str(), m.0.as_str()))
-        .collect();
-    let rc = root.join(".luaurc");
-
-    // A root with no Luau configuration gets one, strict, with the
-    // aliases; `alloy init` would have written the same.
-    if !crate::luau_config::has_config(root) {
-        let c = crate::luau_config::LuauConfig {
-            language_mode: Some("strict".to_string()),
-            aliases: wanted
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                .collect(),
-        };
-        std::fs::write(&rc, crate::luau_config::render_luaurc(&c))?;
-        notes.push("wrote .luaurc: strict mode and the mount aliases".to_string());
-
-        return Ok(notes);
-    }
-
-    if rc.is_file() {
-        let text = std::fs::read_to_string(&rc)?;
-        let mut json: Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-
-            Err(_) => return Ok(notes),
-        };
-        let mut added = Vec::new();
-
-        if let Some(map) = json.as_object_mut() {
-            let aliases = map
-                .entry("aliases")
-                .or_insert_with(|| Value::Object(Map::new()));
-
-            if let Some(aliases) = aliases.as_object_mut() {
-                for (k, v) in &wanted {
-                    if !aliases.contains_key(*k) {
-                        aliases.insert((*k).to_string(), Value::String((*v).to_string()));
-                        added.push(*k);
-                    }
-                }
-            }
-        }
-
-        if !added.is_empty() {
-            let mut text = serde_json::to_string_pretty(&json).unwrap_or(text);
-            text.push('\n');
-            std::fs::write(&rc, text)?;
-            notes.push(format!(
-                "added {} to .luaurc",
-                added
-                    .iter()
-                    .map(|a| format!("@{a}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-    }
-
-    let luau = root.join(".config.luau");
-
-    if luau.is_file()
-        && let Ok(text) = std::fs::read_to_string(&luau)
-        && let Some(c) = crate::luau_config::parse_config_luau(&text)
-    {
-        let missing: Vec<String> = wanted
-            .iter()
-            .filter(|(k, _)| !c.aliases.iter().any(|(a, _)| a == *k))
-            .map(|(k, v)| format!("{k} = \"{v}\""))
-            .collect();
-
-        if !missing.is_empty() {
-            notes.push(format!(
-                ".config.luau lacks the mount aliases; add to its `aliases`: {}",
-                missing.join(", ")
-            ));
-        }
-    }
-
-    Ok(notes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn config() -> Config {
-        Config::parse(
-            r#"
+    const MOUNTS: &str = r#"
 [project]
 name = "demo"
 
@@ -643,72 +715,97 @@ name = "demo"
 server = ["src/server", "@game/ServerScriptService/Server"]
 shared = ["src/shared", "@game/ReplicatedStorage/Shared"]
 pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
-"#,
-            Path::new("alloy.toml"),
-        )
-        .unwrap()
+"#;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("alloy-project-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        dir
+    }
+
+    fn write(dir: &Path, name: &str, text: &str) {
+        let path = dir.join(name);
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The tree of the mount table above, with the aliases it carries.
+    fn mounted() -> Tree {
+        let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
+
+        Tree::load(Path::new("/does-not-exist"), &config)
     }
 
     #[test]
     fn a_file_under_a_mount_has_an_instance_path() {
-        let c = config();
+        let t = mounted();
         assert_eq!(
-            instance_path(&c, Path::new("src/server/combat/hit.aly")).unwrap(),
+            instance_path(&t, Path::new("src/server/combat/hit.aly")).unwrap(),
             vec!["ServerScriptService", "Server", "combat", "hit"]
         );
         assert_eq!(
-            instance_path(&c, Path::new("src/server/init.server.aly")).unwrap(),
+            instance_path(&t, Path::new("src/server/init.server.aly")).unwrap(),
             vec!["ServerScriptService", "Server"]
         );
-        assert!(instance_path(&c, Path::new("src/other.aly")).is_none());
+        assert!(instance_path(&t, Path::new("src/other.aly")).is_none());
     }
 
     #[test]
     fn the_runtime_require_is_the_game_path() {
-        let c = config();
+        let t = mounted();
         assert_eq!(
-            std_require_for(&c, Path::new("src/server/combat/hit.aly")).unwrap(),
+            std_require_for(&t, Path::new("src/server/combat/hit.aly")).unwrap(),
             "@game/ReplicatedStorage/Alloy"
         );
-        assert!(std_require_for(&c, Path::new("src/other.aly")).is_none());
+        assert!(std_require_for(&t, Path::new("src/other.aly")).is_none());
         assert_eq!(
-            std_require_relative_for(&c, Path::new("src/server/combat/hit.aly")).unwrap(),
+            std_require_relative_for(&t, Path::new("src/server/combat/hit.aly")).unwrap(),
             "../../../ReplicatedStorage/Alloy"
         );
         assert_eq!(
-            std_require_relative_for(&c, Path::new("src/shared/util.aly")).unwrap(),
+            std_require_relative_for(&t, Path::new("src/shared/util.aly")).unwrap(),
             "../Alloy"
         );
     }
 
     #[test]
     fn an_alias_require_becomes_a_game_path() {
-        let c = config();
+        let t = mounted();
         let text = "local jecs = require(\"@pkg/jecs\") local u = require(\"@shared/util\") local x = require(\"./x\")";
-        let out = rewrite_requires(&c, Path::new("src/server/main.server.aly"), text);
+        let out = rewrite_requires(&t, text);
         assert_eq!(
             out,
             "local jecs = require(\"@game/ReplicatedStorage/Packages/jecs\") local u = require(\"@game/ReplicatedStorage/Shared/util\") local x = require(\"./x\")"
         );
         assert_eq!(
             rewrite_requires(
-                &Config::default(),
-                Path::new("src/a.aly"),
+                &Tree::default(),
                 "local d = require(\"./data.json\") local c = require('../cfg.toml')\n"
             ),
             "local d = require(\"./data\") local c = require('../cfg')\n"
         );
         assert_eq!(
-            rewrite_requires(&c, Path::new("src/shared/a.aly"), "require(\"@shared/b\")"),
+            rewrite_requires(&t, "require(\"@shared/b\")"),
             "require(\"@game/ReplicatedStorage/Shared/b\")"
+        );
+        // A data path under an alias keeps the module name.
+        assert_eq!(
+            resolve_alias(&t, "shared", "data/config.json").unwrap(),
+            "@game/ReplicatedStorage/Shared/data/config"
         );
     }
 
     #[test]
     fn the_two_projects_point_at_sources_and_output() {
-        let c = config();
+        let t = mounted();
         let root = Path::new("/p");
-        let src = rojo_project(&c, root, root, false);
+        let src = rojo_project(&t, root, root, false);
         assert_eq!(src["name"], "demo");
         assert_eq!(
             src["tree"]["ServerScriptService"]["$className"],
@@ -727,7 +824,7 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
             "build/alloy.luau"
         );
 
-        let build = rojo_project(&c, root, &root.join(".alloy"), true);
+        let build = rojo_project(&t, root, &root.join(".alloy"), true);
         assert_eq!(
             build["tree"]["ServerScriptService"]["Server"]["$path"],
             "../build/server"
@@ -744,18 +841,15 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
 
     #[test]
     fn the_sourcemap_names_scripts_by_suffix() {
-        let dir = std::env::temp_dir().join(format!("alloy-project-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("src/server/combat")).unwrap();
-        std::fs::create_dir_all(dir.join("src/shared")).unwrap();
-        std::fs::create_dir_all(dir.join("Packages")).unwrap();
-        std::fs::write(dir.join("src/server/init.server.aly"), "").unwrap();
-        std::fs::write(dir.join("src/server/combat/hit.aly"), "").unwrap();
-        std::fs::write(dir.join("src/shared/util.aly"), "").unwrap();
-        std::fs::write(dir.join("src/shared/ui.client.aly"), "").unwrap();
-        std::fs::write(dir.join("Packages/jecs.luau"), "").unwrap();
+        let dir = temp("sourcemap");
+        write(&dir, "src/server/init.server.aly", "");
+        write(&dir, "src/server/combat/hit.aly", "");
+        write(&dir, "src/shared/util.aly", "");
+        write(&dir, "src/shared/ui.client.aly", "");
+        write(&dir, "Packages/jecs.luau", "");
 
-        let map = sourcemap(&config(), &dir).unwrap();
+        let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
+        let map = sourcemap(&Tree::load(&dir, &config), &dir).unwrap();
         let services = map["children"].as_array().unwrap();
         let sss = services
             .iter()
@@ -798,6 +892,220 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
             .find(|c| c["name"] == "ui")
             .unwrap();
         assert_eq!(ui["className"], "LocalScript");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A root whose tree is its own project file, with the aliases in
+    /// `.luaurc`.
+    fn with_project_file(dir: &Path) -> Tree {
+        write(
+            dir,
+            "default.project.json",
+            r#"{
+  "name": "place",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": { "$path": "src/shared" },
+      "Packages": { "$path": "Packages" },
+      "Alloy": { "$path": "build/alloy.luau" }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": { "$path": "src/server" }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": { "$path": "src/client" }
+      }
+    }
+  }
+}"#,
+        );
+        write(
+            dir,
+            ".luaurc",
+            r#"{ "languageMode": "strict", "aliases": {
+                 "server": "src/server", "shared": "src/shared",
+                 "client": "src/client", "pkg": "Packages",
+                 "lest": ".lest/core" } }"#,
+        );
+
+        Tree::load(dir, &Config::default())
+    }
+
+    #[test]
+    fn a_project_file_is_the_tree() {
+        let dir = temp("file");
+        let t = with_project_file(&dir);
+        assert_eq!(t.name, "place");
+        assert!(t.project.is_some());
+        assert_eq!(
+            instance_path(&t, Path::new("src/shared/util.aly")).unwrap(),
+            vec!["ReplicatedStorage", "Shared", "util"]
+        );
+        assert_eq!(
+            instance_path(&t, Path::new("src/client/ui/hud.client.aly")).unwrap(),
+            vec![
+                "StarterPlayer",
+                "StarterPlayerScripts",
+                "Client",
+                "ui",
+                "hud"
+            ]
+        );
+        assert_eq!(
+            instance_path(&t, Path::new("src/server/init.server.aly")).unwrap(),
+            vec!["ServerScriptService", "Server"]
+        );
+        // A folder outside `[build] in` still lands where the file says.
+        assert_eq!(
+            instance_path(&t, Path::new("Packages/jecs.luau")).unwrap(),
+            vec!["ReplicatedStorage", "Packages", "jecs"]
+        );
+        assert!(instance_path(&t, Path::new("tools/gen.aly")).is_none());
+        // The tree already mounts `build/alloy.luau`, so that is the
+        // runtime's place.
+        assert_eq!(t.runtime, vec!["ReplicatedStorage", "Alloy"]);
+        assert_eq!(
+            std_require_for(&t, Path::new("src/shared/util.aly")).unwrap(),
+            "@game/ReplicatedStorage/Alloy"
+        );
+        assert_eq!(
+            std_require_relative_for(&t, Path::new("src/client/ui/hud.client.aly")).unwrap(),
+            "../../../../ReplicatedStorage/Alloy"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_alias_resolves_through_the_luau_configuration() {
+        let dir = temp("alias-luaurc");
+        let t = with_project_file(&dir);
+        assert_eq!(
+            rewrite_requires(
+                &t,
+                "require(\"@shared/economy\") require(\"@pkg/jecs\") require(\"@shared/data/config.json\") require(\"@lest/core\")"
+            ),
+            "require(\"@game/ReplicatedStorage/Shared/economy\") require(\"@game/ReplicatedStorage/Packages/jecs\") require(\"@game/ReplicatedStorage/Shared/data/config\") require(\"@lest/core\")"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_config_luau_carries_the_aliases_too() {
+        let dir = temp("alias-config-luau");
+        write(
+            &dir,
+            "default.project.json",
+            r#"{ "name": "p", "tree": { "$className": "DataModel",
+                 "ReplicatedStorage": { "$className": "ReplicatedStorage",
+                   "Shared": { "$path": "src/shared" } } } }"#,
+        );
+        write(
+            &dir,
+            ".config.luau",
+            "return {\n    luau = {\n        languagemode = \"strict\",\n        aliases = {\n            shared = \"src/shared\",\n        },\n    },\n}\n",
+        );
+        let t = Tree::load(&dir, &Config::default());
+        assert_eq!(
+            rewrite_requires(&t, "require(\"@shared/util\")"),
+            "require(\"@game/ReplicatedStorage/Shared/util\")"
+        );
+        // No mount table and no `[project] runtime`: the default place.
+        assert_eq!(t.runtime, vec!["ReplicatedStorage", "Alloy"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_runtime_follows_the_node_that_mounts_the_output() {
+        let dir = temp("runtime-out");
+        write(
+            &dir,
+            "default.project.json",
+            r#"{ "name": "p", "tree": { "$className": "DataModel",
+                 "ReplicatedStorage": { "$className": "ReplicatedStorage",
+                   "Build": { "$path": "build" } } } }"#,
+        );
+        let t = Tree::load(&dir, &Config::default());
+        assert_eq!(t.runtime, vec!["ReplicatedStorage", "Build", "alloy"]);
+
+        // `[project] runtime` wins over the tree.
+        let config = Config::parse(
+            "[project]\nruntime = \"@game/ServerStorage/Rt\"\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            Tree::load(&dir, &config).runtime,
+            vec!["ServerStorage", "Rt"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mount_table_wins_over_the_project_file() {
+        let dir = temp("both");
+        write(
+            &dir,
+            "default.project.json",
+            r#"{ "name": "place", "tree": { "$className": "DataModel",
+                 "ServerStorage": { "$className": "ServerStorage",
+                   "Only": { "$path": "src/shared" } } } }"#,
+        );
+        let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
+        let t = Tree::load(&dir, &config);
+        assert!(t.project.is_none(), "the table is the tree");
+        assert_eq!(t.name, "demo");
+        assert_eq!(
+            instance_path(&t, Path::new("src/shared/util.aly")).unwrap(),
+            vec!["ReplicatedStorage", "Shared", "util"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_file_keeps_its_own_default_project_json() {
+        let dir = temp("files");
+        let t = with_project_file(&dir);
+        let written = files(&t, &Config::default(), &dir).unwrap();
+        let names: Vec<String> = written
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ".alloy/build.project.json",
+                ".alloy/.gitignore",
+                ".alloy/sourcemap.json"
+            ]
+        );
+
+        let built: Value = serde_json::from_str(&written[0].1).unwrap();
+        assert_eq!(built["name"], "place");
+        assert_eq!(
+            built["tree"]["ReplicatedStorage"]["Shared"]["$path"],
+            "../build/shared"
+        );
+        assert_eq!(
+            built["tree"]["ReplicatedStorage"]["Packages"]["$path"],
+            "../Packages"
+        );
+
+        // The mount table writes the source project too.
+        let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
+        let mounted = files(&Tree::load(&dir, &config), &config, &dir).unwrap();
+        assert_eq!(mounted[0].0, PathBuf::from("default.project.json"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

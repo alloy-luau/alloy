@@ -27,6 +27,7 @@ pub mod fmt;
 pub mod fmt_alx;
 pub mod fmt_structure;
 pub mod ingot;
+pub mod jsonc;
 pub mod lint;
 pub mod luau_config;
 pub mod modules;
@@ -34,6 +35,7 @@ pub mod project;
 pub mod render;
 pub mod roblox_classes;
 pub mod roblox_props;
+pub mod rojo;
 pub mod schema;
 /// The fold that turns the checker's printed types back into the names
 /// the source wrote. The language server owns the file; the CLI reads

@@ -221,7 +221,11 @@ pub fn import_trait_defaults_for_file(path: &Path, source: &str) -> Vec<(String,
     let dir = path.parent().unwrap_or(Path::new("."));
     let aliases = match Config::find(dir) {
         Some(config_path) => match Config::load(&config_path) {
-            Ok(config) => aliases(config_path.parent().unwrap_or(dir), &config),
+            Ok(config) => {
+                let root = config_path.parent().unwrap_or(dir);
+
+                aliases(root, &crate::project::Tree::load(root, &config))
+            }
 
             Err(_) => Vec::new(),
         },
@@ -233,24 +237,14 @@ pub fn import_trait_defaults_for_file(path: &Path, source: &str) -> Vec<(String,
     import_trait_defaults(source, &from, &aliases)
 }
 
-/// The alias table of a project: the mounts, then `.luaurc`, each to an
-/// absolute folder.
-pub fn aliases(root: &Path, config: &Config) -> Vec<(String, PathBuf)> {
-    let mut out: Vec<(String, PathBuf)> = config
-        .mount
+/// The alias table of a project, each alias to an absolute folder: the
+/// aliases the tree carries, which come from `.config.luau` or
+/// `.luaurc`, and from the `[mount]` table when that is the tree.
+pub fn aliases(root: &Path, tree: &crate::project::Tree) -> Vec<(String, PathBuf)> {
+    tree.aliases
         .iter()
-        .map(|(a, m)| (a.clone(), normalize(&root.join(&m.0))))
-        .collect();
-
-    if let Some((_, luau)) = crate::luau_config::read_dir(root) {
-        for (alias, target) in luau.aliases {
-            if !out.iter().any(|(a, _)| *a == alias) {
-                out.push((alias, normalize(&root.join(target))));
-            }
-        }
-    }
-
-    out
+        .map(|(a, p)| (a.clone(), normalize(&root.join(p))))
+        .collect()
 }
 
 /// The file an import spec names from a source file: `./x`, `../x`, or
@@ -479,7 +473,11 @@ fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
     let dir = path.parent().unwrap_or(Path::new("."));
     let aliases = match Config::find(dir) {
         Some(config_path) => match Config::load(&config_path) {
-            Ok(config) => aliases(config_path.parent().unwrap_or(dir), &config),
+            Ok(config) => {
+                let root = config_path.parent().unwrap_or(dir);
+
+                aliases(root, &crate::project::Tree::load(root, &config))
+            }
 
             Err(_) => Vec::new(),
         },

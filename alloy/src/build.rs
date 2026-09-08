@@ -19,8 +19,7 @@ pub struct Report {
     /// Every lint that fired, by source path relative to `in`.
     pub lints: Vec<(PathBuf, Lint)>,
     pub failures: Vec<(PathBuf, String)>,
-    /// The project files written for the mounts, relative to the root,
-    /// and what the alias sync did.
+    /// The project files written for the tree, relative to the root.
     pub project_files: Vec<PathBuf>,
     pub notes: Vec<String>,
     /// The check artifacts, kept for the type check of `alloy flux`.
@@ -62,8 +61,8 @@ pub fn run(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report> {
     run_with(root, &config, true, false)
 }
 
-/// The build of a whole config: the mounts write the project files and
-/// route the requires.
+/// The build of a whole config: the tree writes the project files and
+/// routes the requires.
 pub fn run_project(root: &Path, config: &Config) -> std::io::Result<Report> {
     run_with(root, config, true, false)
 }
@@ -166,6 +165,9 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     let input = root.join(&build.input);
     let out = root.join(&build.out);
     let exclude = globs(&build.exclude)?;
+    // The tree is read once: the `[mount]` table, else the project file
+    // at the root. It routes the requires and writes the project files.
+    let tree = crate::project::Tree::load(root, config);
     let mut report = Report::default();
     let mut expected: HashSet<PathBuf> = HashSet::new();
     let mut imports: Vec<(PathBuf, Vec<crate::ImportRef>)> = Vec::new();
@@ -185,21 +187,13 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
     // A data file builds beside the modules; one that would build to
     // the same `.luau` as a source or a plain file is a diagnostic.
-    // An alias in a data path resolves through the mount table and the
-    // root's Luau configuration, to a folder under `in`.
-    let mut aliases: Vec<(String, PathBuf)> = config
-        .mount
+    // An alias in a data path resolves through the root's Luau
+    // configuration, to a folder under `in`.
+    let aliases: Vec<(String, PathBuf)> = tree
+        .aliases
         .iter()
-        .map(|(alias, m)| (alias.clone(), normalize_path(&root.join(&m.0))))
+        .map(|(alias, path)| (alias.clone(), normalize_path(&root.join(path))))
         .collect();
-
-    if let Some((_, luau)) = crate::luau_config::read_dir(root) {
-        for (alias, target) in luau.aliases {
-            if !aliases.iter().any(|(a, _)| *a == alias) {
-                aliases.push((alias, normalize_path(&root.join(target))));
-            }
-        }
-    }
 
     let mut data_files = DataFiles {
         input: normalize_path(&input),
@@ -259,7 +253,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     // `[alx]` in alloy.toml, or a `luaux.toml` beside it, picks the UI
     // library for `.alx`.
     let jsx_config = config.markup(root);
-    let module_aliases = crate::modules::aliases(root, config);
+    let module_aliases = crate::modules::aliases(root, &tree);
 
     // The ingots start once per build and see every file.
     let ingots = crate::ingot::Ingots::load(root, config);
@@ -302,10 +296,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         let (std_require, ship_std_require) = match &emit.std_require {
             Some(s) => (s.clone(), None),
 
-            None => (
-                by_file,
-                crate::project::std_require_for(config, &source_rel),
-            ),
+            None => (by_file, crate::project::std_require_for(&tree, &source_rel)),
         };
         let options = EmitOptions {
             file_name: rel.to_string_lossy().into_owned(),
@@ -459,7 +450,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
         // Roblox reads no `.luaurc`: an `@alias` require in the ship
         // artifact becomes the `@game/...` instance path.
-        let ship = crate::project::rewrite_requires(config, &source_rel, &compiled.ship);
+        let ship = crate::project::rewrite_requires(&tree, &compiled.ship);
         let text = match build.artifact {
             Artifact::Ship => &ship,
 
@@ -487,8 +478,19 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         return Ok(report);
     }
 
-    // The mounts describe the Rojo projects and the sourcemap.
-    for (rel, text) in crate::project::files(config, root)? {
+    // The runtime rides along with the output. It goes first: the tree
+    // mounts it, so the sourcemap below names its file.
+    let runtime = out.join("alloy.luau");
+    expected.insert(runtime.clone());
+
+    if std::fs::read_to_string(&runtime).ok().as_deref() != Some(crate::RUNTIME) {
+        std::fs::create_dir_all(&out)?;
+        std::fs::write(&runtime, crate::RUNTIME)?;
+    }
+
+    // The tree describes the Rojo project of the output and the
+    // sourcemap.
+    for (rel, text) in crate::project::files(&tree, config, root)? {
         let path = root.join(&rel);
 
         if let Some(parent) = path.parent() {
@@ -521,16 +523,6 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     }
 
     report.project_files.push(schema_rel);
-    report.notes = crate::project::sync_aliases(config, root)?;
-
-    // The runtime rides along with the output.
-    let runtime = out.join("alloy.luau");
-    expected.insert(runtime.clone());
-
-    if std::fs::read_to_string(&runtime).ok().as_deref() != Some(crate::RUNTIME) {
-        std::fs::create_dir_all(&out)?;
-        std::fs::write(&runtime, crate::RUNTIME)?;
-    }
 
     if build.clean && out.is_dir() {
         let mut outputs = Vec::new();
@@ -564,7 +556,8 @@ struct DataFiles {
     /// The outcome per data file, relative to `in`: the output path, or
     /// the diagnostic.
     done: HashMap<PathBuf, Result<PathBuf, String>>,
-    /// Alias to the folder it names, absolute: the mounts, then `.luaurc`.
+    /// Alias to the folder it names, absolute, from the Luau
+    /// configuration of the root.
     aliases: Vec<(String, PathBuf)>,
 }
 
@@ -601,13 +594,13 @@ impl DataFiles {
             return Err(format!("data file \"{spec}\" is neither .json nor .toml"));
         };
 
-        // `@alias/x.json` resolves through the mounts or `.luaurc`; the
-        // folder must sit under `in`, since the build writes there.
+        // `@alias/x.json` resolves through `.config.luau` or `.luaurc`;
+        // the folder must sit under `in`, since the build writes there.
         let rel = if let Some(rest) = spec.strip_prefix('@') {
             let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
             let Some((_, dir)) = self.aliases.iter().find(|(a, _)| a == alias) else {
                 return Err(format!(
-                    "data file \"{spec}\" names no alias @{alias} in the [mount] table or .luaurc"
+                    "data file \"{spec}\" names no alias @{alias} in .config.luau or .luaurc"
                 ));
             };
             let abs = normalize_path(&dir.join(tail));

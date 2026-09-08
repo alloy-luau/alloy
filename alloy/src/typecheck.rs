@@ -285,7 +285,7 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     }
 
     // The mirror lays the artifacts out as the output, so an alias that
-    // names a folder under `in`, a mount, points at its output here.
+    // names a folder under `in` points at its output here.
     let mut luau = crate::luau_config::read_dir(root)
         .map(|(_, c)| c)
         .unwrap_or_default();
@@ -1435,9 +1435,7 @@ pub fn unknown_module_message(spec: &str, source_rel: &Path) -> String {
     if let Some(rest) = spec.strip_prefix('@') {
         let alias = rest.split('/').next().unwrap_or(rest);
 
-        return format!(
-            "\"{spec}\" names no module; no alias @{alias} in .luaurc or in the [mount] table"
-        );
+        return format!("\"{spec}\" names no module; no alias @{alias} in .config.luau or .luaurc");
     }
 
     let base = source_rel.parent().unwrap_or(Path::new(""));
@@ -2315,7 +2313,7 @@ mod tests {
         );
         assert_eq!(
             unknown_module_message("@packages/react", Path::new("src/main.aly")),
-            "\"@packages/react\" names no module; no alias @packages in .luaurc or in the [mount] table"
+            "\"@packages/react\" names no module; no alias @packages in .config.luau or .luaurc"
         );
         assert_eq!(
             unknown_module_message("./data.json", Path::new("src/app/main.aly")),

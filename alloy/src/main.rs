@@ -11,7 +11,6 @@ mod doc_cmd;
 mod help;
 mod highlight;
 mod ingot_cmd;
-mod jsonc;
 mod self_cmd;
 mod self_code;
 mod ui;
@@ -157,9 +156,10 @@ fn load_ingots_near(path: &Path) -> Option<alloy::ingot::Ingots> {
     Some(ingots)
 }
 
-/// Writes `alloy.toml`, and the Luau configuration when the folder has
-/// none: strict mode and the `@alloy` alias, as `.luaurc` and as
-/// `.config.luau`, so either reader finds it.
+/// Writes `alloy.toml` and one Luau configuration. A folder with
+/// neither file gets a `.config.luau` with strict mode and the `@alloy`
+/// alias. A folder that already has `.config.luau` or `.luaurc` keeps
+/// that one file, and gains only the mode and the alias it lacks.
 fn init() -> ExitCode {
     let path = Path::new(config::FILE_NAME);
 
@@ -177,22 +177,8 @@ fn init() -> ExitCode {
 
     println!("{}", p.wrote(&path.display().to_string()));
 
-    if alloy::luau_config::has_config(Path::new(".")) {
-        return ExitCode::SUCCESS;
-    }
-
-    for (name, text) in [
-        (".luaurc", config::LUAURC_TEMPLATE),
-        (".config.luau", config::CONFIG_LUAU_TEMPLATE),
-    ] {
-        match std::fs::write(name, text) {
-            Ok(()) => println!("{}", p.wrote(name)),
-
-            Err(e) => {
-                fail(&format!("cannot write {name}: {e}"));
-                return ExitCode::FAILURE;
-            }
-        }
+    if !init_luau_config(Path::new("."), &p) {
+        return ExitCode::FAILURE;
     }
 
     println!(
@@ -201,6 +187,80 @@ fn init() -> ExitCode {
     );
 
     ExitCode::SUCCESS
+}
+
+/// The Luau configuration of `alloy init`. `.config.luau` wins when the
+/// folder has both, as it does for Luau itself.
+fn init_luau_config(dir: &Path, p: &Painter) -> bool {
+    let luau = dir.join(".config.luau");
+    let rc = dir.join(".luaurc");
+    let name = if luau.is_file() {
+        ".config.luau"
+    } else if rc.is_file() {
+        ".luaurc"
+    } else {
+        // Neither file: one new `.config.luau` carries both keys.
+        match std::fs::write(&luau, config::CONFIG_LUAU_TEMPLATE) {
+            Ok(()) => println!("{}", p.wrote(".config.luau")),
+
+            Err(e) => {
+                fail(&format!("cannot write .config.luau: {e}"));
+
+                return false;
+            }
+        }
+
+        return true;
+    };
+
+    let path = dir.join(name);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+
+        Err(e) => {
+            fail(&format!("cannot read {name}: {e}"));
+
+            return false;
+        }
+    };
+    let edited = if name == ".luaurc" {
+        alloy::luau_config::add_defaults_luaurc(&text).ok()
+    } else {
+        alloy::luau_config::add_defaults_config_luau(&text)
+    };
+    let Some((text, added)) = edited else {
+        println!(
+            "{}",
+            p.note(&format!(
+                "{name} is not a table this reader understands; add `alloy = \"./build/alloy\"` to its aliases by hand"
+            ))
+        );
+
+        return true;
+    };
+
+    if added.is_empty() {
+        println!(
+            "{}",
+            p.note(&format!("{name} already has strict mode and @alloy"))
+        );
+
+        return true;
+    }
+
+    match std::fs::write(&path, text) {
+        Ok(()) => {
+            println!("{}", p.wrote(&format!("{name}: {}", added.join(", "))));
+
+            true
+        }
+
+        Err(e) => {
+            fail(&format!("cannot write {name}: {e}"));
+
+            false
+        }
+    }
 }
 
 /// Reads a `--flag value` pair out of the arguments.
@@ -304,9 +364,7 @@ fn build(args: &[String]) -> ExitCode {
 
         None if watch => {
             let roots = match project(args) {
-                Ok((root, config)) => {
-                    vec![root.join(&config.build.input), root.join(config::FILE_NAME)]
-                }
+                Ok((root, config)) => watch_roots(&root, &config),
 
                 Err(e) => {
                     fail(&e);
@@ -319,6 +377,33 @@ fn build(args: &[String]) -> ExitCode {
 
         None => build_project(args),
     }
+}
+
+/// What watch mode polls: the sources, `alloy.toml`, the project file,
+/// and every folder the tree mounts. A change to the tree outside the
+/// sources still moves the sourcemap and the build project, so the
+/// build must run again.
+fn watch_roots(root: &Path, config: &Config) -> Vec<PathBuf> {
+    let mut roots = vec![root.join(&config.build.input), root.join(config::FILE_NAME)];
+    let tree = alloy::project::Tree::load(root, config);
+
+    if let Some(project) = &tree.project {
+        roots.push(root.join(&project.file));
+    }
+
+    let out = root.join(&config.build.out);
+
+    for m in &tree.mounts {
+        let path = root.join(&m.disk);
+
+        // A mount under `[build] out` is what this build writes; polling
+        // it would make the build wake itself.
+        if !path.starts_with(&out) && !roots.iter().any(|r| path.starts_with(r)) {
+            roots.push(path);
+        }
+    }
+
+    roots
 }
 
 /// The newest change under the roots: the count of files and the latest
@@ -835,9 +920,7 @@ fn flux_cmd(args: &[String]) -> ExitCode {
 
     if args.iter().any(|a| a == "--watch") {
         let roots = match project(args) {
-            Ok((root, config)) => {
-                vec![root.join(&config.build.input), root.join(config::FILE_NAME)]
-            }
+            Ok((root, config)) => watch_roots(&root, &config),
 
             Err(e) => {
                 fail(&e);
@@ -1045,9 +1128,7 @@ fn find_lest() -> Option<PathBuf> {
 fn test_cmd(args: &[String]) -> ExitCode {
     if args.iter().any(|a| a == "--watch" || a == "-W") {
         let roots = match project(args) {
-            Ok((root, config)) => {
-                vec![root.join(&config.build.input), root.join(config::FILE_NAME)]
-            }
+            Ok((root, config)) => watch_roots(&root, &config),
 
             Err(e) => {
                 fail(&e);
@@ -2023,4 +2104,154 @@ fn line_col(text: &str, offset: usize) -> (usize, usize) {
     let col = upto.rfind('\n').map_or(offset, |i| offset - i - 1) + 1;
 
     (line, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("alloy-init-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder");
+
+        dir
+    }
+
+    /// `alloy init` in each of the three states a folder can be in.
+    #[test]
+    fn init_writes_one_luau_configuration() {
+        let p = Painter::for_stdout();
+
+        // Neither file: a new `.config.luau`, and no `.luaurc`.
+        let bare = temp("bare");
+        assert!(init_luau_config(&bare, &p));
+        assert!(!bare.join(".luaurc").exists());
+        let written = std::fs::read_to_string(bare.join(".config.luau")).expect("the file");
+        assert_eq!(written, config::CONFIG_LUAU_TEMPLATE);
+
+        // A `.luaurc` alone: the mode and the alias join it, the other
+        // keys stay, and no `.config.luau` is written.
+        let rc = temp("luaurc");
+        std::fs::write(
+            rc.join(".luaurc"),
+            "{ \"aliases\": { \"pkg\": \"Packages\" } }\n",
+        )
+        .expect("the file");
+        assert!(init_luau_config(&rc, &p));
+        assert!(!rc.join(".config.luau").exists());
+        let read = alloy::luau_config::parse_luaurc(
+            &std::fs::read_to_string(rc.join(".luaurc")).expect("the file"),
+        )
+        .expect("a table");
+        assert_eq!(read.language_mode.as_deref(), Some("strict"));
+        assert_eq!(
+            read.aliases,
+            vec![
+                ("alloy".to_string(), "./build/alloy".to_string()),
+                ("pkg".to_string(), "Packages".to_string()),
+            ]
+        );
+
+        // A `.config.luau` alone: the same, in place.
+        let luau = temp("config-luau");
+        std::fs::write(
+            luau.join(".config.luau"),
+            "return {\n    luau = {\n        languagemode = \"nonstrict\",\n    },\n}\n",
+        )
+        .expect("the file");
+        assert!(init_luau_config(&luau, &p));
+        assert!(!luau.join(".luaurc").exists());
+        let read = alloy::luau_config::parse_config_luau(
+            &std::fs::read_to_string(luau.join(".config.luau")).expect("the file"),
+        )
+        .expect("a table");
+        // The user's own mode is never rewritten.
+        assert_eq!(read.language_mode.as_deref(), Some("nonstrict"));
+        assert_eq!(
+            read.aliases,
+            vec![("alloy".to_string(), "./build/alloy".to_string())]
+        );
+
+        // A second run adds nothing.
+        let before = std::fs::read_to_string(luau.join(".config.luau")).expect("the file");
+        assert!(init_luau_config(&luau, &p));
+        assert_eq!(
+            std::fs::read_to_string(luau.join(".config.luau")).expect("the file"),
+            before
+        );
+
+        for dir in [bare, rc, luau] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// With both files, `.config.luau` is the one edited, as Luau reads
+    /// it first.
+    #[test]
+    fn init_edits_the_file_luau_reads_first() {
+        let dir = temp("both");
+        std::fs::write(dir.join(".luaurc"), "{}\n").expect("the file");
+        std::fs::write(dir.join(".config.luau"), "return { luau = {} }\n").expect("the file");
+        assert!(init_luau_config(&dir, &Painter::for_stdout()));
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".luaurc")).expect("the file"),
+            "{}\n"
+        );
+        let read = alloy::luau_config::parse_config_luau(
+            &std::fs::read_to_string(dir.join(".config.luau")).expect("the file"),
+        )
+        .expect("a table");
+        assert_eq!(read.language_mode.as_deref(), Some("strict"));
+        assert_eq!(
+            read.aliases,
+            vec![("alloy".to_string(), "./build/alloy".to_string())]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Watch mode follows the tree, not only the sources.
+    #[test]
+    fn watch_roots_cover_the_tree() {
+        let dir = temp("watch");
+        std::fs::write(
+            dir.join("alloy.toml"),
+            "[mount]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\npkg = [\"Packages\", \"@game/ReplicatedStorage/Packages\"]\n",
+        )
+        .expect("the file");
+        let config = Config::load(&dir.join("alloy.toml")).expect("the config");
+        let roots = watch_roots(&dir, &config);
+
+        assert!(roots.contains(&dir.join("src")));
+        assert!(roots.contains(&dir.join(config::FILE_NAME)));
+        // A folder under `[build] in` is covered by the sources root.
+        assert!(!roots.contains(&dir.join("src/shared")));
+        assert!(roots.contains(&dir.join("Packages")));
+
+        // A project file joins the roots too.
+        std::fs::write(dir.join("alloy.toml"), "[build]\nin = \"src\"\n").expect("the file");
+        std::fs::write(
+            dir.join("default.project.json"),
+            "{ \"name\": \"n\", \"tree\": { \"$className\": \"DataModel\", \"ReplicatedStorage\": { \"$className\": \"ReplicatedStorage\", \"P\": { \"$path\": \"Packages\" } } } }",
+        )
+        .expect("the file");
+        let config = Config::load(&dir.join("alloy.toml")).expect("the config");
+        let roots = watch_roots(&dir, &config);
+        assert!(roots.contains(&dir.join("default.project.json")));
+        assert!(roots.contains(&dir.join("Packages")));
+
+        // The runtime the build writes is never polled: the build would
+        // wake itself.
+        std::fs::write(
+            dir.join("default.project.json"),
+            "{ \"name\": \"n\", \"tree\": { \"$className\": \"DataModel\", \"ReplicatedStorage\": { \"$className\": \"ReplicatedStorage\", \"Alloy\": { \"$path\": \"build/alloy.luau\" } } } }",
+        )
+        .expect("the file");
+        let roots = watch_roots(&dir, &config);
+        assert!(!roots.contains(&dir.join("build/alloy.luau")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

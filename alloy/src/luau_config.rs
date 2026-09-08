@@ -148,6 +148,86 @@ fn unquote(s: &str) -> &str {
         .unwrap_or(s)
 }
 
+/// The alias `alloy init` writes for the runtime the build puts at the
+/// output root.
+pub const ALLOY_ALIAS: (&str, &str) = ("alloy", "./build/alloy");
+
+/// Adds strict mode and the `@alloy` alias to an existing `.luaurc`,
+/// each only when the file lacks it. Every other byte stays, comments
+/// included, so the edit never rewrites what the user wrote. Returns
+/// the text and the names of what it added.
+pub fn add_defaults_luaurc(text: &str) -> Result<(String, Vec<String>), String> {
+    let current = parse_luaurc(text).unwrap_or_default();
+    let mut edits = Vec::new();
+    let mut added = Vec::new();
+
+    if current.language_mode.is_none() {
+        edits.push(crate::jsonc::Edit::Set {
+            path: crate::jsonc::path(&["languageMode"]),
+            value: "\"strict\"".to_string(),
+        });
+        added.push("strict mode".to_string());
+    }
+
+    if !current.aliases.iter().any(|(a, _)| a == ALLOY_ALIAS.0) {
+        edits.push(crate::jsonc::Edit::Set {
+            path: crate::jsonc::path(&["aliases", ALLOY_ALIAS.0]),
+            value: format!("\"{}\"", ALLOY_ALIAS.1),
+        });
+        added.push(format!("@{}", ALLOY_ALIAS.0));
+    }
+
+    if edits.is_empty() {
+        return Ok((text.to_string(), added));
+    }
+
+    crate::jsonc::apply(text, &edits, "  ").map(|t| (t, added))
+}
+
+/// The byte after the `{` that opens the table field named `name`.
+fn table_body(text: &str, name: &str) -> Option<usize> {
+    let at = text.find(name)?;
+    let brace = text[at..].find('{')?;
+
+    Some(at + brace + 1)
+}
+
+/// The same as `add_defaults_luaurc`, for a `.config.luau`. The entries
+/// go in as text, so the rest of the chunk keeps its bytes. `None` when
+/// the chunk is not a table literal this reader understands.
+pub fn add_defaults_config_luau(text: &str) -> Option<(String, Vec<String>)> {
+    let current = parse_config_luau(text)?;
+    let mut out = text.to_string();
+    let mut added = Vec::new();
+
+    if !current.aliases.iter().any(|(a, _)| a == ALLOY_ALIAS.0) {
+        let (at, entry) = match table_body(&out, "aliases") {
+            Some(at) => (
+                at,
+                format!("\n            {} = \"{}\",", ALLOY_ALIAS.0, ALLOY_ALIAS.1),
+            ),
+
+            None => (
+                table_body(&out, "luau")?,
+                format!(
+                    "\n        aliases = {{\n            {} = \"{}\",\n        }},",
+                    ALLOY_ALIAS.0, ALLOY_ALIAS.1
+                ),
+            ),
+        };
+        out.insert_str(at, &entry);
+        added.push(format!("@{}", ALLOY_ALIAS.0));
+    }
+
+    if current.language_mode.is_none() {
+        let at = table_body(&out, "luau")?;
+        out.insert_str(at, "\n        languagemode = \"strict\",");
+        added.push("strict mode".to_string());
+    }
+
+    Some((out, added))
+}
+
 /// The `.config.luau` text for a configuration.
 pub fn render_config_luau(c: &LuauConfig) -> String {
     let mut out = String::from("return {\n    luau = {\n");
@@ -213,6 +293,68 @@ mod tests {
         assert_eq!(rc.language_mode.as_deref(), Some("strict"));
         assert_eq!(
             rc.aliases,
+            vec![("alloy".to_string(), "./build/alloy".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_existing_luaurc_gains_only_what_it_lacks() {
+        let (text, added) =
+            add_defaults_luaurc("{ \"aliases\": { \"pkg\": \"Packages\" } }\n").unwrap();
+        assert_eq!(added, vec!["strict mode", "@alloy"]);
+        let back = parse_luaurc(&text).unwrap();
+        assert_eq!(back.language_mode.as_deref(), Some("strict"));
+        assert_eq!(
+            back.aliases,
+            vec![
+                ("alloy".to_string(), "./build/alloy".to_string()),
+                ("pkg".to_string(), "Packages".to_string()),
+            ]
+        );
+
+        // A second run changes nothing.
+        let (again, added) = add_defaults_luaurc(&text).unwrap();
+        assert!(added.is_empty());
+        assert_eq!(again, text);
+
+        // The user's own mode stays.
+        let (text, added) = add_defaults_luaurc("{ \"languageMode\": \"nonstrict\" }\n").unwrap();
+        assert_eq!(added, vec!["@alloy"]);
+        assert_eq!(
+            parse_luaurc(&text).unwrap().language_mode.as_deref(),
+            Some("nonstrict")
+        );
+    }
+
+    #[test]
+    fn an_existing_config_luau_gains_only_what_it_lacks() {
+        let (text, added) =
+            add_defaults_config_luau("return {\n    luau = {\n        aliases = {\n            pkg = \"Packages\",\n        },\n    },\n}\n")
+                .unwrap();
+        assert_eq!(added, vec!["@alloy", "strict mode"]);
+        let back = parse_config_luau(&text).unwrap();
+        assert_eq!(back.language_mode.as_deref(), Some("strict"));
+        assert_eq!(
+            back.aliases,
+            vec![
+                ("alloy".to_string(), "./build/alloy".to_string()),
+                ("pkg".to_string(), "Packages".to_string()),
+            ]
+        );
+
+        let (again, added) = add_defaults_config_luau(&text).unwrap();
+        assert!(again == text && added.is_empty(), "{again}");
+
+        // A chunk with no `aliases` table gets one.
+        let (text, added) = add_defaults_config_luau(
+            "return {\n    luau = {\n        languagemode = \"nonstrict\",\n    },\n}\n",
+        )
+        .unwrap();
+        assert_eq!(added, vec!["@alloy"]);
+        let back = parse_config_luau(&text).unwrap();
+        assert_eq!(back.language_mode.as_deref(), Some("nonstrict"));
+        assert_eq!(
+            back.aliases,
             vec![("alloy".to_string(), "./build/alloy".to_string())]
         );
     }

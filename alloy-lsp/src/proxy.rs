@@ -1755,13 +1755,13 @@ impl State {
                     && let Some(path) = uri_to_path(uri)
                     && let Some(dir) = path.parent()
                 {
-                    // `@alias/x` goes through the nearest .luaurc; a
+                    // `@alias/x` goes through the project's aliases; a
                     // relative spec is path arithmetic.
                     let resolved = match spec.strip_prefix('@') {
                         Some(rest) => {
                             let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
 
-                            luaurc_aliases(dir, self.root.as_deref())
+                            project_aliases(dir, self.root.as_deref())
                                 .into_iter()
                                 .find(|(a, _)| a == alias)
                                 .map(|(_, base)| imports::lexical(&base, tail))
@@ -2301,15 +2301,16 @@ impl State {
                     Err(_) => (0, normalize(&dir)),
                 };
                 self.ensure_runtime(&runtime_dir);
-                // A file under a mount sits in the sourcemap, and the child
+                // A file in the tree sits in the sourcemap, and the child
                 // resolves its requires in the DataModel tree: the runtime
-                // is `../Alloy` there. A file outside every mount reaches
-                // the runtime on disk.
+                // is `../Alloy` there. A file outside the tree reaches the
+                // runtime on disk.
                 let source_rel = file.strip_prefix(&root).ok().map(Path::to_path_buf);
+                let tree = alloy::project::Tree::load(&root, &config);
                 let std_require = config.emit.std_require.clone().unwrap_or_else(|| {
                     source_rel
                         .as_deref()
-                        .and_then(|rel| alloy::project::std_require_relative_for(&config, rel))
+                        .and_then(|rel| alloy::project::std_require_relative_for(&tree, rel))
                         .unwrap_or_else(|| {
                             if depth == 0 {
                                 "./alloy".to_string()
@@ -6851,8 +6852,8 @@ fn unwrap_future_hint(hint: &mut Value) {
     }
 }
 
-/// The entries a module path can continue with: the aliases of the
-/// nearest `.luaurc` and `@self` when nothing is typed, the children of
+/// The entries a module path can continue with: the project's aliases
+/// and `@self` when nothing is typed, the children of
 /// the sourcemap under `@game/`, and otherwise the directories and the
 /// modules of the resolved directory. Each is `(label, kind, detail)`.
 fn module_entries(
@@ -6871,7 +6872,7 @@ fn module_entries(
         ));
         out.push(("../".to_string(), 19, "the parent directory".to_string()));
 
-        for (name, target) in luaurc_aliases(dir, root) {
+        for (name, target) in project_aliases(dir, root) {
             out.push((
                 format!("@{name}/"),
                 19,
@@ -6937,7 +6938,7 @@ fn module_entries(
     } else if let Some(rest) = head.strip_prefix('@') {
         let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
 
-        luaurc_aliases(dir, root)
+        project_aliases(dir, root)
             .into_iter()
             .find(|(n, _)| n == alias)
             .map(|(_, target)| imports::lexical(&target, tail))
@@ -7103,6 +7104,35 @@ fn strict_config(path: &Path, root: &Path, text: String) -> String {
 
         _ => text,
     }
+}
+
+/// The aliases a module path can use from `dir`: the Luau
+/// configuration above it, and the `[mount]` table of the nearest
+/// `alloy.toml` while `[project] mount_aliases` stays on. A name the
+/// Luau configuration declares wins over a mount of that name.
+fn project_aliases(dir: &Path, root: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let mut out = luaurc_aliases(dir, root);
+    let found = match root {
+        Some(r) => Config::find_within(dir, r),
+
+        None => Config::find(dir),
+    };
+
+    if let Some(path) = found
+        && let Ok(config) = Config::load(&path)
+        && config.project.mount_aliases
+    {
+        let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+        for (name, m) in &config.mount {
+            if !out.iter().any(|(a, _)| a == name) {
+                out.push((name.clone(), imports::lexical(&base, &m.0)));
+            }
+        }
+    }
+
+    out.sort();
+    out
 }
 
 /// The `aliases` of the nearest `.luaurc` or `.config.luau` above
@@ -11381,6 +11411,126 @@ local f = $nameof(RunService.Heartbeat)
         map_from_shadow(&mut other, None, &st);
         assert_eq!(other["range"]["start"]["line"], 9);
         assert_eq!(other["uri"], "file:///x.luau");
+    }
+
+    /// A project root in the temp folder, with the files each test
+    /// names.
+    fn alias_root(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("alloy-lsp-alias-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for (rel, text) in files {
+            let path = dir.join(rel);
+
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the folder");
+            }
+
+            std::fs::write(path, text).expect("the file");
+        }
+
+        dir
+    }
+
+    /// The alias labels an empty import path offers, `@name/` each.
+    fn alias_labels(dir: &Path, root: &Path) -> Vec<String> {
+        module_entries(dir, Some(root), "", "sourcemap.json")
+            .into_iter()
+            .map(|(label, _, _)| label)
+            .filter(|l| l.starts_with('@') && l != "@self/" && l != "@game/")
+            .collect()
+    }
+
+    #[test]
+    fn an_import_path_offers_the_luau_config_and_the_mounts() {
+        let toml = "[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\n";
+        let dir = alias_root(
+            "merge",
+            &[
+                ("alloy.toml", toml),
+                (
+                    ".config.luau",
+                    "return { luau = { aliases = { pkg = \"Packages\" } } }\n",
+                ),
+                ("src/server/main.aly", ""),
+            ],
+        );
+        let src = dir.join("src/server");
+
+        // The Luau configuration and the table both name aliases.
+        assert_eq!(
+            alias_labels(&src, &dir),
+            vec![
+                "@pkg/".to_string(),
+                "@server/".to_string(),
+                "@shared/".to_string()
+            ]
+        );
+
+        // The same set resolves a path, so `@shared/` lists its files.
+        let shared = project_aliases(&src, Some(&dir))
+            .into_iter()
+            .find(|(a, _)| a == "shared")
+            .map(|(_, p)| p);
+        assert_eq!(shared, Some(dir.join("src/shared")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_luaurc_alias_wins_over_a_mount_of_the_same_name() {
+        let toml = "[mount]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\npkg = [\"Packages\", \"@game/ReplicatedStorage/Packages\"]\n";
+        let dir = alias_root(
+            "clash",
+            &[
+                ("alloy.toml", toml),
+                (
+                    ".luaurc",
+                    "{ \"aliases\": { \"shared\": \"vendor/shared\" } }\n",
+                ),
+                ("src/a.aly", ""),
+            ],
+        );
+        let src = dir.join("src");
+        let aliases = project_aliases(&src, Some(&dir));
+
+        assert_eq!(
+            aliases,
+            vec![
+                ("pkg".to_string(), dir.join("Packages")),
+                ("shared".to_string(), dir.join("vendor/shared")),
+            ]
+        );
+        assert_eq!(
+            alias_labels(&src, &dir),
+            vec!["@pkg/".to_string(), "@shared/".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mount_aliases_off_leaves_the_luau_config_alone() {
+        let toml = "[project]\nmount_aliases = false\n\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\n";
+        let dir = alias_root(
+            "off",
+            &[
+                ("alloy.toml", toml),
+                (".luaurc", "{ \"aliases\": { \"pkg\": \"Packages\" } }\n"),
+                ("src/a.aly", ""),
+            ],
+        );
+        let src = dir.join("src");
+
+        assert_eq!(alias_labels(&src, &dir), vec!["@pkg/".to_string()]);
+        assert!(
+            project_aliases(&src, Some(&dir))
+                .iter()
+                .all(|(a, _)| a != "server")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

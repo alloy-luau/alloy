@@ -371,7 +371,13 @@ fn relative_require(from: &Path, to: &Path) -> String {
 /// The spec's require target for a path the source requires, relative
 /// to the source: the built output when the target is an Alloy file,
 /// the file itself otherwise. `None` for a path that is not relative.
-fn target_for(config: &Config, root: &Path, source_rel: &Path, path: &str) -> Option<PathBuf> {
+fn target_for(
+    config: &Config,
+    tree: &crate::project::Tree,
+    root: &Path,
+    source_rel: &Path,
+    path: &str,
+) -> Option<PathBuf> {
     let base = source_rel.parent().unwrap_or(Path::new(""));
     let joined = if let Some(rest) = path.strip_prefix("./") {
         base.join(rest)
@@ -380,9 +386,9 @@ fn target_for(config: &Config, root: &Path, source_rel: &Path, path: &str) -> Op
     } else {
         let rest = path.strip_prefix('@')?;
         let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
-        let m = config.mount.get(alias)?;
+        let (_, dir) = tree.aliases.iter().find(|(a, _)| a == alias)?;
 
-        Path::new(&m.0).join(tail)
+        dir.join(tail)
     };
     let normal = normalize(&joined);
 
@@ -469,7 +475,8 @@ fn write_modules(
     let exclude = crate::build::globs(&config.build.exclude)?;
     let jsx = config.markup(root).ok();
     let runtime = modules.join("alloy");
-    let aliases = crate::modules::aliases(root, config);
+    let tree = crate::project::Tree::load(root, config);
+    let aliases = crate::modules::aliases(root, &tree);
 
     for path in crate::build::sources(&input)? {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
@@ -507,7 +514,8 @@ fn write_modules(
 
         match compiled {
             Ok(out) => {
-                let mut text = rewrite_requires(config, root, &source_rel, &module_rel, &out.ship);
+                let mut text =
+                    rewrite_requires(config, &tree, root, &source_rel, &module_rel, &out.ship);
 
                 if config.test.shim {
                     text = with_shim(&text, &relative_require(&module_rel, &modules.join("shim")));
@@ -595,6 +603,7 @@ fn normalize(path: &Path) -> PathBuf {
 /// the path from the spec to the target. The text keeps its line count.
 fn rewrite_requires(
     config: &Config,
+    tree: &crate::project::Tree,
     root: &Path,
     source_rel: &Path,
     spec_rel: &Path,
@@ -623,7 +632,7 @@ fn rewrite_requires(
             continue;
         };
         let path = &body[..end];
-        let replaced = target_for(config, root, source_rel, path)
+        let replaced = target_for(config, tree, root, source_rel, path)
             .map(|target| relative_require(spec_rel, &target));
 
         out.push_str(&rest[..i + "require(".len()]);
@@ -667,7 +676,8 @@ pub fn spec(
     // The require is written from the source's place, as every other
     // require in the text, and the rewrite below moves them all.
     let runtime = modules_dir(config).join("alloy");
-    let aliases = crate::modules::aliases(root, config);
+    let tree = crate::project::Tree::load(root, config);
+    let aliases = crate::modules::aliases(root, &tree);
     let options = EmitOptions {
         file_name: source_rel.to_string_lossy().into_owned(),
         std_require: relative_require(source_rel, &runtime),
@@ -696,7 +706,7 @@ pub fn spec(
         None,
         ingots,
     )?;
-    let mut text = rewrite_requires(config, root, source_rel, &spec_rel, &out.ship);
+    let mut text = rewrite_requires(config, &tree, root, source_rel, &spec_rel, &out.ship);
 
     if config.test.shim {
         text = with_shim(

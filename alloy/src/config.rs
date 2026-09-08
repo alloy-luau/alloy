@@ -22,8 +22,9 @@ pub struct Config {
     pub test: TestConfig,
     pub project: Project,
     /// The `[mount]` table: alias to `[path, mount]`. The folder at
-    /// `path` lands at `mount` in the DataModel, and `@alias/...`
-    /// requires it. See `crate::project`.
+    /// `path` lands at `mount` in the DataModel. The table is the tree
+    /// when the project writes one, over any project file at the root.
+    /// See `crate::project`.
     pub mount: BTreeMap<String, Mount>,
     /// The `[ingots]` table: name to source. An ingot is an extension
     /// that ships as an executable; see `crate::ingot`.
@@ -138,24 +139,56 @@ impl IngotSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Mount(pub String, pub String);
 
-/// The `[project]` table: the Rojo project the mounts describe.
+/// Where `alloy.luau` lands when neither `[project] runtime` nor the
+/// project file says.
+pub const DEFAULT_RUNTIME: &str = "@game/ReplicatedStorage/Alloy";
+
+/// The `[project]` table: the DataModel tree and what Alloy writes from
+/// it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Project {
-    /// The name in the generated project files.
+    /// The name in the project files Alloy writes. A project file at
+    /// the root carries its own name, which wins.
     pub name: String,
-    /// Where `alloy.luau` mounts. Emitted code requires it by a
-    /// relative instance path from each file's mount.
-    pub runtime: String,
+    /// The Rojo project file to read, relative to the root. Unset means
+    /// `default.project.json`, then the one `*.project.json` at the
+    /// root.
+    pub file: Option<String>,
+    /// Where `alloy.luau` lands. Unset means the place the project file
+    /// already gives it, then the node that mounts `[build] out`, then
+    /// `@game/ReplicatedStorage/Alloy`.
+    pub runtime: Option<String>,
+    /// The `[mount]` table is the tree, and `alloy build` writes
+    /// `default.project.json` and `.alloy/build.project.json` from it.
+    /// Off, Alloy writes neither file: the table then only rewrites an
+    /// `@alias` require into an instance path in the ship artifact, and
+    /// the sync tool of the project owns the tree.
+    pub source_of_truth: bool,
+    /// The `[mount]` table names aliases too: the compiler and the
+    /// language server serve them beside the ones `.config.luau` or
+    /// `.luaurc` declares. A name in the Luau configuration wins. Off,
+    /// only the Luau configuration names aliases.
+    pub mount_aliases: bool,
     /// Write `.alloy/sourcemap.json` on every build.
     pub sourcemap: bool,
+}
+
+impl Project {
+    /// The runtime's place: what the project set, else the default.
+    pub fn runtime(&self) -> &str {
+        self.runtime.as_deref().unwrap_or(DEFAULT_RUNTIME)
+    }
 }
 
 impl Default for Project {
     fn default() -> Self {
         Self {
             name: "game".to_string(),
-            runtime: "@game/ReplicatedStorage/Alloy".to_string(),
+            file: None,
+            runtime: None,
+            source_of_truth: true,
+            mount_aliases: true,
             sourcemap: true,
         }
     }
@@ -629,18 +662,28 @@ lest = true
 shim = true
 
 [project]
-# the name in default.project.json and .alloy/build.project.json
+# the name in the project files Alloy writes; a project file at the
+# root carries its own name, which wins
 name = "game"
-# where build/alloy.luau mounts; emitted code requires it from there
-runtime = "@game/ReplicatedStorage/Alloy"
+# the Rojo project file to read; unset means default.project.json, then
+# the one *.project.json at the root
+# file = "default.project.json"
+# where build/alloy.luau lands; unset means the place the project file
+# gives it, then @game/ReplicatedStorage/Alloy
+# runtime = "@game/ReplicatedStorage/Alloy"
+# the [mount] table is the tree: write default.project.json and
+# .alloy/build.project.json from it
+# source_of_truth = true
+# the [mount] table names aliases too, beside the Luau config ones
+# mount_aliases = true
 # write .alloy/sourcemap.json on every build
 sourcemap = true
 
 [mount]
 # alias = [path, mount]: the folder at path lands at mount in the
-# DataModel, and require("@alias/x") resolves through it. With one or
-# more mounts, `alloy build` writes default.project.json over the
-# sources and .alloy/build.project.json over the output.
+# DataModel. A tool that reads a Rojo or Argon project file needs no
+# table here; Alloy reads default.project.json. A tool with its own
+# format describes the tree here, and this table then wins.
 # server = ["src/server", "@game/ServerScriptService/Server"]
 # client = ["src/client", "@game/StarterPlayer/StarterPlayerScripts/Client"]
 # shared = ["src/shared", "@game/ReplicatedStorage/Shared"]
@@ -658,8 +701,9 @@ sourcemap = true
 # sort_classes = true
 "#;
 
-/// The `.luaurc` that `alloy init` writes: strict mode for every file,
-/// and the `@alloy` alias for the runtime the build writes.
+/// The `.luaurc` that `alloy init` writes into a root that already has
+/// one: strict mode for every file, and the `@alloy` alias for the
+/// runtime the build writes.
 pub const LUAURC_TEMPLATE: &str = r#"{
   "languageMode": "strict",
   "aliases": {
@@ -668,7 +712,8 @@ pub const LUAURC_TEMPLATE: &str = r#"{
 }
 "#;
 
-/// The same configuration as `.config.luau`, the Luau-syntax form.
+/// The same configuration as `.config.luau`, the Luau-syntax form, and
+/// the file `alloy init` writes into a root that has neither.
 pub const CONFIG_LUAU_TEMPLATE: &str = r#"return {
     luau = {
         languagemode = "strict",
@@ -794,7 +839,8 @@ mod tests {
             c.mount["pkg"],
             Mount("Packages".into(), "@game/ReplicatedStorage/Packages".into())
         );
-        assert_eq!(c.project.runtime, "@game/ReplicatedStorage/Alloy");
+        assert_eq!(c.project.runtime, None);
+        assert_eq!(c.project.runtime(), "@game/ReplicatedStorage/Alloy");
     }
 
     #[test]

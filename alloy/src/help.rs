@@ -23,7 +23,7 @@ Commands:
   fmt [paths]     Format the sources in place
   test [file]     Write a lest spec per source with a @test; --run runs it
   doc [topic]     Explain a keyword, an operator, a lint, an article
-  init            Write alloy.toml, .luaurc, and .config.luau
+  init            Write alloy.toml and one Luau config (.config.luau)
   ingot           Scaffold, inspect, or run an extension
   self            Install, update, or remove the binaries
   help            Show this screen

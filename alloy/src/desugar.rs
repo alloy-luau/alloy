@@ -81,6 +81,10 @@ pub struct EmitOptions {
     /// import of a struct or an enum binds the type too. See
     /// `crate::modules::import_types`.
     pub import_types: Vec<(String, Vec<String>)>,
+    /// The enums the imported modules declare, with their variants and
+    /// payload counts. A `match` over an imported enum covers it.
+    /// See `crate::modules::import_enums`.
+    pub import_enums: Vec<(String, Vec<(String, usize)>)>,
     /// Per imported trait, the names of its default methods, so an
     /// `impl Trait for S` here flattens them in as a local trait's would.
     pub import_trait_defaults: Vec<(String, Vec<String>)>,
@@ -164,7 +168,25 @@ enum Wire {
     Array { item: Box<Wire>, optional: bool },
 }
 
+/// The bytes Roblox carries on an UnreliableRemoteEvent.
+const UNRELIABLE_LIMIT: usize = 900;
+
 impl Wire {
+    /// Why the value has no size bound, or `None` when it has one. A
+    /// number, a boolean, and a Roblox datatype all pack to a fixed
+    /// width; a string and an array grow with what the caller passes.
+    fn unbounded(&self) -> Option<&'static str> {
+        match self {
+            Wire::Scalar { kind, .. } if kind == "str" => Some("a string has no length bound"),
+
+            Wire::Scalar { .. } => None,
+
+            Wire::Table { fields, .. } => fields.iter().find_map(|(_, w)| w.unbounded()),
+
+            Wire::Array { .. } => Some("an array has no length bound"),
+        }
+    }
+
     fn is_any(&self) -> bool {
         matches!(self, Wire::Scalar { kind, .. } if kind == "any")
     }
@@ -251,6 +273,7 @@ impl Default for EmitOptions {
             thresholds: crate::lint::Thresholds::default(),
             tests: false,
             import_types: Vec::new(),
+            import_enums: Vec::new(),
             import_trait_defaults: Vec::new(),
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
@@ -729,10 +752,27 @@ impl<'s> Desugar<'s> {
             .and_then(|s| s.strip_suffix(['"', '\'']))
             .unwrap_or(quoted);
 
+        self.options.import_types.iter().any(|(s, types)| {
+            s == spec && types.iter().any(|t| crate::modules::type_head(t) == name)
+        })
+    }
+
+    /// The parameter list an imported type declares, `<T>`. A type
+    /// alias to a generic has to carry them: `type S<T> = _m1.S<T>`.
+    fn module_type_params(&self, quoted: &str, name: &str) -> String {
+        let spec = quoted
+            .strip_prefix(['"', '\''])
+            .and_then(|s| s.strip_suffix(['"', '\'']))
+            .unwrap_or(quoted);
+
         self.options
             .import_types
             .iter()
-            .any(|(s, types)| s == spec && types.iter().any(|t| t == name))
+            .filter(|(s, _)| s == spec)
+            .flat_map(|(_, types)| types.iter())
+            .find(|t| crate::modules::type_head(t) == name)
+            .map(|t| t[name.len()..].to_string())
+            .unwrap_or_default()
     }
 
     fn import_stmt(&mut self, i: &Import) {
@@ -761,13 +801,15 @@ impl<'s> Desugar<'s> {
                         .map(|a| self.text_of(a).to_string())
                         .unwrap_or(name.clone());
 
+                    let args = self.module_type_params(&path, &name);
+
                     if sp.is_type {
-                        types.push(format!("type {local} = {base}.{name}"));
+                        types.push(format!("type {local}{args} = {base}.{name}{args}"));
                     } else {
                         // A struct or an enum is a value and a type; the
                         // type comes along when the module exports one.
                         if self.module_exports_type(&path, &name) {
-                            types.push(format!("type {local} = {base}.{name}"));
+                            types.push(format!("type {local}{args} = {base}.{name}{args}"));
                         }
 
                         names.push(local);
@@ -804,11 +846,13 @@ impl<'s> Desugar<'s> {
                         .map(|a| self.text_of(a).to_string())
                         .unwrap_or(name.clone());
 
+                    let args = self.module_type_params(&path, &name);
+
                     if sp.is_type {
-                        types.push(format!("type {local} = {temp}.{name}"));
+                        types.push(format!("type {local}{args} = {temp}.{name}{args}"));
                     } else {
                         if self.module_exports_type(&path, &name) {
-                            types.push(format!("type {local} = {temp}.{name}"));
+                            types.push(format!("type {local}{args} = {temp}.{name}{args}"));
                         }
 
                         names.push(local);
@@ -855,7 +899,9 @@ impl<'s> Desugar<'s> {
                             .map(|a| self.text_of(a).to_string())
                             .unwrap_or(name.clone());
 
-                        format!("type {local} = {temp}.{name}")
+                        let args = self.module_type_params(&path, &name);
+
+                        format!("type {local}{args} = {temp}.{name}{args}")
                     })
                     .collect();
                 self.generate(anchor, &parts.join(" "));
@@ -1705,6 +1751,14 @@ impl<'s> Desugar<'s> {
                         }
                     }
 
+                    // `case Lobby then` writes a unit variant as a bare
+                    // name, which the parser reads as a binding. A
+                    // capital says the author meant a variant, so a name
+                    // no enum owns is a typo, not a catch-all.
+                    Pattern::Bind(name) if is_variant_name(self.text_of(*name)) => {
+                        flat.push((*name, 0));
+                    }
+
                     _ => {}
                 }
             }
@@ -1953,6 +2007,12 @@ impl<'s> Desugar<'s> {
                             enum_name.get_or_insert(e);
                             rows.push((name, Vec::new()));
                         }
+
+                        // A capitalised name no enum owns is a misspelt
+                        // variant, not a catch-all. Counting it as one
+                        // would let `unreachable_default` claim the arms
+                        // cover the enum.
+                        None if is_variant_name(&name) => return false,
 
                         None => return true,
                     }
@@ -3166,6 +3226,15 @@ impl<'s> Desugar<'s> {
                 _ => {}
             }
         }
+
+        // An imported enum is as exhaustible as one declared here; the
+        // file names its variants the same way.
+        for (name, variants) in &self.options.import_enums {
+            if self.imported_names.contains(name) && !self.enums.contains_key(name) {
+                self.enums.insert(name.clone(), variants.clone());
+                self.enum_decls.insert(name.clone(), variants.clone());
+            }
+        }
     }
 
     /// A bound with each operator trait routed to the runtime type, unless
@@ -3614,8 +3683,12 @@ impl<'s> Desugar<'s> {
         decls: &[Field],
     ) -> String {
         // The check artifact types the receiver, as an impl method's self.
+        // A derive reads every field, and a `write` field is not
+        // readable through the struct's own type, so the receiver meets
+        // a read view of those fields.
+        let readable = self.read_view(decls);
         let sn = if self.options.check && !self.generic_types.contains(name) {
-            format!(": {}", self.self_alias(name))
+            format!(": {}{readable}", self.self_alias(name))
         } else {
             String::new()
         };
@@ -3932,6 +4005,23 @@ impl<'s> Desugar<'s> {
             }
         }
 
+        // The answer of a remote function crosses the wire too.
+        if let Some(ty) = r.ret_type {
+            let text = self.text_of(ty).to_string();
+
+            if let Some((field, bad, why)) = wire_offender(&text) {
+                let what = match field {
+                    Some(f) => format!("returns a value whose field `{f}` is `{bad}`"),
+
+                    None => format!("returns `{bad}`"),
+                };
+                self.diagnose(
+                    ty,
+                    &format!("remote `{name}`: {what}, which {why}; a remote carries only data"),
+                );
+            }
+        }
+
         let params: Vec<String> = r
             .params
             .iter()
@@ -3952,6 +4042,28 @@ impl<'s> Desugar<'s> {
         // The layout names locals the check artifact need not resolve,
         // and the checker types the remote by its declaration.
         let wire = self.wire_layout(r);
+
+        // `@unreliable` rides an UnreliableRemoteEvent, and Roblox drops
+        // a payload over 900 bytes. A parameter with no bound, a string
+        // or an array, can pass it on any call.
+        if r.attributes
+            .iter()
+            .any(|a| a.name.is_some_and(|n| self.text_of(n) == "unreliable"))
+        {
+            for (p, w) in r.params.iter().zip(&wire) {
+                let Some(why) = w.unbounded() else { continue };
+                let pname = self.text_of(p.name).to_string();
+                self.diagnose(
+                    p.name,
+                    &format!(
+                        "remote `{name}` is `@unreliable`, so its payload has to fit {UNRELIABLE_LIMIT} bytes; {why}, and parameter `{pname}` is one. Bound it, or drop `@unreliable`"
+                    ),
+                );
+
+                break;
+            }
+        }
+
         let wire = if self.options.check || wire.iter().all(Wire::is_any) {
             String::new()
         } else {
@@ -4177,8 +4289,11 @@ impl<'s> Desugar<'s> {
 
         for p in &r.params {
             let name = self.text_of(p.name).to_string();
+            // The surface is a type the checker reads, so the type
+            // edits run over it: `T[]` is `Array<T>`, and a std name
+            // takes the runtime's prefix.
             let ty =
-                p.ty.map(|t| self.text_of(t).trim().to_string())
+                p.ty.map(|t| self.copy_type_to_string(t).trim().to_string())
                     .unwrap_or_else(|| "any".to_string());
             let optional = if p.default.is_some() && !ty.ends_with('?') {
                 format!("{ty}?")
@@ -4200,7 +4315,7 @@ impl<'s> Desugar<'s> {
         };
         let ret = r
             .ret_type
-            .map(|t| self.text_of(t).trim().to_string())
+            .map(|t| self.copy_type_to_string(t).trim().to_string())
             .unwrap_or_else(|| "()".to_string());
         // A server handler of a remote function may answer with a Future.
         // `Future<()>` is no type, so an event's `call` yields any.
@@ -4246,7 +4361,10 @@ impl<'s> Desugar<'s> {
         let server_fires = r.from_server && side != Some(crate::directives::Side::Client);
         let client_handles = r.from_server && side != Some(crate::directives::Side::Server);
         let server_handles = r.from_client && side != Some(crate::directives::Side::Client);
-        let mut members = vec!["spec: any".to_string(), "instance: Instance?".to_string()];
+        let mut members = vec![
+            format!("spec: {std}.RemoteSpec"),
+            "instance: Instance?".to_string(),
+        ];
 
         match (client_fires, server_fires) {
             (false, false) => {}
@@ -4284,7 +4402,21 @@ impl<'s> Desugar<'s> {
             };
             members.push(format!("on: {ty}"));
             members.push(format!("once: {ty}"));
-            members.push(format!("wait: () -> {std}.Future<any>"));
+            // `wait` settles with the payload the handler would get, and
+            // `await` yields the first of those values. With both sides
+            // handling, the two payloads differ and the type stays open.
+            let waited = match (client_handles, server_handles) {
+                (true, false) => handler_params
+                    .first()
+                    .and_then(|p| p.split_once(": "))
+                    .map(|(_, t)| t.to_string()),
+
+                (false, true) => Some("Player".to_string()),
+
+                _ => None,
+            };
+            let waited = waited.unwrap_or_else(|| "any".to_string());
+            members.push(format!("wait: () -> {std}.Future<{waited}>"));
         }
 
         // The rate limit guards the client-to-server direction, so only
@@ -5303,11 +5435,26 @@ impl<'s> Desugar<'s> {
         self.scopes.push(HashSet::new());
         let mut cursor = self.byte_start(block.span);
 
-        for stmt in &block.stmts {
+        for (i, stmt) in block.stmts.iter().enumerate() {
             let start = self.byte_start(stmt.span());
             self.copy(cursor, start);
             let before = self.r.out_len();
+            // Luau takes `return`, `break` and `continue` only as the
+            // last statement of a block. `do ... end` around one that is
+            // not last keeps the meaning and parses. `unreachable_code`
+            // already names the statements under it.
+            let fenced = is_early_exit(stmt) && has_live_stmt(&block.stmts[i + 1..]);
+
+            if fenced {
+                self.generate(start, "do ");
+            }
+
             self.stmt(stmt);
+
+            if fenced {
+                self.generate(self.byte_end(stmt.span()), " end");
+            }
+
             self.keep_lines(stmt.span(), before);
             cursor = self.byte_end(stmt.span());
         }
@@ -7654,7 +7801,7 @@ impl<'s> Desugar<'s> {
                 .options
                 .import_types
                 .iter()
-                .any(|(_, names)| names.iter().any(|n| n == name))
+                .any(|(_, names)| names.iter().any(|n| crate::modules::type_head(n) == name))
             || ALIAS_DATATYPES.contains(&name)
         {
             return Some(name.to_string());
@@ -7679,6 +7826,29 @@ impl<'s> Desugar<'s> {
             }
 
             _ => false,
+        }
+    }
+
+    /// ` & { read f: T }` for every `write` field a struct declares. A
+    /// `write` field answers no read, and the derived code reads them
+    /// all. An empty text when the struct has none.
+    fn read_view(&mut self, decls: &[Field]) -> String {
+        let mut parts = Vec::new();
+
+        for f in decls {
+            if !f.modifier.is_some_and(|m| self.text_of(m) == "write") {
+                continue;
+            }
+
+            let name = self.text_of(f.name).to_string();
+            let ty = self.copy_type_to_string(f.ty);
+            parts.push(format!("read {name}: {ty}"));
+        }
+
+        match parts.is_empty() {
+            true => String::new(),
+
+            false => format!(" & {{ {} }}", parts.join(", ")),
         }
     }
 
@@ -8319,6 +8489,13 @@ impl<'s> Desugar<'s> {
             })
             .collect();
 
+        // A closure inside the body names the same parameter, and the
+        // `T` Luau sees there carries no bound. The annotation takes the
+        // intersection the top-level parameters take.
+        if !bounds.is_empty() {
+            self.bind_nested_bounds(&body.block, &bounds);
+        }
+
         if let Some(g) = body.generics
             && !bounds.is_empty()
         {
@@ -8482,6 +8659,44 @@ impl<'s> Desugar<'s> {
         }
 
         self.copy(end_tok.start, end_tok.end);
+    }
+
+    /// Wraps every nested annotation that names a bounded parameter in
+    /// `(T & Bound)`. The wrap is two inserts, so the annotation copies
+    /// as the source wrote it with the bound around it.
+    fn bind_nested_bounds(&mut self, block: &Block, bounds: &[(String, String)]) {
+        for stmt in &block.stmts {
+            self.bind_bounds_in(stmt_children(stmt), bounds);
+        }
+    }
+
+    fn bind_bounds_in(&mut self, children: Vec<Child<'_>>, bounds: &[(String, String)]) {
+        for child in children {
+            match child {
+                Child::Expr(e) => self.bind_bounds_in(expr_children(e), bounds),
+
+                Child::Block(b) => self.bind_nested_bounds(b, bounds),
+
+                Child::Function(f) => {
+                    for p in &f.params {
+                        let Some(t) = p.ty else {
+                            continue;
+                        };
+                        let text = self.text_of(t).trim().to_string();
+
+                        let Some((_, bound)) = bounds.iter().find(|(n, _)| *n == text) else {
+                            continue;
+                        };
+                        let open = self.byte_start(t);
+                        let close = self.byte_end(t);
+                        self.inserts.push((open, "(".to_string()));
+                        self.inserts.push((close, format!(" & {bound})")));
+                    }
+
+                    self.bind_nested_bounds(&f.block, bounds);
+                }
+            }
+        }
     }
 
     fn params_open_tok(&self, body: &FunctionBody) -> u32 {
@@ -9249,10 +9464,34 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
     stmt_children(s).iter().any(|c| match c {
         Child::Expr(e) => expr_needs_desugar(e),
 
-        Child::Block(b) => b.stmts.iter().any(stmt_needs_desugar),
+        Child::Block(b) => block_needs_desugar(b),
 
-        Child::Function(f) => f.block.stmts.iter().any(stmt_needs_desugar),
+        Child::Function(f) => block_needs_desugar(&f.block),
     })
+}
+
+/// Whether a statement leaves its block: `return`, `break`, `continue`.
+fn is_early_exit(s: &Stmt) -> bool {
+    matches!(s, Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_))
+}
+
+/// Whether any of these statements carries code; a `;` does not.
+fn has_live_stmt(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| !matches!(s, Stmt::Empty(_)))
+}
+
+/// Whether a block holds a `return`, a `break`, or a `continue` that is
+/// not its last statement. Luau rejects that, so the emit fences it in
+/// `do ... end` and the block goes through the renderer.
+fn block_has_dead_code(b: &Block) -> bool {
+    b.stmts
+        .iter()
+        .enumerate()
+        .any(|(i, s)| is_early_exit(s) && has_live_stmt(&b.stmts[i + 1..]))
+}
+
+fn block_needs_desugar(b: &Block) -> bool {
+    block_has_dead_code(b) || b.stmts.iter().any(stmt_needs_desugar)
 }
 
 /// Whether the text calls `name(` as a plain name: the struct call the
@@ -9572,7 +9811,7 @@ fn one_line(text: &str) -> String {
 }
 
 /// Backticked names joined with commas and a final `and`.
-fn list_names(names: &[&str]) -> String {
+pub(crate) fn list_names(names: &[&str]) -> String {
     let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
 
     match quoted.len() {
@@ -9671,6 +9910,12 @@ fn wire_offender(ty: &str) -> Option<(Option<String>, String, &'static str)> {
     not_wire_type(trimmed).map(|why| (None, trimmed.to_string(), why))
 }
 
+/// Whether a bare pattern name reads as a variant: it starts with a
+/// capital. A binding the author meant starts lowercase.
+fn is_variant_name(name: &str) -> bool {
+    name.chars().next().is_some_and(char::is_uppercase)
+}
+
 fn not_wire_type(ty: &str) -> Option<&'static str> {
     if ty.contains("->") {
         return Some("is a function type");
@@ -9683,6 +9928,12 @@ fn not_wire_type(ty: &str) -> Option<&'static str> {
             "thread" => return Some("is a coroutine"),
             "Future" => return Some("is a `Future`, which holds a coroutine"),
             "Signal" => return Some("is a `Signal`, which holds functions"),
+            // A remote strips the metatable, so the methods do not
+            // arrive. `Array<T>` and `T[]` are the exception: the wire
+            // packs the items and the other side builds the array.
+            "HashMap" | "Set" | "Queue" | "Heap" | "Iter" => {
+                return Some("carries a metatable that the wire cannot pack");
+            }
             _ => {}
         }
     }
@@ -9701,6 +9952,22 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    #[test]
+    fn a_match_over_an_imported_enum_is_exhaustive() {
+        let src = "import { R } from \"./e1\"\nlocal function t(r: R): number\n    return match r with\n        case R.A then 1\n        case R.B then 2\n    end\nend\nprint(t)\n";
+        let options = EmitOptions {
+            import_enums: vec![(
+                "R".to_string(),
+                vec![("A".to_string(), 0), ("B".to_string(), 0)],
+            )],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert!(messages.is_empty(), "{messages:?}");
     }
 
     fn lint_names(src: &str) -> Vec<&'static str> {
@@ -10035,6 +10302,92 @@ mod tests {
         );
     }
 
+    /// A remote's surface is a type the checker reads, so `T[]` lowers
+    /// to `Array<T>` there and a std name takes the runtime's prefix.
+    #[test]
+    fn a_remote_surface_lowers_its_types() {
+        let src = "remote function Names() -> string[] from client
+remote function Many() -> Array<string> from client
+remote Take(xs: string[]) from client
+";
+        let out = crate::compile(src).unwrap();
+        assert!(!out.check.contains("string[]"), "{}", out.check);
+        assert!(out.check.contains("__alloy.Array<string>"), "{}", out.check);
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
+    /// A `HashMap` keeps its methods on a metatable, which a remote
+    /// strips. The answer of a remote function crosses the wire too.
+    #[test]
+    fn a_metatable_type_cannot_cross_a_remote() {
+        let src = "remote Send(bag: HashMap<string, number>) from client
+remote function Read() -> HashMap<string, number> from client
+";
+        let got = messages(src);
+        assert!(
+            got.iter().any(|m| m
+                == "remote `Send`: parameter `bag` has type `HashMap<string, number>`, which carries a metatable that the wire cannot pack; a remote carries only data"),
+            "{got:?}"
+        );
+        assert!(
+            got.iter().any(|m| m
+                == "remote `Read`: returns `HashMap<string, number>`, which carries a metatable that the wire cannot pack; a remote carries only data"),
+            "{got:?}"
+        );
+        // An array still crosses.
+        assert!(
+            messages(
+                "remote function Names() -> string[] from client
+"
+            )
+            .is_empty()
+        );
+    }
+
+    /// The surface types what the editor reads: `wait` settles with the
+    /// payload the handler would get, and `spec` is the declaration, not
+    /// `any`.
+    #[test]
+    fn a_remote_surface_types_wait_and_spec() {
+        let out = crate::compile("export remote Toast(text: string) from server\n").unwrap();
+        assert!(
+            out.check.contains("wait: () -> __alloy.Future<string>"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("spec: __alloy.RemoteSpec"),
+            "{}",
+            out.check
+        );
+        // The server handles a client's fire, and the sender comes first.
+        let up = crate::compile("export remote Buy(offer_id: number) from client\n").unwrap();
+        assert!(
+            up.check.contains("wait: () -> __alloy.Future<Player>"),
+            "{}",
+            up.check
+        );
+    }
+
+    /// `@unreliable` rides an UnreliableRemoteEvent, and Roblox drops a
+    /// payload over 900 bytes.
+    #[test]
+    fn an_unreliable_remote_needs_a_bounded_payload() {
+        let got = messages("@unreliable\nremote Bulk(chunk: string) from client\n");
+        assert!(
+            got.iter().any(|m| m
+                == "remote `Bulk` is `@unreliable`, so its payload has to fit 900 bytes; a string has no length bound, and parameter `chunk` is one. Bound it, or drop `@unreliable`"),
+            "{got:?}"
+        );
+        // A fixed-width payload passes, and a reliable remote is free.
+        assert!(
+            messages("@unreliable\nremote Tick(@u8 n: number, at: number) from server\n")
+                .is_empty()
+        );
+        assert!(messages("@unreliable\nremote Move(cframe: CFrame) from client\n").is_empty());
+        assert!(messages("remote Bulk(chunk: string) from client\n").is_empty());
+    }
+
     #[test]
     fn a_wire_message_names_the_field_that_holds_the_function() {
         let src = "remote Deep(payload: { name: string, cb: (number) -> () }) from client\n";
@@ -10044,6 +10397,28 @@ mod tests {
             "{:?}",
             messages(src)
         );
+    }
+
+    /// A unit variant is a bare name in a pattern, so a misspelt one
+    /// reads as a binding. A capital says the author meant a variant.
+    #[test]
+    fn a_misspelt_unit_variant_in_an_arm_reports() {
+        let src = "enum Phase as\n    Lobby\n    Playing(number)\nend\nlocal function d(p: Phase): string\n    return match p with\n        case Lobby then \"a\"\n        case Playing(n) then \"b\"\n        case Finished then \"c\"\n        default \"?\"\n    end\nend\nprint(d)\n";
+        let got = messages(src);
+        assert!(
+            got.iter().any(|m| m
+                == "`Phase` has no variant `Finished`; its variants are `Lobby` and `Playing`"),
+            "{got:?}"
+        );
+        // The arms do not cover the enum, so the `default` does run.
+        assert!(
+            !lint_names(src).contains(&"unreachable_default"),
+            "{:?}",
+            lint_names(src)
+        );
+        // A lowercase name is still the catch-all it has always been.
+        let bound = "enum Phase as\n    Lobby\n    Playing(number)\nend\nlocal function d(p: Phase): string\n    return match p with\n        case Lobby then \"a\"\n        case rest then \"b\"\n    end\nend\nprint(d)\n";
+        assert!(messages(bound).is_empty(), "{:?}", messages(bound));
     }
 
     #[test]

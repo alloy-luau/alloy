@@ -1,0 +1,24 @@
+-- A statement under a `return`, a `break`, or a `continue` never runs.
+-- Luau takes those three only as the last statement of a block, so the
+-- emit fences each one in `do ... end`.
+local function scan(xs: number[]): number
+    local found = 0
+
+    for _, x in xs do
+        if x > 3 then
+            found = x
+            break
+            found = 0
+        end
+    end
+
+    while found < 10 do
+        continue
+        found += 1
+    end
+
+    return found
+    found = 1
+end
+
+return scan

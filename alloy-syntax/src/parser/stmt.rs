@@ -19,7 +19,15 @@ impl<'a> Parser<'a> {
         let mut stmts = Vec::new();
 
         while !self.at_end() && !self.at_block_end() {
-            let is_return = self.at("return");
+            let terminator = if self.at("return") {
+                Some("return")
+            } else if self.at("break") {
+                Some("break")
+            } else if self.at("continue") && self.continue_is_keyword() {
+                Some("continue")
+            } else {
+                None
+            };
             let stmt_start = self.pos;
 
             let stmt = match self.stmt() {
@@ -48,14 +56,28 @@ impl<'a> Parser<'a> {
 
             stmts.push(stmt);
 
-            if is_return {
-                // A return ends its block. Only a `;` can follow.
+            if terminator.is_some() {
+                // A `;` belongs to the statement that ends the block.
                 if self.at(";") {
                     let i = self.bump();
                     stmts.push(Stmt::Empty(TokSpan::new(i, i + 1)));
                 }
 
-                break;
+                if self.at_end() || self.at_block_end() {
+                    break;
+                }
+
+                // A statement under a `return`, a `break`, or a
+                // `continue` never runs. The block keeps it so the file
+                // still parses; `unreachable_code` names it and the emit
+                // drops it, since Luau rejects it.
+                //
+                // A statement that starts left of the terminator is the
+                // other case: the block is missing its `end`. Closing
+                // here reports that against the keyword that opened it.
+                if self.column_at(self.pos) < self.column_at(stmt_start) {
+                    break;
+                }
             }
         }
 

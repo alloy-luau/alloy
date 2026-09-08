@@ -31,9 +31,24 @@ pub fn format_alx_file(src: &str, options: &FmtConfig) -> Result<String, String>
     format_alx_inner(src, options, true)
 }
 
+/// A markup error as `alloy fmt` reports it: the position, then the
+/// reason, in the shape `fmt` uses for a file it skipped.
+fn unparsed(src: &str, offset: usize, message: &str) -> String {
+    let at = offset.min(src.len());
+    let before = &src[..at];
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().map_or(0, str::len) + 1;
+
+    format!("{}: {line}:{col}: {message}", crate::fmt::UNPARSED)
+}
+
 fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<String, String> {
     let code_fmt = if whole { format_file } else { format_with };
-    let spans = luaux::compile::markup_spans(src).map_err(|e| e.message)?;
+    // Markup the parser cannot read is the same case as Alloy code it
+    // cannot read: the file keeps its text and the run says why, with
+    // the position the same error carries under `alloy check`.
+    let spans =
+        luaux::compile::markup_spans(src).map_err(|e| unparsed(src, e.offset, &e.message))?;
 
     if spans.is_empty() {
         return code_fmt(src, options);
@@ -45,7 +60,8 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
 
     for (n, (a, b)) in spans.iter().enumerate() {
         code.push_str(&src[last..*a]);
-        let (node, _) = luaux::markup::parse_node(src, *a).map_err(|e| e.message)?;
+        let (node, _) =
+            luaux::markup::parse_node(src, *a).map_err(|e| unparsed(src, e.offset, &e.message))?;
         let lines = print_node(src, &node, options, 0);
         let width = if lines.len() == 1 {
             lines[0].1.chars().count()

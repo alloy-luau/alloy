@@ -137,6 +137,13 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // `collapsible_if` already reports this chain, and
+            // collapsing it takes the depth away. Two lints that give
+            // opposite advice on one construct help nobody.
+            if self.at(i, "if") && self.in_collapsible_chain(i) {
+                continue;
+            }
+
             if nest[i] + 1 == limit + 1 {
                 let word = self.t(i);
                 self.lint(
@@ -235,37 +242,96 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            let j = then + 1;
-            let Some(IfParts {
-                then: inner_then,
-                elseifs: inner_elseifs,
-                else_at: None,
-                end: inner_end,
-            }) = self.if_parts(j)
-            else {
-                continue;
-            };
-
-            if !inner_elseifs.is_empty()
-                || inner_end + 1 != end
-                || self.comment_between(then, j)
-                || self.comment_between(inner_end, end)
-            {
+            // An `if` that is itself the only statement of another `if`
+            // belongs to that one's chain. Reporting it too gives one
+            // warning per level and one rewrite per pass.
+            if self.prev(i) == "then" && self.at(end + 1, "end") {
                 continue;
             }
 
-            let a = self.guarded(i + 1, then);
-            let b = self.guarded(j + 1, inner_then);
-            let body = &self.src[self.end(inner_then) as usize..self.start(inner_end) as usize];
+            // The whole chain, however deep: every condition joins with
+            // `and`, and the innermost body becomes the new body.
+            let mut conds = vec![self.guarded(i + 1, then)];
+            let mut last_then = then;
+            let mut last_end = end;
+            let mut deepest = i;
+
+            while self.at(last_then + 1, "if") {
+                let j = last_then + 1;
+                let Some(IfParts {
+                    then: inner_then,
+                    elseifs: inner_elseifs,
+                    else_at: None,
+                    end: inner_end,
+                }) = self.if_parts(j)
+                else {
+                    break;
+                };
+
+                if !inner_elseifs.is_empty()
+                    || inner_end + 1 != last_end
+                    || self.comment_between(last_then, j)
+                    || self.comment_between(inner_end, last_end)
+                {
+                    break;
+                }
+
+                conds.push(self.guarded(j + 1, inner_then));
+                deepest = j;
+                last_then = inner_then;
+                last_end = inner_end;
+            }
+
+            if conds.len() < 2 {
+                continue;
+            }
+
+            let joined = conds.join(" and ");
+            let body = &self.src[self.end(last_then) as usize..self.start(last_end) as usize];
+            // The collapse takes the nesting away, so the body moves
+            // left with it. Without this the fixer leaves the
+            // statements under the old inner `if`.
+            let body = dedent(
+                body,
+                self.indent_of(deepest).saturating_sub(self.indent_of(i)),
+            );
             self.lint(
                 out,
                 "collapsible_if",
                 i,
                 end,
-                format!("an `if` whose only statement is an `if` is one: `if {a} and {b} then`"),
-                Some(format!("if {a} and {b} then{body}end")),
+                format!("an `if` whose only statement is an `if` is one: `if {joined} then`"),
+                Some(format!("if {joined} then{body}end")),
             );
         }
+    }
+
+    /// Whether an `if` is part of a chain `collapsible_if` reports: it
+    /// is the only statement of the `if` above it, or the `if` below it
+    /// is its only statement.
+    fn in_collapsible_chain(&self, i: usize) -> bool {
+        let Some(IfParts {
+            then,
+            elseifs,
+            else_at: None,
+            end,
+        }) = self.if_parts(i)
+        else {
+            return false;
+        };
+
+        if !elseifs.is_empty() {
+            return false;
+        }
+
+        if self.prev(i) == "then" && self.at(end + 1, "end") {
+            return true;
+        }
+
+        self.at(then + 1, "if")
+            && self
+                .if_parts(then + 1)
+                .is_some_and(|p| p.else_at.is_none() && p.elseifs.is_empty() && p.end + 1 == end)
     }
 
     /// `else if ... end end` is `elseif ... end`.
@@ -297,6 +363,12 @@ impl<'s> Scan<'s> {
             }
 
             let rest = &self.src[self.end(j) as usize..self.end(inner_end) as usize];
+            // `elseif` sits where the `else` did, one level left of the
+            // `if` it replaces, so the body moves left with it.
+            let rest = dedent(
+                rest,
+                self.indent_of(j).saturating_sub(self.indent_of(else_at)),
+            );
             self.lint(
                 out,
                 "collapsible_else_if",
@@ -397,16 +469,48 @@ impl<'s> Scan<'s> {
 
             let table = self.slice(i + 4, p);
             let value = self.slice(q + 3, close).trim();
-            self.lint(
-                out,
-                "table_insert_position",
-                i,
-                close,
-                format!("`table.insert({table}, #{table} + 1, v)` is `table.insert({table}, v)`"),
-                Some(format!("table.insert({table}, {value})")),
-            );
+            // On an Array the shorter form is the method, and
+            // `manual_push` would report the plain call next.
+            let (message, fix) = if self.array_names().contains(&table) {
+                (
+                    format!(
+                        "`table.insert({table}, #{table} + 1, v)` appends; `{table}` is an Array, so `{table}:push(v)` is the form"
+                    ),
+                    format!("{table}:push({value})"),
+                )
+            } else {
+                (
+                    format!(
+                        "`table.insert({table}, #{table} + 1, v)` is `table.insert({table}, v)`"
+                    ),
+                    format!("table.insert({table}, {value})"),
+                )
+            };
+            self.lint(out, "table_insert_position", i, close, message, Some(fix));
         }
     }
+}
+
+/// Every line but the first with up to `n` leading spaces taken off.
+fn dedent(text: &str, n: usize) -> String {
+    if n == 0 {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len());
+
+    for (k, line) in text.split_inclusive('\n').enumerate() {
+        if k == 0 {
+            out.push_str(line);
+
+            continue;
+        }
+
+        let keep = line.len() - line.trim_start_matches(' ').len();
+        out.push_str(&line[keep.min(n)..]);
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -541,7 +645,7 @@ mod tests {
     fn nested_ifs_collapse() {
         assert_eq!(
             fixed("if a then\n    if b or c then\n        print(1)\n    end\nend\n"),
-            "if a and (b or c) then\n        print(1)\n    end\n"
+            "if a and (b or c) then\n    print(1)\nend\n"
         );
         assert_eq!(
             names("if a then\n    if b then\n        print(1)\n    end\n    print(2)\nend\n"),
@@ -555,7 +659,7 @@ mod tests {
             fixed(
                 "if a then\n    print(1)\nelse\n    if b then\n        print(2)\n    else\n        print(3)\n    end\nend\n"
             ),
-            "if a then\n    print(1)\nelseif b then\n        print(2)\n    else\n        print(3)\n    end\n"
+            "if a then\n    print(1)\nelseif b then\n    print(2)\nelse\n    print(3)\nend\n"
         );
     }
 
@@ -580,6 +684,47 @@ mod tests {
         assert_eq!(
             fixed("table.insert(t, #t + 1, v)\n"),
             "table.insert(t, v)\n"
+        );
+        // On an Array the rewrite goes straight to the method; the
+        // plain call would draw `manual_push` on the next run.
+        assert_eq!(
+            fixed("local function f(t: number[])\n    table.insert(t, #t + 1, 5)\nend\n"),
+            "local function f(t: number[])\n    t:push(5)\nend\n"
+        );
+    }
+
+    /// A chain gives one warning and one rewrite, however deep it is,
+    /// and `deep_nesting` stands down where it covers the chain.
+    #[test]
+    fn a_chain_of_ifs_collapses_in_one_rewrite() {
+        let src = "local function f(a, b, c)\n    if a then\n        if b then\n            if c then\n                return 1\n            end\n        end\n    end\n    return 0\nend\n";
+        assert_eq!(
+            names_with(
+                src,
+                Thresholds {
+                    max_nesting: 2,
+                    ..Thresholds::default()
+                }
+            ),
+            vec!["collapsible_if"]
+        );
+        assert_eq!(
+            fixed(src),
+            "local function f(a, b, c)\n    if a and b and c then\n        return 1\n    end\n    return 0\nend\n"
+        );
+    }
+
+    /// A collapse takes one level of nesting away, so the body moves
+    /// left with it and the file stays formatted.
+    #[test]
+    fn a_collapsed_if_keeps_its_indentation() {
+        assert_eq!(
+            fixed("if a then\n    if b then\n        return 1\n    end\nend\n"),
+            "if a and b then\n    return 1\nend\n"
+        );
+        assert_eq!(
+            fixed("if a then\n    return 1\nelse\n    if b then\n        return 2\n    end\nend\n"),
+            "if a then\n    return 1\nelseif b then\n    return 2\nend\n"
         );
     }
 }

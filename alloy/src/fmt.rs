@@ -1854,6 +1854,7 @@ impl<'s> Formatter<'s> {
                         | "until"
                         | ";"
                         | "case"
+                        | "default"
                 )
         })
     }

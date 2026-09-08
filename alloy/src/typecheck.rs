@@ -489,6 +489,12 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         }
 
+        // A half-typed member access leaves the checker with no name,
+        // and it reports its own stand-in. The parser names the gap.
+        if crate::shapes::names_only_the_emit(message) {
+            continue;
+        }
+
         // The path is relative to the mirror: `<out>/a/b.luau`.
         let path = PathBuf::from(report.path.trim_start_matches("./"));
         let path = path
@@ -528,6 +534,13 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         };
 
+        // Alloy owns the unused-name lints, and its own words name the
+        // construct the source wrote. Two lints for one idea disagree
+        // inside one run, so the checker's copy goes.
+        if owned_lint(kind) {
+            continue;
+        }
+
         // Alloy's own lint already said this, in the words of what the
         // source wrote; the checker's copy on the same line says it
         // twice.
@@ -535,6 +548,17 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             && f.lint_lines
                 .iter()
                 .any(|(at, name)| *at == mapped.0 && names.contains(name))
+        {
+            continue;
+        }
+
+        // `:connect` draws a missing-key report as well as
+        // `deprecated_method`, which names the current spelling and
+        // carries the rewrite. One report per mistake.
+        if message.contains("Did you mean")
+            && f.lint_lines
+                .iter()
+                .any(|(at, name)| *at == mapped.0 && *name == "deprecated_method")
         {
             continue;
         }
@@ -604,11 +628,11 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             errored.extend(hits);
         }
 
-        for (at, reason) in silence.unmet(&errored) {
+        for (at, col, reason) in silence.unmet(&errored) {
             analysis.diagnostics.push(TypeDiag {
                 rel: f.rel.clone(),
                 line: at + 1,
-                col: 1,
+                col: col.max(1),
                 kind: "DirectiveError".to_string(),
                 message: crate::directives::unmet_message(reason.as_deref()),
             });
@@ -661,19 +685,32 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
     });
 
+    // A nil base makes every key on it unknown. `could be nil` names
+    // the problem; the key report sends the reader after a typo that
+    // is not there.
+    let nil_lines: Vec<(PathBuf, usize)> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("could be nil"))
+        .map(|d| (d.rel.clone(), d.line))
+        .collect();
+
+    analysis.diagnostics.retain(|d| {
+        !(d.message.starts_with("Key '") && nil_lines.contains(&(d.rel.clone(), d.line)))
+    });
+
     // A `.` where a `:` belongs draws the arity error and then every
     // mismatch that follows from the shifted arguments. The one
     // sentence that names the mistake stands alone.
     let typo_lines: Vec<(PathBuf, usize)> = analysis
         .diagnostics
         .iter()
-        .filter(|d| d.message.contains("` is a method; call it with `"))
+        .filter(|d| d.message.contains(DOT_FOR_COLON))
         .map(|d| (d.rel.clone(), d.line))
         .collect();
 
     analysis.diagnostics.retain(|d| {
-        d.message.contains("` is a method; call it with `")
-            || !typo_lines.contains(&(d.rel.clone(), d.line))
+        d.message.contains(DOT_FOR_COLON) || !typo_lines.contains(&(d.rel.clone(), d.line))
     });
 
     analysis
@@ -741,6 +778,11 @@ pub fn friendly_type_message(
         .map_or(cut.as_str(), |(_, rest)| rest);
     let stripped = strip_std_prefix(cut);
     let folded = drop_result_methods(&crate::shapes::fold(&stripped, known));
+
+    if let Some(hint) = crate::shapes::plain_table_hint(&folded) {
+        return hint;
+    }
+
     let Some(line) = line else {
         return folded;
     };
@@ -761,6 +803,26 @@ pub fn friendly_type_message(
 
         None => folded,
     }
+}
+
+/// The one sentence for a `.` where a `:` belongs, and for the arity of
+/// a method call the source writes without `self`. The CLI and the
+/// editor both call it, so both say the same thing.
+///
+/// `line` is the source line the report sits on. `col` is one-based.
+pub fn rewrite_dot_call(message: &str, line: &str, col: usize) -> Option<String> {
+    rewrite_arity(message, line, col).or_else(|| rewrite_dot_self(message, line, col))
+}
+
+/// The phrase that names a `.` where a `:` belongs. A report on a line
+/// that already carries it is the same mistake told again.
+pub const DOT_FOR_COLON: &str = "` is a method; call it with `";
+
+/// The checker's lints Alloy replaces outright: `unused_variable`,
+/// `unused_function`, and `unused_import` cover the same ground, in the
+/// words of what the source wrote.
+pub fn owned_lint(kind: &str) -> bool {
+    matches!(kind, "LocalUnused" | "FunctionUnused" | "ImportUnused")
 }
 
 /// The Alloy lints that say what one of the checker's lints says. Alloy
@@ -1566,6 +1628,50 @@ mod tests {
             ),
             "`push` is a method; call it with `xs:push(...)`, not `xs.push(...)`"
         );
+    }
+
+    /// The checker answers a `{ ... }` where an Array belongs with the
+    /// nineteen methods the table lacks. The reader wrote the wrong
+    /// bracket.
+    #[test]
+    fn a_table_literal_where_an_array_belongs_names_the_bracket() {
+        let message = "Table type '{string}' not compatible with type 'string[]' because the former is missing fields 'find', 'filter', 'push', 'map'";
+        assert_eq!(
+            friendly_type_message(message, &crate::shapes::Known::default(), None, 1),
+            "a `{ ... }` is a plain table, not a `string[]`; an Array literal is `[ ... ]`"
+        );
+        // A table where a table belongs keeps the checker's words.
+        let other = "Table type '{string}' not compatible with type '{ x: number }' because the former is missing fields 'x'";
+        assert!(
+            friendly_type_message(other, &crate::shapes::Known::default(), None, 1)
+                .contains("missing fields"),
+        );
+    }
+
+    /// A nil base makes every key on it unknown. `could be nil` names
+    /// the problem; the key report sends the reader after a typo that
+    /// is not there.
+    #[test]
+    fn the_unused_lints_and_the_nil_cascade_belong_to_alloy() {
+        assert!(owned_lint("LocalUnused"));
+        assert!(owned_lint("FunctionUnused"));
+        assert!(owned_lint("ImportUnused"));
+        assert!(!owned_lint("DeprecatedApi"));
+    }
+
+    /// The checker names the two emitted files of an import cycle;
+    /// `circular_import` names the two the author wrote.
+    #[test]
+    fn the_emit_only_reports_are_dropped() {
+        assert!(crate::shapes::names_only_the_emit(
+            "TypeError: Key '%error-id%' not found in external type 'Player'"
+        ));
+        assert!(crate::shapes::names_only_the_emit(
+            "Cyclic module dependency: /tmp/alloy-flux-1/root/build/a.luau -> /tmp/x/b.luau"
+        ));
+        assert!(!crate::shapes::names_only_the_emit(
+            "Key 'Position' not found in external type 'Instance'"
+        ));
     }
 
     #[test]

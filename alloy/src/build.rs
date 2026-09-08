@@ -313,6 +313,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             std_require,
             ship_std_require,
             import_types: crate::modules::import_types(&source, &path, &module_aliases),
+            import_enums: crate::modules::import_enums(&source, &path, &module_aliases),
             import_privates: crate::modules::import_privates(&source, &path, &module_aliases),
             import_result_asyncs: crate::modules::import_result_asyncs(
                 &source,

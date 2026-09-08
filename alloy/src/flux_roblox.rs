@@ -41,6 +41,11 @@ const DEPRECATED_METHODS: &[(&str, &str)] = &[
     ("getPlayerFromCharacter", "GetPlayerFromCharacter"),
 ];
 
+/// The two old names a std container also carries: `HashMap:remove(key)`
+/// and a user `clone(self, ...)` both take arguments, and the Roblox
+/// members take none. An empty call is the deprecated one.
+const DEPRECATED_WITHOUT_ARGS: &[(&str, &str)] = &[("remove", "Destroy"), ("clone", "Clone")];
+
 /// The body movers and what replaces each.
 const BODY_MOVERS: &[(&str, &str)] = &[
     ("BodyVelocity", "LinearVelocity"),
@@ -63,7 +68,16 @@ impl<'s> Scan<'s> {
             }
 
             let name = self.t(i + 1);
-            let Some((_, current)) = DEPRECATED_METHODS.iter().find(|(old, _)| *old == name) else {
+            let empty_call = self.at(i + 3, ")");
+            let current = DEPRECATED_METHODS
+                .iter()
+                .find(|(old, _)| *old == name)
+                .or_else(|| {
+                    empty_call
+                        .then(|| DEPRECATED_WITHOUT_ARGS.iter().find(|(old, _)| *old == name))
+                        .flatten()
+                });
+            let Some((_, current)) = current else {
                 continue;
             };
 
@@ -283,7 +297,7 @@ mod tests {
     fn old_method_names_take_the_new_ones() {
         assert_eq!(
             fixed("part.Touched:connect(f)\nlocal c = part:clone()\n"),
-            "part.Touched:Connect(f)\nlocal c = part:clone()\n"
+            "part.Touched:Connect(f)\nlocal c = part:Clone()\n"
         );
         assert_eq!(
             names("function Signal:connect(f) end\nlocal c = s:connect(f)\n"),
@@ -314,6 +328,19 @@ mod tests {
     /// Every lint, the pedantic ones included.
     fn all(src: &str) -> Vec<&'static str> {
         lints(src).iter().map(|l| l.name).collect()
+    }
+
+    /// `:clone()` and `:remove()` are the other two names the lint's
+    /// own description gives. A `HashMap` has a `remove` of its own, so
+    /// only a call with no arguments is the Roblox member.
+    #[test]
+    fn the_argument_free_old_names_fire() {
+        assert_eq!(
+            fixed("local c = part:clone()\nc:remove()\n"),
+            "local c = part:Clone()\nc:Destroy()\n"
+        );
+        assert_eq!(names("local v = bag:remove(\"key\")\n"), Vec::<&str>::new());
+        assert_eq!(names("local c = t:clone(1)\n"), Vec::<&str>::new());
     }
 
     #[test]

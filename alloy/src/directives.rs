@@ -37,6 +37,9 @@ impl Side {
 #[derive(Debug, Clone)]
 struct Expect {
     at: usize,
+    /// The one-based column the directive starts at. A trailing one
+    /// sits after the code, and the report points at it.
+    col: usize,
     reason: Option<String>,
 }
 
@@ -167,13 +170,41 @@ pub fn scan(src: &str) -> Directives {
         }
 
         if let Some(rest) = leading(trimmed, IGNORE_START) {
-            open.push((i, name_argument(rest)));
+            let name = name_argument(rest);
+
+            // The region's filter is a lint name, and a name no lint
+            // carries silences nothing.
+            if let Some(n) = &name
+                && !crate::lint::is_known_name(n)
+            {
+                out.errors.push((
+                    i,
+                    format!(
+                        "the `{IGNORE_START}` directive names `{n}`, which is neither a lint nor a group; `alloy lint --list` has them"
+                    ),
+                ));
+            }
+
+            open.push((i, name));
 
             continue;
         }
 
         if let Some(rest) = leading(trimmed, IGNORE_END) {
-            close_region(&mut out, &mut open, i, name_argument(rest));
+            let name = name_argument(rest);
+
+            if let Some(n) = &name
+                && !crate::lint::is_known_name(n)
+            {
+                out.errors.push((
+                    i,
+                    format!(
+                        "the `{IGNORE_END}` directive names `{n}`, which is neither a lint nor a group; `alloy lint --list` has them"
+                    ),
+                ));
+            }
+
+            close_region(&mut out, &mut open, i, name);
 
             continue;
         }
@@ -191,7 +222,11 @@ pub fn scan(src: &str) -> Directives {
                 out.missing_reason.push(i);
             }
 
-            expecting.push(Expect { at: i, reason });
+            expecting.push(Expect {
+                at: i,
+                col: line.find(EXPECT).map_or(0, |at| at + 1),
+                reason,
+            });
 
             continue;
         }
@@ -235,10 +270,11 @@ pub fn scan(src: &str) -> Directives {
                 out.missing_reason.push(i);
             }
 
-            out.expected
-                .entry(i)
-                .or_default()
-                .push(Expect { at: i, reason });
+            out.expected.entry(i).or_default().push(Expect {
+                at: i,
+                col: line.find(EXPECT).map_or(0, |at| at + 1),
+                reason,
+            });
         } else if trailing(line, IGNORE).is_some() {
             out.ignored.insert(i);
         }
@@ -507,11 +543,11 @@ impl Directives {
 
     /// The directives whose covered line is not in `errored`: each is
     /// an error of its own, with the reason the author wrote.
-    pub fn unmet(&self, errored: &HashSet<usize>) -> Vec<(usize, Option<String>)> {
+    pub fn unmet(&self, errored: &HashSet<usize>) -> Vec<(usize, usize, Option<String>)> {
         self.expected
             .iter()
             .filter(|(line, _)| !errored.contains(line))
-            .flat_map(|(_, at)| at.iter().map(|e| (e.at, e.reason.clone())))
+            .flat_map(|(_, at)| at.iter().map(|e| (e.at, e.col, e.reason.clone())))
             .collect()
     }
 
@@ -636,7 +672,8 @@ mod tests {
         assert!(!d.allows(2));
         assert!(d.allows(3));
         assert!(d.expects(1) && d.expects(2));
-        assert_eq!(d.unmet(&HashSet::from([1])), vec![(2, None)]);
+        // The trailing directive reports at its own column, not at 1.
+        assert_eq!(d.unmet(&HashSet::from([1])), vec![(2, 13, None)]);
         assert!(d.unmet(&HashSet::from([1, 2])).is_empty());
         assert_eq!(span_of_line("a\n  --@alloy-expect-error\n", 1), (4, 25));
     }
@@ -644,7 +681,7 @@ mod tests {
     #[test]
     fn two_stacked_expect_directives_both_report() {
         let d = scan("--@alloy-expect-error\n--@alloy-expect-error\nlocal c = 2\n");
-        assert_eq!(d.unmet(&HashSet::new()), vec![(0, None), (1, None)]);
+        assert_eq!(d.unmet(&HashSet::new()), vec![(0, 1, None), (1, 1, None)]);
         assert!(d.unmet(&HashSet::from([2])).is_empty());
     }
 
@@ -691,7 +728,7 @@ mod tests {
         let d = scan("--@alloy-expect-error the solver misreads this\nlocal a = 1\n");
         assert_eq!(
             d.unmet(&HashSet::new()),
-            vec![(0, Some("the solver misreads this".to_string()))]
+            vec![(0, 1, Some("the solver misreads this".to_string()))]
         );
         assert!(d.missing_reason.is_empty());
         assert_eq!(
@@ -707,7 +744,7 @@ mod tests {
         let tail = scan("local a = 1 --@alloy-expect-error: private on purpose\n");
         assert_eq!(
             tail.unmet(&HashSet::new()),
-            vec![(0, Some("private on purpose".to_string()))]
+            vec![(0, 13, Some("private on purpose".to_string()))]
         );
         assert!(tail.missing_reason.is_empty());
         assert_eq!(

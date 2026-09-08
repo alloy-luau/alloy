@@ -202,6 +202,14 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     let parsed_clean = diagnostics.is_empty();
     diagnostics.extend(rendered.diagnostics);
 
+    for (start, end, message) in lint::const_reassignments(src, &parsed.lexed.toks) {
+        diagnostics.push(Diagnostic {
+            start,
+            end,
+            message,
+        });
+    }
+
     // A directive the compiler does not know silences nothing, so it
     // reads as a working one and is not. A directive it knows but
     // cannot accept reports the same way, on its own line.
@@ -463,6 +471,38 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    /// `alloy doc const` says a reassignment is a compile error. It
+    /// used to reach the reader only through `alloy flux`, as a Luau
+    /// syntax error.
+    #[test]
+    fn a_const_reassignment_is_a_compile_error() {
+        let src = "const MAX = 3\nMAX = 4\nprint(MAX)\n";
+        assert_eq!(
+            messages(src),
+            vec!["`MAX` is a `const`; its value is set once and a reassignment is an error"]
+        );
+        assert_eq!(docs::kind_for(&messages(src)[0]), "ConstError");
+        // A compound assignment is one too, and a plain `local` is free.
+        assert_eq!(messages("const MAX = 3\nMAX += 1\nprint(MAX)\n").len(), 1);
+        assert!(messages("local max = 3\nmax = 4\nprint(max)\n").is_empty());
+        // A read is not a write.
+        assert!(messages("const MAX = 3\nlocal n = MAX + 1\nprint(n)\n").is_empty());
+    }
+
+    /// A statement under a `return` used to end the block early, so the
+    /// function's own `end` read as a stray one and two syntax errors
+    /// landed on the wrong lines.
+    #[test]
+    fn a_statement_after_a_return_gives_no_syntax_error() {
+        let src =
+            "local function after(n: number): number\n    return n\n    n = 1\nend\nreturn after\n";
+        assert_eq!(messages(src), Vec::<String>::new());
+        let out = compile(src).unwrap();
+        assert!(out.ship.contains("do return n end"), "{}", out.ship);
+        let names: Vec<&str> = out.lints.iter().map(|l| l.name).collect();
+        assert!(names.contains(&"unreachable_code"), "{names:?}");
     }
 
     #[test]

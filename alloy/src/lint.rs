@@ -8,7 +8,7 @@
 //! that need the enum table, `unreachable_default` and `empty_default`,
 //! run inside the desugar and land in the same list.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{Chunk, ImportKind, Stmt};
 use alloy_syntax::lexer::{Tok, TokKind};
@@ -199,6 +199,27 @@ pub const LINTS: &[LintInfo] = &[
         default: Level::Warn,
         summary: "a value that may be nil is indexed without a guard",
         detail: "A parameter typed `T?`, or the result of a function that returns `T?`, is indexed with `.` or called with `:` while nothing in the function checks it for nil. Guard it with `if x then`, `x and`, `assert(x)`, or use `?.` and `?:`, which stop the chain at nil.",
+    },
+    LintInfo {
+        name: "dropped_result",
+        group: Group::Correctness,
+        default: Level::Warn,
+        summary: "a call of a `Result` function whose value nothing reads",
+        detail: "A function that can fail answers with a `Result`, and the caller reads it with a `match`, an `if local Ok(v) = r`, or a method. A call statement that drops it loses the failure: the program goes on as if the call worked. Bind the value, or say the failure is expected by naming what to do with it.",
+    },
+    LintInfo {
+        name: "static_call",
+        group: Group::Correctness,
+        default: Level::Warn,
+        summary: "a static of an `impl` called with `:`",
+        detail: "A function in an `impl` that does not take `self` is a static: `Wallet.new()`. Called with `:`, the colon passes the table as the first argument, which the static never asked for, and the values shift by one. `alloy flux --fix` writes the dot.",
+    },
+    LintInfo {
+        name: "argument_count",
+        group: Group::Correctness,
+        default: Level::Warn,
+        summary: "a call passes more arguments than the function takes",
+        detail: "The extra values are evaluated and dropped, so a mistake in the argument order reads as working code. The lint counts only the functions the file declares by a plain name with a fixed parameter list; a vararg, a default, or a name declared twice makes the count a range and the lint stands down. The checker reports the other direction, a call with too few arguments.",
     },
     LintInfo {
         name: "unreachable_default",
@@ -518,7 +539,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Roblox,
         default: Level::Warn,
         summary: "a lowercase Roblox method: `:connect`, `:wait`, `:remove`, `:clone`",
-        detail: "The lowercase members are the pre-2014 names, kept for old places and gone from the docs. `Connect`, `Wait`, `Destroy`, `Clone`, `GetChildren`, `FindFirstChild`, and `IsA` are the current ones, and the checker knows only those. A method of the same name that the file declares does not fire. `alloy flux --fix` rewrites them.",
+        detail: "The lowercase members are the pre-2014 names, kept for old places and gone from the docs. `Connect`, `Wait`, `Destroy`, `Clone`, `GetChildren`, `FindFirstChild`, and `IsA` are the current ones, and the checker knows only those. A method of the same name that the file declares does not fire, and `:remove` and `:clone` fire only on a call with no arguments, since a `HashMap` has a `remove` of its own. `alloy flux --fix` rewrites them.",
     },
     LintInfo {
         name: "instance_new_parent",
@@ -798,12 +819,77 @@ fn directive_lints(src: &str) -> Vec<Lint> {
         .collect()
 }
 
+/// `const N = 3` then `N = 4`: the byte range of each reassignment and
+/// its message.
+///
+/// `alloy doc const` says a reassignment is a compile error. Luau
+/// reports it as a syntax error in the emit, which only `alloy flux`
+/// runs, and in the checker's words.
+pub fn const_reassignments(src: &str, toks: &[Tok]) -> Vec<(u32, u32, String)> {
+    let text = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or("");
+    let lines = crate::fmt_structure::token_lines(src, toks);
+    let starts = |i: usize| {
+        i == 0
+            || lines[i - 1] != lines[i]
+            || matches!(text(i - 1), "then" | "do" | "else" | "end" | ";" | "repeat")
+    };
+    let mut names: Vec<&str> = Vec::new();
+
+    for i in 0..toks.len() {
+        if text(i) != "const" || !(starts(i) || text(i.wrapping_sub(1)) == "export") {
+            continue;
+        }
+
+        let mut j = i + 1;
+
+        while text(j) == "async" {
+            j += 1;
+        }
+
+        if text(j) == "function" || toks.get(j).map(|t| t.kind) != Some(TokKind::Ident) {
+            continue;
+        }
+
+        names.push(text(j));
+    }
+
+    if names.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != TokKind::Ident
+            || !names.contains(&text(i))
+            || !starts(i)
+            || !matches!(
+                text(i + 1),
+                "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..=" | "??="
+            )
+        {
+            continue;
+        }
+
+        let name = text(i);
+        out.push((
+            t.start,
+            t.end,
+            format!("`{name}` is a `const`; its value is set once and a reassignment is an error"),
+        ));
+    }
+
+    out
+}
+
 /// One function in the token stream.
 struct Fn {
     /// The `function` token.
     at: usize,
     /// The name path, empty for an anonymous function.
     path: Vec<usize>,
+    /// The `(` of the parameter list.
+    open: usize,
     /// The `)` of the parameter list.
     close: usize,
     /// The `end`, when the structure found it.
@@ -812,6 +898,8 @@ struct Fn {
     params: Vec<(usize, bool, bool)>,
     has_return_type: bool,
     optional_return: bool,
+    /// The return annotation names `Result`.
+    returns_result: bool,
     exported: bool,
     /// Inside an `impl` or a `trait`.
     in_impl: bool,
@@ -929,6 +1017,7 @@ pub fn run(
         let after = close + 1;
         let has_return_type = after < toks.len() && matches!(text(after), ":" | "->");
         let mut optional_return = false;
+        let mut returns_result = false;
 
         if has_return_type {
             // The annotation runs to the end of the `)` line.
@@ -940,6 +1029,7 @@ pub fn run(
             }
 
             optional_return = text(last) == "?";
+            returns_result = (after..=last).any(|k| text(k) == "Result");
         }
 
         let prev = i.checked_sub(1).map(text);
@@ -952,11 +1042,13 @@ pub fn run(
         fns.push(Fn {
             at: i,
             path,
+            open,
             close,
             end: st.ends[i],
             params,
             has_return_type,
             optional_return,
+            returns_result,
             exported,
             in_impl,
         });
@@ -1090,14 +1182,18 @@ pub fn run(
                 ) && !(prev == Some("(")
                     && !matches!(prev2, Some("assert" | "typeof" | "type")))
                     || prev.is_none();
+                // `return t` passes the optional on; `return t.x` reads
+                // through it. The token after the name decides, so a
+                // guard word before it never covers an access.
+                let access = matches!(next, Some("." | ":" | "["));
 
-                if guard_after || guard_before {
+                if !access && (guard_after || guard_before) {
                     guarded = true;
 
                     break;
                 }
 
-                if matches!(next, Some("." | ":" | "[")) && first_access.is_none() {
+                if access && first_access.is_none() {
                     first_access = Some(i);
                 }
             }
@@ -1189,14 +1285,15 @@ pub fn run(
                 prev,
                 Some("if" | "elseif" | "not" | "while" | "until" | "assert")
             );
+            let access = matches!(next, Some("." | ":" | "["));
 
-            if guard_after || guard_before {
+            if !access && (guard_after || guard_before) {
                 guarded = true;
 
                 break;
             }
 
-            if matches!(next, Some("." | ":" | "[")) && first_access.is_none() {
+            if access && first_access.is_none() {
                 first_access = Some(i);
             }
         }
@@ -1246,6 +1343,209 @@ pub fn run(
                 message: format!(
                     "`{}` returns a value that may be nil; guard the result before indexing it, or use `?.`",
                     t.text(src)
+                ),
+                fix: None,
+            });
+        }
+    }
+
+    // A token's text, or the empty string past the end.
+    let word = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or("");
+
+    // dropped_result: a call statement of a function that answers with
+    // a `Result`. The failure passes in silence.
+    {
+        let answers: Vec<&str> = fns
+            .iter()
+            .filter(|f| f.returns_result && f.path.len() == 1)
+            .map(|f| text(f.path[0]))
+            .collect();
+
+        for i in 0..toks.len() {
+            if toks[i].kind != TokKind::Ident
+                || !answers.contains(&word(i))
+                || word(i + 1) != "("
+                || matches!(
+                    i.checked_sub(1).map(text),
+                    Some("." | ":" | "?." | "?:" | "function" | "local")
+                )
+                || (i > 0 && line_of(i - 1) == line_of(i))
+            {
+                continue;
+            }
+
+            let Some(close) = matching(src, toks, i + 1) else {
+                continue;
+            };
+
+            // Anything after the call on the same line reads the value.
+            if close + 1 < toks.len() && line_of(close + 1) == line_of(close) {
+                continue;
+            }
+
+            let name = word(i);
+            lints.push(Lint {
+                name: "dropped_result",
+                start: toks[i].start,
+                end: toks[close].end,
+                message: format!(
+                    "`{name}` answers with a `Result` and nothing reads it; a failure passes in silence. Match it, write `if local Ok(v) = {name}(...)`, or take the value with a method"
+                ),
+                fix: None,
+            });
+        }
+    }
+
+    // static_call: `Wallet:new()` on a function that takes no `self`.
+    // The colon passes the table as the first argument, which the
+    // static never asked for.
+    {
+        let mut statics: Vec<(&str, &str)> = Vec::new();
+
+        for (a, b) in &impl_ranges {
+            if text(*a) != "impl" {
+                continue;
+            }
+
+            let target = word(a + 1);
+
+            for f in &fns {
+                if f.path.len() != 1 || f.at < *a || f.at > *b || word(f.open + 1) == "self" {
+                    continue;
+                }
+
+                statics.push((target, text(f.path[0])));
+            }
+        }
+
+        for i in 0..toks.len() {
+            if toks[i].kind != TokKind::Ident
+                || word(i + 1) != ":"
+                || toks.get(i + 2).map(|t| t.kind) != Some(TokKind::Ident)
+                || word(i + 3) != "("
+                || matches!(i.checked_sub(1).map(text), Some("." | ":" | "?." | "?:"))
+            {
+                continue;
+            }
+
+            let (owner, member) = (word(i), word(i + 2));
+
+            if !statics.contains(&(owner, member)) {
+                continue;
+            }
+
+            lints.push(Lint {
+                name: "static_call",
+                start: toks[i].start,
+                end: toks[i + 2].end,
+                message: format!(
+                    "`{member}` is not a method; call it with `{owner}.{member}(...)`, not `{owner}:{member}(...)`"
+                ),
+                fix: Some(Fix {
+                    start: toks[i + 1].start,
+                    end: toks[i + 1].end,
+                    replacement: ".".to_string(),
+                }),
+            });
+        }
+    }
+
+    // argument_count: a call with more arguments than the function
+    // takes. Luau's solver reports too few and misses too many, and the
+    // extra values are dropped in silence.
+    {
+        // The functions the file declares once, by a plain name, with a
+        // fixed parameter list: their arity is exact.
+        let mut arity: HashMap<&str, Option<usize>> = HashMap::new();
+
+        for f in &fns {
+            if f.path.len() != 1 || f.in_impl {
+                continue;
+            }
+
+            let name = text(f.path[0]);
+            let mut depth = 0i32;
+            let mut fixed = true;
+            // One slot per comma at depth zero, so a destructured
+            // parameter counts as the one argument it takes.
+            let mut slots = usize::from(f.close > f.open + 1);
+
+            for k in f.open + 1..f.close {
+                let tt = text(k);
+
+                if tt.ends_with('(') || tt.ends_with('[') || tt.ends_with('{') || tt == "<" {
+                    depth += 1;
+                } else if matches!(tt, ")" | "]" | "}" | ">") {
+                    depth -= 1;
+                } else if depth == 0 && tt == "," {
+                    slots += 1;
+                } else if depth == 0 && (tt == "..." || tt == "=") {
+                    // A vararg or a default makes the count a range.
+                    fixed = false;
+
+                    break;
+                }
+            }
+
+            if word(f.open + 1) == "self" {
+                slots = slots.saturating_sub(1);
+            }
+
+            let takes = fixed.then_some(slots);
+
+            arity.entry(name).and_modify(|e| *e = None).or_insert(takes);
+        }
+
+        for i in 0..toks.len() {
+            if toks[i].kind != TokKind::Ident
+                || matches!(
+                    i.checked_sub(1).map(text),
+                    Some("." | ":" | "?." | "?:" | "function" | "local")
+                )
+                || toks.get(i + 1).map(|t| t.text(src)) != Some("(")
+            {
+                continue;
+            }
+
+            let Some(Some(takes)) = arity.get(text(i)).copied() else {
+                continue;
+            };
+            let Some(close) = matching(src, toks, i + 1) else {
+                continue;
+            };
+
+            if close == i + 2 {
+                continue;
+            }
+
+            let mut depth = 0i32;
+            let mut given = 1usize;
+
+            for k in i + 2..close {
+                let tt = text(k);
+
+                if tt.ends_with('(') || tt.ends_with('[') || tt.ends_with('{') {
+                    depth += 1;
+                } else if matches!(tt, ")" | "]" | "}") {
+                    depth -= 1;
+                } else if tt == "," && depth == 0 {
+                    given += 1;
+                }
+            }
+
+            if given <= takes {
+                continue;
+            }
+
+            let name = text(i);
+            let word = |n: usize| if n == 1 { "argument" } else { "arguments" };
+            lints.push(Lint {
+                name: "argument_count",
+                start: toks[i].start,
+                end: toks[close].end,
+                message: format!(
+                    "`{name}` takes {takes} {}; this call passes {given}",
+                    word(takes)
                 ),
                 fix: None,
             });
@@ -1387,6 +1687,64 @@ mod tests {
         );
         assert_eq!(
             names("local function f(p: Player?)\n    print(p?.Name)\nend\n"),
+            Vec::<&str>::new()
+        );
+    }
+
+    /// A guard word before the name never covers an access through it:
+    /// `return t` passes the optional on, `return t.x` reads through it.
+    /// A static called with `:` gets the table as its first argument.
+    #[test]
+    fn a_static_called_with_a_colon_fires() {
+        let src = "struct W as\n    n: number\nend\n\nimpl W\n    function new(): W\n        return new W { n = 0 }\n    end\n\n    function bump(self): number\n        return self.n\n    end\nend\n\nlocal a = W:new()\nlocal b = a:bump()\nprint(a, b)\n";
+        assert_eq!(names(src), vec!["static_call"]);
+        assert!(
+            apply_fixes(src, &crate::compile(src).unwrap().lints)
+                .0
+                .contains("W.new()")
+        );
+    }
+
+    /// Luau's solver reports a call with too few arguments and misses
+    /// one with too many, so the extra values are dropped in silence.
+    #[test]
+    fn a_call_with_too_many_arguments_fires() {
+        let src = "local function heal(who: string, amount: number): number\n    return amount\nend\nprint(heal(\"a\", 10, true))\n";
+        assert_eq!(names(src), vec!["argument_count"]);
+        assert_eq!(
+            names(
+                "local function heal(who: string, amount: number): number\n    return amount\nend\nprint(heal(\"a\", 10))\n"
+            ),
+            Vec::<&str>::new()
+        );
+        // A vararg and a default make the count a range.
+        assert_eq!(
+            names(
+                "local function log(fmt: string, ...)\n    print(fmt, ...)\nend\nlog(\"a\", 1, 2)\n"
+            ),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(
+                "local function step(n: number, by: number = 1): number\n    return n + by\nend\nprint(step(1, 2))\n"
+            ),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn an_access_after_a_keyword_still_fires() {
+        for src in [
+            "local function f(t: { x: number }?): number\n    return t.x\nend\n",
+            "local function f(s: string?): string\n    return s:upper()\nend\n",
+            "local function f(p: Player?): string\n    local n = p.Name\n    print(n)\n    return n\nend\n",
+        ] {
+            assert_eq!(names(src), vec!["optional_access"], "{src}");
+        }
+
+        // The name passed on, not read through, still stands down.
+        assert_eq!(
+            names("local function f(t: Player?): Player?\n    return t\nend\n"),
             Vec::<&str>::new()
         );
     }

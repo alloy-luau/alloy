@@ -96,7 +96,11 @@ Compiles every source, or one file, and writes nothing. Reports the
 compiler's diagnostics and the lints at their [lint] levels; exits with
 one on any diagnostic or denied lint.
 
+`--@alloy-expect-error` silences the line it covers, and a stale one is
+settled under `alloy flux`, which runs the type check.
+
 Options:
+  --fix                 Apply the rewrites that keep the program the same
   --config <file>       Read this alloy.toml instead of the nearest one
   --strict              Turn the strict-only lints on for this run
   --deny-warnings       Fail on any warning
@@ -106,9 +110,10 @@ pub const LINT_TEXT: &str = "\
 Usage: alloy lint [file] [options]
 
 Runs the lints over the project, or one file, and nothing else. The
-lints are Flux's, in seven groups: correctness, suspicious, style,
-complexity, perf, roblox, pedantic. `alloy doc lints` names them all;
-the [lint] table of alloy.toml sets their levels by name or by group.
+lints are Flux's, in eight groups: correctness, suspicious, style,
+complexity, perf, roblox, pedantic, naming, and the checker's own under
+`luau`. `alloy doc lints` names them all; the [lint] table of alloy.toml
+sets their levels by name or by group.
 
 Options:
   --fix                 Apply the rewrites that keep the program the same
@@ -125,7 +130,7 @@ Usage: alloy flux [file] [options]
 Flux is the whole analysis in one run, what clippy is to cargo. It
 compiles every source, runs luau-lsp over the check artifact and maps
 the type errors onto the Alloy lines, and runs every lint at its [lint]
-level: the seven groups of Flux's own, plus the checker's lints under
+level: the eight groups of Flux's own, plus the checker's lints under
 the `luau` group. With one file it compiles and lints that file.
 
 Options:

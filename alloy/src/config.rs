@@ -593,7 +593,7 @@ quote_style = "auto-prefer-double"
 
 [lint]
 # the levels of the lints; a list takes a lint or a group: correctness,
-# suspicious, style, complexity, perf, roblox, pedantic, luau
+# suspicious, style, complexity, perf, roblox, pedantic, naming, luau
 # turn the pedantic group on
 strict = false
 # lints that fail the run; `alloy doc lints` names them all

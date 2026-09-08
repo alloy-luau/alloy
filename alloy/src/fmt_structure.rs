@@ -47,6 +47,10 @@ struct Frame {
     /// The frame took the indent of the bracket below it; a pop on the
     /// same line gives it back.
     took_below: bool,
+    /// A `match` in expression position, and the arms it opens. An `if`
+    /// after such an arm's `then` is an expression, so no `end` closes
+    /// it.
+    expr: bool,
 }
 
 /// The block structure of a token stream.
@@ -208,6 +212,7 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 open_at: i,
                 line,
                 took_below,
+                expr: false,
             });
             *opens += weight;
         };
@@ -262,7 +267,9 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                     let in_expr = (expression_context(prev)
                         && !(first_on_line && matches!(prev, Some("?" | "!" | ">" | ">>"))))
                         || (matches!(prev, Some("then" | "else"))
-                            && top(&stack) == Some(Kind::ExprIf));
+                            && top(&stack) == Some(Kind::ExprIf))
+                        || (prev == Some("then")
+                            && stack.last().is_some_and(|f| f.kind == Kind::Arm && f.expr));
 
                     if in_expr {
                         push(&mut stack, Kind::ExprIf, 0, &mut opens, &mut closes);
@@ -339,7 +346,14 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                     }
                 }
 
-                "match" => push(&mut stack, Kind::MatchHead, 1, &mut opens, &mut closes),
+                "match" => {
+                    let in_expr = expression_context(prev);
+                    push(&mut stack, Kind::MatchHead, 1, &mut opens, &mut closes);
+
+                    if let Some(f) = stack.last_mut() {
+                        f.expr = in_expr;
+                    }
+                }
 
                 "with" => {
                     if let Some(f) = stack.last_mut()
@@ -352,12 +366,22 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 }
 
                 "case" | "default" => {
+                    // An `if` expression in the arm above closes here.
+                    while top(&stack) == Some(Kind::ExprIf) {
+                        pop(&mut stack, &mut closes, &mut opens);
+                    }
+
                     if matches!(top(&stack), Some(Kind::Match | Kind::Arm)) {
                         if top(&stack) == Some(Kind::Arm) {
                             pop(&mut stack, &mut closes, &mut opens);
                         }
 
+                        let in_expr = stack.last().is_some_and(|f| f.expr);
                         push(&mut stack, Kind::Arm, 1, &mut opens, &mut closes);
+
+                        if let Some(f) = stack.last_mut() {
+                            f.expr = in_expr;
+                        }
                     }
                 }
 

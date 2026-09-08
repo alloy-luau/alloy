@@ -78,9 +78,14 @@ impl<'s> Scan<'s> {
             } else {
                 Some(format!("{path}?"))
             };
+            let default = self
+                .expr_end(chain_end + 1)
+                .map(|e| self.slice(chain_end + 1, e).trim())
+                .filter(|d| !d.is_empty())
+                .unwrap_or("x");
             let message = if followed_by_or {
                 format!(
-                    "`{path} and {path}{op}{member} or x` is `{path}?{op}{member} ?? x` when `{member}` is never false"
+                    "`{path} and {path}{op}{member} or {default}` is `{path}?{op}{member} ?? {default}` when `{path}{op}{member}` is never false"
                 )
             } else {
                 format!("`{path} and {path}{op}{member}` is `{path}?{op}{member}`")
@@ -113,33 +118,14 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            // The value runs to `end`, with no block in between.
-            let mut e = q_end + 1;
-            let mut depth = 0i32;
-            let mut simple = true;
+            // The `then` body holds the assignment and nothing else.
+            // A second statement after it would move out of the branch,
+            // so the lint stands down.
+            let Some(e) = self.value_end(q_end + 1) else {
+                continue;
+            };
 
-            while e < self.toks.len() {
-                let text = self.t(e);
-
-                if matches!(text, "(" | "[" | "{") {
-                    depth += 1;
-                } else if matches!(text, ")" | "]" | "}") {
-                    depth -= 1;
-                } else if depth == 0 && text == "end" {
-                    break;
-                } else if matches!(
-                    text,
-                    "function" | "if" | "do" | "while" | "for" | "repeat" | "match"
-                ) {
-                    simple = false;
-
-                    break;
-                }
-
-                e += 1;
-            }
-
-            if !simple || e >= self.toks.len() || e == q_end + 1 {
+            if e == q_end + 1 || !self.at(e, "end") {
                 continue;
             }
 
@@ -469,9 +455,9 @@ impl<'s> Scan<'s> {
         }
     }
 
-    /// `table.insert(xs, v)` on an Array is `xs:push(v)`.
-    fn manual_push(&self, out: &mut Vec<Lint>) {
-        // The names the file declares with an Array type.
+    /// The names the file declares with an Array type: `xs: T[]`,
+    /// `xs: Array<T>`, and `local xs = [ ... ]`.
+    pub(crate) fn array_names(&self) -> Vec<&'s str> {
         let mut arrays: Vec<&str> = Vec::new();
 
         for i in 0..self.toks.len() {
@@ -512,6 +498,13 @@ impl<'s> Scan<'s> {
                 arrays.push(self.t(i));
             }
         }
+
+        arrays
+    }
+
+    /// `table.insert(xs, v)` on an Array is `xs:push(v)`.
+    fn manual_push(&self, out: &mut Vec<Lint>) {
+        let arrays = self.array_names();
 
         if arrays.is_empty() {
             return;
@@ -861,6 +854,36 @@ mod tests {
             fixed("if x == nil then\n    x = f(1)\nend\n"),
             "x ??= f(1)\n"
         );
+        assert_eq!(fixed("if x == nil then x = a or 1 end\n"), "x ??= a or 1\n");
+    }
+
+    /// A `then` body with a second statement is left alone: the rewrite
+    /// would lift that statement out of the branch.
+    #[test]
+    fn a_nil_check_with_more_in_the_body_draws_no_coalesce() {
+        let src = "if x == nil then\n    x = 0\n    print(\"defaulted\")\nend\n";
+        assert_eq!(names(src), Vec::<&str>::new());
+        assert_eq!(fixed(src), src);
+        let two = "if x == nil then\n    print(\"first\")\n    x = 0\nend\n";
+        assert_eq!(names(two), Vec::<&str>::new());
+        assert_eq!(fixed(two), two);
+    }
+
+    /// The message quotes what the reader wrote: the default after
+    /// `or`, and the field the rewrite needs to be non-false.
+    #[test]
+    fn a_guarded_access_with_a_default_quotes_both() {
+        let got =
+            lints("local function f(t: { x: number }?): number\n    return t and t.x or 0\nend\n");
+        let one = got
+            .iter()
+            .find(|l| l.name == "manual_safe_access")
+            .expect("the lint");
+        assert_eq!(
+            one.message,
+            "`t and t.x or 0` is `t?.x ?? 0` when `t.x` is never false"
+        );
+        assert!(one.fix.is_none());
     }
 
     #[test]

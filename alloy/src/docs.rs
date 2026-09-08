@@ -534,7 +534,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "topic:flux",
-        "**alloy flux**\n\nFlux is the whole analysis in one run, what clippy is to cargo. It compiles every source, runs luau-lsp over the check artifact and maps the type errors onto the Alloy lines, and runs every lint at its `[lint]` level: Flux's own seven groups, and the checker's lints under the `luau` group. It also sees what one file cannot: `circular_import` reports two files that import each other.\n\n```\nalloy flux                 the project of the nearest alloy.toml\nalloy flux src/game.aly    one file: the compile, the lints, and the type check\nalloy flux --fix           apply the rewrites that keep the program the same\nalloy flux -D correctness  deny a group for this run; -W warns, -A allows\nalloy flux --explain manual_floor_div\nalloy flux --no-typecheck  skip luau-lsp\nalloy flux --watch         run again after every change\nalloy flux --list          every lint with its group and default level\n```\n\nOne file named on the command line still compiles the whole project, since the type check needs every module the file imports, and the report then covers that file alone. A file outside `[build] in` gets the compile and the lints, and the run says the type check did not run.\n\nThe check artifact keeps the source's lines, so a type error on line 12 of the output is on line 12 of the source; the column maps through the span map. The artifacts go into a mirror of the project under the temp directory, with the root's Luau configuration and a link to every other folder, so requires resolve as they do in the editor.\n\nThe `[flux]` table:\n\n```toml\n[flux]\ntypecheck = true                  # run luau-lsp over the check artifact\ndefinitions = []                  # extra .d.luau or .d.aly files; the project's .d.aly join on their own\nroblox_types = true               # load the Roblox globals\nsecurity_level = \"PluginSecurity\" # LocalUserSecurity, RobloxScriptSecurity, None\n# luau_lsp = \"/path/to/luau-lsp\"  # unset: the PATH, then ~/.alloy/bin and ~/.ember/bin\ntoo_many_arguments = 7\ntoo_many_lines = 100\nmax_nesting = 5\ncognitive_complexity = 25\n```\n\nThe Roblox globals come from the luau-lsp extension's storage when the editor has them, and download once into `~/.alloy/types` otherwise. A `--@alloy-ignore` line silences the checker's report on that line, as it does in the editor.",
+        "**alloy flux**\n\nFlux is the whole analysis in one run, what clippy is to cargo. It compiles every source, runs luau-lsp over the check artifact and maps the type errors onto the Alloy lines, and runs every lint at its `[lint]` level: Flux's own eight groups, and the checker's lints under the `luau` group. It also sees what one file cannot: `circular_import` reports two files that import each other.\n\n```\nalloy flux                 the project of the nearest alloy.toml\nalloy flux src/game.aly    one file: the compile, the lints, and the type check\nalloy flux --fix           apply the rewrites that keep the program the same\nalloy flux -D correctness  deny a group for this run; -W warns, -A allows\nalloy flux --explain manual_floor_div\nalloy flux --no-typecheck  skip luau-lsp\nalloy flux --watch         run again after every change\nalloy flux --list          every lint with its group and default level\n```\n\nOne file named on the command line still compiles the whole project, since the type check needs every module the file imports, and the report then covers that file alone. A file outside `[build] in` gets the compile and the lints, and the run says the type check did not run.\n\nThe check artifact keeps the source's lines, so a type error on line 12 of the output is on line 12 of the source; the column maps through the span map. The artifacts go into a mirror of the project under the temp directory, with the root's Luau configuration and a link to every other folder, so requires resolve as they do in the editor.\n\nThe `[flux]` table:\n\n```toml\n[flux]\ntypecheck = true                  # run luau-lsp over the check artifact\ndefinitions = []                  # extra .d.luau or .d.aly files; the project's .d.aly join on their own\nroblox_types = true               # load the Roblox globals\nsecurity_level = \"PluginSecurity\" # LocalUserSecurity, RobloxScriptSecurity, None\n# luau_lsp = \"/path/to/luau-lsp\"  # unset: the PATH, then ~/.alloy/bin and ~/.ember/bin\ntoo_many_arguments = 7\ntoo_many_lines = 100\nmax_nesting = 5\ncognitive_complexity = 25\n```\n\nThe Roblox globals come from the luau-lsp extension's storage when the editor has them, and download once into `~/.alloy/types` otherwise. A `--@alloy-ignore` line silences the checker's report on that line, as it does in the editor.",
     ),
     (
         "topic:test",
@@ -939,6 +939,7 @@ pub fn kind_for(message: &str) -> &'static str {
     let m = message.to_ascii_lowercase();
     let rules: &[(&[&str], &str)] = &[
         (&["internal:"], "InternalError"),
+        (&["markup:"], "MarkupError"),
         (&["names no module"], "UnknownModule"),
         (&["ingot `"], "IngotError"),
         (&["reserved word"], "ReservedWord"),
@@ -946,6 +947,8 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),
         (&["remote"], "WireType"),
         (&["directive"], "DirectiveError"),
+        (&["result"], "ResultError"),
+        (&["a `const`"], "ConstError"),
         (&["@test", "test "], "TestError"),
         (&["@cfg"], "AttributeError"),
         (&["macro"], "MacroError"),
@@ -975,7 +978,11 @@ pub fn kind_for(message: &str) -> &'static str {
 /// A compiler diagnostic as the editor and the CLI show it: its kind,
 /// a colon, its text.
 pub fn labeled(message: &str) -> String {
-    format!("{}: {message}", kind_for(message))
+    // `markup:` names the kind, and the kind prints in front of the
+    // text; printing both says it twice.
+    let text = message.strip_prefix("markup: ").unwrap_or(message);
+
+    format!("{}: {text}", kind_for(message))
 }
 
 /// The book section a compiler diagnostic belongs to, from its text.
@@ -988,6 +995,9 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         (&["not exhaustive"], "4.2"),
         (&["remote"], "4.3"),
         (&["directive"], "4.4"),
+        // `try` and `Result` are one contract; 3.3 is Futures.
+        (&["result"], "4.1"),
+        (&["a `const`"], "6.1"),
         (&["reserved word"], "6.1"),
         (&["markup"], "3.13"),
         (&["@test", "test "], "3.14"),
@@ -1025,6 +1035,18 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         (&["interface", "type "], "3.7"),
         (&["?.", "?:", "??", "->", "=>", "safe", "non-nil"], "3.1"),
         (&["ternary", "spread", "where", "in operator"], "3.8"),
+        // A syntax error is about the grammar, and the keyword page is
+        // where the grammar lives. Last, so a kinded message wins.
+        (
+            &[
+                "expected",
+                "unexpected",
+                "unterminated",
+                "needs an",
+                "needs a",
+            ],
+            "6.1",
+        ),
     ];
 
     rules

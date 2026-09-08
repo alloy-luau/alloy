@@ -36,6 +36,11 @@ pub(crate) const EXPR_IF_BEFORE: &[&str] = &[
     "..", "==", "~=", "<", ">", "<=", ">=", "??", "?", ":", "in", "?(", "?[",
 ];
 
+/// The binary operators that join two expressions into one.
+pub(crate) const BINARY_OPS: &[&str] = &[
+    "+", "-", "*", "/", "//", "%", "^", "..", "==", "~=", "<", ">", "<=", ">=", "and", "or", "??",
+];
+
 /// Tokens that close the block a statement sits in.
 pub(crate) const CLOSERS: &[&str] = &["end", "else", "elseif", "until", "case", "default"];
 
@@ -213,6 +218,20 @@ impl<'s> Scan<'s> {
         }
     }
 
+    /// The exclusive end of a whole expression at `i`: the simple
+    /// expression and every binary operator that continues it. A value
+    /// that ends here is one statement, so a rewrite that replaces the
+    /// statement cannot swallow the one after it.
+    pub(crate) fn value_end(&self, i: usize) -> Option<usize> {
+        let mut j = self.expr_end(i)?;
+
+        while BINARY_OPS.contains(&self.t(j)) {
+            j = self.expr_end(j + 1)?;
+        }
+
+        Some(j)
+    }
+
     /// The content of a plain string literal at `i`, without its quotes.
     pub(crate) fn string_content(&self, i: usize) -> Option<&'s str> {
         let text = self.t(i);
@@ -244,6 +263,31 @@ impl<'s> Scan<'s> {
                 replacement,
             }),
         });
+    }
+
+    /// The column a token starts at, counted from zero.
+    pub(crate) fn indent_of(&self, i: usize) -> usize {
+        let at = self.start(i) as usize;
+
+        at - self.src[..at].rfind('\n').map_or(0, |n| n + 1)
+    }
+
+    /// The byte range of the whole line a token sits on, the newline
+    /// included, when nothing else shares that line. A rewrite that
+    /// deletes a statement takes the line with it; one that shares a
+    /// line takes the token alone.
+    pub(crate) fn whole_line(&self, i: usize) -> (u32, u32) {
+        let (start, end) = (self.start(i) as usize, self.end(i) as usize);
+        let from = self.src[..start].rfind('\n').map_or(0, |at| at + 1);
+        let to = self.src[end..]
+            .find('\n')
+            .map_or(self.src.len(), |at| end + at + 1);
+
+        if self.src[from..start].trim().is_empty() && self.src[end..to].trim().is_empty() {
+            (from as u32, to as u32)
+        } else {
+            (start as u32, end as u32)
+        }
     }
 
     /// The source between the previous token and this one: whitespace

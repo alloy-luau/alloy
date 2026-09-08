@@ -504,6 +504,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The one-based column a token starts at, in bytes.
+    fn column_at(&self, i: usize) -> usize {
+        let Some(t) = self.toks.get(i) else {
+            return 0;
+        };
+        let before = &self.src[..t.start as usize];
+
+        before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1
+    }
+
     fn err(&self, message: &str) -> ParseError {
         let offset = match self.toks.get(self.pos) {
             Some(t) => t.start as usize,

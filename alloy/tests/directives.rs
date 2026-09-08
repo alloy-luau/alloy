@@ -83,7 +83,7 @@ fn the_unmet_message_quotes_the_reason() {
     let unmet = d.unmet(&std::collections::HashSet::new());
     assert_eq!(unmet.len(), 1);
     assert_eq!(
-        directives::unmet_message(unmet[0].1.as_deref()),
+        directives::unmet_message(unmet[0].2.as_deref()),
         format!("{}: a negative count is refused", directives::UNMET)
     );
 }

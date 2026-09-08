@@ -464,6 +464,32 @@ fn build_project(args: &[String]) -> ExitCode {
 /// One failure line. A compile that stopped names its position, so the
 /// line reads `path:line:col: message` as every diagnostic does; a
 /// failure with no position keeps the plain `path: message`.
+/// A compile that stopped, as every other diagnostic reads: the
+/// position, the section code, and the kind. A failure with no position,
+/// such as a bad `[alx]` table, keeps the plain form.
+fn print_failure(p: &Painter, path: &str, message: &str) {
+    let located = message
+        .split_once(':')
+        .and_then(|(line, rest)| rest.split_once(':').map(|(col, text)| (line, col, text)))
+        .and_then(|(line, col, text)| Some((line.parse().ok()?, col.parse().ok()?, text.trim())));
+
+    match located {
+        Some((line, col, text)) => eprintln!(
+            "{}",
+            p.diagnostic(
+                path,
+                line,
+                col,
+                Level::Error,
+                alloy::docs::code_for(text),
+                &alloy::docs::labeled(text)
+            )
+        ),
+
+        None => eprintln!("{}", p.fail(&failure_line(path, message))),
+    }
+}
+
 fn failure_line(path: &str, message: &str) -> String {
     let digits = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
     let positioned = message
@@ -499,13 +525,7 @@ fn print_diagnostics(input: &Path, report: &alloy::build::Report) {
     }
 
     for (rel, message) in &report.failures {
-        eprintln!(
-            "{}",
-            p.fail(&failure_line(
-                &input.join(rel).display().to_string(),
-                message
-            ))
-        );
+        print_failure(&p, &input.join(rel).display().to_string(), message);
     }
 }
 
@@ -888,7 +908,12 @@ fn flux_once(args: &[String]) -> ExitCode {
         report.diagnostics.retain(|(r, _)| r == rel);
         report.failures.retain(|(r, _)| r == rel);
         report.lints.retain(|(r, _)| r == rel);
-        report.written.retain(|r| r == rel);
+        // `written` holds the emitted `.luau` paths, so the source name
+        // never matches one; the run covered this one file.
+        let output = alloy::build::output_for(rel);
+        report
+            .written
+            .retain(|w| output.as_deref().is_some_and(|o| w == o));
     }
 
     let report = report;
@@ -1189,13 +1214,7 @@ fn test_once(args: &[String]) -> ExitCode {
     }
 
     for (rel, message) in &report.failures {
-        eprintln!(
-            "{}",
-            p.fail(&failure_line(
-                &input.join(rel).display().to_string(),
-                message
-            ))
-        );
+        print_failure(&p, &input.join(rel).display().to_string(), message);
     }
 
     for note in &report.notes {
@@ -1284,6 +1303,18 @@ fn lint_one(
     args: &[String],
 ) -> ExitCode {
     let Some((source, mut out)) = compile_file(path, args) else {
+        // The compile stopped, so there is one error and no lint. The
+        // run still ends with the summary every other run prints.
+        if let Some(command) = summary {
+            let p = Painter::for_stderr();
+            let counts = p.summary(&[
+                (1, "errors", ui::RED),
+                (0, "warnings", ui::AMBER),
+                (0, "denied", ui::RED),
+            ]);
+            eprintln!("{} {counts}", p.fail(command));
+        }
+
         return ExitCode::FAILURE;
     };
 
@@ -1481,17 +1512,79 @@ fn print_lints(
                     )
                 );
             } else {
-                let one_line = fix
-                    .replacement
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                eprintln!("{}", p.note(&format!("rewrite: {one_line}")));
+                eprintln!("{}", p.note(&rewrite_note(&source, fix)));
             }
         }
     }
 
     (warnings, denied)
+}
+
+/// The most times `--fix` re-reads one file. Each pass applies every
+/// rewrite that does not overlap another, so a chain needs one pass per
+/// level; the cap stops a rewrite that undoes itself.
+const FIX_PASSES: usize = 8;
+
+/// The lints of one file's text, for the `--fix` loop. A file that no
+/// longer compiles has none, and the run reports the rewrites it made.
+fn lints_of(path: &Path, source: &str) -> Vec<Lint> {
+    let name = path.to_string_lossy().into_owned();
+    let options = alloy::EmitOptions {
+        file_name: name.clone(),
+        definitions: name.ends_with(".d.aly"),
+        import_types: alloy::modules::import_types_for_file(path, source),
+        import_enums: alloy::modules::import_enums_for_file(path, source),
+        import_privates: alloy::modules::import_privates_for_file(path, source),
+        import_result_asyncs: alloy::modules::import_result_asyncs_for_file(path, source),
+        import_trait_defaults: alloy::modules::import_trait_defaults_for_file(path, source),
+        ..alloy::EmitOptions::default()
+    };
+    let jsx = markup_near(path).ok();
+    let ingots = load_ingots_near(path);
+
+    alloy::compile_file(&name, source, &options, jsx.as_ref(), ingots.as_ref())
+        .map(|o| o.lints)
+        .unwrap_or_default()
+}
+
+/// The `note: rewrite:` line of a lint: the line as it will read.
+///
+/// A rewrite inside one line prints that line rewritten, so a sub-range
+/// edit such as `p?` reads as the whole statement. One that empties a
+/// line says so. A rewrite over several lines prints its text on one.
+fn rewrite_note(source: &str, fix: &alloy::lint::Fix) -> String {
+    let (start, end) = (fix.start as usize, fix.end as usize);
+    let line_start = source[..start.min(source.len())]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let line_end = source[start.min(source.len())..]
+        .find('\n')
+        .map_or(source.len(), |i| start + i);
+
+    // A rewrite that deletes a line reaches one past its end, over the
+    // newline; that still describes the one line.
+    if end <= line_end + 1 {
+        let rebuilt = format!(
+            "{}{}{}",
+            &source[line_start..start],
+            fix.replacement,
+            &source[end.min(line_end)..line_end]
+        );
+
+        if rebuilt.trim().is_empty() {
+            return "rewrite: delete this line".to_string();
+        }
+
+        return format!("rewrite: {}", rebuilt.trim());
+    }
+
+    let one_line = fix
+        .replacement
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    format!("rewrite: {one_line}")
 }
 
 /// `--fix`: applies the rewrites of the lints at `warn` or `deny`, one
@@ -1526,28 +1619,57 @@ fn apply_lint_fixes(
             continue;
         }
 
-        let Ok(source) = std::fs::read_to_string(&path) else {
+        let Ok(mut source) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let (text, n) = lint::apply_fixes(&source, &live);
+        let mut live = live;
+        let mut written = 0;
+        let mut failed = false;
 
-        if n == 0 || text == source {
-            continue;
-        }
+        // One rewrite can expose the next: collapsing an `if` chain
+        // leaves another collapsible pair. The fixer runs again over
+        // what it wrote, so one `--fix` reaches the fixed point.
+        for _ in 0..FIX_PASSES {
+            let (text, n) = lint::apply_fixes(&source, &live);
 
-        match std::fs::write(&path, text) {
-            Ok(()) => {
-                rewrites += n;
-                eprintln!("{}", p.wrote(&format!("{}: {n} rewrites", path.display())));
+            if n == 0 || text == source {
+                break;
             }
 
-            Err(e) => {
+            if let Err(e) = std::fs::write(&path, &text) {
                 eprintln!(
                     "{}",
                     p.fail(&format!("{}: cannot write: {e}", path.display()))
                 );
-                remaining.extend(live.into_iter().map(|l| (rel.clone(), l)));
+                failed = true;
+
+                break;
             }
+
+            written += n;
+            source = text;
+            live = lints_of(&path, &source)
+                .into_iter()
+                .filter(|l| is_fixable(&path, l, config, &mut directives))
+                .collect();
+
+            if live.is_empty() {
+                break;
+            }
+        }
+
+        if failed {
+            remaining.extend(live.into_iter().map(|l| (rel.clone(), l)));
+
+            continue;
+        }
+
+        if written > 0 {
+            rewrites += written;
+            eprintln!(
+                "{}",
+                p.wrote(&format!("{}: {written} rewrites", path.display()))
+            );
         }
     }
 
@@ -1776,6 +1898,7 @@ fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> 
         file_name: path.to_string(),
         definitions: path.ends_with(".d.aly"),
         import_types: alloy::modules::import_types_for_file(Path::new(path), &source),
+        import_enums: alloy::modules::import_enums_for_file(Path::new(path), &source),
         import_privates: alloy::modules::import_privates_for_file(Path::new(path), &source),
         import_result_asyncs: alloy::modules::import_result_asyncs_for_file(
             Path::new(path),
@@ -1808,7 +1931,21 @@ fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> 
         Ok(out) => Some((source, out)),
 
         Err(err) => {
-            fail(&format!("{path}:{}", err.located(&source)));
+            // A compile that stopped reads as every other diagnostic:
+            // the position, the section code, and the kind.
+            let (line, col) = line_col(&source, err.offset.min(source.len()));
+            let p = Painter::for_stderr();
+            eprintln!(
+                "{}",
+                p.diagnostic(
+                    path,
+                    line,
+                    col,
+                    Level::Error,
+                    alloy::docs::code_for(&err.message),
+                    &alloy::docs::labeled(&err.message)
+                )
+            );
             None
         }
     }

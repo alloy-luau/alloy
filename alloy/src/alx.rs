@@ -31,7 +31,7 @@ pub fn compile_alx(
 ) -> Result<AlxOutput, CompileError> {
     let spans = luaux::compile::markup_spans(src).map_err(|e| CompileError {
         offset: e.offset,
-        message: e.message,
+        message: markup_message(&e.message, None),
     })?;
     let blanked = luaux::resolve::blank_luaux_regions(src, &spans);
     let bound = bound_names(&blanked);
@@ -109,7 +109,7 @@ struct Prop {
 
 /// The props a tag may set without the component declaring them: React
 /// reads `key` itself, and it never reaches the component.
-const FREE_PROPS: &[&str] = &["key"];
+pub const FREE_PROPS: &[&str] = &["key"];
 
 /// The attributes of every component tag, against the props the
 /// component declares: a prop it does not take, a required prop the tag
@@ -273,8 +273,8 @@ fn check_element(
             start: tag as u32,
             end: (tag + name.len()) as u32,
             message: format!(
-                "markup: <{name}> leaves the prop {} unset",
-                missing.join(", ")
+                "markup: `<{name}>` leaves {} unset",
+                crate::desugar::list_names(&missing)
             ),
         });
     }
@@ -397,9 +397,16 @@ fn record_props(record: &str) -> Vec<Prop> {
     let mut depth = 0i32;
     let mut field = String::new();
 
+    let mut previous = ' ';
+
     for c in inner.chars() {
         match c {
             '{' | '(' | '[' | '<' => depth += 1,
+
+            // The `>` of `->` closes nothing; a function type in a
+            // record would otherwise unbalance the count and swallow
+            // the comma that ends the field.
+            '>' if matches!(previous, '-' | '=') => {}
 
             '}' | ')' | ']' | '>' => depth -= 1,
 
@@ -413,6 +420,7 @@ fn record_props(record: &str) -> Vec<Prop> {
         }
 
         field.push(c);
+        previous = c;
     }
 
     push_prop(&field, &mut out);
@@ -425,7 +433,7 @@ fn push_prop(field: &str, out: &mut Vec<Prop>) {
         return;
     };
     let name = name.trim();
-    let ty = ty.trim();
+    let ty = ty.trim().trim_end_matches([',', ';']).trim();
     let optional = name.ends_with('?') || ty.ends_with('?');
     let name = name.trim_end_matches('?');
 
@@ -451,10 +459,49 @@ fn markup_message(message: &str, help: Option<&str>) -> String {
     };
 
     match help {
-        Some(h) => format!("markup: {} ({})", alloy_keys(message), alloy_keys(h)),
+        Some(h) => format!(
+            "markup: {} ({})",
+            quote_tags(&alloy_keys(message)),
+            quote_tags(&alloy_keys(h))
+        ),
 
-        None => format!("markup: {}", alloy_keys(message)),
+        None => format!("markup: {}", quote_tags(&alloy_keys(message))),
     }
+}
+
+/// A tag inside a message reads as code, the way every other name the
+/// compiler prints does: `` `</Frame>` ``.
+fn quote_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
+
+    while let Some(at) = rest.find('<') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let slash = usize::from(after.starts_with('/'));
+        let len = after[slash..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .count();
+        let name_end = at + 1 + slash + len;
+
+        if len == 0 || out.ends_with('`') {
+            out.push('<');
+            rest = after;
+
+            continue;
+        }
+
+        let end = name_end + usize::from(rest[name_end..].starts_with('>'));
+        out.push('`');
+        out.push_str(&rest[at..end]);
+        out.push('`');
+        rest = &rest[end..];
+    }
+
+    out.push_str(rest);
+
+    out
 }
 
 /// An offset in the lowered text as an offset in the source: same line,
@@ -688,7 +735,7 @@ return Bad\n";
             "{messages:?}"
         );
         assert!(
-            messages.contains(&"markup: <Badge> leaves the prop label unset"),
+            messages.contains(&"markup: `<Badge>` leaves `label` unset"),
             "{messages:?}"
         );
         assert!(
@@ -697,6 +744,46 @@ return Bad\n";
         );
         // An optional prop left out, and a good tag, say nothing.
         assert_eq!(messages.len(), 3, "{messages:?}");
+    }
+
+    /// A prop whose type ends in `?` needs no value. The `>` of a
+    /// function type closes nothing, so the field before it still ends
+    /// at its comma.
+    #[test]
+    fn an_optional_prop_with_a_function_type_needs_no_value() {
+        let src = "import * as React from \"@packages/react\" --@alloy-ignore\n\
+type Props = {\n\
+    title: string,\n\
+    on_click: (() -> ())?,\n\
+}\n\
+\n\
+local function Badge(props: Props)\n\
+    return (<TextLabel Text={props.title} />)\n\
+end\n\
+\n\
+local function Panel()\n\
+    return (\n\
+        <Frame>\n\
+            <Badge title=\"ok\" />\n\
+            <Badge />\n\
+        </Frame>\n\
+    )\n\
+end\n\
+\n\
+return Panel\n";
+        let out = compile_alx(src, &EmitOptions::default(), luaux::Config::default())
+            .expect("the markup compiles");
+        let messages: Vec<&str> = out
+            .output
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            vec!["markup: `<Badge>` leaves `title` unset"],
+            "{messages:?}"
+        );
     }
 
     /// A tag inside a `{ }` hole is checked too, and `key` is React's.

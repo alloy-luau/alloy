@@ -6,7 +6,7 @@
 use alloy_syntax::lexer::TokKind;
 
 use crate::flux_scan::{CLOSERS, IfParts, Scan};
-use crate::lint::Lint;
+use crate::lint::{Fix, Lint};
 
 /// Runs the structure lints on one file.
 pub(crate) fn run(s: &Scan) -> Vec<Lint> {
@@ -397,6 +397,14 @@ impl<'s> Scan<'s> {
             };
 
             let _ = (x_from, x_to);
+
+            // `c == true` on a `boolean?` is the one shape where the
+            // comparison is the right thing to write: it has to tell
+            // `false` from `nil`.
+            if self.declared_optional_boolean(x) {
+                continue;
+            }
+
             let plain = matches!((op, literal), ("==", "true") | ("~=", "false"));
             let form = if plain {
                 x.to_string()
@@ -442,6 +450,21 @@ impl<'s> Scan<'s> {
         }
 
         false
+    }
+
+    /// Reports if a name carries a `: boolean?` annotation anywhere in
+    /// the file. Three states need the comparison.
+    fn declared_optional_boolean(&self, name: &str) -> bool {
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return false;
+        }
+
+        (0..self.toks.len().saturating_sub(3)).any(|j| {
+            self.t(j) == name
+                && self.t(j + 1) == ":"
+                && self.t(j + 2) == "boolean"
+                && self.t(j + 3) == "?"
+        })
     }
 
     /// Reports if a name carries a `: boolean` annotation anywhere in the
@@ -557,15 +580,23 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            self.lint(
-                out,
-                "redundant_return",
-                end - 1,
-                end - 1,
-                "a bare `return` at the end of a function does what the `end` does; delete it"
-                    .to_string(),
-                Some(String::new()),
-            );
+            // The rewrite deletes the line, not the token: an empty
+            // replacement over `return` alone leaves the indentation
+            // behind, and `fmt --check` then reports the file.
+            let (from, to) = self.whole_line(end - 1);
+            out.push(Lint {
+                name: "redundant_return",
+                start: self.start(end - 1),
+                end: self.end(end - 1),
+                message:
+                    "a bare `return` at the end of a function does what the `end` does; delete it"
+                        .to_string(),
+                fix: Some(Fix {
+                    start: from,
+                    end: to,
+                    replacement: String::new(),
+                }),
+            });
         }
     }
 
@@ -661,7 +692,12 @@ impl<'s> Scan<'s> {
             let index = self.t(i + 1);
             let value = self.t(d + 2);
             let table = self.slice(i + 6, d);
-            let rewrite = format!("for {index}, {value} in {table} do");
+            // A body that never reads the index gets `_`; naming it
+            // would leave an `unused_variable` behind the rewrite.
+            let body = self.st.ends[i].unwrap_or(self.toks.len());
+            let read = (x + 3..body).any(|k| self.is_name(k) && self.t(k) == index);
+            let bound = if read { index } else { "_" };
+            let rewrite = format!("for {bound}, {value} in {table} do");
             self.lint(
                 out,
                 "numeric_for_index",
@@ -737,6 +773,44 @@ impl<'s> Scan<'s> {
         best.map(|(_, n)| n)
     }
 
+    /// The type a name carries in this file: a parameter or a local
+    /// annotation, or the struct a `new` builds. `None` when the file
+    /// does not say.
+    fn declared_type(&self, name: &str) -> Option<&'s str> {
+        for i in 0..self.toks.len() {
+            if !self.is_name(i) || self.t(i) != name {
+                continue;
+            }
+
+            let introduced = matches!(self.prev(i), "(" | "," | "local" | "const");
+
+            if introduced && self.at(i + 1, ":") {
+                let mut j = i + 2;
+
+                while matches!(self.t(j), "read" | "write") {
+                    j += 1;
+                }
+
+                // `print(c:ready())` reads as `(c: ready)` from the
+                // tokens alone; the `(` after the name says it is a
+                // method call, not an annotation.
+                if self.is_name(j) && !self.at(j + 1, "(") {
+                    return Some(self.t(j));
+                }
+            }
+
+            if matches!(self.prev(i), "local" | "const")
+                && self.at(i + 1, "=")
+                && self.at(i + 2, "new")
+                && self.is_name(i + 3)
+            {
+                return Some(self.t(i + 3));
+            }
+        }
+
+        None
+    }
+
     /// `x.count` or `x:reset()` outside the impl of the struct that
     /// declared `count` or `reset` private.
     fn private_access(&self, out: &mut Vec<Lint>) {
@@ -762,7 +836,25 @@ impl<'s> Scan<'s> {
             }
 
             let name = self.t(i);
-            let Some((_, owner)) = members.iter().find(|(m, _)| *m == name) else {
+
+            if !members.iter().any(|(m, _)| *m == name) {
+                continue;
+            }
+
+            // The receiver decides which struct the member belongs to.
+            // Without it, a field named `coins` on an unrelated record
+            // reads as the private `coins` of a struct nearby.
+            let base = i
+                .checked_sub(2)
+                .filter(|b| self.is_name(*b))
+                .map(|b| self.t(b))
+                .filter(|n| *n != "self");
+            let owner = match base.and_then(|n| self.declared_type(n)) {
+                Some(ty) => members.iter().find(|(m, o)| *m == name && *o == ty),
+
+                None => members.iter().find(|(m, _)| *m == name),
+            };
+            let Some((_, owner)) = owner else {
                 continue;
             };
 
@@ -1322,7 +1414,7 @@ mod tests {
     fn a_bare_return_at_the_end_goes() {
         assert_eq!(
             fixed("local function f()\n    print(1)\n    return\nend\n"),
-            "local function f()\n    print(1)\n    \nend\n"
+            "local function f()\n    print(1)\nend\n"
         );
         assert_eq!(
             names("local function f()\n    return 1\nend\n"),
@@ -1509,11 +1601,51 @@ mod tests {
         );
     }
 
+    /// An optional boolean has three states, so `c == true` is the
+    /// right thing to write.
+    #[test]
+    fn bool_comparison_stands_down_on_an_optional() {
+        assert_eq!(
+            names("local function tri(c: boolean?): boolean\n    return c == true\nend\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names("local function two(c: boolean): boolean\n    return c == true\nend\n"),
+            vec!["bool_comparison"]
+        );
+    }
+
+    /// The receiver decides which struct a member belongs to: a field
+    /// named `coins` on an unrelated record is not the private `coins`
+    /// of a struct nearby.
+    #[test]
+    fn private_access_reads_the_receiver() {
+        let src = "struct Profile as\n    private coins: number\nend\n\nimpl Profile\n    public function earn(self, n: number)\n        self.coins += n\n    end\nend\n\ntype Raw = { coins: number }\n\nlocal function load(raw: Raw, p: Profile)\n    p:earn(raw.coins)\nend\n\nreturn load\n";
+        assert_eq!(names(src), Vec::<&str>::new());
+
+        // A receiver the file does not type still fires.
+        let bare = "struct Profile as\n    private coins: number\nend\n\nlocal p = make()\nprint(p.coins)\n";
+        assert_eq!(names(bare), vec!["private_access"]);
+    }
+
+    /// An `if` expression in a `case` arm has no `end`; counting one
+    /// closed the `impl` early and every later member read as private.
+    #[test]
+    fn an_if_expression_in_an_arm_keeps_the_impl_open() {
+        let src = "enum C as\n    A(number)\n    B\nend\n\nstruct R as\n    private xs: number[]\nend\n\nimpl R\n    public function viamatch(self, c: C): number\n        return match c with\n            case A(n) then if #self.xs > 0 then n else 0\n            case B then 0\n        end\n    end\n\n    public function stmt(self, c: C)\n        match c with\n            case A(n) then self.xs:push(n)\n            case B then print(\"b\")\n        end\n    end\nend\n\nreturn R\n";
+        assert_eq!(names(src), Vec::<&str>::new());
+    }
+
     #[test]
     fn a_numeric_loop_over_a_table_becomes_generic() {
         assert_eq!(
             fixed("for i = 1, #t do\n    local v = t[i]\n    print(v)\nend\n"),
-            "for i, v in t do\n    print(v)\nend\n"
+            "for _, v in t do\n    print(v)\nend\n"
+        );
+        // A body that reads the index keeps its name.
+        assert_eq!(
+            fixed("for i = 1, #t do\n    local v = t[i]\n    print(i, v)\nend\n"),
+            "for i, v in t do\n    print(i, v)\nend\n"
         );
     }
 }

@@ -15,6 +15,10 @@ use crate::config::Config;
 /// The type names a source exports: `export struct X`, `export enum X`,
 /// `export interface X`, `export trait X`, `export type X`, and
 /// `export class X`. A plain Luau module's `export type X` counts too.
+///
+/// A generic type carries its parameter list, `Slotted<T>`. An alias to
+/// it in another module has to pass the parameters on, or Luau reads
+/// the alias as the bare name and asks for the argument that is gone.
 pub fn exported_types(source: &str) -> Vec<String> {
     let mut out = Vec::new();
 
@@ -28,29 +32,58 @@ pub fn exported_types(source: &str) -> Vec<String> {
             continue;
         }
 
-        let mut words = rest.split_whitespace();
-        let Some(kind) = words.next() else { continue };
+        let rest = rest.trim_start();
+        let kind: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
 
         if !matches!(
-            kind,
+            kind.as_str(),
             "struct" | "enum" | "interface" | "trait" | "type" | "class"
         ) {
             continue;
         }
 
-        if let Some(name) = words.next() {
-            let name: String = name
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
+        let after = rest[kind.len()..].trim_start();
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
 
-            if !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) {
-                out.push(name);
-            }
+        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
         }
+
+        out.push(format!("{name}{}", type_params(&after[name.len()..])));
     }
 
     out
+}
+
+/// The parameter list a declaration opens with, as Luau takes it: the
+/// bounds go, since a Luau alias holds none. An empty text when the
+/// text does not open with `<`.
+pub fn type_params(text: &str) -> String {
+    let Some(open) = text.strip_prefix('<') else {
+        return String::new();
+    };
+    let Some(close) = open.find('>') else {
+        return String::new();
+    };
+    let names: Vec<&str> = open[..close]
+        .split(',')
+        .map(|p| p.split(':').next().unwrap_or(p).trim())
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    match names.is_empty() {
+        true => String::new(),
+
+        false => format!("<{}>", names.join(", ")),
+    }
+}
+
+/// The name a type entry carries, without its parameter list.
+pub fn type_head(entry: &str) -> &str {
+    entry.split('<').next().unwrap_or(entry)
 }
 
 /// The traits a source exports with their default methods, the ones
@@ -358,6 +391,83 @@ pub fn import_privates_for_file(path: &Path, source: &str) -> Vec<(String, Vec<S
 }
 
 /// The import shapes of a file under the nearest `alloy.toml`.
+/// The enums every module a source imports declares, each with its
+/// variants and how many values they carry. A `match` over an imported
+/// enum reads them to prove it covers every variant.
+pub fn import_enums(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<(String, usize)>)> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut out = Vec::new();
+
+    for spec in import_specs(source) {
+        let Some(path) = resolve(&spec, from, aliases) else {
+            continue;
+        };
+
+        if seen.contains(&path) {
+            continue;
+        }
+
+        seen.push(path.clone());
+
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+
+        for shape in crate::declarations::shapes(&text) {
+            let crate::declarations::Shape::Enum { name, variants } = shape else {
+                continue;
+            };
+
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((
+                    name,
+                    variants.into_iter().map(|(v, p)| (v, p.len())).collect(),
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+/// The imported enums of a file under the nearest `alloy.toml`.
+pub fn import_enums_for_file(path: &Path, source: &str) -> Vec<(String, Vec<(String, usize)>)> {
+    let (from, aliases) = file_context(path);
+
+    import_enums(source, &from, &aliases)
+}
+
+/// The text of every module a file imports, under the nearest
+/// `alloy.toml`. A reader of the file needs the declarations its
+/// imports bring in, and only the source carries them all.
+pub fn import_sources_for_file(path: &Path, source: &str) -> Vec<String> {
+    let (from, aliases) = file_context(path);
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut out = Vec::new();
+
+    for spec in import_specs(source) {
+        let Some(target) = resolve(&spec, &from, &aliases) else {
+            continue;
+        };
+
+        if seen.contains(&target) {
+            continue;
+        }
+
+        seen.push(target.clone());
+
+        if let Ok(text) = std::fs::read_to_string(&target) {
+            out.push(text);
+        }
+    }
+
+    out
+}
+
 pub fn import_shapes_for_file(path: &Path, source: &str) -> Vec<crate::declarations::Shape> {
     let (from, aliases) = file_context(path);
 
@@ -604,6 +714,9 @@ pub fn import_problems(
             let name = text(item.name).to_string();
             let local = text(item.alias.unwrap_or(item.name)).to_string();
             let (a, b) = range(item.name);
+            // The clash is on the name this file binds, which an `as`
+            // moves off the exported name.
+            let (la, lb) = range(item.alias.unwrap_or(item.name));
 
             if alloy_module && !names.contains(&name) {
                 out.push(ImportProblem {
@@ -624,8 +737,8 @@ pub fn import_problems(
 
                 if seen.contains(&local) {
                     out.push(ImportProblem {
-                        start: a,
-                        end: b,
+                        start: la,
+                        end: lb,
                         kind: "ImportError",
                         message: format!("`{local}` is already imported in this file"),
                     });
@@ -720,7 +833,9 @@ mod tests {
     #[test]
     fn exported_type_names_come_from_the_declarations() {
         let src = "export struct A as\nend\nexport enum B as C end\nexport interface D as\nend\nexport trait E\nend\nexport type F<T> = { T }\nexport function g() end\nexport const H = 1\nlocal exported = 1\nexport { exported }\n";
-        assert_eq!(exported_types(src), vec!["A", "B", "D", "E", "F"]);
+        // A generic alias carries its parameter list, so a re-export
+        // passes the parameters on.
+        assert_eq!(exported_types(src), vec!["A", "B", "D", "E", "F<T>"]);
     }
 
     #[test]

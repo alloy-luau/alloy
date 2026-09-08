@@ -92,6 +92,12 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
             }
 
             for m in &i.methods {
+                // A private method is out of reach for every reader of
+                // the hover, and completion already leaves it out.
+                if m.visibility.is_some_and(|v| text(v) == "private") {
+                    continue;
+                }
+
                 if let Some(first) = m.path.first() {
                     entry.1.push(text(*first));
                 }

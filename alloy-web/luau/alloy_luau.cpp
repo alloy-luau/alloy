@@ -249,7 +249,7 @@ extern "C" const char* alloy_autocomplete(int line, int col)
             }
         );
         Luau::ToStringOptions opts;
-        opts.maxTypeLength = 200;
+        opts.maxTypeLength = 20000;
         opts.maxTableLength = 40;
         out = std::string("{\"context\":\"") + context_name(result.context) + "\",\"items\":[";
         bool first = true;

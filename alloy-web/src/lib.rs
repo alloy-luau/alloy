@@ -199,6 +199,13 @@ pub fn complete(offset: u32) -> String {
         }
 
         let Some(ctx) = context::detect(source, offset) else {
+            // A member list holds members: no keyword after `.` or `:`.
+            let start = word_start(source, offset);
+
+            if start > 0 && matches!(source.as_bytes()[start - 1], b'.' | b':') {
+                return json!({ "items": items, "luau": true }).to_string();
+            }
+
             // The analyzer lists the names; Alloy adds its keywords.
             for k in keywords::ALLOY_KEYWORDS {
                 items.push(word(k, "keyword", keywords::doc(k).map(str::to_string), word_start(source, offset)));

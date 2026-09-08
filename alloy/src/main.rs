@@ -770,7 +770,7 @@ fn lint_cmd(args: &[String]) -> ExitCode {
         (0, report.lints.clone())
     };
     let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
-    offer_fixes(&report.lints, &lint_config, fix, "lint");
+    offer_fixes(&input, &report.lints, &lint_config, fix, "lint");
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
     let counts = p.summary(&[
         (report.written.len(), "files", ui::DIM),
@@ -904,6 +904,15 @@ fn flux_once(args: &[String]) -> ExitCode {
     let typecheck = config.flux.typecheck && !args.iter().any(|a| a == "--no-typecheck");
 
     if typecheck {
+        // The checker's lints take their level from the file's own
+        // `--@alloy-lint` before the `[lint]` table, so each source is
+        // scanned once here.
+        let per_file: Vec<(PathBuf, alloy::directives::Directives)> = report
+            .checks
+            .iter()
+            .map(|c| (c.rel.clone(), alloy::directives::scan(&c.source)))
+            .collect();
+
         match alloy::typecheck::analyze(&root, &config, &report.checks) {
             Ok(analysis) => {
                 for note in &analysis.notes {
@@ -916,12 +925,17 @@ fn flux_once(args: &[String]) -> ExitCode {
                     }
 
                     let path = input.join(&d.rel).display().to_string();
+                    let empty = alloy::directives::Directives::default();
+                    let file_directives = per_file
+                        .iter()
+                        .find(|(rel, _)| *rel == d.rel)
+                        .map_or(&empty, |(_, d)| d);
                     let level = if d.is_error() {
                         type_errors += 1;
 
                         Level::Error
                     } else {
-                        match lint::level_of(&lint_config, &d.kind) {
+                        match lint::level_in(&lint_config, file_directives, &d.kind) {
                             lint::Level::Allow => continue,
 
                             lint::Level::Deny => {
@@ -962,7 +976,7 @@ fn flux_once(args: &[String]) -> ExitCode {
         (0, report.lints.clone())
     };
     let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
-    offer_fixes(&report.lints, &lint_config, fix, "flux");
+    offer_fixes(&input, &report.lints, &lint_config, fix, "flux");
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
     let errors = report.diagnostics.len() + report.failures.len() + type_errors;
     let warnings = warnings + type_warnings;
@@ -1278,7 +1292,10 @@ fn lint_one(
     let silence = alloy::directives::scan(&source);
 
     for problem in alloy::modules::import_problems_for_file(Path::new(path), None, &source) {
-        if silence.allows(alloy::directives::line_of(&source, problem.start as usize)) {
+        if silence.allows_named(
+            alloy::directives::line_of(&source, problem.start as usize),
+            Some(problem.kind),
+        ) {
             out.diagnostics.push(alloy::Diagnostic {
                 start: problem.start,
                 end: problem.end,
@@ -1318,7 +1335,13 @@ fn lint_one(
         (0, lints.clone())
     };
     let (warnings, denied) = print_lints(Path::new(""), &remaining, lint_config, args);
-    offer_fixes(&lints, lint_config, fix, summary.unwrap_or("lint"));
+    offer_fixes(
+        Path::new(""),
+        &lints,
+        lint_config,
+        fix,
+        summary.unwrap_or("lint"),
+    );
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
 
     let clean = out.diagnostics.is_empty() && denied == 0 && !(deny_warnings && warnings > 0);
@@ -1346,6 +1369,40 @@ fn lint_one(
     }
 }
 
+/// The directives of each file under a root, read once per path. The
+/// lint levels and `--@alloy-preserve` are per file, so every reporter
+/// needs them beside the `[lint]` table.
+#[derive(Default)]
+struct FileDirectives {
+    seen: std::collections::HashMap<PathBuf, alloy::directives::Directives>,
+}
+
+impl FileDirectives {
+    fn of(&mut self, path: &Path) -> &alloy::directives::Directives {
+        self.seen.entry(path.to_path_buf()).or_insert_with(|| {
+            alloy::directives::scan(&std::fs::read_to_string(path).unwrap_or_default())
+        })
+    }
+}
+
+/// Whether `alloy flux --fix` may rewrite a lint: the level is not
+/// `allow`, the lint has a rewrite, and no `--@alloy-preserve` covers
+/// the line the rewrite starts on.
+fn is_fixable(path: &Path, l: &Lint, config: &LintConfig, directives: &mut FileDirectives) -> bool {
+    let Some(fix) = &l.fix else { return false };
+    let d = directives.of(path);
+
+    if lint::level_in(config, d, l.name) == lint::Level::Allow {
+        return false;
+    }
+
+    let source = std::fs::read_to_string(path).unwrap_or_default();
+
+    !directives
+        .of(path)
+        .preserves(alloy::directives::line_of(&source, fix.start as usize))
+}
+
 /// Prints the lints at `warn` and `deny`; returns how many of each.
 fn print_lints(
     input: &Path,
@@ -1364,19 +1421,22 @@ fn print_lints(
     let mut denied = 0;
     let mut last_path: Option<PathBuf> = None;
     let mut source = String::new();
+    let mut directives = alloy::directives::Directives::default();
 
     for (rel, l) in lints {
-        let level = lint::level_of(&config, l.name);
-
-        if level == lint::Level::Allow {
-            continue;
-        }
-
         let path = input.join(rel);
 
         if last_path.as_ref() != Some(&path) {
             source = std::fs::read_to_string(&path).unwrap_or_default();
+            directives = alloy::directives::scan(&source);
             last_path = Some(path.clone());
+        }
+
+        // A `--@alloy-lint` in the file wins over the `[lint]` table.
+        let level = lint::level_in(&config, &directives, l.name);
+
+        if level == lint::Level::Allow {
+            continue;
         }
 
         let (line, col) = line_col(&source, l.start as usize);
@@ -1411,12 +1471,23 @@ fn print_lints(
         );
 
         if let Some(fix) = &l.fix {
-            let one_line = fix
-                .replacement
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            eprintln!("{}", p.note(&format!("rewrite: {one_line}")));
+            let at = alloy::directives::line_of(&source, fix.start as usize);
+
+            if directives.preserves(at) {
+                eprintln!(
+                    "{}",
+                    p.note(
+                        "`--@alloy-preserve` keeps this line, so `--fix` writes no rewrite here"
+                    )
+                );
+            } else {
+                let one_line = fix
+                    .replacement
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!("{}", p.note(&format!("rewrite: {one_line}")));
+            }
         }
     }
 
@@ -1436,18 +1507,18 @@ fn apply_lint_fixes(
     paths.sort();
     paths.dedup();
     let mut rewrites = 0;
+    let mut directives = FileDirectives::default();
     let mut remaining: Vec<(PathBuf, Lint)> = lints
         .iter()
-        .filter(|(_, l)| l.fix.is_none())
+        .filter(|(rel, l)| !is_fixable(&input.join(rel), l, config, &mut directives))
         .cloned()
         .collect();
 
     for rel in paths {
+        let path = input.join(rel);
         let live: Vec<Lint> = lints
             .iter()
-            .filter(|(r, l)| {
-                r == rel && l.fix.is_some() && lint::level_of(config, l.name) != lint::Level::Allow
-            })
+            .filter(|(r, l)| r == rel && is_fixable(&path, l, config, &mut directives))
             .map(|(_, l)| l.clone())
             .collect();
 
@@ -1455,7 +1526,6 @@ fn apply_lint_fixes(
             continue;
         }
 
-        let path = input.join(rel);
         let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -1486,14 +1556,21 @@ fn apply_lint_fixes(
 }
 
 /// Says how many rewrites `--fix` would apply, when it was not given.
-fn offer_fixes(lints: &[(PathBuf, Lint)], config: &LintConfig, fixed: bool, command: &str) {
+fn offer_fixes(
+    input: &Path,
+    lints: &[(PathBuf, Lint)],
+    config: &LintConfig,
+    fixed: bool,
+    command: &str,
+) {
     if fixed {
         return;
     }
 
+    let mut directives = FileDirectives::default();
     let n = lints
         .iter()
-        .filter(|(_, l)| l.fix.is_some() && lint::level_of(config, l.name) != lint::Level::Allow)
+        .filter(|(rel, l)| is_fixable(&input.join(rel), l, config, &mut directives))
         .count();
 
     if n > 0 {

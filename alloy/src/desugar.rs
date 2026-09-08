@@ -4125,13 +4125,14 @@ impl<'s> Desugar<'s> {
             _ => format!("({client}) & ({server})"),
         };
         // A `.client.aly` or `.server.aly` file sees one side of the
-        // remote. Every other file is shared and sees both, as a module
-        // that branches on `RunService` does.
-        let side = file_side(&self.options.file_name);
-        let client_fires = r.from_client && side != Some(Side::Server);
-        let server_fires = r.from_server && side != Some(Side::Client);
-        let client_handles = r.from_server && side != Some(Side::Server);
-        let server_handles = r.from_client && side != Some(Side::Client);
+        // remote, and `--@alloy-side` says the same in a file whose
+        // name does not. Every other file is shared and sees both, as a
+        // module that branches on `RunService` does.
+        let side = crate::directives::effective_side(self.src, &self.options.file_name);
+        let client_fires = r.from_client && side != Some(crate::directives::Side::Server);
+        let server_fires = r.from_server && side != Some(crate::directives::Side::Client);
+        let client_handles = r.from_server && side != Some(crate::directives::Side::Server);
+        let server_handles = r.from_client && side != Some(crate::directives::Side::Client);
         let mut members = vec!["spec: any".to_string(), "instance: Instance?".to_string()];
 
         match (client_fires, server_fires) {
@@ -9409,30 +9410,6 @@ fn literal_kind(e: &Expr) -> Option<&'static str> {
         Expr::String(_) => Some("string"),
         Expr::True(_) | Expr::False(_) => Some("boolean"),
         _ => None,
-    }
-}
-
-/// Which side of a remote a file sees, from its name.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Side {
-    Client,
-    Server,
-}
-
-/// The side a file name declares: `ui.client.aly` is the client, and
-/// `main.server.aly` is the server. Any other name is shared.
-fn file_side(file: &str) -> Option<Side> {
-    let stem = file
-        .strip_suffix(".aly")
-        .or_else(|| file.strip_suffix(".alx"))
-        .unwrap_or(file);
-
-    if stem.ends_with(".client") {
-        Some(Side::Client)
-    } else if stem.ends_with(".server") {
-        Some(Side::Server)
-    } else {
-        None
     }
 }
 

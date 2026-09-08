@@ -376,7 +376,13 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
         for problem in crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
         {
-            if !silence.allows(crate::directives::line_of(&source, problem.start as usize)) {
+            // The problem's kind is the name an `--@alloy-ignore-start`
+            // may carry, so a region for `UnknownModule` silences that
+            // alone.
+            if !silence.allows_named(
+                crate::directives::line_of(&source, problem.start as usize),
+                Some(problem.kind),
+            ) {
                 continue;
             }
 

@@ -203,13 +203,20 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     diagnostics.extend(rendered.diagnostics);
 
     // A directive the compiler does not know silences nothing, so it
-    // reads as a working one and is not.
-    for (line, word) in &directives::scan(src).unknown {
-        let (start, end) = directives::span_of_line(src, *line);
+    // reads as a working one and is not. A directive it knows but
+    // cannot accept reports the same way, on its own line.
+    let scanned = directives::scan(src);
+
+    for (line, message) in scanned
+        .problems()
+        .into_iter()
+        .chain(scanned.side_problem(&options.file_name))
+    {
+        let (start, end) = directives::span_of_line(src, line);
         diagnostics.push(Diagnostic {
             start: start as u32,
             end: end as u32,
-            message: directives::unknown_message(word),
+            message,
         });
     }
 
@@ -243,7 +250,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     // `--@alloy-expect-error` silences too, and remembers the lines it
     // covered that reported: the checker's pass adds its own and
     // reports each directive left over.
-    let silence = directives::scan(src);
+    let silence = scanned;
     let mut expected_hits = Vec::new();
 
     if !silence.is_empty() {
@@ -253,6 +260,10 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
             .chain(
                 lints
                     .iter()
+                    // The lint that asks a directive for its reason is
+                    // about the directive, not about the line it
+                    // covers, so it meets no expectation.
+                    .filter(|l| l.name != directives::MISSING_REASON)
                     .map(|l| directives::line_of(src, l.start as usize)),
             )
         {
@@ -262,7 +273,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         }
 
         diagnostics.retain(|d| silence.allows(directives::line_of(src, d.start as usize)));
-        lints.retain(|l| silence.allows(directives::line_of(src, l.start as usize)));
+        lints.retain(|l| silence.allows_lint(directives::line_of(src, l.start as usize), l.name));
     }
 
     // A plain `require("./x.json")` passes through the desugar as it is;

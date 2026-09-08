@@ -254,9 +254,11 @@ impl State {
             // Lints at their `[lint]` level: a warning, or an error for
             // a denied one. The table comes from the project's alloy.toml.
             let lint_config = self.lint_config();
+            let directives = alloy::directives::scan(&doc.source);
 
             for l in &out.lints {
-                let level = alloy::lint::level_of(&lint_config, l.name);
+                // A `--@alloy-lint` in the file wins over the table.
+                let level = alloy::lint::level_in(&lint_config, &directives, l.name);
 
                 if level == alloy::lint::Level::Allow {
                     continue;
@@ -280,10 +282,14 @@ impl State {
                     "source": "Alloy",
                     "code": alloy::docs::LINT_CODE,
                     "codeDescription": { "href": alloy::docs::book_url(alloy::docs::LINT_CODE).unwrap_or_default() },
-                    "message": if l.fix.is_some() {
-                        format!("{}: {}\n`alloy flux --fix` rewrites it.", l.name, l.message)
-                    } else {
-                        format!("{}: {}", l.name, l.message)
+                    "message": match &l.fix {
+                        Some(f) if directives.preserves(alloy::directives::line_of(&doc.source, f.start as usize)) => {
+                            format!("{}: {}\n`--@alloy-preserve` keeps this line, so `--fix` writes no rewrite here.", l.name, l.message)
+                        }
+
+                        Some(_) => format!("{}: {}\n`alloy flux --fix` rewrites it.", l.name, l.message),
+
+                        None => format!("{}: {}", l.name, l.message),
                     },
                 }));
             }
@@ -302,10 +308,10 @@ impl State {
 
             for problem in alloy::modules::import_problems_for_file(&path, Some(&rel), &doc.source)
             {
-                if !silence.allows(alloy::directives::line_of(
-                    &doc.source,
-                    problem.start as usize,
-                )) {
+                if !silence.allows_named(
+                    alloy::directives::line_of(&doc.source, problem.start as usize),
+                    Some(problem.kind),
+                ) {
                     continue;
                 }
 
@@ -342,13 +348,21 @@ impl State {
             return actions;
         };
         let lint_config = self.lint_config();
+        let directives = alloy::directives::scan(&doc.source);
         let ((from_line, _), (to_line, _)) = range;
         let mut all_edits: Vec<Value> = Vec::new();
 
         for l in &out.lints {
             let Some(fix) = &l.fix else { continue };
 
-            if alloy::lint::level_of(&lint_config, l.name) == alloy::lint::Level::Allow {
+            if alloy::lint::level_in(&lint_config, &directives, l.name) == alloy::lint::Level::Allow
+            {
+                continue;
+            }
+
+            // `--@alloy-preserve` keeps the line as the author wrote it,
+            // in the editor as under `alloy flux --fix`.
+            if directives.preserves(alloy::directives::line_of(&doc.source, fix.start as usize)) {
                 continue;
             }
 
@@ -721,18 +735,38 @@ impl State {
         let (_, start_char) = position_of(&doc.source, edit_start);
         let alloy_only = typed.starts_with('@');
         let luau_only = typed.starts_with('!');
-        let directives: [(&str, &str); 6] = [
+        let directives: [(&str, &str); 11] = [
             (
                 "--@alloy-ignore",
-                "Silences the next line that holds code, or this line when it sits at the end of one: the compiler's, the lints, and the checker's diagnostics.",
+                "Silences the next line that holds code, or this line when it sits at the end of one: the compiler's, the lints, and the checker's diagnostics. Text after the name is the reason.",
+            ),
+            (
+                "--@alloy-ignore-start",
+                "Opens a silent region, up to the matching `--@alloy-ignore-end`. A lint or a checker kind after the name limits the region to that one.",
+            ),
+            (
+                "--@alloy-ignore-end",
+                "Closes the innermost `--@alloy-ignore-start`, or the one with the same name.",
             ),
             (
                 "--@alloy-expect-error",
-                "Silences the next line that holds code the way `--@alloy-ignore` does, and is an error itself when that line has none.",
+                "Silences the next line that holds code the way `--@alloy-ignore` does, and is an error itself when that line has none. Text after the name is the reason, which comes back in that error.",
             ),
             (
                 "--@alloy-nocheck",
                 "Silences every diagnostic in this file.",
+            ),
+            (
+                "--@alloy-lint",
+                "Sets a lint's level for this file, over `[lint]` in alloy.toml: `--@alloy-lint raw_require=allow`. Several are separated by commas, and a group name sets its whole group.",
+            ),
+            (
+                "--@alloy-side",
+                "`client` or `server`: this file sees that side of every remote, the way a `.client.aly` or `.server.aly` name does.",
+            ),
+            (
+                "--@alloy-preserve",
+                "`alloy flux --fix` writes no rewrite on the next line with code, or on this line when it sits at the end of one. The lint still reports.",
             ),
             (
                 "--!strict",
@@ -6338,19 +6372,21 @@ fn unmet_expectations(doc: &Doc, child: &[Value]) -> Vec<Value> {
     silence
         .unmet(&errored)
         .into_iter()
-        .map(|at| {
+        .map(|(at, reason)| {
             let (s, e) = alloy::directives::span_of_line(&doc.source, at);
             let (sl, sc) = position_of(&doc.source, s);
             let (el, ec) = position_of(&doc.source, e);
-            let message = alloy::directives::UNMET;
+            // The reason names which directive went stale, so a file
+            // with several says which one to look at.
+            let message = alloy::directives::unmet_message(reason.as_deref());
             let mut item = json!({
                 "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
                 "severity": 1,
                 "source": "Alloy",
-                "message": alloy::docs::labeled(message),
+                "message": alloy::docs::labeled(&message),
             });
 
-            if let Some(code) = alloy::docs::code_for(message)
+            if let Some(code) = alloy::docs::code_for(&message)
                 && let Some(url) = alloy::docs::book_url(code)
             {
                 item["code"] = json!(code);
@@ -6651,13 +6687,22 @@ fn keep_diagnostic(
 ) -> bool {
     let message = d.get("message").and_then(Value::as_str).unwrap_or_default();
 
-    // `--@alloy-nocheck` and `--@alloy-ignore` silence the checker too.
-    // The shadow keeps the source's lines, so the line is the same.
+    // `--@alloy-nocheck`, `--@alloy-ignore`, and an ignored region
+    // silence the checker too. The shadow keeps the source's lines, so
+    // the line is the same. The kind before the colon is the name an
+    // `--@alloy-ignore-start` may carry.
     let silence = alloy::directives::scan(&doc.source);
+    // `friendly_message` renames an `Unknown require` report to
+    // `UnknownModule`; a region names what the author reads.
+    let kind = if message.contains("Unknown require") {
+        Some("UnknownModule")
+    } else {
+        message.split_once(": ").map(|(k, _)| k)
+    };
 
     if !silence.is_empty()
         && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
-        && !silence.allows(sl as usize)
+        && !silence.allows_named(sl as usize, kind)
     {
         return false;
     }
@@ -6726,7 +6771,7 @@ fn keep_diagnostic(
         && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
         && out.lints.iter().any(|l| {
             l.name == "private_access"
-                && alloy::lint::level_of(lint_config, l.name) != alloy::lint::Level::Allow
+                && alloy::lint::level_in(lint_config, &silence, l.name) != alloy::lint::Level::Allow
                 && alloy::directives::line_of(&doc.source, l.start as usize) == sl as usize
                 && l.message.contains(&format!("`{field}`"))
         })
@@ -6769,7 +6814,7 @@ fn keep_diagnostic(
         && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
         && out.lints.iter().any(|l| {
             names.contains(&l.name)
-                && alloy::lint::level_of(lint_config, l.name) != alloy::lint::Level::Allow
+                && alloy::lint::level_in(lint_config, &silence, l.name) != alloy::lint::Level::Allow
                 && alloy::directives::line_of(&doc.source, l.start as usize) == sl as usize
         })
     {
@@ -7770,6 +7815,184 @@ local f = $nameof(RunService.Heartbeat)
         assert_eq!(caps["semanticTokensProvider"]["full"], true);
         assert!(caps["semanticTokensProvider"].get("range").is_none());
         assert!(caps["workspace"]["fileOperations"]["didRename"].is_object());
+    }
+    // --- the comment directives ------------------------------------------------
+
+    /// One child diagnostic, as the checker sends it.
+    fn child(line: u32, message: &str, severity: u64) -> Value {
+        json!({
+            "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 4 } },
+            "severity": severity,
+            "message": message,
+        })
+    }
+
+    #[test]
+    fn a_region_silences_the_checkers_reports_between_its_pair() {
+        let source = concat!(
+            "--@alloy-ignore-start\n",
+            "local a = undefined_one\n",
+            "--@alloy-ignore-end\n",
+            "local b = undefined_two\n",
+        );
+        let (st, uri) = one_file(source);
+        let doc = st.docs.get(uri).unwrap();
+        let config = alloy::config::LintConfig::default();
+
+        assert!(!keep_diagnostic(
+            &child(1, "TypeError: Unknown global", 1),
+            doc,
+            None,
+            &config
+        ));
+        assert!(keep_diagnostic(
+            &child(3, "TypeError: Unknown global", 1),
+            doc,
+            None,
+            &config
+        ));
+    }
+
+    #[test]
+    fn a_named_region_silences_that_kind_alone() {
+        let source = concat!(
+            "--@alloy-ignore-start LocalUnused\n",
+            "local a = 1\n",
+            "local b = 2\n",
+            "--@alloy-ignore-end\n",
+        );
+        let (st, uri) = one_file(source);
+        let doc = st.docs.get(uri).unwrap();
+        let config = alloy::config::LintConfig::default();
+
+        assert!(!keep_diagnostic(
+            &child(1, "LocalUnused: Variable 'a' is never used", 2),
+            doc,
+            None,
+            &config
+        ));
+        assert!(keep_diagnostic(
+            &child(2, "LocalShadow: Variable 'b' shadows", 2),
+            doc,
+            None,
+            &config
+        ));
+    }
+
+    #[test]
+    fn a_region_reads_the_kind_the_author_sees() {
+        // The child says `Unknown require`; the editor shows
+        // `UnknownModule`, and the region names that.
+        let source = concat!(
+            "--@alloy-ignore-start UnknownModule\n",
+            "local a = require(\"./gone\")\n",
+            "--@alloy-ignore-end\n",
+        );
+        let (st, uri) = one_file(source);
+        let doc = st.docs.get(uri).unwrap();
+        let config = alloy::config::LintConfig::default();
+
+        assert!(!keep_diagnostic(
+            &child(1, "TypeError: Unknown require: \"./gone\"", 1),
+            doc,
+            None,
+            &config
+        ));
+    }
+
+    #[test]
+    fn an_unmet_expectation_carries_its_reason() {
+        // The covered line must come clean, so it holds no lint of
+        // its own: an unused local would meet the expectation.
+        let source = "--@alloy-expect-error a negative count is refused\nlocal a = 1\nprint(a)\n";
+        let (st, uri) = one_file(source);
+        let doc = st.docs.get(uri).unwrap();
+        let items = unmet_expectations(doc, &[]);
+        assert_eq!(items.len(), 1);
+        let message = items[0]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("a negative count is refused"), "{message}");
+        // The report sits on the directive's own line.
+        assert_eq!(items[0]["range"]["start"]["line"], 0);
+
+        // A directive over a line the checker reported on says nothing.
+        assert!(unmet_expectations(doc, &[child(1, "TypeError: no", 1)]).is_empty());
+    }
+
+    #[test]
+    fn a_lint_directive_re_levels_one_document() {
+        let source = "--@alloy-lint raw_require=deny\nlocal m = require(\"./m\")\n";
+        let (st, uri) = one_file(source);
+        let items = st.alloy_diagnostics(uri);
+        let raw = items
+            .iter()
+            .find(|d| {
+                d["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("raw_require"))
+            })
+            .expect("the lint reports");
+        // Denied, so the editor shows it as an error.
+        assert_eq!(raw["severity"], 1);
+
+        let silent = "--@alloy-lint raw_require=allow\nlocal m = require(\"./m\")\n";
+        let (st, uri) = one_file(silent);
+        assert!(
+            !st.alloy_diagnostics(uri).iter().any(|d| {
+                d["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("raw_require"))
+            }),
+            "an allowed lint still reports"
+        );
+    }
+
+    #[test]
+    fn preserve_keeps_the_quick_fix_off_a_line() {
+        let plain = "local n = p and p.Name\n";
+        let (st, uri) = one_file(plain);
+        let range = ((0, 0), (1, 0));
+        assert!(
+            st.lint_actions(uri, range)
+                .iter()
+                .any(|a| a["kind"] == "quickfix"),
+            "the rewrite is offered"
+        );
+
+        let kept = "--@alloy-preserve the two names read better apart\nlocal n = p and p.Name\n";
+        let (st, uri) = one_file(kept);
+        let range = ((0, 0), (2, 0));
+        assert!(
+            st.lint_actions(uri, range).is_empty(),
+            "a preserved line still offers a rewrite"
+        );
+
+        // The lint still reports, and says the line is preserved.
+        let message = st
+            .alloy_diagnostics(uri)
+            .into_iter()
+            .find_map(|d| {
+                d["message"]
+                    .as_str()
+                    .filter(|m| m.starts_with("manual_safe_access"))
+                    .map(str::to_string)
+            })
+            .expect("the lint reports");
+        assert!(message.contains("--@alloy-preserve"), "{message}");
+    }
+
+    #[test]
+    fn the_directive_list_holds_every_directive() {
+        let source = "--@\n";
+        let (st, uri) = one_file(source);
+        let items = st.directive_completions(uri, 0, 3);
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        for name in alloy::directives::NAMES {
+            assert!(labels.contains(name), "`{name}` is not offered");
+        }
+
+        // `--@` asks for Alloy's own; the Luau hot comments stay out.
+        assert!(!labels.iter().any(|l| l.starts_with("--!")));
     }
 }
 

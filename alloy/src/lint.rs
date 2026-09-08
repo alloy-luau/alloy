@@ -69,6 +69,26 @@ pub enum Level {
     Deny,
 }
 
+impl Level {
+    /// The level a name spells, for `[lint]` and `--@alloy-lint`.
+    pub fn from_name(name: &str) -> Option<Level> {
+        match name {
+            "allow" => Some(Level::Allow),
+            "warn" => Some(Level::Warn),
+            "deny" => Some(Level::Deny),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Allow => "allow",
+            Level::Warn => "warn",
+            Level::Deny => "deny",
+        }
+    }
+}
+
 /// The group a lint belongs to, after clippy's: `[lint]` sets a level
 /// for a whole group by its name, and `--list` sorts by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,6 +426,13 @@ pub const LINTS: &[LintInfo] = &[
         summary: "`for i = 1, #t do local v = t[i]`",
         detail: "Flux. The numeric loop indexes the table by hand on its first line. `for i, v in t do` binds both, in order, and reads as what it is. `alloy flux --fix` rewrites the header and drops the index line.",
     },
+    LintInfo {
+        name: "missing_reason",
+        group: Group::Style,
+        default: Level::Warn,
+        summary: "an `--@alloy-expect-error` with no reason",
+        detail: "The directive says a line must hold an error. Write why after the name, `--@alloy-expect-error the contract rejects a negative count`, and the reason comes back in the message when the line goes clean, so a stale directive is easy to place. `--@alloy-ignore` takes a reason the same way and never draws this lint. No automatic rewrite: only the author knows the reason.",
+    },
     // --- complexity ------------------------------------------------------------
     LintInfo {
         name: "too_many_arguments",
@@ -693,6 +720,35 @@ pub fn group_name(name: &str) -> &'static str {
         .unwrap_or(LUAU_GROUP)
 }
 
+/// The level a lint runs at in one file: the `--@alloy-lint` directives
+/// of that file first, then the `[lint]` table of alloy.toml. A file
+/// says the last word about its own lints.
+pub fn level_in(
+    config: &LintConfig,
+    directives: &crate::directives::Directives,
+    name: &str,
+) -> Level {
+    directives
+        .level_override(name)
+        .unwrap_or_else(|| level_of(config, name))
+}
+
+/// Whether a name is a lint, a group, an ingot's lint, or one of the
+/// type checker's. `[lint]` and `--@alloy-lint` accept the same names.
+/// A checker lint has no list here, so a capitalised name passes, the
+/// way `level_of` reads one under the `luau` group.
+pub fn is_known_name(name: &str) -> bool {
+    let checker_lint = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && name.chars().all(|c| c.is_ascii_alphanumeric());
+
+    !name.is_empty()
+        && (LINTS.iter().any(|l| l.name == name)
+            || Group::from_name(name).is_some()
+            || name == LUAU_GROUP
+            || checker_lint
+            || external().iter().any(|l| l.name == name || l.group == name))
+}
+
 /// A `[lint]` name that is neither a lint nor a group.
 pub fn unknown_names(config: &LintConfig) -> Vec<String> {
     config
@@ -709,6 +765,36 @@ pub fn unknown_names(config: &LintConfig) -> Vec<String> {
                     .any(|l| l.name == n.as_str() || l.group == n.as_str())
         })
         .cloned()
+        .collect()
+}
+
+/// The lints about the directives themselves: an
+/// `--@alloy-expect-error` with no reason after it.
+fn directive_lints(src: &str) -> Vec<Lint> {
+    let directives = crate::directives::scan(src);
+
+    directives
+        .missing_reason
+        .iter()
+        .map(|at| {
+            let (line_start, end) = crate::directives::span_of_line(src, *at);
+            // The directive may trail code; the lint is about the
+            // directive, so the range starts at the comment.
+            let start = src[line_start..end]
+                .find(crate::directives::EXPECT)
+                .map_or(line_start, |i| line_start + i);
+
+            Lint {
+                name: crate::directives::MISSING_REASON,
+                start: start as u32,
+                end: end as u32,
+                message: format!(
+                    "`{}` says nothing about why the line must fail; write the reason after it",
+                    crate::directives::EXPECT
+                ),
+                fix: None,
+            }
+        })
         .collect()
 }
 
@@ -744,6 +830,8 @@ pub fn run(
     if definitions {
         return lints;
     }
+
+    lints.extend(directive_lints(src));
 
     let text = |i: usize| toks[i].text(src);
     let st = structure(src, toks);

@@ -63,6 +63,9 @@ pub fn set_source(source: &str) -> String {
     let decls = alloy::declarations::summaries(source, false);
     let shapes = alloy::declarations::shapes(source);
     let lint_config = alloy::config::LintConfig::default();
+    // `--@alloy-lint` in the file wins over the defaults, and
+    // `--@alloy-preserve` keeps a rewrite off a line.
+    let directives = alloy::directives::scan(source);
 
     let result = match &compiled {
         Ok(out) => {
@@ -82,11 +85,14 @@ pub fn set_source(source: &str) -> String {
                 .lints
                 .iter()
                 .filter_map(|l| {
-                    let level = match alloy::lint::level_of(&lint_config, l.name) {
+                    let level = match alloy::lint::level_in(&lint_config, &directives, l.name) {
                         alloy::lint::Level::Allow => return None,
                         alloy::lint::Level::Warn => "warning",
                         alloy::lint::Level::Deny => "error",
                     };
+                    let fix = l.fix.as_ref().filter(|f| {
+                        !directives.preserves(alloy::directives::line_of(source, f.start as usize))
+                    });
 
                     Some(json!({
                         "name": l.name,
@@ -94,7 +100,7 @@ pub fn set_source(source: &str) -> String {
                         "start": l.start,
                         "end": l.end.max(l.start),
                         "message": l.message,
-                        "fix": l.fix.as_ref().map(|f| json!({ "start": f.start, "end": f.end, "replacement": f.replacement })),
+                        "fix": fix.map(|f| json!({ "start": f.start, "end": f.end, "replacement": f.replacement })),
                     }))
                 })
                 .collect();
@@ -181,9 +187,14 @@ pub fn complete(offset: u32) -> String {
             let from = head.rfind("--").map_or(line_start, |i| line_start + i);
 
             for (name, what) in [
-                ("--@alloy-ignore", "Silences the next line that holds code, or this line at its end."),
-                ("--@alloy-expect-error", "Silences the next line, and is an error when that line has none."),
+                ("--@alloy-ignore", "Silences the next line that holds code, or this line at its end. Text after the name is the reason."),
+                ("--@alloy-ignore-start", "Opens a silent region, up to `--@alloy-ignore-end`. A name after it limits the region to that lint or kind."),
+                ("--@alloy-ignore-end", "Closes the innermost `--@alloy-ignore-start`."),
+                ("--@alloy-expect-error", "Silences the next line, and is an error when that line has none. Text after the name is the reason."),
                 ("--@alloy-nocheck", "Silences every diagnostic in this file."),
+                ("--@alloy-lint", "Sets a lint's level for this file: `--@alloy-lint raw_require=allow`."),
+                ("--@alloy-side", "`client` or `server`: the side of every remote this file sees."),
+                ("--@alloy-preserve", "`alloy flux --fix` writes no rewrite on that line."),
                 ("--!strict", "The checker's strict mode for this file."),
                 ("--!nonstrict", "The checker's nonstrict mode for this file."),
                 ("--!nocheck", "No type checking for this file."),
@@ -744,5 +755,39 @@ fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
             "interface",
             "type",
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The playground offers every directive the compiler reads, and
+    /// re-levels a lint the file's own `--@alloy-lint` names.
+    #[test]
+    fn the_directive_list_and_the_lint_levels_reach_the_playground() {
+        let source = "--@alloy-lint raw_require=allow\nlocal m = require(\"./m\")\n--@\n";
+        let out = super::set_source(source);
+        assert!(!out.contains("\"name\":\"raw_require\""), "{out}");
+
+        let at = source.find("--@").map(|i| i + 3).unwrap() as u32;
+        let items = super::complete(at);
+
+        for name in alloy::directives::NAMES {
+            assert!(items.contains(name), "`{name}` is not offered: {items}");
+        }
+    }
+
+    #[test]
+    fn a_preserved_line_carries_no_rewrite() {
+        let kept = "--@alloy-preserve\nlocal n = p and p.Name\n";
+        let out = super::set_source(kept);
+        assert!(out.contains("\"name\":\"manual_safe_access\""), "{out}");
+        assert!(!out.contains("player?"), "{out}");
+        assert!(!out.contains("\"replacement\""), "{out}");
+
+        let plain = "local n = p and p.Name\n";
+        assert!(
+            super::set_source(plain).contains("\"replacement\""),
+            "the rewrite reaches the playground without the directive"
+        );
     }
 }

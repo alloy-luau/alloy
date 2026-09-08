@@ -524,7 +524,7 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             unparsed.insert(f.rel.clone());
         }
 
-        let Some(mapped) = map_position(f, line_no, col, is_error, message) else {
+        let Some(mapped) = map_position(f, line_no, col, is_error, kind, message) else {
             continue;
         };
 
@@ -575,6 +575,15 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             (kind.to_string(), message.to_string())
         };
 
+        // The rewrite above renames a kind, `Unknown require` into
+        // `UnknownModule`; a region that names one reads the name the
+        // author sees, so the region is read once more here.
+        if let Some(silence) = directives.get(&f.rel)
+            && !silence.allows_named(mapped.0.saturating_sub(1), Some(&kind))
+        {
+            continue;
+        }
+
         analysis.diagnostics.push(TypeDiag {
             rel: f.rel.clone(),
             line: mapped.0,
@@ -595,13 +604,13 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             errored.extend(hits);
         }
 
-        for at in silence.unmet(&errored) {
+        for (at, reason) in silence.unmet(&errored) {
             analysis.diagnostics.push(TypeDiag {
                 rel: f.rel.clone(),
                 line: at + 1,
                 col: 1,
                 kind: "DirectiveError".to_string(),
-                message: crate::directives::UNMET.to_string(),
+                message: crate::directives::unmet_message(reason.as_deref()),
             });
         }
     }
@@ -1320,11 +1329,14 @@ fn map_position(
     line: usize,
     col: usize,
     is_error: bool,
+    kind: &str,
     message: &str,
 ) -> Option<(usize, usize)> {
     let silence = crate::directives::scan(&f.source);
 
-    if !silence.allows(line.saturating_sub(1)) {
+    // The checker's kind is the name an `--@alloy-ignore-start` may
+    // carry, so a region for `LocalUnused` silences that alone.
+    if !silence.allows_named(line.saturating_sub(1), Some(kind)) {
         return None;
     }
 
@@ -1708,12 +1720,18 @@ mod tests {
             parsed_clean: true,
             expected_hits: Vec::new(),
         };
-        assert_eq!(map_position(&f, 1, 19, true, "Expected"), Some((1, 19)));
+        assert_eq!(
+            map_position(&f, 1, 19, true, "TypeError", "Expected"),
+            Some((1, 19))
+        );
         let silenced = CheckSource {
             source: "local x: number = \"s\" --@alloy-ignore\n".to_string(),
             ..f
         };
-        assert_eq!(map_position(&silenced, 1, 19, true, "Expected"), None);
+        assert_eq!(
+            map_position(&silenced, 1, 19, true, "TypeError", "Expected"),
+            None
+        );
         assert!(consumed_by_intrinsic(
             "local RunService = 1\nlocal f = $nameof(RunService.Heartbeat)\n",
             "RunService"

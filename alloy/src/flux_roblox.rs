@@ -46,6 +46,28 @@ const DEPRECATED_METHODS: &[(&str, &str)] = &[
 /// members take none. An empty call is the deprecated one.
 const DEPRECATED_WITHOUT_ARGS: &[(&str, &str)] = &[("remove", "Destroy"), ("clone", "Clone")];
 
+/// The old names the std spells the same way: `sig:connect(f)`,
+/// `conn:disconnect()`, `sig:wait()`, `x:clone()` on a `T: Clone`, and
+/// `bag:remove()`. Each fires only over a Roblox receiver, which
+/// `roblox_expr` reads from the tokens.
+const NEEDS_ROBLOX_RECEIVER: &[&str] = &["connect", "disconnect", "wait", "remove", "clone"];
+
+/// The globals that name an instance with no member behind them.
+const INSTANCE_GLOBALS: &[&str] = &["game", "workspace", "Workspace", "script"];
+
+/// Whether an annotation names a Roblox event or the connection one
+/// returns. The std's own `Signal` and `SignalConnection` do not.
+fn names_event_type(ty: &str) -> bool {
+    ty.contains("RBXScriptSignal") || ty.contains("RBXScriptConnection")
+}
+
+/// Whether an annotation names an Instance or one of its classes.
+fn names_instance_type(ty: &str) -> bool {
+    let base = ty.trim().trim_end_matches('?').trim();
+
+    crate::roblox_classes::INSTANCE_CLASSES.contains(&base)
+}
+
 /// The body movers and what replaces each.
 const BODY_MOVERS: &[(&str, &str)] = &[
     ("BodyVelocity", "LinearVelocity"),
@@ -92,6 +114,17 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // The std spells these names the way the old API does.
+            // Over a receiver that is not a Roblox instance or event,
+            // the call is the std's, not the 2014 member.
+            if NEEDS_ROBLOX_RECEIVER.contains(&name) {
+                let event = matches!(name, "connect" | "disconnect" | "wait");
+
+                if !self.roblox_expr(self.chain_start(i), i, event, true) {
+                    continue;
+                }
+            }
+
             self.lint(
                 out,
                 "deprecated_method",
@@ -101,6 +134,129 @@ impl<'s> Scan<'s> {
                 Some((*current).to_string()),
             );
         }
+    }
+
+    /// The head of the call chain that ends at `at`: names, `.`, `:`,
+    /// and whole bracket groups, walked back. `expr_start_before` stops
+    /// inside `f("x")`, and the name before that call is the one that
+    /// says whether the receiver is a Roblox value.
+    fn chain_start(&self, at: usize) -> usize {
+        let mut c = at;
+
+        while c > 0 {
+            let j = c - 1;
+            let text = self.t(j);
+
+            if matches!(text, ")" | "]" | "}") {
+                match self.opener(j) {
+                    Some(open) => c = open,
+                    None => break,
+                }
+
+                continue;
+            }
+
+            if matches!(text, "." | ":") || self.is_name(j) {
+                c = j;
+
+                continue;
+            }
+
+            break;
+        }
+
+        c
+    }
+
+    /// The bracket that opens the group closing at `close`.
+    fn opener(&self, close: usize) -> Option<usize> {
+        let mut depth = 0i32;
+
+        for j in (0..=close).rev() {
+            let text = self.t(j);
+
+            if matches!(text, ")" | "]" | "}") {
+                depth += 1;
+            } else if matches!(text, "(" | "[" | "{") || text.ends_with('(') || text.ends_with('[')
+            {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Whether the tokens `a..b` read a Roblox instance, or an event on
+    /// one when `event` is set. Three shapes say yes: a member that
+    /// starts with a capital, since every std member is snake case; one
+    /// of the instance globals; and a name the file annotates with a
+    /// Roblox class. `deep` allows one step back to a local's
+    /// initializer, so `local part = workspace.Part` carries over.
+    fn roblox_expr(&self, a: usize, b: usize, event: bool, deep: bool) -> bool {
+        for j in a..b {
+            if !self.is_name(j) || !self.t(j).starts_with(|c: char| c.is_ascii_uppercase()) {
+                continue;
+            }
+
+            if matches!(self.prev(j), "." | ":") {
+                return true;
+            }
+        }
+
+        // An event needs a member to hang on; a bare `workspace` is an
+        // instance, and `workspace:clone()` is the old `Clone`.
+        if !event && a + 1 == b && INSTANCE_GLOBALS.contains(&self.t(a)) {
+            return true;
+        }
+
+        if a + 1 != b || !self.is_name(a) {
+            return false;
+        }
+
+        let name = self.t(a);
+
+        if let Some(ty) = self.declared_type(name) {
+            return if event {
+                names_event_type(ty)
+            } else {
+                names_instance_type(ty)
+            };
+        }
+
+        deep && match self.local_init(name) {
+            Some((s, e)) => self.roblox_expr(s, e, event, false),
+            None => false,
+        }
+    }
+
+    /// The tokens of the value in `local name = value`, on one line.
+    fn local_init(&self, name: &str) -> Option<(usize, usize)> {
+        for j in 1..self.toks.len() {
+            if !self.at(j - 1, "local") || !self.is_name(j) || self.t(j) != name {
+                continue;
+            }
+
+            if !self.at(j + 1, "=") {
+                continue;
+            }
+
+            let line = self.line_of(j);
+            let mut k = j + 2;
+
+            while k < self.toks.len() && self.line_of(k) == line {
+                k += 1;
+            }
+
+            if k > j + 2 {
+                return Some((j + 2, k));
+            }
+        }
+
+        None
     }
 
     /// Whether the file names a derive, as in `@derive(Debug, Clone)`.
@@ -310,7 +466,7 @@ mod tests {
 
     /// The lints at their default level: the pedantic ones stay out.
     fn names(src: &str) -> Vec<&'static str> {
-        let config = crate::config::LintConfig::default();
+        let config = crate::config::LintConfig::default().without_strict();
 
         lints(src)
             .iter()
@@ -322,11 +478,64 @@ mod tests {
     #[test]
     fn old_method_names_take_the_new_ones() {
         assert_eq!(
-            fixed("part.Touched:connect(f)\nlocal c = part:clone()\n"),
-            "part.Touched:Connect(f)\nlocal c = part:Clone()\n"
+            fixed("part.Touched:connect(f)\nlocal c = workspace.Ball:clone()\n"),
+            "part.Touched:Connect(f)\nlocal c = workspace.Ball:Clone()\n"
         );
         assert_eq!(
             names("function Signal:connect(f) end\nlocal c = s:connect(f)\n"),
+            Vec::<&str>::new()
+        );
+    }
+
+    /// The receiver decides. An event on an instance, a signal the file
+    /// annotates, and a `GetPropertyChangedSignal` call all take the
+    /// current name.
+    #[test]
+    fn a_roblox_receiver_fires() {
+        assert_eq!(
+            names("game.Players.PlayerAdded:connect(f)\n"),
+            vec!["deprecated_method"]
+        );
+        assert_eq!(
+            names("humanoid:GetPropertyChangedSignal(\"Health\"):connect(f)\n"),
+            vec!["deprecated_method"]
+        );
+        assert_eq!(
+            names("local touched: RBXScriptSignal = part.Touched\ntouched:connect(f)\n"),
+            vec!["deprecated_method"]
+        );
+        assert_eq!(
+            names("local conn: RBXScriptConnection = part.Touched:Connect(f)\nconn:disconnect()\n"),
+            vec!["deprecated_method"]
+        );
+        assert_eq!(
+            names("local part: Part = workspace.Ball\npart:remove()\n"),
+            vec!["deprecated_method"]
+        );
+        assert_eq!(names("script.Parent:clone()\n"), vec!["deprecated_method"]);
+    }
+
+    /// The std spells `connect`, `disconnect`, `wait`, and `clone` the
+    /// way the 2014 API did. Over a value of the std, or a plain local,
+    /// the lint stands down.
+    #[test]
+    fn a_std_receiver_stands_down() {
+        assert_eq!(
+            names(
+                "local sig: Signal<number> = Signal.new()\nlocal conn = sig:connect(f)\nconn:disconnect()\nsig:wait()\n"
+            ),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names("function copy<T: Clone>(x: T): T\n    return x:clone()\nend\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names("local s = make()\ns:connect(f)\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names("local c: SignalConnection = sig:connect(f)\nc:disconnect()\n"),
             Vec::<&str>::new()
         );
     }
@@ -362,8 +571,8 @@ mod tests {
     #[test]
     fn the_argument_free_old_names_fire() {
         assert_eq!(
-            fixed("local c = part:clone()\nc:remove()\n"),
-            "local c = part:Clone()\nc:Destroy()\n"
+            fixed("local c = workspace.Ball:clone()\nscript:remove()\n"),
+            "local c = workspace.Ball:Clone()\nscript:Destroy()\n"
         );
         assert_eq!(names("local v = bag:remove(\"key\")\n"), Vec::<&str>::new());
         assert_eq!(names("local c = t:clone(1)\n"), Vec::<&str>::new());

@@ -15,6 +15,12 @@ describe("HashMap", function()
 		expect(m:len()).toBe(2)
 	end)
 
+	it("gives the map back, so sets chain", function()
+		local m = HashMap.new()
+		expect(m:set("a", 1):set("b", 2)).toBe(m)
+		expect(m:len()).toBe(2)
+	end)
+
 	it("counts a replaced and a removed entry once", function()
 		local m = HashMap.from({ a = 1 })
 		m:set("a", 5)

@@ -378,11 +378,23 @@ end
 --- operand has to be where the alias `Future` says only what it is.
 export type Awaitable<T> = Future<T>
 
+--- What `await` takes, read as a shape: a value with `andThen` that
+--- settles with a `T`. `Future<T>` is invariant in `T`, since `andThen`
+--- takes a `(T) -> ...`, so a list of `Future<number>` and
+--- `Future<nil>` has no one `Future<T>` to unify with. `await` and
+--- `race` bind the whole argument type and read `T` back off
+--- `__value`, which is covariant, so a mixed list lands on the union
+--- of the value types instead of the meet.
+export type Settled<T> = {
+	read __value: T,
+	read andThen: (self: any, on_resolve: ((any) -> ...any)?, on_reject: ((any) -> ...any)?) -> any,
+}
+
 --- `await`: a Future, or anything with `andThen`. Yields until settled,
 --- returns the value, rethrows a stored error with its trace.
 -- The extra values type as `any`: a `wait` on a remote settles with the
 -- whole payload, and `local a, b = await f` is then no error.
-function alloy.await<T>(target: Awaitable<T>): (T, ...any)
+function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
 	if type(target) == "table" and getmetatable(target) == Future then
 		if target.state == PENDING then
 			local thread = coroutine.running()
@@ -426,7 +438,7 @@ end
 --- so `try await f()` on an async function that returns a Result yields
 --- the value. The compiler calls `try_await_result` where it knows the
 --- function returns a Result, for the type; both run the same code.
-function alloy.try_await<T>(target: Awaitable<T>): Result<T, any>
+function alloy.try_await<A>(target: A & Settled<any>): Result<index<A, "__value">, any>
 	local ok, value = pcall(alloy.await, target)
 	if not ok then
 		return Err(value) :: any
@@ -454,7 +466,7 @@ end
 -- A list of one value type races to a Future of it. A mixed list needs
 -- the type written on the elements, `Future<number | string>`: the
 -- solver lands on the meet of the element types otherwise.
-function Future.race<T>(futures: { read [number]: Future<T> }): Future<T>
+function Future.race<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	local winner = new_future()
 	for _, f in futures do
 		f:andThen(function(v)
@@ -466,7 +478,7 @@ function Future.race<T>(futures: { read [number]: Future<T> }): Future<T>
 	return (winner :: any) :: Future<any>
 end
 
-function Future.any<T>(futures: { read [number]: Future<T> }): Future<T>
+function Future.any<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	local winner = new_future()
 	local failed = 0
 	for _, f in futures do
@@ -515,7 +527,7 @@ export type Array<T> = {
 	[number]: T,
 	len: (self: { read [number]: T }) -> number,
 	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> (),
+	push: (self: { read [number]: T }, ...T) -> Array<T>,
 	pop: (self: { read [number]: T }) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
@@ -544,7 +556,7 @@ export type Array2<T> = {
 	[number]: T,
 	len: (self: { read [number]: T }) -> number,
 	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> (),
+	push: (self: { read [number]: T }, ...T) -> Array2<T>,
 	pop: (self: { read [number]: T }) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
@@ -567,7 +579,7 @@ export type Array3<T> = {
 	[number]: T,
 	len: (self: { read [number]: T }) -> number,
 	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> (),
+	push: (self: { read [number]: T }, ...T) -> Array3<T>,
 	pop: (self: { read [number]: T }) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
@@ -609,7 +621,7 @@ export type ReadArray<T> = {
 -- `write T[]`: a sink. Push and index assignment only.
 export type WriteArray<T> = {
 	[number]: T,
-	push: (self: any, ...T) -> (),
+	push: (self: any, ...T) -> WriteArray<T>,
 }
 
 local Array = {}
@@ -758,7 +770,7 @@ alloy.Array = Array
 
 export type HashMap<K, V> = {
 	get: (self: HashMap<K, V>, key: K) -> V?,
-	set: (self: HashMap<K, V>, key: K, value: V) -> (),
+	set: (self: HashMap<K, V>, key: K, value: V) -> HashMap<K, V>,
 	has: (self: HashMap<K, V>, key: K) -> boolean,
 	remove: (self: HashMap<K, V>, key: K) -> V?,
 	len: (self: HashMap<K, V>) -> number,

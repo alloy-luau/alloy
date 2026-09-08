@@ -33,6 +33,12 @@ describe("Array", function()
 		expect(Array.new():first()).toBeNil()
 	end)
 
+	it("gives the array back, so pushes chain", function()
+		local xs = Array.new()
+		expect(xs:push(1):push(2, 3)).toBe(xs)
+		expect(plain(xs)).toEqual({ 1, 2, 3 })
+	end)
+
 	it("maps, filters, and finds with the index", function()
 		local xs = Array.from({ 10, 20, 30 })
 		expect(plain(xs:map(function(v, i)

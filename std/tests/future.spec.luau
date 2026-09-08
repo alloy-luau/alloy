@@ -45,6 +45,12 @@ describe("Future", function()
 		expect(alloy.await(Future.any({ Future.reject("x"), Future.resolve("ok") }))).toBe("ok")
 	end)
 
+	it("races a list whose futures carry different values", function()
+		local ready = Future.resolve(42)
+		local timer = Future.delay(0)
+		expect(alloy.await(Future.race({ ready, timer }))).toBe(42)
+	end)
+
 	it("any rejects when every future fails", function()
 		local f = Future.any({ Future.reject("one"), Future.reject("two") })
 		expect(function()

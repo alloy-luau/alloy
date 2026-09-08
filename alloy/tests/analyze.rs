@@ -25,8 +25,56 @@ end
 print(written, nested, inferred, make())
 "#;
 
-#[test]
-fn a_type_argument_list_analyzes_as_luau() {
+/// `set`, `add`, and `push` give back the container they wrote into.
+const CHAINS: &str = r#"local prices: HashMap<string, number> = HashMap.new()
+local counted = prices:set("gem", 5):set("sword", 10):len()
+
+local seen: Set<string> = Set.new()
+local members = seen:add("a"):add("b"):to_array()
+
+local xs = [ 1 ]
+local total = xs:push(2, 3):push(4):len()
+
+function log_to(sink: write string[])
+    sink:push("line"):push("more")
+end
+
+print(counted, members, total)
+"#;
+
+/// A `@derive(Serialize)` struct passed to a `T: Serialize` bound.
+const DERIVED: &str = r#"@derive(Serialize)
+struct Point as
+    x: number
+    y: number
+end
+
+function to_data<T: Serialize>(v: T): any
+    return v:serialize()
+end
+
+print(to_data(new Point { x = 1, y = 2 }))
+"#;
+
+/// `Future.race` over a list whose futures carry different values.
+/// The union of the value types is the answer; a list of one value
+/// type keeps that type.
+const RACED: &str = r#"local ready = Future.resolve(42)
+local timer = Future.delay(1)
+local first: number? = await Future.race([ ready, timer ])
+
+local a = Future.resolve("a")
+local b = Future.resolve("b")
+local same: string = await Future.race([ a, b ])
+local both: string[] = await Future.all([ a, b ])
+
+print(first, same, both)
+"#;
+
+/// Compiles `src`, writes it beside a copy of the std, and runs
+/// `luau-lsp analyze` over it. The test skips when the tool or the
+/// Roblox definitions are missing.
+fn analyze(src: &str, name: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("tools/types/globalTypes.d.luau");
 
@@ -38,17 +86,17 @@ fn a_type_argument_list_analyzes_as_luau() {
 
     let options = EmitOptions {
         check: true,
-        file_name: "type_args.aly".to_string(),
+        file_name: format!("{name}.aly"),
         // The runtime lands beside the artifact, so the require is a path.
         std_require: "./alloy".to_string(),
         ..EmitOptions::default()
     };
-    let out = alloy::compile_with(SRC, &options).unwrap();
+    let out = alloy::compile_with(src, &options).unwrap();
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
 
-    let dir = std::env::temp_dir().join("alloy-analyze-type-args");
+    let dir = std::env::temp_dir().join(format!("alloy-analyze-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("type_args.luau");
+    let file = dir.join(format!("{name}.luau"));
     std::fs::write(&file, &out.check).unwrap();
     // The runtime sits beside the artifact, which requires it by alias.
     std::fs::write(
@@ -56,6 +104,9 @@ fn a_type_argument_list_analyzes_as_luau() {
         std::fs::read_to_string(root.join("std/alloy.luau")).unwrap(),
     )
     .unwrap();
+    // Without this the analyzer runs nonstrict, and the require gives
+    // `any`: every std type in the artifact would go unchecked.
+    std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
 
     let run = Command::new("luau-lsp")
         .arg("analyze")
@@ -80,4 +131,30 @@ fn a_type_argument_list_analyzes_as_luau() {
         .collect();
 
     assert!(bad.is_empty(), "{}\n---\n{}", bad.join("\n"), out.check);
+}
+
+#[test]
+fn a_type_argument_list_analyzes_as_luau() {
+    analyze(SRC, "type-args");
+}
+
+/// The mutating methods that return the value they changed keep that
+/// return in the std's type, so a chain of them checks.
+#[test]
+fn a_mutating_method_chains() {
+    analyze(CHAINS, "chains");
+}
+
+/// `@derive(Serialize)` writes `serialize`, so the struct meets a
+/// `T: Serialize` bound with no method of its own.
+#[test]
+fn a_derived_struct_meets_the_serialize_bound() {
+    analyze(DERIVED, "derived-serialize");
+}
+
+/// A mixed list of Futures races to the union of the value types, and
+/// a list of one type keeps it.
+#[test]
+fn a_mixed_race_lands_on_the_union() {
+    analyze(RACED, "raced");
 }

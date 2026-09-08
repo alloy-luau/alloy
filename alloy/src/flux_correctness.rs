@@ -796,7 +796,7 @@ impl<'s> Scan<'s> {
     /// The type a name carries in this file: a parameter or a local
     /// annotation, or the struct a `new` builds. `None` when the file
     /// does not say.
-    fn declared_type(&self, name: &str) -> Option<&'s str> {
+    pub(crate) fn declared_type(&self, name: &str) -> Option<&'s str> {
         for i in 0..self.toks.len() {
             if !self.is_name(i) || self.t(i) != name {
                 continue;
@@ -1517,7 +1517,7 @@ mod tests {
 
     /// The lints at their default level: the pedantic ones stay out.
     fn names(src: &str) -> Vec<&'static str> {
-        let config = crate::config::LintConfig::default();
+        let config = crate::config::LintConfig::default().without_strict();
 
         lints(src)
             .iter()
@@ -1767,7 +1767,7 @@ mod tests {
             Vec::<&str>::new()
         );
         assert_eq!(
-            unused("struct S as\n    x: number\nend\nimpl S\n    function m(self) end\nend\n"),
+            unused("struct S as\n    x: number\nend\nimpl S as\n    function m(self) end\nend\n"),
             Vec::<&str>::new()
         );
         let src = "local f = function() end\n";
@@ -1816,7 +1816,7 @@ mod tests {
 
     #[test]
     fn a_private_member_read_outside_its_impl_fires() {
-        let src = "struct C as\n    private count: number = 0\nend\nimpl C\n    function bump(self): number\n        self.count += 1\n        self:log()\n        return self.count\n    end\n    private function log(self)\n        print(self.count)\n    end\nend\nlocal c = new C {}\nprint(c.count)\nc:log()\nprint(c:bump())\n";
+        let src = "struct C as\n    private count: number = 0\nend\nimpl C as\n    function bump(self): number\n        self.count += 1\n        self:log()\n        return self.count\n    end\n    private function log(self)\n        print(self.count)\n    end\nend\nlocal c = new C {}\nprint(c.count)\nc:log()\nprint(c:bump())\n";
         let all = lints(src);
         let hits: Vec<&str> = all
             .iter()
@@ -1877,7 +1877,7 @@ mod tests {
     /// of a struct nearby.
     #[test]
     fn private_access_reads_the_receiver() {
-        let src = "struct Profile as\n    private coins: number\nend\n\nimpl Profile\n    public function earn(self, n: number)\n        self.coins += n\n    end\nend\n\ntype Raw = { coins: number }\n\nlocal function load(raw: Raw, p: Profile)\n    p:earn(raw.coins)\nend\n\nreturn load\n";
+        let src = "struct Profile as\n    private coins: number\nend\n\nimpl Profile as\n    public function earn(self, n: number)\n        self.coins += n\n    end\nend\n\ntype Raw = { coins: number }\n\nlocal function load(raw: Raw, p: Profile)\n    p:earn(raw.coins)\nend\n\nreturn load\n";
         assert_eq!(names(src), Vec::<&str>::new());
 
         // A receiver the file does not type still fires.
@@ -1897,7 +1897,7 @@ mod tests {
         assert_eq!(names(required), Vec::<&str>::new());
 
         // Inside the impl the field is the struct's own.
-        let inside = "struct Vault as\n    owner: string\n    private code: number = 0\nend\n\nimpl Vault\n    function new(owner: string): Vault\n        return new Vault { owner = owner, code = 1 }\n    end\nend\nprint(Vault)\n";
+        let inside = "struct Vault as\n    owner: string\n    private code: number = 0\nend\n\nimpl Vault as\n    function new(owner: string): Vault\n        return new Vault { owner = owner, code = 1 }\n    end\nend\nprint(Vault)\n";
         assert_eq!(names(inside), Vec::<&str>::new());
     }
 
@@ -1942,7 +1942,7 @@ mod tests {
             vec!["duplicate_function"]
         );
         // Two impls may write one method name; the owner tells them apart.
-        let two = "struct A as\n    x: number\nend\nstruct B as\n    x: number\nend\nimpl A\n    function get(self): number\n        return self.x\n    end\nend\nimpl B\n    function get(self): number\n        return self.x\n    end\nend\nprint(A, B)\n";
+        let two = "struct A as\n    x: number\nend\nstruct B as\n    x: number\nend\nimpl A as\n    function get(self): number\n        return self.x\n    end\nend\nimpl B as\n    function get(self): number\n        return self.x\n    end\nend\nprint(A, B)\n";
         assert_eq!(names(two), Vec::<&str>::new());
     }
 
@@ -1950,7 +1950,7 @@ mod tests {
     /// closed the `impl` early and every later member read as private.
     #[test]
     fn an_if_expression_in_an_arm_keeps_the_impl_open() {
-        let src = "enum C as\n    A(number)\n    B\nend\n\nstruct R as\n    private xs: number[]\nend\n\nimpl R\n    public function viamatch(self, c: C): number\n        return match c with\n            case A(n) then if #self.xs > 0 then n else 0\n            case B then 0\n        end\n    end\n\n    public function stmt(self, c: C)\n        match c with\n            case A(n) then self.xs:push(n)\n            case B then print(\"b\")\n        end\n    end\nend\n\nreturn R\n";
+        let src = "enum C as\n    A(number)\n    B\nend\n\nstruct R as\n    private xs: number[]\nend\n\nimpl R as\n    public function viamatch(self, c: C): number\n        return match c with\n            case A(n) then if #self.xs > 0 then n else 0\n            case B then 0\n        end\n    end\n\n    public function stmt(self, c: C)\n        match c with\n            case A(n) then self.xs:push(n)\n            case B then print(\"b\")\n        end\n    end\nend\n\nreturn R\n";
         assert_eq!(names(src), Vec::<&str>::new());
     }
 

@@ -136,9 +136,38 @@ pub fn fold(text: &str, known: &Known) -> String {
     // `()` is no type argument; it reads as `Future<()>`.
     out = out.replace("Future<nil>", "Future<()>");
     fold_union_dupes(&mut out);
+    fold_array_parens(&mut out);
     fold_read_arrays(&mut out);
 
     out
+}
+
+/// `(number[])[]`, a union that folded to one member under an array,
+/// reads as `number[][]`.
+fn fold_array_parens(text: &mut String) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(")[]") {
+        let close = from + i;
+        let Some(open) = enclosing_open(text, close) else {
+            from = close + 3;
+            continue;
+        };
+        let inner = &text[open + 1..close];
+
+        if inner.contains(" | ")
+            || inner.contains(" & ")
+            || inner.contains("->")
+            || inner.contains(' ')
+        {
+            from = close + 3;
+            continue;
+        }
+
+        text.replace_range(close..close + 1, "");
+        text.replace_range(open..open + 1, "");
+        from = close - 1;
+    }
 }
 
 /// An Array method's receiver, `{ read [number]: T }`, prints as
@@ -1019,12 +1048,19 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
         }
     }
 
-    // The std containers, by the methods that name their arguments.
+    // The std containers, by the methods that name their arguments. Two
+    // arrays of one element type are two types to the checker, so the
+    // element may be a union: it keeps its parentheses under the `[]`
+    // until the names inside it resolve and the union folds.
     if let Some(elem) = get("[number]")
         && has("concat")
         && has("push")
     {
-        return Some(format!("{elem}[]"));
+        return Some(if elem.contains(" | ") {
+            format!("({elem})[]")
+        } else {
+            format!("{elem}[]")
+        });
     }
 
     if let Some(sig) = get("get")
@@ -1812,6 +1848,14 @@ mod tests {
         assert_eq!(fold(text, &known()), "local m: HashMap<string, number>");
         let text = "local s: t1 where t1 = { add: (self: t1, value: string) -> boolean, has: (self: t1, value: string) -> boolean, union: (self: t1, other: t1) -> t1 }";
         assert_eq!(fold(text, &known()), "local s: Set<string>");
+    }
+
+    #[test]
+    fn a_nested_array_of_two_array_types_reads_once() {
+        let text = "local g: t1 where t1 = {\n    [number]: t2 | t3,\n    concat: (self: {read t2 | t3}, other: t1) -> t1,\n    push: (self: t1, value: t2 | t3) -> ()\n} ; t2 = {\n    [number]: number,\n    concat: (self: {read number}, other: t2) -> t2,\n    push: (self: t2, value: number) -> ()\n} ; t3 = {\n    [number]: number,\n    concat: (self: {read number}, other: t3) -> t3,\n    push: (self: t3, value: number) -> ()\n}";
+        assert_eq!(fold(text, &known()), "local g: number[][]");
+        let text = "local g: t1 where t1 = { [number]: number | string, concat: (self: t1) -> t1, push: (self: t1) -> () }";
+        assert_eq!(fold(text, &known()), "local g: (number | string)[]");
     }
 
     #[test]

@@ -66,14 +66,29 @@ pub enum Context {
     TypeSlot { prefix: String },
     /// `new |`: a struct, or a class the engine constructs.
     NewTarget { prefix: String },
-    /// `case |`: a variant of an enum, or `default`.
-    MatchCase { prefix: String },
+    /// `case |`: a variant of an enum, or `default`. `scrutinee` holds
+    /// the text between the enclosing `match` and its `with`, when a
+    /// `match` is open above the caret.
+    MatchCase {
+        prefix: String,
+        scrutinee: Option<String>,
+    },
     /// The modifier column of a struct or interface body: `read`,
     /// `write`, `private`, `public`, or the `end`.
     FieldStart { prefix: String },
     /// The member column of an `impl` or `trait` body: `function`,
     /// `async`, `private`, `public`, an attribute, or the `end`.
     MemberStart { prefix: String },
+}
+
+/// What the declaration of a name says about the name's type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Declared {
+    /// The annotation it carries: `local m: Msg`, `const m: Msg`, or
+    /// `m: Msg` as a parameter.
+    Annotation(String),
+    /// The expression it starts from: `local m = Msg.Join(p)`.
+    Init(String),
 }
 
 /// The body the cursor sits in, when a declaration opened above it
@@ -423,6 +438,188 @@ fn trailing_word(text: &str) -> &str {
     &text[start..]
 }
 
+/// The last whole-word occurrence of `word` in `text`.
+fn last_word_at(text: &str, word: &str) -> Option<usize> {
+    let mut found = None;
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(word) {
+        let start = from + i;
+        let end = start + word.len();
+
+        if !text[..start].chars().next_back().is_some_and(is_word)
+            && !text[end..].chars().next().is_some_and(is_word)
+        {
+            found = Some(start);
+        }
+
+        from = start + 1;
+    }
+
+    found
+}
+
+/// The scrutinee of a `match` head: the text between `match` and the
+/// `with` that ends the head. `local r = match x with` and `return
+/// match x with` read the same as the statement form.
+fn scrutinee_of(line: &str) -> Option<String> {
+    let with = last_word_at(line, "with")?;
+    let start = last_word_at(&line[..with], "match")? + "match".len();
+    let text = line[start..with].trim();
+
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The expression the `match` around the caret takes. The scan counts
+/// the blocks upward, so the nearest open `match` wins and an inner one
+/// shadows an outer.
+fn match_scrutinee(src: &str, offset: usize) -> Option<String> {
+    let mut depth = 0i32;
+
+    for line in src[..offset.min(src.len())].lines().rev() {
+        let t = line.trim();
+
+        if t.is_empty() || t.starts_with("--") {
+            continue;
+        }
+
+        depth += block_closers(t);
+
+        let opens = block_openers(t);
+
+        // More opened here than the scan closed below: this line opens
+        // the block the caret sits in.
+        if opens > depth {
+            return scrutinee_of(t);
+        }
+
+        depth -= opens;
+    }
+
+    None
+}
+
+/// Whether the text before a name binds it: a `local` or a `const`, or
+/// the comma of a list either one opened.
+fn binds(before: &str) -> bool {
+    let t = before.trim_end();
+
+    for word in ["local", "const"] {
+        if let Some(head) = t.strip_suffix(word) {
+            return !head.ends_with(is_word);
+        }
+    }
+
+    t.ends_with(',') && {
+        let head = t.trim_start();
+
+        head.starts_with("local ") || head.starts_with("const ")
+    }
+}
+
+/// Whether a name sits in the parameter list of a `function` head.
+fn in_parameters(before: &str) -> bool {
+    before.contains("function") && before.matches('(').count() > before.matches(')').count()
+}
+
+/// The type an annotation names, up to the `,`, `)`, or `=` that ends
+/// it at the top level.
+fn type_text(rest: &str) -> String {
+    let mut depth = 0i32;
+    let mut end = rest.len();
+
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' | '(' | '[' | '{' => depth += 1,
+
+            '>' | ')' | ']' | '}' => {
+                if depth == 0 {
+                    end = i;
+
+                    break;
+                }
+
+                depth -= 1;
+            }
+
+            ',' | '=' if depth == 0 => {
+                end = i;
+
+                break;
+            }
+
+            _ => {}
+        }
+    }
+
+    rest[..end].trim().to_string()
+}
+
+fn declared_in_line(line: &str, name: &str) -> Option<Declared> {
+    let mut from = 0;
+
+    while let Some(i) = line[from..].find(name) {
+        let start = from + i;
+        let end = start + name.len();
+        from = start + 1;
+        let before = &line[..start];
+
+        if before.chars().next_back().is_some_and(is_word)
+            || line[end..].chars().next().is_some_and(is_word)
+            // A field or a member of something else.
+            || before.trim_end().ends_with(['.', ':'])
+        {
+            continue;
+        }
+
+        let after = line[end..].trim_start();
+
+        if let Some(rest) = after.strip_prefix(':')
+            && !rest.starts_with(':')
+            && (binds(before) || in_parameters(before))
+        {
+            return Some(Declared::Annotation(type_text(rest)));
+        }
+
+        if let Some(rest) = after.strip_prefix('=')
+            && !rest.starts_with('=')
+            && binds(before)
+        {
+            return Some(Declared::Init(rest.trim().to_string()));
+        }
+    }
+
+    None
+}
+
+/// The type the `impl` block around the caret is for: the `X` of
+/// `impl X` and of `impl Trait for X`. The first line at the margin
+/// above the caret decides.
+pub fn impl_target(src: &str, offset: usize) -> Option<String> {
+    let line = src[..offset.min(src.len())]
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty() && !l.starts_with(char::is_whitespace))?;
+    let rest = line.trim().strip_prefix("impl ")?;
+    let target = rest.rsplit(" for ").next().unwrap_or(rest).trim();
+    let name: String = target.chars().take_while(|c| is_word(*c)).collect();
+
+    (!name.is_empty()).then_some(name)
+}
+
+/// What the nearest declaration of `name` above the caret says. A use
+/// of the name and a member access are not declarations.
+pub fn declared(src: &str, offset: usize, name: &str) -> Option<Declared> {
+    if name.is_empty() {
+        return None;
+    }
+
+    src[..offset.min(src.len())]
+        .lines()
+        .rev()
+        .find_map(|line| declared_in_line(line, name))
+}
+
 pub fn detect(src: &str, offset: usize) -> Option<Context> {
     let offset = offset.min(src.len());
     let line_start = src[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -525,6 +722,7 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         if last == "case" {
             return Some(Context::MatchCase {
                 prefix: prefix.to_string(),
+                scrutinee: match_scrutinee(src, offset),
             });
         }
     }
@@ -830,9 +1028,112 @@ mod tests {
         assert_eq!(
             at("match m with\n    case |"),
             Some(Context::MatchCase {
-                prefix: String::new()
+                prefix: String::new(),
+                scrutinee: Some("m".to_string()),
             })
         );
+    }
+
+    fn scrutinee(src: &str) -> Option<String> {
+        match at(src) {
+            Some(Context::MatchCase { scrutinee, .. }) => scrutinee,
+
+            other => panic!("not a case list: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_case_reads_the_expression_its_match_takes() {
+        let some = |s: &str| Some(s.to_string());
+
+        // The statement form and the two expression forms.
+        assert_eq!(scrutinee("match msg with\n    case |"), some("msg"));
+        assert_eq!(
+            scrutinee("local r = match msg with\n    case |"),
+            some("msg")
+        );
+        assert_eq!(
+            scrutinee("    return match msg with\n    case |"),
+            some("msg")
+        );
+        assert_eq!(
+            scrutinee("match year % 4, year % 100 with\n    case |"),
+            some("year % 4, year % 100")
+        );
+
+        // The head on the caret's own line.
+        assert_eq!(scrutinee("match msg with case |"), some("msg"));
+
+        // An inner match wins; once it closes the outer one is back.
+        let nested = "match a with\n    case X then\n        match b with\n            case |";
+        assert_eq!(scrutinee(nested), some("b"));
+
+        let closed = concat!(
+            "match a with\n",
+            "    case X then\n",
+            "        match b with\n",
+            "            case Y then f()\n",
+            "        end\n",
+            "    case |"
+        );
+        assert_eq!(scrutinee(closed), some("a"));
+
+        // An `if` inside an arm opens and closes on one line.
+        let guarded = concat!(
+            "match a with\n",
+            "    case X then\n",
+            "        if p then q() end\n",
+            "    case |"
+        );
+        assert_eq!(scrutinee(guarded), some("a"));
+
+        // No match above: the proxy keeps its full list.
+        assert_eq!(scrutinee("local x = 1\ncase |"), None);
+    }
+
+    #[test]
+    fn a_declaration_gives_its_annotation_or_its_first_value() {
+        let src = concat!(
+            "local function handle(msg: Msg, tries: number)\n",
+            "    local parsed: Result<number, string> = Ok(1)\n",
+            "    const start = Msg.Join(p)\n",
+            "    local names: string[] = {}\n",
+            "    local t = start\n"
+        );
+        let end = src.len();
+        let ann = |n: &str| declared(src, end, n);
+
+        assert_eq!(ann("msg"), Some(Declared::Annotation("Msg".to_string())));
+        assert_eq!(
+            ann("tries"),
+            Some(Declared::Annotation("number".to_string()))
+        );
+        assert_eq!(
+            ann("parsed"),
+            Some(Declared::Annotation("Result<number, string>".to_string()))
+        );
+        assert_eq!(
+            ann("start"),
+            Some(Declared::Init("Msg.Join(p)".to_string()))
+        );
+        assert_eq!(
+            ann("names"),
+            Some(Declared::Annotation("string[]".to_string()))
+        );
+        assert_eq!(ann("t"), Some(Declared::Init("start".to_string())));
+        assert_eq!(ann("p"), None);
+    }
+
+    #[test]
+    fn self_takes_the_type_the_impl_is_for() {
+        let one = "impl Msg\n    function tag(self)\n        match self with\n";
+        assert_eq!(impl_target(one, one.len()), Some("Msg".to_string()));
+
+        let two = "impl Shape for Circle\n    function area(self)\n";
+        assert_eq!(impl_target(two, two.len()), Some("Circle".to_string()));
+
+        let none = "local function f()\n    match self with\n";
+        assert_eq!(impl_target(none, none.len()), None);
     }
 
     #[test]

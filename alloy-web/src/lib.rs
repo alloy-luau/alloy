@@ -208,7 +208,16 @@ pub fn complete(offset: u32) -> String {
 
             // The analyzer lists the names; Alloy adds its keywords.
             for k in keywords::ALLOY_KEYWORDS {
-                items.push(word(k, "keyword", keywords::doc(k).map(str::to_string), word_start(source, offset)));
+                let mut item = word(k, "keyword", keywords::doc(k).map(str::to_string), word_start(source, offset));
+
+                // `case` is half an arm: the list opens again behind it
+                // for the pattern.
+                if *k == "case" {
+                    item["insert"] = json!("case ");
+                    item["suggest"] = json!(true);
+                }
+
+                items.push(item);
             }
 
             return json!({ "items": items, "luau": true }).to_string();
@@ -405,18 +414,54 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
-            Context::MatchCase { prefix } => {
+            Context::MatchCase { prefix, scrutinee } => {
                 let from = offset - prefix.len();
+                let kind = scrutinee.as_deref().map_or(MatchKind::Unknown, |t| match_kind(source, offset, t, &s.decls));
 
-                for d in &s.decls {
-                    if let Some((_, variant)) = d.name.split_once('.') {
-                        items.push(word(variant, "constant", Some(d.hover.clone()), from));
+                match &kind {
+                    MatchKind::Enum(name) => {
+                        for d in &s.decls {
+                            if let Some(variant) = d.name.strip_prefix(name.as_str()).and_then(|r| r.strip_prefix('.')) {
+                                let mut item = word(variant, "constant", Some(d.hover.clone()), from);
+                                item["insert"] = json!(variant_insert(variant, d.hover.lines().nth(1).unwrap_or("")));
+                                items.push(item);
+                            }
+                        }
+                    }
+
+                    MatchKind::Result => {
+                        for (name, insert) in [("Ok", "Ok(${1:v})"), ("Err", "Err(${1:e})")] {
+                            let mut item = word(name, "constant", None, from);
+                            item["insert"] = json!(insert);
+                            items.push(item);
+                        }
+                    }
+
+                    MatchKind::Array => {
+                        for (name, insert) in [("[ first, ...rest ]", "[ ${1:first}, ...${2:rest} ]"), ("[ ]", "[ ]")] {
+                            let mut item = word(name, "constant", None, from);
+                            item["insert"] = json!(insert);
+                            items.push(item);
+                        }
+                    }
+
+                    // A string or a number matches its own literals.
+                    MatchKind::Literal => {}
+
+                    MatchKind::Unknown => {
+                        for d in &s.decls {
+                            if let Some((_, variant)) = d.name.split_once('.') {
+                                items.push(word(variant, "constant", Some(d.hover.clone()), from));
+                            }
+                        }
+
+                        for name in ["Ok", "Err", "_"] {
+                            items.push(word(name, "keyword", None, from));
+                        }
                     }
                 }
 
-                for name in ["Ok", "Err", "default", "_"] {
-                    items.push(word(name, "keyword", None, from));
-                }
+                items.push(word("default", "keyword", None, from));
             }
 
             Context::FieldStart { prefix } => {
@@ -511,6 +556,117 @@ pub fn fold(text: &str) -> String {
 #[wasm_bindgen]
 pub fn doc_of(name: &str) -> String {
     keywords::doc(name).unwrap_or("").to_string()
+}
+
+/// What a `match` scrutinee resolves to, which decides the arms.
+enum MatchKind {
+    /// An enum in scope: its variants are the arms.
+    Enum(String),
+    /// A `Result<T, E>`: `Ok` and `Err`.
+    Result,
+    /// `T[]` or `Array<T>`: the array patterns.
+    Array,
+    /// A string or a number: only `default` fits.
+    Literal,
+    /// Nothing the playground reads.
+    Unknown,
+}
+
+/// The type a `match` scrutinee has. A plain name resolves from its
+/// annotation, from the variant it starts at, or from a declaration.
+fn match_kind(source: &str, offset: usize, scrutinee: &str, decls: &[Declaration]) -> MatchKind {
+    let name = scrutinee.trim();
+
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return MatchKind::Unknown;
+    }
+
+    // `self` in an `impl` body is the type the block is for.
+    if name == "self" {
+        return context::impl_target(source, offset)
+            .map_or(MatchKind::Unknown, |t| kind_of_type(&t, decls));
+    }
+
+    match context::declared(source, offset, name) {
+        Some(context::Declared::Annotation(t)) => kind_of_type(&t, decls),
+
+        Some(context::Declared::Init(v)) => kind_of_value(&v, decls),
+
+        None => kind_of_name(name, decls),
+    }
+}
+
+fn kind_of_type(text: &str, decls: &[Declaration]) -> MatchKind {
+    let t = text.trim().trim_end_matches('?').trim();
+
+    if t == "Result" || t.starts_with("Result<") {
+        return MatchKind::Result;
+    }
+
+    if t.ends_with("[]") || t.starts_with("Array<") {
+        return MatchKind::Array;
+    }
+
+    if matches!(t, "string" | "number") {
+        return MatchKind::Literal;
+    }
+
+    kind_of_name(t.split('<').next().unwrap_or(t).trim(), decls)
+}
+
+fn kind_of_name(name: &str, decls: &[Declaration]) -> MatchKind {
+    let Some(d) = decls.iter().find(|d| d.name == name) else {
+        return MatchKind::Unknown;
+    };
+    let head = d.hover.lines().nth(1).unwrap_or("");
+
+    if head.contains("enum ") {
+        return MatchKind::Enum(name.to_string());
+    }
+
+    if head.contains("Result<") {
+        return MatchKind::Result;
+    }
+
+    if head.contains("[]") || head.contains("Array<") {
+        return MatchKind::Array;
+    }
+
+    MatchKind::Unknown
+}
+
+fn kind_of_value(text: &str, decls: &[Declaration]) -> MatchKind {
+    let t = text.trim();
+    let head: String = t
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    if matches!(head.as_str(), "Ok" | "Err") {
+        return MatchKind::Result;
+    }
+
+    if head.is_empty() || !t[head.len()..].starts_with('.') {
+        return MatchKind::Unknown;
+    }
+
+    match kind_of_name(&head, decls) {
+        MatchKind::Enum(name) => MatchKind::Enum(name),
+
+        _ => MatchKind::Unknown,
+    }
+}
+
+/// A variant inserts its name, and opens a payload slot when it takes
+/// one.
+fn variant_insert(variant: &str, signature: &str) -> String {
+    match signature.find('(') {
+        Some(open) if !signature[open + 1..].trim_start().starts_with(')') => {
+            format!("{variant}($1)")
+        }
+
+        _ => variant.to_string(),
+    }
 }
 
 fn word_start(source: &str, offset: usize) -> usize {

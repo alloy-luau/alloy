@@ -84,6 +84,8 @@ struct State {
     /// Questions in flight, by request id.
     asked: HashMap<String, Asked>,
     next_id: u64,
+    /// Whether the editor takes snippet text in a completion item.
+    snippets: bool,
 }
 
 impl State {
@@ -284,6 +286,44 @@ impl State {
                         format!("{}: {}", l.name, l.message)
                     },
                 }));
+            }
+        }
+
+        // A module that names no file, a name the module does not
+        // export, and a name imported twice. The build reports these,
+        // and the checker has no words for the last two, so the editor
+        // reads them here.
+        if doc.error.is_none()
+            && let Some(path) = uri_to_path(uri)
+        {
+            let silence = alloy::directives::scan(&doc.source);
+
+            let rel = PathBuf::from(self.friendly_path(&path));
+
+            for problem in alloy::modules::import_problems_for_file(&path, Some(&rel), &doc.source)
+            {
+                if !silence.allows(alloy::directives::line_of(
+                    &doc.source,
+                    problem.start as usize,
+                )) {
+                    continue;
+                }
+
+                let (sl, sc) = position_of(&doc.source, problem.start as usize);
+                let (el, ec) = position_of(&doc.source, problem.end.max(problem.start) as usize);
+                let mut item = json!({
+                    "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                    "severity": 1,
+                    "source": "Alloy",
+                    "message": format!("{}: {}", problem.kind, problem.message),
+                });
+
+                if let Some(url) = alloy::docs::book_url("3.2") {
+                    item["code"] = json!("3.2");
+                    item["codeDescription"] = json!({ "href": url });
+                }
+
+                diagnostics.push(item);
             }
         }
 
@@ -799,12 +839,24 @@ impl State {
                 .iter()
                 .filter(|k| !labels.contains(k))
                 .map(|k| {
-                    json!({
+                    let mut item = json!({
                         "label": k,
                         "kind": 14,
                         "detail": "Alloy keyword",
                         "documentation": keywords::doc(k).map(|d| json!({ "kind": "markdown", "value": d })),
-                    })
+                    });
+
+                    // `case` is half an arm: the list opens again behind
+                    // it for the pattern.
+                    if *k == "case" {
+                        item["insertText"] = json!("case ");
+                        item["command"] = json!({
+                            "title": "Suggest",
+                            "command": "editor.action.triggerSuggest",
+                        });
+                    }
+
+                    item
                 }),
         );
 
@@ -898,13 +950,136 @@ impl State {
         items
     }
 
+    /// The variants of an enum, read from the one file that declares
+    /// it. Another file with the same enum name has its own variants.
+    fn enum_variants(&self, uri: &str, name: &str) -> Vec<&alloy::declarations::Declaration> {
+        let prefix = format!("{name}.");
+        let mine = self.docs.get(uri).into_iter().map(|d| (uri, d));
+
+        mine.chain(self.docs.iter().map(|(u, d)| (u.as_str(), d)))
+            .find(|(u, doc)| {
+                doc.decls.iter().any(|d| {
+                    d.name == name
+                        && d.hover.lines().nth(1).is_some_and(|l| {
+                            l.contains("enum ") && (*u == uri || l.starts_with("export "))
+                        })
+                })
+            })
+            .map(|(_, doc)| {
+                doc.decls
+                    .iter()
+                    .filter(|d| d.name.starts_with(&prefix))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The type a `match` scrutinee has, which decides the arms. A
+    /// plain name resolves from its annotation, from the variant it
+    /// starts at, or from the declaration index; nothing else does.
+    fn match_kind(&self, uri: &str, source: &str, offset: usize, scrutinee: &str) -> MatchKind {
+        let name = scrutinee.trim();
+
+        // Two scrutinees, a call, or an operator: the proxy reads none.
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return MatchKind::Unknown;
+        }
+
+        // `self` in an `impl` body is the type the block is for.
+        if name == "self" {
+            return context::impl_target(source, offset)
+                .map_or(MatchKind::Unknown, |t| self.kind_of_type(uri, &t));
+        }
+
+        match context::declared(source, offset, name) {
+            Some(context::Declared::Annotation(t)) => self.kind_of_type(uri, &t),
+
+            Some(context::Declared::Init(v)) => self.kind_of_value(uri, &v),
+
+            None => self.kind_of_name(uri, name),
+        }
+    }
+
+    /// What a type annotation names.
+    fn kind_of_type(&self, uri: &str, text: &str) -> MatchKind {
+        let t = text.trim().trim_end_matches('?').trim();
+
+        if t == "Result" || t.starts_with("Result<") {
+            return MatchKind::Result;
+        }
+
+        if t.ends_with("[]") || t.starts_with("Array<") {
+            return MatchKind::Array;
+        }
+
+        if matches!(t, "string" | "number") {
+            return MatchKind::Literal;
+        }
+
+        self.kind_of_name(uri, t.split('<').next().unwrap_or(t).trim())
+    }
+
+    /// What a declared name is, from the head line of its hover. A type
+    /// alias stands for what it names.
+    fn kind_of_name(&self, uri: &str, name: &str) -> MatchKind {
+        let Some(d) = self
+            .decls_in_scope(uri)
+            .into_iter()
+            .find(|d| d.name == name)
+        else {
+            return MatchKind::Unknown;
+        };
+        let head = d.hover.lines().nth(1).unwrap_or("");
+
+        if head.contains("enum ") {
+            return MatchKind::Enum(name.to_string());
+        }
+
+        if head.contains("Result<") {
+            return MatchKind::Result;
+        }
+
+        if head.contains("[]") || head.contains("Array<") {
+            return MatchKind::Array;
+        }
+
+        MatchKind::Unknown
+    }
+
+    /// What an initialiser says: `Msg.Join(p)` is that enum, and `Ok`
+    /// or `Err` is a `Result`.
+    fn kind_of_value(&self, uri: &str, text: &str) -> MatchKind {
+        let t = text.trim();
+        let head: String = t
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        if matches!(head.as_str(), "Ok" | "Err") {
+            return MatchKind::Result;
+        }
+
+        if head.is_empty() || !t[head.len()..].starts_with('.') {
+            return MatchKind::Unknown;
+        }
+
+        match self.kind_of_name(uri, &head) {
+            MatchKind::Enum(name) => MatchKind::Enum(name),
+
+            _ => MatchKind::Unknown,
+        }
+    }
+
     /// The declarations a file sees: its own, and what other files
     /// export. A local of another file is not in scope here.
     fn decls_in_scope(&self, uri: &str) -> Vec<&alloy::declarations::Declaration> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
+        // The file's own declarations come first, so a name it declares
+        // wins over the same name in another file.
+        let mine = self.docs.get(uri).into_iter().map(|d| (uri, d));
 
-        for (u, doc) in &self.docs {
+        for (u, doc) in mine.chain(self.docs.iter().map(|(u, d)| (u.as_str(), d))) {
             let own = u == uri;
 
             for d in &doc.decls {
@@ -945,6 +1120,25 @@ impl State {
 
             if let Some(d) = doc_text {
                 item["documentation"] = json!({ "kind": "markdown", "value": d });
+            }
+
+            item
+        };
+        let snippets = self.snippets;
+        let snippet = |label: &str,
+                       insert: &str,
+                       kind: u64,
+                       detail: &str,
+                       doc_text: Option<String>,
+                       from: usize| {
+            let mut item = word(label, kind, doc_text, from);
+            item["detail"] = json!(detail);
+
+            if snippets {
+                item["textEdit"]["newText"] = json!(insert);
+                item["insertTextFormat"] = json!(2);
+            } else {
+                item["textEdit"]["newText"] = json!(plain_snippet(insert));
             }
 
             item
@@ -1248,30 +1442,108 @@ impl State {
                 }
             }
 
-            Context::MatchCase { prefix } => {
+            Context::MatchCase { prefix, scrutinee } => {
                 let from = offset - prefix.len();
-                let mut seen = HashSet::new();
+                let kind = scrutinee.as_deref().map_or(MatchKind::Unknown, |s| {
+                    self.match_kind(uri, &doc.source, offset, s)
+                });
 
-                for d in self.decls_in_scope(uri) {
-                    // A variant declares as `Enum.Variant`.
-                    if let Some((_, variant)) = d.name.split_once('.')
-                        && d.hover.contains("```alloy\n")
-                        && seen.insert(variant.to_string())
-                    {
-                        items.push(word(variant, 20, Some(d.hover.clone()), from));
+                match &kind {
+                    // The variants of the enum being matched, and only
+                    // those: a global or a keyword is no arm.
+                    MatchKind::Enum(name) => {
+                        for d in self.enum_variants(uri, name) {
+                            let variant = &d.name[name.len() + 1..];
+                            let signature = d.hover.lines().nth(1).unwrap_or(&d.name);
+                            let insert = if payload_types(signature).is_empty() {
+                                variant.to_string()
+                            } else {
+                                format!("{variant}($1)")
+                            };
+                            items.push(snippet(
+                                variant,
+                                &insert,
+                                20,
+                                signature,
+                                Some(d.hover.clone()),
+                                from,
+                            ));
+                        }
+                    }
+
+                    MatchKind::Result => {
+                        for (label, insert, what) in [
+                            ("Ok", "Ok(${1:v})", "The success case of a `Result`."),
+                            ("Err", "Err(${1:e})", "The failure case of a `Result`."),
+                        ] {
+                            items.push(snippet(
+                                label,
+                                insert,
+                                20,
+                                &plain_snippet(insert),
+                                Some(what.to_string()),
+                                from,
+                            ));
+                        }
+                    }
+
+                    MatchKind::Array => {
+                        for (label, insert, what) in [
+                            (
+                                "[ first, ...rest ]",
+                                "[ ${1:first}, ...${2:rest} ]",
+                                "An array with one item at least; `rest` takes the tail.",
+                            ),
+                            ("[ ]", "[ ]", "The empty array."),
+                        ] {
+                            items.push(snippet(
+                                label,
+                                insert,
+                                20,
+                                label,
+                                Some(what.to_string()),
+                                from,
+                            ));
+                        }
+                    }
+
+                    // A string or a number matches its own literals, and
+                    // the child cannot list those.
+                    MatchKind::Literal => {}
+
+                    // Nothing named the scrutinee: every variant in
+                    // scope stays.
+                    MatchKind::Unknown => {
+                        let mut seen = HashSet::new();
+
+                        for d in self.decls_in_scope(uri) {
+                            // A variant declares as `Enum.Variant`.
+                            if let Some((_, variant)) = d.name.split_once('.')
+                                && d.hover.contains("```alloy\n")
+                                && seen.insert(variant.to_string())
+                            {
+                                items.push(word(variant, 20, Some(d.hover.clone()), from));
+                            }
+                        }
+
+                        for (name, what) in [
+                            ("Ok", "The success case of a `Result`."),
+                            ("Err", "The failure case of a `Result`."),
+                            ("_", "Matches anything without binding it."),
+                        ] {
+                            if seen.insert(name.to_string()) {
+                                items.push(word(name, 14, Some(what.to_string()), from));
+                            }
+                        }
                     }
                 }
 
-                for (name, what) in [
-                    ("Ok", "The success case of a `Result`."),
-                    ("Err", "The failure case of a `Result`."),
-                    ("default", "The arm that takes what no case did."),
-                    ("_", "Matches anything without binding it."),
-                ] {
-                    if seen.insert(name.to_string()) {
-                        items.push(word(name, 14, Some(what.to_string()), from));
-                    }
-                }
+                items.push(word(
+                    "default",
+                    14,
+                    Some("The arm that takes what no case did.".to_string()),
+                    from,
+                ));
             }
 
             Context::FieldStart { prefix } => {
@@ -1782,6 +2054,12 @@ impl Server {
                 let _ = std::fs::create_dir_all(&st.mirror);
                 st.root = root;
                 st.initialize_id = message.get("id").map(id_key);
+                st.snippets = message
+                    .pointer(
+                        "/params/capabilities/textDocument/completion/completionItem/snippetSupport",
+                    )
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let mirror_uri = path_to_uri(&st.mirror);
                 let mirror_path = st.mirror.to_string_lossy().into_owned();
 
@@ -3015,6 +3293,7 @@ impl Server {
                             .cloned()
                             .unwrap_or_default();
                         let mut st = self.state.lock().expect("state");
+                        let doc_path = uri_to_path(&source);
                         let mapped: Vec<Value> = match st.docs.get(&source) {
                             Some(doc) => {
                                 let mut out: Vec<Value> = Vec::new();
@@ -3023,7 +3302,8 @@ impl Server {
                                 let unmet = unmet_expectations(doc, &diagnostics);
 
                                 for mut d in diagnostics {
-                                    if !keep_diagnostic(&d, doc, &lint_config) {
+                                    if !keep_diagnostic(&d, doc, doc_path.as_deref(), &lint_config)
+                                    {
                                         continue;
                                     }
 
@@ -3206,8 +3486,11 @@ impl Server {
                     "textDocument/diagnostic" => {
                         if let Some(items) = result.get_mut("items").and_then(Value::as_array_mut) {
                             let lint_config = st.lint_config();
+                            let doc_path = uri_to_path(uri);
                             let unmet = unmet_expectations(doc, items);
-                            items.retain(|d| keep_diagnostic(d, doc, &lint_config));
+                            items.retain(|d| {
+                                keep_diagnostic(d, doc, doc_path.as_deref(), &lint_config)
+                            });
                             items.extend(unmet);
                             collapse_diagnostics(items);
                         }
@@ -3301,17 +3584,20 @@ impl Server {
                 && let Some(reports) = result.get_mut("items").and_then(Value::as_array_mut)
             {
                 for report in reports {
-                    let doc = report
+                    let source = report
                         .get("uri")
                         .and_then(Value::as_str)
                         .and_then(|shadow| st.shadows.get(shadow))
-                        .and_then(|source| st.docs.get(source));
+                        .cloned();
+                    let doc = source.as_ref().and_then(|source| st.docs.get(source));
 
                     if let Some(doc) = doc
                         && let Some(items) = report.get_mut("items").and_then(Value::as_array_mut)
                     {
                         let lint_config = st.lint_config();
-                        items.retain(|d| keep_diagnostic(d, doc, &lint_config));
+                        let doc_path = source.as_deref().and_then(uri_to_path);
+                        items
+                            .retain(|d| keep_diagnostic(d, doc, doc_path.as_deref(), &lint_config));
                     }
                 }
             }
@@ -3326,6 +3612,10 @@ impl Server {
                     friendly_message(d, doc, &st);
                 }
 
+                // A rewrite may move two reports onto one line, the
+                // `impl` an alias names among them; they collapse after
+                // it, not before.
+                collapse_diagnostics(items);
                 snap_ranges(items, &doc.source);
             }
 
@@ -6353,7 +6643,12 @@ fn covers(outer: Span, inner: Span) -> bool {
 /// touches generated text, or an unused-variable lint for a name that an
 /// intrinsic such as `$nameof` consumed. Errors in generated text stay;
 /// they map to the construct that produced them.
-fn keep_diagnostic(d: &Value, doc: &Doc, lint_config: &alloy::config::LintConfig) -> bool {
+fn keep_diagnostic(
+    d: &Value,
+    doc: &Doc,
+    doc_path: Option<&Path>,
+    lint_config: &alloy::config::LintConfig,
+) -> bool {
     let message = d.get("message").and_then(Value::as_str).unwrap_or_default();
 
     // `--@alloy-nocheck` and `--@alloy-ignore` silence the checker too.
@@ -6374,6 +6669,30 @@ fn keep_diagnostic(d: &Value, doc: &Doc, lint_config: &alloy::config::LintConfig
         return false;
     }
 
+    // `require(script.Parent)` resolves at runtime and names no path;
+    // `raw_require` already says the checker cannot follow it.
+    if message.contains("Unknown require")
+        && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
+        && alloy::typecheck::quoted_on_line(&doc.source, sl as usize).is_none()
+    {
+        return false;
+    }
+
+    // Past its first error the parser invents the tree, and the emit
+    // copies the text through: `trait Zap` reads to the checker as a
+    // call of an unknown global, and the `end` the recovery never saw
+    // is a syntax error of its own. The compiler already names the
+    // parse error, and the lints are off for the same reason, so only
+    // a type error away from the recovery still stands.
+    if let Some(out) = &doc.output
+        && !out.parsed_clean
+        && (message.contains("Unknown global '")
+            || message.starts_with("SyntaxError")
+            || d.get("severity").and_then(Value::as_u64) != Some(1))
+    {
+        return false;
+    }
+
     // A line the compiler already reports on has an unreliable emit,
     // and the checker's report there describes that emit, not the code:
     // `Unknown global 'new'` under `ReservedWord`, a syntax error under
@@ -6384,6 +6703,18 @@ fn keep_diagnostic(d: &Value, doc: &Doc, lint_config: &alloy::config::LintConfig
             .diagnostics
             .iter()
             .any(|a| alloy::directives::line_of(&doc.source, a.start as usize) == sl as usize)
+    {
+        return false;
+    }
+
+    // An import the build reports on reads in Alloy's words, which name
+    // what the module exports; the checker's report on the same line is
+    // the same problem told as a missing key.
+    if let Some(path) = doc_path
+        && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
+        && alloy::modules::import_problems_for_file(path, None, &doc.source)
+            .iter()
+            .any(|p| alloy::directives::line_of(&doc.source, p.start as usize) == sl as usize)
     {
         return false;
     }
@@ -6429,13 +6760,15 @@ fn keep_diagnostic(d: &Value, doc: &Doc, lint_config: &alloy::config::LintConfig
         return false;
     }
 
-    // `unused_variable` and `unused_function` say it on the same line;
-    // the checker's report would say it twice.
-    if unused_name(message).is_some()
+    // Alloy's own lint says it on the same line, in the words of what
+    // the source wrote; the checker's copy would say it twice.
+    if let Some(names) = message
+        .split_once(": ")
+        .and_then(|(kind, _)| alloy::typecheck::paired_lint(kind))
         && let Some(out) = &doc.output
         && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
         && out.lints.iter().any(|l| {
-            matches!(l.name, "unused_variable" | "unused_function")
+            names.contains(&l.name)
                 && alloy::lint::level_of(lint_config, l.name) != alloy::lint::Level::Allow
                 && alloy::directives::line_of(&doc.source, l.start as usize) == sl as usize
         })
@@ -6569,41 +6902,21 @@ fn alloy_wording(d: &mut Value, doc: &Doc) {
         .take(ec.saturating_sub(sc) as usize)
         .collect();
 
-    // `new Plain { }`, where `Plain` is a type alias, emits a call
-    // through a global the artifact never binds.
-    if let Some(name) = quoted_after(&message, "Unknown global '") {
-        if names_word(line, &format!("new {name}")) {
-            d["message"] = json!(format!("{kind}: `{name}` is a type, not a struct"));
-
-            return;
-        }
-
-        if names_word(line, &format!("is {name}")) {
-            d["message"] = json!(format!("{kind}: `{name}` is not a type in scope"));
-
-            return;
-        }
-
-        // Every method body of `impl T for Alias` reports the same
-        // global; the `impl` line is where the mistake is.
-        if let Some(at) = impl_line_for(doc, sl, name) {
-            d["message"] = json!(format!(
-                "{kind}: `{name}` is a type, not a struct; `impl` needs one"
-            ));
-            d["range"] = range_value((at, 0), (at, impl_width(doc, at)));
-
-            return;
-        }
-    }
-
-    // `new n { }`, where `n` is a value: the emit asks it for `new`.
-    if let Some(owner) = quoted_after(&message, "Type '")
-        && message.ends_with("does not have key 'new'")
-        && let Some(name) = word_after(line, "new ")
+    // `new Plain { }` on a type alias, `x is Alias`, `impl T for Alias`,
+    // and `new n { }` on a value each emit a name the artifact never
+    // binds. The compiler writes these sentences, so the terminal and
+    // the editor say one thing.
+    if let Some((better, at)) =
+        alloy::typecheck::rewrite_emitted_name(&message, &doc.source, sl as usize + 1)
     {
-        d["message"] = json!(format!(
-            "{kind}: `new` needs a struct; `{name}` is a {owner}"
-        ));
+        d["message"] = json!(format!("{kind}: {better}"));
+
+        // Every method body of an `impl` reports the same name; the
+        // `impl` line is where the mistake is.
+        if let Some(at) = at {
+            let at = at as u32 - 1;
+            d["range"] = range_value((at, 0), (at, impl_width(doc, at)));
+        }
 
         return;
     }
@@ -6652,17 +6965,6 @@ fn quoted_after<'a>(message: &'a str, opener: &str) -> Option<&'a str> {
     message[at..].find('\'').map(|end| &message[at..at + end])
 }
 
-/// The identifier right after `opener` on a line.
-fn word_after(line: &str, opener: &str) -> Option<String> {
-    let at = line.find(opener)? + opener.len();
-    let name: String = line[at..]
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-
-    (!name.is_empty()).then_some(name)
-}
-
 /// Whether the line holds the phrase as whole words.
 fn names_word(line: &str, phrase: &str) -> bool {
     line.match_indices(phrase).any(|(i, _)| {
@@ -6672,20 +6974,6 @@ fn names_word(line: &str, phrase: &str) -> bool {
         !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
             && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
     })
-}
-
-/// The line of the `impl ... for Name` above a line, when one opens the
-/// block the line sits in.
-fn impl_line_for(doc: &Doc, line: u32, name: &str) -> Option<u32> {
-    doc.source
-        .lines()
-        .take(line as usize)
-        .enumerate()
-        .filter(|(_, l)| {
-            l.trim_start().starts_with("impl ") && l.trim_end().ends_with(&format!(" for {name}"))
-        })
-        .map(|(k, _)| k as u32)
-        .last()
 }
 
 /// The width of a line, in UTF-16 units.
@@ -6776,6 +7064,47 @@ fn without_self(message: &str) -> Option<String> {
 
 /// The payload types of a variant signature, `Msg.Move(Player, number)`
 /// giving `["Player", "number"]`, split at the commas outside brackets.
+/// What a `match` scrutinee resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MatchKind {
+    /// An enum in scope: its variants are the arms.
+    Enum(String),
+    /// A `Result<T, E>`: `Ok` and `Err`.
+    Result,
+    /// `T[]` or `Array<T>`: the array patterns.
+    Array,
+    /// A string or a number: only `default` fits.
+    Literal,
+    /// Nothing the proxy reads.
+    Unknown,
+}
+
+/// A snippet without its placeholders, for an editor that takes none.
+fn plain_snippet(insert: &str) -> String {
+    let mut out = String::new();
+    let mut rest = insert;
+
+    while let Some(i) = rest.find('$') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+
+        if let Some(body) = after.strip_prefix('{') {
+            let end = body.find('}').unwrap_or(body.len());
+            out.push_str(body[..end].split_once(':').map_or("", |(_, name)| name));
+            rest = &body[(end + 1).min(body.len())..];
+        } else {
+            let end = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
+            rest = &after[end..];
+        }
+    }
+
+    out.push_str(rest);
+
+    out
+}
+
 fn payload_types(signature: &str) -> Vec<String> {
     let Some(open) = signature.find('(') else {
         return Vec::new();
@@ -7052,6 +7381,149 @@ mod tests {
     }
 
     use super::*;
+
+    /// A state with one open document, so the declarations are there.
+    fn one_file(src: &str) -> (State, &'static str) {
+        let uri = "file:///t.aly";
+        let mut st = State {
+            root: Some(PathBuf::from("/")),
+            mirror: PathBuf::from("/m"),
+            snippets: true,
+            ..State::default()
+        };
+        st.docs.insert(
+            uri.to_string(),
+            Doc::new(
+                src.to_string(),
+                1,
+                &EmitOptions::default(),
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+
+        (st, uri)
+    }
+
+    const MATCH_FILE: &str = concat!(
+        "enum Msg as\n",
+        "    Quit\n",
+        "    Join(Player)\n",
+        "end\n",
+        "enum Color as Red, Green end\n",
+        "type Answer = Result<number, string>\n",
+        "local function handle(msg: Msg, tally: number, names: string[])\n",
+        "    local parsed: Result<number, string> = Ok(1)\n",
+        "    local seed = Msg.Join(p)\n",
+        "    local reply: Answer = Ok(2)\n",
+        "    local made = Array<Msg>()\n",
+        "    match msg with\n",
+        "        case \n",
+        "    end\n",
+        "end\n"
+    );
+
+    #[test]
+    fn a_scrutinee_resolves_to_a_type() {
+        let (st, uri) = one_file(MATCH_FILE);
+        let at = |name: &str| st.match_kind(uri, MATCH_FILE, MATCH_FILE.len(), name);
+        let msg = MatchKind::Enum("Msg".to_string());
+
+        // The annotation of a parameter, of a local, and of a const.
+        assert_eq!(at("msg"), msg);
+        assert_eq!(at("parsed"), MatchKind::Result);
+        assert_eq!(at("names"), MatchKind::Array);
+        assert_eq!(at("tally"), MatchKind::Literal);
+
+        // The variant a local starts at.
+        assert_eq!(at("seed"), msg);
+
+        // A hover that names an enum or a `Result`.
+        assert_eq!(at("Msg"), msg);
+        assert_eq!(at("reply"), MatchKind::Result);
+
+        // Anything else keeps the full list.
+        assert_eq!(at("made"), MatchKind::Unknown);
+        assert_eq!(at("p"), MatchKind::Unknown);
+        assert_eq!(at("year % 4, year % 100"), MatchKind::Unknown);
+    }
+
+    fn case_items(st: &State, uri: &str, src: &str) -> Vec<Value> {
+        let offset = src.rfind("case ").unwrap() + "case ".len();
+        let ctx = context::detect(src, offset).expect("a case list");
+
+        st.context_items(uri, offset, &ctx)
+    }
+
+    #[test]
+    fn a_case_list_holds_the_arms_of_its_own_match() {
+        let (st, uri) = one_file(MATCH_FILE);
+        let items = case_items(&st, uri, MATCH_FILE);
+        let labels: Vec<&str> = items
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or(""))
+            .collect();
+
+        // The variants of `Msg` alone, then `default`. The other enum's
+        // variants, `Ok`, `Err`, and `_` stay out.
+        assert_eq!(labels, ["Quit", "Join", "default"]);
+        assert_eq!(items[0]["textEdit"]["newText"], "Quit");
+        assert_eq!(items[1]["textEdit"]["newText"], "Join($1)");
+        assert_eq!(items[1]["insertTextFormat"], 2);
+        assert_eq!(items[1]["detail"], "Msg.Join(Player)");
+        assert!(
+            items[1]["documentation"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("A variant of `enum Msg`")
+        );
+    }
+
+    #[test]
+    fn a_result_a_literal_and_an_array_take_their_own_arms() {
+        let result = "local r: Result<number, string> = Ok(1)\nmatch r with\n    case \nend\n";
+        let (st, uri) = one_file(result);
+        let items = case_items(&st, uri, result);
+        let labels: Vec<&str> = items
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, ["Ok", "Err", "default"]);
+        assert_eq!(items[0]["textEdit"]["newText"], "Ok(${1:v})");
+        assert_eq!(items[1]["textEdit"]["newText"], "Err(${1:e})");
+
+        let text = "local s: string = \"a\"\nmatch s with\n    case \nend\n";
+        let (st, uri) = one_file(text);
+        let items = case_items(&st, uri, text);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "default");
+
+        let array = "local xs: string[] = {}\nmatch xs with\n    case \nend\n";
+        let (st, uri) = one_file(array);
+        let items = case_items(&st, uri, array);
+        let labels: Vec<&str> = items
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, ["[ first, ...rest ]", "[ ]", "default"]);
+        assert_eq!(
+            items[0]["textEdit"]["newText"],
+            "[ ${1:first}, ...${2:rest} ]"
+        );
+    }
+
+    #[test]
+    fn an_editor_without_snippets_takes_the_plain_text() {
+        let (mut st, uri) = one_file(MATCH_FILE);
+        st.snippets = false;
+        let items = case_items(&st, uri, MATCH_FILE);
+        assert_eq!(items[1]["textEdit"]["newText"], "Join()");
+        assert!(items[1].get("insertTextFormat").is_none());
+        assert_eq!(
+            plain_snippet("[ ${1:first}, ...${2:rest} ]"),
+            "[ first, ...rest ]"
+        );
+    }
 
     #[test]
     fn import_temps_leave_the_type_names() {

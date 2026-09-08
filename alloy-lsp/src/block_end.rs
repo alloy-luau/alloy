@@ -5,8 +5,33 @@
 /// `end`, from a walk over the lexer's tokens: strings and comments never
 /// count. None when the line opens nothing or the file is balanced.
 pub fn needs_end(src: &str, line: u32) -> Option<String> {
-    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+    let stack = open_blocks(src, src.len());
+    let (opener_line, offset) = *stack.last()?;
+
+    if opener_line != line {
         return None;
+    }
+
+    let line_start = src[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let indent: String = src[line_start..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+
+    Some(indent)
+}
+
+/// Whether a block is still open at a byte offset, so `end` is a word
+/// the line can take.
+pub fn open_before(src: &str, offset: usize) -> bool {
+    !open_blocks(src, offset).is_empty()
+}
+
+/// The openers with no `end` yet, each as its line and byte offset, over
+/// the tokens that start before `until`.
+fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
     };
 
     let toks = &lexed.toks;
@@ -15,6 +40,10 @@ pub fn needs_end(src: &str, line: u32) -> Option<String> {
     let mut stack: Vec<(u32, usize)> = Vec::new();
 
     for (i, tok) in toks.iter().enumerate() {
+        if tok.start as usize >= until {
+            break;
+        }
+
         let word = text(i);
         let before = i.checked_sub(1).map(text).unwrap_or("");
         let _ = tok;
@@ -64,19 +93,7 @@ pub fn needs_end(src: &str, line: u32) -> Option<String> {
         }
     }
 
-    let (opener_line, offset) = *stack.last()?;
-
-    if opener_line != line {
-        return None;
-    }
-
-    let line_start = src[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let indent: String = src[line_start..]
-        .chars()
-        .take_while(|c| *c == ' ' || *c == '\t')
-        .collect();
-
-    Some(indent)
+    stack
 }
 
 #[cfg(test)]

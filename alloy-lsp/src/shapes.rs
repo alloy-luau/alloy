@@ -11,6 +11,157 @@ use serde_json::Value;
 #[derive(Default)]
 pub struct Known {
     pub shapes: Vec<Shape>,
+    pub interfaces: Vec<Interface>,
+}
+
+/// An interface a source declares: the interfaces it extends and the
+/// fields it adds. The checker prints the two met with `&`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Interface {
+    pub name: String,
+    pub bases: Vec<String>,
+    pub fields: Vec<String>,
+}
+
+/// The interfaces a source declares, with their bases and fields.
+pub fn interfaces(source: &str) -> Vec<Interface> {
+    let mut out: Vec<Interface> = Vec::new();
+    let mut open: Option<Interface> = None;
+
+    for line in source.lines() {
+        let text = line.trim();
+
+        if let Some(rest) = text
+            .strip_prefix("interface ")
+            .or_else(|| text.strip_prefix("export interface "))
+        {
+            let head = rest.trim_end().trim_end_matches(" as").trim();
+            let (name, bases) = match head.split_once(" extends ") {
+                Some((n, b)) => (
+                    n.trim(),
+                    b.split(',').map(|p| p.trim().to_string()).collect(),
+                ),
+
+                None => (head, Vec::new()),
+            };
+
+            if let Some(previous) = open.take() {
+                out.push(previous);
+            }
+
+            open = Some(Interface {
+                name: name.to_string(),
+                bases,
+                fields: Vec::new(),
+            });
+
+            continue;
+        }
+
+        let Some(current) = open.as_mut() else {
+            continue;
+        };
+
+        if text == "end" {
+            out.push(open.take().expect("open interface"));
+
+            continue;
+        }
+
+        let head = text
+            .trim_start_matches("read ")
+            .trim_start_matches("write ");
+
+        if let Some((name, _)) = head.split_once(':')
+            && !name.trim().is_empty()
+            && name.trim().chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            current.fields.push(name.trim().to_string());
+        }
+    }
+
+    if let Some(previous) = open {
+        out.push(previous);
+    }
+
+    out
+}
+
+impl Interface {
+    /// Whether a printed type is this interface: the bases it extends,
+    /// met with a table of the fields it adds, or one table holding
+    /// every field, the bases' included.
+    fn matches(&self, text: &str, all: &[Interface]) -> bool {
+        let mut bases: Vec<String> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+
+        for part in split_intersection(text) {
+            match part.starts_with('{') {
+                true => keys.extend(members(part).into_iter().map(|(k, _)| k)),
+
+                false => bases.push(part.to_string()),
+            }
+        }
+
+        let mut wanted: Vec<String> = self.bases.clone();
+        wanted.sort();
+        bases.sort();
+        keys.sort();
+
+        if self.name.is_empty() || keys.is_empty() {
+            return false;
+        }
+
+        let mut own = self.fields.clone();
+        own.sort();
+
+        if bases == wanted && keys == own {
+            return true;
+        }
+
+        let mut every = self.inherited(all);
+        every.sort();
+
+        bases.is_empty() && keys == every
+    }
+
+    /// Every field the interface carries: the bases' fields and its own.
+    fn inherited(&self, all: &[Interface]) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .bases
+            .iter()
+            .filter_map(|b| all.iter().find(|i| i.name == *b))
+            .flat_map(|i| i.inherited(all))
+            .chain(self.fields.iter().cloned())
+            .collect();
+        out.sort();
+        out.dedup();
+
+        out
+    }
+}
+
+/// The members of an intersection at depth zero.
+fn split_intersection(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (k, c) in text.char_indices() {
+        match c {
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth -= 1,
+            '&' if depth == 0 && text[..k].ends_with(' ') && text[k + 1..].starts_with(' ') => {
+                out.push(text[start..k].trim());
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+
+    out.push(text[start..].trim());
+
+    out
 }
 
 /// Folds every string of a JSON value, in place.
@@ -22,6 +173,9 @@ pub fn fold_value(value: &mut Value, known: &Known) {
                 || s.contains("\" | \"")
                 || s.contains("__private")
                 || s.contains("Array<")
+                || s.contains("{read ")
+                || s.contains("Awaitable<")
+                || s.contains("ResultMethods")
                 || s.contains(" | ")
             {
                 *s = fold(s, known);
@@ -36,6 +190,64 @@ pub fn fold_value(value: &mut Value, known: &Known) {
     }
 }
 
+/// A checker message as a reader should get it: a failed bound reads as
+/// a bound, and the tail that walks the emitted shape goes.
+pub fn friendly_text(message: &str) -> String {
+    match bound_failure(message) {
+        Some(rewritten) => rewritten,
+
+        None => cut_explanation(message),
+    }
+}
+
+/// `where T: Shape` emits as an intersection, so a bound the argument
+/// misses reads as an intersection it is not part of.
+fn bound_failure(message: &str) -> Option<String> {
+    const CLAUSE: &str = "component of the intersection is ";
+
+    let at = message.find(CLAUSE)? + CLAUSE.len();
+    let bound = quoted_from(&message[at..])?;
+    let got_at = message.find("but got ")? + "but got ".len();
+    let got = quoted_from(&message[got_at..])?;
+    // The message keeps the kind it came with; a caller that adds one
+    // would print it twice.
+    let head = match message.split_once(": ") {
+        Some((kind, _)) if !kind.contains(' ') => format!("{kind}: "),
+
+        _ => String::new(),
+    };
+
+    Some(format!(
+        "{head}`{got}` does not satisfy the bound `{bound}`"
+    ))
+}
+
+/// The text the quote at the start of a message fragment opens; the
+/// checker writes either a quote or a backtick.
+fn quoted_from(text: &str) -> Option<&str> {
+    let quote = text.chars().next().filter(|c| matches!(c, '\'' | '`'))?;
+    let end = text[1..].find(quote)?;
+
+    Some(&text[1..1 + end])
+}
+
+/// The checker explains a mismatch by walking the shape it printed, so
+/// the tail names the emit: `_1`, `__index`, and the type pack. The
+/// head already says what the reader needs.
+fn cut_explanation(message: &str) -> String {
+    const MARKERS: [&str; 2] = ["this is because", "in the metatable portion"];
+
+    let Some(at) = MARKERS.iter().filter_map(|m| message.find(m)).min() else {
+        return message.to_string();
+    };
+    let head = message[..at].trim_end();
+
+    head.strip_suffix(';')
+        .unwrap_or(head)
+        .trim_end()
+        .to_string()
+}
+
 /// One `tN = { ... }` binding of a `where` clause.
 struct Binding {
     var: String,
@@ -46,7 +258,9 @@ struct Binding {
 /// shapes goes, and the head reads by name; then the enum unions and
 /// the Result unions.
 pub fn fold(text: &str, known: &Known) -> String {
-    let mut out = text.to_string();
+    // The std spells the operand of `await` `Awaitable<T>`; the source
+    // writes `Future<T>`, and the two are one type.
+    let mut out = text.replace("Awaitable<", "Future<");
 
     // A hover may hold several types, one per line; each `where` is
     // handled in turn, from the last so the offsets before it hold.
@@ -111,9 +325,14 @@ pub fn fold(text: &str, known: &Known) -> String {
     }
 
     fold_heads(&mut out, known);
+    fold_metatable_groups(&mut out, known);
     fold_tagged_results(&mut out);
     fold_results(&mut out);
     fold_lite_results(&mut out);
+    // Whatever the Result folds could not pair keeps its data half; the
+    // method table is the same for every Result and names nothing.
+    out = drop_result_methods(&out);
+    fold_results(&mut out);
     fold_symbols(&mut out);
 
     // An enum inside another's payload folds first, and then the outer.
@@ -125,6 +344,8 @@ pub fn fold(text: &str, known: &Known) -> String {
             break;
         }
     }
+    fold_variant_tables(&mut out, known);
+    fold_enum_unions(&mut out, known);
     out = fold_private_views(&out);
     fold_full_views(&mut out, known);
     fold_array_alias(&mut out);
@@ -140,8 +361,65 @@ pub fn fold(text: &str, known: &Known) -> String {
     // `Array<number[] | number[]>` is one array once the union folds.
     fold_array_alias(&mut out);
     fold_read_arrays(&mut out);
+    fold_deletable(&mut out);
+    fold_quoted_types(&mut out, known);
 
     out
+}
+
+/// A message prints a type between quotes, `not found in table '{ ... }'`.
+/// It reads by name there the way a hover does.
+fn fold_quoted_types(text: &mut String, known: &Known) {
+    for quote in ['\''] {
+        let mut from = 0;
+
+        while let Some(i) = text[from..].find(quote) {
+            let open = from + i + 1;
+            // The child cuts a long print, so the closing quote may be
+            // gone; what is left still names the shape.
+            let cut = text[open..].find(quote).is_none();
+            let close = text[open..].find(quote).unwrap_or(text.len() - open);
+            let body = text[open..open + close].to_string();
+
+            if cut && !body.trim_start().starts_with('{') {
+                break;
+            }
+
+            let folded = { dedupe_type(&body) };
+
+            if folded != body {
+                text.replace_range(open..open + close, &folded);
+                from = open + folded.len() + 1;
+
+                continue;
+            }
+
+            match name_of_body(&body, known) {
+                Some(name) if name != body => {
+                    let name = match cut {
+                        true => format!("{name}{quote}"),
+
+                        false => name,
+                    };
+                    text.replace_range(open..open + close, &name);
+                    from = open + name.len() + 1;
+                }
+
+                _ => from = open + close + 1,
+            }
+        }
+    }
+}
+
+/// `delete` takes a value with a `Destroy`, a `Disconnect`, or their
+/// lower-case pair. The union of the four reads as the name the doc
+/// gives it.
+fn fold_deletable(text: &mut String) {
+    const UNION: &str = "{ read Destroy: (any) -> () } | { read Disconnect: (any) -> () } | { read destroy: (any) -> () } | { read disconnect: (any) -> () }";
+
+    while let Some(at) = text.find(UNION) {
+        text.replace_range(at..at + UNION.len(), "Deletable");
+    }
 }
 
 /// `(number[])[]`, a union that folded to one member under an array,
@@ -512,6 +790,245 @@ fn fold_heads(text: &mut String, known: &Known) {
     }
 }
 
+/// `ResultMethods<T, E> & { ... }` is how a Result's method table meets
+/// its data half. The methods are the same for every Result, so the
+/// data half alone says what the value is.
+pub fn drop_result_methods(text: &str) -> String {
+    let mut out = text.to_string();
+    let mut from = 0;
+
+    while let Some(i) = out[from..].find("ResultMethods") {
+        // The runtime's table may spell it `__alloy.ResultMethods`.
+        let at = from + i;
+        let at = out[..at]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .map_or(0, |k| k + 1);
+
+        let Some(rel) = out[at..].find(" & ") else {
+            break;
+        };
+        let end = at + rel + " & ".len();
+
+        // `(ResultMethods<T, E> & { ... })` loses its parentheses with
+        // the member, since one type needs none.
+        if out[..at].ends_with('(') {
+            let open = at - 1;
+
+            let Some(len) = balanced_len(&out[open..]) else {
+                break;
+            };
+            let close = open + len - 1;
+            out.replace_range(close..close + 1, "");
+            out.replace_range(open..end, "");
+            from = open;
+
+            continue;
+        }
+
+        out.replace_range(at..end, "");
+        from = at;
+    }
+
+    out
+}
+
+/// A struct value printed in place, `{ @metatable t1, { x: number } }`,
+/// reads by the struct's name wherever it stands, not only after a `: `.
+fn fold_metatable_groups(text: &mut String, known: &Known) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find("{ @metatable ") {
+        let open = from + i;
+        let Some(len) = balanced_len(&text[open..]) else {
+            break;
+        };
+        let body = text[open..open + len].to_string();
+        let rest = &body["{ @metatable ".len()..];
+        let head_len = type_len(rest);
+        let head = rest[..head_len].trim().to_string();
+
+        let replacement = match known.shapes.iter().find(|s| s.name() == head) {
+            // Every variant of a payload enum carries the enum's own
+            // metatable, so the metatable names none of them. The union
+            // of the data tables is what reads as the enum.
+            Some(Shape::Enum { .. }) => rest
+                .get(head_len + 1..)
+                .map(str::trim)
+                .and_then(|t| t.strip_suffix('}'))
+                .map(|t| t.trim().to_string()),
+
+            // A struct's metatable prints by the struct's name.
+            Some(Shape::Struct { name, .. }) => Some(name.clone()),
+
+            _ => {
+                let data = rest
+                    .get(head_len + 1..)
+                    .map(str::trim)
+                    .and_then(|t| t.strip_suffix('}'))
+                    .map(|t| t.trim().to_string());
+
+                // The metatable is a solver variable the clause never
+                // named. A tagged table under it is a variant, and the
+                // union of the variants names the enum.
+                match data.as_deref().is_some_and(is_tagged_variant) {
+                    true => data,
+
+                    false => name_of_body(&body, known),
+                }
+            }
+        };
+
+        match replacement {
+            Some(name) => {
+                text.replace_range(open..open + len, &name);
+                from = open + name.len();
+            }
+
+            None => from = open + 1,
+        }
+    }
+}
+
+/// A tagged table the union fold could not pair with its siblings still
+/// names one variant; the enum is what the reader wrote.
+fn fold_variant_tables(text: &mut String, known: &Known) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find("tag: \"") {
+        let at = from + i;
+
+        let group = enclosing_brace(text, at)
+            .and_then(|open| balanced_len(&text[open..]).map(|len| (open, len)));
+
+        let Some((open, len)) = group else {
+            from = at + 1;
+
+            continue;
+        };
+        let body = text[open..open + len].to_string();
+
+        if is_tagged_variant(&body)
+            && let Some(name) = enum_of_variant(&body, known)
+        {
+            text.replace_range(open..open + len, &name);
+            from = open + name.len();
+
+            continue;
+        }
+
+        from = at + 1;
+    }
+}
+
+/// The enum a tagged table belongs to: its `tag` literal names one of
+/// the enum's variants.
+fn enum_of_variant(table: &str, known: &Known) -> Option<String> {
+    let m = members(table);
+    let (_, tag) = m.iter().find(|(k, _)| k == "tag")?;
+    let variant = tag.trim().trim_matches('"');
+
+    known.shapes.iter().find_map(|s| match s {
+        Shape::Enum { name, variants } if variants.iter().any(|(v, _)| v == variant) => {
+            Some(name.clone())
+        }
+
+        _ => None,
+    })
+}
+
+/// A payload enum whose variants folded to its name still prints its
+/// unit variants as strings: `Shape | "Empty"` is `Shape`.
+fn fold_enum_unions(text: &mut String, known: &Known) {
+    for shape in &known.shapes {
+        let Shape::Enum { name, variants } = shape else {
+            continue;
+        };
+        let units: Vec<String> = variants
+            .iter()
+            .filter(|(_, p)| p.is_empty())
+            .map(|(v, _)| format!("\"{v}\""))
+            .collect();
+
+        if units.is_empty() {
+            continue;
+        }
+
+        let mut from = 0;
+
+        while let Some(at) = word_at_or_after(text, name, from) {
+            let mut start = at;
+            let mut end = at + name.len();
+            let mut grew = false;
+
+            loop {
+                let rest = text[end..].trim_start();
+                let pad = text[end..].len() - rest.len();
+
+                let Some(after) = rest.strip_prefix("| ") else {
+                    break;
+                };
+                let gap = after.len() - after.trim_start().len();
+                let candidate = after.trim_start();
+
+                let Some(unit) = units.iter().find(|u| candidate.starts_with(u.as_str())) else {
+                    break;
+                };
+                end += pad + 2 + gap + unit.len();
+                grew = true;
+            }
+
+            loop {
+                let before = text[..start].trim_end();
+
+                let Some(head) = before.strip_suffix('|') else {
+                    break;
+                };
+                let head = head.trim_end();
+
+                let Some(unit) = units.iter().find(|u| head.ends_with(u.as_str())) else {
+                    break;
+                };
+                start = head.len() - unit.len();
+                grew = true;
+            }
+
+            match grew {
+                true => {
+                    text.replace_range(start..end, name);
+                    from = start + name.len();
+                }
+
+                false => from = at + name.len(),
+            }
+        }
+    }
+}
+
+/// The offset of `name` as a whole word at or after `from`.
+fn word_at_or_after(text: &str, name: &str, from: usize) -> Option<usize> {
+    text[from.min(text.len())..]
+        .match_indices(name)
+        .map(|(i, _)| from + i)
+        .find(|at| {
+            let before = text[..*at].chars().next_back();
+            let after = text[at + name.len()..].chars().next();
+
+            !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// Whether a table body is one variant of a payload enum: a `tag`
+/// literal with the emit's `_1` and `_2` slots beside it.
+fn is_tagged_variant(body: &str) -> bool {
+    let m = members(body);
+
+    m.iter().any(|(k, v)| k == "tag" && v.starts_with('"'))
+        && m.iter().any(|(k, _)| {
+            k.len() > 1 && k.starts_with('_') && k[1..].chars().all(|c| c.is_ascii_digit())
+        })
+}
+
 /// A mapped result prints as one table with `tag: "Ok" | "Err"` and
 /// `read _1: T | E`; it reads as `Result<T, E>`.
 fn fold_lite_results(text: &mut String) {
@@ -526,10 +1043,20 @@ fn fold_lite_results(text: &mut String) {
             return;
         };
         let body = text[open..open + len].to_string();
-        let Some((_, both)) = members(&body).into_iter().find(|(k, _)| k == "_1") else {
-            return;
+        let m = members(&body);
+        let get = |key: &str| m.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        // `__ok` and `__err` keep the order the source wrote; the `_1`
+        // union prints its members alphabetically.
+        let pair = match (get("__ok"), get("__err")) {
+            (Some(t), Some(e)) => Some((t, e)),
+
+            _ => get("_1").and_then(|both| {
+                both.split_once(" | ")
+                    .map(|(t, e)| (t.to_string(), e.to_string()))
+            }),
         };
-        let Some((t, e)) = both.split_once(" | ") else {
+
+        let Some((t, e)) = pair else {
             return;
         };
         let name = format!("Result<{t}, {e}>");
@@ -559,44 +1086,202 @@ fn fold_temp_receiver(text: &str) -> String {
     out
 }
 
-/// A hint the child cut short, `: t1 where t1 = { [number]: any, concat:
-/// (read any[], t1) -> t1, ...`, still names an array by its head: the
-/// indexer and the first method are enough.
+/// A `where` clause the child cut short still names an array: the head
+/// is a solver variable whose binding opens with `[number]: T` and an
+/// Array method. The pair reads as `T[]`, wherever the cut landed.
 fn fold_cut_array(text: &mut String) {
     let mut from = 0;
 
     while let Some(i) = text[from..].find(" where ") {
         let at = from + i;
         let (head_start, head) = head_of(text, at);
-        let var = head.trim().trim_end_matches('?');
-        let optional = head.trim().ends_with('?');
-        let clause = &text[at + " where ".len()..];
-        let Some(body) = clause.strip_prefix(&format!("{var} = {{ [number]: ")) else {
+        let Some((var_start, var, optional, quoted)) = solver_head(head_start, head) else {
             from = at + 1;
             continue;
         };
-        let Some(comma) = body.find(", ") else {
+        let clause_start = at + " where ".len();
+        let Some(mut name) = cut_name(&text[clause_start..], &var) else {
             from = at + 1;
             continue;
         };
-        let elem = body[..comma].to_string();
-        let rest = &body[comma + 2..];
+        let end = clause_end(text, clause_start);
 
-        if !(rest.starts_with("concat:") || rest.starts_with("push:") || rest.starts_with("len:")) {
-            from = at + 1;
-            continue;
+        if optional {
+            name = format!("{name}?");
         }
 
-        let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
-        let name = if elem.contains(' ') || elem.contains('|') {
-            format!("({elem})[]")
-        } else {
-            format!("{elem}[]")
-        };
-        let name = if optional { format!("{name}?") } else { name };
-        text.replace_range(head_start..end, &name);
-        from = head_start + name.len();
+        // The cut may have taken the closing quote with it; the
+        // replacement writes the pair.
+        if quoted && !text[end..].starts_with('\'') {
+            name.push('\'');
+        }
+
+        text.replace_range(var_start..end, &name);
+        from = var_start + name.len();
     }
+}
+
+/// A `where` clause head that is one solver variable: its offset, the
+/// variable, whether it is optional, and whether a quote opens it.
+/// `None` when the head is anything else.
+fn solver_head(head_start: usize, head: &str) -> Option<(usize, String, bool, bool)> {
+    let lead = head.len() - head.trim_start().len();
+    let mut at = head_start + lead;
+    let mut var = head.trim();
+    let quoted = var.starts_with('\'');
+
+    if quoted {
+        at += 1;
+        var = &var[1..];
+    }
+
+    let var = var.trim_end();
+    let optional = var.ends_with('?');
+    let var = var.trim_end_matches('?');
+
+    if var.len() < 2 || !var.starts_with('t') || !var[1..].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    Some((at, var.to_string(), optional, quoted))
+}
+
+/// The end of a `where` clause: the parsed length when the bindings are
+/// whole, else the end of the fenced block or of the text, since a cut
+/// clause runs to the end of what the child sent.
+fn clause_end(text: &str, clause_start: usize) -> usize {
+    let (bindings, len) = parse_bindings(&text[clause_start..]);
+
+    if !bindings.is_empty() {
+        return clause_start + len;
+    }
+
+    text[clause_start..]
+        .find("\n```")
+        .map_or(text.len(), |k| clause_start + k)
+}
+
+/// The name the binding `var` stands for, read from the head of its
+/// body so a cut clause still answers: an Array by its indexer and one
+/// method, a struct by the return of the `__new` its metatable carries.
+/// A binding that only aliases another variable is followed.
+fn cut_name(clause: &str, var: &str) -> Option<String> {
+    let mut var = var.to_string();
+
+    for _ in 0..4 {
+        // The cut may have taken the head's own binding; one Array in
+        // the clause is still what the head stands for.
+        let body = match binding_body(clause, &var) {
+            Some(body) => body,
+
+            None => lone_array_binding(clause)?,
+        };
+        let trimmed = body.trim_start();
+
+        if let Some(inner) = trimmed.strip_prefix('{') {
+            let inner = inner.trim_start();
+
+            if let Some(rest) = inner.strip_prefix("@metatable ") {
+                return constructed_name(rest);
+            }
+
+            let rest = inner.strip_prefix("[number]: ")?;
+            let len = type_len(rest);
+            let elem = rest[..len].trim().to_string();
+            let next = rest[len..].strip_prefix(',')?.trim_start();
+            let key = &next[..next.find(':')?];
+
+            if !matches!(
+                key,
+                "concat"
+                    | "contains"
+                    | "filter"
+                    | "find"
+                    | "for_each"
+                    | "is_empty"
+                    | "join"
+                    | "len"
+                    | "map"
+                    | "pop"
+                    | "push"
+            ) {
+                return None;
+            }
+
+            let compound = elem.contains(" | ")
+                || elem.contains(" & ")
+                || elem.contains("->")
+                || elem.ends_with('?');
+
+            return Some(match compound {
+                true => format!("({elem})[]"),
+
+                false => format!("{elem}[]"),
+            });
+        }
+
+        // `t2 = t1`: the head stands for another binding.
+        let next: String = trimmed
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+
+        if next.len() < 2 || !next.starts_with('t') || next == var {
+            return None;
+        }
+
+        var = next;
+    }
+
+    None
+}
+
+/// The one binding of a clause that opens an Array, when exactly one
+/// does. A cut clause names the head's binding nowhere else.
+fn lone_array_binding(clause: &str) -> Option<&str> {
+    let mut found = None;
+
+    for (i, _) in clause.match_indices("= { [number]: ") {
+        if found.is_some() {
+            return None;
+        }
+
+        found = Some(&clause[i + 2..]);
+    }
+
+    found
+}
+
+/// The struct a metatable builds: `__new: ({ ... }) -> Node` names it.
+/// The body may be cut after the constructor; that much is enough.
+fn constructed_name(body: &str) -> Option<String> {
+    let at = body.find("__new: ").or_else(|| body.find("new: "))?;
+    let rest = &body[at..];
+    let arrow = rest.find(") -> ")? + ") -> ".len();
+    let tail = &rest[arrow..];
+    let name = tail[..type_len(tail)].trim().to_string();
+
+    (!name.is_empty() && name.chars().next().is_some_and(char::is_alphabetic)).then_some(name)
+}
+
+/// The body of the binding `var` names, from its `= ` to the end of the
+/// clause. `None` when the clause binds no such variable.
+fn binding_body<'a>(clause: &'a str, var: &str) -> Option<&'a str> {
+    let needle = format!("{var} = ");
+    let mut from = 0;
+
+    while let Some(i) = clause[from..].find(&needle) {
+        let at = from + i;
+        let starts = at == 0 || clause[..at].ends_with(" ; ");
+
+        if starts {
+            return Some(&clause[at + needle.len()..]);
+        }
+
+        from = at + 1;
+    }
+
+    None
 }
 
 /// `Array<T>` reads as the sugar the source has, `T[]`, when `T` is a
@@ -648,14 +1333,26 @@ fn fold_array_alias_once(text: &mut String) {
 /// `local x: ` or `x: ` head, so a replacement keeps the label.
 fn head_of(text: &str, where_at: usize) -> (usize, &str) {
     // A head printed over several lines ends in a bracket before the
-    // `where`; the type starts on the line that opens it.
-    let before = text[..where_at].trim_end();
-    let group_start = before
-        .chars()
-        .next_back()
-        .filter(|c| matches!(c, '}' | ')' | ']'))
-        .and_then(|_| enclosing_open(text, before.len() - 1))
-        .unwrap_or(where_at);
+    // `where`; the type starts on the line that opens it. A union walks
+    // group by group, past every `|` between them.
+    let mut group_start = where_at;
+
+    loop {
+        let before = text[..group_start].trim_end();
+
+        match before.chars().next_back() {
+            Some('}' | ')' | ']') => match enclosing_open(text, before.len() - 1) {
+                Some(open) => group_start = open,
+
+                None => break,
+            },
+
+            Some('|' | '&' | '?') => group_start = before.len() - 1,
+
+            _ => break,
+        }
+    }
+
     let line_start = text[..group_start].rfind('\n').map(|n| n + 1).unwrap_or(0);
     let line = &text[line_start..group_start];
     // The type starts after the last `: ` outside brackets on the line,
@@ -870,26 +1567,50 @@ fn resolve(bindings: &[Binding], known: &Known) -> Vec<(String, String)> {
     }
 }
 
-/// The members of `{ a: T, b: U }` as `(key, type)` pairs, split at
-/// the commas of depth one.
 /// The members of a table body split at the commas of depth one, with
-/// their modifiers.
+/// their modifiers. A type argument list holds its own commas, so
+/// `[number]: Result<number, any>` stays one member.
 fn member_parts(body: &str) -> Vec<&str> {
     let inner = body.trim();
     let inner = inner
         .strip_prefix('{')
         .and_then(|s| s.strip_suffix('}'))
         .unwrap_or(inner);
-    let mut depth = 0i32;
-    let mut in_string = false;
     let mut start = 0;
     let mut parts: Vec<&str> = Vec::new();
 
-    for (k, c) in inner.char_indices() {
+    while start < inner.len() {
+        let len = type_len(&inner[start..]);
+
+        if inner[start + len..].starts_with(',') {
+            parts.push(&inner[start..start + len]);
+            start += len + 1;
+        } else {
+            break;
+        }
+    }
+
+    parts.push(&inner[start..]);
+
+    parts
+}
+
+/// The length of a type at the start of the text, up to a `,` or a
+/// closing bracket at depth zero. Angle brackets count, so
+/// `Result<number, any>` stays whole; the `>` of an arrow closes none.
+fn type_len(text: &str) -> usize {
+    let mut depth = 0i32;
+    let mut angle = 0i32;
+    let mut in_string = false;
+    let mut prev = ' ';
+
+    for (k, c) in text.char_indices() {
         if in_string {
             if c == '"' {
                 in_string = false;
             }
+
+            prev = c;
 
             continue;
         }
@@ -897,18 +1618,18 @@ fn member_parts(body: &str) -> Vec<&str> {
         match c {
             '"' => in_string = true,
             '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' if depth == 0 => return k,
             '}' | ')' | ']' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(&inner[start..k]);
-                start = k + 1;
-            }
+            '<' if prev.is_ascii_alphanumeric() || prev == '_' => angle += 1,
+            '>' if prev != '-' && angle > 0 => angle -= 1,
+            ',' if depth == 0 && angle == 0 => return k,
             _ => {}
         }
+
+        prev = c;
     }
 
-    parts.push(&inner[start..]);
-
-    parts
+    text.len()
 }
 
 fn members(body: &str) -> Vec<(String, String)> {
@@ -954,10 +1675,11 @@ fn find_key_colon(part: &str) -> Option<usize> {
 fn name_of_body(body: &str, known: &Known) -> Option<String> {
     let trimmed = body.trim();
 
-    // A struct instance: `{ @metatable tN, { fields } }`.
+    // A struct instance: `{ @metatable tN, { fields } }`. The metatable
+    // may print in place, so its own commas are not the separator.
     if let Some(rest) = trimmed.strip_prefix("{ @metatable ") {
-        let comma = rest.find(',')?;
-        let table = rest[comma + 1..].trim();
+        let comma = type_len(rest);
+        let table = rest.get(comma + 1..)?.trim();
         let table = table.strip_suffix('}')?.trim();
         // A guard on a field prints it twice, `read dirty: true, write
         // dirty: boolean`; the field set is what names the struct.
@@ -971,6 +1693,14 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
             .collect();
         printed.sort();
         printed.dedup();
+
+        // A tagged table under a metatable is one variant of a payload
+        // enum; the enum is the type the source wrote.
+        if is_tagged_variant(table)
+            && let Some(name) = enum_of_variant(table, known)
+        {
+            return Some(name);
+        }
 
         for shape in &known.shapes {
             if let Shape::Struct { name, fields } = shape {
@@ -1029,7 +1759,14 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
     let get = |key: &str| m.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
 
     // The object a `remote` declaration binds.
-    if has("fire_all") && has("on_ratelimited") && has("wait") {
+    // The surface a side sees is a subset, so no one member is always
+    // there; the pair of `instance` and `spec` is.
+    if has("instance")
+        && has("spec")
+        && ["call", "fire", "fire_all", "on", "once", "wait"]
+            .iter()
+            .any(|k| has(k))
+    {
         return Some("Remote".to_string());
     }
 
@@ -1047,6 +1784,8 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
         let keys: Vec<String> = m.iter().map(|(k, _)| k.clone()).collect();
 
         if all_read || all_optional {
+            let head = if all_read { "Readonly" } else { "Partial" };
+
             for shape in &known.shapes {
                 let Shape::Struct { name, fields } = shape else {
                     continue;
@@ -1056,12 +1795,30 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
                     fields.iter().filter(|(_, p)| !p).map(|(f, _)| f).collect();
 
                 if same_set(&keys, &all) || same_set(&keys, &public) {
-                    let head = if all_read { "Readonly" } else { "Partial" };
-
                     return Some(format!("{head}<{name}>"));
                 }
             }
+
+            // An interface carries the fields of what it extends too.
+            for iface in &known.interfaces {
+                let every = iface.inherited(&known.interfaces);
+                let all: Vec<&String> = every.iter().collect();
+
+                if !all.is_empty() && same_set(&keys, &all) {
+                    return Some(format!("{head}<{}>", iface.name));
+                }
+            }
         }
+    }
+
+    // An interface prints as what it extends, met with a table of the
+    // fields it adds; the source wrote one name.
+    if let Some(iface) = known
+        .interfaces
+        .iter()
+        .find(|i| i.matches(trimmed, &known.interfaces))
+    {
+        return Some(iface.name.clone());
     }
 
     // The std containers, by the methods that name their arguments. Two
@@ -1093,6 +1850,24 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
         && let Some(t) = set_arg(sig)
     {
         return Some(format!("Set<{t}>"));
+    }
+
+    // A struct's metatable: `{ __index: t1, __new: (f: { ... }) -> Node,
+    // __tostring: (s: Node) -> string }`. The constructor's return names
+    // the struct the metatable belongs to.
+    if has("__index")
+        && let Some(sig) = get("__new").or_else(|| get("new"))
+        && let Some(arrow) = sig.rfind("-> ")
+    {
+        let name = sig[arrow + 3..].trim();
+
+        if known
+            .shapes
+            .iter()
+            .any(|s| matches!(s, Shape::Struct { name: n, .. } if n == name))
+        {
+            return Some(name.to_string());
+        }
     }
 
     // The rest of the std, by a member only it has.
@@ -1826,6 +2601,7 @@ mod tests {
 
     fn known() -> Known {
         Known {
+            interfaces: Vec::new(),
             shapes: vec![
                 Shape::Struct {
                     name: "Saber".into(),
@@ -1888,6 +2664,7 @@ mod tests {
         let text = ": Swinger & Swinger__private & { last: number, scope: Scope }";
         assert_eq!(fold(text, &Known::default()), ": Swinger");
         let known = Known {
+            interfaces: Vec::new(),
             shapes: alloy::declarations::shapes(
                 "export struct Swinger as\n    read requested: Signal<> = Signal.new()\n    private last: number = 0\n    private scope: Scope = Scope.new()\nend\n",
             ),
@@ -2005,6 +2782,7 @@ mod tests {
     #[test]
     fn a_symbol_and_a_nested_enum_read_by_name() {
         let known = Known {
+            interfaces: Vec::new(),
             shapes: vec![
                 Shape::Enum {
                     name: "Shape".into(),
@@ -2035,6 +2813,7 @@ mod tests {
     #[test]
     fn an_enum_inside_a_type_argument_reads_by_name() {
         let boost = Known {
+            interfaces: Vec::new(),
             shapes: vec![Shape::Enum {
                 name: "Boost".into(),
                 variants: vec![
@@ -2151,6 +2930,79 @@ mod pcall_tests {
         assert_eq!(
             fold(text, &Known::default()),
             "```luau\nfunction Result.pcall(f: (...any) -> (...any), ...: any): Result<any, string>\n```"
+        );
+    }
+}
+
+#[cfg(test)]
+mod array_clause_tests {
+    use super::*;
+
+    #[test]
+    fn a_cut_array_clause_reads_by_its_element() {
+        let text = "Expected this to be\n\t'string[]'\nbut got\n\t't1 where t1 = { [number]: number, concat: (read number[], t1) -> t1, contains: (read number[], number) -> b";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "Expected this to be\n\t'string[]'\nbut got\n\t'number[]'"
+        );
+    }
+
+    #[test]
+    fn a_clause_over_several_lines_folds_too() {
+        let text = "```luau\nlocal rs: t1 where t1 = {\n    [number]: Result<number, any>,\n    concat: (self: {read Result<number, any>}, other: t1) -> t1,\n    len: (self: {read ResultErr<number, any>... *TRUNCATED*\n```";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "```luau\nlocal rs: Result<number, any>[]\n```"
+        );
+    }
+
+    #[test]
+    fn a_type_argument_list_keeps_its_comma() {
+        assert_eq!(
+            member_parts("{ [number]: Result<number, any>, len: (self: t1) -> number }"),
+            vec![
+                " [number]: Result<number, any>",
+                " len: (self: t1) -> number "
+            ]
+        );
+    }
+
+    #[test]
+    fn an_optional_head_keeps_its_question_mark() {
+        let text =
+            "local xs: t1? where t1 = { [number]: string, push: (self: t1, value: string) -> ()";
+        assert_eq!(fold(text, &Known::default()), "local xs: string[]?");
+    }
+}
+
+#[cfg(test)]
+mod dbg2 {
+    use super::*;
+
+    #[test]
+    fn debug_enum_payload() {
+        let known = Known {
+            shapes: vec![
+                Shape::Struct {
+                    name: "Scope2".into(),
+                    fields: vec![("tag".into(), false)],
+                },
+                Shape::Enum {
+                    name: "Shape".into(),
+                    variants: vec![
+                        ("Circle".into(), vec!["number".into()]),
+                        ("Rect".into(), vec!["number".into(), "number".into()]),
+                        ("Empty".into(), vec![]),
+                    ],
+                },
+            ],
+            interfaces: Vec::new(),
+        };
+        let text = "Key 'area' is missing from 'string' in the type '\"Empty\" | { _1: number, tag: \"Circle\" } | { _1: number, _2: number, tag: \"Rect\" }'";
+        println!("OUT: {:?}", fold(text, &known));
+        println!(
+            "NOB: {:?}",
+            name_of_body("{ _1: number, tag: \"Circle\" }", &known)
         );
     }
 }

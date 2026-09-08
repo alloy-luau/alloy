@@ -102,6 +102,78 @@ pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
     })
 }
 
+/// The prop names a component takes, read from its parameter type: the
+/// record written in place, or the alias that names one.
+pub fn component_props(src: &str, name: &str) -> Vec<String> {
+    let head = format!("function {name}(");
+
+    let Some(at) = src.find(&head) else {
+        return Vec::new();
+    };
+    let rest = &src[at + head.len()..];
+
+    let Some(close) = rest.find(')') else {
+        return Vec::new();
+    };
+    let param = &rest[..close];
+
+    let Some((_, declared)) = param.split_once(": ") else {
+        return Vec::new();
+    };
+    let declared = declared.trim();
+
+    if declared.starts_with('{') {
+        return record_keys(declared);
+    }
+
+    // `props: Props`, where `type Props = { ... }`.
+    let alias = format!("type {declared} = ");
+
+    match src.find(&alias) {
+        Some(k) => record_keys(src[k + alias.len()..].trim_start()),
+
+        None => Vec::new(),
+    }
+}
+
+/// The keys of a record type that starts the text, `{ a: number, b:
+/// string }`, at brace depth one.
+fn record_keys(text: &str) -> Vec<String> {
+    let Some(body) = text.strip_prefix('{') else {
+        return Vec::new();
+    };
+    let mut depth = 0i32;
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut key = true;
+
+    for c in body.chars() {
+        match c {
+            '{' | '(' | '[' | '<' => depth += 1,
+            '}' | ')' | ']' | '>' if depth == 0 => break,
+            '}' | ')' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                word.clear();
+                key = true;
+            }
+            ':' if depth == 0 && key => {
+                let name = word.trim().to_string();
+
+                if !name.is_empty() {
+                    out.push(name);
+                }
+
+                word.clear();
+                key = false;
+            }
+            _ if depth == 0 && key => word.push(c),
+            _ => {}
+        }
+    }
+
+    out
+}
+
 /// The attribute names written in an opening tag's text.
 fn attribute_names(tag: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -299,7 +371,7 @@ pub fn hover(spot: &Spot, bound: &HashSet<String>) -> Option<Value> {
 }
 
 /// Completion items for a slot.
-pub fn completions(spot: &Spot, bound: &HashSet<String>) -> Vec<Value> {
+pub fn completions(spot: &Spot, bound: &HashSet<String>, src: &str) -> Vec<Value> {
     let mut items = Vec::new();
 
     match spot {
@@ -338,11 +410,26 @@ pub fn completions(spot: &Spot, bound: &HashSet<String>) -> Vec<Value> {
             prefix,
             existing,
         } => {
+            let taken: HashSet<&str> = existing.iter().map(String::as_str).collect();
+
+            // A component takes the props its parameter type declares,
+            // not a Roblox class's properties.
             if !roblox::is_class(class) {
+                for prop in component_props(src, class) {
+                    if prop.starts_with(prefix.as_str()) && !taken.contains(prop.as_str()) {
+                        items.push(json!({
+                            "label": prop,
+                            "kind": 10,
+                            "detail": format!("prop of {class}"),
+                            "insertText": format!("{prop}={{$1}}"),
+                            "insertTextFormat": 2,
+                            "sortText": format!("1{prop}"),
+                        }));
+                    }
+                }
+
                 return items;
             }
-
-            let taken: HashSet<&str> = existing.iter().map(String::as_str).collect();
 
             for prop in roblox::properties(class) {
                 if prop.starts_with(prefix.as_str()) && !taken.contains(prop) {
@@ -466,6 +553,7 @@ mod tests {
                 prefix: "TextL".into(),
             },
             &HashSet::new(),
+            "",
         );
         assert!(items.iter().any(|i| i["label"] == "TextLabel"));
         let items = completions(
@@ -475,11 +563,34 @@ mod tests {
                 existing: vec![],
             },
             &HashSet::new(),
+            "",
         );
         assert!(
             items
                 .iter()
                 .any(|i| i["label"] == "Activated" && i["kind"] == 23)
         );
+    }
+
+    #[test]
+    fn a_component_offers_the_props_it_declares() {
+        let src = "type Props = { title: string, count: number }\nlocal function Panel(props: Props) end\nlocal function Badge(props: { label: string }) end";
+        assert_eq!(component_props(src, "Badge"), vec!["label".to_string()]);
+        assert_eq!(
+            component_props(src, "Panel"),
+            vec!["title".to_string(), "count".to_string()]
+        );
+
+        let items = completions(
+            &Spot::AttributeSlot {
+                class: "Badge".into(),
+                prefix: String::new(),
+                existing: vec![],
+            },
+            &HashSet::new(),
+            src,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "label");
     }
 }

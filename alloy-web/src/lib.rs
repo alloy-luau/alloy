@@ -29,6 +29,7 @@ struct Session {
     output: Option<Output>,
     decls: Vec<Declaration>,
     shapes: Vec<Shape>,
+    interfaces: Vec<shapes::Interface>,
 }
 
 thread_local! {
@@ -38,6 +39,7 @@ thread_local! {
             output: None,
             decls: Vec::new(),
             shapes: Vec::new(),
+            interfaces: Vec::new(),
         })
     };
 }
@@ -116,6 +118,7 @@ pub fn set_source(source: &str) -> String {
         s.output = compiled.ok();
         s.decls = decls;
         s.shapes = shapes;
+        s.interfaces = shapes::interfaces(source);
     });
 
     result.to_string()
@@ -477,6 +480,7 @@ pub fn fold(text: &str) -> String {
         let s = s.borrow();
         let known = shapes::Known {
             shapes: s.shapes.clone(),
+            interfaces: s.interfaces.clone(),
         };
         let mut out = text.to_string();
 

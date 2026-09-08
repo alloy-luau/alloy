@@ -25,7 +25,20 @@ pub struct Doc {
     pub shapes: Vec<alloy::declarations::Shape>,
     /// The shapes of the modules the file imports.
     pub import_shapes: Vec<alloy::declarations::Shape>,
+    /// The interfaces the file declares, so a printed intersection
+    /// reads by the name the source gave it.
+    pub interfaces: Vec<crate::shapes::Interface>,
+    /// The error that stopped the compile, when one did. The child then
+    /// sees the Alloy source, which it cannot read.
+    pub error: Option<alloy::CompileError>,
     pub is_alx: bool,
+}
+
+/// The source with the operators Luau has no reading for blanked, each
+/// to the same width so every position still maps: `a?.b` becomes
+/// `a .b`, which the child completes as the member access it is.
+fn plain_enough(source: &str) -> String {
+    source.replace("?.", " .").replace("!.", " .")
 }
 
 impl Doc {
@@ -46,6 +59,8 @@ impl Doc {
             bindings: Vec::new(),
             shapes: Vec::new(),
             import_shapes: Vec::new(),
+            interfaces: Vec::new(),
+            error: None,
             is_alx: options.file_name.ends_with(".alx"),
         };
         doc.compile(options, jsx, ingots);
@@ -64,6 +79,7 @@ impl Doc {
         self.decls = alloy::declarations::summaries(&self.source, options.definitions);
         self.bindings = alloy::declarations::bindings(&self.source);
         self.shapes = alloy::declarations::shapes(&self.source);
+        self.interfaces = crate::shapes::interfaces(&self.source);
         self.import_shapes = alloy::modules::import_shapes_for_file(
             std::path::Path::new(&options.file_name),
             &self.source,
@@ -76,11 +92,13 @@ impl Doc {
             Ok(out) => {
                 self.shadow = out.check.clone();
                 self.output = Some(out);
+                self.error = None;
             }
 
-            Err(_) => {
-                self.shadow = self.source.clone();
+            Err(e) => {
+                self.shadow = plain_enough(&self.source);
                 self.output = None;
+                self.error = Some(e);
             }
         }
     }

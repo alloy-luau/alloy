@@ -1277,7 +1277,7 @@ fn lint_one(
     // module it could not find, and the name it could not import.
     let silence = alloy::directives::scan(&source);
 
-    for problem in alloy::modules::import_problems_for_file(Path::new(path), &source) {
+    for problem in alloy::modules::import_problems_for_file(Path::new(path), None, &source) {
         if silence.allows(alloy::directives::line_of(&source, problem.start as usize)) {
             out.diagnostics.push(alloy::Diagnostic {
                 start: problem.start,

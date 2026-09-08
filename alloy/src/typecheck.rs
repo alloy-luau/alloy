@@ -23,11 +23,18 @@ pub struct CheckSource {
     pub source: String,
     pub check: String,
     pub map: SpanMap,
-    /// One-based lines where `unused_variable` or `unused_function` fired.
-    pub unused_lines: Vec<usize>,
+    /// Every lint that fired, as its one-based line and its name. The
+    /// checker has a lint of its own for some of them, and one problem
+    /// reads once.
+    pub lint_lines: Vec<(usize, &'static str)>,
     /// One-based lines that carry a compiler diagnostic; the checker's
     /// reports there describe an unreliable emit and stay out.
     pub error_lines: Vec<usize>,
+    /// Whether the parser read the whole file. Past its first error the
+    /// parser invents the tree and the emit copies the text through, so
+    /// every type error the checker finds is about code no one wrote.
+    /// The parse error is the one thing to fix first.
+    pub parsed_clean: bool,
     /// Zero-based lines an `--@alloy-expect-error` covers that the
     /// compiler or a lint reported on.
     pub expected_hits: Vec<usize>,
@@ -421,7 +428,13 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     let mut cmd = Command::new(&binary);
     cmd.current_dir(&mirror)
         .arg("analyze")
-        .arg("--flag:LuauSolverV2=true");
+        .arg("--flag:LuauSolverV2=true")
+        // A printed type must arrive whole: `friendly_type_message`
+        // folds an emitted table back to the name the source wrote, and
+        // the default limit cuts it to `*TRUNCATED*` first. The language
+        // server raises the same two flags, so both say one thing.
+        .arg("--flag:LuauTypeMaximumStringifierLength=200000")
+        .arg("--flag:LuauTableTypeMaximumStringifierLength=200000");
 
     for d in &definitions {
         cmd.arg(format!("--definitions={}", d.display()));
@@ -451,6 +464,9 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     // reported on, by source; the rest of the directives are errors.
     let mut expected_hits: HashMap<PathBuf, HashSet<usize>> = HashMap::new();
     let mut directives: HashMap<PathBuf, crate::directives::Directives> = HashMap::new();
+    // The artifacts the checker could not parse; its lints over one of
+    // them describe a partial tree.
+    let mut unparsed: HashSet<PathBuf> = HashSet::new();
 
     for line in text.lines() {
         let Some(report) = parse_line(line) else {
@@ -501,13 +517,25 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
 
         let is_error = kind == "TypeError" || kind == "SyntaxError";
+
+        // An artifact the checker cannot parse leaves it a partial
+        // tree, and its lints over that tree call everything unused.
+        if kind == "SyntaxError" {
+            unparsed.insert(f.rel.clone());
+        }
+
         let Some(mapped) = map_position(f, line_no, col, is_error, message) else {
             continue;
         };
 
-        // `unused_variable` and `unused_function` report the plain cases;
-        // the checker's report on the same line would say it twice.
-        if matches!(kind, "LocalUnused" | "FunctionUnused") && f.unused_lines.contains(&mapped.0) {
+        // Alloy's own lint already said this, in the words of what the
+        // source wrote; the checker's copy on the same line says it
+        // twice.
+        if let Some(names) = paired_lint(kind)
+            && f.lint_lines
+                .iter()
+                .any(|(at, name)| *at == mapped.0 && names.contains(name))
+        {
             continue;
         }
 
@@ -515,10 +543,28 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         }
 
+        // Past its first error the parser invents the tree and the emit
+        // copies the text through: `trait Zap` reads to the checker as
+        // a call of an unknown global, and the `end` the recovery never
+        // saw is a syntax error of its own. The compiler already names
+        // the parse error, and the lints are off for the same reason, so
+        // only a type error away from the recovery still stands.
+        if !f.parsed_clean
+            && (!is_error || kind == "SyntaxError" || message.starts_with("Unknown global"))
+        {
+            continue;
+        }
+
         // A require the checker could not resolve names what the source
         // asked for; it is an error, as the require fails at runtime.
         let (kind, message) = if message.starts_with("Unknown require") {
-            let spec = quoted_on_line(&f.source, mapped.0.saturating_sub(1)).unwrap_or_default();
+            // No quoted path on the line means `require(script.Parent)`
+            // or another runtime path. It resolves in Roblox, and the
+            // `raw_require` lint already says the checker cannot follow
+            // it, so there is nothing to report here.
+            let Some(spec) = quoted_on_line(&f.source, mapped.0.saturating_sub(1)) else {
+                continue;
+            };
             let rel = config.build.input.join(&f.rel);
 
             (
@@ -560,15 +606,51 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
     }
 
+    analysis
+        .diagnostics
+        .retain(|d| d.is_error() || !unparsed.contains(&d.rel));
+
     for d in &mut analysis.diagnostics {
-        if d.kind == "TypeError" || d.kind == "SyntaxError" {
-            let source = files
-                .iter()
-                .find(|f| f.rel == d.rel)
-                .and_then(|f| f.source.lines().nth(d.line.saturating_sub(1)));
-            d.message = friendly_type_message(&d.message, &known, source, d.col);
+        if d.kind != "TypeError" && d.kind != "SyntaxError" {
+            continue;
+        }
+
+        let whole = files
+            .iter()
+            .find(|f| f.rel == d.rel)
+            .map(|f| f.source.as_str());
+        let source = whole.and_then(|s| s.lines().nth(d.line.saturating_sub(1)));
+        d.message = friendly_type_message(&d.message, &known, source, d.col);
+
+        if let Some(text) = whole
+            && let Some((message, at)) = rewrite_emitted_name(&d.message, text, d.line)
+        {
+            d.message = message;
+
+            if let Some(at) = at {
+                d.line = at;
+                d.col = 1;
+            }
         }
     }
+
+    // Two method bodies of one `impl` report the same mistake once the
+    // rewrite moves both to the `impl` line.
+    let mut seen: Vec<(PathBuf, usize, usize, String)> = Vec::new();
+
+    analysis.diagnostics.retain(|d| {
+        let key = (d.rel.clone(), d.line, d.col, d.message.clone());
+
+        match seen.contains(&key) {
+            true => false,
+
+            false => {
+                seen.push(key);
+
+                true
+            }
+        }
+    });
 
     // A `.` where a `:` belongs draws the arity error and then every
     // mismatch that follows from the shifted arguments. The one
@@ -660,6 +742,7 @@ pub fn friendly_type_message(
         .or_else(|| rewrite_remote_key(&folded, line))
         .or_else(|| rewrite_await(&folded, line))
         .or_else(|| rewrite_arity(&folded, line, col))
+        .or_else(|| rewrite_dot_self(&folded, line, col))
     {
         return better;
     }
@@ -669,6 +752,139 @@ pub fn friendly_type_message(
 
         None => folded,
     }
+}
+
+/// The Alloy lints that say what one of the checker's lints says. Alloy
+/// names the construct the source wrote, so where both fire on a line
+/// the checker's copy goes.
+pub fn paired_lint(kind: &str) -> Option<&'static [&'static str]> {
+    Some(match kind {
+        "LocalUnused" => &["unused_variable"],
+
+        "FunctionUnused" => &["unused_function"],
+
+        "ImportUnused" => &["unused_import"],
+
+        "TableLiteral" => &["duplicate_key"],
+
+        "ComparisonPrecedence" => &["misplaced_not", "bool_comparison"],
+
+        "DeprecatedApi" => &["deprecated_global", "deprecated_method"],
+
+        "TableOperations" => &["table_insert_position", "manual_push"],
+
+        _ => return None,
+    })
+}
+
+/// A report about a name the emit writes and the source does not, in
+/// the source's words: `new Plain { }` and `x is Plain` on a type
+/// alias, `impl T for Alias`, and `new n { }` on a value. The second
+/// half of the answer is the line to move the report to; the `impl`
+/// case reports once on the `impl` line rather than once per method.
+/// The language server writes the same sentences.
+pub fn rewrite_emitted_name(
+    message: &str,
+    source: &str,
+    line: usize,
+) -> Option<(String, Option<usize>)> {
+    let text = source.lines().nth(line.saturating_sub(1))?;
+
+    if let Some(name) = quoted_after(message, "Unknown global '") {
+        if names_word(text, &format!("new {name}")) {
+            return Some((format!("`{name}` is a type, not a struct"), None));
+        }
+
+        if names_word(text, &format!("is {name}")) {
+            return Some((format!("`{name}` is not a type in scope"), None));
+        }
+
+        // Every method body of `impl T for Alias` reports the same
+        // global; the `impl` line is where the mistake is.
+        if let Some(at) = impl_line_for(source, line, name) {
+            return Some((
+                format!("`{name}` is a type, not a struct; `impl` needs one"),
+                Some(at),
+            ));
+        }
+
+        // A `type`, an `interface`, or a `trait` binds no value, so the
+        // emit passes the name through and the checker looks for a
+        // global of that name.
+        if declares_type_only(source, name) {
+            return Some((format!("`{name}` is a type, not a value"), None));
+        }
+    }
+
+    // `new n { }`, where `n` is a value: the emit asks it for `new`.
+    if let Some(owner) = quoted_after(message, "Type '")
+        && message.ends_with("does not have key 'new'")
+        && let Some(name) = word_after(text, "new ")
+    {
+        return Some((format!("`new` needs a struct; `{name}` is a {owner}"), None));
+    }
+
+    None
+}
+
+/// The text between `opener` and the next quote.
+fn quoted_after<'a>(message: &'a str, opener: &str) -> Option<&'a str> {
+    let at = message.find(opener)? + opener.len();
+
+    message[at..].find('\'').map(|end| &message[at..at + end])
+}
+
+/// The identifier right after `opener` on a line.
+fn word_after(line: &str, opener: &str) -> Option<String> {
+    let at = line.find(opener)? + opener.len();
+    let name: String = line[at..]
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    (!name.is_empty()).then_some(name)
+}
+
+/// Whether the line holds the phrase as whole words.
+fn names_word(line: &str, phrase: &str) -> bool {
+    line.match_indices(phrase).any(|(i, _)| {
+        let before = line[..i].chars().next_back();
+        let after = line[i + phrase.len()..].chars().next();
+
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// Whether the source declares the name as a type alone: a `type`, an
+/// `interface`, or a `trait`. A struct and an enum bind a value too.
+fn declares_type_only(source: &str, name: &str) -> bool {
+    source.lines().any(|l| {
+        let text = l.trim_start();
+        let text = text.strip_prefix("export ").unwrap_or(text);
+
+        ["type ", "interface ", "trait "].iter().any(|head| {
+            text.strip_prefix(head).is_some_and(|rest| {
+                rest.strip_prefix(name).is_some_and(|tail| {
+                    !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                })
+            })
+        })
+    })
+}
+
+/// The one-based line of the `impl ... for Name` above a line, when one
+/// opens the block the line sits in.
+fn impl_line_for(source: &str, line: usize, name: &str) -> Option<usize> {
+    source
+        .lines()
+        .take(line.saturating_sub(1))
+        .enumerate()
+        .filter(|(_, l)| {
+            l.trim_start().starts_with("impl ") && l.trim_end().ends_with(&format!(" for {name}"))
+        })
+        .map(|(k, _)| k + 1)
+        .last()
 }
 
 /// The std holds a Result's methods in an alias of their own, so the
@@ -787,6 +1003,54 @@ fn rewrite_arity(message: &str, line: &str, col: usize) -> Option<String> {
         "Argument count mismatch. `{member}` takes {expects} {}, {tail}",
         plural(expects)
     ))
+}
+
+/// A `.` call of a method sends the first argument where the receiver
+/// belongs, so the checker reports the mismatch against the method's
+/// self parameter. The std writes that parameter `read T`, a type the
+/// source never spells; the separator is the mistake, and it reads as
+/// the arity rewrite says it.
+fn rewrite_dot_self(message: &str, line: &str, col: usize) -> Option<String> {
+    if !message.starts_with("Expected this to be 'read ") {
+        return None;
+    }
+
+    let (sep, receiver, member) = enclosing_call(line, col)?;
+
+    // A capitalized receiver names a module, a type, or a remote, and
+    // each of those takes its `.`.
+    (sep == '.' && receiver.starts_with(|c: char| c.is_lowercase() || c == '_')).then(|| {
+        format!(
+            "`{member}` is a method; call it with `{receiver}:{member}(...)`, not `{receiver}.{member}(...)`"
+        )
+    })
+}
+
+/// The call whose arguments hold a column: the separator, the receiver,
+/// and the member. `call_head` reads a call that starts at the column;
+/// this one reads the call the column sits inside.
+fn enclosing_call(line: &str, col: usize) -> Option<(char, String, String)> {
+    let upto = line.get(..col.saturating_sub(1))?;
+    let open = upto.rfind('(')?;
+    let head = &upto[..open];
+    let sep = head.rfind([':', '.'])?;
+    let member = head[sep + 1..].trim();
+    let name = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+    if !name(member) {
+        return None;
+    }
+
+    let receiver: String = head[..sep]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    (!receiver.is_empty()).then(|| (head.as_bytes()[sep] as char, receiver, member.to_string()))
 }
 
 /// `await` on a value that is no Future prints the std's own parameter,
@@ -1280,6 +1544,100 @@ mod tests {
     }
 
     #[test]
+    fn a_dot_call_that_lands_on_the_self_parameter_names_the_colon() {
+        assert_eq!(
+            friendly_type_message(
+                "TypeError: Expected this to be 'read number[]', but got 'number'",
+                &crate::shapes::Known::default(),
+                Some("local d = xs.push(4)"),
+                19,
+            ),
+            "`push` is a method; call it with `xs:push(...)`, not `xs.push(...)`"
+        );
+    }
+
+    #[test]
+    fn a_checker_lint_pairs_with_the_alloy_one() {
+        assert_eq!(paired_lint("TableLiteral"), Some(&["duplicate_key"][..]));
+        assert_eq!(paired_lint("LocalUnused"), Some(&["unused_variable"][..]));
+        assert_eq!(paired_lint("TypeError"), None);
+    }
+
+    #[test]
+    fn a_new_on_a_type_alias_names_the_type() {
+        let src = "type Plain = { a: number }\nlocal q = new Plain { a = 1 }\n";
+        assert_eq!(
+            rewrite_emitted_name(
+                "Unknown global 'Plain'; consider assigning to it first",
+                src,
+                2
+            ),
+            Some(("`Plain` is a type, not a struct".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn an_is_test_against_no_type_says_so() {
+        let src = "local v: any = 1\nif v is Nothing then print(\"?\") end\n";
+        assert_eq!(
+            rewrite_emitted_name(
+                "Unknown global 'Nothing'; consider assigning to it first",
+                src,
+                2
+            ),
+            Some(("`Nothing` is not a type in scope".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn an_impl_for_an_alias_reports_on_the_impl_line() {
+        let src = "type Alias = { z: number }\nimpl Shape for Alias\n    function area(self): number\n        return self.z\n    end\nend\n";
+        assert_eq!(
+            rewrite_emitted_name(
+                "Unknown global 'Alias'; consider assigning to it first",
+                src,
+                3
+            ),
+            Some((
+                "`Alias` is a type, not a struct; `impl` needs one".to_string(),
+                Some(2)
+            ))
+        );
+    }
+
+    #[test]
+    fn a_type_printed_as_a_value_says_it_is_a_type() {
+        let src = "type Alias3 = number\nprint(Alias3)\n";
+        assert_eq!(
+            rewrite_emitted_name(
+                "Unknown global 'Alias3'; consider assigning to it first",
+                src,
+                2
+            ),
+            Some(("`Alias3` is a type, not a value".to_string(), None))
+        );
+
+        let iface = "interface Both extends HasName as\n    id: number\nend\nprint(Both)\n";
+        assert_eq!(
+            rewrite_emitted_name(
+                "Unknown global 'Both'; consider assigning to it first",
+                iface,
+                4
+            ),
+            Some(("`Both` is a type, not a value".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn a_new_on_a_value_names_what_it_holds() {
+        let src = "local n = 5\nlocal r = new n {}\n";
+        assert_eq!(
+            rewrite_emitted_name("Type 'number' does not have key 'new'", src, 2),
+            Some(("`new` needs a struct; `n` is a number".to_string(), None))
+        );
+    }
+
+    #[test]
     fn a_constructor_message_names_the_field() {
         let known = crate::shapes::Known::default();
         let line = "local bad4 = new Plain { a = \"not a number\", b = \"x\" }";
@@ -1345,8 +1703,9 @@ mod tests {
             source: src.to_string(),
             check: out.check.clone(),
             map: out.map,
-            unused_lines: Vec::new(),
+            lint_lines: Vec::new(),
             error_lines: Vec::new(),
+            parsed_clean: true,
             expected_hits: Vec::new(),
         };
         assert_eq!(map_position(&f, 1, 19, true, "Expected"), Some((1, 19)));

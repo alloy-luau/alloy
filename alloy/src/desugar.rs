@@ -357,6 +357,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         renames: Vec::new(),
         ship_blanks: Vec::new(),
         structs: HashSet::new(),
+        struct_generics: HashMap::new(),
         structs_with_new: HashMap::new(),
         impl_target: None,
         declared_types: HashSet::new(),
@@ -620,6 +621,9 @@ struct Desugar<'s> {
     ship_blanks: Vec<(u32, u32)>,
     /// Declared struct names, for pattern tests and `is`.
     structs: HashSet<String>,
+    /// A struct's type parameters as the source writes them, `<T>`, for
+    /// the structs that take any.
+    struct_generics: HashMap<String, String>,
     /// The structs whose `impl` writes a constructor, `new` or `New`, by
     /// its name: they construct through it, and the fields form stays
     /// inside their own impl.
@@ -1202,6 +1206,17 @@ impl<'s> Desugar<'s> {
             .generics
             .map(|g| strip_bounds(self.text_of(g)))
             .unwrap_or_default();
+
+        // `impl Box` on a `struct Box<T>` binds no `T`, so a method that
+        // names one has a type the checker cannot find.
+        if i.generics.is_none()
+            && let Some(params) = self.struct_generics.get(&target_name).cloned()
+        {
+            let message = format!(
+                "the struct `{target_name}` takes `{params}`; write `impl {target_name}{params}` so its methods can name them"
+            );
+            self.diagnose(i.target, &message);
+        }
         let types_self = self.options.check && (foreign || local_type || !impl_generics.is_empty());
         // A struct with private members: a private method lands on
         // `Target__private` in the check artifact, and a public method
@@ -2114,10 +2129,13 @@ impl<'s> Desugar<'s> {
             self.diagnose(m.span, &msg);
         }
 
-        if let Some(d) = &m.default {
+        if m.default.is_some() {
             let arms_end = m.arms.last().map_or(m.span.start, |a| a.span.end);
-            let empty = matches!(d.as_ref(), Expr::Nil(_));
-            self.default_lints(m.span, arms_end, exhaustive, empty);
+            // A match expression has no empty default: the parser needs
+            // a value after `default`. `default nil` is the fallback the
+            // source wrote, and the only spelling for "no value here",
+            // so it is not the empty body the lint looks for.
+            self.default_lints(m.span, arms_end, exhaustive, false);
         }
 
         let with_end = self.toks[m
@@ -2625,6 +2643,21 @@ impl<'s> Desugar<'s> {
                 at,
                 "the attributes `inline` and `noinline` ask for opposite things; keep one",
             );
+        }
+    }
+
+    /// Whether an attribute reaches a target. `check_attrs` reports the
+    /// ones that do not; the emit leaves them out so the artifact holds
+    /// no name the source never bound.
+    fn attr_reaches(&self, name: &str, target: &str) -> bool {
+        match (builtin_attr_targets(name), self.attr_decls.get(name)) {
+            (Some(t), _) => t.contains(&target),
+
+            (None, Some((t, _))) => t.iter().any(|t| t == target),
+
+            // An imported attribute keeps its targets in the module
+            // that declares it; nothing here can say no.
+            (None, None) => self.imported_names.contains(name),
         }
     }
 
@@ -4261,6 +4294,12 @@ impl<'s> Desugar<'s> {
                 }
 
                 None => upstream.push(self.text_of(a.span).to_string()),
+
+                // An attribute that does not reach a function is
+                // already a diagnostic. Its arguments are not values:
+                // `@derive(Clone)` would write `Clone` into the attach
+                // table, and the checker would call it an unknown global.
+                Some(n) if !self.attr_reaches(n, "function") => {}
 
                 Some(n) => {
                     let args: Vec<String> =
@@ -7144,6 +7183,12 @@ impl<'s> Desugar<'s> {
             .map(|f| (self.text_of(f.name).to_string(), f.default.is_some()))
             .collect();
         self.structs.insert(name.clone());
+
+        if let Some(g) = st.generics {
+            self.struct_generics
+                .insert(name.clone(), self.text_of(g).trim().to_string());
+        }
+
         self.note_field_types(&name, &st.fields);
         let wire_fields = st
             .fields
@@ -7740,7 +7785,9 @@ impl<'s> Desugar<'s> {
     `a?.b.c = v` becomes `if G ~= nil then INNER = v end`, with the value
     inside the guard so it does not evaluate when the chain is nil. `t ??= v`
     becomes `if T == nil then T = v end`, where `T` reads twice, so a
-    computed key or a call in the target hoists first.
+    computed key or a call in the target hoists first. A plain name takes
+    `x = if x == nil then v else x` instead: the value still evaluates only
+    when `x` is nil, and the checker reads `x` as narrowed after it.
     */
     fn assign(&mut self, a: &Assign) {
         let anchor = self.byte_start(a.span);
@@ -7761,10 +7808,18 @@ impl<'s> Desugar<'s> {
         let value = self.render_to_string(&a.values[0]);
         let op = if coalesce { "=" } else { self.text_of(a.op) };
 
-        let body = if coalesce {
-            format!("if {target} == nil then {target} = {value} end")
-        } else {
-            format!("{target} {op} {value}")
+        // A plain name takes the value through an `if` expression, not
+        // an `if` statement. Both write the value only when the name is
+        // nil; only the expression narrows, so `x ??= 1` on a `number?`
+        // parameter leaves `x` a `number` for the checker.
+        let plain = coalesce && matches!(&a.targets[0], Expr::Name(_));
+
+        let body = match (coalesce, plain) {
+            (_, true) => format!("{target} = if {target} == nil then {value} else {target}"),
+
+            (true, false) => format!("if {target} == nil then {target} = {value} end"),
+
+            (false, false) => format!("{target} {op} {value}"),
         };
 
         let text = match guard {
@@ -9794,6 +9849,55 @@ mod tests {
     }
 
     #[test]
+    fn a_coalesce_assign_to_a_name_narrows_it() {
+        // `if x == nil then x = 1 end` leaves `x` a `number?` for the
+        // checker; the `if` expression is what narrows.
+        let out = crate::compile(
+            "local function f(x: number?): number\n    x ??= 1\n    return x\nend\nprint(f)\n",
+        )
+        .unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("x = if x == nil then 1 else x"),
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn a_coalesce_assign_to_a_field_keeps_the_statement() {
+        // A field takes the statement: the expression would write the
+        // field back through `__newindex` when it is not nil.
+        let out = crate::compile("local t = { a = 1 }\nt.a ??= 2\nprint(t)\n").unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("if t.a == nil then t.a = 2 end"),
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn a_default_that_writes_nil_is_not_an_empty_default() {
+        let src = "local function pick(t: string): string?\n    return match t with\n        case \"a\" then \"A\"\n        default nil\n    end\nend\nprint(pick)\n";
+        assert!(
+            !lint_names(src).contains(&"empty_default"),
+            "{:?}",
+            lint_names(src)
+        );
+    }
+
+    #[test]
+    fn a_default_with_an_empty_block_is_an_empty_default() {
+        let src = "enum Color as Red, Green, Blue end\nlocal function f(c: Color)\n    match c with\n        case Color.Red then print(\"r\")\n        default\n    end\nend\nprint(f)\n";
+        assert!(
+            lint_names(src).contains(&"empty_default"),
+            "{:?}",
+            lint_names(src)
+        );
+    }
+
+    #[test]
     fn a_generic_struct_types_its_constructor() {
         let out = crate::compile(
             "struct Box<T> as\n    value: T\n    count: number = 1\nend\nlocal b = new Box<<number>> { value = 5 }\nprint(b)\n",
@@ -9805,6 +9909,19 @@ mod tests {
                 .contains("function Box.__new<T>(f: { value: T, count: number? }): Box<T>"),
             "{}",
             out.check
+        );
+    }
+
+    #[test]
+    fn an_impl_that_leaves_the_parameters_out_reports() {
+        let src = "struct Box<T> as\n    value: T\nend\nimpl Box\n    function get(self): T\n        return self.value\n    end\nend\nprint(Box)\n";
+        let out = crate::compile(src).unwrap();
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages.contains(
+                &"the struct `Box` takes `<T>`; write `impl Box<T>` so its methods can name them"
+            ),
+            "{messages:?}"
         );
     }
 

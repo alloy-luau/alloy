@@ -345,11 +345,17 @@ fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
     (from, aliases)
 }
 
-/// The import problems of a file under the nearest `alloy.toml`.
-pub fn import_problems_for_file(path: &Path, source: &str) -> Vec<ImportProblem> {
+/// The import problems of a file under the nearest `alloy.toml`. `rel`
+/// is the path a message names, which reads best from the project root;
+/// `None` names the file as it was given.
+pub fn import_problems_for_file(
+    path: &Path,
+    rel: Option<&Path>,
+    source: &str,
+) -> Vec<ImportProblem> {
     let (from, aliases) = file_context(path);
 
-    import_problems(source, path, &from, &aliases)
+    import_problems(source, rel.unwrap_or(path), &from, &aliases)
 }
 
 /// The import types of a file under the nearest `alloy.toml`, or none
@@ -480,8 +486,12 @@ pub fn import_problems(
     };
     let mut out = Vec::new();
     let mut exports: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    // Every name the file binds through an import, with where it bound it.
-    let mut bound: Vec<String> = Vec::new();
+    // Every name the file binds through an import. A type and a value
+    // live in their own namespace, so `import * as M` and `import
+    // { type M }` from the same module both bind and neither is a
+    // duplicate of the other.
+    let mut bound_values: Vec<String> = Vec::new();
+    let mut bound_types: Vec<String> = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
         let Stmt::Import(node) = stmt else {
@@ -512,7 +522,7 @@ pub fn import_problems(
             ImportKind::Namespace(name) => {
                 let local = text(*name).to_string();
 
-                if bound.contains(&local) {
+                if bound_values.contains(&local) {
                     let (a, b) = range(*name);
                     out.push(ImportProblem {
                         start: a,
@@ -522,19 +532,20 @@ pub fn import_problems(
                     });
                 }
 
-                bound.push(local);
+                bound_values.push(local);
 
                 continue;
             }
 
             ImportKind::Both(name, list) => {
-                bound.push(text(*name).to_string());
+                bound_values.push(text(*name).to_string());
 
                 list
             }
 
             ImportKind::Named(list) | ImportKind::TypeOnly(list) => list,
         };
+        let type_only = matches!(&node.kind, ImportKind::TypeOnly(_));
         // A plain Luau module returns a table; its keys are not
         // declarations, so only an Alloy module's names are checked.
         let alloy_module = target
@@ -568,16 +579,28 @@ pub fn import_problems(
                         and_list(&names)
                     ),
                 });
-            } else if bound.contains(&local) {
-                out.push(ImportProblem {
-                    start: a,
-                    end: b,
-                    kind: "ImportError",
-                    message: format!("`{local}` is already imported in this file"),
-                });
+            } else {
+                let seen = match type_only || item.is_type {
+                    true => &mut bound_types,
+
+                    false => &mut bound_values,
+                };
+
+                if seen.contains(&local) {
+                    out.push(ImportProblem {
+                        start: a,
+                        end: b,
+                        kind: "ImportError",
+                        message: format!("`{local}` is already imported in this file"),
+                    });
+                }
             }
 
-            bound.push(local);
+            match type_only || item.is_type {
+                true => bound_types.push(local),
+
+                false => bound_values.push(local),
+            }
         }
     }
 
@@ -634,6 +657,29 @@ pub fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn duplicates(src: &str) -> Vec<String> {
+        import_problems(src, Path::new("src/main.aly"), Path::new("/nowhere"), &[])
+            .into_iter()
+            .filter(|p| p.message.contains("already imported"))
+            .map(|p| p.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_type_and_a_value_of_one_name_are_not_a_duplicate_import() {
+        let src = "import * as Inv from \"./inv\"\nimport { add, type Inv } from \"./inv\"\nimport type { Item } from \"./inv\"\nprint(add, Inv)\n";
+        assert_eq!(duplicates(src), Vec::<String>::new());
+    }
+
+    #[test]
+    fn one_name_imported_twice_in_one_namespace_is_a_duplicate() {
+        let value = "import * as Inv from \"./inv\"\nimport { Inv } from \"./inv\"\nprint(Inv)\n";
+        assert_eq!(duplicates(value).len(), 1);
+
+        let ty = "import type { Item } from \"./inv\"\nimport { type Item } from \"./other\"\nprint(1)\n";
+        assert_eq!(duplicates(ty).len(), 1);
+    }
 
     #[test]
     fn exported_type_names_come_from_the_declarations() {

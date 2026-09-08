@@ -317,11 +317,15 @@ pub fn fold(text: &str, known: &Known) -> String {
         }
 
         // Every name the head uses resolved: the rest of the clause,
-        // parsed or not, is for those names alone.
+        // parsed or not, is for those names alone. A fenced hover holds
+        // nothing after it, so the cut runs to the fence. A diagnostic
+        // carries the sentence on after the clause, a closing quote
+        // among it, so there the cut stops where the bindings end.
+        let parsed_end = tail_start + tail_end;
         let clause_end = out[tail_start..]
             .find("\n```")
-            .map_or(out.len(), |k| tail_start + k);
-        out.replace_range(head_start..clause_end.max(tail_start + tail_end), &new_head);
+            .map_or(parsed_end, |k| (tail_start + k).max(parsed_end));
+        out.replace_range(head_start..clause_end, &new_head);
     }
 
     fold_heads(&mut out, known);
@@ -3039,6 +3043,15 @@ mod array_clause_tests {
         assert_eq!(
             fold(text, &Known::default()),
             "Expected this to be\n\t'string[]'\nbut got\n\t'number[]'"
+        );
+    }
+
+    #[test]
+    fn a_whole_clause_in_a_diagnostic_keeps_the_closing_quote() {
+        let text = "Expected this to be 'string[]' but got 't2 where t1 = { [number]: number, concat: (read number[], t1) -> t1, push: (read number[], ...number) -> () } ; t2 = t1'";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "Expected this to be 'string[]' but got 'number[]'"
         );
     }
 

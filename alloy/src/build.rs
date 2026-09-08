@@ -370,12 +370,17 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         // each is an error of the build, not of the type check alone.
         let silence = crate::directives::scan(&source);
 
+        // The type check reads these lines: a module the checker cannot
+        // resolve either would say the same thing a second time.
+        let mut import_lines: Vec<usize> = Vec::new();
+
         for problem in crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
         {
             if !silence.allows(crate::directives::line_of(&source, problem.start as usize)) {
                 continue;
             }
 
+            import_lines.push(source[..problem.start as usize].matches('\n').count() + 1);
             report.diagnostics.push((
                 rel.clone(),
                 Diagnostic {
@@ -409,25 +414,26 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         if keep {
-            let unused_lines = compiled
+            let lint_lines = compiled
                 .lints
                 .iter()
-                .filter(|l| l.name == "unused_variable" || l.name == "unused_function")
-                .map(|l| source[..l.start as usize].matches('\n').count() + 1)
+                .map(|l| (source[..l.start as usize].matches('\n').count() + 1, l.name))
                 .collect();
             let error_lines = compiled
                 .diagnostics
                 .iter()
                 .chain(&data_diagnostics)
                 .map(|d| source[..d.start as usize].matches('\n').count() + 1)
+                .chain(import_lines)
                 .collect();
             report.checks.push(crate::typecheck::CheckSource {
                 rel: rel.clone(),
                 source: source.clone(),
                 check: compiled.check.clone(),
                 map: compiled.map.clone(),
-                unused_lines,
+                lint_lines,
                 error_lines,
+                parsed_clean: compiled.parsed_clean,
                 expected_hits: compiled.expected_hits.clone(),
             });
         }

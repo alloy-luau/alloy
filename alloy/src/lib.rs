@@ -86,6 +86,10 @@ pub struct Output {
     /// lowered text; and that edited text, for the column mapping.
     pub layer: Option<SpanMap>,
     pub layered: Option<String>,
+    /// Whether the parser read the whole file. A recovery invents the
+    /// tree past the first error, so a lint or a type error over the
+    /// emit describes code no one wrote.
+    pub parsed_clean: bool,
 }
 
 /// One `import ... from "path"` of a file, or one data path with the
@@ -316,6 +320,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         lowered: None,
         layer: None,
         layered: None,
+        parsed_clean,
     })
 }
 

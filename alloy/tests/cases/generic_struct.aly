@@ -1,0 +1,61 @@
+export struct Slotted<T> as
+	value: T
+	count: number = 1
+end
+
+impl Slotted<T>
+	function new(value: T): Slotted<T>
+		return new Slotted<<T>> { value = value }
+	end
+
+	function get(self): T
+		return self.value
+	end
+
+	function bump(self, n: number): number
+		self.count += n
+		return self.count
+	end
+end
+
+struct Pair<A, B> as
+	left: A
+	right: B
+end
+
+impl Pair<A, B>
+	function swap(self): B
+		return self.right
+	end
+end
+
+struct Swap<A, B> as
+	left: A
+	right: B
+end
+
+impl Swap<A, B>
+	function flip(self): Swap<B, A>
+		return new Swap<<B, A>> { left = self.right, right = self.left }
+	end
+end
+
+trait Loud
+	function shout(self): string
+end
+
+struct Voiced<T> as
+	value: T
+end
+
+impl Loud for Voiced<T>
+	function shout(self): string
+		return "hi"
+	end
+end
+
+local held = Slotted.new(5)
+local sw = new Swap<<number, string>> { left = 1, right = "a" }
+local p = new Pair<<number, string>> { left = 1, right = "a" }
+local v = new Voiced<<number>> { value = 1 }
+print(held:get(), p:swap(), v:shout(), sw:flip())

@@ -1776,7 +1776,7 @@ fn struct_field_report(
         .map(|(key, owner)| (owner, key));
     let (owner, key) = read.or(write)?;
     let fields = shapes.iter().find_map(|s| match s {
-        crate::declarations::Shape::Struct { name, fields } if name == owner => Some(fields),
+        crate::declarations::Shape::Struct { name, fields, .. } if name == owner => Some(fields),
 
         _ => None,
     })?;

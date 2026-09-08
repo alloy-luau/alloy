@@ -2501,6 +2501,77 @@ fn find_key_colon(part: &str) -> Option<usize> {
     None
 }
 
+/// A generic struct printed as its plain-table alias: the fields, then
+/// one `read name: (self: ...) -> ...` per method. The field set names
+/// the struct, and a field declared as a bare parameter names that
+/// parameter's argument. `Slotted` with no argument beats the table
+/// when a field leaves one unbound.
+fn generic_struct_of_body(body: &str, known: &Known) -> Option<String> {
+    if !body.starts_with('{') || balanced_len(body) != Some(body.len()) {
+        return None;
+    }
+
+    let inner = body.get(1..body.len() - 1)?.trim();
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut methods = 0usize;
+
+    for (key, value) in members(inner) {
+        if value.trim_start().starts_with("(self:") {
+            methods += 1;
+        } else {
+            fields.push((key, value));
+        }
+    }
+
+    if methods == 0 || fields.is_empty() {
+        return None;
+    }
+
+    let keys: Vec<String> = fields.iter().map(|(k, _)| k.clone()).collect();
+
+    for shape in &known.shapes {
+        let Shape::Struct {
+            name,
+            fields: decl,
+            generics,
+            types,
+        } = shape
+        else {
+            continue;
+        };
+
+        if generics.is_empty() || decl.len() != types.len() {
+            continue;
+        }
+
+        let all: Vec<&String> = decl.iter().map(|(f, _)| f).collect();
+
+        if !same_set(&keys, &all) {
+            continue;
+        }
+
+        let args: Vec<String> = generics
+            .iter()
+            .map(|g| {
+                decl.iter()
+                    .zip(types)
+                    .find(|((_, _), ty)| ty.trim() == g)
+                    .and_then(|((f, _), _)| fields.iter().find(|(k, _)| k == f))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        if args.iter().any(String::is_empty) {
+            return Some(name.clone());
+        }
+
+        return Some(format!("{name}<{}>", args.join(", ")));
+    }
+
+    None
+}
+
 fn name_of_body(body: &str, known: &Known) -> Option<String> {
     let trimmed = body.trim();
 
@@ -2532,7 +2603,7 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
         }
 
         for shape in &known.shapes {
-            if let Shape::Struct { name, fields } = shape {
+            if let Shape::Struct { name, fields, .. } = shape {
                 let all: Vec<&String> = fields.iter().map(|(f, _)| f).collect();
                 let public: Vec<&String> =
                     fields.iter().filter(|(_, p)| !p).map(|(f, _)| f).collect();
@@ -2550,6 +2621,14 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
         }
 
         return None;
+    }
+
+    // A generic struct: the check artifact writes its alias as a plain
+    // table of the fields and the methods, since Luau prints no type
+    // argument for a `typeof(setmetatable(...))` alias. The arguments
+    // read back off the fields that hold them.
+    if let Some(name) = generic_struct_of_body(trimmed, known) {
+        return Some(name);
     }
 
     // A struct's full view: the name met with its private tables,
@@ -2622,7 +2701,7 @@ fn name_of_body(body: &str, known: &Known) -> Option<String> {
             let head = if all_read { "Readonly" } else { "Partial" };
 
             for shape in &known.shapes {
-                let Shape::Struct { name, fields } = shape else {
+                let Shape::Struct { name, fields, .. } = shape else {
                     continue;
                 };
                 let all: Vec<&String> = fields.iter().map(|(f, _)| f).collect();
@@ -3974,6 +4053,8 @@ mod tests {
                         ("cost".into(), false),
                         ("color".into(), false),
                     ],
+                    generics: vec![],
+                    types: vec!["string".into(), "number".into(), "number[]".into()],
                 },
                 Shape::Enum {
                     name: "Rarity".into(),
@@ -3994,6 +4075,21 @@ mod tests {
     fn a_struct_value_reads_by_name() {
         let text = "```luau\nlocal found: t3? where t1 = {\n    [number]: number,\n    concat: (self: t1, other: t1) -> t1,\n    push: (self: t1, ...number) -> ()\n} ; t2 = {\n    __index: t2,\n    __new: (f: { color: t1, cost: number, id: string }) -> t3\n} ; t3 = { @metatable t2, {\n    read color: t1,\n    read cost: number,\n    read id: string\n} }\n```";
         assert_eq!(fold(text, &known()), "```luau\nlocal found: Saber?\n```");
+    }
+
+    #[test]
+    fn a_generic_struct_reads_with_its_argument() {
+        let known = Known {
+            interfaces: Vec::new(),
+            shapes: vec![Shape::Struct {
+                name: "Slotted".into(),
+                fields: vec![("value".into(), false), ("count".into(), false)],
+                generics: vec!["T".into()],
+                types: vec!["T".into(), "number".into()],
+            }],
+        };
+        let text = "local held: t1 where t1 = {\n    read bump: (self: t1, n: number) -> number,\n    count: number,\n    read get: (self: t1) -> number,\n    value: number\n}";
+        assert_eq!(fold(text, &known), "local held: Slotted<number>");
     }
 
     #[test]
@@ -4455,6 +4551,8 @@ mod dbg2 {
                 Shape::Struct {
                     name: "Scope2".into(),
                     fields: vec![("tag".into(), false)],
+                    generics: vec![],
+                    types: vec!["string".into()],
                 },
                 Shape::Enum {
                     name: "Shape".into(),

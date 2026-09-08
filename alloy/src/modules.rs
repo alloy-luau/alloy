@@ -365,7 +365,7 @@ pub fn import_privates(
     let mut out = Vec::new();
 
     for shape in import_shapes(source, from, aliases) {
-        let crate::declarations::Shape::Struct { name, fields } = shape else {
+        let crate::declarations::Shape::Struct { name, fields, .. } = shape else {
             continue;
         };
         let private: Vec<String> = fields

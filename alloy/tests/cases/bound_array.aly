@@ -1,0 +1,41 @@
+trait Sized
+	function size(self): number
+end
+
+struct Bag as
+	items: string[]
+end
+
+impl Sized for Bag
+	function size(self): number
+		return self.items:len()
+	end
+end
+
+local function total<T: Sized>(xs: T[]): number
+	local sum = 0
+	for _, x in xs do
+		sum += x:size()
+	end
+	return sum
+end
+
+local function first<T: Sized>(xs: T[]): number
+	return xs[1]:size()
+end
+
+local function grow<T: Sized>(xs: T[], t: T): number
+	xs:push(t)
+	return xs:len()
+end
+
+local function pairs_of<T: Sized>(xs: Array<T>): number
+	local n = 0
+	for i, x in xs do
+		n += i + x:size()
+	end
+	return n
+end
+
+local bag = new Bag { items = [ "a" ] }
+print(total([ bag ]), first([ bag ]), grow([ bag ], bag), pairs_of([ bag ]))

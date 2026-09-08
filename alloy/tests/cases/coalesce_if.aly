@@ -1,0 +1,23 @@
+local function eq(x: number?): number
+	if x == nil then x = 1 end
+	return x
+end
+local function falsy(y: string?): string
+	if not y then y = "z" end
+	return y
+end
+local function branch(z: number?): number
+	if z == nil then z = 3 else print(z) end
+	return z
+end
+local function spread(w: number?): number
+	if w == nil then
+		w = 4
+	end
+	return w
+end
+local function two(v: number?): number
+	if v == nil then v = 5 print("set") end
+	return v ?? 6
+end
+print(eq(nil), falsy(nil), branch(nil), spread(nil), two(nil))

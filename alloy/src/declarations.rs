@@ -680,6 +680,11 @@ pub enum Shape {
         name: String,
         /// Every field, in order, with whether it is private.
         fields: Vec<(String, bool)>,
+        /// `struct Slotted<T>`: the parameter names, in order.
+        generics: Vec<String>,
+        /// The declared type of each field, as source text, parallel to
+        /// `fields`. A print names the struct's arguments through them.
+        types: Vec<String>,
     },
     Enum {
         name: String,
@@ -699,6 +704,17 @@ impl Shape {
             }
         }
     }
+}
+
+/// The names in a generic list: `<T, U: Shape>` gives `T` and `U`.
+fn generic_names(text: &str) -> Vec<String> {
+    text.trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .split(',')
+        .map(|item| item.split(':').next().unwrap_or("").trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
 }
 
 /// The structs and enums a source declares.
@@ -731,6 +747,11 @@ pub fn shapes(src: &str) -> Vec<Shape> {
                         (text(f.name), private)
                     })
                     .collect(),
+                generics: s
+                    .generics
+                    .map(|g| generic_names(&text(g)))
+                    .unwrap_or_default(),
+                types: s.fields.iter().map(|f| text(f.ty)).collect(),
             }),
 
             Stmt::Enum(e) => out.push(Shape::Enum {
@@ -790,6 +811,8 @@ mod shape_tests {
                 Shape::Struct {
                     name: "S".into(),
                     fields: vec![("x".into(), false), ("n".into(), true)],
+                    generics: vec![],
+                    types: vec!["number".into(), "number".into()],
                 },
                 Shape::Enum {
                     name: "E".into(),

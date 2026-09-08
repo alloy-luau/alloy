@@ -282,6 +282,13 @@ pub fn complete(offset: u32) -> String {
                 return json!({ "items": items, "luau": true }).to_string();
             }
 
+            // The analyzer answers nothing inside an `if` expression and
+            // right before a literal, which is where an arm, a ternary,
+            // and a `default` land. Alloy names the scope for those.
+            if context::expression_start(source, offset) {
+                items.extend(value_scope(source, offset, &s.decls));
+            }
+
             // The analyzer lists the names; Alloy adds its keywords.
             for k in keywords::ALLOY_KEYWORDS {
                 let mut item = word(k, "keyword", keywords::doc(k).map(str::to_string), word_start(source, offset));
@@ -463,18 +470,30 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
-            Context::TypeSlot { prefix } => {
+            Context::TypeSlot { prefix, prefers } => {
                 let from = offset - prefix.len();
 
                 for name in ["number", "string", "boolean", "any", "unknown", "nil", "thread", "buffer"] {
                     items.push(word(name, "type", None, from));
                 }
 
+                // `extends` and the trait of an `impl` want a contract;
+                // `impl X` and the target after `for` want a struct or
+                // an enum. The rest of the list stays, one rank down.
                 for d in &s.decls {
                     let head = d.hover.lines().nth(1).unwrap_or("");
+                    let concrete = head.contains("struct ") || head.contains("enum ");
+                    let contract = head.contains("interface ") || head.contains("trait ");
 
-                    if !d.name.starts_with(['@', '$']) && !d.name.contains('.') && (head.contains("struct ") || head.contains("enum ") || head.contains("interface ") || head.contains("trait ") || head.contains("type ")) {
-                        items.push(word(&d.name, "type", Some(d.hover.clone()), from));
+                    if !d.name.starts_with(['@', '$']) && !d.name.contains('.') && (concrete || contract || head.contains("type ")) {
+                        let ranks = match prefers {
+                            context::Prefers::Any => false,
+                            context::Prefers::Contract => contract,
+                            context::Prefers::Concrete => concrete,
+                        };
+                        let mut item = word(&d.name, "type", Some(d.hover.clone()), from);
+                        item["sort"] = json!(if ranks { 0 } else { 1 });
+                        items.push(item);
                     }
                 }
 
@@ -824,6 +843,131 @@ fn variant_insert(variant: &str, signature: &str) -> String {
     }
 }
 
+/// The globals a value expression reaches for. The analyzer owns the
+/// full global list; these are the names an arm or a ternary writes,
+/// for the positions where it answers nothing.
+const EXPRESSION_GLOBALS: &[&str] = &[
+    "print",
+    "warn",
+    "error",
+    "assert",
+    "tostring",
+    "tonumber",
+    "typeof",
+    "type",
+    "ipairs",
+    "pairs",
+    "next",
+    "select",
+    "pcall",
+    "math",
+    "string",
+    "table",
+    "os",
+    "task",
+    "buffer",
+    "coroutine",
+    "utf8",
+    "game",
+    "workspace",
+    "script",
+    "Instance",
+    "Enum",
+    "Vector3",
+    "Vector2",
+    "CFrame",
+    "Color3",
+    "UDim",
+    "UDim2",
+    "TweenInfo",
+    "BrickColor",
+    "Random",
+    "NumberRange",
+    "DateTime",
+];
+
+/// The names an expression at the caret may write: the locals and the
+/// parameters in scope, the structs and the enums the file declares,
+/// the std names, and the words an expression takes.
+fn value_scope(source: &str, offset: usize, decls: &[Declaration]) -> Vec<Value> {
+    let from = word_start(source, offset);
+    let mut items = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |label: &str, kind: &str, doc_text: Option<String>, detail: &str| {
+        if !seen.insert(label.to_string()) {
+            return;
+        }
+
+        items.push(json!({
+            "label": label,
+            "kind": kind,
+            "doc": doc_text,
+            "from": from,
+            "detail": detail,
+        }));
+    };
+
+    for local in context::locals_in_scope(source, offset) {
+        let kind = match local.kind {
+            context::LocalKind::Function => "function",
+
+            _ => "variable",
+        };
+        let detail = local
+            .annotation
+            .clone()
+            .unwrap_or_else(|| match local.kind {
+                context::LocalKind::Parameter => "parameter".to_string(),
+
+                _ => "local".to_string(),
+            });
+        push(&local.name, kind, None, &detail);
+    }
+
+    // An interface, a trait, and a type alias name a type, not a value.
+    for d in decls {
+        if d.name.starts_with(['@', '$']) || d.name.contains('.') {
+            continue;
+        }
+
+        let head = d.hover.lines().nth(1).unwrap_or("");
+        let kind = if head.contains("struct ") || head.contains("class ") {
+            "class"
+        } else if head.contains("enum ") {
+            "enum"
+        } else {
+            continue;
+        };
+        push(&d.name, kind, Some(d.hover.clone()), "alloy");
+    }
+
+    for name in alloy::desugar::AMBIENT {
+        push(
+            name,
+            "class",
+            keywords::doc(name).map(str::to_string),
+            "alloy:std",
+        );
+    }
+
+    for name in EXPRESSION_GLOBALS {
+        push(name, "variable", None, "roblox");
+    }
+
+    for name in [
+        "if", "not", "new", "await", "try", "function", "true", "false", "nil",
+    ] {
+        push(
+            name,
+            "keyword",
+            keywords::doc(name).map(str::to_string),
+            "keyword",
+        );
+    }
+
+    items
+}
+
 fn word_start(source: &str, offset: usize) -> usize {
     let bytes = source.as_bytes();
     let mut start = offset;
@@ -983,6 +1127,33 @@ mod tests {
         assert!(items.contains("health"), "{items}");
         assert!(!items.contains("kills"), "{items}");
         assert!(!items.contains("Workspace"), "{items}");
+    }
+
+    /// The arms of an `if` expression get the scope: the analyzer
+    /// answers nothing there, so the playground names it itself.
+    #[test]
+    fn an_if_expression_arm_names_the_scope() {
+        let source = concat!(
+            "struct Round as\n",
+            "    seconds: number\n",
+            "end\n",
+            "\n",
+            "export function pick(acc: number): string\n",
+            "    local many = \"many\"\n",
+            "    return if acc > 0 then \"a\" else \"b\"\n",
+            "end\n",
+        );
+        super::set_source(source);
+
+        let at = source.find("then \"a\"").unwrap() + "then ".len();
+        let items = super::complete(at as u32);
+
+        for name in ["acc", "many", "pick", "Round", "Ok", "print"] {
+            assert!(items.contains(&format!("\"{name}\"")), "`{name}`: {items}");
+        }
+
+        // The analyzer still gets its turn at the same byte.
+        assert!(items.contains("\"luau\":true"), "{items}");
     }
 
     #[test]

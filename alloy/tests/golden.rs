@@ -1,6 +1,7 @@
 //! Golden tests: every `.aly` under `tests/cases` compiles to the `.luau`
 //! beside it, and every output has the line count of its source. A new
-//! case is two files.
+//! case is two files. A `<name>.check.luau` beside them, where one
+//! exists, is the check artifact of the same source.
 
 use std::fs;
 use std::path::Path;
@@ -45,6 +46,24 @@ fn every_case_matches_its_expected_output() {
             "{}: line count changed",
             path.display()
         );
+
+        // The check artifact, where the case pins it too.
+        let check_path = path.with_extension("check.luau");
+
+        if let Ok(want) = fs::read_to_string(&check_path) {
+            assert_eq!(
+                out.check,
+                want,
+                "{} differs from its .check.luau",
+                path.display()
+            );
+            assert_eq!(
+                out.check.lines().count(),
+                src.lines().count(),
+                "{}: check line count changed",
+                path.display()
+            );
+        }
 
         count += 1;
     }

@@ -848,11 +848,17 @@ impl State {
         // the std join the child's, which lists classes alone.
         let raw = &doc.source[..offset];
         let raw_head = raw.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+        // The ternary check reads the caret's own line: a `?` on an
+        // earlier line says nothing about this `:`.
+        let line_start = raw.rfind('\n').map_or(0, |i| i + 1);
+        let line_head = &raw_head[line_start.min(raw_head.len())..];
+        // `c ? a : b` ends its else with a `:` that takes a value.
         let type_slot = (raw_head.ends_with(": ")
             || raw_head.ends_with("-> ")
             || raw_head.ends_with(": read ")
             || raw_head.ends_with(": write "))
-            && !raw_head.trim_end().ends_with("::");
+            && !raw_head.trim_end().ends_with("::")
+            && !context::ternary_else(line_head);
 
         let labels: Vec<&str> = result
             .get("items")
@@ -922,6 +928,140 @@ impl State {
                     item
                 }),
         );
+
+        items
+    }
+
+    /// The names an expression at the caret may write: the locals and
+    /// the parameters in scope, the declarations the file sees, the std
+    /// names, and the keywords an expression takes. luau-lsp answers
+    /// nothing inside an `if` expression and right before a literal,
+    /// which is where an Alloy arm, a ternary, and a `default` land, so
+    /// this list stands in for it there and nowhere else.
+    fn value_scope(&self, uri: &str, line: u32, character: u32, result: &Value) -> Vec<Value> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return Vec::new();
+        };
+
+        let answered = result
+            .get("items")
+            .and_then(Value::as_array)
+            .or_else(|| result.as_array())
+            .is_some_and(|items| !items.is_empty());
+
+        // The child answered: its list already holds the scope.
+        if answered || !context::expression_start(&doc.source, offset) {
+            return Vec::new();
+        }
+
+        let mut items = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        // The locals come first: at an arm or a ternary they are what
+        // the author reaches for.
+        for local in context::locals_in_scope(&doc.source, offset) {
+            let kind = match local.kind {
+                context::LocalKind::Function => 3,
+                context::LocalKind::Parameter => 6,
+                context::LocalKind::Variable => 6,
+            };
+            let binding = doc.bindings.iter().find(|b| b.name == local.name);
+            let detail = match (&local.annotation, binding) {
+                (Some(a), _) => a.clone(),
+
+                (None, Some(b)) => b.prefix.clone(),
+
+                (None, None) => match local.kind {
+                    context::LocalKind::Parameter => "parameter".to_string(),
+
+                    _ => "local".to_string(),
+                },
+            };
+            let mut item = json!({
+                "label": local.name,
+                "kind": kind,
+                "detail": detail,
+                "sortText": format!("0{}", local.name),
+            });
+
+            if let Some(text) = binding.and_then(|b| b.doc.clone()) {
+                item["documentation"] = json!({ "kind": "markdown", "value": text });
+            }
+
+            if seen.insert(local.name.clone()) {
+                items.push(item);
+            }
+        }
+
+        let mut push = |name: &str, kind: u64, detail: String, doc_text: Option<String>| {
+            if is_internal_name(name) || !seen.insert(name.to_string()) {
+                return;
+            }
+
+            let mut item = json!({ "label": name, "kind": kind, "detail": detail });
+
+            if let Some(d) = doc_text {
+                item["documentation"] = json!({ "kind": "markdown", "value": d });
+            }
+
+            items.push(item);
+        };
+
+        // The declarations the file sees: its own, and what it imports.
+        // A variant needs its enum in front, so it stays out.
+        for d in self.decls_in_scope(uri) {
+            if d.name.starts_with(['@', '$']) || d.name.contains('.') {
+                continue;
+            }
+
+            // An interface, a trait, and a type alias name a type, not
+            // a value; a variant needs its enum in front.
+            let head = d.hover.lines().nth(1).unwrap_or("");
+            let kind = if head.contains("struct ") || head.contains("class ") {
+                7
+            } else if head.contains("enum ") {
+                13
+            } else {
+                continue;
+            };
+            push(&d.name, kind, "alloy".to_string(), Some(d.hover.clone()));
+        }
+
+        // A plain Luau module binds a name no declaration index holds.
+        for name in imports::bound_names(&doc.source) {
+            push(&name, 9, "import".to_string(), None);
+        }
+
+        for name in alloy::desugar::AMBIENT {
+            let kind = if matches!(*name, "Ok" | "Err") { 3 } else { 7 };
+            push(
+                name,
+                kind,
+                "alloy:std".to_string(),
+                keywords::doc(name).map(str::to_string),
+            );
+        }
+
+        for name in EXPRESSION_GLOBALS {
+            push(name, 6, "roblox".to_string(), None);
+        }
+
+        // The words an expression itself takes. `end`, `local`, and the
+        // other statement words do not fit here.
+        for name in [
+            "if", "not", "new", "await", "try", "function", "true", "false", "nil",
+        ] {
+            push(
+                name,
+                14,
+                "keyword".to_string(),
+                keywords::doc(name).map(str::to_string),
+            );
+        }
 
         items
     }
@@ -1688,7 +1828,7 @@ impl State {
             // of an import path, Enter is a newline.
             Context::Nothing => {}
 
-            Context::TypeSlot { prefix } => {
+            Context::TypeSlot { prefix, prefers } => {
                 let from = offset - prefix.len();
 
                 for mut item in self.type_completions(uri, &[]) {
@@ -1696,8 +1836,10 @@ impl State {
                     let kind = item["kind"].as_u64().unwrap_or(7);
                     let doc_text = item["documentation"]["value"].as_str().map(str::to_string);
                     let detail = item["detail"].clone();
+                    let rank = type_rank(*prefers, detail.as_str().unwrap_or(""));
                     item = word(&label, kind, doc_text, from);
                     item["detail"] = detail;
+                    item["sortText"] = json!(format!("{rank}{label}"));
                     items.push(item);
                 }
             }
@@ -4450,6 +4592,7 @@ impl Server {
                         if !quoted {
                             extra.extend(st.primitive_completions(uri, line, character, result));
                             extra.extend(st.std_completions(uri, line, character, result));
+                            extra.extend(st.value_scope(uri, line, character, result));
                             extra.extend(st.directive_completions(uri, line, character));
                         }
 
@@ -5663,6 +5806,71 @@ fn strip_import_temps(value: &mut Value, shadow: &str) {
 /// Removes the runtime's table from a type text, in every string of the
 /// value: `__alloy.Future<T>` becomes `Future<T>`, and the primitive
 /// helper `__alloy_string.trim` becomes `string.trim`.
+/// Where a type name sorts in the list of a slot. `extends` and the
+/// trait of an `impl` take a contract; `impl X` and the target after
+/// `for` take a struct, an enum, or a class. The other names stay in
+/// the list: the author may be about to declare one.
+fn type_rank(prefers: context::Prefers, detail: &str) -> u8 {
+    match prefers {
+        context::Prefers::Any => 1,
+
+        context::Prefers::Contract => match detail {
+            "interface" | "trait" | "alloy:std trait" => 0,
+
+            _ => 1,
+        },
+
+        context::Prefers::Concrete => match detail {
+            "struct" | "enum" => 0,
+
+            _ => 1,
+        },
+    }
+}
+
+/// The globals a value expression reaches for, for the list the proxy
+/// builds where luau-lsp answers nothing. The full global list is the
+/// child's to give; these are the names an arm or a ternary writes.
+const EXPRESSION_GLOBALS: &[&str] = &[
+    "print",
+    "warn",
+    "error",
+    "assert",
+    "tostring",
+    "tonumber",
+    "typeof",
+    "type",
+    "ipairs",
+    "pairs",
+    "next",
+    "select",
+    "pcall",
+    "math",
+    "string",
+    "table",
+    "os",
+    "task",
+    "buffer",
+    "coroutine",
+    "utf8",
+    "game",
+    "workspace",
+    "script",
+    "Instance",
+    "Enum",
+    "Vector3",
+    "Vector2",
+    "CFrame",
+    "Color3",
+    "UDim",
+    "UDim2",
+    "TweenInfo",
+    "BrickColor",
+    "Random",
+    "NumberRange",
+    "DateTime",
+];
+
 /// A name the emit made: `__alloy`, `__alloy_string`, `_m1`, `_1`,
 /// `Name__private`, `Name__all`, `__new`, and the mapped type functions.
 pub fn is_internal_name(label: &str) -> bool {
@@ -10462,6 +10670,96 @@ mod tests {
         );
 
         (st, uri)
+    }
+
+    /// An `if` expression arm, a ternary, and a `default` get the
+    /// locals, the parameters, the file's own declarations, and the std
+    /// names. The child's own list wins wherever it answered.
+    #[test]
+    fn an_expression_position_the_child_leaves_empty_gets_the_scope() {
+        let src = concat!(
+            "struct Round as\n",
+            "    seconds: number\n",
+            "end\n",
+            "\n",
+            "export function pick(acc: number): string\n",
+            "    local many = \"many\"\n",
+            "    return if acc > 0 then \"a\" else \"b\"\n",
+            "end\n",
+        );
+        let (st, uri) = one_file(src);
+        let at = src.find("then \"a\"").unwrap() + "then ".len();
+        let (line, character) = position_of(src, at);
+        let items = st.value_scope(uri, line, character, &json!([]));
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        for name in ["acc", "many", "pick", "Round", "Ok", "print", "if", "not"] {
+            assert!(labels.contains(&name), "`{name}` is missing: {labels:?}");
+        }
+
+        // A field of a struct is no name the caret can write bare.
+        assert!(!labels.contains(&"seconds"), "{labels:?}");
+        // The child answered: its list already holds the scope.
+        assert!(
+            st.value_scope(uri, line, character, &json!([{ "label": "print" }]))
+                .is_empty()
+        );
+    }
+
+    /// A scrutinee the proxy cannot resolve keeps to the variants the
+    /// file declares or imports; another file's stay out.
+    #[test]
+    fn an_unresolved_scrutinee_offers_only_the_names_the_file_sees() {
+        let src = concat!(
+            "enum Phase as\n",
+            "    Lobby\n",
+            "    Playing\n",
+            "end\n",
+            "\n",
+            "export function run(input: InputObject)\n",
+            "    match input.KeyCode with\n",
+            "        case \n",
+            "    end\n",
+            "end\n",
+        );
+        let (mut st, uri) = one_file(src);
+        st.docs.insert(
+            "file:///other.aly".to_string(),
+            Doc::new(
+                "export enum Coin as\n    Gold\n    Silver\nend\n".to_string(),
+                1,
+                &EmitOptions::default(),
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+
+        let at = src.find("case \n").unwrap() + "case ".len();
+        let ctx = context::detect(src, at).expect("a case context");
+        let items = st.context_items(uri, at, &ctx);
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        for name in ["Lobby", "Playing", "Ok", "Err", "Enum", "default"] {
+            assert!(labels.contains(&name), "`{name}` is missing: {labels:?}");
+        }
+
+        // `Coin` is another file's, and this one imports nothing.
+        for name in ["Gold", "Silver"] {
+            assert!(!labels.contains(&name), "`{name}` leaked: {labels:?}");
+        }
+    }
+
+    /// A statement line inside a block takes `end`, and the member
+    /// column of an `impl` is the only place its member words belong.
+    #[test]
+    fn a_statement_line_in_a_block_takes_end() {
+        let src = "export function f(n: number): number\n    local x = n\n    \nend\n";
+        let (st, uri) = one_file(src);
+        let at = src.find("\n    \n").unwrap() + 1 + 4;
+        let (line, character) = position_of(src, at);
+        let items = st.primitive_completions(uri, line, character, &json!([{ "label": "print" }]));
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert!(labels.contains(&"end"), "{labels:?}");
     }
 
     const MATCH_FILE: &str = concat!(

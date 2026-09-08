@@ -414,6 +414,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         trait_required: HashMap::new(),
         struct_fields: HashMap::new(),
         generic_types: HashSet::new(),
+        struct_methods: HashMap::new(),
+        impl_generics: HashMap::new(),
+        trait_impl_targets: HashSet::new(),
+        elem_bounds: Vec::new(),
         ext_methods: HashSet::new(),
         ext_statics: HashMap::new(),
         self_type: None,
@@ -695,6 +699,20 @@ struct Desugar<'s> {
     /// Structs declared with type parameters: their alias needs
     /// arguments, so the check artifact leaves `self` untyped there.
     generic_types: HashSet<String>,
+    /// The instance methods of each struct an `impl` block writes, and
+    /// the generic list of that block. The check artifact spells them
+    /// into a generic struct's alias.
+    struct_methods: HashMap<String, Vec<MethodSig>>,
+    /// The generic list each `impl` block declares, by target.
+    impl_generics: HashMap<String, String>,
+    /// Structs a `impl Trait for` block targets. Their methods come from
+    /// the trait too, so the alias cannot list them all.
+    trait_impl_targets: HashSet<String>,
+    /// Parameters of the function under render whose type is a bounded
+    /// `T[]`: the name, and the `(T & Bound)` an element reads back as.
+    /// Luau's Array is invariant, so the bound has to return at each
+    /// element read.
+    elem_bounds: Vec<(String, String)>,
     /// Extension method names declared on foreign types in this file, so
     /// `x:name(...)` routes through the dispatcher.
     ext_methods: HashSet<String>,
@@ -751,6 +769,19 @@ struct MacroRef {
 enum WordOp {
     Bit,
     In,
+}
+
+/// One instance method an `impl` block writes, in spans, so the type
+/// text lowers when the struct renders and not while the file is
+/// scanned.
+struct MethodSig {
+    name: TokSpan,
+    /// The generic list the method itself declares, `<U>`.
+    generics: Option<TokSpan>,
+    /// Every parameter after `self`: the name, the type, whether it is a
+    /// vararg, and whether it carries a default.
+    params: Vec<(TokSpan, Option<TokSpan>, bool, bool)>,
+    ret: Option<TokSpan>,
 }
 
 /// What a pattern compiles to against one access path.
@@ -2639,6 +2670,121 @@ impl<'s> Desugar<'s> {
         self.generate(end_tok.end, &" end".repeat(extra_ends));
     }
 
+    /// The name a condition tests for nil: `x == nil` or `not x`, on a
+    /// plain local or parameter.
+    fn nil_test_name(&self, c: &Expr) -> Option<TokSpan> {
+        match c {
+            Expr::Binary { op, lhs, rhs, .. } if self.text_of(*op) == "==" => {
+                match (&**lhs, &**rhs) {
+                    (Expr::Name(n), Expr::Nil(_)) => Some(*n),
+
+                    _ => None,
+                }
+            }
+
+            Expr::Unary { op, operand, .. } if self.text_of(*op) == "not" => match &**operand {
+                Expr::Name(n) => Some(*n),
+
+                _ => None,
+            },
+
+            _ => None,
+        }
+    }
+
+    /*
+    `if x == nil then x = v end` on a plain local or parameter, with the
+    `not x` form and the `else` form beside it. The then-body must be that
+    one assignment and nothing else.
+
+    Luau narrows no name after an assignment inside a branch, in either
+    solver, so the check artifact writes the same store as an `if`
+    expression. The ship artifact keeps the statement, and the
+    `manual_coalesce` lint still asks for `??=`.
+    */
+    fn coalesce_if<'a>(&self, i: &'a If) -> Option<(TokSpan, &'a Expr)> {
+        if i.branches.len() != 1 {
+            return None;
+        }
+
+        let (cond, block) = &i.branches[0];
+        let Cond::Expr(c) = cond else {
+            return None;
+        };
+        let name = self.nil_test_name(c)?;
+
+        let [Stmt::Assign(a)] = &block.stmts[..] else {
+            return None;
+        };
+
+        if a.targets.len() != 1 || a.values.len() != 1 || self.text_of(a.op) != "=" {
+            return None;
+        }
+
+        let Expr::Name(t) = &a.targets[0] else {
+            return None;
+        };
+
+        if self.text_of(*t) != self.text_of(name) {
+            return None;
+        }
+
+        // `x =` is dropped, so it must hold no newline: the output keeps
+        // the line count of the source.
+        let head = self.byte_start(a.span) as usize..self.byte_start(a.values[0].span()) as usize;
+
+        if self.src[head].contains('\n') {
+            return None;
+        }
+
+        Some((name, &a.values[0]))
+    }
+
+    /// Whether this statement, or anything under it, is a coalescing `if`.
+    /// The walk copies a statement whole when nothing under it changes,
+    /// so the outer function has to answer for its body.
+    fn holds_coalesce_if(&self, s: &Stmt) -> bool {
+        if let Stmt::If(i) = s
+            && self.coalesce_if(i).is_some()
+        {
+            return true;
+        }
+
+        stmt_children(s).iter().any(|c| match c {
+            Child::Expr(_) => false,
+
+            Child::Block(b) => b.stmts.iter().any(|s| self.holds_coalesce_if(s)),
+
+            Child::Function(f) => f.block.stmts.iter().any(|s| self.holds_coalesce_if(s)),
+        })
+    }
+
+    /// Renders the statement `coalesce_if` matched as
+    /// `x = if x == nil then v else x`, then reopens the source `if` with
+    /// an empty body so the trailing `else` and `end` keep their places.
+    fn coalesce_if_stmt(&mut self, span: TokSpan, i: &If, name: TokSpan, value: &Expr) {
+        let start = self.byte_start(span);
+        let n = self.text_of(name).to_string();
+        let (_, block) = &i.branches[0];
+        self.generate(start, &format!("{n} = "));
+        // `if COND then` copies from the source, so a condition that
+        // spans lines keeps every newline.
+        self.copy(start, self.byte_start(block.span));
+        let vspan = value.span();
+        self.expr(value);
+        let mut cursor = self.byte_end(vspan);
+        self.generate(cursor, &format!(" else {n} if {n} == nil then"));
+
+        if let Some(e) = &i.else_block {
+            let body_start = self.block_start_or(e, cursor);
+            self.copy(cursor, body_start);
+            self.block(e);
+            cursor = self.block_end_or(e, body_start);
+        }
+
+        self.copy(cursor, self.byte_end(span));
+    }
+
     fn while_with_local(&mut self, span: TokSpan, w: &While) {
         let start = self.byte_start(span);
         let (decls, test, binds) = self.cond_local_parts(&w.cond);
@@ -3218,6 +3364,65 @@ impl<'s> Desugar<'s> {
                         self.private_types.insert(target.clone());
                     }
 
+                    // A generic struct's alias lists its methods, so the
+                    // solver names the type argument. A trait impl adds
+                    // methods this scan cannot see, and closes that door.
+                    if i.trait_name.is_some() {
+                        self.trait_impl_targets.insert(target.clone());
+                    } else {
+                        let methods: Vec<&alloy_syntax::ast::Function> = i
+                            .methods
+                            .iter()
+                            .filter(|m| {
+                                m.body
+                                    .params
+                                    .first()
+                                    .is_some_and(|p| self.text_of(p.name) == "self")
+                                    && !m.visibility.is_some_and(|v| self.text_of(v) == "private")
+                            })
+                            .collect();
+                        let sigs: Vec<MethodSig> = methods
+                            .iter()
+                            .filter_map(|m| {
+                                Some(MethodSig {
+                                    name: *m.path.first()?,
+                                    generics: m.body.generics,
+                                    params: m
+                                        .body
+                                        .params
+                                        .iter()
+                                        .skip(1)
+                                        .map(|p| (p.name, p.ty, p.is_vararg, p.default.is_some()))
+                                        .collect(),
+                                    ret: m.body.ret_type,
+                                })
+                            })
+                            .collect();
+
+                        // Every method the alias lists has to have a
+                        // signature it can spell.
+                        let listable = methods.len() == sigs.len()
+                            && methods.iter().all(|m| {
+                                m.body.is_async.is_none()
+                                    && !m.body.has_bounds
+                                    && m.body.params.iter().all(|p| p.destructure.is_none())
+                            });
+
+                        if listable {
+                            let generics = i
+                                .generics
+                                .map(|g| strip_bounds(self.text_of(g)))
+                                .unwrap_or_default();
+                            self.impl_generics.insert(target.clone(), generics);
+                            self.struct_methods
+                                .entry(target.clone())
+                                .or_default()
+                                .extend(sigs);
+                        } else {
+                            self.trait_impl_targets.insert(target.clone());
+                        }
+                    }
+
                     if i.trait_name.is_none()
                         && let Some(ctor) = i.methods.iter().find_map(|m| {
                             m.path
@@ -3455,6 +3660,83 @@ impl<'s> Desugar<'s> {
     // --- structs -------------------------------------------------------------
 
     /*
+    The members of a generic struct's alias in the check artifact: the
+    fields, then every instance method the `impl` block writes.
+
+    Luau prints no type argument for an alias whose body is
+    `typeof(setmetatable(...))`, so `Slotted.new(5)` hovers `Slotted`
+    where the reader wrote `Slotted<number>`. A plain table alias prints
+    `Slotted<number>`, and it has to carry the methods itself. `None`
+    where the alias cannot be complete: a struct with no parameters
+    needs no change, and a trait impl adds methods this cannot list.
+    */
+    fn generic_alias_members(
+        &mut self,
+        name: &str,
+        generics: &str,
+        field_types: &[String],
+    ) -> Option<Vec<String>> {
+        if !self.options.check || generics.is_empty() || self.trait_impl_targets.contains(name) {
+            return None;
+        }
+
+        if self.impl_generics.get(name).map(String::as_str) != Some(generics) {
+            return None;
+        }
+
+        let sigs = std::mem::take(self.struct_methods.get_mut(name)?);
+        let mut members: Vec<String> = field_types.to_vec();
+
+        for m in &sigs {
+            let mname = self.text_of(m.name).to_string();
+            let mut params = vec![format!("self: {name}{generics}")];
+
+            for (pname, pty, vararg, default) in &m.params {
+                let ty = pty
+                    .map(|t| self.copy_type_to_string(t))
+                    .unwrap_or_else(|| "any".to_string());
+
+                if *vararg {
+                    params.push(format!("...{ty}"));
+                    continue;
+                }
+
+                let opt = if *default && !ty.trim_end().ends_with('?') {
+                    "?"
+                } else {
+                    ""
+                };
+                params.push(format!("{}: {ty}{opt}", self.text_of(*pname)));
+            }
+
+            let ret = m
+                .ret
+                .map(|t| self.copy_type_to_string(t))
+                .unwrap_or_else(|| "()".to_string());
+            let mg = m.generics.map(|g| self.text_of(g)).unwrap_or_default();
+            // A method is a read property: the checker holds a struct's
+            // methods read-only, and a read-write slot would reject them.
+            members.push(format!(
+                "read {mname}: {mg}({}) -> {ret}",
+                params.join(", ")
+            ));
+        }
+
+        self.struct_methods.insert(name.to_string(), sigs);
+
+        // `function swap(self): Pair<B, A>` would make the alias name
+        // itself with other arguments, which Luau rejects. The metatable
+        // form takes those structs back.
+        let whole = format!("{name}{generics}");
+
+        if members.iter().any(|m| names_other_args(m, name, &whole)) {
+            return None;
+        }
+
+        Some(members)
+    }
+
+    /*
     A struct is a class table with `__index`, a raw constructor on the class
     table's own metatable, and a type. Field lines hold nothing at runtime;
     the header carries the tables and the `end` line carries the type and
@@ -3534,6 +3816,11 @@ impl<'s> Desugar<'s> {
             format!(
                 "{export}type {name} = typeof(setmetatable({{}} :: {{ {} }}, {name})) type {name}__all = {name}{hidden} & typeof({name}__private)",
                 public_types.join(", ")
+            )
+        } else if let Some(members) = self.generic_alias_members(&name, &generics, &field_types) {
+            format!(
+                "{export}type {name}{generics} = {{ {} }}",
+                members.join(", ")
             )
         } else {
             format!(
@@ -5922,6 +6209,10 @@ impl<'s> Desugar<'s> {
 
             Stmt::LocalFunction(f) if self.params_have_attrs(&f.body) => return true,
 
+            _ if self.options.check && self.holds_coalesce_if(s) => return true,
+
+            _ if !self.elem_bounds.is_empty() && self.holds_element_index(s) => return true,
+
             _ => {}
         }
 
@@ -5996,6 +6287,11 @@ impl<'s> Desugar<'s> {
             Stmt::PatternLocal(p) => self.pattern_local(p),
 
             Stmt::If(i) if if_has_local(i) => self.if_with_locals(stmt.span(), i),
+
+            Stmt::If(i) if self.options.check && self.coalesce_if(i).is_some() => {
+                let (name, value) = self.coalesce_if(i).expect("matched above");
+                self.coalesce_if_stmt(stmt.span(), i, name, value);
+            }
 
             Stmt::While(w) if matches!(w.cond, Cond::Local { .. }) => {
                 self.while_with_local(stmt.span(), w);
@@ -6575,6 +6871,20 @@ impl<'s> Desugar<'s> {
                 let targs = pack_type_args(&self.lower_type_args(&text));
                 let a = self.args_text(args);
                 self.generate(anchor, &format!("{std}.Signal.new{targs}{a}"));
+            }
+
+            // An element read out of a bounded `T[]`. The cast is the
+            // whole expression, so `xs[i]:size()` still calls through it.
+            Expr::Index {
+                object,
+                key: IndexKey::Computed(k),
+                optional: false,
+                ..
+            } if self.element_bound(object).is_some() => {
+                let ty = self.element_bound(object).expect("matched above");
+                let obj = self.render_to_string(object);
+                let key = self.render_to_string(k);
+                self.generate(anchor, &format!("({obj}[{key}] :: {ty})"));
             }
 
             Expr::Index { .. } | Expr::Call { .. } | Expr::Child { .. } | Expr::NonNil { .. }
@@ -8819,6 +9129,18 @@ impl<'s> Desugar<'s> {
             self.bind_nested_bounds(&body.block, &bounds);
         }
 
+        // A bounded `T[]` parameter: the loop heads take the annotation
+        // now, and `expr` casts the index reads while the body renders.
+        let mut elements = Vec::new();
+
+        if self.options.check && !bounds.is_empty() {
+            elements = self.bounded_array_params(body, &bounds);
+
+            if !elements.is_empty() {
+                self.bind_loop_bounds(&body.block, &elements);
+            }
+        }
+
         if let Some(g) = body.generics
             && !bounds.is_empty()
         {
@@ -8978,7 +9300,17 @@ impl<'s> Desugar<'s> {
         // 5. The body, its trailing trivia, and the close.
         let body_start = self.block_start_or(&body.block, end_tok.start);
         self.copy(cursor, body_start);
+        let saved_elems = if elements.is_empty() {
+            None
+        } else {
+            Some(std::mem::replace(&mut self.elem_bounds, elements))
+        };
         self.function_block(body);
+
+        if let Some(saved) = saved_elems {
+            self.elem_bounds = saved;
+        }
+
         let after = self.block_end_or(&body.block, body_start);
         self.copy(after, end_tok.start);
 
@@ -9032,6 +9364,108 @@ impl<'s> Desugar<'s> {
                 }
             }
         }
+    }
+
+    /*
+    The check artifact reads an element of a bounded `T[]` at its bound.
+
+    Luau's Array is invariant, so `Array<T & Bound>` accepts no concrete
+    argument and the parameter stays `Array<T>`. The bound comes back at
+    each element read instead: a loop variable takes an annotation, and
+    an index expression takes a cast in `expr`.
+    */
+    fn bounded_array_params(
+        &mut self,
+        body: &FunctionBody,
+        bounds: &[(String, String)],
+    ) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+
+        for p in &body.params {
+            let Some(t) = p.ty else {
+                continue;
+            };
+            let Some(elem) = array_element(self.text_of(t)) else {
+                continue;
+            };
+            let Some((name, bound)) = bounds.iter().find(|(n, _)| n == elem) else {
+                continue;
+            };
+            out.push((
+                self.text_of(p.name).to_string(),
+                format!("({name} & {bound})"),
+            ));
+        }
+
+        out
+    }
+
+    /// Annotates every `for _, x in xs do` whose `xs` is a bounded `T[]`.
+    /// The annotation is one insert inside the loop head, so the head
+    /// copies as the source wrote it.
+    fn bind_loop_bounds(&mut self, block: &Block, elements: &[(String, String)]) {
+        for stmt in &block.stmts {
+            if let Stmt::GenericFor(f) = stmt
+                && let [var, elem] = &f.vars[..]
+                && var.destructure.is_none()
+                && elem.ty.is_none()
+                && elem.destructure.is_none()
+                && let [Expr::Name(n)] = &f.exprs[..]
+                && let Some((_, ty)) = elements.iter().find(|(p, _)| p == self.text_of(*n))
+            {
+                let at = self.byte_end(elem.name);
+                let ty = ty.clone();
+                self.inserts.push((at, format!(": {ty}")));
+            }
+
+            self.loop_bounds_in(stmt_children(stmt), elements);
+        }
+    }
+
+    fn loop_bounds_in(&mut self, children: Vec<Child<'_>>, elements: &[(String, String)]) {
+        for child in children {
+            match child {
+                Child::Expr(_) => {}
+
+                Child::Block(b) => self.bind_loop_bounds(b, elements),
+
+                Child::Function(f) => self.bind_loop_bounds(&f.block, elements),
+            }
+        }
+    }
+
+    /// Whether a statement reads an index of a bounded `T[]`. The walk
+    /// copies a statement whole when nothing under it changes, so the
+    /// cast has to announce itself here.
+    fn holds_element_index(&self, s: &Stmt) -> bool {
+        stmt_children(s).iter().any(|c| self.element_index_in(c))
+    }
+
+    fn element_index_in(&self, c: &Child<'_>) -> bool {
+        match c {
+            Child::Expr(e) => {
+                matches!(e, Expr::Index { object, key: IndexKey::Computed(_), optional: false, .. }
+                    if self.element_bound(object).is_some())
+                    || expr_children(e).iter().any(|c| self.element_index_in(c))
+            }
+
+            Child::Block(b) => b.stmts.iter().any(|s| self.holds_element_index(s)),
+
+            Child::Function(f) => f.block.stmts.iter().any(|s| self.holds_element_index(s)),
+        }
+    }
+
+    /// The bound an index of this object reads back as.
+    fn element_bound(&self, object: &Expr) -> Option<String> {
+        let Expr::Name(n) = object else {
+            return None;
+        };
+        let name = self.text_of(*n);
+
+        self.elem_bounds
+            .iter()
+            .find(|(p, _)| p == name)
+            .map(|(_, ty)| ty.clone())
     }
 
     fn params_open_tok(&self, body: &FunctionBody) -> u32 {
@@ -10063,6 +10497,44 @@ fn apply_bounds(ty: &str, bounds: &[(String, String)]) -> String {
     }
 
     out
+}
+
+/// Whether a type text names `name` with arguments other than the ones
+/// `whole` spells. A reference with the same arguments is the recursion
+/// Luau allows.
+fn names_other_args(text: &str, name: &str, whole: &str) -> bool {
+    let head = format!("{name}<");
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(&head) {
+        let at = from + i;
+        let before = text.as_bytes().get(at.wrapping_sub(1));
+        let word = at == 0
+            || before.is_none_or(|c| !(c.is_ascii_alphanumeric() || *c == b'_' || *c == b'.'));
+
+        if word && !text[at..].starts_with(whole) {
+            return true;
+        }
+
+        from = at + head.len();
+    }
+
+    false
+}
+
+/// The element a parameter's array type names: `T[]` and `Array<T>`
+/// both hold `T`. An optional array holds nothing: a nil element read
+/// needs the guard, not a cast.
+fn array_element(ty: &str) -> Option<&str> {
+    let ty = ty.trim();
+
+    if let Some(inner) = ty.strip_suffix("[]") {
+        return Some(inner.trim());
+    }
+
+    ty.strip_prefix("Array<")
+        .and_then(|t| t.strip_suffix('>'))
+        .map(str::trim)
 }
 
 /// One type with `T[]` written as `Array<T>`, at every depth. The

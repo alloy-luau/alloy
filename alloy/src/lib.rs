@@ -33,6 +33,7 @@ pub mod modules;
 pub mod project;
 pub mod render;
 pub mod roblox_classes;
+pub mod roblox_props;
 pub mod schema;
 /// The fold that turns the checker's printed types back into the names
 /// the source wrote. The language server owns the file; the CLI reads

@@ -103,6 +103,7 @@ fn the_diagnostic_cap_holds() {
 
 const CORPUS: &[&str] = &[
     "local x = 1\nprint(x)\n",
+    "enum Phase as\n\tLobby\n\tPlaying(round: number)\nend\n",
     "if a then b() elseif c then d() else e() end\n",
     "for i = 1, 10 do t[i] = i * 2 end\n",
     "local function f(a: number, b: string?): boolean return a > #b end\n",

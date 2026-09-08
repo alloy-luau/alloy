@@ -58,19 +58,34 @@ impl TypeDiag {
     /// The book section the kind belongs to, for a report Alloy raised
     /// itself; `None` leaves the report to the checker's own `luau`.
     pub fn code(&self) -> Option<&'static str> {
-        match self.kind.as_str() {
-            "UnknownModule" => Some("3.2"),
-            "DirectiveError" => Some("4.4"),
-            _ => None,
-        }
+        section_of(&self.kind)
     }
 
     /// A type or syntax error, as opposed to one of the checker's lints.
     pub fn is_error(&self) -> bool {
         matches!(
             self.kind.as_str(),
-            "TypeError" | "SyntaxError" | "UnknownModule" | "DirectiveError"
+            "TypeError"
+                | "SyntaxError"
+                | "UnknownModule"
+                | "DirectiveError"
+                | "StructError"
+                | "EnumError"
+                | "ExhaustiveMatch"
         )
+    }
+}
+
+/// The book section a report kind belongs to; `None` leaves the report
+/// to the checker's own `luau` code.
+pub fn section_of(kind: &str) -> Option<&'static str> {
+    match kind {
+        "UnknownModule" => Some("3.2"),
+        "DirectiveError" => Some("4.4"),
+        "StructError" => Some("3.6"),
+        "EnumError" => Some("3.4"),
+        "ExhaustiveMatch" => Some("4.2"),
+        _ => None,
     }
 }
 
@@ -567,6 +582,22 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         }
 
+        // The enum emit writes `tag` and `_1`; a report about one of
+        // those, on a line the source never wrote them on, describes
+        // the emit and names nothing the reader can fix.
+        // The same for a duplicate key the source wrote once: a markup
+        // attribute that expands to several properties builds one.
+        if f.source
+            .lines()
+            .nth(mapped.0.saturating_sub(1))
+            .is_some_and(|text| {
+                crate::shapes::names_the_emit_key(message, text)
+                    || crate::shapes::duplicate_only_in_the_emit(message, text)
+            })
+        {
+            continue;
+        }
+
         // Past its first error the parser invents the tree and the emit
         // copies the text through: `trait Zap` reads to the checker as
         // a call of an unknown global, and the `end` the recovery never
@@ -643,6 +674,25 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         .diagnostics
         .retain(|d| d.is_error() || !unparsed.contains(&d.rel));
 
+    // A name may be declared in two files. The file a report sits in is
+    // the one whose declaration the reader is looking at, so its own
+    // shapes answer first.
+    let per_file: Vec<(PathBuf, Vec<crate::declarations::Shape>)> = files
+        .iter()
+        .map(|f| {
+            let mut shapes = crate::declarations::shapes(&f.source);
+            let rest: Vec<_> = known
+                .shapes
+                .iter()
+                .filter(|s| !shapes.iter().any(|h| h.name() == s.name()))
+                .cloned()
+                .collect();
+            shapes.extend(rest);
+
+            (f.rel.clone(), shapes)
+        })
+        .collect();
+
     for d in &mut analysis.diagnostics {
         if d.kind != "TypeError" && d.kind != "SyntaxError" {
             continue;
@@ -664,8 +714,63 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
                 d.line = at;
                 d.col = 1;
             }
+
+            continue;
+        }
+
+        let shapes = per_file
+            .iter()
+            .find(|(rel, _)| *rel == d.rel)
+            .map_or(known.shapes.as_slice(), |(_, s)| s.as_slice());
+
+        if let Some(text) = whole
+            && let Some(better) = resite_report(&d.message, shapes, text, d.line, d.col)
+        {
+            d.kind = better.kind.to_string();
+            d.message = better.message;
+
+            if let Some((line, col)) = better.at {
+                d.line = line;
+                d.col = col;
+            }
         }
     }
+
+    // The checker checks an invariant position both ways and against
+    // the optional a method's parameter carries, so one mistake reads
+    // three times at one place. Nothing in the source is optional.
+    let mut sites: Vec<(PathBuf, usize, usize, String)> = Vec::new();
+
+    analysis.diagnostics.retain(|d| {
+        let key = (
+            d.rel.clone(),
+            d.line,
+            d.col,
+            d.message.replace("?'", "'").replace("?`", "`"),
+        );
+
+        match sites.contains(&key) {
+            true => false,
+
+            false => {
+                sites.push(key);
+
+                true
+            }
+        }
+    });
+
+    // `private_access` already names the field and says who reaches it,
+    // and it carries the line the source wrote. One report per mistake.
+    analysis.diagnostics.retain(|d| {
+        !d.message.contains("is private to")
+            || !files.iter().any(|f| {
+                f.rel == d.rel
+                    && f.lint_lines
+                        .iter()
+                        .any(|(at, name)| *at == d.line && *name == "private_access")
+            })
+    });
 
     // Two method bodies of one `impl` report the same mistake once the
     // rewrite moves both to the `impl` line.
@@ -740,7 +845,7 @@ pub fn known_shapes(files: &[CheckSource]) -> crate::shapes::Known {
 /// The runtime's own names taken out of a printed type: the require
 /// binding, the mapped-type functions, and the `__all` suffix an
 /// exported table carries.
-fn strip_std_prefix(text: &str) -> String {
+pub fn strip_std_prefix(text: &str) -> String {
     if !(text.contains("__alloy") || text.contains("__mapped_") || text.contains("__all")) {
         return text.to_string();
     }
@@ -751,9 +856,26 @@ fn strip_std_prefix(text: &str) -> String {
         out = out.replace(&format!("__alloy_{primitive}."), &format!("{primitive}."));
     }
 
-    out.replace("__alloy.", "")
-        .replace("__all", "")
-        .replace("__mapped_optional<", "Partial<")
+    // `__all` is the suffix an exported table carries. Stripping it
+    // inside `__alloy` would leave `oy`, so the name has to end there.
+    let mut cut = out.replace("__alloy.", "");
+    let mut from = 0;
+
+    while let Some(i) = cut[from..].find("__all") {
+        let at = from + i;
+        let end = at + "__all".len();
+
+        if cut[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            from = end;
+
+            continue;
+        }
+
+        cut.replace_range(at..end, "");
+        from = at;
+    }
+
+    cut.replace("__mapped_optional<", "Partial<")
         .replace("__mapped_read<", "Readonly<")
         .replace("__mapped_write<", "Sink<")
 }
@@ -782,6 +904,10 @@ pub fn friendly_type_message(
     if let Some(hint) = crate::shapes::plain_table_hint(&folded) {
         return hint;
     }
+
+    // The fold names an Array after the shared pass ran, so the two
+    // spellings only meet here.
+    let folded = crate::shapes::table_beside_array(&folded).unwrap_or(folded);
 
     let Some(line) = line else {
         return folded;
@@ -1420,10 +1546,41 @@ fn map_position(
     let (sl, sc) = line_col(&f.source, src_off);
 
     if sl == line {
-        Some((line, sc))
-    } else {
-        Some((line, 1))
+        return Some((line, sc));
     }
+
+    // The markup lowering moves an expression off the line it was
+    // written on, so the map answers with the tag's place instead. The
+    // name the report quotes is still on the line the reader reads.
+    let col = f
+        .source
+        .lines()
+        .nth(line.saturating_sub(1))
+        .and_then(|text| named_column(text, message))
+        .unwrap_or(1);
+
+    Some((line, col))
+}
+
+/// The one-based column of the name a report quotes, when the line
+/// holds it. Only the phrases that quote a name the source wrote count;
+/// a quoted type is not a place.
+fn named_column(text: &str, message: &str) -> Option<usize> {
+    const OPENERS: [&str; 6] = [
+        "Unknown global '",
+        "Unknown type '",
+        "Key '",
+        "does not have key '",
+        "Cannot add property '",
+        "Variable '",
+    ];
+
+    let name = OPENERS
+        .iter()
+        .filter_map(|opener| quoted_after(message, opener))
+        .find(|name| !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))?;
+
+    word_column(text, name)
 }
 
 /// The variable of a `LocalUnused` or `FunctionUnused` lint.
@@ -1488,9 +1645,661 @@ fn line_col(text: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// A report the checker sited on the wrong token, or worded in the
+/// terms of the emit. The answer is the kind, the message, and, when
+/// the report moves, its one-based line and column.
+///
+/// The language server calls it too, so the terminal and the editor say
+/// one thing.
+pub fn resite_report(
+    message: &str,
+    shapes: &[crate::declarations::Shape],
+    source: &str,
+    line: usize,
+    col: usize,
+) -> Option<Resited> {
+    let text = source.lines().nth(line.saturating_sub(1))?;
+
+    struct_field_report(message, shapes, source, text, line)
+        .or_else(|| duplicate_declaration(message, source, line))
+        .or_else(|| unknown_type_report(message, source, text, line))
+        .or_else(|| variant_call_report(message, shapes, text, line, col))
+        .or_else(|| array_element_report(message, text, line, col))
+        .or_else(|| unmet_bound_report(message, source, text, line, col))
+        .or_else(|| covered_arm_report(message, text, line))
+}
+
+/// A `case` an arm above already covers. The emit tests the arms in
+/// order, so the checker narrows the value away and reports the last
+/// test as a comparison of types that cannot meet, in a negation the
+/// source cannot write.
+fn covered_arm_report(message: &str, text: &str, line: usize) -> Option<Resited> {
+    if !(message.contains("cannot be compared with ==") && message.contains("~\"")) {
+        return None;
+    }
+
+    let body = text.trim_start();
+    let value = body.strip_prefix("case ")?.split_whitespace().next()?;
+
+    Some(Resited {
+        kind: "ExhaustiveMatch",
+        message: format!("this arm never runs: an arm above already covers {value}"),
+        at: Some((line, text.len() - body.len() + 1)),
+    })
+}
+
+/// An array literal whose elements have the wrong type. The checker
+/// checks the element type in both directions and against the optional
+/// the array's own methods carry, so one literal draws three reports,
+/// all on the call. The bracket is the mistake.
+fn array_element_report(message: &str, text: &str, line: usize, col: usize) -> Option<Resited> {
+    let want = quoted_after(message, "Expected this to be exactly '")?;
+    let got = quoted_after(message.split_once("but got ")?.1, "'")?;
+    let (want, got) = (want.trim_end_matches('?'), got.trim_end_matches('?'));
+    let open = text.get(col.saturating_sub(1)..)?.find('[')?;
+
+    Some(Resited {
+        kind: "TypeError",
+        message: format!("Expected this to be a `{want}[]`, but got a `{got}[]`"),
+        at: Some((line, col + open)),
+    })
+}
+
+/// An argument that does not meet a generic bound. The checker knows
+/// the bound as the type the parameter was replaced by, so it reads as
+/// a plain mismatch and sits on the call.
+fn unmet_bound_report(
+    message: &str,
+    source: &str,
+    text: &str,
+    line: usize,
+    col: usize,
+) -> Option<Resited> {
+    let want = quoted_after(message, "Expected this to be '")?;
+    let got = quoted_after(message.split_once("but got ")?.1, "'")?;
+
+    if !declares_trait(source, want) {
+        return None;
+    }
+
+    let rest = text.get(col.saturating_sub(1)..)?;
+    let open = rest.find('(')?;
+    let lead = rest[open + 1..].len() - rest[open + 1..].trim_start().len();
+
+    Some(Resited {
+        kind: "TypeError",
+        message: format!("`{got}` does not satisfy the bound `{want}`"),
+        at: Some((line, col + open + 1 + lead)),
+    })
+}
+
+/// Whether the source declares the name as a trait, which Alloy writes
+/// as a bound and nowhere else.
+fn declares_trait(source: &str, name: &str) -> bool {
+    source.lines().any(|line| {
+        let body = line.trim_start();
+        let body = body.strip_prefix("export ").unwrap_or(body);
+
+        body.strip_prefix("trait ").is_some_and(|rest| {
+            rest.strip_prefix(name)
+                .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+        })
+    })
+}
+
+/// What `resite_report` answers: the kind the report carries after the
+/// rewrite, its text, and the place it moves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resited {
+    pub kind: &'static str,
+    pub message: String,
+    /// One-based line and column, when the report moves.
+    pub at: Option<(usize, usize)>,
+}
+
+/// A member a struct does not have, read, written, or called. The
+/// checker names the struct's runtime table and puts the report on the
+/// base of the access; the reader wants the member's own name, and the
+/// members that do exist.
+fn struct_field_report(
+    message: &str,
+    shapes: &[crate::declarations::Shape],
+    source: &str,
+    text: &str,
+    line: usize,
+) -> Option<Resited> {
+    let read = quoted_after(message, "Type '").zip(quoted_after(message, "does not have key '"));
+    let write = quoted_after(message, "Cannot add property '")
+        .zip(quoted_after(message, "' to table '"))
+        .map(|(key, owner)| (owner, key));
+    let (owner, key) = read.or(write)?;
+    let fields = shapes.iter().find_map(|s| match s {
+        crate::declarations::Shape::Struct { name, fields } if name == owner => Some(fields),
+
+        _ => None,
+    })?;
+    let at = member_column(text, key);
+    let called = at.is_some_and(|c| text.as_bytes().get(c.saturating_sub(2)) == Some(&b':'));
+    let at = at.map(|c| (line, c));
+    let methods = impl_methods(source, owner);
+    let private =
+        fields.iter().any(|(n, p)| n == key && *p) || methods.iter().any(|(n, p)| n == key && *p);
+
+    if private {
+        return Some(Resited {
+            kind: "StructError",
+            message: format!("`{key}` is private to `{owner}`; only its impl reaches it"),
+            at,
+        });
+    }
+
+    // A member the source does write belongs to a report of its own; a
+    // list of the others would not help.
+    if methods.iter().any(|(n, _)| n == key) {
+        return None;
+    }
+
+    let (noun, names): (&str, Vec<&str>) = match called {
+        true => ("method", methods.iter().map(|(n, _)| n.as_str()).collect()),
+
+        false => (
+            "field",
+            fields
+                .iter()
+                .filter(|(_, private)| !private)
+                .map(|(n, _)| n.as_str())
+                .collect(),
+        ),
+    };
+    // A typo is the common case, and the nearest name answers it. A
+    // private field is a candidate: the reader inside the impl sees it.
+    let near = fields
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .chain(methods.iter().map(|(n, _)| n.as_str()))
+        .map(|n| (edit_distance(n, key), n))
+        .filter(|(d, _)| *d <= 2 && *d < key.len())
+        .min();
+
+    let tail = match near {
+        Some((_, n)) => format!("; did you mean `{n}`?"),
+
+        None if names.is_empty() => String::new(),
+
+        None => format!("; its {noun}s are {}", crate::desugar::list_names(&names)),
+    };
+
+    Some(Resited {
+        kind: "StructError",
+        message: format!("`{owner}` has no {noun} `{key}`{tail}"),
+        at,
+    })
+}
+
+/// The methods an `impl` of the owner declares, each with whether it is
+/// private.
+fn impl_methods(source: &str, owner: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut inside = false;
+
+    for line in source.lines() {
+        let body = line.trim();
+
+        if let Some(rest) = body.strip_prefix("impl ") {
+            let target = rest.rsplit(" for ").next().unwrap_or(rest).trim();
+            inside = target
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .eq(owner.chars());
+
+            continue;
+        }
+
+        if !inside {
+            continue;
+        }
+
+        if body == "end" && !line.starts_with([' ', '\t']) {
+            inside = false;
+
+            continue;
+        }
+
+        let private = body.starts_with("private ");
+        let head = body.strip_prefix("private ").unwrap_or(body);
+
+        if let Some(rest) = head.strip_prefix("function ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            if !name.is_empty() && rest[name.len()..].starts_with(['(', '<']) {
+                out.push((name, private));
+            }
+        }
+    }
+
+    out
+}
+
+/// A name declared twice. The checker reports on the `end` of the
+/// second declaration and names the `end` of the first; the reader
+/// looks for the two names.
+fn duplicate_declaration(message: &str, source: &str, line: usize) -> Option<Resited> {
+    let name = quoted_after(message, "Redefinition of type '")?;
+    let decls = type_declarations(source, name);
+    let second = decls
+        .iter()
+        .rposition(|(at, _)| *at <= line)
+        .filter(|i| *i > 0)?;
+    let (at, col) = decls[second];
+
+    Some(Resited {
+        kind: "TypeError",
+        message: format!(
+            "`{name}` is already declared, on line {}",
+            decls[second - 1].0
+        ),
+        at: Some((at, col)),
+    })
+}
+
+/// Every place a source declares a type name, as one-based line and
+/// column of the name.
+fn type_declarations(source: &str, name: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+
+    for (i, line) in source.lines().enumerate() {
+        let body = line.trim_start();
+        let body = body.strip_prefix("export ").unwrap_or(body);
+
+        for head in ["struct ", "enum ", "type ", "interface ", "trait "] {
+            let Some(rest) = body.strip_prefix(head) else {
+                continue;
+            };
+
+            if rest
+                .strip_prefix(name)
+                .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+                && let Some(at) = line.find(&format!("{head}{name}"))
+            {
+                out.push((i + 1, at + head.len() + 1));
+            }
+        }
+    }
+
+    out
+}
+
+/// `Unknown type 'N'`. The checker puts it on the token that uses the
+/// type, not on the name; and when `N` is a value in scope, the mirror
+/// of "`N` is a type, not a value" is the sentence.
+fn unknown_type_report(message: &str, source: &str, text: &str, line: usize) -> Option<Resited> {
+    let name = quoted_after(message, "Unknown type '")?;
+    let col = word_column(text, name)?;
+    let at = Some((line, col));
+
+    if type_declarations(source, name).is_empty() {
+        if binds_value(source, name) {
+            return Some(Resited {
+                kind: "TypeError",
+                message: format!("`{name}` is a value, not a type"),
+                at,
+            });
+        }
+
+        if is_generic_bound(text, col) {
+            return Some(Resited {
+                kind: "TypeError",
+                message: format!("`{name}` names no trait or interface; a bound needs one"),
+                at,
+            });
+        }
+    }
+
+    Some(Resited {
+        kind: "TypeError",
+        message: message.to_string(),
+        at,
+    })
+}
+
+/// Whether the source binds the name as a value: a local, a `const`, or
+/// a function.
+fn binds_value(source: &str, name: &str) -> bool {
+    source.lines().any(|line| {
+        let body = line.trim_start();
+        let body = body.strip_prefix("export ").unwrap_or(body);
+
+        ["local function ", "local ", "const ", "function "]
+            .iter()
+            .any(|head| {
+                body.strip_prefix(head).is_some_and(|rest| {
+                    rest.strip_prefix(name).is_some_and(|tail| {
+                        !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                    })
+                })
+            })
+    })
+}
+
+/// Whether the name at a one-based column sits in a generic parameter
+/// list, after the `:` that opens a bound.
+fn is_generic_bound(line: &str, col: usize) -> bool {
+    let Some(before) = line.get(..col.saturating_sub(1)) else {
+        return false;
+    };
+    let head = before.trim_end();
+    let Some(head) = head.strip_suffix(':') else {
+        return false;
+    };
+
+    match head.rfind('<') {
+        Some(open) => head.rfind('(').is_none_or(|paren| paren < open),
+
+        None => false,
+    }
+}
+
+/// An enum variant built with the wrong payload. The checker counts the
+/// payload as a function's parameters, and a unit variant is a string
+/// it cannot call. Alloy's own wording for a pattern says it.
+fn variant_call_report(
+    message: &str,
+    shapes: &[crate::declarations::Shape],
+    text: &str,
+    line: usize,
+    col: usize,
+) -> Option<Resited> {
+    let (sep, receiver, member) = call_head(text, col)?;
+
+    if sep != '.' {
+        return None;
+    }
+
+    let payload = shapes.iter().find_map(|s| match s {
+        crate::declarations::Shape::Enum { name, variants } if *name == receiver => variants
+            .iter()
+            .find(|(v, _)| *v == member)
+            .map(|(_, types)| types.len()),
+
+        _ => None,
+    })?;
+    let at = member_column(text, &member).map(|c| (line, c));
+
+    if message.starts_with("Cannot call a value of type") {
+        return (payload == 0).then(|| Resited {
+            kind: "EnumError",
+            message: format!("the variant `{member}` carries no payload"),
+            at,
+        });
+    }
+
+    let (_, given) = arity_counts(message).filter(|_| message.contains("Function expects"))?;
+    let plural = if payload == 1 { "value" } else { "values" };
+    let tail = match given {
+        0 => "none given".to_string(),
+
+        n => format!("{n} given"),
+    };
+
+    Some(Resited {
+        kind: "EnumError",
+        message: format!("the variant `{member}` carries {payload} {plural}, {tail}"),
+        at,
+    })
+}
+
+/// The one-based column of `.name` or `:name` on a line, at the name.
+fn member_column(line: &str, name: &str) -> Option<usize> {
+    [format!(".{name}"), format!(":{name}")]
+        .iter()
+        .filter_map(|needle| {
+            line.match_indices(needle.as_str())
+                .find(|(at, _)| {
+                    !line[at + needle.len()..]
+                        .starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                })
+                .map(|(at, _)| at + 2)
+        })
+        .min()
+}
+
+/// The one-based column of a name on a line, as a whole word.
+fn word_column(line: &str, name: &str) -> Option<usize> {
+    line.match_indices(name)
+        .find(|(at, _)| {
+            !line[..*at].ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                && !line[at + name.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+        })
+        .map(|(at, _)| at + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resited(message: &str, source: &str, line: usize, col: usize) -> Resited {
+        let shapes = crate::declarations::shapes(source);
+
+        resite_report(message, &shapes, source, line, col).expect("a rewrite")
+    }
+
+    const STRUCT_SRC: &str = "struct Loadout as\n    weapon: string\n    ammo: number\nend\n\nlocal kit = new Loadout { weapon = \"Bow\", ammo = 12 }\nlocal n = kit.amo\nkit.wepon = \"Sword\"\n";
+
+    #[test]
+    fn a_field_read_names_the_field_and_its_place() {
+        let got = resited("Type 'Loadout' does not have key 'amo'", STRUCT_SRC, 7, 11);
+
+        assert_eq!(got.kind, "StructError");
+        assert_eq!(
+            got.message,
+            "`Loadout` has no field `amo`; did you mean `ammo`?"
+        );
+        assert_eq!(got.at, Some((7, 15)));
+    }
+
+    #[test]
+    fn a_field_write_reads_as_a_field_not_a_table() {
+        let got = resited(
+            "Cannot add property 'wepon' to table 'Loadout'",
+            STRUCT_SRC,
+            8,
+            1,
+        );
+
+        assert_eq!(
+            got.message,
+            "`Loadout` has no field `wepon`; did you mean `weapon`?"
+        );
+        assert_eq!(got.at, Some((8, 5)));
+    }
+
+    #[test]
+    fn a_field_with_no_near_name_lists_the_fields() {
+        let source = "struct Point as\n    x: number\n    y: number\nend\nlocal p = new Point { x = 1, y = 2 }\nprint(p.nothing)\n";
+        let got = resited("Type 'Point' does not have key 'nothing'", source, 6, 7);
+
+        assert_eq!(
+            got.message,
+            "`Point` has no field `nothing`; its fields are `x` and `y`"
+        );
+    }
+
+    #[test]
+    fn a_private_member_reads_as_private_and_not_as_missing() {
+        let source = "struct Cooldown as\n    read name: string\n    private last: number = 0\nend\n\nimpl Cooldown\n    private function stamp(self)\n    end\nend\n\nprint(c.last)\nc:stamp()\n";
+
+        assert_eq!(
+            resited("Type 'Cooldown' does not have key 'last'", source, 11, 7).message,
+            "`last` is private to `Cooldown`; only its impl reaches it"
+        );
+        assert_eq!(
+            resited("Type 'Cooldown' does not have key 'stamp'", source, 12, 1).message,
+            "`stamp` is private to `Cooldown`; only its impl reaches it"
+        );
+    }
+
+    #[test]
+    fn a_method_the_struct_does_not_write_reads_as_a_method() {
+        let source = "struct Sq as side: number end\n\nimpl Sq\n    function area(self): number\n        return 1\n    end\nend\n\nlocal gone = s:perimeter()\n";
+        let got = resited("Type 'Sq' does not have key 'perimeter'", source, 9, 14);
+
+        assert_eq!(
+            got.message,
+            "`Sq` has no method `perimeter`; its methods are `area`"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_declaration_names_both_places() {
+        let source =
+            "struct Item as\n    id: number\nend\n\nstruct Item as\n    name: string\nend\n";
+        let got = resited(
+            "Redefinition of type 'Item', previously defined at line 3",
+            source,
+            7,
+            1,
+        );
+
+        assert_eq!(got.message, "`Item` is already declared, on line 1");
+        assert_eq!(got.at, Some((5, 8)));
+    }
+
+    #[test]
+    fn a_value_used_as_a_type_reads_as_a_value() {
+        let source = "local scale = 2\nlocal bad: scale = 1\n";
+        let got = resited("Unknown type 'scale'", source, 2, 12);
+
+        assert_eq!(got.message, "`scale` is a value, not a type");
+        assert_eq!(got.at, Some((2, 12)));
+    }
+
+    #[test]
+    fn a_bound_that_names_nothing_sits_on_the_bound() {
+        let source =
+            "local function shout<T: Loud>(item: T): string\n    return tostring(item)\nend\n";
+        let got = resited("Unknown type 'Loud'", source, 1, 37);
+
+        assert_eq!(
+            got.message,
+            "`Loud` names no trait or interface; a bound needs one"
+        );
+        assert_eq!(got.at, Some((1, 25)));
+    }
+
+    #[test]
+    fn a_variant_built_with_the_wrong_payload_reads_as_a_variant() {
+        let source = "enum Phase as\n    Lobby\n    Playing(number)\n    Over(string, number)\nend\n\nlocal p1 = Phase.Playing()\nlocal p2 = Phase.Over(\"red\")\nlocal p3 = Phase.Lobby(1)\n";
+
+        assert_eq!(
+            resited(
+                "Argument count mismatch. Function expects 1 argument, but none are specified",
+                source,
+                7,
+                12
+            )
+            .message,
+            "the variant `Playing` carries 1 value, none given"
+        );
+        assert_eq!(
+            resited(
+                "Argument count mismatch. Function expects 2 arguments, but only 1 is specified",
+                source,
+                8,
+                12
+            )
+            .message,
+            "the variant `Over` carries 2 values, 1 given"
+        );
+
+        let unit = resited(
+            "Cannot call a value of type \"Lobby\" in union: Phase",
+            source,
+            9,
+            12,
+        );
+
+        assert_eq!(unit.kind, "EnumError");
+        assert_eq!(unit.message, "the variant `Lobby` carries no payload");
+        assert_eq!(unit.at, Some((9, 18)));
+    }
+
+    #[test]
+    fn an_array_literal_of_the_wrong_element_reads_once_on_the_bracket() {
+        let source =
+            "local function names(xs: string[]): number\n    return #xs\nend\n\nnames([1, 2, 3])\n";
+        let got = resited(
+            "Expected this to be exactly 'string?', but got 'number'",
+            source,
+            5,
+            1,
+        );
+
+        assert_eq!(
+            got.message,
+            "Expected this to be a `string[]`, but got a `number[]`"
+        );
+        assert_eq!(got.at, Some((5, 7)));
+    }
+
+    #[test]
+    fn an_unmet_bound_reads_as_a_bound_on_the_argument() {
+        let source = "trait Named\n    function name(self): string\nend\n\nstruct Plain as\n    n: number\nend\n\nprint(announce(new Plain { n = 1 }))\n";
+        let got = resited("Expected this to be 'Named', but got 'Plain'", source, 9, 7);
+
+        assert_eq!(got.message, "`Plain` does not satisfy the bound `Named`");
+        assert_eq!(got.at, Some((9, 16)));
+    }
+
+    #[test]
+    fn an_arm_an_earlier_one_covers_reads_as_an_arm() {
+        let source = "local function grade(name: string): number\n    return match name with\n        case \"gold\" then 3\n        case \"silver\" then 2\n        case \"gold\" then 1\n        default 0\n    end\nend\n";
+        let got = resited(
+            "Types string & ~\"gold\" & ~\"silver\" and \"gold\" cannot be compared with == because they do not have the same metatable",
+            source,
+            5,
+            9,
+        );
+
+        assert_eq!(got.kind, "ExhaustiveMatch");
+        assert_eq!(
+            got.message,
+            "this arm never runs: an arm above already covers \"gold\""
+        );
+        assert_eq!(got.at, Some((5, 9)));
+    }
+
+    #[test]
+    fn the_strip_leaves_the_require_binding_whole() {
+        assert_eq!(
+            strip_std_prefix("Too many type parameters passed to '__alloy'"),
+            "Too many type parameters passed to '__alloy'"
+        );
+        assert_eq!(strip_std_prefix("__alloy.Future<number>"), "Future<number>");
+        assert_eq!(
+            strip_std_prefix("Key 'x' not found in 'lib__all'"),
+            "Key 'x' not found in 'lib'"
+        );
+        assert!(crate::shapes::names_only_the_emit(
+            "Too many type parameters passed to '__alloy', which is typed as <T>(...any) -> T[]"
+        ));
+    }
+
+    #[test]
+    fn a_report_off_its_line_keeps_the_name_the_reader_wrote() {
+        let text = "            <TextLabel Size={12} Text={props_missing} />";
+
+        assert_eq!(
+            named_column(
+                text,
+                "Unknown global 'props_missing'; consider assigning to it first"
+            ),
+            Some(40)
+        );
+        assert_eq!(named_column(text, "Expected this to be 'number'"), None);
+    }
 
     #[test]
     fn an_unknown_module_names_what_was_asked_for() {

@@ -63,7 +63,7 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
         let (node, _) =
             luaux::markup::parse_node(src, *a).map_err(|e| unparsed(src, e.offset, &e.message))?;
         let lines = print_node(src, &node, options, 0);
-        let width = if lines.len() == 1 {
+        let width = if lines.len() == 1 && !parenthesized_block(src, *a, *b) {
             lines[0].1.chars().count()
         } else {
             options.column_width + 1
@@ -76,6 +76,26 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
     code.push_str(&src[last..]);
     let formatted = code_fmt(&code, options)?;
     Ok(substitute(&formatted, &printed, options))
+}
+
+/// Whether the source put the markup in parentheses of its own, one on
+/// the line above and one on the line below. `fmt` keeps that shape:
+/// it is the form the examples write, and a tag that fits on one line
+/// would otherwise lose it.
+fn parenthesized_block(src: &str, start: usize, end: usize) -> bool {
+    const BLANK: [char; 3] = [' ', '\t', '\r'];
+
+    let Some(before) = src[..start].trim_end_matches(BLANK).strip_suffix('\n') else {
+        return false;
+    };
+
+    if !before.trim_end_matches(BLANK).ends_with('(') {
+        return false;
+    }
+
+    src.get(end..)
+        .and_then(|after| after.trim_start_matches(BLANK).strip_prefix('\n'))
+        .is_some_and(|after| after.trim_start_matches(BLANK).starts_with(')'))
 }
 
 /// A name of the given width; the code formatter lays it out as one
@@ -600,6 +620,16 @@ mod tests {
     fn children_go_on_their_own_lines() {
         let src = "return (\n    <Frame>\n        <UICorner />\n        <TextLabel>{a}</TextLabel>\n    </Frame>\n)\n";
         assert_eq!(fmt(src), src);
+    }
+
+    /// A tag the author wrapped in parentheses of its own keeps that
+    /// shape, even when it would fit on one line.
+    #[test]
+    fn a_parenthesized_return_keeps_its_lines() {
+        let src = "local function Badge(props: { title: string })\n    return (\n        <TextLabel Text={props.title} />\n    )\nend\n";
+        assert_eq!(fmt(src), src);
+        let one = "local function Badge(props: { title: string })\n    return (<TextLabel Text={props.title} />)\nend\n";
+        assert_eq!(fmt(one), one);
     }
 
     #[test]

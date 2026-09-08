@@ -94,6 +94,14 @@ describe("Future", function()
 		end)
 		expect(err).toBe("why")
 	end)
+
+	it("and_then runs what andThen runs", function()
+		local seen
+		Future.resolve(3):and_then(function(v)
+			seen = v
+		end)
+		expect(seen).toBe(3)
+	end)
 end)
 
 return nil

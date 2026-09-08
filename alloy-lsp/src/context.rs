@@ -46,6 +46,9 @@ pub enum Context {
     },
     /// `import * |`.
     ImportStar,
+    /// `import Name, |`: a default binding took the first slot, so the
+    /// names in braces come next.
+    ImportBrace,
     /// `import * as M |` or `import { ... } |`: the `from`.
     ImportFrom,
     /// `attribute name(...) |`: the `on`.
@@ -84,6 +87,14 @@ pub enum Context {
     TraitMemberStart { prefix: String },
     /// `new Stats { |`: a field of the struct the literal fills.
     StructField { prefix: String, target: String },
+    /// The variant column of an `enum` body: a new name, and the `end`.
+    VariantStart { prefix: String },
+    /// Inside the string of `new Instance("|")`: an engine class name.
+    /// The emit moves the call, so the child answers elsewhere.
+    ClassName { prefix: String },
+    /// `new Instance("Part") { |`: a property of the class the string
+    /// names. The emit turns the table into assignments.
+    InstanceField { prefix: String, class: String },
 }
 
 /// What the declaration of a name says about the name's type.
@@ -205,6 +216,65 @@ pub fn in_string(src: &str, offset: usize) -> bool {
     inside_string(&src[line_start..offset])
 }
 
+/// The value `$matches(value, |` tests, when the caret sits in the
+/// pattern slot of the call. `$matches` takes the value first and the
+/// pattern second, so one comma at depth one opens the pattern.
+fn matches_scrutinee(head: &str) -> Option<String> {
+    let open = head.rfind("$matches(")? + "$matches(".len();
+    let inside = &head[open..];
+    let mut depth = 0i32;
+    let mut comma = None;
+
+    for (i, c) in inside.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 && comma.is_none() => comma = Some(i),
+            _ => {}
+        }
+    }
+
+    if depth < 0 {
+        return None;
+    }
+
+    let at = comma?;
+    let value = inside[..at].trim();
+
+    // Past the pattern's own comma the caret is in an argument list of
+    // the pattern, not in the pattern slot.
+    (!value.is_empty() && !inside[at + 1..].contains(',')).then(|| value.to_string())
+}
+
+/// The word a token opens, past the brackets the source put in front
+/// of it: `(new` names `new`, and `=` stays itself.
+fn opening_word(token: &str) -> &str {
+    let word = token.trim_start_matches(|c: char| !is_word(c));
+
+    match word.is_empty() {
+        true => token,
+
+        false => word,
+    }
+}
+
+/// Whether the caret sits in the class string of `new Instance("`.
+/// The emit turns the call into `Instance.new("Part")` and moves it, so
+/// the position the child reads is no longer the string.
+fn names_a_class(head: &str) -> bool {
+    let Some(open) = head.rfind(['"', '\'']) else {
+        return false;
+    };
+
+    if head[open + 1..].contains(['"', '\'']) {
+        return false;
+    }
+
+    let before = head[..open].trim_end();
+
+    before.ends_with("new Instance(") || before.ends_with("Instance.new(")
+}
+
 /// Whether the cursor names a parameter: inside the parenthesis of a
 /// `function` head or of a `remote` declaration, not after a `:` of the
 /// parameter. A remote's parameters are names the author is choosing,
@@ -212,13 +282,17 @@ pub fn in_string(src: &str, offset: usize) -> bool {
 fn names_a_parameter(head: &str) -> bool {
     let trimmed = head.trim_start();
     let statement = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-    let remote = statement
-        .starts_with("remote ")
-        .then(|| head.len() - statement.len() + "remote".len());
+    let indent = head.len() - statement.len();
+    // A `remote` and a `macro` name their parameters the way a
+    // `function` does, and neither word reaches the emit.
+    let declared = ["remote ", "macro "]
+        .iter()
+        .find(|word| statement.starts_with(*word))
+        .map(|word| indent + word.trim_end().len());
     let Some(f) = head
         .rfind("function")
         .map(|f| f + "function".len())
-        .or(remote)
+        .or(declared)
     else {
         return false;
     };
@@ -237,6 +311,25 @@ fn names_a_parameter(head: &str) -> bool {
     !last.contains(':') && !last.contains('=')
 }
 
+/// Whether the caret sits in the braces of a destructuring `local` or
+/// `const`. The names there come from the value alone, so no std name
+/// and no keyword belongs in the list.
+pub fn in_destructure(src: &str, offset: usize) -> bool {
+    let offset = offset.min(src.len());
+    let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let head = src[line_start..offset].trim_start();
+    let head = head.strip_prefix("export ").unwrap_or(head);
+    let opened = head
+        .strip_prefix("local ")
+        .or_else(|| head.strip_prefix("const "));
+
+    opened.is_some_and(|rest| {
+        let rest = rest.trim_start();
+
+        rest.starts_with('{') && !rest.contains('}') && !rest.contains('=')
+    })
+}
+
 /// The guard a member access carries before its separator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
@@ -246,13 +339,16 @@ pub enum Access {
     Optional,
     /// `a!.b`, which lowers to `(if a == nil then error(..) else a).b`.
     Asserted,
+    /// `"abc":upper()`, which lowers to `("abc"):upper()`: the emit
+    /// wraps the literal so the call parses.
+    Wrapped,
 }
 
 impl Access {
     /// The text between the receiver and the separator in the source.
     fn source_guard(self) -> &'static str {
         match self {
-            Access::Plain => "",
+            Access::Plain | Access::Wrapped => "",
             Access::Optional => "?",
             Access::Asserted => "!",
         }
@@ -262,7 +358,7 @@ impl Access {
     /// before the separator, and the other two write nothing.
     fn shadow_guard(self) -> &'static str {
         match self {
-            Access::Asserted => ")",
+            Access::Asserted | Access::Wrapped => ")",
             _ => "",
         }
     }
@@ -288,6 +384,16 @@ pub fn member_at(src: &str, offset: usize) -> Option<(String, Access, char, usiz
         Some('.' | ':') => return None,
         _ => (before, Access::Plain),
     };
+    // `"abc":upper()` and `` `a{b}`:split(",") ``: the receiver is the
+    // literal, which the emit wraps in parentheses.
+    if access == Access::Plain
+        && let Some(quote) = before.chars().next_back()
+        && matches!(quote, '"' | '\'' | '`')
+        && let Some(open) = before[..before.len() - quote.len_utf8()].rfind(quote)
+    {
+        return Some((before[open..].to_string(), Access::Wrapped, sep, word));
+    }
+
     let start = before
         .char_indices()
         .rev()
@@ -346,6 +452,47 @@ pub fn member_column(
     let col = at + lowered.len() + prefix;
 
     (col <= shadow_line.len()).then_some(col)
+}
+
+/// Where the member of a guarded access sits on the lowered line, when
+/// the receiver is a call and has no name of its own. `f(x)?:m()`
+/// lowers to `local _1 = f(x) if _1 ~= nil then _1:m() end`, and
+/// `f(x)?.m` to `(if _1 == nil then nil else _1.m)`, so the member
+/// follows the guard's `then` or `else`.
+pub fn guarded_member_column(head: &str, shadow_line: &str, sep: char) -> Option<usize> {
+    let guarded = head.trim_end_matches(is_word_byte);
+    let guarded = guarded.strip_suffix(sep)?;
+
+    if !guarded.ends_with(['?', '!']) || !guarded.trim_end_matches(['?', '!']).ends_with(')') {
+        return None;
+    }
+
+    if !shadow_line.contains("== nil") && !shadow_line.contains("~= nil") {
+        return None;
+    }
+
+    // The word the guard hands on, right after the branch it opens.
+    for opener in ["then ", "else "] {
+        let mut from = 0;
+        let mut found = None;
+
+        while let Some(i) = shadow_line[from..].find(opener) {
+            let at = from + i + opener.len();
+            let word = shadow_line[at..].trim_start_matches(is_word_byte);
+
+            if word.len() < shadow_line[at..].len() && word.starts_with(sep) {
+                found = Some(shadow_line.len() - word.len() + 1);
+            }
+
+            from = from + i + 1;
+        }
+
+        if found.is_some() {
+            return found;
+        }
+    }
+
+    None
 }
 
 /// The string a module path is being typed in, when the cursor is inside
@@ -921,7 +1068,7 @@ fn takes_a_type(head: &str) -> bool {
 /// The struct a literal at the caret fills: the name before the `{`
 /// that is still open, as `new Stats { |` writes it, or the type the
 /// binding a bare `{ |` initialises declares.
-fn struct_literal_target(src: &str, offset: usize) -> Option<String> {
+fn struct_literal_target(src: &str, offset: usize) -> Option<(String, bool)> {
     let head = &src[..offset];
     let mut opens: Vec<usize> = Vec::new();
     let mut quote: Option<char> = None;
@@ -971,7 +1118,12 @@ fn struct_literal_target(src: &str, offset: usize) -> Option<String> {
     };
 
     if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
-        return Some(name);
+        return Some((name, false));
+    }
+
+    // `new Instance("Part") { |`: the class comes from the string.
+    if let Some(class) = instance_class(before) {
+        return Some((class, true));
     }
 
     // `local l: Loadout = { |`: the annotation of the binding names it.
@@ -980,7 +1132,37 @@ fn struct_literal_target(src: &str, offset: usize) -> Option<String> {
     let colon = line.rfind(':')?;
     let declared = type_text(&line[colon + 1..]);
 
-    (!declared.is_empty() && declared.starts_with(|c: char| c.is_uppercase())).then_some(declared)
+    (!declared.is_empty() && declared.starts_with(|c: char| c.is_uppercase()))
+        .then_some((declared, false))
+}
+
+/// The class of `new Instance("Part")`, from the text that ends with
+/// its closing parenthesis. An object initialiser follows it.
+pub fn instance_class(before: &str) -> Option<String> {
+    let head = before.trim_end().strip_suffix(')')?;
+    let open = head.rfind('(')?;
+    let name = head[..open].trim_end();
+    let called = name.ends_with("Instance") && {
+        let before_name = &name[..name.len() - "Instance".len()];
+
+        before_name.trim_end().ends_with("new") || before_name.is_empty()
+    };
+
+    if !called && !name.ends_with("Instance.new") {
+        return None;
+    }
+
+    let inner = head[open + 1..].trim();
+    let quote = inner.chars().next()?;
+
+    if !matches!(quote, '"' | '\'') || !inner.ends_with(quote) || inner.len() < 2 {
+        return None;
+    }
+
+    let class = &inner[1..inner.len() - 1];
+
+    (!class.is_empty() && class.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .then(|| class.to_string())
 }
 
 fn declared_in_line(line: &str, name: &str) -> Option<Declared> {
@@ -1104,7 +1286,15 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
     // A string that is no module path: the child answers alone, since it
     // knows the class names `Instance.new("` and `GetService("` take.
     if inside_string(head) {
-        return None;
+        return names_a_class(head).then(|| Context::ClassName {
+            prefix: prefix.to_string(),
+        });
+    }
+
+    // `parent=>Name` waits for a child by name. No type carries the
+    // children of an instance, so no list belongs here.
+    if head.ends_with("=>") {
+        return Some(Context::Nothing);
     }
 
     // The literal arguments of an attribute.
@@ -1127,7 +1317,13 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
 
     if (head.ends_with(' ') || head.ends_with('=')) && !head_words.is_empty() {
         let last = head_words[head_words.len() - 1];
-        let second = head_words.len().checked_sub(2).map(|i| head_words[i]);
+        // `(new Instance(...))` and `[ new Point {} ]` open the word with
+        // a bracket, which is no part of it.
+        let last = opening_word(last);
+        let second = head_words
+            .len()
+            .checked_sub(2)
+            .map(|i| opening_word(head_words[i]));
         let type_decl = head_words.first() == Some(&"type")
             || (head_words.first() == Some(&"export") && head_words.get(1) == Some(&"type"));
 
@@ -1155,6 +1351,14 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         }
     }
 
+    // `$matches(value, |Busy(_))` takes a pattern, the way an arm does.
+    if let Some(value) = matches_scrutinee(head) {
+        return Some(Context::MatchCase {
+            prefix: prefix.to_string(),
+            scrutinee: Some(value),
+        });
+    }
+
     // A new name the author is choosing.
     if names_a_parameter(head) {
         return Some(Context::Nothing);
@@ -1180,7 +1384,15 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
 
     // The field name of a struct literal. The child sees a table the
     // emit passes to a constructor, so it lists the globals instead.
-    if let Some(target) = struct_literal_target(src, offset - prefix.len()) {
+    if let Some((target, is_class)) = struct_literal_target(src, offset - prefix.len()) {
+        // `new Instance("Part") { |` fills a class, not a struct.
+        if is_class {
+            return Some(Context::InstanceField {
+                prefix: prefix.to_string(),
+                class: target,
+            });
+        }
+
         return Some(Context::StructField {
             prefix: prefix.to_string(),
             target,
@@ -1192,7 +1404,13 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         Some(Body::Struct) => {
             let at_column = head.trim().is_empty();
 
-            if head.contains(':') {
+            if let Some(colon) = head.find(':') {
+                // The `=` ends the annotation: what follows is a value,
+                // and the child reads it.
+                if head[colon + 1..].contains('=') {
+                    return None;
+                }
+
                 return Some(Context::TypeSlot {
                     prefix: prefix.to_string(),
                 });
@@ -1216,6 +1434,12 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         Some(Body::Enum) => {
             if in_enum_payload(src, line_start, head) {
                 return Some(Context::EnumPayload {
+                    prefix: prefix.to_string(),
+                });
+            }
+
+            if head.trim().is_empty() && prefix != "end" {
+                return Some(Context::VariantStart {
                     prefix: prefix.to_string(),
                 });
             }
@@ -1420,6 +1644,11 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             return None;
         }
 
+        // `import Name, |`: the braces follow the default binding.
+        if rest.trim_end().ends_with(',') {
+            return Some(Context::ImportBrace);
+        }
+
         // `import Name |`: a default import wants `from`.
         if rest.split_whitespace().count() == 1 && rest.ends_with(' ') {
             return Some(Context::ImportFrom);
@@ -1535,9 +1764,195 @@ mod tests {
         assert_eq!(at("local s = \"hel|lo\""), None);
         assert_eq!(at("@ratelimit(2|"), Some(Context::Nothing));
         assert_eq!(at("struct Holder as\n    read na|"), Some(Context::Nothing));
-        assert_eq!(at("enum Kind as\n    Al|"), Some(Context::Nothing));
         assert_eq!(at("for k, v in pa|"), None);
         assert_eq!(at("remote Test(nam|"), Some(Context::Nothing));
+        assert_eq!(at("macro twice(val|"), Some(Context::Nothing));
+    }
+
+    /// The variant column of an `enum` body: the name is the author's,
+    /// and `end` closes the body.
+    #[test]
+    fn an_enum_body_offers_the_end_alone() {
+        let start = |p: &str| {
+            Some(Context::VariantStart {
+                prefix: p.to_string(),
+            })
+        };
+        assert_eq!(at("enum Kind as\n    Al|"), start("Al"));
+        assert_eq!(at("enum Kind as\n    |"), start(""));
+        assert_eq!(at("enum Kind as\n    end|"), Some(Context::Nothing));
+        assert_eq!(
+            at("enum Kind as\n    Move(num|"),
+            Some(Context::EnumPayload {
+                prefix: "num".to_string()
+            })
+        );
+    }
+
+    /// A struct field's default is a value: the annotation ends at the
+    /// `=`, and the child reads what follows.
+    #[test]
+    fn a_field_default_is_a_value_not_a_type() {
+        assert_eq!(at("struct Box as\n    scope: Scope = Scope.|"), None);
+        assert_eq!(
+            at("struct Box as\n    scope: Sco|"),
+            Some(Context::TypeSlot {
+                prefix: "Sco".to_string()
+            })
+        );
+    }
+
+    /// `new` opens a constructor whatever bracket sits in front of it.
+    #[test]
+    fn a_bracket_before_new_keeps_the_word() {
+        let target = |p: &str| {
+            Some(Context::NewTarget {
+                prefix: p.to_string(),
+            })
+        };
+        assert_eq!(at("local s = a ?? (new |"), target(""));
+        assert_eq!(at("local xs = [ new Poi|"), target("Poi"));
+        assert_eq!(at("local s = new |"), target(""));
+    }
+
+    /// The class string of `new Instance("` and the child-name operator.
+    #[test]
+    fn a_class_string_lists_classes_and_a_child_name_lists_nothing() {
+        assert_eq!(
+            at("local p = new Instance(\"Pa|"),
+            Some(Context::ClassName {
+                prefix: "Pa".to_string()
+            })
+        );
+        assert_eq!(
+            at("local p = Instance.new(\"|"),
+            Some(Context::ClassName {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(at("local s = game:GetService(\"Pl|"), None);
+        assert_eq!(at("local part = workspace=>Ma|"), Some(Context::Nothing));
+    }
+
+    /// `import M, { | }` takes the names of the module, so the comma
+    /// asks for the brace, not for `from`.
+    #[test]
+    fn a_default_import_then_a_comma_opens_the_brace() {
+        assert_eq!(at("import Lib, |"), Some(Context::ImportBrace));
+        assert_eq!(at("import Lib |"), Some(Context::ImportFrom));
+        assert!(matches!(
+            at("import Lib, { ma|"),
+            Some(Context::ImportNames { .. })
+        ));
+    }
+
+    /// `new Instance("Part") { |` fills a class, and the class comes
+    /// from the string the call takes.
+    #[test]
+    fn an_object_initialiser_reads_its_class() {
+        let field = |class: &str, p: &str| {
+            Some(Context::InstanceField {
+                prefix: p.to_string(),
+                class: class.to_string(),
+            })
+        };
+        assert_eq!(
+            at("local p = new Instance(\"Part\") {\n    An|"),
+            field("Part", "An")
+        );
+        assert_eq!(
+            at("local p = new Instance(\"Part\") {\n    Name = \"a\",\n    |"),
+            field("Part", "")
+        );
+        assert_eq!(
+            at("local s = new Stats {\n    heal|"),
+            Some(Context::StructField {
+                prefix: "heal".to_string(),
+                target: "Stats".to_string()
+            })
+        );
+        assert_eq!(
+            super::instance_class("new Instance(\"Part\")"),
+            Some("Part".to_string())
+        );
+        assert_eq!(
+            super::instance_class("Instance.new(\"TextLabel\")"),
+            Some("TextLabel".to_string())
+        );
+        assert_eq!(super::instance_class("f(\"Part\")"), None);
+    }
+
+    /// `$matches(v, |Busy(_))` takes a pattern; the value it tests is
+    /// the first argument.
+    #[test]
+    fn a_matches_call_takes_a_pattern() {
+        let scrutinee = |src: &str| match at(src) {
+            Some(Context::MatchCase { scrutinee, .. }) => scrutinee,
+
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            scrutinee("local b = $matches(state, |"),
+            Some("state".to_string())
+        );
+        assert_eq!(
+            scrutinee("local b = $matches(self.phase, Lob|"),
+            Some("self.phase".to_string())
+        );
+        assert_eq!(at("local b = $matches(sta|"), None);
+    }
+
+    /// A destructuring `local` names the fields of the value alone.
+    #[test]
+    fn a_destructure_takes_the_values_fields() {
+        let at_end = |src: &str| super::in_destructure(src, src.len());
+        assert!(at_end("local { na"));
+        assert!(at_end("    const { name, hp"));
+        assert!(!at_end("local { name } = player"));
+        assert!(!at_end("local t = { na"));
+    }
+
+    /// A call before a guard has no name on the lowered line; the
+    /// member follows the branch the guard opens.
+    #[test]
+    fn a_guarded_call_finds_its_member() {
+        let shadow = "    local _1 = session_of(sender) if _1 ~= nil then _1:swing() end";
+        assert_eq!(
+            super::guarded_member_column("    session_of(sender)?:", shadow, ':'),
+            Some(shadow.find("_1:swing").unwrap() + 3)
+        );
+
+        let optional = "    local v = (if _1 == nil then nil else _1.name)";
+        assert_eq!(
+            super::guarded_member_column("    local v = f(x)?.", optional, '.'),
+            Some(optional.find("_1.name").unwrap() + 3)
+        );
+
+        // A plain call keeps its own receiver, so nothing moves.
+        assert_eq!(
+            super::guarded_member_column("    f(x):", "    f(x):m()", ':'),
+            None
+        );
+    }
+
+    /// A string literal is a receiver: the emit wraps it, so the member
+    /// sits past the closing parenthesis.
+    #[test]
+    fn a_string_literal_receiver_finds_its_member() {
+        use super::Access;
+
+        let src = "local u = \"abc\":up";
+        assert_eq!(
+            super::member_at(src, src.len()),
+            Some(("\"abc\"".to_string(), Access::Wrapped, ':', 2))
+        );
+
+        let source = "local u = \"abc\":upper()";
+        let shadow = "local u = (\"abc\"):upper()";
+        assert_eq!(
+            super::member_column(source, shadow, "\"abc\"", Access::Wrapped, ':', 0, 16),
+            Some(shadow.find("):upper").unwrap() + 2)
+        );
     }
 
     #[test]

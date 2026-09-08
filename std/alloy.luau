@@ -227,6 +227,9 @@ export type Future<T> = {
 	-- In the type alone: a generic reads `T` off a Future it is handed.
 	read __value: T,
 	read andThen: (self: Future<T>, on_resolve: ((T) -> ...any)?, on_reject: ((any) -> ...any)?) -> Future<T>,
+	-- The snake_case twin of `andThen`, the one camelCase name the std
+	-- carries. Both name the same function.
+	read and_then: (self: Future<T>, on_resolve: ((T) -> ...any)?, on_reject: ((any) -> ...any)?) -> Future<T>,
 	read cancel: (self: Future<T>) -> (),
 	read is_settled: (self: Future<T>) -> boolean,
 }
@@ -328,28 +331,46 @@ function Future.delay(seconds: number): Future<nil>
 	end)
 end
 
-function Future.andThen(self, on_resolve, on_reject)
+-- Each receiver is annotated `Future<T>`: an inferred one would be the
+-- record the runtime keeps, and `state`, `value` and `waiters` would
+-- reach a hover and a completion detail.
+function Future.andThen<T>(
+	self: Future<T>,
+	on_resolve: ((T) -> ...any)?,
+	on_reject: ((any) -> ...any)?
+): Future<T>
+	local f = self :: any
 	local function run()
-		if self.state == RESOLVED and on_resolve then
-			on_resolve(self.value)
-		elseif self.state ~= RESOLVED and on_reject then
-			on_reject(self.value)
+		if f.state == RESOLVED and on_resolve then
+			on_resolve(f.value)
+		elseif f.state ~= RESOLVED and on_reject then
+			on_reject(f.value)
 		end
 	end
-	if self.state == PENDING then
-		table.insert(self.waiters, run)
+	if f.state == PENDING then
+		table.insert(f.waiters, run)
 	else
 		task_lib.spawn(run)
 	end
 	return self
 end
 
-function Future.cancel(self)
-	settle(self, CANCELLED, "cancelled", nil)
+--- The snake_case name for `andThen`, so a file need not carry the one
+--- camelCase call the std has. It runs the same code.
+function Future.and_then<T>(
+	self: Future<T>,
+	on_resolve: ((T) -> ...any)?,
+	on_reject: ((any) -> ...any)?
+): Future<T>
+	return Future.andThen(self, on_resolve, on_reject)
 end
 
-function Future.is_settled(self)
-	return self.state ~= PENDING
+function Future.cancel<T>(self: Future<T>): ()
+	settle(self :: any, CANCELLED, "cancelled", nil)
+end
+
+function Future.is_settled<T>(self: Future<T>): boolean
+	return (self :: any).state ~= PENDING
 end
 
 --- What `await` takes. It is `Future<T>`; the name is what the checker
@@ -461,6 +482,10 @@ function Future.any<T>(futures: { read [number]: Future<T> }): Future<T>
 	return (winner :: any) :: Future<any>
 end
 
+-- The element is `Result2`, the one-table Result: `Result<T, any>` here
+-- is a union of two intersections under an Array under a Future, and
+-- `await` on that reaches the solver's step limit. The error side is
+-- `any`, since a rejection carries whatever it was rejected with.
 function Future.all_settled<T>(futures: { Future<T> }): Future<Array<Result2<T, any>>>
 	return (alloy.future(function()
 		local out = {}
@@ -1955,7 +1980,9 @@ end
 
 --- `x:name(...)` where `name` is an extension method: the impl for the
 --- receiver's kind, else the receiver's own method.
-function alloy.call(receiver, name: string, ...)
+--- The receiver is `any`: the dispatcher reads the value's own kind, and
+--- the check artifact routes a name two primitives both declare here.
+function alloy.call(receiver: any, name: string, ...: any): ...any
 	local t = impl_for_value(receiver)
 	local f = t and t[name]
 	if f then
@@ -2477,6 +2504,11 @@ function alloy.remote(spec: any): Remote
 	local validate = attrs.validate and attrs.validate[1]
 	-- `@timeout(seconds)`: a call that gets no answer in time rejects.
 	local timeout = attrs.timeout and attrs.timeout[1]
+	-- One bucket per player, dropped when the player is collected.
+	-- Both bindings open before `allowed`, which reads them: declared
+	-- after it, they would be two names and `allowed` would index nil.
+	local buckets = setmetatable({}, { __mode = "k" })
+	local on_limited = nil
 
 	local function allowed(player)
 		if not limiter then
@@ -2555,8 +2587,6 @@ function alloy.remote(spec: any): Remote
 			end),
 		})
 	end
-	local buckets = setmetatable({}, { __mode = "k" })
-	local on_limited = nil
 
 	if run_service():IsServer() then
 		function remote.fire(player, ...)

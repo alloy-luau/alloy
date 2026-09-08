@@ -868,9 +868,10 @@ mod tests {
             &HashSet::new(),
             src,
         );
-        // The declared prop, then `key`, which the markup reads itself.
-        assert_eq!(items.len(), 2);
+        // The declared prop, then the two the markup reads itself.
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0]["label"], "label");
         assert_eq!(items[1]["label"], "key");
+        assert_eq!(items[2]["label"], "ClassName");
     }
 }

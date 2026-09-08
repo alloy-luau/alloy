@@ -683,8 +683,10 @@ struct Desugar<'s> {
     self_type: Option<String>,
     /// Extension method name to its primitive target. A primitive has no
     /// class block to extend, so the check artifact calls a declared
-    /// helper table, `__alloy_string.trim(s)`, instead.
-    ext_primitive: HashMap<String, String>,
+    /// helper table, `__alloy_string.trim(s)`, instead. `None` marks a
+    /// name two primitives both declare: the target follows the value,
+    /// which only the run knows.
+    ext_primitive: HashMap<String, Option<String>>,
     /// Whether the emit touched an extension: a foreign impl or a call by
     /// an extension name. Then the check artifact differs from the ship.
     ext_hit: bool,
@@ -2997,20 +2999,42 @@ impl<'s> Desugar<'s> {
         self.scan_children(expr_children(e));
     }
 
+    /// Records the primitive an extension method belongs to. A second
+    /// primitive with the same method name leaves the target open.
+    fn note_primitive(&mut self, name: &str, target: &str) {
+        let open = matches!(self.ext_primitive.get(name), Some(Some(other)) if other != target);
+        let value = match open {
+            true => None,
+
+            false => Some(target.to_string()),
+        };
+
+        match self.ext_primitive.get(name) {
+            Some(None) => {}
+
+            _ => {
+                self.ext_primitive.insert(name.to_string(), value);
+            }
+        }
+    }
+
     fn prescan(&mut self, block: &Block) {
-        for ext in &self.options.extensions {
-            if ext.is_static {
-                self.ext_statics
-                    .entry(ext.target.clone())
-                    .or_default()
-                    .insert(ext.name.clone());
+        let declared: Vec<(bool, String, String)> = self
+            .options
+            .extensions
+            .iter()
+            .map(|e| (e.is_static, e.name.clone(), e.target.clone()))
+            .collect();
+
+        for (is_static, name, target) in declared {
+            if is_static {
+                self.ext_statics.entry(target).or_default().insert(name);
             } else {
-                if PRIMITIVES.contains(&ext.target.as_str()) {
-                    self.ext_primitive
-                        .insert(ext.name.clone(), ext.target.clone());
+                if PRIMITIVES.contains(&target.as_str()) {
+                    self.note_primitive(&name, &target);
                 }
 
-                self.ext_methods.insert(ext.name.clone());
+                self.ext_methods.insert(name);
             }
         }
 
@@ -3165,7 +3189,7 @@ impl<'s> Desugar<'s> {
 
                             if has_self {
                                 if PRIMITIVES.contains(&target.as_str()) {
-                                    self.ext_primitive.insert(name.clone(), target.clone());
+                                    self.note_primitive(&name, &target);
                                 }
 
                                 self.ext_methods.insert(name);
@@ -7290,8 +7314,22 @@ impl<'s> Desugar<'s> {
                             return format!("{std}.call({prefix}, \"{mname}\"{sep}{inner})");
                         }
 
-                        if let Some(target) = self.ext_primitive.get(&mname) {
-                            return format!("__alloy_{target}.{mname}({prefix}{sep}{inner})");
+                        match self.ext_primitive.get(&mname) {
+                            Some(Some(target)) => {
+                                return format!("__alloy_{target}.{mname}({prefix}{sep}{inner})");
+                            }
+
+                            // Two primitives declare the name, so the
+                            // check artifact keeps the dispatcher the
+                            // ship uses; it reads the value's own kind.
+                            Some(None) => {
+                                let std = self.std();
+                                self.ext_hit = true;
+
+                                return format!("{std}.call({prefix}, \"{mname}\"{sep}{inner})");
+                            }
+
+                            None => {}
                         }
                     }
                 }
@@ -8590,9 +8628,17 @@ impl<'s> Desugar<'s> {
 
             if body.is_async.is_some() {
                 let std = self.std();
-                self.generate(rs, &format!("{std}.Future<"));
-                self.copy(rs, re);
-                self.generate(re, ">");
+
+                // `Future<()>` is no Luau type: a type pack is no type
+                // argument. `nil` stands in, and the editor reads it
+                // back as `Future<()>`.
+                if self.text_of(rt).trim() == "()" {
+                    self.generate(rs, &format!("{std}.Future<nil>"));
+                } else {
+                    self.generate(rs, &format!("{std}.Future<"));
+                    self.copy(rs, re);
+                    self.generate(re, ">");
+                }
             } else {
                 self.copy(rs, re);
             }
@@ -8624,8 +8670,12 @@ impl<'s> Desugar<'s> {
         // A body that returns nothing resolves to nil: the wrapper alone
         // would infer `Future<unknown>`, which the header's `Future<nil>`
         // refuses.
-        let to_nil =
-            body.is_async.is_some() && body.ret_type.is_none() && !returns_value(&body.block);
+        let empty_ret = match body.ret_type {
+            Some(rt) => self.text_of(rt).trim() == "()",
+
+            None => true,
+        };
+        let to_nil = body.is_async.is_some() && empty_ret && !returns_value(&body.block);
 
         if body.is_async.is_some() {
             let std = self.std();

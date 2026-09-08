@@ -514,6 +514,19 @@ impl<'a> Parser<'a> {
         before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1
     }
 
+    /// The source a token span covers.
+    fn span_text(&self, span: TokSpan) -> &'a str {
+        let last = (span.end as usize)
+            .saturating_sub(1)
+            .max(span.start as usize);
+        let (Some(first), Some(last)) = (self.toks.get(span.start as usize), self.toks.get(last))
+        else {
+            return "";
+        };
+
+        &self.src[first.start as usize..last.end as usize]
+    }
+
     fn err(&self, message: &str) -> ParseError {
         let offset = match self.toks.get(self.pos) {
             Some(t) => t.start as usize,

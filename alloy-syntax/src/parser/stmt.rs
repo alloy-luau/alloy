@@ -2436,7 +2436,31 @@ impl<'a> Parser<'a> {
 
             if self.eat("(") {
                 while !self.at(")") {
-                    payload.push(self.type_()?);
+                    // The Rust habit, `Playing(round: number)`. An
+                    // enum payload is a type; the name has no place.
+                    // The parse takes the type, so the rest of the
+                    // enum still reads and one report covers it.
+                    let named = (self.at_name() && self.text_at(1) == ":").then(|| {
+                        let at = self.toks[self.pos + 1].start as usize;
+                        self.bump();
+                        self.bump();
+
+                        at
+                    });
+                    let ty = self.type_()?;
+
+                    if let Some(at) = named {
+                        let head = self.span_text(vname).to_string();
+                        let body = self.span_text(ty).to_string();
+                        self.report_at(
+                            at,
+                            &format!(
+                                "an enum payload is a type, not a name; write `{head}({body})`"
+                            ),
+                        );
+                    }
+
+                    payload.push(ty);
 
                     if !self.eat(",") {
                         break;

@@ -85,6 +85,13 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // `@derive(Clone)` writes `clone`, and a struct that has it
+            // is not an Instance. The derive declares the method the
+            // way a written one does.
+            if name == "clone" && self.src.contains("@derive(") && self.derives("Clone") {
+                continue;
+            }
+
             self.lint(
                 out,
                 "deprecated_method",
@@ -94,6 +101,25 @@ impl<'s> Scan<'s> {
                 Some((*current).to_string()),
             );
         }
+    }
+
+    /// Whether the file names a derive, as in `@derive(Debug, Clone)`.
+    fn derives(&self, wanted: &str) -> bool {
+        for i in 0..self.toks.len() {
+            if !(self.at(i, "@") && self.at(i + 1, "derive") && self.at(i + 2, "(")) {
+                continue;
+            }
+
+            let Some(close) = self.matching(i + 2) else {
+                continue;
+            };
+
+            if (i + 3..close).any(|j| self.at(j, wanted)) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// The `(` of `Instance.new` at `i`, when the call is one.

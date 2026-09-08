@@ -100,6 +100,17 @@ pub fn compile_alx(
     Ok(AlxOutput { output, lowered })
 }
 
+/// Whether a markup diagnostic is one of the attribute checks. The
+/// lowering runs past these, so the emit is the same either way and a
+/// checker report elsewhere on the line still stands.
+pub fn is_attribute_check(message: &str) -> bool {
+    message.starts_with("markup: prop ")
+        || message.starts_with("markup: property ")
+        || message.contains(" has no prop named ")
+        || message.contains("` is an event of ")
+        || (message.starts_with("markup: `<") && message.contains("` leaves "))
+}
+
 /// One prop a component declares.
 struct Prop {
     name: String,
@@ -107,9 +118,11 @@ struct Prop {
     optional: bool,
 }
 
-/// The props a tag may set without the component declaring them: React
-/// reads `key` itself, and it never reaches the component.
-pub const FREE_PROPS: &[&str] = &["key"];
+/// The props a tag may set without its class or its component
+/// declaring them. React reads `key` itself and it never reaches the
+/// component; `ClassName` is the utility list a styling ingot reads and
+/// rewrites into properties before the tag is built.
+pub const FREE_PROPS: &[&str] = &["key", "ClassName"];
 
 /// The attributes of every component tag, against the props the
 /// component declares: a prop it does not take, a required prop the tag
@@ -190,7 +203,13 @@ fn check_element(
 
     let name = element.name.as_written();
 
-    if luaux::roblox::is_class(&name) || !bound.contains(&name) {
+    if luaux::roblox::is_class(&name) {
+        check_intrinsic(element, &name, out);
+
+        return;
+    }
+
+    if !bound.contains(&name) {
         return;
     }
 
@@ -277,6 +296,68 @@ fn check_element(
                 crate::desugar::list_names(&missing)
             ),
         });
+    }
+}
+
+/// A Roblox tag's attributes against the class: a literal where the
+/// property takes another type, and a literal on an event, which takes
+/// a function. A property the class does not have is luaux's report.
+fn check_intrinsic(element: &luaux::markup::Element, class: &str, out: &mut Vec<Diagnostic>) {
+    use luaux::markup::Attribute;
+
+    for attribute in &element.attributes {
+        let Attribute::Named { name, span, value } = attribute else {
+            continue;
+        };
+        if FREE_PROPS.contains(&name.as_str()) {
+            continue;
+        }
+
+        let Some(got) = literal_type(value) else {
+            continue;
+        };
+        let report = |out: &mut Vec<Diagnostic>, message: String| {
+            out.push(Diagnostic {
+                start: span.start as u32,
+                end: (span.start + name.len()) as u32,
+                message,
+            });
+        };
+
+        if luaux::roblox::is_event(class, name) {
+            report(
+                out,
+                format!(
+                    "markup: `{name}` is an event of {class}; it takes a function, not a {got}"
+                ),
+            );
+
+            continue;
+        }
+
+        let Some(want) = crate::roblox_props::property_type(class, name) else {
+            continue;
+        };
+
+        if want != got {
+            report(
+                out,
+                format!(
+                    "markup: property {name} of {class} is {}, not {got}",
+                    readable_type(want)
+                ),
+            );
+        }
+    }
+}
+
+/// A Roblox type as the source writes it: the dump spells an enum
+/// `EnumFont`, and the reader writes `Enum.Font`.
+fn readable_type(name: &str) -> String {
+    match name.strip_prefix("Enum") {
+        Some(rest) if rest.starts_with(char::is_uppercase) => format!("Enum.{rest}"),
+
+        _ => name.to_string(),
     }
 }
 
@@ -819,6 +900,49 @@ return List\n";
             !messages.iter().any(|m| m.contains("key")),
             "`key` is React's own: {messages:?}"
         );
+    }
+
+    /// A Roblox property takes the type the class declares, and an
+    /// event takes a function.
+    #[test]
+    fn a_roblox_property_checks_the_literal_it_is_given() {
+        let src = "import * as React from \"@packages/react\" --@alloy-ignore\n\
+local function Panel()\n\
+    return (\n\
+        <Frame>\n\
+            <TextLabel Size={12} Text={5} />\n\
+            <TextButton Activated={\"not a function\"} />\n\
+            <TextLabel Text=\"fine\" TextSize={14} Visible={true} />\n\
+        </Frame>\n\
+    )\n\
+end\n\
+\n\
+return Panel\n";
+        let out = compile_alx(src, &EmitOptions::default(), luaux::Config::default())
+            .expect("the markup compiles");
+        let messages: Vec<&str> = out
+            .output
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "markup: property Size of TextLabel is UDim2, not number",
+                "markup: property Text of TextLabel is string, not number",
+                "markup: `Activated` is an event of TextButton; it takes a function, not a string",
+            ],
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn an_enum_property_reads_as_the_source_writes_it() {
+        assert_eq!(readable_type("EnumFont"), "Enum.Font");
+        assert_eq!(readable_type("UDim2"), "UDim2");
+        assert_eq!(readable_type("number"), "number");
     }
 
     #[test]

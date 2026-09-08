@@ -399,8 +399,25 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            // `new Instance("Part") { |`: the class's own properties.
+            Context::InstanceField { prefix, class } => {
+                let from = offset - prefix.len();
+
+                for name in alloy::luaux::roblox::properties(class) {
+                    let mut item = word(name, "field", None, from);
+                    item["detail"] = json!(format!("property of {class}"));
+                    item["insert"] = json!(format!("{name} = ${{1:{name}}}"));
+                    items.push(item);
+                }
+            }
+
             Context::ImportStar => {
                 items.push(word("as", "keyword", Some("The name the module takes here.".to_string()), offset));
+            }
+
+            // A default binding took the first slot; the braces follow.
+            Context::ImportBrace => {
+                items.push(word("{", "keyword", Some("Named exports, one or more, `as` to rename.".to_string()), offset));
             }
 
             Context::ImportFrom => {
@@ -558,6 +575,22 @@ pub fn complete(offset: u32) -> String {
 
                 for name in ["function", "async function", "private function", "public", "end"] {
                     items.push(word(name, "keyword", None, from));
+                }
+            }
+
+            // A variant name is the author's own; the `end` closes the body.
+            Context::VariantStart { prefix } => {
+                items.push(word("end", "keyword", None, offset - prefix.len()));
+            }
+
+            // `new Instance("|")`: the classes the engine builds.
+            Context::ClassName { prefix } => {
+                let from = offset - prefix.len();
+
+                for name in alloy::luaux::roblox::creatable_classes() {
+                    let mut item = word(name, "class", None, from);
+                    item["detail"] = json!("Roblox class");
+                    items.push(item);
                 }
             }
 

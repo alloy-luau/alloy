@@ -21,6 +21,10 @@ pub struct Interface {
     pub name: String,
     pub bases: Vec<String>,
     pub fields: Vec<String>,
+    /// Whether a `type` alias over a record declared it, and not an
+    /// `interface` block. The alias marks no field `read` or `write`,
+    /// so a printed record that marks one is another type.
+    pub alias: bool,
 }
 
 /// The interfaces a source declares, with their bases and fields, and
@@ -41,12 +45,13 @@ fn record_aliases(source: &str) -> Vec<Interface> {
 
     while let Some(i) = rest.find("type ") {
         let head = &rest[i..];
-        let before = rest[..i].trim_end();
-        let opens = i == 0
-            || before.is_empty()
-            || before.ends_with('\n')
-            || before.ends_with("export")
-            || before.ends_with("local");
+        // The word opens a declaration when nothing but `export` or
+        // `local` stands before it on its line. Trimming the text back
+        // to the previous line's last byte reads a `type` in the middle
+        // of one as a declaration.
+        let raw = &rest[..i];
+        let lead = raw[raw.rfind('\n').map_or(0, |k| k + 1)..].trim();
+        let opens = matches!(lead, "" | "export" | "local");
         rest = &rest[i + "type ".len()..];
 
         if !opens {
@@ -86,6 +91,7 @@ fn record_aliases(source: &str) -> Vec<Interface> {
                 name,
                 bases: Vec::new(),
                 fields,
+                alias: true,
             });
         }
     }
@@ -122,6 +128,7 @@ fn declared_interfaces(source: &str) -> Vec<Interface> {
                 name: name.to_string(),
                 bases,
                 fields: Vec::new(),
+                alias: false,
             });
 
             continue;
@@ -163,6 +170,13 @@ impl Interface {
     fn matches(&self, text: &str, all: &[Interface]) -> bool {
         let mut bases: Vec<String> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
+
+        // `Readonly<Ent>` prints `{ read id: number, read name: string }`.
+        // The alias `Ent` marks no field, so the mapped form is not it,
+        // and `fold_aliases` names it after this fold declines.
+        if self.alias && marks_a_member(text) {
+            return false;
+        }
 
         for part in split_intersection(text) {
             match part.starts_with('{') {
@@ -213,6 +227,19 @@ impl Interface {
     }
 }
 
+/// Whether a printed record marks a member `read` or `write`.
+fn marks_a_member(text: &str) -> bool {
+    split_intersection(text)
+        .into_iter()
+        .filter(|p| p.starts_with('{'))
+        .flat_map(|p| member_parts(p))
+        .any(|m| {
+            let text = m.trim();
+
+            text.starts_with("read ") || text.starts_with("write ")
+        })
+}
+
 /// The members of an intersection at depth zero.
 fn split_intersection(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
@@ -250,6 +277,12 @@ pub fn fold_value(value: &mut Value, known: &Known) {
                 || s.contains("Awaitable<")
                 || s.contains("ResultMethods")
                 || s.contains(" | ")
+                || s.contains("intersect<")
+                || s.contains("@metatable")
+                || s.contains('~')
+                || s.contains("ResultOk")
+                || s.contains("ResultErr")
+                || s.contains("Result2<")
             {
                 *s = fold(s, known);
             }
@@ -271,7 +304,70 @@ pub fn fold_value(value: &mut Value, known: &Known) {
 pub fn names_only_the_emit(message: &str) -> bool {
     // The checker names the two emitted files of an import cycle;
     // `circular_import` names the two the author wrote.
-    message.contains("%error-id%") || message.contains("Cyclic module dependency")
+    // The require binding as the subject of a report: the reader never
+    // wrote the name, and the mistake reads on the annotation instead.
+    message.contains("%error-id%")
+        || message.contains("Cyclic module dependency")
+        || message.contains("'__alloy'")
+}
+
+/// Whether a report is about a key the emit writes and the source line
+/// does not: an enum's `tag`, and the `_1`, `_2` its payload goes in.
+/// A reader who never wrote the name has nothing to fix.
+pub fn names_the_emit_key(message: &str, line: &str) -> bool {
+    const OPENERS: [&str; 3] = ["does not have key '", "Key '", "Cannot add property '"];
+
+    OPENERS
+        .iter()
+        .filter_map(|opener| {
+            let at = message.find(opener)? + opener.len();
+
+            message[at..].find('\'').map(|end| &message[at..at + end])
+        })
+        .any(|key| {
+            let emitted = key == "tag"
+                || key
+                    .strip_prefix('_')
+                    .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+
+            emitted && !holds_word(line, key)
+        })
+}
+
+/// Whether a duplicate-field report is about a table the emit built:
+/// the source line writes the key once, or not at all. A markup
+/// attribute that expands to several properties makes these.
+pub fn duplicate_only_in_the_emit(message: &str, line: &str) -> bool {
+    const OPENER: &str = "Table field '";
+
+    let Some(at) = message.find(OPENER).map(|i| i + OPENER.len()) else {
+        return false;
+    };
+    let Some(end) = message[at..].find('\'') else {
+        return false;
+    };
+
+    if !message.contains("is a duplicate") {
+        return false;
+    }
+
+    let key = &message[at..at + end];
+
+    line.match_indices(key)
+        .filter(|(at, _)| {
+            !line[..*at].ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                && !line[at + key.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+        })
+        .count()
+        < 2
+}
+
+/// Whether a line holds a name as a whole word.
+fn holds_word(line: &str, name: &str) -> bool {
+    line.match_indices(name).any(|(at, _)| {
+        !line[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_')
+            && !line[at + name.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+    })
 }
 
 /// A `{ ... }` where an Array belongs, as the mistake reads. The checker
@@ -304,11 +400,118 @@ pub fn plain_table_hint(message: &str) -> Option<String> {
 /// A checker message as a reader should get it: a failed bound reads as
 /// a bound, and the tail that walks the emitted shape goes.
 pub fn friendly_text(message: &str) -> String {
-    match bound_failure(message) {
-        Some(rewritten) => rewritten,
+    let text = bound_failure(message)
+        .or_else(|| pack_mismatch(message))
+        .or_else(|| unsolved_generic(message))
+        .or_else(|| solver_gave_up(message))
+        .unwrap_or_else(|| cut_explanation(message));
 
-        None => cut_explanation(message),
+    table_beside_array(&text).unwrap_or(text)
+}
+
+/// The checker's own step limit, worded as an order to the reader. It
+/// says nothing is wrong with the code, only that the checker stopped.
+fn solver_gave_up(message: &str) -> Option<String> {
+    const CLAUSE: &str = "Code is too complex to typecheck!";
+
+    let at = message.find(CLAUSE)?;
+
+    Some(format!(
+        "{}the checker reached its limit on this expression; it says nothing about the code. Name a step in a local, or annotate the result",
+        &message[..at]
+    ))
+}
+
+/// A generic the checker could not solve. It answers with the bounds it
+/// collected, which name no place and no fix; the reader wants to know
+/// that the values do not agree.
+fn unsolved_generic(message: &str) -> Option<String> {
+    const CLAUSE: &str = "No valid instantiation could be inferred for generic type parameter ";
+
+    let at = message.find(CLAUSE)? + CLAUSE.len();
+    let name: String = message[at..]
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    let head = match message.split_once(": ") {
+        Some((kind, _)) if !kind.contains(' ') => format!("{kind}: "),
+
+        _ => String::new(),
+    };
+
+    (!name.is_empty()).then(|| {
+        format!(
+            "{head}these values give `{name}` no one type; make them agree, or write `{name}` out"
+        )
+    })
+}
+
+/// `{T}` is a plain Luau table and `T[]` is an Array with its methods.
+/// A message that holds both reads as one type printed two ways, so it
+/// says which is which.
+pub fn table_beside_array(message: &str) -> Option<String> {
+    let name = message.match_indices('{').find_map(|(at, _)| {
+        let rest = message.get(at + 1..)?.trim_start();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        if name.is_empty() || !rest[name.len()..].trim_start().starts_with('}') {
+            return None;
+        }
+
+        message.contains(&format!("{name}[]")).then_some(name)
+    })?;
+
+    Some(format!(
+        "{message}; a `{{ {name} }}` is a plain table, and `{name}[]` is an Array"
+    ))
+}
+
+/// A callback whose parameters do not line up. The checker explains it
+/// by walking the type pack, which reads as a broken sentence and calls
+/// the two types "former" and "latter". The parameter, what the source
+/// wrote, and what the callee asks for say it.
+fn pack_mismatch(message: &str) -> Option<String> {
+    const CLAUSE: &str = "entry in the type pack is ";
+
+    let flat = flatten(message);
+    let at = flat.find(CLAUSE)?;
+    let ordinal = flat[..at].split_whitespace().next_back()?.to_string();
+
+    if !ordinal.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return None;
     }
+
+    let rest = &flat[at + CLAUSE.len()..];
+    let first = quoted_from(rest)?;
+    let after = rest.get(first.len() + 2..)?;
+    let second = quoted_from(after.split_once("type and ")?.1)?;
+    // "the latter type" is the type the source wrote; "the former" is
+    // the one the callee asks for.
+    let (got, want) = match after.trim_start().starts_with("in the latter") {
+        true => (first, second),
+
+        false => (second, first),
+    };
+    let head = flat[..at].split_once("; it ").map(|(h, _)| h)?.trim_end();
+
+    // A pack of parameters belongs to a function on both sides; any
+    // other pack keeps the head alone.
+    if head.matches("->").count() < 2 {
+        return Some(head.to_string());
+    }
+
+    Some(format!(
+        "{head}: its {ordinal} parameter is `{got}` where `{want}` is wanted"
+    ))
+}
+
+/// One line of a message the checker laid out over several, with its
+/// tabs and its runs of spaces closed up.
+fn flatten(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `where T: Shape` emits as an intersection, so a bound the argument
@@ -369,9 +572,36 @@ struct Binding {
 /// shapes goes, and the head reads by name; then the enum unions and
 /// the Result unions.
 pub fn fold(text: &str, known: &Known) -> String {
+    // `Table type 'X' not compatible with type 'Y'` contrasts a value
+    // the reader wrote in place against the type it is going into. A
+    // `type` alias of the same shape, declared in another module, is
+    // no name they wrote, so the record stays a record here.
+    let narrowed;
+    let known = match text.contains("not compatible with type") {
+        true => {
+            narrowed = Known {
+                shapes: known.shapes.clone(),
+                interfaces: known
+                    .interfaces
+                    .iter()
+                    .filter(|i| !i.alias)
+                    .cloned()
+                    .collect(),
+            };
+
+            &narrowed
+        }
+
+        false => known,
+    };
     // The std spells the operand of `await` `Awaitable<T>`; the source
     // writes `Future<T>`, and the two are one type.
-    let mut out = text.replace("Awaitable<", "Future<");
+    let mut out = text
+        .replace("Awaitable<", "Future<")
+        // A method hovered on a Future names the alias `await` takes;
+        // the reader wrote `Future`.
+        .replace("function Awaitable:", "function Future:")
+        .replace("function Awaitable.", "function Future.");
 
     // A hover may hold several types, one per line; each `where` is
     // handled in turn, from the last so the offsets before it hold.
@@ -470,6 +700,10 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_array_alias(&mut out);
     fold_narrowed_primitives(&mut out);
     fold_cut_array(&mut out);
+    fold_cut_results(&mut out);
+    fold_result_aliases(&mut out);
+    fold_refinements(&mut out);
+    fold_negated_members(&mut out);
     out = fold_temp_receiver(&out);
     fold_aliases(&mut out, known);
     // An async body that returns nothing types as `Future<nil>`, since
@@ -1355,6 +1589,271 @@ fn fold_lite_results(text: &mut String) {
         let name = format!("Result<{t}, {e}>");
         text.replace_range(open..open + len, &name);
     }
+}
+
+/// A Result the child printed with its members cut, `{ read _1: T,
+/// read __err: E, ... 3 more ... }`: the folds that pair the two arms
+/// need `tag`, which the cut dropped. `__err` carries the error side of
+/// both arms, and the value side is the `_1` that differs from it.
+fn fold_cut_results(text: &mut String) {
+    const MARK: &str = "read __err: ";
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(MARK) {
+        let at = from + i;
+        let Some(open) = enclosing_brace(text, at) else {
+            return;
+        };
+        let (start, end) = union_run(text, open);
+        let arms = split_union(&text[start..end]);
+        let mut error: Option<String> = None;
+        let mut value: Option<String> = None;
+        let mut cut = false;
+        let mut all = !arms.is_empty();
+
+        for arm in &arms {
+            let body = arm.trim();
+
+            if !body.starts_with('{') || !body.ends_with('}') {
+                all = false;
+
+                break;
+            }
+
+            cut = cut || body.contains(" more ...");
+            let m = members(body);
+            let get = |key: &str| m.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+            let Some(e) = get("__err") else {
+                all = false;
+
+                break;
+            };
+
+            if error.get_or_insert(e.clone()) != &e {
+                all = false;
+
+                break;
+            }
+
+            if let Some(t) = get("__ok") {
+                value = Some(t);
+            } else if let Some(t) = get("_1").filter(|t| *t != e) {
+                value.get_or_insert(t);
+            }
+        }
+
+        // A print that carries `tag` is whole; `fold_results` reads it.
+        if !all || !cut {
+            from = at + MARK.len();
+
+            continue;
+        }
+
+        let (Some(t), Some(e)) = (value.or_else(|| error.clone()), error) else {
+            from = at + MARK.len();
+
+            continue;
+        };
+        let name = format!("Result<{t}, {e}>");
+        text.replace_range(start..end, &name);
+        from = start + name.len();
+    }
+}
+
+/// The byte range of the ` | ` joined run of brace groups that holds
+/// the group opening at `open`.
+fn union_run(text: &str, open: usize) -> (usize, usize) {
+    let mut start = open;
+    let mut end = open + balanced_len(&text[open..]).unwrap_or(text.len() - open);
+
+    loop {
+        let head = text[..start].trim_end();
+        let Some(prev) = head.strip_suffix('|').map(str::trim_end) else {
+            break;
+        };
+
+        if !prev.ends_with('}') {
+            break;
+        }
+
+        let Some(at) = open_of(prev) else {
+            break;
+        };
+        start = at;
+    }
+
+    loop {
+        let tail = text[end..].trim_start();
+        let Some(next) = tail.strip_prefix('|').map(str::trim_start) else {
+            break;
+        };
+
+        if !next.starts_with('{') {
+            break;
+        }
+
+        let at = text.len() - next.len();
+        let Some(len) = balanced_len(&text[at..]) else {
+            break;
+        };
+        end = at + len;
+    }
+
+    (start, end)
+}
+
+/// The offset of the `{` that opens the group a text ends with.
+fn open_of(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+
+    for (k, c) in text.char_indices().rev() {
+        match c {
+            '}' => depth += 1,
+            '{' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// `ResultOk`, `ResultErr`, `Result2` and the method tables are how
+/// the std spells the parts of a Result. None of the four is a name a
+/// source may write, and each stands for `Result<T, E>`.
+fn fold_result_aliases(text: &mut String) {
+    for head in [
+        "ResultOk<",
+        "ResultErr<",
+        "Result2<",
+        "ResultMethods2<",
+        "ResultMethods<",
+    ] {
+        let mut from = 0;
+
+        while let Some(i) = text[from..].find(head) {
+            let at = from + i;
+            let Some(len) = group_len(&text[at + head.len() - 1..], '<', '>') else {
+                from = at + head.len();
+
+                continue;
+            };
+            let end = at + head.len() - 1 + len;
+
+            // `ResultMethods<T, E> & { ... }` is the method table met
+            // with the data half; the fold above it reads the pair.
+            if text[end..].trim_start().starts_with('&') {
+                from = at + head.len();
+
+                continue;
+            }
+
+            let args = &text[at + head.len()..end - 1];
+            let name = format!("Result<{args}>");
+            text.replace_range(at..end, &name);
+            from = at + name.len();
+        }
+    }
+}
+
+/// `intersect<T, ~nil>` is how the checker writes a value a loop or a
+/// test proved is not nil. Alloy has no negation to write, and the
+/// name the source gave the value is `T`.
+fn fold_refinements(text: &mut String) {
+    const HEAD: &str = "intersect<";
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(HEAD) {
+        let at = from + i;
+        let Some(len) = group_len(&text[at + HEAD.len() - 1..], '<', '>') else {
+            from = at + HEAD.len();
+
+            continue;
+        };
+        let inner = &text[at + HEAD.len()..at + HEAD.len() - 1 + len - 1];
+        let kept: Vec<&str> = split_list(inner)
+            .into_iter()
+            .filter(|p| !p.trim().starts_with('~'))
+            .collect();
+
+        if kept.is_empty() {
+            from = at + HEAD.len();
+
+            continue;
+        }
+
+        let name = kept.join(" & ");
+        text.replace_range(at..at + HEAD.len() - 1 + len, &name);
+        from = at + name.len();
+    }
+}
+
+/// `a & ~nil` is a value a test proved is not nil. Alloy writes no
+/// negation, and the name the source gave the value is the other side.
+fn fold_negated_members(text: &mut String) {
+    loop {
+        let Some(at) = text.find('~') else {
+            return;
+        };
+        let name_len = text[at + 1..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .count();
+
+        if name_len == 0 {
+            return;
+        }
+
+        let end = at + 1 + name_len;
+        let before = text[..at].trim_end();
+
+        // ` & ~nil` goes with the `&` that joined it, and `~nil & ` with
+        // the one that follows.
+        if let Some(head) = before.strip_suffix('&') {
+            text.replace_range(head.trim_end().len()..end, "");
+
+            continue;
+        }
+
+        let after = text[end..].trim_start();
+
+        match after.strip_prefix('&') {
+            Some(rest) => {
+                let keep = text.len() - rest.trim_start().len();
+                text.replace_range(at..keep, "");
+            }
+
+            None => return,
+        }
+    }
+}
+
+/// The parts of a comma separated list at depth zero.
+fn split_list(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (k, c) in text.char_indices() {
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+            ')' | '}' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(text[start..k].trim());
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+
+    out.push(text[start..].trim());
+
+    out
 }
 
 /// `function _1:unwrap(self: any): T`: the receiver is a temp the emit
@@ -2932,6 +3431,8 @@ fn enclosing_brace(text: &str, at: usize) -> Option<usize> {
 /// A Symbol prints as an empty table under a metatable with a printer;
 /// it reads as `Symbol`.
 fn fold_symbols(text: &mut String) {
+    // The child prints the empty half as `{ }` or as `{  }`.
+    *text = text.replace("{  }", "{ }");
     let pattern = "{ @metatable { __tostring: (...any) -> string }, { } }";
     let mut from = 0;
 
@@ -3320,6 +3821,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_mapped_record_keeps_the_mapped_name() {
+        let known = Known {
+            interfaces: interfaces("type Ent = { id: number, name: string }\n"),
+            shapes: Vec::new(),
+        };
+
+        // The alias marks no field, so the `Readonly` print is not it,
+        // and the mapped fold names what the source wrote.
+        assert_eq!(
+            fold(
+                "Property id of table '{ read id: number, read name: string }' is read-only",
+                &known
+            ),
+            "Property id of table 'Readonly<Ent>' is read-only"
+        );
+        // A literal contrasted against another type keeps its record.
+        assert_eq!(
+            fold(
+                "Table type '{ id: number, name: string }' not compatible with type 'Entity'",
+                &known
+            ),
+            "Table type '{ id: number, name: string }' not compatible with type 'Entity'"
+        );
+        // Elsewhere the alias still names the shape.
+        assert_eq!(
+            fold("local e: { id: number, name: string }", &known),
+            "local e: Ent"
+        );
+    }
+
+    #[test]
+    fn a_future_method_names_the_future() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "function Awaitable:cancel(self: Awaitable<number>): ()",
+                &known
+            ),
+            "function Future:cancel(self: Future<number>): ()"
+        );
+    }
+
+    #[test]
+    fn a_record_alias_reads_by_name_with_no_export() {
+        let known = Known {
+            interfaces: interfaces("type Profile = { name: string, level: number }\n"),
+            shapes: Vec::new(),
+        };
+        let printed = "local all: {\n        level: number,\n        name: string\n    }[]";
+
+        assert_eq!(fold(printed, &known), "local all: Profile[]");
+    }
+
+    #[test]
+    fn a_cut_result_print_reads_as_a_result() {
+        let known = Known::default();
+        let arms = "{ read _1: Record, read __err: string, ... 3 more ... } \
+                    | { read _1: string, read __err: string, ... 3 more ... }";
+
+        assert_eq!(fold(arms, &known), "Result<Record, string>");
+        assert_eq!(
+            fold(&format!("Array<{arms}>"), &known),
+            "Result<Record, string>[]"
+        );
+        // A whole print keeps the tag, and the pairing fold reads it.
+        assert_eq!(
+            fold("{ read _1: number, read __err: string }", &known),
+            "{ read _1: number, read __err: string }"
+        );
+    }
+
+    #[test]
+    fn the_two_arms_of_a_result_read_as_the_result() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "local head: ResultOk<number, string> | Result<number, string> | ResultErr<number, string>",
+                &known
+            ),
+            "local head: Result<number, string>"
+        );
+        assert_eq!(
+            fold("ResultErr<Item, string>", &known),
+            "Result<Item, string>"
+        );
+    }
+
+    #[test]
+    fn a_not_nil_refinement_reads_as_the_type_it_refines() {
+        let known = Known::default();
+
+        assert_eq!(fold("intersect<T, ~nil>", &known), "T");
+        assert_eq!(fold("(a & ~nil) | { }", &known), "(a) | { }");
+        assert_eq!(fold("Item & ~nil", &known), "Item");
+        assert_eq!(fold("intersect<A, ~nil>[]", &known), "A[]");
+        assert_eq!(fold("intersect<Item, Named>", &known), "Item & Named");
+    }
+
     use super::*;
 
     fn known() -> Known {
@@ -3486,10 +4088,12 @@ mod tests {
             fold(prefixed, &Known::default()),
             "function open(player: Player): __alloy.Future<Result<Session, string>>"
         );
+        // `ResultOk` is the arm the emit names; a source writes
+        // `Result`, so one arm alone reads as the Result it belongs to.
         let one = "local r: ResultMethods<number, string> & { read _1: number, read __err: string, read __ok: number, tag: \"Ok\", read trace: string? }";
         assert_eq!(
             fold(one, &Known::default()),
-            "local r: ResultOk<number, string>"
+            "local r: Result<number, string>"
         );
     }
 
@@ -3704,6 +4308,100 @@ mod array_clause_tests {
         let text =
             "local xs: t1? where t1 = { [number]: string, push: (self: t1, value: string) -> ()";
         assert_eq!(fold(text, &Known::default()), "local xs: string[]?");
+    }
+
+    #[test]
+    fn a_callback_mismatch_names_the_parameter_and_not_the_type_pack() {
+        let text = "Expected this to be '(number, number) -> string' but got '(string) -> string'; it takes the 1st entry in the type pack is `string` in the latter type and `number` in the former type, and `string` is not a supertype of `number`";
+        assert_eq!(
+            friendly_text(text),
+            "Expected this to be '(number, number) -> string' but got '(string) -> string': its 1st parameter is `string` where `number` is wanted"
+        );
+    }
+
+    #[test]
+    fn the_same_sentence_reads_alike_over_several_lines() {
+        let text = "Expected this to be\n\t'(Player, number) -> ()'\nbut got\n\t'(Player, string) -> ()'; \nit takes the 2nd entry in the type pack is `string` in the latter type and `number` in the former type";
+        assert_eq!(
+            friendly_text(text),
+            "Expected this to be '(Player, number) -> ()' but got '(Player, string) -> ()': its 2nd parameter is `string` where `number` is wanted"
+        );
+    }
+
+    #[test]
+    fn a_report_about_a_key_the_emit_writes_is_dropped() {
+        let line = "local Build(first_name) = Job.Build(\"tower\")";
+        assert!(names_the_emit_key(
+            "Type 'nil' does not have key 'tag'",
+            line
+        ));
+        assert!(names_the_emit_key(
+            "Key '_1' not found in table 'Job'",
+            line
+        ));
+        // The source that writes the name keeps its report.
+        assert!(!names_the_emit_key(
+            "Type 'Row' does not have key 'tag'",
+            "print(row.tag)"
+        ));
+        assert!(!names_the_emit_key(
+            "Type 'Row' does not have key 'name'",
+            line
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_the_lowering_made_is_dropped() {
+        let expanded = "            <Frame Name=\"Stats\" ClassName=\"panel bg-orange-700\">";
+        assert!(duplicate_only_in_the_emit(
+            "Table field 'BackgroundColor3' is a duplicate; previously defined at line 65",
+            expanded
+        ));
+        assert!(!duplicate_only_in_the_emit(
+            "Table field 'hp' is a duplicate; previously defined at line 4",
+            "local t = { hp = 1, hp = 2 }"
+        ));
+    }
+
+    #[test]
+    fn a_table_beside_an_array_says_which_is_which() {
+        assert_eq!(
+            friendly_text("Expected this to be 'Future<{Profile}>', but got 'Future<Profile[]>'"),
+            "Expected this to be 'Future<{Profile}>', but got 'Future<Profile[]>'; a `{ Profile }` is a plain table, and `Profile[]` is an Array"
+        );
+        assert_eq!(
+            friendly_text("Expected this to be 'number', but got 'string'"),
+            "Expected this to be 'number', but got 'string'"
+        );
+    }
+
+    #[test]
+    fn a_generic_with_no_solution_reads_as_the_values_that_disagree() {
+        assert_eq!(
+            friendly_text(
+                "TypeError: No valid instantiation could be inferred for generic type parameter T. It was expected to be at least: number | nil and at most: number & nil but these types are not compatible with one another."
+            ),
+            "TypeError: these values give `T` no one type; make them agree, or write `T` out"
+        );
+    }
+
+    #[test]
+    fn the_checkers_step_limit_says_it_is_the_checker() {
+        assert_eq!(
+            friendly_text(
+                "TypeError: Code is too complex to typecheck! Consider simplifying the code around this area"
+            ),
+            "TypeError: the checker reached its limit on this expression; it says nothing about the code. Name a step in a local, or annotate the result"
+        );
+    }
+
+    #[test]
+    fn a_pack_that_is_no_callback_keeps_the_head_alone() {
+        let text = "Expected this to be 'number' but got 'string'; it takes the 1st entry in the type pack is `string` in the latter type and `number` in the former type";
+        assert_eq!(
+            friendly_text(text),
+            "Expected this to be 'number' but got 'string'"
+        );
     }
 }
 

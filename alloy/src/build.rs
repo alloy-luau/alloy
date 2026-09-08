@@ -431,6 +431,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
                 .diagnostics
                 .iter()
                 .chain(&data_diagnostics)
+                .filter(|d| !crate::alx::is_attribute_check(&d.message))
                 .map(|d| source[..d.start as usize].matches('\n').count() + 1)
                 .chain(import_lines)
                 .collect();

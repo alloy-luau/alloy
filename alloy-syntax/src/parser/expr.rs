@@ -406,6 +406,15 @@ impl<'a> Parser<'a> {
         };
 
         if args.is_none() && init.is_none() {
+            // `new Pair<number, string> { ... }`: a constructor writes
+            // its type arguments the way a call does, in `<<...>>`. One
+            // `<` reads as a comparison, so the parse stops here.
+            if self.at("<") {
+                return Err(
+                    self.err("`new` writes its type arguments in `<<...>>`, not in `<...>`")
+                );
+            }
+
             return Err(self.err("`new` needs `(args)` or `{ fields }` after the name"));
         }
 

@@ -706,10 +706,16 @@ impl State {
             .unwrap_or_default();
 
         if type_slot {
-            return self.type_completions(&labels);
+            return self.type_completions(uri, &labels);
         }
 
         if before.ends_with(['.', ':', '$', '@']) {
+            return Vec::new();
+        }
+
+        // A position the child answers with nothing takes nothing: the
+        // std names and the keywords belong where a name can begin.
+        if labels.is_empty() {
             return Vec::new();
         }
 
@@ -749,7 +755,7 @@ impl State {
     /// The type names for an annotation: every struct, interface, enum,
     /// trait, and type alias of the workspace, the std types, and the
     /// primitives.
-    fn type_completions(&self, labels: &[&str]) -> Vec<Value> {
+    fn type_completions(&self, uri: &str, labels: &[&str]) -> Vec<Value> {
         let mut items = Vec::new();
         let mut seen: HashSet<String> = labels.iter().map(|l| l.to_string()).collect();
         let mut push = |name: &str, kind: u64, detail: &str, doc_text: Option<String>| {
@@ -764,7 +770,7 @@ impl State {
             }
         };
 
-        for d in self.docs.values().flat_map(|d| d.decls.iter()) {
+        for d in self.decls_in_scope(uri) {
             if d.name.starts_with(['$', '@']) || d.name.contains('.') {
                 continue;
             }
@@ -821,7 +827,41 @@ impl State {
             push(name, 14, "primitive", None);
         }
 
+        // The engine's classes and datatypes, which the child lists as
+        // values alone.
+        for name in alloy::roblox_classes::INSTANCE_CLASSES
+            .iter()
+            .chain(alloy::roblox_classes::DATATYPES)
+        {
+            push(name, 7, "roblox", None);
+        }
+
         items
+    }
+
+    /// The declarations a file sees: its own, and what other files
+    /// export. A local of another file is not in scope here.
+    fn decls_in_scope(&self, uri: &str) -> Vec<&alloy::declarations::Declaration> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+
+        for (u, doc) in &self.docs {
+            let own = u == uri;
+
+            for d in &doc.decls {
+                let exported = d
+                    .hover
+                    .lines()
+                    .nth(1)
+                    .is_some_and(|l| l.starts_with("export "));
+
+                if (own || exported || d.name.contains('.')) && seen.insert(d.name.clone()) {
+                    out.push(d);
+                }
+            }
+        }
+
+        out
     }
 
     /// The items for a completion context. A sigil item replaces the
@@ -871,7 +911,7 @@ impl State {
 
                 let mut seen = HashSet::new();
 
-                for d in self.docs.values().flat_map(|d| d.decls.iter()) {
+                for d in self.decls_in_scope(uri) {
                     if d.name.starts_with('@')
                         && fits(&declared_attribute_targets(&d.hover))
                         && seen.insert(d.name.clone())
@@ -893,7 +933,7 @@ impl State {
 
                 let mut seen = HashSet::new();
 
-                for d in self.docs.values().flat_map(|d| d.decls.iter()) {
+                for d in self.decls_in_scope(uri) {
                     if d.name.starts_with('$') && seen.insert(d.name.clone()) {
                         items.push(word(&d.name, 3, Some(d.hover.clone()), *sigil));
                     }
@@ -1108,6 +1148,101 @@ impl State {
             // of an import path, Enter is a newline.
             Context::Nothing => {}
 
+            Context::TypeSlot { prefix } => {
+                let from = offset - prefix.len();
+
+                for mut item in self.type_completions(uri, &[]) {
+                    let label = item["label"].as_str().unwrap_or("").to_string();
+                    let kind = item["kind"].as_u64().unwrap_or(7);
+                    let doc_text = item["documentation"]["value"].as_str().map(str::to_string);
+                    let detail = item["detail"].clone();
+                    item = word(&label, kind, doc_text, from);
+                    item["detail"] = detail;
+                    items.push(item);
+                }
+            }
+
+            Context::NewTarget { prefix } => {
+                let from = offset - prefix.len();
+
+                for d in self.decls_in_scope(uri) {
+                    let head = d.hover.lines().nth(1).unwrap_or("");
+
+                    if head.contains("struct ") || head.contains("class ") {
+                        items.push(word(&d.name, 7, Some(d.hover.clone()), from));
+                    }
+                }
+
+                for name in [
+                    "HashMap", "Set", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array",
+                ] {
+                    items.push(word(name, 7, keywords::doc(name).map(str::to_string), from));
+                }
+
+                for name in alloy::roblox_classes::INSTANCE_CLASSES
+                    .iter()
+                    .chain(alloy::roblox_classes::DATATYPES)
+                {
+                    let mut item = word(name, 7, None, from);
+                    item["detail"] = json!("roblox");
+                    items.push(item);
+                }
+            }
+
+            Context::MatchCase { prefix } => {
+                let from = offset - prefix.len();
+                let mut seen = HashSet::new();
+
+                for d in self.decls_in_scope(uri) {
+                    // A variant declares as `Enum.Variant`.
+                    if let Some((_, variant)) = d.name.split_once('.')
+                        && d.hover.contains("```alloy\n")
+                        && seen.insert(variant.to_string())
+                    {
+                        items.push(word(variant, 20, Some(d.hover.clone()), from));
+                    }
+                }
+
+                for (name, what) in [
+                    ("Ok", "The success case of a `Result`."),
+                    ("Err", "The failure case of a `Result`."),
+                    ("default", "The arm that takes what no case did."),
+                    ("_", "Matches anything without binding it."),
+                ] {
+                    if seen.insert(name.to_string()) {
+                        items.push(word(name, 14, Some(what.to_string()), from));
+                    }
+                }
+            }
+
+            Context::FieldStart { prefix } => {
+                let from = offset - prefix.len();
+
+                for (name, what) in [
+                    ("read", "A read-only field."),
+                    ("write", "A write-only field."),
+                    ("private", "A field the impl alone sees."),
+                    ("public", "A field everything sees, the default."),
+                    ("end", "Closes the body."),
+                ] {
+                    items.push(word(name, 14, Some(what.to_string()), from));
+                }
+            }
+
+            Context::MemberStart { prefix } => {
+                let from = offset - prefix.len();
+
+                for (name, what) in [
+                    ("function", "A method; `self` first for an instance method."),
+                    ("async function", "A method that returns a Future."),
+                    ("private function", "A method the impl alone calls."),
+                    ("public", "A method everything calls, the default."),
+                    ("end", "Closes the body."),
+                ] {
+                    items.push(word(name, 14, Some(what.to_string()), from));
+                }
+            }
+
             Context::ImportStar => {
                 items.push(word(
                     "as",
@@ -1158,15 +1293,15 @@ impl State {
                     items.push(word(name, 14, None, offset - prefix.len()));
                 }
 
-                items.extend(self.type_completions(&[]));
-
-                for name in alloy::roblox_classes::INSTANCE_CLASSES
+                let mut seen: HashSet<String> = items
                     .iter()
-                    .chain(alloy::roblox_classes::DATATYPES)
-                {
-                    let mut item = word(name, 7, None, offset - prefix.len());
-                    item["detail"] = json!("roblox");
-                    items.push(item);
+                    .filter_map(|i| i["label"].as_str().map(str::to_string))
+                    .collect();
+
+                for item in self.type_completions(uri, &[]) {
+                    if seen.insert(item["label"].as_str().unwrap_or("").to_string()) {
+                        items.push(item);
+                    }
                 }
             }
 
@@ -5380,6 +5515,17 @@ fn keep_diagnostic(d: &Value, doc: &Doc, lint_config: &alloy::config::LintConfig
 /// the real one, and an unresolved require is an `UnknownModule` error
 /// over the whole import, naming the module the source asked for.
 fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
+    // A type inside a message reads as a hover does: the runtime's
+    // names go, and a struct's private view folds to the struct.
+    if let Some(message) = d.get("message").and_then(Value::as_str)
+        && (message.contains("__") || message.contains(" where ") || message.contains("Array<"))
+    {
+        let mut folded = json!(message);
+        strip_std_prefix(&mut folded);
+        crate::shapes::fold_value(&mut folded, &st.known_shapes());
+        d["message"] = folded;
+    }
+
     let Some(message) = d.get("message").and_then(Value::as_str) else {
         return;
     };
@@ -5755,6 +5901,27 @@ mod tests {
         assert!(!declares_a_name_at(src, 36));
         assert!(declares_a_name_at(src, 45));
         assert!(!declares_a_name_at(src, src.len() - 2));
+    }
+
+    #[test]
+    fn a_private_view_in_a_message_reads_as_the_struct() {
+        let st = State::default();
+        let doc = Doc::new(
+            "struct Swinger as\n    private last: number\nend\n".to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let mut d = json!({
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } },
+            "message": "TypeError: Type 'Swinger & Swinger__private & { last: number, scope: Scope }' does not have key 'self'",
+        });
+        friendly_message(&mut d, &doc, &st);
+        assert_eq!(
+            d["message"],
+            "TypeError: Type 'Swinger' does not have key 'self'"
+        );
     }
 
     #[test]

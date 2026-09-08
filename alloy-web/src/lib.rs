@@ -351,6 +351,80 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            Context::TypeSlot { prefix } => {
+                let from = offset - prefix.len();
+
+                for name in ["number", "string", "boolean", "any", "unknown", "nil", "thread", "buffer"] {
+                    items.push(word(name, "type", None, from));
+                }
+
+                for d in &s.decls {
+                    let head = d.hover.lines().nth(1).unwrap_or("");
+
+                    if !d.name.starts_with(['@', '$']) && !d.name.contains('.') && (head.contains("struct ") || head.contains("enum ") || head.contains("interface ") || head.contains("trait ") || head.contains("type ")) {
+                        items.push(word(&d.name, "type", Some(d.hover.clone()), from));
+                    }
+                }
+
+                for name in ["Array", "HashMap", "Set", "Queue", "Heap", "Scope", "Iter", "Result", "Future", "Signal", "Partial", "Readonly", "Sink"] {
+                    items.push(word(name, "type", keywords::doc(name).map(str::to_string), from));
+                }
+
+                for name in alloy::roblox_classes::INSTANCE_CLASSES.iter().chain(alloy::roblox_classes::DATATYPES) {
+                    items.push(word(name, "class", None, from));
+                }
+            }
+
+            Context::NewTarget { prefix } => {
+                let from = offset - prefix.len();
+
+                for d in &s.decls {
+                    let head = d.hover.lines().nth(1).unwrap_or("");
+
+                    if head.contains("struct ") {
+                        items.push(word(&d.name, "class", Some(d.hover.clone()), from));
+                    }
+                }
+
+                for name in ["HashMap", "Set", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array"] {
+                    items.push(word(name, "class", keywords::doc(name).map(str::to_string), from));
+                }
+
+                for name in alloy::roblox_classes::INSTANCE_CLASSES.iter().chain(alloy::roblox_classes::DATATYPES) {
+                    items.push(word(name, "class", None, from));
+                }
+            }
+
+            Context::MatchCase { prefix } => {
+                let from = offset - prefix.len();
+
+                for d in &s.decls {
+                    if let Some((_, variant)) = d.name.split_once('.') {
+                        items.push(word(variant, "constant", Some(d.hover.clone()), from));
+                    }
+                }
+
+                for name in ["Ok", "Err", "default", "_"] {
+                    items.push(word(name, "keyword", None, from));
+                }
+            }
+
+            Context::FieldStart { prefix } => {
+                let from = offset - prefix.len();
+
+                for name in ["read", "write", "private", "public", "end"] {
+                    items.push(word(name, "keyword", None, from));
+                }
+            }
+
+            Context::MemberStart { prefix } => {
+                let from = offset - prefix.len();
+
+                for name in ["function", "async function", "private function", "public", "end"] {
+                    items.push(word(name, "keyword", None, from));
+                }
+            }
+
             Context::ImportSpec { .. } | Context::Nothing => {}
         }
 

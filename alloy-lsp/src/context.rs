@@ -56,9 +56,144 @@ pub enum Context {
     /// `import("...")`: a module path. `text` is what the string holds so
     /// far, and `start` the byte offset after the opening quote.
     ImportSpec { text: String, start: usize },
-    /// Right after the closing quote of a module path: the statement is
-    /// done, and no list belongs here.
+    /// Right after the closing quote of a module path, a new name the
+    /// author is choosing, the inside of a string, a literal an
+    /// attribute takes: the statement is done or the name is theirs, and
+    /// no list belongs here.
     Nothing,
+    /// A type goes here: after `type X =`, `satisfies`, `is`, `extends`,
+    /// `impl`, a field's `:` in a struct body.
+    TypeSlot { prefix: String },
+    /// `new |`: a struct, or a class the engine constructs.
+    NewTarget { prefix: String },
+    /// `case |`: a variant of an enum, or `default`.
+    MatchCase { prefix: String },
+    /// The modifier column of a struct or interface body: `read`,
+    /// `write`, `private`, `public`, or the `end`.
+    FieldStart { prefix: String },
+    /// The member column of an `impl` or `trait` body: `function`,
+    /// `async`, `private`, `public`, an attribute, or the `end`.
+    MemberStart { prefix: String },
+}
+
+/// The body the cursor sits in, when a declaration opened above it
+/// and no `end` at the margin closed it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Body {
+    Struct,
+    Enum,
+    Impl,
+}
+
+/// The declaration body around `line_start`: the nearest line at the
+/// margin above that opens one, unless a margin `end` or another
+/// margin statement sits between. Inside an `impl`, a method's own
+/// block counts too: a cursor within one is in ordinary code.
+fn enclosing_body(src: &str, line_start: usize) -> Option<Body> {
+    let mut depth = 0i32;
+
+    for line in src[..line_start].lines().rev() {
+        let trimmed = line.trim_start();
+        let at_margin = trimmed.len() == line.len();
+
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+
+        if !at_margin {
+            // The blocks a method's body opens and closes, seen from
+            // below: a closer first, then its opener.
+            depth += block_closers(trimmed) - block_openers(trimmed);
+
+            continue;
+        }
+
+        let decl = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let decl = decl.strip_prefix("@").map_or(decl, |_| "");
+
+        return match decl.split_whitespace().next() {
+            Some("struct" | "interface") if decl.contains(" as") || decl.ends_with("as") => {
+                Some(Body::Struct)
+            }
+            Some("enum") if decl.contains(" as") => Some(Body::Enum),
+            Some("impl" | "trait") if depth <= 0 => Some(Body::Impl),
+            _ => None,
+        };
+    }
+
+    None
+}
+
+fn block_openers(text: &str) -> i32 {
+    text.split(|c: char| !is_word(c))
+        .filter(|w| {
+            matches!(
+                *w,
+                "function" | "if" | "for" | "while" | "do" | "match" | "repeat"
+            )
+        })
+        .count() as i32
+        - text
+            .split(|c: char| !is_word(c))
+            .filter(|w| matches!(*w, "do"))
+            .count() as i32
+            * i32::from(text.contains("while ") || text.contains("for "))
+}
+
+fn block_closers(text: &str) -> i32 {
+    text.split(|c: char| !is_word(c))
+        .filter(|w| matches!(*w, "end" | "until"))
+        .count() as i32
+}
+
+/// Whether the cursor sits inside a quoted string on its line, with
+/// escapes skipped; a long string is not counted.
+fn inside_string(before: &str) -> bool {
+    let mut open: Option<char> = None;
+    let mut chars = before.chars();
+
+    while let Some(c) = chars.next() {
+        match open {
+            Some(q) => {
+                if c == '\\' {
+                    chars.next();
+                } else if c == q {
+                    open = None;
+                }
+            }
+
+            None => {
+                if c == '"' || c == '\'' || c == '`' {
+                    open = Some(c);
+                } else if c == '-' && chars.as_str().starts_with('-') {
+                    return false;
+                }
+            }
+        }
+    }
+
+    open.is_some()
+}
+
+/// Whether the cursor names a function's parameter: inside the
+/// parenthesis of a `function` head, not after a `:` of the parameter.
+fn names_a_parameter(head: &str) -> bool {
+    let Some(f) = head.rfind("function") else {
+        return false;
+    };
+    let after = &head[f + "function".len()..];
+    let Some(open) = after.find('(') else {
+        return false;
+    };
+    let params = &after[open + 1..];
+
+    if params.matches('(').count() < params.matches(')').count() || params.contains(')') {
+        return false;
+    }
+
+    let last = params.rsplit(',').next().unwrap_or(params);
+
+    !last.contains(':') && !last.contains('=')
 }
 
 /// The string a module path is being typed in, when the cursor is inside
@@ -339,6 +474,127 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         });
     }
 
+    let trimmed = before.trim_start();
+
+    // A string that is no module path: the child answers alone, since it
+    // knows the class names `Instance.new("` and `GetService("` take.
+    if inside_string(head) {
+        return None;
+    }
+
+    // The literal arguments of an attribute.
+    for name in [
+        "@ratelimit(",
+        "@timeout(",
+        "@rename(",
+        "@u8(",
+        "@deprecated(",
+    ] {
+        if let Some(i) = head.rfind(name)
+            && !head[i..].contains(')')
+        {
+            return Some(Context::Nothing);
+        }
+    }
+
+    // A word a type, a constructor, or a variant goes after.
+    let head_words: Vec<&str> = head.split_whitespace().collect();
+
+    if (head.ends_with(' ') || head.ends_with('=')) && !head_words.is_empty() {
+        let last = head_words[head_words.len() - 1];
+        let second = head_words.len().checked_sub(2).map(|i| head_words[i]);
+        let type_decl = head_words.first() == Some(&"type")
+            || (head_words.first() == Some(&"export") && head_words.get(1) == Some(&"type"));
+
+        if matches!(last, "satisfies" | "is" | "extends" | "impl")
+            || (last == "for" && head_words.first() == Some(&"impl"))
+            || (last == "not" && second == Some("is"))
+            || (last == "=" && type_decl && head_words.len() == 3)
+        {
+            return Some(Context::TypeSlot {
+                prefix: prefix.to_string(),
+            });
+        }
+
+        if last == "new" {
+            return Some(Context::NewTarget {
+                prefix: prefix.to_string(),
+            });
+        }
+
+        if last == "case" {
+            return Some(Context::MatchCase {
+                prefix: prefix.to_string(),
+            });
+        }
+    }
+
+    // A new name the author is choosing.
+    if names_a_parameter(head) {
+        return Some(Context::Nothing);
+    }
+
+    if let Some(w) = head_words.first()
+        && *w == "for"
+        && !head_words.contains(&"in")
+    {
+        return Some(Context::Nothing);
+    }
+
+    if let Some(i) = head.rfind("case ")
+        && head[i..].contains('(')
+        && !head[i..].contains(')')
+    {
+        return Some(Context::Nothing);
+    }
+
+    if (trimmed.starts_with("local [") || trimmed.starts_with("const [")) && !head.contains('=') {
+        return Some(Context::Nothing);
+    }
+
+    // The body of a declaration.
+    match enclosing_body(src, line_start) {
+        Some(Body::Struct) => {
+            let at_column = head.trim().is_empty();
+
+            if head.contains(':') {
+                return Some(Context::TypeSlot {
+                    prefix: prefix.to_string(),
+                });
+            }
+
+            if at_column {
+                return Some(Context::FieldStart {
+                    prefix: prefix.to_string(),
+                });
+            }
+
+            return Some(Context::Nothing);
+        }
+
+        Some(Body::Enum) => {
+            if in_enum_payload(src, line_start, head) {
+                return Some(Context::EnumPayload {
+                    prefix: prefix.to_string(),
+                });
+            }
+
+            return Some(Context::Nothing);
+        }
+
+        Some(Body::Impl) => {
+            let at_column = head.trim().is_empty();
+
+            if at_column {
+                return Some(Context::MemberStart {
+                    prefix: prefix.to_string(),
+                });
+            }
+        }
+
+        None => {}
+    }
+
     if let Some(interface) = declaration_head(head) {
         return Some(Context::DeclarationAs {
             prefix: prefix.to_string(),
@@ -351,8 +607,6 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             prefix: prefix.to_string(),
         });
     }
-
-    let trimmed = before.trim_start();
 
     let attr_decl = trimmed
         .strip_prefix("export ")
@@ -512,6 +766,76 @@ mod tests {
     }
 
     #[test]
+    fn a_new_name_and_a_finished_token_answer_nothing() {
+        assert_eq!(at("function f(alpha: number, bet|"), Some(Context::Nothing));
+        assert_eq!(at("local function f(|"), Some(Context::Nothing));
+        assert_eq!(at("for _, ite| in items do"), Some(Context::Nothing));
+        assert_eq!(
+            at("match m with\n    case Join(pi|"),
+            Some(Context::Nothing)
+        );
+        assert_eq!(at("local [ fir| ] = xs"), Some(Context::Nothing));
+        assert_eq!(at("local s = \"hel|lo\""), None);
+        assert_eq!(at("@ratelimit(2|"), Some(Context::Nothing));
+        assert_eq!(at("struct Holder as\n    read na|"), Some(Context::Nothing));
+        assert_eq!(at("enum Kind as\n    Al|"), Some(Context::Nothing));
+        assert_eq!(at("function f(a: |"), None);
+        assert_eq!(at("for k, v in pa|"), None);
+    }
+
+    #[test]
+    fn type_slots_and_bodies_have_their_own_lists() {
+        let ty = |p: &str| {
+            Some(Context::TypeSlot {
+                prefix: p.to_string(),
+            })
+        };
+        assert_eq!(at("type Alias = |"), ty(""));
+        assert_eq!(at("local v = t satisfies Ha|"), ty("Ha"));
+        assert_eq!(at("if key is |"), ty(""));
+        assert_eq!(at("if key is not |"), ty(""));
+        assert_eq!(at("interface Both extends |"), ty(""));
+        assert_eq!(at("impl Dr|"), ty("Dr"));
+        assert_eq!(at("impl Drawable for |"), ty(""));
+        assert_eq!(at("struct Box as\n    inner: |"), ty(""));
+        assert_eq!(
+            at("struct Box as\n    |"),
+            Some(Context::FieldStart {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("struct Box as\n    pri|"),
+            Some(Context::FieldStart {
+                prefix: "pri".to_string()
+            })
+        );
+        assert_eq!(
+            at("impl Box\n    |"),
+            Some(Context::MemberStart {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("impl Box\n    function f(self)\n        local x = |"),
+            None
+        );
+        assert_eq!(at("struct Box as\nend\nlocal x = |"), None);
+        assert_eq!(
+            at("local made = new |"),
+            Some(Context::NewTarget {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("match m with\n    case |"),
+            Some(Context::MatchCase {
+                prefix: String::new()
+            })
+        );
+    }
+
+    #[test]
     fn a_variant_payload_is_a_type_slot() {
         assert_eq!(
             at("enum Msg as\n    Move(num|"),
@@ -525,7 +849,10 @@ mod tests {
                 prefix: String::new()
             })
         );
-        assert_eq!(at("enum Msg as\n    Move(number) |"), None);
+        assert_eq!(
+            at("enum Msg as\n    Move(number) |"),
+            Some(Context::Nothing)
+        );
         assert_eq!(at("enum Msg as\nend\nlocal x = f(num|"), None);
         assert_eq!(at("local x = f(num|"), None);
     }

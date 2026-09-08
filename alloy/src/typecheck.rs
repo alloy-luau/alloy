@@ -294,6 +294,19 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         luau.language_mode = Some("strict".to_string());
     }
 
+    // The mount table serves aliases too while `[project] mount_aliases`
+    // stays on; the mirror's config carries them so the analyzer
+    // resolves `@pkg/x` the way the compiler does. The user's own
+    // file is never written.
+    if config.project.mount_aliases {
+        for (name, m) in &config.mount {
+            if !luau.aliases.iter().any(|(a, _)| a == name) {
+                luau.aliases
+                    .push((name.clone(), format!("./{}", m.0.replace('\\', "/"))));
+            }
+        }
+    }
+
     let input_abs = normalize(&root.join(&config.build.input));
 
     for (_, target) in &mut luau.aliases {
@@ -2489,7 +2502,10 @@ mod tests {
     fn a_checker_lint_pairs_with_the_alloy_one() {
         assert_eq!(paired_lint("TableLiteral"), Some(&["duplicate_key"][..]));
         assert_eq!(paired_lint("LocalUnused"), Some(&["unused_variable"][..]));
-        assert_eq!(paired_lint("UnreachableCode"), Some(&["unreachable_code"][..]));
+        assert_eq!(
+            paired_lint("UnreachableCode"),
+            Some(&["unreachable_code"][..])
+        );
         assert_eq!(paired_lint("TypeError"), None);
     }
 

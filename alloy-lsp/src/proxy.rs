@@ -893,11 +893,16 @@ impl State {
             .map(|name| {
                 let kind = if matches!(*name, "Ok" | "Err") { 3 } else { 7 };
 
+                // A std type reads with the names it carries, the way
+                // its hover does.
+                let doc = alloy::docs::type_markdown(name)
+                    .or_else(|| crate::keywords::doc(name).map(str::to_string));
+
                 json!({
                     "label": name,
                     "kind": kind,
                     "detail": "alloy:std",
-                    "documentation": crate::keywords::doc(name).map(|d| json!({ "kind": "markdown", "value": d })),
+                    "documentation": doc.map(|d| json!({ "kind": "markdown", "value": d })),
                 })
             })
             .collect();
@@ -2628,6 +2633,9 @@ impl Server {
                     settings::merge(&mut st.settings, &over);
                 }
 
+                let mounts = mount_alias_settings(st.root.as_deref());
+                settings::merge(&mut st.settings, &mounts);
+
                 // The child reads its own shape from here, and asks for
                 // it over `workspace/configuration`, which the proxy
                 // answers: the editor need not support that request.
@@ -2696,6 +2704,9 @@ impl Server {
                     let over = settings::from_editor(settings);
                     settings::merge(&mut st.settings, &over);
                 }
+
+                let mounts = mount_alias_settings(st.root.as_deref());
+                settings::merge(&mut st.settings, &mounts);
 
                 let child_settings = st.settings.clone();
                 drop(st);
@@ -3940,6 +3951,10 @@ impl Server {
             Some((start, end, text)) => {
                 let (sl, sc) = position_of(&doc.source, start);
                 let (el, ec) = position_of(&doc.source, end);
+                // A std type: the overview, then the names a reader can
+                // hover on their own.
+                let text = alloy::docs::type_markdown(&doc.source[start..end])
+                    .unwrap_or_else(|| text.to_string());
 
                 json!({
                     "contents": { "kind": "markdown", "value": text },
@@ -4265,9 +4280,20 @@ impl Server {
                             // under the cursor and says nothing, and
                             // `string (5 bytes)` measures the key the
                             // emit wrote, not the name the source has.
-                            if restates_itself(&text)
-                                || (is_byte_count(&text) && names_a_key(doc, line, character))
-                            {
+                            let says_nothing = restates_itself(&text)
+                                || (is_byte_count(&text) && names_a_key(doc, line, character));
+
+                            // A std member: the type above, then what
+                            // the member does and an example, which no
+                            // type carries.
+                            let member = std_member_hover(&text, doc, line, character);
+
+                            if let Some(section) = &member {
+                                text.push_str("\n\n");
+                                text.push_str(section);
+                            }
+
+                            if says_nothing && member.is_none() {
                                 *result = Value::Null;
                             } else if text != value {
                                 result["contents"]["value"] = json!(text);
@@ -4567,6 +4593,11 @@ impl Server {
                     {
                         st.mark_enum_members(uri, line, character, result);
                         st.mark_declarations(result);
+
+                        if let Some(doc) = st.docs.get(uri) {
+                            attach_std_member_docs(result, doc, line, character);
+                        }
+
                         let member = st
                             .docs
                             .get(uri)
@@ -5123,10 +5154,38 @@ impl Server {
                 }
             }
 
-            if !alloy::luau_config::has_config(&root) {
-                let rc = root.join(".luaurc");
-                st.write_mirror(&rc, "{ \"languageMode\": \"strict\" }\n");
+            // The mirror's own `.luaurc`: the root's Luau configuration,
+            // strict when it names no mode, plus the mount names it lacks
+            // while `[project] mount_aliases` stays on. The child reads
+            // this file, so `@pkg/x` resolves in a shadow the way the
+            // compiler resolves it, and the user's own file stays as it
+            // is. A mirrored `.config.luau` goes, so the merged file is
+            // the one read.
+            let mut luau = alloy::luau_config::read_dir(&root)
+                .map(|(_, c)| c)
+                .unwrap_or_default();
+
+            if luau.language_mode.is_none() {
+                luau.language_mode = Some("strict".to_string());
             }
+
+            if let Some(path) = Config::find_within(&root, &root)
+                && let Ok(config) = Config::load(&path)
+                && config.project.mount_aliases
+            {
+                for (name, m) in &config.mount {
+                    if !luau.aliases.iter().any(|(a, _)| a == name) {
+                        luau.aliases
+                            .push((name.clone(), format!("./{}", m.0.replace('\\', "/"))));
+                    }
+                }
+            }
+
+            st.write_mirror(
+                &root.join(".luaurc"),
+                &alloy::luau_config::render_luaurc(&luau),
+            );
+            let _ = std::fs::remove_file(st.mirror.join(".config.luau"));
         }
 
         for path in files {
@@ -7135,6 +7194,46 @@ fn project_aliases(dir: &Path, root: Option<&Path>) -> Vec<(String, PathBuf)> {
     out
 }
 
+/// The child's `require.directoryAliases` for the mount names the Luau
+/// configuration lacks, while `[project] mount_aliases` stays on. The
+/// child resolves `@pkg/x` in a shadow through this setting, so the
+/// user's own configuration file is never written. Paths are relative
+/// to the child's workspace, which mirrors the root.
+fn mount_alias_settings(root: Option<&Path>) -> Value {
+    let Some(root) = root else {
+        return json!({});
+    };
+    let Some(path) = Config::find_within(root, root) else {
+        return json!({});
+    };
+    let Ok(config) = Config::load(&path) else {
+        return json!({});
+    };
+
+    if !config.project.mount_aliases || config.mount.is_empty() {
+        return json!({});
+    }
+
+    let declared = luaurc_aliases(root, Some(root));
+    let mut map = serde_json::Map::new();
+
+    for (name, m) in &config.mount {
+        if declared.iter().any(|(a, _)| a == name) {
+            continue;
+        }
+
+        let dir = m.0.replace('\\', "/");
+        let dir = dir.trim_end_matches('/');
+        map.insert(format!("@{name}/"), Value::String(format!("{dir}/")));
+    }
+
+    if map.is_empty() {
+        return json!({});
+    }
+
+    json!({ "require": { "directoryAliases": map } })
+}
+
 /// The `aliases` of the nearest `.luaurc` or `.config.luau` above
 /// `dir`, up to the root, each resolved against the directory that
 /// declares it.
@@ -8086,6 +8185,126 @@ fn array_element(lines: &[&str], case_line: usize) -> Option<String> {
     }
 
     None
+}
+
+/// The std type a receiver word names, with whether the word is the
+/// type itself. A value resolves through its annotation, or through
+/// what it starts from.
+fn std_receiver(source: &str, sigil: usize, word: &str) -> Option<(&'static str, bool)> {
+    if word.is_empty() {
+        return None;
+    }
+
+    if let Some(key) = alloy::docs::member_owner(word) {
+        return Some((key, true));
+    }
+
+    let base = match context::declared(source, sigil, word)? {
+        context::Declared::Annotation(t) => alloy::docs::type_head(&t),
+        context::Declared::Init(v) => alloy::docs::value_head(&v),
+    }?;
+
+    alloy::docs::member_owner(&base).map(|key| (key, false))
+}
+
+/// The std member the byte sits on: the word after a `.` or a `:` whose
+/// receiver resolves to a std type that documents it.
+fn std_member_at(
+    source: &str,
+    offset: usize,
+) -> Option<(&'static str, &'static alloy::docs::Member)> {
+    let (name, sigil, receiver) = alloy::docs::member_spot(source, offset)?;
+    let (key, on_type) = std_receiver(source, sigil, receiver)?;
+    let m = alloy::docs::member(key, name)?;
+
+    alloy::docs::member_fits(m.kind, on_type).then_some((key, m))
+}
+
+/// The std member a hover sits on, as the doc and the example the
+/// checker's type cannot carry. The source resolves the receiver where
+/// it can; otherwise the type the child printed names it.
+fn std_member_hover(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
+    let offset = offset_of(&doc.source, line, character)?;
+    let hit = std_member_at(&doc.source, offset).or_else(|| {
+        let (name, _, _) = alloy::docs::member_spot(&doc.source, offset)?;
+
+        alloy::docs::MEMBERS
+            .iter()
+            .filter(|(key, _)| names_type(value, key))
+            .find_map(|(key, _)| alloy::docs::member(key, name).map(|m| (*key, m)))
+    })?;
+
+    Some(alloy::docs::member_hover(hit.0, hit.1))
+}
+
+/// Whether a printed type names `key` as a whole word.
+fn names_type(text: &str, key: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(key) {
+        let start = from + i;
+        let end = start + key.len();
+        let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+        if !(start > 0 && word(bytes[start - 1])) && !(end < bytes.len() && word(bytes[end])) {
+            return true;
+        }
+
+        from = start + 1;
+    }
+
+    false
+}
+
+/// The child's member list, with the std's doc on the items a std type
+/// declares. A completion item carries the type; the doc says what the
+/// member does.
+fn attach_std_member_docs(result: &mut Value, doc: &Doc, line: u32, character: u32) {
+    let Some(offset) = offset_of(&doc.source, line, character) else {
+        return;
+    };
+    let head = doc.source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+
+    if !head.ends_with(['.', ':']) {
+        return;
+    }
+
+    let sigil = head.len() - 1;
+    let from = head[..sigil]
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let Some((key, on_type)) = std_receiver(&doc.source, sigil, &head[from..sigil]) else {
+        return;
+    };
+    let items = match result.get_mut("items").and_then(Value::as_array_mut) {
+        Some(items) => items,
+
+        None => match result.as_array_mut() {
+            Some(items) => items,
+
+            None => return,
+        },
+    };
+
+    for item in items {
+        let Some(label) = item.get("label").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(m) = alloy::docs::member(key, label) else {
+            continue;
+        };
+        if !alloy::docs::member_fits(m.kind, on_type) {
+            continue;
+        }
+
+        item["detail"] = json!(m.signature);
+        item["documentation"] = json!({
+            "kind": "markdown",
+            "value": alloy::docs::member_hover(key, m),
+        });
+    }
 }
 
 /// Whether a hover is a type alias to itself, `type Player = Player`.
@@ -10700,6 +10919,78 @@ mod tests {
         );
 
         (st, uri)
+    }
+
+    /// A hover on a std member reads the member's own section, not the
+    /// type's whole page. The receiver resolves from the source: an
+    /// annotation, an initializer, or the type name itself.
+    #[test]
+    fn a_hover_on_a_std_member_names_the_member() {
+        let src = concat!(
+            "local prices: HashMap<string, number> = HashMap.new()\n",
+            "local price = prices:get(\"sword\")\n",
+            "local xs = [ 1, 2, 3 ]\n",
+            "local n = xs:len()\n",
+        );
+        let (st, uri) = one_file(src);
+        let doc = st.docs.get(uri).expect("doc");
+
+        let at_new = std_member_hover("```luau\n(...)\n```", doc, 0, 49).expect("HashMap.new");
+        assert!(at_new.starts_with("**HashMap.new**"), "{at_new}");
+
+        let at_get = std_member_hover("```luau\n(...)\n```", doc, 1, 22).expect("HashMap:get");
+        assert!(at_get.starts_with("**HashMap:get**"), "{at_get}");
+        assert!(
+            at_get.contains("```alloy"),
+            "the section carries an example"
+        );
+
+        let at_len = std_member_hover("```luau\n(...)\n```", doc, 3, 14).expect("Array:len");
+        assert!(at_len.starts_with("**Array:len**"), "{at_len}");
+    }
+
+    /// With no annotation the type the child printed names the receiver.
+    #[test]
+    fn a_printed_type_names_the_member_the_source_cannot() {
+        let src = "local n = whatever:pop()\n";
+        let (st, uri) = one_file(src);
+        let doc = st.docs.get(uri).expect("doc");
+        let printed = "```luau\n(self: Queue<string>) -> string?\n```";
+        let hover = std_member_hover(printed, doc, 0, 20).expect("Queue:pop");
+
+        assert!(hover.starts_with("**Queue:pop**"), "{hover}");
+    }
+
+    /// A hover on the type name keeps the overview and lists the names.
+    #[test]
+    fn a_hover_on_a_std_type_lists_its_members() {
+        let text = alloy::docs::type_markdown("HashMap").expect("HashMap");
+
+        assert!(text.contains("A map with methods"), "the overview stays");
+        assert!(text.contains("Members: `new`, `from`, `get`"), "{text}");
+        assert!(!text.contains("|---|"), "no table is left");
+    }
+
+    /// The child's member list gains the std's doc and signature.
+    #[test]
+    fn a_std_member_completion_carries_its_doc() {
+        let src = "local prices: HashMap<string, number> = HashMap.new()\nprices:g\n";
+        let (st, uri) = one_file(src);
+        let doc = st.docs.get(uri).expect("doc");
+        let mut result = json!([{ "label": "get" }, { "label": "nothing" }]);
+        attach_std_member_docs(&mut result, doc, 1, 8);
+
+        assert_eq!(result[0]["detail"], json!("HashMap:get(key: K): V?"));
+        assert!(
+            result[0]["documentation"]["value"]
+                .as_str()
+                .is_some_and(|v| v.starts_with("**HashMap:get**")),
+            "{result}"
+        );
+        assert!(
+            result[1].get("detail").is_none(),
+            "an unknown label is left"
+        );
     }
 
     /// An `if` expression arm, a ternary, and a `default` get the

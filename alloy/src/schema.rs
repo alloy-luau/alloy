@@ -86,6 +86,54 @@ pub fn lint_names() -> Vec<String> {
         .collect()
 }
 
+/// The names a `[lint.rules]` key takes: the list names, plus the
+/// markup lints under their `alx.` prefix.
+pub fn rule_names() -> Vec<String> {
+    lint_names()
+        .into_iter()
+        .chain(
+            crate::lint::ALX_LINTS
+                .iter()
+                .map(|l| format!("{}{}", crate::lint::ALX_PREFIX, l.name)),
+        )
+        .collect()
+}
+
+/// The value of a `[lint.rules]` entry: a level, or a table of them
+/// for a dotted name such as `alx.static_conditional_child`.
+fn rule_value() -> Value {
+    let level = json!({
+        "type": "string",
+        "enum": ["allow", "warn", "deny"],
+        "description": "What the lint does when it fires: `allow` is silent, `warn` prints and passes, `deny` prints and fails the run."
+    });
+
+    json!({
+        "description": "The level of one lint, one group, or a table of them under a prefix: `alx.static_conditional_child = \"warn\"`.",
+        "oneOf": [
+            level,
+            { "type": "object", "additionalProperties": level }
+        ]
+    })
+}
+
+/// The key completion of `[lint.rules]`: the known names first, and
+/// any string after them, so a lint newer than the schema still
+/// passes.
+fn rule_key_schema(extra: &[String]) -> Value {
+    let mut names = rule_names();
+    // TOML nests a dotted key, so `alx` is a key of its own too.
+    names.push(crate::lint::ALX_PREFIX.trim_end_matches('.').to_string());
+    names.extend(extra.iter().cloned());
+
+    json!({
+        "anyOf": [
+            { "type": "string", "enum": names },
+            { "type": "string" }
+        ]
+    })
+}
+
 fn mount_value() -> Value {
     json!({
         "type": "array",
@@ -206,19 +254,40 @@ pub const TABLES: &[Table] = &[
     },
     Table {
         name: "lint",
-        doc: "The level of each lint under `alloy flux` and `alloy lint`. A list takes a lint name or a group name: correctness, suspicious, style, complexity, perf, roblox, pedantic, naming, or luau for the type checker's own. A name beats its group. `alloy doc lints` names them.",
+        doc: "Where every lint starts under `alloy flux` and `alloy lint`. `[lint.rules]` then sets one lint or one group. `alloy doc lints` names them.",
         keys: &[
+            key(
+                "recommended",
+                BOOL,
+                "true",
+                "Apply the level each lint declares. Off, every lint starts at `allow`, and `[lint.rules]` alone turns one on.",
+            ),
             key(
                 "strict",
                 BOOL,
-                "false",
+                "true",
                 "Turns the pedantic group on, at warn: `implicit_any`, `missing_return_type`, `explicit_any`, `todo_comment`, `print_debug`, `missing_doc`.",
             ),
-            lint_list("deny", "Lints or groups that fail the run."),
-            lint_list("warn", "Lints or groups that print and pass."),
-            lint_list("allow", "Lints or groups that stay silent."),
+            lint_list(
+                "deny",
+                "Deprecated: lints or groups that fail the run. Write `[lint.rules] <name> = \"deny\"`.",
+            ),
+            lint_list(
+                "warn",
+                "Deprecated: lints or groups that print and pass. Write `[lint.rules] <name> = \"warn\"`.",
+            ),
+            lint_list(
+                "allow",
+                "Deprecated: lints or groups that stay silent. Write `[lint.rules] <name> = \"allow\"`.",
+            ),
         ],
         open: None,
+    },
+    Table {
+        name: "lint.rules",
+        doc: "The level of one lint: a lint name, a group name (correctness, suspicious, style, complexity, perf, roblox, pedantic, naming, or luau for the type checker's own), an ingot's `<ingot>/<lint>`, or `alx.<name>` for a markup lint. A name beats its group.",
+        keys: &[],
+        open: Some(rule_value),
     },
     Table {
         name: "flux",
@@ -316,6 +385,12 @@ pub const TABLES: &[Table] = &[
         doc: "How Anneal, `alloy fmt`, lays code out. The names follow larvae and stylua where the option is theirs; `alloy doc fmt` explains each.",
         keys: &[
             key(
+                "recommended",
+                BOOL,
+                "true",
+                "Apply the recommended layout, the defaults below. Off, the formatter preserves what the file does: no line is reflowed, quotes and blank lines stay as written, and the indent comes from the file. The keys set here still apply over that.",
+            ),
+            key(
                 "column_width",
                 INT,
                 "100",
@@ -323,9 +398,9 @@ pub const TABLES: &[Table] = &[
             ),
             key(
                 "line_endings",
-                Ty::Choice(&["unix", "windows"]),
-                r#""unix""#,
-                "The line ending of the written file.",
+                Ty::Choice(&["input", "unix", "windows"]),
+                r#""input""#,
+                "The line ending of the written file. `input` keeps the endings the file already uses.",
             ),
             key(
                 "indent_type",
@@ -652,11 +727,11 @@ pub const TABLES: &[Table] = &[
     },
     Table {
         name: "alx.lints",
-        doc: "The levels of the markup lints.",
+        doc: "Deprecated: the levels of the markup lints. Write `[lint.rules] alx.<name> = \"allow\" | \"warn\" | \"deny\"`.",
         keys: &[unset(
             "static_conditional_child",
             Ty::Choice(&["off", "warn", "error"]),
-            "Markup in a child expression that no function encloses: it is built once, not on each render.",
+            "Deprecated: write `[lint.rules] alx.static_conditional_child`. Markup in a child expression that no function encloses: it is built once, not on each render.",
         )],
         open: None,
     },
@@ -804,7 +879,13 @@ pub fn schema() -> Value {
         }
     }
 
-    Value::Object(root)
+    let mut root = Value::Object(root);
+
+    if let Some(rules) = root.pointer_mut("/properties/lint/properties/rules") {
+        rules["propertyNames"] = rule_key_schema(&[]);
+    }
+
+    root
 }
 
 /// The schema of one project: the general one, plus what its ingots
@@ -875,6 +956,10 @@ pub fn project(manifests: &[&crate::ingot::Manifest]) -> Value {
         {
             all.extend(names.iter().map(|n| json!(n)));
         }
+    }
+
+    if let Some(rules) = root.pointer_mut("/properties/lint/properties/rules") {
+        rules["propertyNames"] = rule_key_schema(&names);
     }
 
     root

@@ -319,8 +319,30 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             ..base_options.clone()
         };
 
+        // `--@alloy-lint alx.<name>=<level>` sets a markup lint for
+        // one file, the way it sets any other lint.
+        let per_file;
         let jsx = match (&jsx_config, is_alx) {
-            (Ok(c), _) => Some(c),
+            (Ok(c), true) => {
+                match crate::directives::scan(&source)
+                    .level_override("alx.static_conditional_child")
+                {
+                    Some(level) => {
+                        per_file = {
+                            let mut own = c.clone();
+                            own.static_conditional_child = crate::config::markup_level(level);
+
+                            own
+                        };
+
+                        Some(&per_file)
+                    }
+
+                    None => Some(c),
+                }
+            }
+
+            (Ok(c), false) => Some(c),
 
             (Err(_), false) => None,
 

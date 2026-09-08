@@ -800,6 +800,21 @@ mod tests {
         assert_eq!(twice.level_override("raw_require"), Some(Level::Allow));
     }
 
+    /// A markup lint carries the `alx.` prefix `[lint.rules]` gives it.
+    #[test]
+    fn a_lint_directive_takes_a_markup_name() {
+        let d = scan("--@alloy-lint alx.static_conditional_child=allow\nlocal a = 1\n");
+        assert_eq!(
+            d.level_override("alx.static_conditional_child"),
+            Some(Level::Allow)
+        );
+        assert!(d.errors.is_empty());
+
+        let unknown = scan("--@alloy-lint alx.no_such_lint=allow\n");
+        assert_eq!(unknown.errors.len(), 1);
+        assert!(unknown.errors[0].1.contains("`alx.no_such_lint`"));
+    }
+
     #[test]
     fn an_unknown_lint_or_level_is_a_directive_error() {
         let bad_name = scan("--@alloy-lint no_such_lint=warn\n");

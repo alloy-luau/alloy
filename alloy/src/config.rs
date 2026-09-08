@@ -68,7 +68,17 @@ pub struct AlxFactory {
     pub merge: Option<String>,
 }
 
-/// `[alx.lints]`: the levels of the markup lints.
+/// A markup lint's level as the markup compiler spells it.
+pub(crate) fn markup_level(level: crate::lint::Level) -> luaux::config::LintLevel {
+    match level {
+        crate::lint::Level::Allow => luaux::config::LintLevel::Off,
+        crate::lint::Level::Warn => luaux::config::LintLevel::Warn,
+        crate::lint::Level::Deny => luaux::config::LintLevel::Error,
+    }
+}
+
+/// `[alx.lints]`: the levels of the markup lints. Deprecated; write
+/// `[lint.rules] alx.<name> = "<level>"`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct AlxLints {
@@ -200,6 +210,10 @@ impl Default for Project {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FmtConfig {
+    /// Apply the recommended layout: the defaults below. Off, the
+    /// formatter preserves what the file already does, and only the
+    /// keys the project sets change that. See `FmtConfig::preserving`.
+    pub recommended: bool,
     /// The width a bracket group breaks past.
     pub column_width: usize,
     pub line_endings: LineEndings,
@@ -241,13 +255,19 @@ pub struct FmtConfig {
     pub exclude: Vec<String>,
     /// The markup of `.alx` files.
     pub alx: AlxFmt,
+    /// Read the indent of each file from the file itself. Set by
+    /// `recommended = false` when the project names no indent, and
+    /// never a key of the table.
+    #[serde(skip)]
+    pub detect_indent: bool,
 }
 
 impl Default for FmtConfig {
     fn default() -> Self {
         Self {
+            recommended: true,
             column_width: 100,
-            line_endings: LineEndings::Unix,
+            line_endings: LineEndings::Input,
             indent_type: IndentType::Spaces,
             indent_width: 4,
             quote_style: QuoteStyle::AutoPreferDouble,
@@ -268,13 +288,133 @@ impl Default for FmtConfig {
             expand_imports: false,
             exclude: Vec::new(),
             alx: AlxFmt::default(),
+            detect_indent: false,
         }
     }
+}
+
+/// The width `recommended = false` puts on the formatter. It is a
+/// number and not `usize::MAX` because the layout adds one to it when
+/// it measures a markup hole, and that must not overflow.
+pub const NO_REFLOW_WIDTH: usize = 1_000_000;
+
+impl FmtConfig {
+    /// The layout with nothing recommended: no line is reflowed, and
+    /// every option that can keep what the author wrote does. The
+    /// indent comes from each file. `[fmt]` keys the project sets
+    /// apply over this.
+    pub fn preserving() -> Self {
+        Self {
+            recommended: false,
+            column_width: NO_REFLOW_WIDTH,
+            quote_style: QuoteStyle::Preserve,
+            leading_zero: LeadingZero::Preserve,
+            call_parentheses: CallParentheses::Input,
+            block_newline_gaps: BlockGaps::Preserve,
+            detect_indent: true,
+            alx: AlxFmt {
+                attribute_quotes: AttributeQuotes::Preserve,
+                text_wrap: TextWrap::Preserve,
+                ..AlxFmt::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// The options for one file. Under `detect_indent` the indent is
+    /// the file's own; otherwise the table's.
+    pub fn for_source(&self, src: &str) -> Self {
+        if !self.detect_indent {
+            return self.clone();
+        }
+
+        let mut out = self.clone();
+
+        if let Some((indent_type, width)) = detect_indent(src) {
+            out.indent_type = indent_type;
+            out.indent_width = width;
+        }
+
+        out
+    }
+}
+
+/// The preserving profile with the keys of a written `[fmt]` table
+/// over it. The caller has already parsed the same table once, so
+/// every value here is one `FmtConfig` accepts.
+fn over_preserving(written: &toml::Table) -> FmtConfig {
+    let mut table = match toml::Value::try_from(FmtConfig::preserving()) {
+        Ok(toml::Value::Table(t)) => t,
+        _ => unreachable!("the layout serializes as a table"),
+    };
+    merge(&mut table, written);
+
+    let mut out: FmtConfig = toml::Value::Table(table)
+        .try_into()
+        .expect("the [fmt] table already parsed");
+    // An indent the project names wins over the file's own.
+    out.detect_indent =
+        !written.contains_key("indent_type") && !written.contains_key("indent_width");
+
+    out
+}
+
+/// Writes every key of `over` into `base`, table by table, so
+/// `[fmt.alx]` with one key keeps the rest of the profile.
+fn merge(base: &mut toml::Table, over: &toml::Table) {
+    for (k, v) in over {
+        match (base.get_mut(k), v) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => merge(b, o),
+
+            _ => {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+/// The indent of a source: tabs when a line starts with one, else the
+/// smallest step between the leading spaces of two lines. `None` for a
+/// file that indents nothing.
+pub fn detect_indent(src: &str) -> Option<(IndentType, usize)> {
+    let mut widths: Vec<usize> = Vec::new();
+
+    for line in src.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if line.starts_with('\t') {
+            return Some((IndentType::Tabs, 4));
+        }
+
+        let spaces = line.len() - line.trim_start_matches(' ').len();
+
+        if spaces > 0 {
+            widths.push(spaces);
+        }
+    }
+
+    // The step is the smallest gap between two indent levels, so a
+    // block nested three deep does not read as one level of twelve.
+    widths.sort_unstable();
+    widths.dedup();
+
+    let step = widths
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .chain(widths.first().copied())
+        .min()?;
+
+    (step > 0).then_some((IndentType::Spaces, step))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LineEndings {
+    /// The endings the file already uses, CRLF when its first line
+    /// ends in one. A checkout on Windows keeps its endings.
+    Input,
     Unix,
     Windows,
 }
@@ -428,19 +568,128 @@ pub enum TextWrap {
     Preserve,
 }
 
-/// The `[lint]` table: the level of each lint. A list takes a lint name
-/// or a group name, `pedantic`; a name beats its group.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// The `[lint]` table: the two modes, and `[lint.rules]` under it.
+///
+/// The modes say where every lint starts. `recommended` applies the
+/// level each lint declares, and `strict` raises the pedantic group to
+/// `warn`. `[lint.rules]` then names a lint or a group and gives it a
+/// level; a name beats its group.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LintConfig {
+    /// Apply the level each lint declares. Off, every lint starts at
+    /// `allow` and `[lint.rules]` alone turns one on.
+    pub recommended: bool,
     /// Turns the `pedantic` group on, at `warn`.
     pub strict: bool,
-    /// Lints that fail the run.
+    /// `[lint.rules]`: a lint name, a group name, or `alx.<name>` for a
+    /// markup lint, at `allow`, `warn`, or `deny`.
+    pub rules: Rules,
+    /// Deprecated: lints that fail the run. Write
+    /// `[lint.rules] <name> = "deny"`.
     pub deny: Vec<String>,
-    /// Lints that print and pass.
+    /// Deprecated: lints that print and pass.
     pub warn: Vec<String>,
-    /// Lints that stay silent.
+    /// Deprecated: lints that stay silent.
     pub allow: Vec<String>,
+}
+
+/// The `[lint.rules]` table: a name to a level.
+///
+/// `alx.static_conditional_child = "warn"` is a nested table in TOML,
+/// so the reader flattens what it reads back to the dotted name the
+/// user wrote. A quoted key, `"enamel/no_effect" = "deny"`, arrives
+/// flat already.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct Rules(pub BTreeMap<String, crate::lint::Level>);
+
+impl FromIterator<(String, crate::lint::Level)> for Rules {
+    fn from_iter<I: IntoIterator<Item = (String, crate::lint::Level)>>(iter: I) -> Self {
+        Rules(iter.into_iter().collect())
+    }
+}
+
+impl std::ops::Deref for Rules {
+    type Target = BTreeMap<String, crate::lint::Level>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Rules {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Rules {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        fn walk<E: serde::de::Error>(
+            prefix: &str,
+            value: &toml::Value,
+            out: &mut BTreeMap<String, crate::lint::Level>,
+        ) -> Result<(), E> {
+            match value {
+                toml::Value::String(text) => {
+                    let level = crate::lint::Level::from_name(text).ok_or_else(|| {
+                        E::custom(format!(
+                            "`{prefix} = \"{text}\"` is not one of allow, warn, deny"
+                        ))
+                    })?;
+                    out.insert(prefix.to_string(), level);
+
+                    Ok(())
+                }
+
+                toml::Value::Table(t) => {
+                    for (k, v) in t {
+                        walk(&format!("{prefix}.{k}"), v, out)?;
+                    }
+
+                    Ok(())
+                }
+
+                _ => Err(E::custom(format!(
+                    "`{prefix}` takes a level: allow, warn, or deny"
+                ))),
+            }
+        }
+
+        let raw = BTreeMap::<String, toml::Value>::deserialize(d)?;
+        let mut out = BTreeMap::new();
+
+        for (k, v) in &raw {
+            walk(k, v, &mut out)?;
+        }
+
+        Ok(Rules(out))
+    }
+}
+
+impl LintConfig {
+    /// The same modes with `strict` off: every lint at the level it
+    /// declares, and the pedantic group silent.
+    pub fn without_strict(&self) -> Self {
+        Self {
+            strict: false,
+            ..self.clone()
+        }
+    }
+}
+
+impl Default for LintConfig {
+    fn default() -> Self {
+        Self {
+            recommended: true,
+            strict: true,
+            rules: Rules::default(),
+            deny: Vec::new(),
+            warn: Vec::new(),
+            allow: Vec::new(),
+        }
+    }
 }
 
 /// The `[flux]` table: what `alloy flux` runs beyond the lints, and the
@@ -592,113 +841,62 @@ impl Default for Build {
 /// The file name the CLI looks for.
 pub const FILE_NAME: &str = "alloy.toml";
 
-/// A default file, written by `alloy init`.
+/// A default file, written by `alloy init`. Every value here is a
+/// default, so the file says what the project can change and changes
+/// nothing yet.
 pub const TEMPLATE: &str = r#"#:schema .alloy/alloy.schema.json
 [build]
 in = "src"
 out = "build"
 exclude = []
 clean = false
-# ship runs on Roblox; check is what luau-lsp sees
 artifact = "ship"
 
 [emit]
-# seconds for every WaitForChild that `=>` emits; unset waits forever
 # wait_timeout = 5
-# what emitted code requires for the runtime; unset means a relative
-# require of the alloy.luau the build writes into the output root
 # std_require = "@alloy"
-# blank `import type` lines in the output so they add no dependency
 # erase_type_imports = false
 
 [fmt]
-# Anneal, the formatter. Every key has a default; these are the ones a
-# project changes most. `alloy doc fmt` lists them all.
+recommended = true
 column_width = 100
 indent_type = "spaces"
 indent_width = 4
 quote_style = "auto-prefer-double"
-# call_parentheses = "always"
-# exclude = ["vendor/*"]
-# sort_requires = { enabled = true, grouping = "by-kind" }
-# [fmt.alx]
-# attribute_per_line = true
 
 [lint]
-# the levels of the lints; a list takes a lint or a group: correctness,
-# suspicious, style, complexity, perf, roblox, pedantic, naming, luau
-# turn the pedantic group on
-strict = false
-# lints that fail the run; `alloy doc lints` names them all
-deny = []
-warn = []
-allow = []
+recommended = true
+strict = true
+
+[lint.rules]
+# raw_require = "allow"
 
 [flux]
-# `alloy flux`: the type check and the thresholds; `alloy doc flux`
-# run luau-lsp over the check artifact
 typecheck = true
-# extra definitions files; the project's .d.aly files join on their own
 definitions = []
-# too_many_arguments = 7
-# too_many_lines = 100
-# max_nesting = 5
-# cognitive_complexity = 25
-
-# [alx]
-# how .alx markup lowers: the factory it calls and the names it maps;
-# `alloy doc markup` explains the keys
-# [alx.factory]
-# backend = "table"
-# create = "create"
 
 [test]
-# `alloy test` writes one lest spec per source with a @test
 out = "tests"
 suite = "alloy"
-# write lest.toml and the @lest alias when the root has none
 lest = true
-# load engine doubles (Vector3, Enum, task, game, Instance) before a spec
 shim = true
 
 [project]
-# the name in the project files Alloy writes; a project file at the
-# root carries its own name, which wins
 name = "game"
-# the Rojo project file to read; unset means default.project.json, then
-# the one *.project.json at the root
-# file = "default.project.json"
-# where build/alloy.luau lands; unset means the place the project file
-# gives it, then @game/ReplicatedStorage/Alloy
-# runtime = "@game/ReplicatedStorage/Alloy"
-# the [mount] table is the tree: write default.project.json and
-# .alloy/build.project.json from it
-# source_of_truth = true
-# the [mount] table names aliases too, beside the Luau config ones
-# mount_aliases = true
-# write .alloy/sourcemap.json on every build
 sourcemap = true
+source_of_truth = true
+mount_aliases = true
 
-[mount]
-# alias = [path, mount]: the folder at path lands at mount in the
-# DataModel. A tool that reads a Rojo or Argon project file needs no
-# table here; Alloy reads default.project.json. A tool with its own
-# format describes the tree here, and this table then wins.
-# server = ["src/server", "@game/ServerScriptService/Server"]
-# client = ["src/client", "@game/StarterPlayer/StarterPlayerScripts/Client"]
+# [mount]
+# alias = [path, mount]: the folder at path lands at mount in the DataModel
 # shared = ["src/shared", "@game/ReplicatedStorage/Shared"]
-# pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
+# server = ["src/server", "@game/ServerScriptService/Server"]
 
-[ingots]
-# name = source: an extension that ships as an executable beside its
-# ingot.toml. A path is relative to the root; a release is pinned.
-# `alloy doc ingots` explains them.
+# [ingots]
+# an extension that ships as an executable: a path relative to this file,
+# or a GitHub release pinned by version
 # tailwind = "ingots/tailwind"
 # tailwind = { repo = "alloy-luau/tailwind-ingot", version = "0.1.0" }
-
-# [ingot.tailwind]
-# the options of one ingot, over the defaults its manifest declares
-# sort_classes = true
 "#;
 
 /// The `.luaurc` that `alloy init` writes into a root that already has
@@ -742,7 +940,57 @@ impl std::fmt::Display for ConfigError {
 
 impl Config {
     pub fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
-        toml::from_str(text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))
+        let mut config: Self =
+            toml::from_str(text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
+
+        // `[fmt] recommended = false` moves the base under the table,
+        // so the keys the project wrote have to be applied again, this
+        // time over the preserving profile.
+        if !config.fmt.recommended {
+            let raw: toml::Table =
+                toml::from_str(text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
+            let written = raw
+                .get("fmt")
+                .and_then(|v| v.as_table())
+                .cloned()
+                .unwrap_or_default();
+
+            config.fmt = over_preserving(&written);
+        }
+
+        Ok(config)
+    }
+
+    /// The keys of the file that still parse and no longer belong: the
+    /// old `[lint]` lists and the old `[alx.lints]` table. Each line
+    /// names the key that replaces it.
+    pub fn deprecations(&self) -> Vec<String> {
+        let mut out = Vec::new();
+
+        for (list, level) in [
+            (&self.lint.deny, "deny"),
+            (&self.lint.warn, "warn"),
+            (&self.lint.allow, "allow"),
+        ] {
+            if let Some(name) = list.first() {
+                out.push(format!(
+                    "`[lint] {level}` is deprecated; write `[lint.rules] {name} = \"{level}\"`"
+                ));
+            }
+        }
+
+        if let Some(level) = &self.alx.lints.static_conditional_child {
+            let level = match level.as_str() {
+                "off" => "allow",
+                "error" => "deny",
+                _ => "warn",
+            };
+            out.push(format!(
+                "`[alx.lints]` is deprecated; write `[lint.rules] alx.static_conditional_child = \"{level}\"`"
+            ));
+        }
+
+        out
     }
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
@@ -756,11 +1004,29 @@ impl Config {
     /// holds anything, else a `luaux.toml` at the root, else the
     /// defaults.
     pub fn markup(&self, root: &Path) -> Result<luaux::Config, String> {
-        if self.alx.is_set() {
-            return self.alx.to_markup();
+        let mut markup = match self.alx.is_set() {
+            true => self.alx.to_markup()?,
+
+            false => luaux::Config::load(root).map_err(|e| e.message)?,
+        };
+
+        // `[lint.rules]` owns the levels now; `[alx.lints]`, which the
+        // branch above still reads, is the deprecated form and loses
+        // to it. With neither written, the markup compiler keeps the
+        // level its own backend picked, unless nothing is recommended.
+        let name = "static_conditional_child";
+
+        if self
+            .lint
+            .rules
+            .contains_key(&format!("{}{name}", crate::lint::ALX_PREFIX))
+            || !self.lint.recommended
+        {
+            markup.static_conditional_child =
+                markup_level(crate::lint::alx_level_of(&self.lint, name));
         }
 
-        luaux::Config::load(root).map_err(|e| e.message)
+        Ok(markup)
     }
 
     /// Finds `alloy.toml` in `start` or the nearest ancestor. The project

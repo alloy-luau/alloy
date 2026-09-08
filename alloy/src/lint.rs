@@ -2,7 +2,8 @@
 //!
 //! A diagnostic from the compiler stops a build. A lint is advice: the
 //! program runs, and the lint names a habit that costs bugs. Each lint
-//! has a name, a default level, and a switch in `[lint]` of `alloy.toml`.
+//! has a name, a default level, and a switch in `[lint.rules]` of
+//! `alloy.toml`.
 //!
 //! The lints here read tokens and the top-level statements. The ones
 //! that need the enum table, `unreachable_default` and `empty_default`,
@@ -59,7 +60,8 @@ pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
 }
 
 /// What a lint does when it fires.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Level {
     /// Silent.
     Allow,
@@ -70,7 +72,7 @@ pub enum Level {
 }
 
 impl Level {
-    /// The level a name spells, for `[lint]` and `--@alloy-lint`.
+    /// The level a name spells, for `[lint.rules]` and `--@alloy-lint`.
     pub fn from_name(name: &str) -> Option<Level> {
         match name {
             "allow" => Some(Level::Allow),
@@ -105,9 +107,9 @@ pub enum Group {
     Perf,
     /// Roblox APIs that are deprecated or misused.
     Roblox,
-    /// Strict rules, off until `[lint] strict = true` or `warn = ["pedantic"]`.
+    /// Strict rules, on while `[lint] strict = true`.
     Pedantic,
-    /// The case of names, off until `warn = ["naming"]`.
+    /// The case of names, off until `[lint.rules] naming = "warn"`.
     Naming,
 }
 
@@ -148,23 +150,44 @@ impl Group {
             Group::Complexity => "a simple thing done in a hard way",
             Group::Perf => "code that runs slower than the plain form",
             Group::Roblox => "a Roblox API that is deprecated or misused",
-            Group::Pedantic => "strict rules, off until `[lint] strict = true`",
-            Group::Naming => "the case of names, off until `[lint] warn = [\"naming\"]`",
+            Group::Pedantic => "strict rules, on while `[lint] strict = true`",
+            Group::Naming => "the case of names, off until `[lint.rules] naming = \"warn\"`",
         }
     }
 }
 
 /// The group of the type checker's own lints, `LocalUnused` and the
-/// rest, which `alloy flux` reports beside these. `[lint]` sets their
-/// level by this name.
+/// rest, which `alloy flux` reports beside these. `[lint.rules]` sets
+/// their level by this name.
 pub const LUAU_GROUP: &str = "luau";
+
+/// The prefix of a markup lint in `[lint.rules]`:
+/// `alx.static_conditional_child = "warn"`. The markup compiler owns
+/// these, so a level here reaches it through `Config::markup`.
+pub const ALX_PREFIX: &str = "alx.";
+
+/// One markup lint. The list is short because the markup compiler
+/// reports everything else as an error.
+pub struct AlxLintInfo {
+    /// The name without the `alx.` prefix.
+    pub name: &'static str,
+    pub default: Level,
+    pub summary: &'static str,
+}
+
+/// Every markup lint, as `[lint.rules]` names them under `alx.`.
+pub const ALX_LINTS: &[AlxLintInfo] = &[AlxLintInfo {
+    name: "static_conditional_child",
+    default: Level::Warn,
+    summary: "markup in a child expression that no function encloses: it is built once, not on each render",
+}];
 
 /// The description of one lint, for `alloy doc lints` and `--list`.
 pub struct LintInfo {
     pub name: &'static str,
     pub group: Group,
-    /// The level with no `[lint]` table. `Allow` marks a pedantic
-    /// lint, which `strict = true` raises to `Warn`.
+    /// The level the recommended set gives it. `Allow` marks a
+    /// pedantic lint, which `strict = true` raises to `Warn`.
     pub default: Level,
     pub summary: &'static str,
     pub detail: &'static str,
@@ -546,7 +569,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Roblox,
         default: Level::Warn,
         summary: "a lowercase Roblox method: `:connect`, `:wait`, `:remove`, `:clone`",
-        detail: "The lowercase members are the pre-2014 names, kept for old places and gone from the docs. `Connect`, `Wait`, `Destroy`, `Clone`, `GetChildren`, `FindFirstChild`, and `IsA` are the current ones, and the checker knows only those. A method of the same name that the file declares does not fire, and `:remove` and `:clone` fire only on a call with no arguments, since a `HashMap` has a `remove` of its own. `alloy flux --fix` rewrites them.",
+        detail: "The lowercase members are the pre-2014 names, kept for old places and gone from the docs. `Connect`, `Wait`, `Destroy`, `Clone`, `GetChildren`, `FindFirstChild`, and `IsA` are the current ones, and the checker knows only those. A method of the same name that the file declares does not fire, and `:remove` and `:clone` fire only on a call with no arguments, since a `HashMap` has a `remove` of its own. The std spells `connect`, `disconnect`, `wait`, and `clone` the same way, so those four ask for a Roblox receiver: an event such as `.Touched` or `:GetPropertyChangedSignal(...)`, an instance such as `workspace.Ball` or `script`, or a name the file annotates with a Roblox class. Over a `Signal`, a `SignalConnection`, a `T: Clone`, or a plain local, nothing fires. `alloy flux --fix` rewrites them.",
     },
     LintInfo {
         name: "instance_new_parent",
@@ -692,53 +715,69 @@ pub fn intern(name: &str) -> &'static str {
     leaked
 }
 
-/// The level a lint runs at under a config: its own name in a list
-/// first, then its group's name, then its default. A name the table
-/// lacks is a lint of the type checker, under the `luau` group. A name
-/// with a `/` is an ingot's, under the ingot's name.
+/// The level `[lint]` sets for one key: `[lint.rules]` first, then the
+/// deprecated `deny`, `warn`, and `allow` lists.
+pub fn listed(config: &LintConfig, key: &str) -> Option<Level> {
+    if let Some(level) = config.rules.get(key) {
+        return Some(*level);
+    }
+
+    if config.deny.iter().any(|n| n == key) {
+        Some(Level::Deny)
+    } else if config.warn.iter().any(|n| n == key) {
+        Some(Level::Warn)
+    } else if config.allow.iter().any(|n| n == key) {
+        Some(Level::Allow)
+    } else {
+        None
+    }
+}
+
+/// The level a lint runs at under a config: its own name in
+/// `[lint.rules]` first, then its group's name, then the level the
+/// modes give it. A name the table lacks is a lint of the type
+/// checker, under the `luau` group. A name with a `/` is an ingot's,
+/// under the ingot's name.
+///
+/// The modes are two: `strict` raises the pedantic group to `warn`,
+/// and `recommended` decides the floor, which is each lint's own
+/// default when it is on and `allow` when it is off.
 pub fn level_of(config: &LintConfig, name: &str) -> Level {
     if let Some((ingot, _)) = name.split_once('/') {
         let ext = external().into_iter().find(|l| l.name == name);
-        let listed = |key: &str| {
-            if config.allow.iter().any(|n| n == key) {
-                Some(Level::Allow)
-            } else if config.deny.iter().any(|n| n == key) {
-                Some(Level::Deny)
-            } else if config.warn.iter().any(|n| n == key) {
-                Some(Level::Warn)
-            } else {
-                None
-            }
-        };
 
-        return listed(name)
-            .or_else(|| listed(ingot))
-            .unwrap_or_else(|| ext.map(|l| l.default).unwrap_or(Level::Warn));
+        return listed(config, name)
+            .or_else(|| listed(config, ingot))
+            .unwrap_or_else(|| match config.recommended {
+                true => ext.map(|l| l.default).unwrap_or(Level::Warn),
+                false => Level::Allow,
+            });
     }
 
     let info = LINTS.iter().find(|l| l.name == name);
     let group = info.map(|l| l.group.name()).unwrap_or(LUAU_GROUP);
-    let listed = |key: &str| {
-        if config.allow.iter().any(|n| n == key) {
-            Some(Level::Allow)
-        } else if config.deny.iter().any(|n| n == key) {
-            Some(Level::Deny)
-        } else if config.warn.iter().any(|n| n == key) {
-            Some(Level::Warn)
-        } else {
-            None
-        }
-    };
 
-    if let Some(level) = listed(name).or_else(|| listed(group)) {
+    if let Some(level) = listed(config, name).or_else(|| listed(config, group)) {
         return level;
     }
 
     match info {
         Some(l) if l.group == Group::Pedantic && config.strict => Level::Warn,
+        _ if !config.recommended => Level::Allow,
         Some(l) => l.default,
         None => Level::Warn,
     }
+}
+
+/// The level of one markup lint, named without the `alx.` prefix.
+/// `Config::markup` passes it to the markup compiler.
+pub fn alx_level_of(config: &LintConfig, name: &str) -> Level {
+    let info = ALX_LINTS.iter().find(|l| l.name == name);
+
+    listed(config, &format!("{ALX_PREFIX}{name}")).unwrap_or(match config.recommended {
+        true => info.map(|l| l.default).unwrap_or(Level::Warn),
+        false => Level::Allow,
+    })
 }
 
 /// The group of a lint by name; the type checker's lints are `luau`,
@@ -776,6 +815,10 @@ pub fn is_known_name(name: &str) -> bool {
     let checker_lint = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
         && name.chars().all(|c| c.is_ascii_alphanumeric());
 
+    if let Some(markup) = name.strip_prefix(ALX_PREFIX) {
+        return ALX_LINTS.iter().any(|l| l.name == markup);
+    }
+
     !name.is_empty()
         && (LINTS.iter().any(|l| l.name == name)
             || Group::from_name(name).is_some()
@@ -784,21 +827,16 @@ pub fn is_known_name(name: &str) -> bool {
             || external().iter().any(|l| l.name == name || l.group == name))
 }
 
-/// A `[lint]` name that is neither a lint nor a group.
+/// A `[lint]` name that is neither a lint nor a group. The deprecated
+/// lists and `[lint.rules]` name the same things, so both are read.
 pub fn unknown_names(config: &LintConfig) -> Vec<String> {
     config
         .allow
         .iter()
         .chain(&config.warn)
         .chain(&config.deny)
-        .filter(|n| {
-            !LINTS.iter().any(|l| l.name == n.as_str())
-                && Group::from_name(n).is_none()
-                && n.as_str() != LUAU_GROUP
-                && !external()
-                    .iter()
-                    .any(|l| l.name == n.as_str() || l.group == n.as_str())
-        })
+        .chain(config.rules.keys())
+        .filter(|n| !is_known_name(n))
         .cloned()
         .collect()
 }
@@ -1674,10 +1712,11 @@ fn matching(src: &str, toks: &[Tok], open: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
-    /// The lints at their default level: the pedantic ones stay out.
+    /// The lints of the recommended set, with the pedantic group off,
+    /// which is what `strict = false` leaves.
     fn names(src: &str) -> Vec<&'static str> {
         let out = crate::compile(src).unwrap();
-        let config = LintConfig::default();
+        let config = LintConfig::default().without_strict();
 
         out.lints
             .iter()
@@ -1710,7 +1749,7 @@ mod tests {
     /// A static called with `:` gets the table as its first argument.
     #[test]
     fn a_static_called_with_a_colon_fires() {
-        let src = "struct W as\n    n: number\nend\n\nimpl W\n    function new(): W\n        return new W { n = 0 }\n    end\n\n    function bump(self): number\n        return self.n\n    end\nend\n\nlocal a = W:new()\nlocal b = a:bump()\nprint(a, b)\n";
+        let src = "struct W as\n    n: number\nend\n\nimpl W as\n    function new(): W\n        return new W { n = 0 }\n    end\n\n    function bump(self): number\n        return self.n\n    end\nend\n\nlocal a = W:new()\nlocal b = a:bump()\nprint(a, b)\n";
         assert_eq!(names(src), vec!["static_call"]);
         assert!(
             apply_fixes(src, &crate::compile(src).unwrap().lints)
@@ -1805,25 +1844,26 @@ mod tests {
     }
 
     #[test]
-    fn strict_lints_are_off_until_the_config_turns_them_on() {
+    fn strict_carries_the_pedantic_group_and_is_on_by_default() {
         let src = "-- Doc.\nexport function f(x)\n    return x\nend\n";
         let out = crate::compile(src).unwrap();
         let mut hits: Vec<&str> = out.lints.iter().map(|l| l.name).collect();
         hits.sort();
         assert_eq!(hits, vec!["implicit_any", "missing_return_type"]);
 
-        let lax = LintConfig::default();
-        assert_eq!(level_of(&lax, "implicit_any"), Level::Allow);
-
-        let strict = LintConfig {
-            strict: true,
-            ..LintConfig::default()
-        };
+        let strict = LintConfig::default();
+        assert!(strict.strict);
         assert_eq!(level_of(&strict, "implicit_any"), Level::Warn);
         assert_eq!(level_of(&strict, "optional_access"), Level::Warn);
 
+        let lax = strict.without_strict();
+        assert_eq!(level_of(&lax, "implicit_any"), Level::Allow);
+        assert_eq!(level_of(&lax, "optional_access"), Level::Warn);
+
         let denied = LintConfig {
-            deny: vec!["optional_access".to_string()],
+            rules: [("optional_access".to_string(), Level::Deny)]
+                .into_iter()
+                .collect(),
             ..LintConfig::default()
         };
         assert_eq!(level_of(&denied, "optional_access"), Level::Deny);
@@ -1859,7 +1899,7 @@ mod tests {
 
             return;
         }
-        let config = LintConfig::default();
+        let config = LintConfig::default().without_strict();
 
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();

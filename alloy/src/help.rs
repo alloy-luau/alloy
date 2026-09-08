@@ -93,8 +93,8 @@ pub const CHECK_TEXT: &str = "\
 Usage: alloy check [file] [options]
 
 Compiles every source, or one file, and writes nothing. Reports the
-compiler's diagnostics and the lints at their [lint] levels; exits with
-one on any diagnostic or denied lint.
+compiler's diagnostics and the lints at the levels [lint.rules] gives
+them; exits with one on any diagnostic or denied lint.
 
 `--@alloy-expect-error` silences the line it covers, and a stale one is
 settled under `alloy flux`, which runs the type check.
@@ -112,16 +112,16 @@ Usage: alloy lint [file] [options]
 Runs the lints over the project, or one file, and nothing else. The
 lints are Flux's, in eight groups: correctness, suspicious, style,
 complexity, perf, roblox, pedantic, naming, and the checker's own under
-`luau`. `alloy doc lints` names them all; the [lint] table of alloy.toml
-sets their levels by name or by group.
+`luau`. `alloy doc lints` names them all; the [lint.rules] table of
+alloy.toml sets their levels by name or by group.
 
 Options:
   --fix                 Apply the rewrites that keep the program the same
   -W, -A, -D <name>     Warn, allow, or deny a lint or a group for this run
   --config <file>       Read this alloy.toml instead of the nearest one
-  --strict              Turn the pedantic group on for this run
+  --strict              Turn the pedantic group on for this run; on by default
   --deny-warnings       Fail on any warning
-  --list                Print every lint with its group and default level
+  --list                Print every lint and its level, in the [lint.rules] form
 ";
 
 pub const FLUX_TEXT: &str = "\
@@ -129,8 +129,8 @@ Usage: alloy flux [file] [options]
 
 Flux is the whole analysis in one run, what clippy is to cargo. It
 compiles every source, runs luau-lsp over the check artifact and maps
-the type errors onto the Alloy lines, and runs every lint at its [lint]
-level: the eight groups of Flux's own, plus the checker's lints under
+the type errors onto the Alloy lines, and runs every lint at its
+[lint.rules] level: the eight groups of Flux's own, plus the checker's lints under
 the `luau` group. With one file it compiles and lints that file.
 
 Options:
@@ -140,9 +140,9 @@ Options:
   --explain <lint>      Print the page of one lint and exit
   --no-typecheck        Skip luau-lsp for this run
   --config <file>       Read this alloy.toml instead of the nearest one
-  --strict              Turn the pedantic group on for this run
+  --strict              Turn the pedantic group on for this run; on by default
   --deny-warnings       Fail on any warning
-  --list                Print every lint with its group and default level
+  --list                Print every lint and its level, in the [lint.rules] form
 
 The [flux] table names the luau-lsp binary and the definitions files,
 and sets the limits of the complexity lints. `alloy doc flux` explains it.
@@ -175,7 +175,9 @@ Usage: alloy fmt [paths] [options]
 
 Formats the project's .aly and .alx files in place, or the paths given.
 Anneal lays the code out from the tokens and the [fmt] options; the
-program stays the same. `alloy doc fmt` lists the options.
+program stays the same. `[fmt] recommended = false` leaves the layout of
+each file as it is and applies the keys the project sets over that.
+`alloy doc fmt` lists the options.
 
 Options:
   --check               Write nothing; fail when a file would change

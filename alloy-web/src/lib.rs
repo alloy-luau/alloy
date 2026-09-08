@@ -62,7 +62,9 @@ pub fn set_source(source: &str) -> String {
     let compiled = alloy::compile_with(source, &options);
     let decls = alloy::declarations::summaries(source, false);
     let shapes = alloy::declarations::shapes(source);
-    let lint_config = alloy::config::LintConfig::default();
+    // The playground is a scratch pad, not a game: the pedantic group
+    // stays quiet there, so a `print` draws no warning.
+    let lint_config = alloy::config::LintConfig::default().without_strict();
     // `--@alloy-lint` in the file wins over the defaults, and
     // `--@alloy-preserve` keeps a rewrite off a line.
     let directives = alloy::directives::scan(source);

@@ -148,10 +148,23 @@ fn lexable(source: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// The byte offsets where an access operator ends a line and nothing
-/// follows it: `a.`, `a:`, `a?.`, `a!.`, `a?:`, `a!:`, `a[`, `a?[`,
+/// Whether a token closes what stands before it: `)`, `}`, `]`, `,`.
+/// A member operator is never followed by one, so a name is missing
+/// there as surely as at the end of a line. The caret inside `{ }` of
+/// a tag, a call, or a table sits exactly there.
+///
+/// `{` is not one of them: `x: { a }` writes a type after a `:`.
+fn closes_an_expression(text: &str) -> bool {
+    matches!(text.chars().next(), Some(')' | '}' | ']' | ','))
+}
+
+/// The byte offsets where an access operator wants a name and none
+/// follows: `a.`, `a:`, `a?.`, `a!.`, `a?:`, `a!:`, `a[`, `a?[`,
 /// `a![`. Each carries the text the repair writes there. The parser
 /// wants a name after a separator and a key inside a bracket.
+///
+/// A bracket goes by the end of the line alone: `x[]` closes itself,
+/// and the placeholder carries a `]` that would then stand twice.
 fn dangling_members(source: &str) -> Vec<(usize, &'static str)> {
     let Ok(lexed) = alloy_syntax::lexer::lex(source) else {
         return Vec::new();
@@ -159,10 +172,10 @@ fn dangling_members(source: &str) -> Vec<(usize, &'static str)> {
     let mut spots = Vec::new();
 
     for (i, tok) in lexed.toks.iter().enumerate() {
-        let fill = match tok.kind {
-            TokKind::Dot | TokKind::Colon => HOLE,
+        let (fill, member) = match tok.kind {
+            TokKind::Dot | TokKind::Colon => (HOLE, true),
 
-            TokKind::Symbol if tok.text(source) == "[" => BRACKET_HOLE,
+            TokKind::Symbol if tok.text(source) == "[" => (BRACKET_HOLE, false),
 
             _ => continue,
         };
@@ -171,7 +184,10 @@ fn dangling_members(source: &str) -> Vec<(usize, &'static str)> {
 
         match lexed.toks.get(i + 1) {
             Some(next) => {
-                if source[end..next.start as usize].contains('\n') {
+                let dangles = source[end..next.start as usize].contains('\n')
+                    || (member && closes_an_expression(next.text(source)));
+
+                if dangles {
                     spots.push((end, fill));
                 }
             }
@@ -702,6 +718,30 @@ mod tests {
             let shadow = doc.to_shadow(1, column);
             assert_eq!(doc.to_source(shadow.0, shadow.1), (1, column), "{op}");
         }
+    }
+
+    /// A member operator with a closer right after it wants a name as
+    /// much as one at the end of a line: the caret inside `{ }` of a
+    /// tag, a call, or a table stands there while the author types.
+    #[test]
+    fn a_closer_after_a_member_operator_dangles_too() {
+        for (src, at) in [
+            ("local e = <Frame Size={xs?[1]?.}>\n", 31),
+            ("local t = { a = xs. }\n", 19),
+            ("print(xs.)\n", 9),
+            ("local a = [ xs., 1 ]\n", 15),
+        ] {
+            assert_eq!(dangling_members(src), vec![(at, HOLE)], "{src}");
+        }
+
+        // A `:` writes a type as often as it names a method, and a type
+        // opens with a token that is no name.
+        assert!(dangling_members("type T = { f: (number) -> () }\n").is_empty());
+        assert!(dangling_members("local function f(a: { n: number }) end\n").is_empty());
+
+        // The bracket goes by the end of the line alone: `x[]` closes
+        // itself, and the placeholder carries a `]` of its own.
+        assert!(dangling_members("local v = xs[]\n").is_empty());
     }
 
     /// A bracket that opens a key on the next line parses on its own,

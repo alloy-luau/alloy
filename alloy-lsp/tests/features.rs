@@ -1884,6 +1884,7 @@ local function Panel(props: { parts: { Part }? })
     local name = parts?[1]?.Name
     local a = parts?[1]?.
     local b = parts![1].
+    local c = <Frame Size={parts?[1]?.} />
     return <Frame Size={size_of(parts![1])}>
         <TextLabel Text={parts?[1]?.Name} />
     </Frame>
@@ -1932,20 +1933,26 @@ fn a_guarded_index_answers_through_the_markup_lowering() {
     let labels = s.completion_labels(&uri, 16, 24);
     assert!(holds(&labels), "asserted index: {labels:?}");
 
+    // The same, inside the `{ }` of a tag, where the caret has the
+    // hole's `}` right after it rather than the end of the line. That
+    // is where the author stands while typing the attribute.
+    let labels = s.completion_labels(&uri, 17, 38);
+    assert!(holds(&labels), "a hole the closer follows: {labels:?}");
+
     // The same chain written out, on a plain line and in a hole.
     let h = s.hover(&uri, 14, 29);
     assert!(h.contains("string"), "chain on a plain line: {h}");
-    let h = s.hover(&uri, 18, 37);
+    let h = s.hover(&uri, 19, 37);
     assert!(h.contains("string"), "chain in a hole: {h}");
 
     // Every column of a markup line maps, not only the ones inside a
     // word: the two guards of the hole read as the operators they are,
     // and the receiver reads its own type.
-    let h = s.hover(&uri, 18, 30);
+    let h = s.hover(&uri, 19, 30);
     assert!(h.contains("a?[k]"), "the guard of the index: {h}");
-    let h = s.hover(&uri, 18, 34);
+    let h = s.hover(&uri, 19, 34);
     assert!(h.contains("a?.b"), "the guard of the chain: {h}");
-    let h = s.hover(&uri, 18, 26);
+    let h = s.hover(&uri, 19, 26);
     assert!(h.contains("{Part}?"), "the receiver in a hole: {h}");
 
     // A binding of a guarded index gets its element type as a hint.
@@ -1953,7 +1960,7 @@ fn a_guarded_index_answers_through_the_markup_lowering() {
         "textDocument/inlayHint",
         json!({ "textDocument": { "uri": uri },
             "range": { "start": { "line": 0, "character": 0 },
-                       "end": { "line": 23, "character": 0 } } }),
+                       "end": { "line": 24, "character": 0 } } }),
     );
     let one: Vec<String> = hints
         .as_array()
@@ -1968,7 +1975,7 @@ fn a_guarded_index_answers_through_the_markup_lowering() {
     // A name inside a hole goes to where the file declares it.
     let defs = s.request(
         "textDocument/definition",
-        json!({ "textDocument": { "uri": uri }, "position": { "line": 17, "character": 26 } }),
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 18, "character": 26 } }),
     );
     assert_eq!(defs[0]["range"]["start"]["line"], 7, "{defs}");
     assert_eq!(defs[0]["range"]["start"]["character"], 15, "{defs}");

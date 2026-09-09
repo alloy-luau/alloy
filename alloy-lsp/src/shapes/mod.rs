@@ -47,6 +47,9 @@ pub use messages::{
 pub struct Known {
     pub shapes: Vec<Shape>,
     pub interfaces: Vec<Interface>,
+    /// Every namespace member: the name the emit writes and the path
+    /// the source wrote. `Math_Vec2` reads as `Math.Vec2`.
+    pub namespaces: Vec<(String, String)>,
 }
 
 /// An interface a source declares: the interfaces it extends and the
@@ -356,6 +359,7 @@ pub fn fold(text: &str, known: &Known) -> String {
                     .filter(|i| !i.alias)
                     .cloned()
                     .collect(),
+                namespaces: known.namespaces.clone(),
             };
 
             &narrowed
@@ -462,6 +466,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_variant_tables(&mut out, known);
     fold_enum_unions(&mut out, known);
     out = fold_private_views(&out);
+    fold_namespace_names(&mut out, known);
     fold_full_views(&mut out, known);
     fold_interfaces(&mut out, known);
     fold_name_parens(&mut out);
@@ -1281,6 +1286,45 @@ pub fn fold_private_views(text: &str) -> String {
     out.replace("__private.", ".")
 }
 
+/// `Math_Vec2` is the name the emit gives a type of `namespace Math`;
+/// the reader knows it as `Math.Vec2`. The fold takes whole words, so
+/// a name that only starts with one stays.
+fn fold_namespace_names(text: &mut String, known: &Known) {
+    if known.namespaces.is_empty() {
+        return;
+    }
+
+    // The longest name first: `A_B_C` must not fold as `A_B` and a tail.
+    let mut pairs: Vec<&(String, String)> = known.namespaces.iter().collect();
+    pairs.sort_by_key(|(rendered, _)| std::cmp::Reverse(rendered.len()));
+
+    for (rendered, shown) in pairs {
+        let mut from = 0;
+
+        while let Some(i) = text[from..].find(rendered.as_str()) {
+            let at = from + i;
+            let end = at + rendered.len();
+            let before = text[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
+            let after = text[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+
+            if before || after {
+                from = end;
+
+                continue;
+            }
+
+            text.replace_range(at..end, shown);
+            from = at + shown.len();
+        }
+    }
+}
+
 /// The `__` fields Alloy's own emit writes, plus the Luau metamethods.
 /// A hover hides these; every other `__` name is the author's, or a
 /// package's, and it stays. jecs marks an entity with `__T`, and
@@ -1571,6 +1615,7 @@ mod tests {
         let known = Known {
             shapes: Vec::new(),
             interfaces: interfaces(source),
+            namespaces: Vec::new(),
         };
 
         assert_eq!(
@@ -1654,6 +1699,7 @@ mod tests {
         let known = Known {
             interfaces: interfaces("type Ent = { id: number, name: string }\n"),
             shapes: Vec::new(),
+            namespaces: Vec::new(),
         };
 
         // The alias marks no field, so the `Readonly` print is not it,
@@ -1698,6 +1744,7 @@ mod tests {
         let known = Known {
             interfaces: interfaces("type Profile = { name: string, level: number }\n"),
             shapes: Vec::new(),
+            namespaces: Vec::new(),
         };
         let printed = "local all: {\n        level: number,\n        name: string\n    }[]";
 
@@ -1776,6 +1823,7 @@ mod tests {
                     ],
                 },
             ],
+            namespaces: Vec::new(),
         }
     }
 
@@ -1795,6 +1843,7 @@ mod tests {
                 generics: vec!["T".into()],
                 types: vec!["T".into(), "number".into()],
             }],
+            namespaces: Vec::new(),
         };
         let text = "local held: t1 where t1 = {\n    read bump: (self: t1, n: number) -> number,\n    count: number,\n    read get: (self: t1) -> number,\n    value: number\n}";
         assert_eq!(fold(text, &known), "local held: Slotted<number>");
@@ -1819,6 +1868,7 @@ mod tests {
             shapes: alloy::declarations::shapes(
                 "export struct Swinger as\n    read requested: Signal<> = Signal.new()\n    private last: number = 0\n    private scope: Scope = Scope.new()\nend\n",
             ),
+            namespaces: Vec::new(),
         };
         assert_eq!(fold(text, &known), ": Swinger");
     }
@@ -1953,6 +2003,7 @@ mod tests {
                     ],
                 },
             ],
+            namespaces: Vec::new(),
         };
         let text = "local function describe(event: { _1: Player, _2: Vector3, tag: \"Spawn\" } | { _1: Player, _2: { _1: number, _2: number, tag: \"Rect\" } | { _1: number, tag: \"Circle\" }, tag: \"Hit\" } | { _1: Player, tag: \"Leave\" }): string";
         assert_eq!(
@@ -1975,6 +2026,7 @@ mod tests {
                     ("Strength".into(), vec!["number".into()]),
                 ],
             }],
+            namespaces: Vec::new(),
         };
         let inside = "function buy(id: string): Result<\"None\" | { _1: number, tag: \"Coins\" } | { _1: number, tag: \"Strength\" }, string>";
         assert_eq!(
@@ -2097,6 +2149,7 @@ mod dbg2 {
                 },
             ],
             interfaces: Vec::new(),
+            namespaces: Vec::new(),
         };
         let text = "Key 'area' is missing from 'string' in the type '\"Empty\" | { _1: number, tag: \"Circle\" } | { _1: number, _2: number, tag: \"Rect\" }'";
         println!("OUT: {:?}", fold(text, &known));

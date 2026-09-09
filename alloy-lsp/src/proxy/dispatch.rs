@@ -1302,6 +1302,7 @@ impl Server {
                     {
                         st.mark_enum_members(uri, line, character, result);
                         st.mark_declarations(result);
+                        st.mark_namespaces(uri, line, character, result);
 
                         if let Some(doc) = st.docs.get(uri) {
                             complete_std_members(doc, line, character, st.snippets, result);

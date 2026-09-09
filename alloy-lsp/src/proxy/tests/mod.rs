@@ -2,7 +2,8 @@ mod support;
 
 mod completion;
 mod diagnostics;
-mod globals;
 mod documents;
+mod globals;
 mod hover;
+mod namespaces;
 mod services;

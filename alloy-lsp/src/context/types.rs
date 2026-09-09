@@ -62,6 +62,16 @@ pub(crate) fn takes_a_type(head: &str) -> bool {
         return true;
     }
 
+    // `local p: Math.`: a namespace path stands in the slot, and the
+    // head before it is the one that takes the type.
+    if let Some(base) = head.strip_suffix('.') {
+        let cut = base.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.');
+
+        if cut.len() < base.len() {
+            return takes_a_type(cut);
+        }
+    }
+
     if head.ends_with("-> ") {
         return true;
     }

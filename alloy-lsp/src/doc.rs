@@ -19,6 +19,12 @@ pub struct Doc {
     pub exports: Vec<Export>,
     /// The declarations of the file, for hover on their names.
     pub decls: Vec<alloy::declarations::Declaration>,
+    /// Every namespace member: the name the emit writes and the path
+    /// the source wrote, for the folds.
+    pub namespaces: Vec<(String, String)>,
+    /// Every namespace the file declares, with the byte range of its
+    /// body and the members it holds.
+    pub namespace_ranges: Vec<alloy::declarations::NamespaceSpan>,
     /// The bindings of the file with their declaring keywords.
     pub bindings: Vec<alloy::declarations::Binding>,
     /// The structs and enums, so a printed type folds back to its name.
@@ -65,6 +71,8 @@ impl Doc {
             shadow: String::new(),
             exports: Vec::new(),
             decls: Vec::new(),
+            namespaces: Vec::new(),
+            namespace_ranges: Vec::new(),
             bindings: Vec::new(),
             shapes: Vec::new(),
             import_shapes: Vec::new(),
@@ -94,6 +102,8 @@ impl Doc {
         self.globals =
             alloy::globals::declared(&alloy::globals::index_text(path, &self.source), path);
         self.decls = alloy::declarations::summaries(&self.source, options.definitions);
+        self.namespaces = alloy::declarations::namespace_names(&self.source);
+        self.namespace_ranges = alloy::declarations::namespace_ranges(&self.source);
         self.bindings = alloy::declarations::bindings(&self.source);
         self.shapes = alloy::declarations::shapes(&self.source);
         self.interfaces = crate::shapes::interfaces(&self.source);

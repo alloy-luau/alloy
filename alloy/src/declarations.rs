@@ -355,7 +355,278 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
         }
     }
 
+    // A namespace and each of its members. The member reads under the
+    // path the source writes, `Math.Vec2`, and under the name the emit
+    // gives it, `Math_Vec2`, so a hover on either finds it.
+    for stmt in stmts {
+        if let Stmt::Namespace(ns) = stmt.under_default() {
+            namespace_summaries(src, toks, ns, "", &mut out);
+        }
+    }
+
     out
+}
+
+/// The hover entries of one namespace: the header with its members
+/// listed, then one entry per member under both of its names.
+fn namespace_summaries(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    outer: &str,
+    out: &mut Vec<Declaration>,
+) {
+    let text = |span: TokSpan| -> &str {
+        if span.end <= span.start {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+    let start_of = |span: TokSpan| toks[span.start as usize].start as usize;
+    let name = text(ns.name);
+    let path = match outer.is_empty() {
+        true => name.to_string(),
+
+        false => format!("{outer}.{name}"),
+    };
+    let modifier = match (ns.global, ns.exported) {
+        (true, _) => "global ",
+
+        (false, true) => "export ",
+
+        _ => "",
+    };
+    let mut members: Vec<String> = Vec::new();
+
+    for m in &ns.members {
+        let Some(member) = member_name(&m.stmt) else {
+            continue;
+        };
+        let word = text(member);
+        let private = m.is_private(src, toks);
+
+        if !private {
+            members.push(format!("`{word}`"));
+        }
+
+        // The declaration as written, with the path in front of its
+        // name, so the reader sees where the member lives.
+        let body = text(m.stmt.span());
+        let at = start_of(member) - start_of(m.stmt.span());
+        let shown = format!("{}{path}.{}", &body[..at], &body[at..]);
+        let mut lines = vec!["```alloy".to_string()];
+        lines.extend(capped(&shown));
+        lines.push("```".to_string());
+
+        if private {
+            lines.push(format!("\n`{word}` is private to `{path}`."));
+        }
+
+        let mut hover = lines.join("\n");
+
+        if let Some(d) = doc_before(src, start_of(m.stmt.span())) {
+            hover.push_str("\n\n");
+            hover.push_str(&d);
+        }
+
+        let offset = start_of(member);
+        out.push(Declaration {
+            name: format!("{path}.{word}"),
+            hover: hover.clone(),
+            offset,
+        });
+        out.push(Declaration {
+            name: format!("{}_{word}", path.replace('.', "_")),
+            hover,
+            offset,
+        });
+
+        if let Stmt::Namespace(inner) = m.stmt.under_default() {
+            namespace_summaries(src, toks, inner, &path, out);
+        }
+    }
+
+    let mut hover = format!("```alloy\n{modifier}namespace {path} as\nend\n```");
+
+    if !members.is_empty() {
+        hover.push_str(&format!("\n\nMembers: {}.", members.join(", ")));
+    }
+
+    if let Some(d) = doc_before(src, start_of(ns.span)) {
+        hover = format!(
+            "```alloy\n{modifier}namespace {path} as\nend\n```\n\n{d}{}",
+            match members.is_empty() {
+                true => String::new(),
+
+                false => format!("\n\nMembers: {}.", members.join(", ")),
+            }
+        );
+    }
+
+    out.push(Declaration {
+        name: path.clone(),
+        hover: hover.clone(),
+        offset: start_of(ns.name),
+    });
+
+    // A nested namespace answers to its own name too, the way a
+    // top-level one does.
+    if !outer.is_empty() {
+        out.push(Declaration {
+            name: name.to_string(),
+            hover,
+            offset: start_of(ns.name),
+        });
+    }
+}
+
+/// One namespace of a source, with the byte range its body covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceSpan {
+    /// The path the source writes: `Math`, `Outer.Inner`.
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
+    /// Each member: its name and whether it is private.
+    pub members: Vec<(String, bool)>,
+}
+
+/// Every namespace of a source, outermost first, with the members each
+/// one declares. The editor reads it: a name inside the namespace
+/// completes without the path, and outside it takes the path.
+pub fn namespace_ranges(src: &str) -> Vec<NamespaceSpan> {
+    if !src.contains("namespace") {
+        return Vec::new();
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let Stmt::Namespace(ns) = stmt.under_default() {
+            namespace_range(src, toks, ns, "", &mut out);
+        }
+    }
+
+    out
+}
+
+fn namespace_range(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    outer: &str,
+    out: &mut Vec<NamespaceSpan>,
+) {
+    let text = |span: TokSpan| -> &str {
+        if span.end <= span.start {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+    let name = text(ns.name);
+    let path = match outer.is_empty() {
+        true => name.to_string(),
+
+        false => format!("{outer}.{name}"),
+    };
+    let mut members = Vec::new();
+
+    for m in &ns.members {
+        if let Some(member) = member_name(&m.stmt) {
+            members.push((text(member).to_string(), m.is_private(src, toks)));
+        }
+
+        if let Stmt::Namespace(inner) = m.stmt.under_default() {
+            namespace_range(src, toks, inner, &path, out);
+        }
+    }
+
+    out.push(NamespaceSpan {
+        path,
+        start: toks[ns.span.start as usize].start as usize,
+        end: toks[ns.span.end as usize - 1].end as usize,
+        members,
+    });
+}
+
+/// Every namespace member of a source, as the pair the reader needs:
+/// the name the emit writes and the path the source wrote. `Math_Vec2`
+/// reads as `Math.Vec2`.
+pub fn namespace_names(src: &str) -> Vec<(String, String)> {
+    if !src.contains("namespace") {
+        return Vec::new();
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let Stmt::Namespace(ns) = stmt.under_default() {
+            namespace_pairs(src, toks, ns, "", &mut out);
+        }
+    }
+
+    out
+}
+
+fn namespace_pairs(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    outer: &str,
+    out: &mut Vec<(String, String)>,
+) {
+    let text = |span: TokSpan| -> &str {
+        if span.end <= span.start {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+    let name = text(ns.name);
+    let path = match outer.is_empty() {
+        true => name.to_string(),
+
+        false => format!("{outer}.{name}"),
+    };
+
+    for m in &ns.members {
+        let Some(member) = member_name(&m.stmt) else {
+            continue;
+        };
+        let word = text(member);
+
+        if let Stmt::Namespace(inner) = m.stmt.under_default() {
+            namespace_pairs(src, toks, inner, &path, out);
+
+            continue;
+        }
+
+        out.push((
+            format!("{}_{word}", path.replace('.', "_")),
+            format!("{path}.{word}"),
+        ));
+    }
+}
+
+/// The name one namespace member binds.
+fn member_name(stmt: &Stmt) -> Option<TokSpan> {
+    match stmt.under_default() {
+        Stmt::Function(f) if f.path.len() == 1 => f.path.first().copied(),
+
+        Stmt::Attribute(a) => Some(a.name),
+
+        other => other.declared_name(),
+    }
 }
 
 /// `name: T` for a parameter, or `name` alone.
@@ -403,6 +674,49 @@ mod tests {
             d[2].hover,
             "```alloy\nMsg.Move(number)\n```\nA variant of `enum Msg`."
         );
+    }
+
+    #[test]
+    fn a_namespace_and_its_members_hover() {
+        let src = "-- Numbers.\nexport namespace Math as\n    const PI = 3.14\n    private const E = 2.7\n    struct Vec2 as\n        x: number\n    end\nend\n";
+        let d = summaries(src, false);
+        let names: Vec<&str> = d.iter().map(|x| x.name.as_str()).collect();
+        assert!(names.contains(&"Math"), "{names:?}");
+        assert!(names.contains(&"Math.PI"), "{names:?}");
+        assert!(names.contains(&"Math_PI"), "{names:?}");
+        assert!(names.contains(&"Math.Vec2"), "{names:?}");
+        assert!(names.contains(&"Math_Vec2"), "{names:?}");
+
+        let ns = d.iter().find(|x| x.name == "Math").unwrap();
+        assert!(
+            ns.hover
+                .starts_with("```alloy\nexport namespace Math as\nend\n```"),
+            "{}",
+            ns.hover
+        );
+        assert!(ns.hover.contains("Numbers."), "{}", ns.hover);
+        // A private member stays out of the list.
+        assert!(ns.hover.ends_with("Members: `PI`, `Vec2`."), "{}", ns.hover);
+
+        let vec2 = d.iter().find(|x| x.name == "Math.Vec2").unwrap();
+        assert_eq!(
+            vec2.hover,
+            "```alloy\nstruct Math.Vec2 as\n        x: number\n    end\n```"
+        );
+
+        let e = d.iter().find(|x| x.name == "Math.E").unwrap();
+        assert!(e.hover.contains("`E` is private to `Math`."), "{}", e.hover);
+    }
+
+    #[test]
+    fn a_nested_namespace_reads_its_whole_path() {
+        let src = "namespace Outer as\n    namespace Inner as\n        const B = 2\n    end\nend\n";
+        let d = summaries(src, false);
+        let names: Vec<&str> = d.iter().map(|x| x.name.as_str()).collect();
+        assert!(names.contains(&"Outer.Inner"), "{names:?}");
+        assert!(names.contains(&"Inner"), "{names:?}");
+        assert!(names.contains(&"Outer.Inner.B"), "{names:?}");
+        assert!(names.contains(&"Outer_Inner_B"), "{names:?}");
     }
 
     #[test]

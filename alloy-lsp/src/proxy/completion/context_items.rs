@@ -336,6 +336,25 @@ impl State {
             Context::TypeSlot { prefix, prefers } => {
                 let from = offset - prefix.len();
 
+                // `local p: Math.|`: the types of that namespace, and
+                // nothing else. Luau has no such type path, so the
+                // child answers nothing here.
+                if let Some(path) = namespace_before(&doc.source, from) {
+                    for d in self.namespace_types(uri, &path) {
+                        let head = d.hover.lines().nth(1).unwrap_or("");
+                        let kind_word = ["struct", "enum", "trait", "interface", "type"]
+                            .into_iter()
+                            .find(|w| head.contains(&format!("{w} ")))
+                            .unwrap_or("type");
+                        let label = d.name[path.len() + 1..].to_string();
+                        let mut item = word(&label, 7, Some(d.hover.clone()), from);
+                        item["detail"] = json!(format!("{kind_word} {path}.{label}"));
+                        items.push(item);
+                    }
+
+                    return items;
+                }
+
                 for mut item in self.type_completions(uri, &[]) {
                     let label = item["label"].as_str().unwrap_or("").to_string();
                     let kind = item["kind"].as_u64().unwrap_or(7);

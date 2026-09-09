@@ -709,6 +709,7 @@ pub fn fold(text: &str) -> String {
         let known = shapes::Known {
             shapes: s.shapes.clone(),
             interfaces: s.interfaces.clone(),
+            namespaces: alloy::declarations::namespace_names(&s.source),
         };
         let mut out = text.to_string();
 

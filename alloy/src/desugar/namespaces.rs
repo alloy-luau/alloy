@@ -383,7 +383,11 @@ impl<'s> Desugar<'s> {
             let mut info = info;
             let mut at = span.end as usize;
 
-            while self.text_of(TokSpan::new(at, at + 1)) == "." {
+            while self.tok_text(at) == "." {
+                if at + 2 > self.toks.len() {
+                    return None;
+                }
+
                 let field = TokSpan::new(at + 1, at + 2);
                 let member = self.text_of(field).to_string();
                 let fe = self.byte_end(field);
@@ -412,6 +416,16 @@ impl<'s> Desugar<'s> {
         let rendered = self.ns_type_name(&name)?;
 
         Some((s, e, rendered))
+    }
+
+    /// The text of one token, or an empty string past the end. The
+    /// lenient parse of a half-written line runs off it.
+    fn tok_text(&self, at: usize) -> &'s str {
+        match self.toks.get(at) {
+            Some(t) => &self.src[t.start as usize..t.end as usize],
+
+            None => "",
+        }
     }
 
     /// The name a bare type takes inside a namespace body.

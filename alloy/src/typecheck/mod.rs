@@ -878,6 +878,10 @@ pub fn known_shapes(files: &[CheckSource]) -> crate::shapes::Known {
             .iter()
             .flat_map(|f| crate::shapes::interfaces(&f.source))
             .collect(),
+        namespaces: files
+            .iter()
+            .flat_map(|f| crate::declarations::namespace_names(&f.source))
+            .collect(),
     }
 }
 

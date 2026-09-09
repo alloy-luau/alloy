@@ -84,8 +84,13 @@ impl State {
                 .collect(),
             interfaces: here
                 .into_iter()
-                .chain(rest.map(|(_, d)| d))
+                .chain(rest.clone().map(|(_, d)| d))
                 .flat_map(|d| d.interfaces.iter().chain(&d.import_interfaces).cloned())
+                .collect(),
+            namespaces: here
+                .into_iter()
+                .chain(rest.map(|(_, d)| d))
+                .flat_map(|d| d.namespaces.iter().cloned())
                 .collect(),
         }
     }

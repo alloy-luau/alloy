@@ -1,0 +1,8 @@
+local map: { [string]: { name: string, coins: number } }? = nil
+local key = "one"
+local value = map?[key]
+local sure = map![key]
+local name = map?[key]?.name
+local coins = map![key].coins
+local deep = map![key].name
+print(value, sure, name, coins, deep)

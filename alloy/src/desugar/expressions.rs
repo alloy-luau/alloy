@@ -864,7 +864,18 @@ impl<'s> Desugar<'s> {
                     let name = self.name_prefix(&mut inner, &mut guard, inner_simple);
                     let source = self.text_of(span);
                     let message = luau_string(&format!("{source} is nil"));
-                    inner = format!("(if {name} == nil then error({message}) else {name})");
+                    // The checker gives `error(m)` a type it cannot
+                    // index through, and the whole branch takes it:
+                    // `x![k].m` then answers nothing. `:: never` says
+                    // the branch has no value, so the else side alone
+                    // decides. The ship artifact runs the call and
+                    // needs no cast.
+                    let raised = match self.options.check {
+                        true => format!("(error({message}) :: never)"),
+
+                        false => format!("error({message})"),
+                    };
+                    inner = format!("(if {name} == nil then {raised} else {name})");
                     inner_simple = false;
                     // `!` ends the guard: past it the value is never nil.
                     guard = None;

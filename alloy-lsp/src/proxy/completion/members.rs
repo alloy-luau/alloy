@@ -1,6 +1,57 @@
 use super::*;
 
 impl State {
+    /// `self:` inside a trait's default method. A trait has no table in
+    /// the emit, so the child has no type for `self` there; the trait's
+    /// own signatures are the list.
+    pub(crate) fn trait_self_members(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return Vec::new();
+        };
+        let head = doc.source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+
+        if !head.ends_with(['.', ':']) {
+            return Vec::new();
+        }
+
+        let sigil = head.len() - 1;
+        let from = head[..sigil]
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        if &head[from..sigil] != "self" {
+            return Vec::new();
+        }
+
+        let Some((name, methods)) = enclosing_trait(&doc.source, line) else {
+            return Vec::new();
+        };
+        let snippets = self.snippets;
+
+        methods
+            .into_iter()
+            .map(|(label, detail)| {
+                let mut item = json!({
+                    "label": label,
+                    "kind": 2,
+                    "detail": detail,
+                    "sortText": format!("0{label}"),
+                    "documentation": {
+                        "kind": "markdown",
+                        "value": format!("A method of `trait {name}`."),
+                    },
+                });
+                set_call(&mut item, &label, &detail, snippets);
+
+                item
+            })
+            .collect()
+    }
+
     /// Narrows a remote's member list to what the file may reach. The
     /// emit types one surface for both sides, so `Toast.fire` is in the
     /// list of a `.client.aly` file that cannot reach it; the
@@ -615,4 +666,58 @@ pub(crate) fn payload_types(signature: &str) -> Vec<String> {
     }
 
     out
+}
+
+/// The trait whose body holds `line`, with each method's name and the
+/// signature the trait writes. A trait stands at the margin, so its
+/// `end` is the first `end` in column zero under it.
+pub(crate) fn enclosing_trait(source: &str, line: u32) -> Option<(String, Vec<(String, String)>)> {
+    let lines: Vec<&str> = source.lines().collect();
+    let at = line as usize;
+    let head = (0..=at.min(lines.len().saturating_sub(1)))
+        .rev()
+        .find(|i| {
+            let text = lines[*i];
+
+            text.starts_with("trait ")
+                || text.starts_with("export trait ")
+                || text.starts_with("global trait ")
+        })?;
+    let name: String = lines[head]
+        .trim_start_matches("export ")
+        .trim_start_matches("global ")
+        .trim_start_matches("trait ")
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    // The caret has to sit inside the body.
+    let close = (head + 1..lines.len()).find(|i| lines[*i] == "end")?;
+
+    if at <= head || at > close {
+        return None;
+    }
+
+    let mut methods = Vec::new();
+
+    for text in &lines[head + 1..close] {
+        let body = text.trim();
+        let body = body.strip_prefix("private ").unwrap_or(body);
+        let body = body.strip_prefix("public ").unwrap_or(body);
+        let Some(rest) = body.strip_prefix("function ") else {
+            continue;
+        };
+        let label: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        if label.is_empty() || !rest[label.len()..].starts_with(['(', '<']) {
+            continue;
+        }
+
+        let detail = format!("function {name}{}", &rest[label.len()..]);
+        methods.push((label, detail));
+    }
+
+    (!methods.is_empty()).then_some((name, methods))
 }

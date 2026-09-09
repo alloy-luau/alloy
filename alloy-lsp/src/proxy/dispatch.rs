@@ -1339,6 +1339,10 @@ impl Server {
                             extra.extend(st.std_completions(uri, line, character, result));
                             extra.extend(st.value_scope(uri, line, character, result));
                             extra.extend(st.directive_completions(uri, line, character));
+                            // A trait has no table in the emit, so the
+                            // child answers nothing for `self` inside a
+                            // default method.
+                            extra.extend(st.trait_self_members(uri, line, character));
                         }
 
                         let (from_ingots, incomplete) =

@@ -503,3 +503,46 @@ pub(crate) fn a_method_finds_the_impl_that_writes_it() {
     assert_eq!(method_owner(source, "bump").as_deref(), Some("Counter"));
     assert_eq!(method_owner(source, "make"), None);
 }
+
+/// A private field read inside its impl. The child prints the type
+/// alone; the declaration carries `private` and the struct.
+#[test]
+fn a_field_at_a_use_reads_its_declaration() {
+    let src = "struct S as\n    x: number\n    private secret: number\nend\n\nimpl S as\n    function f(self): number\n        return self.secret + self.x\n    end\nend\n\nlocal s = new S { x = 1, secret = 2 }\n\nprint(s.x)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let at = |needle: &str| {
+        let start = src.find(needle).expect("needle");
+
+        (start, start + needle.len())
+    };
+    let (start, end) = at("secret + ");
+    let (start, end) = (start, end - " + ".len());
+    assert_eq!(
+        used_field_hover(&st, doc, start, end).as_deref(),
+        Some("```alloy\nprivate secret: number\n```\nA field of `struct S`.")
+    );
+
+    // A local bound by a constructor names the struct too.
+    let (start, end) = at("s.x)");
+    let (start, end) = (start + 2, end - 1);
+    assert_eq!(
+        used_field_hover(&st, doc, start, end).as_deref(),
+        Some("```alloy\nx: number\n```\nA field of `struct S`.")
+    );
+
+    // A method after a `:` is no field.
+    assert_eq!(used_field_hover(&st, doc, 0, 1), None);
+}
+
+/// The second link of a chain named the receiver by the first word of
+/// the folded self type, `read`.
+#[test]
+fn a_chain_link_names_the_receiver_type() {
+    let known = crate::shapes::Known::default();
+    let text = "function w.xs:map(function(x: number) return x end):find(self: {read number}, f: (number, number) -> boolean): number?";
+    assert_eq!(
+        crate::shapes::fold(text, &known),
+        "function Array:find(self: read number[], f: (number, number) -> boolean): number?"
+    );
+}

@@ -9,7 +9,7 @@ mod restyle;
 pub(crate) use declarations::case_binding_text;
 pub(crate) use fields::{
     declared_field_hover, declared_parameter_hover, declared_type_parameters_of, field_key,
-    foreign_method_hover, function_name_of, remote_parameter_hover,
+    foreign_method_hover, function_name_of, remote_parameter_hover, used_field_hover,
 };
 pub(crate) use members::{attach_std_member_docs, std_member_hover, std_receiver};
 pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};

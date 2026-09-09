@@ -85,18 +85,63 @@ fn fold_call_receiver_at(text: &str) -> Option<(usize, String)> {
         return None;
     }
 
-    let name = &after[..name_len];
-
     // A receiver that is a name already, `Iter:filter`, is the type.
     // `self:markup` and `x:describe` name the variable the call went
     // through; the type is what the reader wants there, and only a
-    // type name stands in for it. `read number[]` and `any` are not
-    // names, and `self: read T[]` would read as `read`.
-    if !receiver.contains('(') && !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+    // type name stands in for it. The first word decides, so
+    // `self: read number[]` leaves a plain receiver as it is.
+    if !receiver.contains('(') && !after[..name_len].starts_with(|c: char| c.is_ascii_uppercase()) {
         return None;
     }
 
+    let name = receiver_type_name(self_type(after))?;
+
     Some((open, format!("{SIGNATURE}{name}{}", &span[colon..open])))
+}
+
+/// The `self` annotation of a head: the text from the type to the comma
+/// or the parenthesis that closes the parameter.
+fn self_type(after: &str) -> &str {
+    let mut depth = 0i32;
+
+    for (i, c) in after.char_indices() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return &after[..i],
+            ')' | ']' | '}' | '>' => depth -= 1,
+            ',' if depth == 0 => return &after[..i],
+            _ => {}
+        }
+    }
+
+    after
+}
+
+/// The type name a `self` annotation stands for. A modifier is no
+/// name, an array reads as `Array`, and a generic reads as its head.
+fn receiver_type_name(ty: &str) -> Option<String> {
+    let mut t = ty.trim();
+
+    for word in ["read ", "write "] {
+        t = t.strip_prefix(word).unwrap_or(t).trim_start();
+    }
+
+    let t = t.trim_end_matches('?').trim_end();
+
+    if t.ends_with("[]") {
+        return Some("Array".to_string());
+    }
+
+    let head: String = t
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    match head.is_empty() || matches!(head.as_str(), "any" | "unknown" | "nil" | "self") {
+        true => None,
+
+        false => Some(head),
+    }
 }
 
 /// `function _1:unwrap(self: any): T`: the receiver is a temp the emit

@@ -855,3 +855,19 @@ pub(crate) fn a_value_offers_no_constructor() {
     got.sort();
     assert_eq!(got, ["name", "new"]);
 }
+
+/// A trait has no table in the emit, so the child has no type for
+/// `self` inside a default method. The trait's own signatures are the
+/// list.
+#[test]
+fn self_inside_a_trait_lists_the_trait_methods() {
+    let src = "trait T as\n    function f(self): number\n\n    function g(self): number\n        return self:\n    end\nend\n";
+    let (st, uri) = one_file(src);
+    let items = st.trait_self_members(uri, 4, 20);
+    let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+    assert_eq!(labels, vec!["f", "g"]);
+    assert_eq!(items[0]["detail"], "function T(self): number");
+
+    // Outside the trait, and after a name that is not `self`, nothing.
+    assert!(st.trait_self_members(uri, 6, 0).is_empty());
+}

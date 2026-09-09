@@ -41,6 +41,7 @@ impl Server {
             .or_else(|| declared_parameter_hover(doc, start, end))
             .or_else(|| foreign_method_hover(doc, start, end))
             .or_else(|| type_parameter_hover(doc, start, end))
+            .or_else(|| used_field_hover(&st, doc, start, end))
         {
             let (sl, sc) = position_of(&doc.source, start);
             let (el, ec) = position_of(&doc.source, end);
@@ -497,4 +498,75 @@ pub(crate) fn enclosing_brace(source: &str, at: usize) -> Option<usize> {
     }
 
     None
+}
+
+/// A field where it is read, `self.secret` or `p.x`. The child answers
+/// with the type alone; the declaration carries `private`, the
+/// modifiers, and the struct that owns it.
+pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) -> Option<String> {
+    // The word sits after a `.`; a `:` names a method and `..` is the
+    // concatenation operator.
+    let head = doc.source[..start].trim_end();
+
+    if !head.ends_with('.') || head.ends_with("..") {
+        return None;
+    }
+
+    let receiver_end = head.len() - 1;
+    let receiver_head = doc.source[..receiver_end].trim_end();
+
+    if !receiver_head.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let (rs, re) = keywords::word_range(&doc.source, receiver_head.len() - 1);
+    let receiver = &doc.source[rs..re];
+    let word = &doc.source[start..end];
+    // `self` reads the type of the `impl` block around it; any other
+    // name reads its annotation or what it starts from.
+    let owner = match receiver {
+        "self" => {
+            let (line, _) = position_of(&doc.source, start);
+            impl_self_type(doc, line)?
+        }
+
+        _ => match context::declared(&doc.source, rs, receiver)? {
+            context::Declared::Annotation(t) => alloy::docs::type_head(&t)?,
+
+            // `local s = new S { ... }`: the constructor names the type.
+            context::Declared::Init(v) => match v.trim().strip_prefix("new ") {
+                Some(rest) => rest
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect(),
+
+                None => alloy::docs::value_head(&v)?,
+            },
+        },
+    };
+    let owner = owner.split('<').next().unwrap_or(&owner).to_string();
+    // The declaration of the struct, here or in a module this file
+    // imports, and the line inside it that declares the field.
+    let (keyword, line) = doc
+        .decls
+        .iter()
+        .chain(st.docs.values().flat_map(|d| d.decls.iter()))
+        .filter(|d| d.name == owner)
+        .find_map(|d| {
+            let keyword = ["struct", "interface", "class"]
+                .into_iter()
+                .find(|k| d.hover.contains(&format!("{k} ")))?;
+            let line = d
+                .hover
+                .lines()
+                .find(|l| field_key(l) == Some(word))
+                .map(|l| l.trim().trim_end_matches(',').trim_end().to_string())?;
+
+            Some((keyword, line))
+        })?;
+
+    Some(format!(
+        "```alloy\n{line}\n```\nA field of `{keyword} {owner}`."
+    ))
 }

@@ -344,3 +344,62 @@ fn a_private_member_does_not_export() {
     let main = output(&dir, "main.luau");
     assert!(!main.contains("Geom_Hidden"), "{main}");
 }
+
+// --- 5. attributes ----------------------------------------------------------
+
+/// `@deprecated` sits on a namespace; its line stays and the header
+/// takes the line under it.
+#[test]
+fn a_namespace_takes_deprecated() {
+    let out = clean(
+        "@deprecated(\"use Geometry\")\nnamespace Old as\n    const x = 1\nend\n\nprint(Old.x)\n",
+    );
+    assert!(
+        out.lines().nth(1).unwrap().contains("local Old = {}"),
+        "{out}"
+    );
+}
+
+/// `@cfg(server)` on a namespace: each member reaches the table on
+/// that side only.
+#[test]
+fn a_cfg_on_a_namespace_guards_the_table() {
+    let out =
+        clean("@cfg(server)\nnamespace Store as\n    const key = 1\nend\n\nprint(Store.key)\n");
+    assert!(
+        out.contains("if __alloy.cfg.server() then Store.key = Store_key end"),
+        "{out}"
+    );
+}
+
+/// `@cfg` on a member is the member's own guard.
+#[test]
+fn a_cfg_on_a_member_guards_the_member() {
+    let out = clean(
+        "namespace Debug as\n    @cfg(server)\n    function log(msg: string)\n        print(msg)\n    end\nend\n\nDebug.log(\"a\")\n",
+    );
+    assert!(
+        out.contains("local function Debug_log(msg: string)"),
+        "{out}"
+    );
+    assert!(out.contains("cfg.server()"), "{out}");
+}
+
+/// A user attribute takes `namespace` as a target.
+#[test]
+fn a_user_attribute_reaches_a_namespace() {
+    clean(
+        "attribute tag(name: string) on namespace\n\n@tag(\"core\")\nnamespace M as\n    const x = 1\nend\n\nprint(M.x)\n",
+    );
+}
+
+/// An attribute that does not take `namespace` reports there.
+#[test]
+fn an_attribute_that_misses_the_target_reports() {
+    let hits = messages("@derive(Clone)\nnamespace M as\n    const x = 1\nend\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].contains("has no meaning on a namespace"),
+        "{hits:?}"
+    );
+}

@@ -405,6 +405,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         member_names: HashMap::new(),
         ns_stack: Vec::new(),
         ns_export: false,
+        ns_force_local: false,
         export_listed: HashSet::new(),
         type_name_spans: chunk.type_names.clone(),
     };
@@ -936,6 +937,11 @@ struct Desugar<'s> {
     /// The names a top-level `export { ... }` list carries, so a
     /// namespace it names exports its types too.
     export_listed: HashSet<String>,
+    /// The next function header takes `local`: a namespace member never
+    /// leaks into the file, and a plain `function f()` would be a Luau
+    /// global. The attributed path reads it, since the modifier goes
+    /// after the attribute lines.
+    ns_force_local: bool,
     /// The namespace under render exports, so its type members carry
     /// `export` and another module can name them.
     ns_export: bool,

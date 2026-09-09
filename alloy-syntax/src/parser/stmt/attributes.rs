@@ -163,6 +163,7 @@ impl<'a> Parser<'a> {
                 | "interface"
                 | "type"
                 | "local"
+                | "namespace"
         ) {
             let i = self.bump();
 

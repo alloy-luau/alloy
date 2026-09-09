@@ -18,9 +18,11 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
     Some(match name {
         "derive" | "sealed" => &["struct", "enum"],
 
-        "cfg" => &["function", "local"],
+        "cfg" => &["function", "local", "namespace"],
 
-        "test" | "native" | "checked" | "deprecated" | "inline" | "noinline" => &["function"],
+        "deprecated" => &["function", "namespace"],
+
+        "test" | "native" | "checked" | "inline" | "noinline" => &["function"],
 
         "unreliable" | "ratelimit" | "timeout" | "validate" | "immediate" => &["remote"],
 
@@ -140,6 +142,15 @@ impl<'s> Desugar<'s> {
 
                 for v in &e.variants {
                     self.check_attrs(&v.attributes, "variant");
+                }
+            }
+
+            // A namespace takes attributes, and so does each member.
+            Stmt::Namespace(ns) => {
+                self.check_attrs(&ns.attributes, "namespace");
+
+                for m in &ns.members {
+                    self.check_stmt_attrs(&m.stmt);
                 }
             }
 
@@ -1028,7 +1039,7 @@ impl<'s> Desugar<'s> {
             lead.push(' ');
         }
 
-        if (is_test || exported) && !is_local {
+        if ((is_test || exported) && !is_local) || std::mem::take(&mut self.ns_force_local) {
             lead.push_str("local ");
         }
 

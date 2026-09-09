@@ -611,6 +611,28 @@ impl<'s> Desugar<'s> {
         };
         let start = self.byte_start(ns.span);
         let end_tok = self.toks[ns.span.end as usize - 1];
+        // `@cfg(server)` on the group: each member's line on the table
+        // runs only on that side, so the name is nil on the other.
+        let mut cfg = None;
+
+        for a in &ns.attributes {
+            if a.name.map(|n| self.text_of(n)) == Some("cfg") {
+                match self.cfg_condition(&a.args) {
+                    Ok(cond) => cfg = Some(cond),
+
+                    Err(message) => self.diagnose(a.span, &message),
+                }
+            }
+        }
+
+        // The attributes are read at compile time. Their lines stay,
+        // blank, and the header sits on the declaration's own line.
+        let decl_start = match ns.attributes.last() {
+            Some(a) => self.toks[a.span.end as usize].start,
+
+            None => start,
+        };
+        self.blank_lines(start, decl_start);
         // The header line opens the table. A nested namespace is a field
         // of the one around it, so it takes no `local`.
         let header = match info.parent.is_some() {
@@ -618,12 +640,12 @@ impl<'s> Desugar<'s> {
 
             false => format!("local {} = {{}}", info.path),
         };
-        self.generate(start, &header);
+        self.generate(decl_start, &header);
 
         // The header text goes and its line stays. The `as` token ends
         // it, so the first member keeps the trivia in front of it.
         let head_end = self.namespace_head_end(ns);
-        self.blank_lines(start, head_end);
+        self.blank_lines(decl_start, head_end);
         let first = ns
             .members
             .first()
@@ -638,7 +660,7 @@ impl<'s> Desugar<'s> {
         for m in &ns.members {
             let m_start = self.byte_start(m.span);
             self.copy(cursor, m_start);
-            self.namespace_member(&info, m);
+            self.namespace_member(&info, m, cfg.as_deref());
             cursor = self.byte_end(m.span);
         }
 
@@ -655,7 +677,7 @@ impl<'s> Desugar<'s> {
 
     /// One member: the declaration under its rendered name, then the
     /// line that puts it on the table.
-    fn namespace_member(&mut self, info: &NamespaceInfo, m: &NamespaceMember) {
+    fn namespace_member(&mut self, info: &NamespaceInfo, m: &NamespaceMember, cfg: Option<&str>) {
         let span = m.span;
         let start = self.byte_start(span);
         let stmt_start = self.byte_start(m.stmt.span());
@@ -686,11 +708,17 @@ impl<'s> Desugar<'s> {
         }
 
         // A member never leaks into the file, so a plain `function f()`
-        // takes the `local` a Luau global would not have.
+        // takes the `local` a Luau global would not have. With
+        // attributes above it the modifier goes after their lines, so
+        // the attributed path writes it instead.
         if let Stmt::Function(f) = m.stmt.under_default()
             && f.path.len() == 1
         {
-            self.generate(stmt_start, "local ");
+            match f.attrs.is_empty() {
+                true => self.generate(stmt_start, "local "),
+
+                false => self.ns_force_local = true,
+            }
         }
 
         self.stmt(&m.stmt);
@@ -717,7 +745,12 @@ impl<'s> Desugar<'s> {
         }
 
         if !tail.is_empty() {
-            self.generate(self.byte_end(span), &tail);
+            let text = match cfg {
+                Some(cond) => format!(" if {cond} then{tail} end"),
+
+                None => tail,
+            };
+            self.generate(self.byte_end(span), &text);
         }
     }
 }

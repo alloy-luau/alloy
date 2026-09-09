@@ -175,6 +175,7 @@ pub(crate) fn declaration_head(head: &str) -> Option<bool> {
 fn declaration_word(line: &str) -> Option<&'static str> {
     let t = line.trim_start();
     let t = t.strip_prefix("export ").map(str::trim_start).unwrap_or(t);
+    let binds = t.starts_with("local ") || t.starts_with("const ");
     let t = t
         .strip_prefix("local ")
         .or_else(|| t.strip_prefix("const "))
@@ -195,7 +196,60 @@ fn declaration_word(line: &str) -> Option<&'static str> {
         }
     }
 
-    None
+    // `local x = 1` and `const N = 2` bind a name, which is where
+    // `@cfg` goes.
+    binds.then_some("local")
+}
+
+/// The level of a long bracket at the start of the text: 0 for `[[`,
+/// 2 for `[==[`. None when the text opens no long bracket.
+fn long_bracket(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix('[')?;
+    let level = rest.chars().take_while(|c| *c == '=').count();
+
+    rest[level..].starts_with('[').then_some(level)
+}
+
+/// The declaration the attribute lines lead to: the first statement
+/// past the blank lines, the other attributes, and the comments. Both
+/// comment forms sit between an attribute and what it marks.
+fn declaration_below(src: &str) -> Option<&'static str> {
+    let mut rest = src;
+
+    loop {
+        let text = rest.trim_start();
+
+        if text.is_empty() {
+            return None;
+        }
+
+        let line_end = text.find('\n').unwrap_or(text.len());
+
+        if let Some(after) = text.strip_prefix("--") {
+            // A block comment runs to its closing bracket, over as many
+            // lines as it takes.
+            if let Some(level) = long_bracket(after) {
+                let closer = format!("]{}]", "=".repeat(level));
+                let at = text.find(&closer)?;
+                rest = &text[at + closer.len()..];
+
+                continue;
+            }
+
+            rest = &text[line_end..];
+
+            continue;
+        }
+
+        // Another attribute of the same declaration.
+        if text.starts_with('@') {
+            rest = &text[line_end..];
+
+            continue;
+        }
+
+        return declaration_word(&text[..line_end]);
+    }
 }
 
 /// What an attribute at this position would go on: a remote's parameter
@@ -240,19 +294,9 @@ pub(crate) fn attribute_target(
         return None;
     }
 
-    // At column zero the attribute precedes a declaration: skip the other
-    // attribute lines, blanks, and comments to the first one.
-    for line in src[line_end..].lines().skip(1) {
-        let t = line.trim_start();
-
-        if t.is_empty() || t.starts_with('@') || t.starts_with("--") {
-            continue;
-        }
-
-        return declaration_word(line);
-    }
-
-    None
+    // At column zero the attribute precedes a declaration: past the
+    // other attribute lines, the blanks, and the comments.
+    declaration_below(&src[line_end.min(src.len())..])
 }
 
 /// The type the `impl` block around the caret is for: the `X` of

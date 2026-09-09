@@ -2539,6 +2539,115 @@ mod tests {
         assert_eq!(at("year % 4, year % 100"), MatchKind::Unknown);
     }
 
+    /// The attribute list a `@` opens, for the declaration under it.
+    fn attribute_labels(src: &str) -> Vec<String> {
+        let (st, uri) = one_file(src);
+        let offset = src.find('@').expect("a sigil") + 1;
+        let ctx = context::detect(src, offset).expect("an attribute list");
+
+        st.context_items(uri, offset, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// An attribute belongs to what it sits above. The list offers the
+    /// ones that go there and no others, and a comment between the two
+    /// does not hide the declaration.
+    #[test]
+    pub(crate) fn an_attribute_list_follows_the_declaration_under_it() {
+        let remote = attribute_labels("@\nremote Ping() from server\n");
+
+        for name in ["@ratelimit", "@timeout", "@validate", "@unreliable"] {
+            assert!(remote.contains(&name.to_string()), "{remote:?}");
+        }
+
+        for name in ["@derive", "@test", "@cfg", "@u8", "@rename", "@sealed"] {
+            assert!(!remote.contains(&name.to_string()), "{remote:?}");
+        }
+
+        // The same list past a comment of either form.
+        assert_eq!(
+            attribute_labels("@\n-- why\nremote Ping() from server\n"),
+            remote
+        );
+        assert_eq!(
+            attribute_labels("@\n--[[ why\n   it stays ]]\nremote Ping() from server\n"),
+            remote
+        );
+
+        let structure = attribute_labels("@\nstruct V as\n    x: number\nend\n");
+
+        assert!(structure.contains(&"@derive".to_string()), "{structure:?}");
+        assert!(structure.contains(&"@sealed".to_string()), "{structure:?}");
+        assert!(
+            !structure.contains(&"@ratelimit".to_string()),
+            "{structure:?}"
+        );
+
+        let function = attribute_labels("@\nfunction go()\nend\n");
+
+        for name in ["@native", "@checked", "@deprecated", "@test", "@cfg"] {
+            assert!(function.contains(&name.to_string()), "{function:?}");
+        }
+
+        assert!(!function.contains(&"@derive".to_string()), "{function:?}");
+
+        // A binding takes `@cfg` alone.
+        assert_eq!(attribute_labels("@\nlocal count = 1\n"), ["@cfg"]);
+
+        // The wire sizes go on a remote's parameter and a struct field.
+        let param = attribute_labels("remote Hit(@ target: Player) from client\n");
+
+        assert!(param.contains(&"@u8".to_string()), "{param:?}");
+        assert!(!param.contains(&"@ratelimit".to_string()), "{param:?}");
+
+        let field = attribute_labels("struct V as\n    @\n    x: number\nend\n");
+
+        assert!(field.contains(&"@u8".to_string()), "{field:?}");
+        assert!(field.contains(&"@rename".to_string()), "{field:?}");
+        assert!(!field.contains(&"@derive".to_string()), "{field:?}");
+    }
+
+    /// A declared attribute reaches the targets it names, and nothing
+    /// else.
+    #[test]
+    pub(crate) fn a_declared_attribute_reaches_its_own_targets() {
+        let src = concat!(
+            "attribute audited(reason: string) on remote, function\n",
+            "\n",
+            "@\n",
+            "remote Ping() from server\n",
+        );
+        let (st, uri) = one_file(src);
+        let offset = src.rfind('@').expect("a sigil") + 1;
+        let ctx = context::detect(src, offset).expect("an attribute list");
+        let labels: Vec<String> = st
+            .context_items(uri, offset, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect();
+
+        assert!(labels.contains(&"@audited".to_string()), "{labels:?}");
+
+        let structure = concat!(
+            "attribute audited(reason: string) on remote, function\n",
+            "\n",
+            "@\n",
+            "struct V as\n    x: number\nend\n",
+        );
+        let (st, uri) = one_file(structure);
+        let offset = structure.rfind('@').expect("a sigil") + 1;
+        let ctx = context::detect(structure, offset).expect("an attribute list");
+        let labels: Vec<String> = st
+            .context_items(uri, offset, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect();
+
+        assert!(!labels.contains(&"@audited".to_string()), "{labels:?}");
+    }
+
     pub(crate) fn case_items(st: &State, uri: &str, src: &str) -> Vec<Value> {
         let offset = src.rfind("case ").unwrap() + "case ".len();
         let ctx = context::detect(src, offset).expect("a case list");

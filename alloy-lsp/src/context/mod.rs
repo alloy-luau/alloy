@@ -1470,6 +1470,33 @@ mod tests {
         assert_eq!(target_of("@|\n"), None);
     }
 
+    /// A comment between the attribute and its declaration is no
+    /// declaration. Both comment forms sit there, and a block comment
+    /// runs over as many lines as it takes.
+    #[test]
+    fn a_comment_does_not_hide_the_attribute_target() {
+        assert_eq!(
+            target_of("@|\n-- why\nremote Ping() from server\n"),
+            Some("remote")
+        );
+        assert_eq!(
+            target_of("@|\n--[[ why\n   it is here ]]\nremote Ping() from server\n"),
+            Some("remote")
+        );
+        assert_eq!(
+            target_of("@|\n--[==[ why ]==]\nstruct V as\nend\n"),
+            Some("struct")
+        );
+        assert_eq!(
+            target_of("@|\n--[[ why ]] function go() end\n"),
+            Some("function")
+        );
+        // A binding takes `@cfg`, which no other target does.
+        assert_eq!(target_of("@|\nlocal count = 1\n"), Some("local"));
+        assert_eq!(target_of("@|\nexport const CAP = 10\n"), Some("local"));
+        assert_eq!(target_of("@|\ntype Handler = () -> ()\n"), Some("type"));
+    }
+
     #[test]
     fn attribute_declarations() {
         assert_eq!(

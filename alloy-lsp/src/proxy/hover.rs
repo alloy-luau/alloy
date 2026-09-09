@@ -3050,16 +3050,18 @@ pub(crate) fn declares_a_name_at(source: &str, offset: usize) -> bool {
     DECLARERS.contains(&&source[word_start..end])
 }
 
-/// What a built-in attribute goes on.
+/// What a built-in attribute goes on. The list mirrors
+/// `builtin_attr_targets` in the compiler, which is what reports an
+/// attribute on the wrong declaration.
 pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
     match key {
-        "@derive" => &["struct", "enum"],
+        "@derive" | "@sealed" => &["struct", "enum"],
 
         "@cfg" => &["function", "local"],
 
         "@test" | "@native" | "@checked" | "@deprecated" | "@inline" | "@noinline" => &["function"],
 
-        "@unreliable" | "@ratelimit" | "@timeout" | "@validate" => &["remote"],
+        "@unreliable" | "@ratelimit" | "@timeout" | "@validate" | "@immediate" => &["remote"],
 
         "@u8" | "@u16" | "@u32" | "@i8" | "@i16" | "@i32" | "@f32" => &["param", "field"],
 

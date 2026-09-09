@@ -161,10 +161,18 @@ impl State {
     pub(crate) fn project_rel(&self, uri: &str) -> Option<PathBuf> {
         let path = uri_to_path(uri)?;
         let root = self.root.as_deref()?;
-        let config = Config::find_within(path.parent()?, root)?;
-        let base = config
-            .parent()?
-            .join(&Config::load(&config).ok()?.build.input);
+        // With no alloy.toml the workspace root is the input; a file
+        // outside it keeps its own path.
+        let found = path.parent().and_then(|d| Config::find_within(d, root));
+        let base = match found {
+            Some(config) => {
+                let input = Config::load(&config).ok()?.build.input;
+
+                config.parent()?.join(input)
+            }
+
+            None => root.to_path_buf(),
+        };
 
         Some(
             normalize(&path)

@@ -13,6 +13,9 @@ pub(crate) use fields::{
 };
 pub(crate) use members::{attach_std_member_docs, std_member_hover, std_receiver};
 pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
+
+#[cfg(test)]
+pub(crate) use modules::const_hover as const_hover_of;
 pub(crate) use restyle::{
     declared_annotation, declared_signature, drop_bound_intersections, fold_std_shapes,
     is_byte_count, keep_annotation, name_by_declaration, name_method_receiver,

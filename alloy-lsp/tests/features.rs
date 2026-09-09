@@ -2087,3 +2087,156 @@ fn the_editor_can_turn_both_helpers_off() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Two files of one project: one declares globals, the other names
+/// them with no import. The editor gets a clean file, a hover on the
+/// declaration, a completion list that holds the names, and a
+/// definition that lands in the declaring file.
+#[test]
+fn a_global_reaches_another_file_in_the_editor() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-globals-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/shared")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/shared/log.aly"),
+        "--- Writes a line to the output.\nglobal function log(msg: string)\n    print(msg)\nend\n\nglobal const MAX = 10\n",
+    )
+    .unwrap();
+    let main_src = "local n: number = MAX\nlog(`start {n}`)\nlocal bad: string = MAX\nprint(bad)\n";
+    let main = dir.join("src/main.aly");
+    std::fs::write(&main, main_src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", main.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": main_src } } }),
+    );
+
+    // The globals type through the require the emit writes: `MAX` is a
+    // number, so the string annotation is the one error the file has.
+    let diags = s.diagnostics(&uri, |ds| {
+        ds.iter()
+            .any(|d| d.contains("number") && d.contains("string"))
+    });
+    assert!(
+        diags.iter().all(|d| !d.contains("Unknown global")),
+        "{diags:#?}"
+    );
+
+    // Hover on the call reads the declaration in the other file.
+    let h = s.hover(&uri, 1, 1);
+    assert!(h.contains("log"), "{h}");
+    assert!(h.contains("Writes a line to the output."), "{h}");
+
+    // In a file that names no global yet, the list still holds them,
+    // with the file that declares each one in the detail.
+    let probe_src = "local v = \n";
+    let probe = dir.join("src/probe.aly");
+    std::fs::write(&probe, probe_src).unwrap();
+    let probe_uri = format!("file://{}", probe.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": probe_uri, "languageId": "alloy-luau", "version": 1, "text": probe_src } } }),
+    );
+    let items = s.completion_items(&probe_uri, 0, 10);
+    let hit = items
+        .iter()
+        .find(|i| i["label"] == "MAX")
+        .unwrap_or_else(|| panic!("no `MAX` in {items:#?}"));
+    assert!(
+        hit["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("shared/log.aly"),
+        "{hit}"
+    );
+
+    // Go to definition lands on the declaration, not on the require the
+    // emit writes on the first line.
+    let def = s.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 1, "character": 1 } }),
+    );
+    let target = def
+        .as_array()
+        .and_then(|a| a.first().cloned())
+        .unwrap_or(def.clone());
+    assert!(
+        target["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("shared/log.aly"),
+        "{def}"
+    );
+    assert_eq!(target["range"]["start"]["line"], json!(1), "{def}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A space asks for a completion only where a side directive takes a
+/// word; anywhere else the answer is empty, so no popup opens.
+#[test]
+fn a_space_completes_the_side_of_a_directive() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-sidespace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "--@alloy-file-side \nlocal x = 1\n";
+    let file = dir.join("t.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    let on_directive = s.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 19 },
+            "context": { "triggerKind": 2, "triggerCharacter": " " }
+        }),
+    );
+    let labels: Vec<String> = on_directive
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(labels, ["client", "server", "shared"], "{on_directive}");
+
+    // A space in code opens nothing.
+    let plain = s.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 10 },
+            "context": { "triggerKind": 2, "triggerCharacter": " " }
+        }),
+    );
+    assert_eq!(plain, json!([]), "{plain}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

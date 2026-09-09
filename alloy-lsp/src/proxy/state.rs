@@ -175,6 +175,12 @@ impl State {
                 g.side = g
                     .side_directive
                     .unwrap_or_else(|| self.side_of(uri, &doc.source));
+                // `file` names the module a require reaches; a script
+                // cannot be required, so its globals live in the module
+                // the build hoists them into. `declared_in` keeps the
+                // file the author wrote, which is what a message and a
+                // completion detail name.
+                g.declared_in = rel.clone();
                 g.file = match script {
                     true => PathBuf::from(alloy::globals::hoist_name(&rel.to_string_lossy())),
 

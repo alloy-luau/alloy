@@ -227,10 +227,13 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     let const_globals: Vec<(String, String)> = globals::used(src, &options.globals)
         .into_iter()
         .filter_map(|(name, _)| {
+            // A name may be global on each side, so the one this file
+            // reaches is the one whose `const` binds here.
             options
                 .globals
                 .iter()
-                .find(|g| g.constant && g.name == name)
+                .find(|g| g.name == name && globals::reaches(g.side, options.side))
+                .filter(|g| g.constant)
                 .map(|g| (name, g.file.clone()))
         })
         .collect();

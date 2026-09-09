@@ -446,6 +446,86 @@ fn a_global_reaches_its_own_side() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Every pair of sides for one name. A server global and a client
+/// global never run together, so both may hold the name; a shared
+/// global reserves it on every side, and two globals of one side
+/// report.
+#[test]
+fn one_name_holds_on_two_sides_that_never_meet() {
+    let dir = temp_project("side-pairs");
+    let client = "--@alloy-file-side client\nglobal const LIMIT = 1\n";
+    let server = "--@alloy-file-side server\nglobal const LIMIT = 2\n";
+    let shared = "global const LIMIT = 3\n";
+    fs::write(dir.join("src/uc.client.aly"), "print(LIMIT)\n").unwrap();
+    fs::write(dir.join("src/us.server.aly"), "print(LIMIT)\n").unwrap();
+    // The pairs and how many files report the clash: none when the two
+    // sides never meet, one report per declaring file otherwise.
+    let clashes = |a: &str, b: &str| -> usize {
+        fs::write(dir.join("src/a.aly"), a).unwrap();
+        fs::write(dir.join("src/b.aly"), b).unwrap();
+
+        messages(&build(&dir))
+            .iter()
+            .filter(|m| m.contains("`LIMIT` is global in both"))
+            .count()
+    };
+
+    assert_eq!(clashes(client, server), 0);
+    assert_eq!(clashes(server, client), 0);
+    assert_eq!(clashes(client, shared), 2);
+    assert_eq!(clashes(shared, client), 2);
+    assert_eq!(clashes(server, shared), 2);
+    assert_eq!(clashes(shared, server), 2);
+    assert_eq!(clashes(client, client), 2);
+    assert_eq!(clashes(server, server), 2);
+    assert_eq!(clashes(shared, shared), 2);
+
+    // With one name on each side, each file reaches the one of its own.
+    fs::write(dir.join("src/a.aly"), client).unwrap();
+    fs::write(dir.join("src/b.aly"), server).unwrap();
+    let report = build(&dir);
+    assert!(messages(&report).is_empty(), "{:?}", messages(&report));
+    assert!(output(&dir, "uc.client.luau").contains("require(\"./a\")"));
+    assert!(output(&dir, "us.server.luau").contains("require(\"./b\")"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A global a script declares moves into a module of the build's own
+/// making. A message names the script the author wrote.
+#[test]
+fn a_message_names_the_script_that_declares_a_global() {
+    let dir = temp_project("script-name");
+    fs::write(
+        dir.join("src/main.server.aly"),
+        "global const LIMIT = 1
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/other.server.aly"),
+        "global const LIMIT = 2
+",
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    let messages = messages(&report);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages.iter().all(|m| !m.contains(".globals.aly")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`LIMIT` is global in both main.server.aly and other.server.aly")),
+        "{messages:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// `--@alloy-side` over one global beats every rule the file follows.
 #[test]
 fn a_side_directive_over_a_global_wins() {

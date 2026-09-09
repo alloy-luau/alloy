@@ -145,6 +145,10 @@ pub struct EmitOptions {
     /// module beside it. The declarations go, and the injected require
     /// brings the names back.
     pub hoist_globals: bool,
+    /// The script this file holds the globals of, when the build
+    /// hoisted them here. A message names the script the author wrote,
+    /// never the module the build made.
+    pub hoisted_from: Option<String>,
     /// The side the project's tree gives the file, for a name that
     /// says none. The module a script's globals moved into takes the
     /// script's side this way too.
@@ -155,8 +159,12 @@ pub struct EmitOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalRef {
     pub name: String,
-    /// The declaring file, as a message names it.
+    /// The module the require reaches. For a global in a script this
+    /// is the module the build hoists the declaration into.
     pub file: String,
+    /// The file that wrote the declaration, which is what a message
+    /// names. A script keeps its own name here.
+    pub declared_in: String,
     /// The require spec that reaches the declaring module from here.
     pub require: String,
     /// The ship artifact's require when it differs: under a mount it is
@@ -246,6 +254,7 @@ impl Default for EmitOptions {
             global_attributes: Vec::new(),
             ingot_rewrite: false,
             hoist_globals: false,
+            hoisted_from: None,
             side: None,
         }
     }
@@ -2116,7 +2125,13 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        let file = self.options.file_name.clone();
+        // The module a script's globals moved into carries the script's
+        // declarations, so a message names the script.
+        let file = self
+            .options
+            .hoisted_from
+            .clone()
+            .unwrap_or_else(|| self.options.file_name.clone());
 
         for g in &decls {
             let mut say = |message: String| {
@@ -2165,16 +2180,19 @@ impl<'s> Desugar<'s> {
             // A script's globals live in the module the build hoists
             // them into, so that module is this file, not another.
             let own = crate::globals::hoist_name(&file);
+            // The side this declaration reaches: its own directive, or
+            // the side of the file it sits in. A server name and a
+            // client name never meet, so both may stand.
+            let side = g.side_directive.unwrap_or(self.file_side);
 
-            if let Some(other) = self
-                .options
-                .globals
-                .iter()
-                .find(|o| o.name == g.name && !(self.options.hoist_globals && o.file == own))
-            {
+            if let Some(other) = self.options.globals.iter().find(|o| {
+                o.name == g.name
+                    && !(self.options.hoist_globals && o.file == own)
+                    && crate::globals::sides_collide(o.side, side)
+            }) {
                 say(format!(
                     "`{}` is global in both {file} and {}",
-                    g.name, other.file
+                    g.name, other.declared_in
                 ));
 
                 continue;
@@ -2195,6 +2213,21 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The global one name reaches in this file. A server global and a
+    /// client global may share a name, so the file's own side picks;
+    /// with neither on this side the first stands, and the caller
+    /// reports the side it sits on.
+    fn global_ref(&self, name: &str) -> Option<&GlobalRef> {
+        let mut named = self.options.globals.iter().filter(|g| g.name == name);
+        let first = named.clone().next()?;
+
+        Some(
+            named
+                .find(|g| crate::globals::reaches(g.side, self.file_side))
+                .unwrap_or(first),
+        )
+    }
+
     /// Records a use of a project global. The name reaches the file
     /// without an import, so the emit puts the require and the binding
     /// on the first line. A name the file binds itself is the file's own.
@@ -2206,7 +2239,7 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        let Some(g) = self.options.globals.iter().find(|g| g.name == name) else {
+        let Some(g) = self.global_ref(name) else {
             return;
         };
 
@@ -2246,7 +2279,7 @@ impl<'s> Desugar<'s> {
         let mut used: Vec<&GlobalRef> = Vec::new();
 
         for (name, _) in &self.globals_used {
-            let Some(g) = self.options.globals.iter().find(|g| &g.name == name) else {
+            let Some(g) = self.global_ref(name) else {
                 continue;
             };
 

@@ -37,7 +37,10 @@ impl State {
                 alloy::globals::Kind::Type => 7,
                 _ => 6,
             };
-            let file = g.file.to_string_lossy().replace('\\', "/");
+            // The declaring file, which is the one the reader can
+            // open. A script's globals move into a module of the
+            // build's own making, and that name says nothing here.
+            let file = g.declared_in.to_string_lossy().replace('\\', "/");
             let doc = self
                 .docs
                 .values()

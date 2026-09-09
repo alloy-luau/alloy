@@ -645,6 +645,9 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             let module_options = EmitOptions {
                 file_name: display_path(&module_rel),
                 hoist_globals: false,
+                // The declarations are the script's; a message names
+                // the file the author wrote.
+                hoisted_from: Some(display_path(&rel)),
                 // The module keeps the script's side; its own name has
                 // no suffix to say it.
                 side: side_of(&rel, &source),
@@ -668,7 +671,16 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             ) {
                 Ok(module) => {
                     for d in &module.diagnostics {
-                        report.diagnostics.push((rel.clone(), d.clone()));
+                        // The script and the module its globals moved
+                        // into both hold the declarations, so both
+                        // report the same thing at the same place.
+                        let said = report.diagnostics.iter().any(|(r, o)| {
+                            *r == rel && o.start == d.start && o.message == d.message
+                        });
+
+                        if !said {
+                            report.diagnostics.push((rel.clone(), d.clone()));
+                        }
                     }
 
                     if keep {

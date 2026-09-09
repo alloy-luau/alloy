@@ -88,8 +88,13 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Global {
     pub name: String,
-    /// The declaring file, relative to `[build] in`, as a message names it.
+    /// The module a file requires to reach the name, relative to
+    /// `[build] in`. For a global in a script this is the module the
+    /// build hoists the declaration into, not the script itself.
     pub file: PathBuf,
+    /// The file that wrote the declaration, which is what a message and
+    /// a hover name. A script keeps its own name here.
+    pub declared_in: PathBuf,
     /// The byte offset of the declared name, for go to definition.
     pub offset: u32,
     /// The byte range of the whole declaration head, for a diagnostic.
@@ -214,6 +219,7 @@ pub fn declared_in(
         out.push(Global {
             name: name.to_string(),
             file: file.to_path_buf(),
+            declared_in: file.to_path_buf(),
             offset: at(name_span),
             start: at(span),
             end: toks
@@ -786,6 +792,7 @@ pub fn refs_for(
             side: g.side,
             name: g.name.clone(),
             file: g.file.to_string_lossy().replace('\\', "/"),
+            declared_in: g.declared_in.to_string_lossy().replace('\\', "/"),
             require: require_from(user, &g.file),
             ship_require: ship.get(&g.file).cloned(),
             value: g.kind.is_value(),
@@ -817,25 +824,50 @@ pub fn used(src: &str, refs: &[crate::desugar::GlobalRef]) -> Vec<(String, u32)>
     crate::desugar::render(src, &parsed.lexed.toks, &parsed.chunk, &options).globals_used
 }
 
+/// Whether a global declared on one side reaches a file on another. A
+/// global with no side is shared, so every file reaches it. A sided one
+/// reaches its own side alone, and a shared file, which runs on either
+/// side, holds neither side's own.
+pub fn reaches(
+    global: Option<crate::directives::Side>,
+    file: Option<crate::directives::Side>,
+) -> bool {
+    global.is_none() || global == file
+}
+
+/// Whether two globals of one name take the name from each other. Two
+/// sides that never run together each hold one name; a shared global
+/// reserves the name on every side.
+pub fn sides_collide(
+    a: Option<crate::directives::Side>,
+    b: Option<crate::directives::Side>,
+) -> bool {
+    a.is_none() || b.is_none() || a == b
+}
+
 /// The names two files both declare as global, each with the two files.
 /// A hidden dependency the reader cannot see is the reason the build
 /// reports it: neither file names the other.
+///
+/// A server global and a client global may share a name. The two never
+/// run together, so no file sees both.
 pub fn duplicates(globals: &[Global]) -> Vec<(String, PathBuf, PathBuf)> {
-    let mut seen: HashMap<&str, &Global> = HashMap::new();
+    let mut seen: HashMap<&str, Vec<&Global>> = HashMap::new();
     let mut out = Vec::new();
 
     for g in globals {
-        match seen.get(g.name.as_str()) {
-            Some(first) if first.file != g.file => {
-                out.push((g.name.clone(), first.file.clone(), g.file.clone()));
-            }
+        let others = seen.entry(&g.name).or_default();
 
-            Some(_) => {}
+        if let Some(first) = others
+            .iter()
+            .find(|o| o.file != g.file && sides_collide(o.side, g.side))
+        {
+            out.push((g.name.clone(), first.file.clone(), g.file.clone()));
 
-            None => {
-                seen.insert(&g.name, g);
-            }
+            continue;
         }
+
+        others.push(g);
     }
 
     out
@@ -909,5 +941,53 @@ mod tests {
         let dups = duplicates(&all);
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].0, "log");
+    }
+
+    #[test]
+    fn two_sides_that_never_meet_hold_one_name_each() {
+        use crate::directives::Side;
+
+        let client = Some(Side::Client);
+        let server = Some(Side::Server);
+
+        assert!(!sides_collide(client, server));
+        assert!(!sides_collide(server, client));
+        assert!(sides_collide(client, client));
+        assert!(sides_collide(server, server));
+        assert!(sides_collide(None, client));
+        assert!(sides_collide(server, None));
+        assert!(sides_collide(None, None));
+
+        let mut all = declared(
+            "--@alloy-file-side client\nglobal const LIMIT = 1\n",
+            Path::new("c.aly"),
+        );
+        all.extend(declared(
+            "--@alloy-file-side server\nglobal const LIMIT = 2\n",
+            Path::new("s.aly"),
+        ));
+        assert!(duplicates(&all).is_empty());
+
+        all.extend(declared("global const LIMIT = 3\n", Path::new("h.aly")));
+        // The shared one takes the name on every side. The entry names
+        // the first file it takes it from.
+        let dups = duplicates(&all);
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].2, PathBuf::from("h.aly"));
+    }
+
+    #[test]
+    fn a_global_of_one_side_reaches_that_side_alone() {
+        use crate::directives::Side;
+
+        let client = Some(Side::Client);
+        let server = Some(Side::Server);
+
+        assert!(reaches(client, client));
+        assert!(!reaches(client, server));
+        assert!(!reaches(client, None));
+        assert!(reaches(None, client));
+        assert!(reaches(None, server));
+        assert!(reaches(None, None));
     }
 }

@@ -29,9 +29,9 @@ pub use documents::root_key;
 use capabilities::edit_capabilities;
 #[allow(unused_imports)]
 use completion::{
-    MatchKind, call_snippet, clean_completion, drop_internal_items, drop_receiver, hide_private,
-    hide_record, import_temps, lands_on_member, member_position, module_entries, payload_types,
-    plain_snippet, strip_import_temps, strip_std_prefix,
+    MatchKind, call_snippet, clean_completion, complete_std_members, drop_internal_items,
+    drop_receiver, hide_private, hide_record, import_temps, lands_on_member, member_position,
+    module_entries, payload_types, plain_snippet, strip_import_temps, strip_std_prefix,
 };
 #[allow(unused_imports)]
 use diagnostics::{
@@ -1514,6 +1514,7 @@ impl Server {
                         st.mark_declarations(result);
 
                         if let Some(doc) = st.docs.get(uri) {
+                            complete_std_members(doc, line, character, st.snippets, result);
                             attach_std_member_docs(result, doc, line, character);
                         }
 
@@ -2292,6 +2293,95 @@ mod tests {
         for name in alloy::desugar::AMBIENT_TYPES {
             assert!(labels.contains(name), "`{name}` is missing: {labels:?}");
         }
+    }
+
+    /// A `.` with no name after it stops the parse, so the child sees
+    /// the Alloy source and answers nothing. The std table holds the
+    /// members, and the type table offers its statics alone.
+    #[test]
+    pub(crate) fn a_dot_after_a_std_name_lists_the_std_members() {
+        let src = "local h = HashMap.\nlocal f = Future.\n";
+        let (st, uri) = one_file(src);
+        let doc = st.docs.get(uri).expect("doc");
+        let mut result = Value::Null;
+        complete_std_members(doc, 0, 18, true, &mut result);
+        let labels: Vec<&str> = result
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|i| i["label"].as_str())
+            .collect();
+
+        assert_eq!(labels, ["new", "from"], "the statics of HashMap");
+        assert_eq!(
+            result[0]["detail"],
+            json!("HashMap.new<K, V>(): HashMap<K, V>")
+        );
+        assert_eq!(result[0]["insertText"], json!("new()"));
+        assert!(
+            result[0]["documentation"]["value"]
+                .as_str()
+                .is_some_and(|v| v.starts_with("**HashMap.new**")),
+            "{result}"
+        );
+
+        let mut result = Value::Null;
+        complete_std_members(doc, 1, 17, true, &mut result);
+        let labels: Vec<&str> = result
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|i| i["label"].as_str())
+            .collect();
+
+        for name in [
+            "resolve",
+            "reject",
+            "delay",
+            "all",
+            "race",
+            "any",
+            "all_settled",
+        ] {
+            assert!(labels.contains(&name), "`{name}` is missing: {labels:?}");
+        }
+
+        assert!(!labels.contains(&"cancel"), "a method is no static");
+    }
+
+    /// A method takes a receiver, so the type table does not offer it;
+    /// a value does, and a static is no member of one.
+    #[test]
+    pub(crate) fn a_std_member_list_keeps_what_the_sigil_can_call() {
+        let src = "local prices: HashMap<string, number> = HashMap.new()\nprices.\nHashMap.\n";
+        let (st, uri) = one_file(src);
+        let doc = st.docs.get(uri).expect("doc");
+        let child = json!([{ "label": "get" }, { "label": "new" }, { "label": "Fire" }]);
+        let mut result = child.clone();
+        complete_std_members(doc, 1, 7, true, &mut result);
+        let labels: Vec<&str> = result
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|i| i["label"].as_str())
+            .collect();
+
+        assert!(labels.contains(&"get"), "{labels:?}");
+        assert!(!labels.contains(&"new"), "a static is no member of a map");
+        // A name the std table does not document stays the child's.
+        assert!(labels.contains(&"Fire"), "{labels:?}");
+
+        let mut result = child.clone();
+        complete_std_members(doc, 2, 8, true, &mut result);
+        let labels: Vec<&str> = result
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|i| i["label"].as_str())
+            .collect();
+
+        assert!(labels.contains(&"new"), "{labels:?}");
+        assert!(!labels.contains(&"get"), "a method takes a receiver");
     }
 
     /// The child's member list gains the std's doc and signature.

@@ -2,7 +2,9 @@
 
 use super::documents::{normalize, project_aliases};
 use super::hints::writable_type;
-use super::hover::{builtin_attribute_targets, declared_attribute_targets, remote_spec};
+use super::hover::{
+    builtin_attribute_targets, declared_attribute_targets, remote_spec, std_receiver,
+};
 use super::navigation::module_file_of;
 use super::*;
 
@@ -3167,4 +3169,115 @@ pub(crate) fn payload_types(signature: &str) -> Vec<String> {
     }
 
     out
+}
+
+/// The std type a member position reads, with whether the receiver is
+/// the type itself. `HashMap.` names the type; `prices.` names a value.
+pub(crate) fn std_member_receiver(
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<(&'static str, bool)> {
+    let offset = offset_of(&doc.source, line, character)?;
+    let head = doc.source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+
+    if !head.ends_with(['.', ':']) {
+        return None;
+    }
+
+    let sigil = head.len() - 1;
+    let from = head[..sigil]
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    std_receiver(&doc.source, sigil, &head[from..sigil])
+}
+
+/// The member list of a std type. A dangling `.` stops the parse, so
+/// the artifact falls back to the Alloy source, where the child knows
+/// no `HashMap` and answers nothing. The std table holds the names
+/// either way, and it drops what the sigil cannot call: a static takes
+/// no receiver, a method takes one.
+pub(crate) fn complete_std_members(
+    doc: &Doc,
+    line: u32,
+    character: u32,
+    snippets: bool,
+    result: &mut Value,
+) {
+    let Some((key, on_type)) = std_member_receiver(doc, line, character) else {
+        return;
+    };
+
+    if result.is_null() {
+        *result = json!([]);
+    }
+
+    let items = match result.get_mut("items").and_then(Value::as_array_mut) {
+        Some(items) => items,
+
+        None => match result.as_array_mut() {
+            Some(items) => items,
+
+            None => return,
+        },
+    };
+
+    items.retain(|i| {
+        let Some(label) = i.get("label").and_then(Value::as_str) else {
+            return true;
+        };
+
+        match alloy::docs::member(key, label) {
+            Some(m) => alloy::docs::member_fits(m.kind, on_type),
+
+            // A name the std table does not document is the child's to
+            // answer for.
+            None => true,
+        }
+    });
+
+    let held: HashSet<&str> = items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(Value::as_str))
+        .collect();
+    let mut extra = Vec::new();
+
+    for m in alloy::docs::members(key) {
+        if held.contains(m.name) || !alloy::docs::member_fits(m.kind, on_type) {
+            continue;
+        }
+
+        let kind = match m.kind {
+            alloy::docs::MemberKind::Method => 2,
+            alloy::docs::MemberKind::Static => 3,
+            alloy::docs::MemberKind::Field => 5,
+            alloy::docs::MemberKind::Constant => 21,
+        };
+        let mut item = json!({
+            "label": m.name,
+            "kind": kind,
+            "detail": m.signature,
+            "documentation": {
+                "kind": "markdown",
+                "value": alloy::docs::member_hover(key, m),
+            },
+        });
+        // The signature reads `HashMap.new<K, V>(): HashMap<K, V>`; the
+        // call the list inserts starts after the name.
+        let sigil = match m.kind {
+            alloy::docs::MemberKind::Method => ':',
+
+            _ => '.',
+        };
+
+        if let Some(rest) = m.signature.strip_prefix(&format!("{key}{sigil}{}", m.name)) {
+            set_call(&mut item, m.name, rest, snippets);
+        }
+
+        extra.push(item);
+    }
+
+    items.extend(extra);
 }

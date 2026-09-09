@@ -70,16 +70,82 @@ pub fn member_at(src: &str, offset: usize) -> Option<(String, Access, char, usiz
         return Some((before[open..].to_string(), Access::Wrapped, sep, word));
     }
 
-    let start = before
+    let start = match before.ends_with(']') {
+        // `profile["coins"].`, `parts?[1]!.`: the index is part of the
+        // receiver, and each bracket carries its own guard.
+        true => bracketed_start(before)?,
+
+        false => before
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_word_byte(*c) || *c == '.')
+            .last()
+            .map(|(i, _)| i)?,
+    };
+    let base = &before[start..];
+
+    (!base.is_empty() && !base.ends_with('.') && !base.starts_with(|c: char| c.is_numeric()))
+        .then(|| (base.to_string(), access, sep, word))
+}
+
+/// Where a receiver that ends in a bracket starts: `mo?["k"]` from the
+/// `m`, `xs[i][j]` from the `x`. Walks back over each balanced group,
+/// the `?` or `!` that guards it, and the path before them. `None`
+/// when a bracket never opens or nothing names the head.
+fn bracketed_start(before: &str) -> Option<usize> {
+    let bytes = before.as_bytes();
+    let mut end = before.len();
+
+    while end > 0 && bytes[end - 1] == b']' {
+        let mut depth = 0i32;
+        let mut i = end;
+
+        loop {
+            i = i.checked_sub(1)?;
+
+            match bytes[i] {
+                b']' => depth += 1,
+
+                b'[' => depth -= 1,
+
+                _ => {}
+            }
+
+            if depth == 0 {
+                break;
+            }
+        }
+
+        if i > 0 && matches!(bytes[i - 1], b'?' | b'!') {
+            i -= 1;
+        }
+
+        end = i;
+    }
+
+    if end == before.len() {
+        return None;
+    }
+
+    let start = before[..end]
         .char_indices()
         .rev()
         .take_while(|(_, c)| is_word_byte(*c) || *c == '.')
         .last()
         .map(|(i, _)| i)?;
-    let base = &before[start..];
 
-    (!base.is_empty() && !base.ends_with('.') && !base.starts_with(|c: char| c.is_numeric()))
-        .then(|| (base.to_string(), access, sep, word))
+    (start < end).then_some(start)
+}
+
+/// The receiver as the lowering spells it. `mo?["k"]` keeps the index
+/// and drops the `?`, which the guard around the whole expression
+/// carries instead; `mo!["k"]` closes that guard before the bracket.
+fn shadow_base(base: &str) -> String {
+    match base.contains(['?', '!']) {
+        true => base.replace("?[", "[").replace("![", ")["),
+
+        false => base.to_string(),
+    }
 }
 
 /// Every byte offset in `line` where `needle` starts a whole access:
@@ -119,7 +185,7 @@ pub fn member_column(
         .filter(|i| i + typed.len() <= source_column)
         .count()
         .checked_sub(1)?;
-    let lowered = format!("{base}{}{sep}", access.shadow_guard());
+    let lowered = format!("{}{}{sep}", shadow_base(base), access.shadow_guard());
     let at = *access_starts(shadow_line, &lowered).get(nth)?;
     let col = at + lowered.len() + prefix;
 
@@ -127,15 +193,16 @@ pub fn member_column(
 }
 
 /// Where the member of a guarded access sits on the lowered line, when
-/// the receiver is a call and has no name of its own. `f(x)?:m()`
-/// lowers to `local _1 = f(x) if _1 ~= nil then _1:m() end`, and
-/// `f(x)?.m` to `(if _1 == nil then nil else _1.m)`, so the member
-/// follows the guard's `then` or `else`.
+/// the receiver is a call or an index and has no name of its own.
+/// `f(x)?:m()` lowers to `local _1 = f(x) if _1 ~= nil then _1:m() end`,
+/// `f(x)?.m` to `(if _1 == nil then nil else _1.m)`, and `xs[1]?.m` the
+/// same way, so the member follows the guard's `then` or `else`.
 pub fn guarded_member_column(head: &str, shadow_line: &str, sep: char) -> Option<usize> {
     let guarded = head.trim_end_matches(is_word_byte);
     let guarded = guarded.strip_suffix(sep)?;
 
-    if !guarded.ends_with(['?', '!']) || !guarded.trim_end_matches(['?', '!']).ends_with(')') {
+    if !guarded.ends_with(['?', '!']) || !guarded.trim_end_matches(['?', '!']).ends_with([')', ']'])
+    {
         return None;
     }
 
@@ -251,6 +318,45 @@ mod tests {
         );
     }
 
+    /// An index is part of the receiver: `profile["a"].`, `map?[k].`
+    /// and `parts![1].` each read the member of what the index
+    /// answers, and the emit spells the guard before the bracket.
+    #[test]
+    fn an_index_before_the_member_reads_as_the_receiver() {
+        for (src, base) in [
+            ("local v = profile[\"a\"].na", "profile[\"a\"]"),
+            ("local v = map?[key].na", "map?[key]"),
+            ("local v = parts![1].na", "parts![1]"),
+            ("local v = grid[1][2].na", "grid[1][2]"),
+        ] {
+            assert_eq!(
+                member_at(src, src.len()),
+                Some((base.to_string(), Access::Plain, '.', 2)),
+                "{src}"
+            );
+        }
+
+        // `?[` drops its `?`: the guard wraps the whole expression.
+        let source = "local v = map?[key].name";
+        let shadow = "local v = (if map == nil then nil else map[key].name)";
+        assert_eq!(
+            member_column(source, shadow, "map?[key]", Access::Plain, '.', 0, 20),
+            Some(shadow.find("map[key].").unwrap() + "map[key].".len())
+        );
+
+        // `![` closes its guard before the bracket.
+        let asserted = "local v = map![key].name";
+        let lowered =
+            "local v = (if map == nil then (error(\"map is nil\") :: never) else map)[key].name";
+        assert_eq!(
+            member_column(asserted, lowered, "map![key]", Access::Plain, '.', 0, 20),
+            Some(lowered.find("map)[key].").unwrap() + "map)[key].".len())
+        );
+
+        // A bracket that never opens names no receiver.
+        assert_eq!(member_at("local v = ].na", 14), None);
+    }
+
     /// A call before a guard has no name on the lowered line; the
     /// member follows the branch the guard opens.
     #[test]
@@ -267,9 +373,20 @@ mod tests {
             Some(optional.find("_1.name").unwrap() + 3)
         );
 
+        // An index before the guard hoists the same way a call does.
+        let indexed = "    local v = (if _1 == nil then nil else _1.name)";
+        assert_eq!(
+            guarded_member_column("    local v = parts[1]?.", indexed, '.'),
+            Some(indexed.find("_1.name").unwrap() + 3)
+        );
+
         // A plain call keeps its own receiver, so nothing moves.
         assert_eq!(
             guarded_member_column("    f(x):", "    f(x):m()", ':'),
+            None
+        );
+        assert_eq!(
+            guarded_member_column("    parts[1]:", "    parts[1]:m()", ':'),
             None
         );
     }

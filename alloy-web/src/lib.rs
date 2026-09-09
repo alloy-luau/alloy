@@ -175,7 +175,16 @@ fn member_offset(source: &str, check: &str, offset: usize) -> Option<usize> {
         sep,
         prefix,
         offset - source_start,
-    )?;
+    )
+    .or_else(|| {
+        // `xs[1]?.m` binds the index to a name of the lowering's own,
+        // so the receiver of the source is not on the lowered line.
+        context::guarded_member_column(
+            source.get(source_start..offset)?,
+            check.get(start..end)?,
+            sep,
+        )
+    })?;
 
     Some(start + column)
 }

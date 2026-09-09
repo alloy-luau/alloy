@@ -127,6 +127,9 @@ impl Server {
             return None;
         }
 
+        // An index before the guard, `xs[1]?.m`, binds to a name of the
+        // lowering's own the way a call does, so the receiver of the
+        // source is not on the lowered line either.
         let column = context::member_column(
             source_line,
             shadow_line,
@@ -135,7 +138,10 @@ impl Server {
             sep,
             prefix,
             offset - line_start,
-        )?;
+        )
+        .or_else(|| {
+            context::guarded_member_column(&doc.source[line_start..offset], shadow_line, sep)
+        })?;
 
         Some((shadow_line_no, shadow_line[..column].chars().count() as u32))
     }

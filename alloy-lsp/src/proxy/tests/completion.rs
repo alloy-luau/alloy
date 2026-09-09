@@ -871,3 +871,86 @@ fn self_inside_a_trait_lists_the_trait_methods() {
     // Outside the trait, and after a name that is not `self`, nothing.
     assert!(st.trait_self_members(uri, 6, 0).is_empty());
 }
+
+/// An index before the member: `profile["a"].`, `map?[k].` and
+/// `parts![1].`. The emit moves the receiver of the two guarded forms,
+/// so the child's own mapping no longer sits after the separator, and
+/// the column the lowering wrote is the one that answers.
+#[test]
+pub(crate) fn an_index_before_a_member_finds_its_column() {
+    let head = concat!(
+        "type P = { name: string }\n",
+        "local map: { [string]: P }? = nil\n",
+        "local plain: { [string]: P } = {}\n",
+    );
+
+    for (line, want) in [
+        ("local a = plain[\"k\"].na", "plain[\"k\"]."),
+        ("local a = map?[\"k\"].na", "map[\"k\"]."),
+        ("local a = map![\"k\"].na", "map)[\"k\"]."),
+    ] {
+        let src = format!("{head}{line}\nprint(a)\n");
+        let (st, uri) = one_file(&src);
+        let doc = st.docs.get(uri).unwrap();
+        let no = 3u32;
+        let column = line.len() as u32;
+        let (base, access, sep, prefix) =
+            context::member_at(&doc.source, doc.source.find(".na").unwrap() + 3)
+                .unwrap_or_else(|| panic!("{line}"));
+        assert_eq!(prefix, 2, "{line}");
+
+        let (shadow_no, _) = doc.to_shadow(no, column);
+        let shadow_line = doc.shadow.lines().nth(shadow_no as usize).unwrap();
+        let at = context::member_column(
+            doc.source.lines().nth(no as usize).unwrap(),
+            shadow_line,
+            &base,
+            access,
+            sep,
+            prefix,
+            column as usize,
+        )
+        .unwrap_or_else(|| panic!("{line}: {shadow_line}"));
+        assert!(
+            shadow_line[..at - prefix].ends_with(want),
+            "{line}: {shadow_line}"
+        );
+    }
+}
+
+/// `plain["k"]?.` binds the index to a name of the lowering's own, the
+/// way a call before a guard does, so the member follows the branch.
+#[test]
+pub(crate) fn an_index_before_a_guard_follows_the_branch() {
+    let src = concat!(
+        "type P = { name: string }\n",
+        "local plain: { [string]: P } = {}\n",
+        "local a = plain[\"k\"]?.na\nprint(a)\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).unwrap();
+    let offset = doc.source.find(".na").unwrap() + 3;
+    let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let (shadow_no, _) = doc.to_shadow(2, (offset - line_start) as u32);
+    let shadow_line = doc.shadow.lines().nth(shadow_no as usize).unwrap();
+
+    // No receiver of the source stands on the lowered line.
+    let (base, access, sep, prefix) = context::member_at(&doc.source, offset).expect("a member");
+    assert_eq!(base, "plain[\"k\"]");
+    assert_eq!(
+        context::member_column(
+            doc.source.lines().nth(2).unwrap(),
+            shadow_line,
+            &base,
+            access,
+            sep,
+            prefix,
+            offset - line_start,
+        ),
+        None
+    );
+
+    let at = context::guarded_member_column(&doc.source[line_start..offset], shadow_line, sep)
+        .unwrap_or_else(|| panic!("{shadow_line}"));
+    assert!(shadow_line[..at].ends_with('.'), "{shadow_line}");
+}

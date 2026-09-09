@@ -29,6 +29,12 @@ pub fn open_before(src: &str, offset: usize) -> bool {
 
 /// The openers with no `end` yet, each as its line and byte offset, over
 /// the tokens that start before `until`.
+///
+/// A word alone does not open a block: `attribute r() on function`,
+/// `remote function Buy(id: string) from server`, `declare function
+/// print(s: string)`, and `type Handler = function` all write the word
+/// `function` and take no body. The walk reads the head of the
+/// statement, which is what the parser reads to tell the forms apart.
 fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
     let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
         return Vec::new();
@@ -36,22 +42,88 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
 
     let toks = &lexed.toks;
     let text = |i: usize| &src[toks[i].start as usize..toks[i].end as usize];
-    let line_of = |offset: usize| src[..offset].matches('\n').count() as u32;
     let mut stack: Vec<(u32, usize)> = Vec::new();
+    // The statement the token belongs to, as the word it starts with
+    // and where that word sits. A statement ends at a line break that
+    // no bracket holds open, so a head wrapped over lines keeps.
+    let mut head = "";
+    let mut head_at = usize::MAX;
+    let mut line = 0u32;
+    let mut read = 0usize;
+    let mut depth = 0i32;
 
-    for (i, tok) in toks.iter().enumerate() {
-        if tok.start as usize >= until {
+    for i in 0..toks.len() {
+        let at = toks[i].start as usize;
+
+        if at >= until {
             break;
+        }
+
+        let breaks = src[read..at].matches('\n').count() as u32;
+        line += breaks;
+        read = at;
+
+        if i == 0 || (breaks > 0 && depth <= 0) {
+            head_at = i;
+            head = text(i);
+
+            // `export` carries the declaration behind it; the word
+            // after it is the one that says what the statement is.
+            if head == "export" && i + 1 < toks.len() {
+                head_at = i + 1;
+                head = text(i + 1);
+            }
         }
 
         let word = text(i);
         let before = i.checked_sub(1).map(text).unwrap_or("");
-        let _ = tok;
+        let after = toks.get(i + 1).map(|_| text(i + 1)).unwrap_or("");
 
         match word {
-            "function" | "do" | "repeat" | "struct" | "enum" | "interface" | "trait" | "impl"
-            | "macro" | "match" => {
-                stack.push((line_of(toks[i].start as usize), toks[i].start as usize));
+            "(" | "[" | "{" => depth += 1,
+
+            ")" | "]" | "}" => depth -= 1,
+
+            // A `function` in a type slot names a shape, not a body.
+            // `declare function`, `remote function`, and the target of
+            // an `attribute` declare a signature and stop there. A
+            // `type` alias takes a body only as `type function f(t)`.
+            "function"
+                if !matches!(before, ":" | "->" | "|" | "&")
+                    && !matches!(head, "remote" | "attribute")
+                    && !(head == "declare" && head_at + 1 == i)
+                    && !(head == "type" && head_at + 1 != i) =>
+            {
+                stack.push((line, at));
+            }
+
+            // `attribute r() on struct` names the target of the
+            // declaration; the words open no block there.
+            "struct" | "enum" | "interface" | "trait" | "impl" | "macro" | "match"
+                if head != "attribute" =>
+            {
+                stack.push((line, at));
+            }
+
+            // `class Name`, `open class Name`, and `declare class Name`
+            // all take members up to an `end`. `local class = 1` and
+            // `t.class` write the same word as a name.
+            "class"
+                if !matches!(before, "." | ":" | "->" | "|" | "&")
+                    && after.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                    && after != "end" =>
+            {
+                stack.push((line, at));
+            }
+
+            // `declare extern type Name with ... end`: the members
+            // close with an `end`, the way a class does.
+            "extern" if head == "declare" => {
+                stack.push((line, at));
+            }
+
+            "do" | "repeat" => {
+                stack.push((line, at));
             }
 
             // An `if` expression closes with `else`, not `end`: it sits
@@ -82,7 +154,7 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
                     | "??"
             ) =>
             {
-                stack.push((line_of(toks[i].start as usize), toks[i].start as usize));
+                stack.push((line, at));
             }
 
             "end" | "until" => {
@@ -100,13 +172,74 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
 mod tests {
     use super::*;
 
+    /// A declaration that takes no body writes a word a block also
+    /// writes. The head of the statement tells the two apart.
+    #[test]
+    fn a_bodyless_declaration_wants_no_end() {
+        for src in [
+            "attribute ratelimit(n: number) on function\n",
+            "attribute tag(name: string) on struct\n",
+            "attribute mark() on enum\n",
+            "attribute mark() on interface\n",
+            "export attribute tag(n: string) on struct\n",
+            "remote function Buy(id: string) from server\n",
+            "remote Hit(target: Player) from client\n",
+            "export remote function Buy(id: string) from server\n",
+            "declare function print(s: string)\n",
+            "declare Players: Instance\n",
+            "type F = (x: number) -> ()\n",
+            "type Handler = function\n",
+            "local f: (a: number) -> number = g\n",
+            "local f: function = g\n",
+            "import { a } from './b'\n",
+            "export { a, b }\n",
+            "if x then return end\n",
+        ] {
+            assert_eq!(needs_end(src, 0), None, "{src:?}");
+        }
+
+        // A head wrapped over lines is still the head of its statement.
+        let wrapped = "attribute r(\n    n: number\n) on function\n";
+
+        assert_eq!(needs_end(wrapped, 2), None, "{wrapped:?}");
+
+        let remote = "remote function Buy(\n    id: string\n) from server\n";
+
+        assert_eq!(needs_end(remote, 2), None, "{remote:?}");
+    }
+
     #[test]
     fn an_open_block_on_the_line_wants_an_end() {
-        assert_eq!(needs_end("local function f()\n", 0).as_deref(), Some(""));
+        for src in [
+            "function f()\n",
+            "local function f()\n",
+            "export function f()\n",
+            "type function pick(t)\n",
+            "if x then\n",
+            "for i = 1, 2 do\n\n",
+            "while ok do\n",
+            "do\n",
+            "repeat\n",
+            "struct V as\n",
+            "impl V as\n",
+            "trait Priced as\n",
+            "enum Phase as\n",
+            "interface Named as\n",
+            "match x with\n",
+            "macro twice(x)\n",
+            "class Player\n",
+            "open class Player\n",
+            "declare class Player\n",
+            "declare extern type Player with\n",
+        ] {
+            assert_eq!(needs_end(src, 0).as_deref(), Some(""), "{src:?}");
+        }
+
         assert_eq!(needs_end("    if x then\n", 0).as_deref(), Some("    "));
-        assert_eq!(needs_end("for i = 1, 2 do\n\n", 0).as_deref(), Some(""));
-        assert_eq!(needs_end("struct V as\n", 0).as_deref(), Some(""));
-        assert_eq!(needs_end("macro twice(x)\n", 0).as_deref(), Some(""));
+        assert_eq!(
+            needs_end("function f()\n    local g = function()\n", 1).as_deref(),
+            Some("    ")
+        );
     }
 
     #[test]

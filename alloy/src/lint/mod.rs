@@ -380,6 +380,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "An `impl` on a foreign type such as `BasePart` or `string` works project wide. `export` said that before `global` existed; `global impl` is the spelling now. Off by default while `export impl` is still accepted: `[lint.rules] export_impl = \"warn\"` turns it on, and `alloy flux --fix` rewrites the keyword.",
     },
     LintInfo {
+        name: "prefer_destroy",
+        group: Group::Style,
+        default: Level::Allow,
+        summary: "`delete part` on a plain Instance, where `destroy part` says it",
+        detail: "Flux. `delete` covers every kind of cleanup: a connection, a thread, a scope, a signal, an Instance. On a plain Instance it runs the Destroy and nothing else, so the word promises more than the code does. `destroy part` names the one thing that happens, and `destroy part after n` puts it on a timer. The lint fires when the file shows the operand is an Instance and no scope holds anything for it. Off by default, since `delete` on an Instance is right: `[lint.rules] prefer_destroy = \"warn\"` turns it on, and `alloy flux --fix` rewrites the word.",
+    },
+    LintInfo {
         name: "manual_safe_access",
         group: Group::Style,
         default: Level::Warn,

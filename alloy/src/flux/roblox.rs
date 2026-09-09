@@ -12,6 +12,7 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.deprecated_method(&mut out);
     s.instance_new_parent(&mut out);
     s.deprecated_body_mover(&mut out);
+    s.prefer_destroy(&mut out);
     s.todo_comment(&mut out);
     s.print_debug(&mut out);
     s.missing_doc(&mut out);
@@ -344,6 +345,84 @@ impl<'s> Scan<'s> {
     }
 
     /// A `TODO`, `FIXME`, `XXX`, or `HACK` comment.
+    /// Whether the name at `i` is an Instance the file says is one: an
+    /// annotation with a class name, or a `local x = Instance.new(...)`.
+    fn plain_instance(&self, i: usize) -> bool {
+        if !self.is_name(i) || matches!(self.prev(i), "." | ":") {
+            return false;
+        }
+
+        if self
+            .declared_type(self.t(i))
+            .is_some_and(names_instance_type)
+        {
+            return true;
+        }
+
+        match self.local_init(self.t(i)) {
+            Some((a, _)) => {
+                self.instance_new_open(a).is_some()
+                    || (self.at(a, "new") && self.at(a + 1, "Instance"))
+            }
+
+            None => false,
+        }
+    }
+
+    /// Whether a scope holds the name, or holds an item that names it
+    /// as its owner: `scope:add(part)` and `scope:add(conn, part)`.
+    fn scope_holds(&self, name: &str) -> bool {
+        for i in 0..self.toks.len() {
+            if !(self.at(i, ":") && self.at(i + 1, "add") && self.at(i + 2, "(")) {
+                continue;
+            }
+
+            let Some(close) = self.matching(i + 2) else {
+                continue;
+            };
+
+            if (i + 3..close)
+                .any(|j| self.t(j) == name && self.is_name(j) && !matches!(self.prev(j), "." | ":"))
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// `delete part` where the file shows `part` is a plain Instance.
+    fn prefer_destroy(&self, out: &mut Vec<Lint>) {
+        for i in 0..self.toks.len() {
+            if !self.at(i, "delete") || !self.statement_start(i) || !self.plain_instance(i + 1) {
+                continue;
+            }
+
+            // The name is the whole operand. `delete t.part` empties the
+            // slot as well, which `destroy` does not do.
+            if self.statement_end(i) != i + 2 {
+                continue;
+            }
+
+            let name = self.t(i + 1);
+
+            if self.scope_holds(name) {
+                continue;
+            }
+
+            self.lint(
+                out,
+                "prefer_destroy",
+                i,
+                i,
+                format!(
+                    "`{name}` is an Instance with nothing else to clean; `destroy {name}` says what happens"
+                ),
+                Some("destroy".to_string()),
+            );
+        }
+    }
+
     fn todo_comment(&self, out: &mut Vec<Lint>) {
         for (start, end, text) in self.comments() {
             let Some(word) = ["TODO", "FIXME", "XXX", "HACK"]
@@ -473,6 +552,48 @@ mod tests {
             .map(|l| l.name)
             .filter(|n| crate::lint::level_of(&config, n) != crate::lint::Level::Allow)
             .collect()
+    }
+
+    /// The lint names of a source, pedantic ones included.
+    fn all_names(src: &str) -> Vec<&'static str> {
+        lints(src).iter().map(|l| l.name).collect()
+    }
+
+    /// `delete` on a plain Instance says less than `destroy`. A path, a
+    /// value the file says nothing about, and an Instance a scope holds
+    /// something for all stand down.
+    #[test]
+    fn a_plain_instance_takes_destroy() {
+        assert_eq!(
+            all_names("local part = Instance.new(\"Part\")\ndelete part\n"),
+            vec!["prefer_destroy"]
+        );
+        assert_eq!(
+            all_names("local part: Part = workspace.Ball\ndelete part\n"),
+            vec!["prefer_destroy"]
+        );
+        assert_eq!(
+            fixed("local part = new Instance(\"Part\")\ndelete part\n"),
+            "local part = new Instance(\"Part\")\ndestroy part\n"
+        );
+
+        // The lint is off unless the config asks for it.
+        assert_eq!(
+            names("local part = Instance.new(\"Part\")\ndelete part\n"),
+            Vec::<&str>::new()
+        );
+
+        // A scope holds something for the Instance, so `delete` has
+        // work to do.
+        assert!(!all_names(
+            "local part = Instance.new(\"Part\")\nlocal scope = Scope.new()\nscope:add(part.Touched:Connect(f), part)\ndelete part\n"
+        )
+        .contains(&"prefer_destroy"));
+
+        // A field empties its slot, and a value of no named type is not
+        // an Instance as far as the file says.
+        assert!(!all_names("delete self.part\n").contains(&"prefer_destroy"));
+        assert!(!all_names("local bag = make()\ndelete bag\n").contains(&"prefer_destroy"));
     }
 
     #[test]

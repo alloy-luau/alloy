@@ -1050,12 +1050,14 @@ fn struct_field_report(
     };
     // A typo is the common case, and the nearest name answers it. A
     // private field is a candidate: the reader inside the impl sees it.
+    // The key itself is not: two files may declare a struct of the same
+    // name, and "did you mean `x`?" about `x` reads as nonsense.
     let near = fields
         .iter()
         .map(|(n, _)| n.as_str())
         .chain(methods.iter().map(|(n, _)| n.as_str()))
         .map(|n| (edit_distance(n, key), n))
-        .filter(|(d, _)| *d <= 2 && *d < key.len())
+        .filter(|(d, _)| *d > 0 && *d <= 2 && *d < key.len())
         .min();
 
     let tail = match near {
@@ -1420,6 +1422,20 @@ mod tests {
             "`Loadout` has no field `wepon`; did you mean `weapon`?"
         );
         assert_eq!(got.at, Some((8, 5)));
+    }
+
+    /// Two files may declare a struct of one name, and the shape the
+    /// report reads may be the other one's. The suggestion is then the
+    /// key itself, which says nothing.
+    #[test]
+    fn a_suggestion_is_never_the_name_it_is_about() {
+        let source = "struct Point as\n    x: number\n    y: number\nend\nlocal p = new Point { x = 1, y = 2 }\nprint(p.z)\n";
+        let got = resited("Type 'Point' does not have key 'z'", source, 6, 7);
+
+        assert_eq!(
+            got.message,
+            "`Point` has no field `z`; its fields are `x` and `y`"
+        );
     }
 
     #[test]

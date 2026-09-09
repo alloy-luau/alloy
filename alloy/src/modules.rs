@@ -283,6 +283,54 @@ pub fn resolve(spec: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Option
     None
 }
 
+/// The project root a source sits under: its absolute path with as
+/// many steps removed as its path from the root has. A source given by
+/// its own name alone leaves no root, and a message shows the whole
+/// path then.
+fn root_of(from: &Path, rel: &Path) -> Option<PathBuf> {
+    let mut root = from.to_path_buf();
+
+    for _ in rel.components() {
+        if !root.pop() {
+            return None;
+        }
+    }
+
+    (root.components().next().is_some()).then_some(root)
+}
+
+/// The folder an `@alias/tail` spec names, when the project declares
+/// the alias: the alias's folder with the rest of the path under it,
+/// shown from `root` when it sits there. `None` when no alias matches.
+pub fn alias_target(
+    spec: &str,
+    aliases: &[(String, PathBuf)],
+    root: Option<&Path>,
+) -> Option<PathBuf> {
+    let rest = spec.strip_prefix('@')?;
+    let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    let (_, dir) = aliases.iter().find(|(a, _)| a == alias)?;
+    let target = normalize(&dir.join(tail));
+
+    Some(match root.and_then(|r| target.strip_prefix(r).ok()) {
+        Some(under) => under.to_path_buf(),
+
+        None => target,
+    })
+}
+
+/// Whether a file name names a script rather than a module: `.server`
+/// or `.client` before the extension. Roblox runs a script on its own,
+/// and a script returns nothing, so no import can name one.
+pub fn is_script(name: &str) -> bool {
+    let stem = ["d.aly", "aly", "alx", "luau", "lua"]
+        .iter()
+        .find_map(|ext| name.strip_suffix(&format!(".{ext}")))
+        .unwrap_or(name);
+
+    stem.ends_with(".server") || stem.ends_with(".client")
+}
+
 /// Whether the file exists under exactly this name.
 ///
 /// macOS and Windows match a file name without regard to case, so
@@ -448,6 +496,23 @@ pub fn import_enums(
                     variants.into_iter().map(|(v, p)| (v, p.len())).collect(),
                 ));
             }
+        }
+    }
+
+    out
+}
+
+/// The file each import of a source resolves to, under the nearest
+/// `alloy.toml`. A path that names no file is left out.
+pub fn import_targets_for_file(path: &Path, source: &str) -> Vec<PathBuf> {
+    let (from, aliases) = file_context(path);
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    for spec in import_specs(source) {
+        if let Some(target) = resolve(&spec, &from, &aliases)
+            && !out.contains(&target)
+        {
+            out.push(target);
         }
     }
 
@@ -680,12 +745,29 @@ pub fn import_problems(
         // bind here, so a second import of one is a duplicate.
         let target = resolve(&spec, from, aliases);
 
-        if target.is_none() {
+        // Roblox runs a `.server` or `.client` file on its own, and the
+        // file returns nothing, so an import takes no value from one.
+        // The path never resolves either: `Foo.server` is not a stem.
+        let names_script = is_script(&spec)
+            || target
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| is_script(&n.to_string_lossy()));
+
+        if names_script {
             out.push(ImportProblem {
                 start: path_start,
                 end: path_end,
                 kind: "UnknownModule",
-                message: crate::typecheck::unknown_module_message(&spec, rel),
+                message: crate::typecheck::script_import_message(&spec),
+            });
+        } else if target.is_none() {
+            let named = alias_target(&spec, aliases, root_of(from, rel).as_deref());
+            out.push(ImportProblem {
+                start: path_start,
+                end: path_end,
+                kind: "UnknownModule",
+                message: crate::typecheck::unknown_module_message(&spec, rel, named.as_deref()),
             });
         }
         let specs = match &node.kind {
@@ -837,6 +919,38 @@ mod tests {
             .filter(|p| p.message.contains("already imported"))
             .map(|p| p.message)
             .collect()
+    }
+
+    /// A `.server` or `.client` file is a script: Roblox runs it, and
+    /// it returns nothing, so an import of one is an error of its own.
+    #[test]
+    fn an_import_of_a_script_says_so() {
+        let dir = std::env::temp_dir().join(format!("alloy-script-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(dir.join("src/boot.server.aly"), "print(1)\n").expect("script");
+        std::fs::write(dir.join("src/ui.client.luau"), "print(1)\n").expect("script");
+        std::fs::write(dir.join("src/util.aly"), "export local a = 1\n").expect("module");
+        let from = dir.join("src/main.aly");
+        let src = "import b from \"./boot.server\"\nimport u from \"./ui.client\"\nimport { a } from \"./util\"\nprint(b, u, a)\n";
+        let problems = import_problems(src, Path::new("src/main.aly"), &from, &[]);
+        let messages: Vec<String> = problems.into_iter().map(|p| p.message).collect();
+        assert_eq!(
+            messages,
+            vec![
+                crate::typecheck::script_import_message("./boot.server"),
+                crate::typecheck::script_import_message("./ui.client"),
+            ],
+            "{messages:?}"
+        );
+
+        assert!(is_script("main.server.aly"));
+        assert!(is_script("hud.client.luau"));
+        assert!(is_script("./main.server"));
+        assert!(!is_script("main.aly"));
+        assert!(!is_script("server.aly"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A spec resolves by the name on disk, letter for letter. macOS

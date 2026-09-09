@@ -1032,7 +1032,16 @@ impl<'s> Desugar<'s> {
     /// The export table, appended after the last token. The test
     /// artifact has no module to return: the spec's footer follows.
     fn module_return(&mut self, at: u32, block: &Block) {
-        if self.exports.is_empty() || self.options.tests {
+        if self.options.tests {
+            return;
+        }
+
+        // A module that exports only types binds no value, and Luau
+        // requires a module to return exactly one. It returns an empty
+        // table; the `export type` lines stand on their own.
+        let types_only = self.exports.is_empty();
+
+        if types_only && !exports_a_type(block) {
             return;
         }
 
@@ -1047,12 +1056,24 @@ impl<'s> Desugar<'s> {
         }
 
         if matches!(block.stmts.last(), Some(Stmt::Return(_))) {
+            // A module of types alone exports no value, so its own
+            // `return` is the one value the module returns.
+            if types_only {
+                return;
+            }
+
             self.diagnostics.push(Diagnostic {
                 start: at,
                 end: at,
                 message: "a module with `export` returns its exports; remove the `return`"
                     .to_string(),
             });
+
+            return;
+        }
+
+        if types_only {
+            self.generate(at, " return {}");
 
             return;
         }
@@ -10284,6 +10305,26 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
         Child::Block(b) => block_needs_desugar(b),
 
         Child::Function(f) => block_needs_desugar(&f.block),
+    })
+}
+
+/// Whether a block exports a type, an interface, or another
+/// declaration that binds no value at run time. Such a module returns
+/// an empty table: Luau requires a module to return exactly one value,
+/// and `export type` alone leaves nothing to return.
+fn exports_a_type(block: &Block) -> bool {
+    block.stmts.iter().any(|s| match s {
+        Stmt::TypeAlias(t) => t.exported,
+
+        Stmt::Interface(i) => i.exported,
+
+        Stmt::Trait(t) => t.exported,
+
+        Stmt::Attribute(a) => a.exported,
+
+        Stmt::Macro(m) => m.exported,
+
+        _ => false,
     })
 }
 

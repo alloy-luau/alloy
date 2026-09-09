@@ -8,9 +8,9 @@
 //!
 //! Either way the tree drives the same four things. `.alloy/
 //! build.project.json` is the tree over the compiled output, the one
-//! `rojo serve` and `rojo build` take. `.alloy/sourcemap.json` is the
-//! instance tree with the source paths, which the language server maps
-//! onto its mirror. A `require("@alias/x")` in the ship artifact
+//! `rojo serve` and `rojo build` take. `sourcemap.json` at the root is
+//! the instance tree with the source paths, under the name Rojo and
+//! luau-lsp read, which the language server maps onto its mirror. A `require("@alias/x")` in the ship artifact
 //! becomes an instance path, because Roblox reads no `.luaurc`. And
 //! `alloy.luau` lands at the runtime's place. The mount table also
 //! writes `default.project.json`; a root with a project file keeps the
@@ -266,41 +266,6 @@ pub fn instance_path(tree: &Tree, rel: &Path) -> Option<Vec<String>> {
     place_of(tree, rel)
 }
 
-/// The relative require path from the parent of `from` to `to`: `./`
-/// for a sibling, `../` per level up, then the rest of the way down.
-/// `..` above a service reaches the DataModel, and a path down from
-/// there names the service.
-fn relative(from_parent: &[String], to: &[String]) -> String {
-    let common = from_parent
-        .iter()
-        .zip(to)
-        .take_while(|(a, b)| a == b)
-        .count();
-    let ups = from_parent.len() - common;
-    let down = &to[common..];
-    let mut out = if ups == 0 {
-        ".".to_string()
-    } else {
-        vec![".."; ups].join("/")
-    };
-
-    for seg in down {
-        out.push('/');
-        out.push_str(seg);
-    }
-
-    out
-}
-
-/// The parent of a file's instance, for a relative require from it.
-/// An `init` file is its directory, so both cases drop one name.
-fn parent_of(tree: &Tree, rel: &Path) -> Option<Vec<String>> {
-    let mut path = instance_path(tree, rel)?;
-    path.pop();
-
-    Some(path)
-}
-
 /// The require string for the runtime in the ship artifact of a file in
 /// the tree: the runtime's own `@game/...` path, which Luau takes as it
 /// is. `None` when the file is outside the tree, or the tree names no
@@ -313,19 +278,6 @@ pub fn std_require_for(tree: &Tree, rel: &Path) -> Option<String> {
     }
 
     Some(format!("@game/{}", tree.runtime.join("/")))
-}
-
-/// The require string for the runtime from a file, as a relative
-/// instance path. The analyzer resolves a require in the sourcemap's
-/// tree, and knows `./` and `../` there.
-pub fn std_require_relative_for(tree: &Tree, rel: &Path) -> Option<String> {
-    let parent = parent_of(tree, rel)?;
-
-    if tree.runtime.is_empty() {
-        return None;
-    }
-
-    Some(relative(&parent, &tree.runtime))
 }
 
 /// The require string for `@alias/rest`: the alias names a folder on
@@ -693,9 +645,13 @@ pub fn files(tree: &Tree, config: &Config, root: &Path) -> std::io::Result<Vec<(
         "sourcemap.json\n".to_string(),
     ));
 
+    // The sourcemap sits at the root under the name Rojo writes and
+    // luau-lsp reads, so a tool that looks for one finds this one.
+    // `[project] sourcemap = false` writes none, and leaves a file
+    // another tool wrote as it is.
     if config.project.sourcemap {
         out.push((
-            PathBuf::from(".alloy/sourcemap.json"),
+            PathBuf::from("sourcemap.json"),
             pretty(&sourcemap(tree, root)?),
         ));
     }
@@ -764,14 +720,6 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
             "@game/ReplicatedStorage/Alloy"
         );
         assert!(std_require_for(&t, Path::new("src/other.aly")).is_none());
-        assert_eq!(
-            std_require_relative_for(&t, Path::new("src/server/combat/hit.aly")).unwrap(),
-            "../../../ReplicatedStorage/Alloy"
-        );
-        assert_eq!(
-            std_require_relative_for(&t, Path::new("src/shared/util.aly")).unwrap(),
-            "../Alloy"
-        );
     }
 
     #[test]
@@ -837,6 +785,28 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
             build["tree"]["ReplicatedStorage"]["Alloy"]["$path"],
             "../build/alloy.luau"
         );
+    }
+
+    #[test]
+    fn the_sourcemap_lands_at_the_root() {
+        let dir = temp("sourcemap-root");
+        write(&dir, "src/shared/util.aly", "");
+        let mut config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
+        let tree = Tree::load(&dir, &config);
+        let names = |config: &Config| -> Vec<String> {
+            files(&tree, config, &dir)
+                .unwrap()
+                .iter()
+                .map(|(p, _)| p.to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
+        // Rojo and luau-lsp read `sourcemap.json` at the root, so the
+        // build writes that name and no other.
+        assert!(names(&config).contains(&"sourcemap.json".to_string()));
+        assert!(!names(&config).contains(&".alloy/sourcemap.json".to_string()));
+
+        config.project.sourcemap = false;
+        assert!(!names(&config).contains(&"sourcemap.json".to_string()));
     }
 
     #[test]
@@ -975,10 +945,6 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
             std_require_for(&t, Path::new("src/shared/util.aly")).unwrap(),
             "@game/ReplicatedStorage/Alloy"
         );
-        assert_eq!(
-            std_require_relative_for(&t, Path::new("src/client/ui/hud.client.aly")).unwrap(),
-            "../../../../ReplicatedStorage/Alloy"
-        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1087,7 +1053,7 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
             vec![
                 ".alloy/build.project.json",
                 ".alloy/.gitignore",
-                ".alloy/sourcemap.json"
+                "sourcemap.json"
             ]
         );
 

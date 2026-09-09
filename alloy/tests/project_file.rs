@@ -156,8 +156,8 @@ fn the_project_file_gives_the_same_tree_as_the_mount_table() {
     // The tree is the same, so the sourcemap and the build project are
     // the same tree of instances.
     assert_eq!(
-        canonical(&read_json(&from_file.join(".alloy/sourcemap.json"))),
-        canonical(&read_json(&from_table.join(".alloy/sourcemap.json"))),
+        canonical(&read_json(&from_file.join("sourcemap.json"))),
+        canonical(&read_json(&from_table.join("sourcemap.json"))),
         "the sourcemaps differ"
     );
     assert_eq!(
@@ -223,7 +223,7 @@ fn the_users_project_file_is_never_written() {
         "default.project.json changed"
     );
     assert!(dir.join(".alloy/build.project.json").is_file());
-    assert!(dir.join(".alloy/sourcemap.json").is_file());
+    assert!(dir.join("sourcemap.json").is_file());
 
     // The `.luaurc` keeps every byte too: nothing writes aliases now.
     assert_eq!(fs::read_to_string(dir.join(".luaurc")).unwrap(), LUAURC);
@@ -276,7 +276,7 @@ fn the_sourcemap_names_every_script_of_the_tree() {
     let dir = example("sourcemap", false);
     build(&dir);
 
-    let map = read_json(&dir.join(".alloy/sourcemap.json"));
+    let map = read_json(&dir.join("sourcemap.json"));
     assert_eq!(map["name"], "game");
     assert_eq!(map["className"], "DataModel");
 
@@ -379,7 +379,7 @@ fn source_of_truth_decides_whether_the_project_files_are_written() {
     build(&owned);
     assert!(owned.join("default.project.json").is_file());
     assert!(owned.join(".alloy/build.project.json").is_file());
-    assert!(owned.join(".alloy/sourcemap.json").is_file());
+    assert!(owned.join("sourcemap.json").is_file());
 
     let synced = mounted_root("truth-off", false, true);
     build(&synced);
@@ -393,7 +393,7 @@ fn source_of_truth_decides_whether_the_project_files_are_written() {
     );
     // The sourcemap is the language server's input, and `[project]
     // sourcemap` governs it on its own.
-    assert!(synced.join(".alloy/sourcemap.json").is_file());
+    assert!(synced.join("sourcemap.json").is_file());
 
     // The requires are the same either way.
     assert_eq!(

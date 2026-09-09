@@ -642,7 +642,7 @@ pub const TABLES: &[Table] = &[
                 "sourcemap",
                 BOOL,
                 "true",
-                "Write `.alloy/sourcemap.json` on every build. The language server reads it for `@game/` completion and instance types.",
+                "Write `sourcemap.json` at the root on every build, the name Rojo and luau-lsp read. The language server reads it for `@game/` completion and instance types. On, the build writes over a `sourcemap.json` another tool wrote; off, it writes none.",
             ),
         ],
         open: None,

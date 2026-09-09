@@ -158,3 +158,73 @@ fn a_derived_struct_meets_the_serialize_bound() {
 fn a_mixed_race_lands_on_the_union() {
     analyze(RACED, "raced");
 }
+
+/// A module of types alone and a module of types and values both give
+/// the analyzer one value to require. Before the emit returned a table,
+/// `require` of a types-only module read `Module does not return exactly
+/// 1 value`.
+#[test]
+fn an_exporting_module_returns_one_value_to_require() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let defs = root.join("tools/types/globalTypes.d.luau");
+
+    if !defs.is_file() {
+        eprintln!("skipped: no definitions at {}", defs.display());
+
+        return;
+    }
+
+    let dir = std::env::temp_dir().join("alloy-analyze-module-return");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
+    std::fs::write(
+        dir.join("alloy.luau"),
+        std::fs::read_to_string(root.join("std/alloy.luau")).unwrap(),
+    )
+    .unwrap();
+
+    let cases = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
+    let mut files = Vec::new();
+
+    for name in ["module_types_only", "module_mixed_exports"] {
+        let src = std::fs::read_to_string(cases.join(format!("{name}.aly"))).unwrap();
+        let options = EmitOptions {
+            check: true,
+            file_name: format!("{name}.aly"),
+            std_require: "./alloy".to_string(),
+            ..EmitOptions::default()
+        };
+        let out = alloy::compile_with(&src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        std::fs::write(dir.join(format!("{name}.luau")), &out.check).unwrap();
+        files.push(name);
+    }
+
+    let main = "local types = require(\"./module_types_only\")\nlocal mixed = require(\"./module_mixed_exports\")\ntype Id = mixed.Id\nlocal n: Id = mixed.next(mixed.MAX)\nprint(types, n)\n";
+    let main_file = dir.join("main.luau");
+    std::fs::write(&main_file, main).unwrap();
+
+    let run = Command::new("luau-lsp")
+        .arg("analyze")
+        .arg("--flag:LuauSolverV2=true")
+        .arg(format!("--definitions={}", defs.display()))
+        .arg(&main_file)
+        .output();
+
+    let Ok(run) = run else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+
+    let text =
+        String::from_utf8_lossy(&run.stdout).into_owned() + &String::from_utf8_lossy(&run.stderr);
+    let bad: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("TypeError") || l.contains("SyntaxError"))
+        .collect();
+    assert!(bad.is_empty(), "{}\n---\n{files:?}", bad.join("\n"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

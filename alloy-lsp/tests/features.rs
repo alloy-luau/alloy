@@ -319,8 +319,19 @@ fn start(child: &Path, dir: &Path) -> Session {
 
 /// A session initialized with the given `initialize` params.
 fn start_with(child: &Path, init_params: Value) -> Session {
+    start_env(child, init_params, &[])
+}
+
+/// The same, with environment variables set on the server process.
+fn start_env(child: &Path, init_params: Value, env: &[(&str, &str)]) -> Session {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_alloy-lsp"));
+
+    for (name, value) in env {
+        command.env(name, value);
+    }
+
     let mut server = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_alloy-lsp"))
+        command
             .arg("--luau-lsp")
             .arg(child)
             .arg("--definitions")
@@ -593,9 +604,11 @@ fn hover_completion_and_extensions() {
     );
 
     // Inside an import string: the modules beside this file, and `@self`.
+    // The file being edited is not among them: a module never imports
+    // itself.
     let labels = s.completion_labels(&uri, 80, 24);
     assert!(
-        labels.iter().any(|l| l == "ext") && labels.iter().any(|l| l == "main"),
+        labels.iter().any(|l| l == "ext") && !labels.iter().any(|l| l == "main"),
         "{labels:?}"
     );
     let labels = s.completion_labels(&uri, 80, 22);
@@ -993,7 +1006,7 @@ fn a_file_outside_the_root_finds_the_runtime() {
     assert!(
         diags
             .iter()
-            .any(|d| d.starts_with("UnknownModule: \"@pkg/thing\"") && d.contains("no alias @pkg")),
+            .any(|d| d.starts_with("UnknownModule: \"@pkg/thing\"") && d.contains("no alias pkg")),
         "{diags:?}"
     );
     assert!(
@@ -1002,6 +1015,208 @@ fn a_file_outside_the_root_finds_the_runtime() {
     );
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A project with a mount table and no sourcemap: the shadow finds the
+/// runtime, so no import draws a report, and the import path carries one
+/// document link to the real file.
+#[test]
+fn an_import_resolves_without_a_sourcemap_and_carries_one_link() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-imports-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/client")).unwrap();
+    std::fs::create_dir_all(dir.join("packages")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n\n[mount]\nclient = [\"src/client\", \"@game/ReplicatedStorage/Client\"]\npkg = [\"packages\", \"@game/ReplicatedStorage/Packages\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("packages/fluid.luau"),
+        "local m = {}\nfunction m.create(x: string): string return x end\nreturn m\n",
+    )
+    .unwrap();
+    // The file uses the runtime, so the shadow requires it, and it sits
+    // under a mount, so the ship artifact would name an instance path.
+    let src =
+        "import fluid from \"@pkg/fluid\"\nlocal xs = [ 1, 2 ]\nprint(fluid.create(\"a\"), xs)\n";
+    let file = dir.join("src/client/main.client.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+    s.drain(Duration::from_secs(6));
+    let published: Vec<String> = s
+        .seen
+        .iter()
+        .filter(|m| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri)
+        .flat_map(|m| {
+            m["params"]["diagnostics"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|d| d["message"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !published
+            .iter()
+            .any(|d| d.contains("names no module") || d.contains("Unknown require")),
+        "{published:?}"
+    );
+
+    // One link, on the quoted path, to the file on disk: the runtime the
+    // shadow requires draws none, and the mirror copy is not the target.
+    let links = s.request(
+        "textDocument/documentLink",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let links = links.as_array().cloned().unwrap_or_default();
+    assert_eq!(links.len(), 1, "{links:#?}");
+    assert_eq!(links[0]["range"]["start"]["line"], json!(0));
+    assert_eq!(
+        links[0]["target"].as_str().unwrap_or_default(),
+        format!("file://{}", dir.join("packages/fluid.luau").display())
+    );
+
+    // The path hovers as the import line alone; the binding hovers as
+    // the module's table.
+    assert_eq!(
+        s.hover(&uri, 0, 22),
+        "```alloy\nimport fluid from \"@pkg/fluid\"\n```"
+    );
+    assert!(s.hover(&uri, 0, 8).contains("create"));
+
+    // A path that names no file reports on the import, whichever form
+    // it takes; a `.server` file is a script, not a module.
+    std::fs::write(dir.join("src/client/boot.server.aly"), "print(1)\n").unwrap();
+    let bad = "import a from \"./gone\"\nimport b from \"../up\"\nimport c from \"@pkg/nope\"\nimport d from \"./boot.server\"\nprint(a, b, c, d)\n";
+    let bad_file = dir.join("src/client/bad.aly");
+    std::fs::write(&bad_file, bad).unwrap();
+    let bad_uri = format!("file://{}", bad_file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": bad_uri, "languageId": "alloy-luau", "version": 1, "text": bad } } }),
+    );
+    let diags = s.diagnostics(&bad_uri, |ds| {
+        ds.iter().filter(|d| d.contains("UnknownModule")).count() >= 4
+    });
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("\"./gone\" names no module") && d.contains("src/client/gone")),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("\"../up\" names no module") && d.contains("src/up")),
+        "{diags:?}"
+    );
+    // `pkg` is a mount, so the message names the folder it stands for.
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("\"@pkg/nope\" names no module") && d.contains("packages/nope")),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("\"./boot.server\" is a script, not a module")),
+        "{diags:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A package install writes files after the server started. The poll
+/// reads them, the child hears about them, and an import of the new
+/// module types without a restart.
+#[test]
+fn a_module_added_on_disk_types_without_a_restart() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-added-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("packages")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n\n[mount]\nsrc = [\"src\", \"@game/ReplicatedStorage/Src\"]\npkg = [\"packages\", \"@game/ReplicatedStorage/Packages\"]\n",
+    )
+    .unwrap();
+    let src = "import vide from \"@pkg/vide\"\nlocal n: number = vide.count(\"a\")\nprint(n)\n";
+    let file = dir.join("src/main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start_env(
+        &child,
+        json!({ "processId": std::process::id(), "rootUri": format!("file://{}", dir.display()), "capabilities": {} }),
+        &[("ALLOY_LSP_POLL_SECS", "1")],
+    );
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // The module is not there yet, so the import draws a report.
+    s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("@pkg/vide")));
+
+    // A package install writes the module after the server started.
+    std::fs::write(
+        dir.join("packages/vide.luau"),
+        "local m = {}\nfunction m.count(s: string): string return s end\nreturn m\n",
+    )
+    .unwrap();
+
+    // The poll reads it: the import resolves, and its type is the
+    // module's, so `count` returning a string draws the mismatch.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut hover = String::new();
+
+    while Instant::now() < deadline {
+        s.drain(Duration::from_secs(2));
+        hover = s.hover(&uri, 0, 8);
+
+        if hover.contains("count") {
+            break;
+        }
+    }
+
+    assert!(hover.contains("count"), "{hover}");
+
+    // The document was published again against the new module, so the
+    // report on the import is gone.
+    s.drain(Duration::from_secs(2));
+    let last: Vec<String> = s
+        .seen
+        .iter()
+        .rfind(|m| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri)
+        .and_then(|m| m["params"]["diagnostics"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|d| d["message"].as_str().map(str::to_string))
+        .collect();
+    assert!(!last.iter().any(|d| d.contains("@pkg/vide")), "{last:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An enum's variants complete as enum members with their signatures,

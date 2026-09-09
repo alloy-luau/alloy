@@ -180,7 +180,8 @@ pub struct Project {
     /// `.luaurc` declares. A name in the Luau configuration wins. Off,
     /// only the Luau configuration names aliases.
     pub mount_aliases: bool,
-    /// Write `.alloy/sourcemap.json` on every build.
+    /// Write `sourcemap.json` at the root on every build, over a
+    /// file another tool wrote there.
     pub sourcemap: bool,
 }
 

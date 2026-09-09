@@ -258,6 +258,11 @@ fn main() -> ExitCode {
         }
     });
 
+    // The project's folders on their own thread: an editor that sends
+    // no watcher notification still hears about a package install.
+    let poll_server = Arc::clone(&server);
+    std::thread::spawn(move || poll_server.poll_files());
+
     // Editor -> child on the main thread, the first message included.
     if !server.handle_client(first) {
         return ExitCode::SUCCESS;

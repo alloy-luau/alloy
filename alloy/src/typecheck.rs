@@ -473,10 +473,18 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         cmd.arg(format!("--definitions={}", d.display()));
     }
 
-    let sourcemap = root.join(".alloy/sourcemap.json");
+    // `alloy build` writes `sourcemap.json` at the root. A root that
+    // still holds the `.alloy/sourcemap.json` an older build wrote uses
+    // that one.
+    let sourcemap = [
+        root.join("sourcemap.json"),
+        root.join(".alloy/sourcemap.json"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file());
 
-    if sourcemap.is_file() {
-        cmd.arg("--sourcemap").arg(&sourcemap);
+    if let Some(sourcemap) = &sourcemap {
+        cmd.arg("--sourcemap").arg(sourcemap);
     }
 
     for s in &sources {
@@ -490,6 +498,8 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         + &String::from_utf8_lossy(&output.stderr);
 
     let known = known_shapes(files);
+    // The aliases a message names a folder through, read once.
+    let module_aliases = crate::modules::aliases(root, &crate::project::Tree::load(root, config));
     // A message may run over several lines; the extra lines join the
     // report before them.
     let mut last: Option<usize> = None;
@@ -631,19 +641,39 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         // A require the checker could not resolve names what the source
         // asked for; it is an error, as the require fails at runtime.
         let (kind, message) = if message.starts_with("Unknown require") {
+            // Alloy writes the runtime require; the reader wrote no
+            // import of it, so a report about it names nothing to fix.
+            if f.check
+                .lines()
+                .nth(line_no.saturating_sub(1))
+                .and_then(runtime_require_span)
+                .is_some_and(|(s, e)| (s..=e).contains(&col.saturating_sub(1)))
+            {
+                continue;
+            }
+
             // No quoted path on the line means `require(script.Parent)`
             // or another runtime path. It resolves in Roblox, and the
             // `raw_require` lint already says the checker cannot follow
             // it, so there is nothing to report here.
-            let Some(spec) = quoted_on_line(&f.source, mapped.0.saturating_sub(1)) else {
+            let Some(spec) = required_spec(message, &f.source, mapped.0.saturating_sub(1)) else {
                 continue;
             };
             let rel = config.build.input.join(&f.rel);
+            let named = crate::modules::alias_target(&spec, &module_aliases, Some(root));
 
             (
                 "UnknownModule".to_string(),
-                unknown_module_message(&spec, &rel),
+                unknown_module_message(&spec, &rel, named.as_deref()),
             )
+        } else if message.contains(NO_MODULE_RETURN) {
+            // The module is there and returns no value. The import is
+            // what the reader wrote, so the report names that.
+            let Some(spec) = required_spec(message, &f.source, mapped.0.saturating_sub(1)) else {
+                continue;
+            };
+
+            ("UnknownModule".to_string(), no_module_return_message(&spec))
         } else {
             (kind.to_string(), message.to_string())
         };
@@ -1471,11 +1501,31 @@ fn keep_innermost(diagnostics: &mut Vec<TypeDiag>) {
 /// resolve, from the module path the source wrote and the source's own
 /// path relative to the root: what was asked for, and where it was
 /// looked for. The kind is the caller's prefix.
-pub fn unknown_module_message(spec: &str, source_rel: &Path) -> String {
+pub fn unknown_module_message(
+    spec: &str,
+    source_rel: &Path,
+    alias_target: Option<&Path>,
+) -> String {
+    // A data path names one file; a module path names one of several.
+    let what = match crate::data::Format::of(spec) {
+        Some(format) => format!("no {} file", format.name()),
+
+        None => "no .aly, .alx, or .luau file".to_string(),
+    };
+    let shown = |p: &Path| p.to_string_lossy().replace('\\', "/");
+
     if let Some(rest) = spec.strip_prefix('@') {
         let alias = rest.split('/').next().unwrap_or(rest);
 
-        return format!("\"{spec}\" names no module; no alias @{alias} in .config.luau or .luaurc");
+        // The project declares the alias, so the folder is the answer;
+        // without it the alias itself is what to add.
+        return match alias_target {
+            Some(target) => format!("\"{spec}\" names no module; {what} at {}", shown(target)),
+
+            None => format!(
+                "\"{spec}\" names no module; no alias {alias} in alloy.toml's [mount] table, .config.luau, or .luaurc"
+            ),
+        };
     }
 
     let base = source_rel.parent().unwrap_or(Path::new(""));
@@ -1495,28 +1545,131 @@ pub fn unknown_module_message(spec: &str, source_rel: &Path) -> String {
         }
     }
 
-    // A data path names one file; a module path names one of several.
-    let what = match crate::data::Format::of(spec) {
-        Some(format) => format!("no {} file", format.name()),
-
-        None => "no .aly, .alx, or .luau file".to_string(),
-    };
-
-    format!(
-        "\"{spec}\" names no module; {what} at {}",
-        target.to_string_lossy().replace('\\', "/")
-    )
+    format!("\"{spec}\" names no module; {what} at {}", shown(&target))
 }
 
 /// The content of the first quoted string on a zero-based line.
 pub fn quoted_on_line(source: &str, line: usize) -> Option<String> {
-    let text = source.lines().nth(line)?;
-    let open = text.find(['"', '\''])?;
-    let quote = text.as_bytes()[open] as char;
-    let rest = &text[open + 1..];
-    let close = rest.find(quote)?;
+    quoted_paths_on_line(source, line).into_iter().next()
+}
 
-    Some(rest[..close].to_string())
+/// Every quoted string on a zero-based line, in the order they read.
+pub fn quoted_paths_on_line(source: &str, line: usize) -> Vec<String> {
+    let Some(text) = source.lines().nth(line) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut rest = text;
+
+    while let Some(open) = rest.find(['"', '\'']) {
+        let quote = rest.as_bytes()[open] as char;
+        let body = &rest[open + 1..];
+
+        let Some(close) = body.find(quote) else {
+            break;
+        };
+
+        out.push(body[..close].to_string());
+        rest = &body[close + 1..];
+    }
+
+    out
+}
+
+/// The span of the runtime require the emit writes at the head of a
+/// file, `local __alloy = require(...)`, on one line of the emitted
+/// text, as byte columns. Alloy writes that require, and the reader
+/// wrote no import of it, so a report inside the span names nothing to
+/// fix.
+pub fn runtime_require_span(emitted_line: &str) -> Option<(usize, usize)> {
+    const PRELUDE: &str = "local __alloy = require(";
+    let at = emitted_line.find(PRELUDE)?;
+    let close = emitted_line[at..].find(')')?;
+
+    Some((at, at + close))
+}
+
+/// The module path a checker's `Unknown require` is about, among the
+/// quoted paths of the source line. The message names the file the
+/// checker looked for, so the path whose tail that file's path ends
+/// with is the one the report describes: one emitted line can carry
+/// two requires. The first quoted path answers when none matches.
+pub fn required_spec(message: &str, source: &str, line: usize) -> Option<String> {
+    let specs = quoted_paths_on_line(source, line);
+
+    if let Some(named) = named_module_path(message) {
+        let named = named.replace('\\', "/");
+        // The checker names a file, `.../src/@pkg/fluid.lua`; the source
+        // wrote the path without the extension.
+        let named = match named.rsplit_once('/') {
+            Some((dir, file)) => match file.rsplit_once('.') {
+                Some((stem, _)) => format!("{dir}/{stem}"),
+
+                None => named.clone(),
+            },
+
+            None => named.clone(),
+        };
+
+        if let Some(hit) = specs.iter().find(|spec| {
+            let tail = module_tail(spec);
+
+            !tail.is_empty() && (named == tail || named.ends_with(&format!("/{tail}")))
+        }) {
+            return Some(hit.clone());
+        }
+    }
+
+    specs.into_iter().next()
+}
+
+/// The file path a checker's report about a require names: the one it
+/// looked for, or the one it could not take a value from.
+fn named_module_path(message: &str) -> Option<&str> {
+    if let Some((_, rest)) = message.rsplit_once("Unknown require: ") {
+        return Some(rest.trim());
+    }
+
+    if let Some((_, rest)) = message.split_once("Cannot require module ") {
+        return Some(rest.split_once(": ").map(|(p, _)| p).unwrap_or(rest).trim());
+    }
+
+    None
+}
+
+/// The text a checker writes for a module that returns no value.
+pub const NO_MODULE_RETURN: &str = "Module does not return exactly 1 value";
+
+/// The report for an import of a module that returns nothing. Luau
+/// takes exactly one value from a module, so a file with no `return`
+/// and no `export` gives the import nothing.
+pub fn no_module_return_message(spec: &str) -> String {
+    format!("\"{spec}\" returns nothing to import; add a `return` or an `export`")
+}
+
+/// The report for an import of a `.server` or `.client` file. Roblox
+/// runs a script on its own, and a script returns nothing.
+pub fn script_import_message(spec: &str) -> String {
+    format!(
+        "\"{spec}\" is a script, not a module; a `.server` or `.client` file runs on its own and returns nothing"
+    )
+}
+
+/// A module path with its leading `./` and `../` steps and any data
+/// extension dropped: what the end of the file path the checker names
+/// reads as.
+fn module_tail(spec: &str) -> &str {
+    let mut tail = spec.trim();
+
+    while let Some(rest) = tail.strip_prefix("./").or_else(|| tail.strip_prefix("../")) {
+        tail = rest;
+    }
+
+    match crate::data::Format::of(tail) {
+        Some(_) => tail.rsplit_once('.').map(|(a, _)| a).unwrap_or(tail),
+
+        None => tail,
+    }
 }
 
 /// One line of the analyzer's output, split.
@@ -2342,21 +2495,69 @@ mod tests {
     }
 
     #[test]
+    fn the_report_names_the_require_the_checker_looked_for() {
+        // One emitted line carries the runtime require and the import;
+        // the file the checker names says which one failed.
+        let source = "import fluid from '@pkg/fluid'\n";
+        assert_eq!(
+            required_spec("Unknown require: /m/src/@pkg/fluid.lua", source, 0),
+            Some("@pkg/fluid".to_string())
+        );
+        // A line with two paths: the second one is the one that failed.
+        let two = "import { a } from \"./ok\" import { b } from \"./gone\"\n";
+        assert_eq!(
+            required_spec("Unknown require: /m/src/gone.lua", two, 0),
+            Some("./gone".to_string())
+        );
+        // A data path keeps its extension in the source, and the
+        // checker names the module the build writes beside it.
+        assert_eq!(
+            required_spec(
+                "Unknown require: /m/src/app/data.lua",
+                "import d from \"./data.json\"\n",
+                0
+            ),
+            Some("./data.json".to_string())
+        );
+        // Nothing to match: the first path on the line answers.
+        assert_eq!(
+            required_spec("Unknown require: unsupported path", two, 0),
+            Some("./ok".to_string())
+        );
+
+        // The runtime require the emit writes has its own span.
+        let emitted = "local __alloy = require(\"@alloy\") local fluid = require('@pkg/fluid')";
+        let (start, end) = runtime_require_span(emitted).expect("a span");
+        assert_eq!(&emitted[start..=end], "local __alloy = require(\"@alloy\")");
+        assert!(runtime_require_span("local fluid = require('@pkg/fluid')").is_none());
+    }
+
+    #[test]
     fn an_unknown_module_names_what_was_asked_for() {
         assert_eq!(
-            unknown_module_message("./ui", Path::new("src/app/main.aly")),
+            unknown_module_message("./ui", Path::new("src/app/main.aly"), None),
             "\"./ui\" names no module; no .aly, .alx, or .luau file at src/app/ui"
         );
         assert_eq!(
-            unknown_module_message("../shared/util", Path::new("src/app/main.aly")),
+            unknown_module_message("../shared/util", Path::new("src/app/main.aly"), None),
             "\"../shared/util\" names no module; no .aly, .alx, or .luau file at src/shared/util"
         );
+        // No such alias: the alias is what to add.
         assert_eq!(
-            unknown_module_message("@packages/react", Path::new("src/main.aly")),
-            "\"@packages/react\" names no module; no alias @packages in .config.luau or .luaurc"
+            unknown_module_message("@packages/react", Path::new("src/main.aly"), None),
+            "\"@packages/react\" names no module; no alias packages in alloy.toml's [mount] table, .config.luau, or .luaurc"
+        );
+        // The alias is declared, so the folder it names is the answer.
+        assert_eq!(
+            unknown_module_message(
+                "@pkg/nope",
+                Path::new("src/main.aly"),
+                Some(Path::new("packages/roblox/nope"))
+            ),
+            "\"@pkg/nope\" names no module; no .aly, .alx, or .luau file at packages/roblox/nope"
         );
         assert_eq!(
-            unknown_module_message("./data.json", Path::new("src/app/main.aly")),
+            unknown_module_message("./data.json", Path::new("src/app/main.aly"), None),
             "\"./data.json\" names no module; no JSON file at src/app/data.json"
         );
         assert_eq!(

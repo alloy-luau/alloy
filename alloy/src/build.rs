@@ -622,7 +622,7 @@ impl DataFiles {
             let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
             let Some((_, dir)) = self.aliases.iter().find(|(a, _)| a == alias) else {
                 return Err(format!(
-                    "data file \"{spec}\" names no alias @{alias} in .config.luau or .luaurc"
+                    "data file \"{spec}\" names no alias {alias} in alloy.toml's [mount] table, .config.luau, or .luaurc"
                 ));
             };
             let abs = normalize_path(&dir.join(tail));
@@ -674,7 +674,9 @@ impl DataFiles {
         let path = self.input.join(rel);
 
         if !path.is_file() {
-            return Err(crate::typecheck::unknown_module_message(spec, source_rel));
+            return Err(crate::typecheck::unknown_module_message(
+                spec, source_rel, None,
+            ));
         }
 
         let out_rel = rel.with_extension("luau");

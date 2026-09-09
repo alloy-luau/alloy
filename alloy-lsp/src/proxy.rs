@@ -28,6 +28,10 @@ pub struct Server {
     state: Mutex<State>,
     child_in: Mutex<Box<dyn Write + Send>>,
     client_out: Mutex<Box<dyn Write + Send>>,
+    /// Held for the length of a pass over the workspace. The file poll
+    /// runs on its own thread, and two passes at once would open a
+    /// document twice.
+    scan: Mutex<()>,
 }
 
 /// A request the editor sent, waiting for the child's answer.
@@ -86,6 +90,9 @@ struct State {
     next_id: u64,
     /// Whether the editor takes snippet text in a completion item.
     snippets: bool,
+    /// Whether the editor takes a watcher registration. Without one the
+    /// server polls the project's folders itself.
+    watch_registration: bool,
 }
 
 impl State {
@@ -2316,16 +2323,9 @@ impl State {
                     .and_then(Value::as_str)
                     .unwrap_or("sourcemap.json");
 
-                // A module never imports itself.
-                let own = path.file_stem().map(|s| s.to_string_lossy().into_owned());
-
                 for (label, kind, detail) in
-                    module_entries(dir, self.root.as_deref(), head, sourcemap)
+                    module_entries(dir, self.root.as_deref(), head, sourcemap, Some(&path))
                 {
-                    if head.is_empty() && Some(&label) == own.as_ref() {
-                        continue;
-                    }
-
                     let mut item = word(&label, kind, None, start + cut);
                     item["detail"] = json!(detail);
 
@@ -2372,40 +2372,23 @@ impl State {
         let options = match config {
             Some((config_path, config)) => {
                 let root = normalize(config_path.parent().unwrap_or(Path::new(".")));
-                let input = normalize(&root.join(&config.build.input));
-                let file = normalize(&path);
-                // The runtime sits at the input root of the file's own
-                // project, as the build puts it at the output root; a file
-                // outside that input gets it beside itself.
-                let (depth, runtime_dir) = match file.strip_prefix(&input) {
-                    Ok(rel) => (rel.components().count().saturating_sub(1), input.clone()),
-
-                    Err(_) => (0, normalize(&dir)),
-                };
-                self.ensure_runtime(&runtime_dir);
-                // A file in the tree sits in the sourcemap, and the child
-                // resolves its requires in the DataModel tree: the runtime
-                // is `../Alloy` there. A file outside the tree reaches the
-                // runtime on disk.
-                let source_rel = file.strip_prefix(&root).ok().map(Path::to_path_buf);
-                let tree = alloy::project::Tree::load(&root, &config);
-                let std_require = config.emit.std_require.clone().unwrap_or_else(|| {
-                    source_rel
-                        .as_deref()
-                        .and_then(|rel| alloy::project::std_require_relative_for(&tree, rel))
-                        .unwrap_or_else(|| {
-                            if depth == 0 {
-                                "./alloy".to_string()
-                            } else {
-                                format!("{}alloy", "../".repeat(depth))
-                            }
-                        })
-                });
+                // The shadow requires the runtime by an alias, and the
+                // mirror's Luau configuration names the place the runtime
+                // is written. A relative path would not do: the analyzer
+                // reads `../alloy` in a file the sourcemap holds as an
+                // instance path, so the runtime would resolve only in a
+                // project that has built one. The ship artifact still
+                // writes the instance path.
+                self.ensure_runtime(&normalize(&root.join(&config.build.out)));
+                self.write_mirror(
+                    &root.join(".luaurc"),
+                    &mirror_luau_text(&root, Some(&config)),
+                );
 
                 EmitOptions {
                     wait_timeout: config.emit.wait_timeout,
                     file_name,
-                    std_require,
+                    std_require: RUNTIME_ALIAS.to_string(),
                     definitions,
                     erase_type_imports: config.emit.erase_type_imports,
                     extensions: self.extensions.clone(),
@@ -2611,6 +2594,7 @@ impl Server {
             state: Mutex::new(state),
             child_in: Mutex::new(child_in),
             client_out: Mutex::new(client_out),
+            scan: Mutex::new(()),
         }
     }
 
@@ -2716,6 +2700,12 @@ impl Server {
                     )
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                st.watch_registration = message
+                    .pointer(
+                        "/params/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration",
+                    )
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let mirror_uri = path_to_uri(&st.mirror);
                 let mirror_path = st.mirror.to_string_lossy().into_owned();
 
@@ -2779,7 +2769,7 @@ impl Server {
             Some("initialized") => {
                 self.to_child(&message);
                 self.open_workspace();
-                self.watch_data_files();
+                self.watch_project_files();
             }
 
             Some("exit") => {
@@ -4642,33 +4632,55 @@ impl Server {
 
                 // A link sits on the require the emit wrote, which maps to
                 // the start of the import; it moves to the quoted path of
-                // that source line, and its target leaves the mirror.
+                // that source line, and its target leaves the mirror. One
+                // shadow line can hold two requires, the runtime among
+                // them, so the reader gets one link per import path.
                 "textDocument/documentLink" => {
                     if let Some(uri) = &ctx
                         && let Some(doc) = st.docs.get(uri)
                         && let Some(links) = result.as_array_mut()
                     {
+                        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+
                         links.retain_mut(|link| {
-                            if let Some(target) = link.get("target").and_then(Value::as_str)
-                                && let Some(source) = st.shadows.get(target)
+                            let Some(target) = link.get("target").and_then(Value::as_str) else {
+                                return false;
+                            };
+                            let real = uri_to_path(target).map(|p| normalize(&p));
+
+                            // Alloy writes the runtime require; the reader
+                            // wrote no import of it, so it gets no link.
+                            if real
+                                .as_ref()
+                                .and_then(|p| st.real_path(p))
+                                .is_some_and(|p| st.runtimes.borrow().contains(&normalize(&p)))
                             {
-                                let source = source.clone();
-                                link["target"] = json!(source);
+                                return false;
+                            }
+
+                            // A link out of the mirror names the file the
+                            // reader edits, not its copy.
+                            let (target, _) = st.editor_uri(target);
+
+                            if uri_to_path(&target).is_none_or(|p| !p.exists()) {
+                                return false;
                             }
 
                             let Some(((line, _), _)) = link.get("range").and_then(range_of) else {
                                 return false;
                             };
+                            let Some((s, e)) = quoted_span_on_line(&doc.source, line) else {
+                                return false;
+                            };
 
-                            match quoted_span_on_line(&doc.source, line) {
-                                Some((s, e)) => {
-                                    link["range"] = range_value((line, s), (line, e));
-
-                                    true
-                                }
-
-                                None => false,
+                            if !seen.insert((line, s)) {
+                                return false;
                             }
+
+                            link["target"] = json!(target);
+                            link["range"] = range_value((line, s), (line, e));
+
+                            true
                         });
                     }
                 }
@@ -5215,9 +5227,13 @@ impl Server {
             return;
         };
 
-        let (input, out) = match Config::find_within(&root, &root)
-            .and_then(|p| Config::load(&p).ok().map(|c| (p, c)))
-        {
+        // One pass at a time: the file poll and the editor both start
+        // one, and a document opened twice reaches the child twice.
+        let _pass = self.scan.lock().unwrap_or_else(|e| e.into_inner());
+
+        let config =
+            Config::find_within(&root, &root).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
+        let (input, out) = match &config {
             Some((p, c)) => {
                 let base = p.parent().unwrap_or(&root).to_path_buf();
 
@@ -5226,6 +5242,7 @@ impl Server {
 
             None => (root.clone(), None),
         };
+        let config = config.map(|(_, c)| c);
 
         let mut files = Vec::new();
         let mut plain = Vec::new();
@@ -5259,8 +5276,9 @@ impl Server {
                     };
                     st.write_mirror(&path, &text);
 
-                    // `alloy build` writes `.alloy/sourcemap.json`; a root
-                    // with no `sourcemap.json` of its own uses it.
+                    // `alloy build` writes `sourcemap.json` at the root.
+                    // A root that still holds the `.alloy/sourcemap.json`
+                    // an older build wrote uses that one.
                     if path == root.join(".alloy/sourcemap.json")
                         && !root.join("sourcemap.json").is_file()
                     {
@@ -5269,38 +5287,30 @@ impl Server {
                 }
             }
 
-            // The mirror's own `.luaurc`: the root's Luau configuration,
-            // strict when it names no mode, plus the mount names it lacks
-            // while `[project] mount_aliases` stays on. The child reads
-            // this file, so `@pkg/x` resolves in a shadow the way the
-            // compiler resolves it, and the user's own file stays as it
-            // is. A mirrored `.config.luau` goes, so the merged file is
-            // the one read.
-            let mut luau = alloy::luau_config::read_dir(&root)
-                .map(|(_, c)| c)
-                .unwrap_or_default();
-
-            if luau.language_mode.is_none() {
-                luau.language_mode = Some("strict".to_string());
-            }
-
-            if let Some(path) = Config::find_within(&root, &root)
-                && let Ok(config) = Config::load(&path)
-                && config.project.mount_aliases
-            {
-                for (name, m) in &config.mount {
-                    if !luau.aliases.iter().any(|(a, _)| a == name) {
-                        luau.aliases
-                            .push((name.clone(), format!("./{}", m.0.replace('\\', "/"))));
-                    }
-                }
-            }
-
+            // The mirror's own `.luaurc`. A mirrored `.config.luau` goes,
+            // so the merged file is the one read.
             st.write_mirror(
                 &root.join(".luaurc"),
-                &alloy::luau_config::render_luaurc(&luau),
+                &mirror_luau_text(&root, config.as_ref()),
             );
             let _ = std::fs::remove_file(st.mirror.join(".config.luau"));
+
+            // The tree writes the mirror's sourcemap, as `alloy build`
+            // writes the project's. A file added since the last build is
+            // in this one, so `@game/` completes and types without one.
+            if let Some(config) = &config {
+                let tree = alloy::project::Tree::load(&root, config);
+
+                if !tree.mounts.is_empty()
+                    && let Ok(map) = alloy::project::sourcemap(&tree, &root)
+                {
+                    let text = serde_json::to_string_pretty(&map).unwrap_or_default() + "\n";
+                    st.write_mirror(
+                        &root.join("sourcemap.json"),
+                        &mirrored_sourcemap(&text, &input, out.as_deref(), &root),
+                    );
+                }
+            }
         }
 
         for path in files {
@@ -5318,7 +5328,13 @@ impl Server {
 
         let runtime = {
             let mut st = self.state.lock().expect("state");
-            let real = normalize(&input.join("alloy.luau"));
+            // The runtime goes where the build puts it, the place the
+            // mirror's `alloy` alias names.
+            let real = normalize(
+                &out.clone()
+                    .unwrap_or_else(|| root.clone())
+                    .join("alloy.luau"),
+            );
             st.runtimes.borrow_mut().insert(real.clone());
             st.write_mirror(&real, alloy::RUNTIME);
             let uri = st.child_uri(&path_to_uri(&real));
@@ -5341,12 +5357,209 @@ impl Server {
         log::info("workspace shadows opened");
     }
 
-    /// Asks the editor to report changes to data files, so a saved
-    /// `.json` or `.toml` regenerates its mirror module. The extension's
-    /// own watcher covers `.json`; this one adds `.toml`. An editor
-    /// without dynamic registration answers with an error, which is
-    /// dropped.
-    fn watch_data_files(&self) {
+    /// Polls the project's folders and re-reads what changed. Not every
+    /// editor sends `workspace/didChangeWatchedFiles`, and a package
+    /// install writes its files outside the editor either way, so the poll
+    /// is the floor under the watcher. `ALLOY_LSP_POLL_SECS` sets the
+    /// interval; the default is 15 seconds.
+    pub fn poll_files(&self) {
+        let secs = std::env::var("ALLOY_LSP_POLL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(15);
+        let mut stamp: Option<(usize, Option<std::time::SystemTime>)> = None;
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            let roots = self.poll_roots();
+
+            if roots.is_empty() {
+                continue;
+            }
+
+            let now = tree_stamp(&roots);
+
+            // The first pass rescans too: a package install between the
+            // startup pass and this one would otherwise be the baseline and
+            // never read. A rescan that finds nothing new costs one walk.
+            if stamp != Some(now) {
+                stamp = Some(now);
+                self.rescan_workspace();
+            }
+        }
+    }
+
+    /// The folders a file poll watches: `[build] in`, every folder the
+    /// mount table and the Luau configuration name, and the workspace
+    /// root's own files. The output folder stays out: the build writes
+    /// there, and a poll of it would answer its own writes.
+    fn poll_roots(&self) -> Vec<PathBuf> {
+        let root = self.state.lock().expect("state").root.clone();
+        let Some(root) = root else {
+            return Vec::new();
+        };
+        let mut roots = vec![root.clone()];
+
+        if let Some(path) = Config::find_within(&root, &root)
+            && let Ok(config) = Config::load(&path)
+        {
+            let base = path.parent().unwrap_or(&root).to_path_buf();
+            roots.push(base.join(&config.build.input));
+
+            for m in config.mount.values() {
+                roots.push(base.join(&m.0));
+            }
+        }
+
+        for (_, target) in project_aliases(&root, Some(&root)) {
+            roots.push(target);
+        }
+
+        roots.sort();
+        roots.dedup();
+        // A folder inside another is already walked by it.
+        let all = roots.clone();
+        roots.retain(|r| !all.iter().any(|o| o != r && r.starts_with(o)));
+        roots
+    }
+
+    /// Re-reads the project from disk. A package install writes a whole
+    /// tree at once: the new files reach the mirror, the child hears
+    /// that each plain module changed, and every document that imports
+    /// one is sent again, or its import keeps the type it had.
+    fn rescan_workspace(&self) {
+        let root = self.state.lock().expect("state").root.clone();
+        let Some(root) = root else {
+            return;
+        };
+        let out = Config::find_within(&root, &root)
+            .and_then(|p| Config::load(&p).ok().map(|c| (p, c)))
+            .map(|(p, c)| p.parent().unwrap_or(&root).join(&c.build.out));
+        let mut files = Vec::new();
+        let mut plain = Vec::new();
+        walk(&root, out.as_deref(), &mut files, &mut plain);
+
+        // What the mirror does not already hold, letter for letter.
+        let changed: Vec<PathBuf> = {
+            let st = self.state.lock().expect("state");
+
+            plain
+                .into_iter()
+                .filter(|path| {
+                    let target = st.mirror_path(path);
+
+                    std::fs::read_to_string(&target).ok() != std::fs::read_to_string(path).ok()
+                })
+                .collect()
+        };
+        let fresh: Vec<PathBuf> = {
+            let st = self.state.lock().expect("state");
+
+            files
+                .into_iter()
+                .filter(|path| !st.docs.contains_key(&path_to_uri(path)))
+                .collect()
+        };
+
+        if changed.is_empty() && fresh.is_empty() {
+            return;
+        }
+
+        log::info(&format!(
+            "rescan: {} plain files, {} shadows",
+            changed.len(),
+            fresh.len()
+        ));
+        self.open_workspace();
+
+        // The child caches a module it has read; it re-reads one it
+        // hears about.
+        let notice: Vec<Value> = {
+            let st = self.state.lock().expect("state");
+            let mut list: Vec<Value> = Vec::new();
+
+            for path in &changed {
+                list.push(json!({ "uri": path_to_uri(path), "type": 2 }));
+
+                if let Some(module) = data_module_of(path) {
+                    list.push(json!({ "uri": path_to_uri(&module), "type": 2 }));
+                }
+            }
+
+            drop(st);
+            list
+        };
+
+        if !notice.is_empty() {
+            self.forward_plain(json!({
+                "jsonrpc": "2.0",
+                "method": "workspace/didChangeWatchedFiles",
+                "params": { "changes": notice }
+            }));
+        }
+
+        let mut touched = changed;
+        touched.extend(fresh);
+        self.refresh_importers(&touched);
+    }
+
+    /// Resends every document whose imports name one of these files, so
+    /// the child reads the module again and the document types against
+    /// it. A new module alone leaves the import as it was typed.
+    fn refresh_importers(&self, changed: &[PathBuf]) {
+        let changed: Vec<PathBuf> = changed.iter().map(|p| normalize(p)).collect();
+        let messages: Vec<(String, Value)> = {
+            let st = self.state.lock().expect("state");
+
+            st.docs
+                .iter()
+                .filter_map(|(uri, doc)| {
+                    let path = uri_to_path(uri)?;
+
+                    if !child_sees(uri) {
+                        return None;
+                    }
+
+                    let names = alloy::modules::import_targets_for_file(&path, &doc.source)
+                        .iter()
+                        .any(|t| changed.contains(&normalize(t)));
+
+                    if !names {
+                        return None;
+                    }
+
+                    Some((
+                        uri.clone(),
+                        json!({
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/didChange",
+                            "params": {
+                                "textDocument": { "uri": st.child_uri(uri), "version": doc.version },
+                                "contentChanges": [{ "text": doc.shadow }]
+                            }
+                        }),
+                    ))
+                })
+                .collect()
+        };
+
+        for (uri, message) in messages {
+            self.to_child(&message);
+            self.publish(&uri);
+        }
+    }
+
+    /// Asks the editor to report changes to every file the project
+    /// reads: a source, a plain Luau module, a data file, and the Luau
+    /// configuration. A package install writes a whole tree at once, and
+    /// the child types an import of a module it never read as `any`.
+    /// An editor that takes no dynamic registration is polled instead.
+    fn watch_project_files(&self) {
+        if !self.state.lock().expect("state").watch_registration {
+            return;
+        }
+
         let id = {
             let mut st = self.state.lock().expect("state");
             let id = st.fresh_id();
@@ -5360,10 +5573,14 @@ impl Server {
             "method": "client/registerCapability",
             "params": {
                 "registrations": [{
-                    "id": "alloy-data-files",
+                    "id": "alloy-project-files",
                     "method": "workspace/didChangeWatchedFiles",
                     "registerOptions": {
-                        "watchers": [{ "globPattern": "**/*.{json,toml}" }]
+                        "watchers": [
+                            { "globPattern": "**/*.{aly,alx,luau,lua,json,toml,luaurc}" },
+                            { "globPattern": "**/.luaurc" },
+                            { "globPattern": "**/.config.luau" }
+                        ]
                     }
                 }]
             }
@@ -5739,6 +5956,48 @@ fn markup_bound(src: &str) -> HashSet<String> {
 
 /// Alloy files into `out`; the plain files a require or the child's
 /// configuration can reach into `plain`.
+/// The newest change under the roots: how many files there are and the
+/// latest modification time. Both move on any write, add, or delete.
+fn tree_stamp(roots: &[PathBuf]) -> (usize, Option<std::time::SystemTime>) {
+    fn walk_stamp(dir: &Path, count: &mut usize, newest: &mut Option<std::time::SystemTime>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+
+            if path.is_dir() {
+                if matches!(name.as_str(), "node_modules" | "target")
+                    || (name.starts_with('.') && !matches!(name.as_str(), ".alloy" | ".ember"))
+                {
+                    continue;
+                }
+
+                walk_stamp(&path, count, newest);
+            } else if let Ok(meta) = entry.metadata()
+                && let Ok(m) = meta.modified()
+            {
+                *count += 1;
+
+                if newest.is_none_or(|n| m > n) {
+                    *newest = Some(m);
+                }
+            }
+        }
+    }
+
+    let mut count = 0;
+    let mut newest = None;
+
+    for root in roots {
+        walk_stamp(root, &mut count, &mut newest);
+    }
+
+    (count, newest)
+}
+
 fn walk(dir: &Path, skip: Option<&Path>, out: &mut Vec<PathBuf>, plain: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -7275,6 +7534,7 @@ fn module_entries(
     root: Option<&Path>,
     head: &str,
     sourcemap: &str,
+    own: Option<&Path>,
 ) -> Vec<(String, u64, String)> {
     let mut out = Vec::new();
 
@@ -7376,6 +7636,11 @@ fn module_entries(
             continue;
         }
 
+        // A module never imports itself.
+        if own.is_some_and(|own| normalize(&path) == normalize(own)) {
+            continue;
+        }
+
         if path.is_dir() {
             if seen.insert(name.clone()) {
                 out.push((format!("{name}/"), 19, "directory".to_string()));
@@ -7398,8 +7663,11 @@ fn module_entries(
             .iter()
             .find_map(|ext| name.strip_suffix(&format!(".{ext}")));
 
+        // A `.server` or `.client` file is a script, not a module: it
+        // returns nothing, and Roblox runs it on its own.
         if let Some(stem) = stem
             && stem != "init"
+            && !alloy::modules::is_script(&name)
             && seen.insert(stem.to_string())
         {
             out.push((stem.to_string(), 9, name.clone()));
@@ -7568,6 +7836,64 @@ fn home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
+}
+
+/// The alias the shadow requires the runtime by. The mirror's Luau
+/// configuration points it at the file the mirror holds, so a shadow
+/// resolves the runtime on disk, with no sourcemap and no build.
+const RUNTIME_ALIAS: &str = "@alloy";
+
+/// The Luau configuration the mirror gets for a project root: the
+/// root's own file, strict when it names no mode, the `[mount]` names
+/// it lacks while `[project] mount_aliases` stays on, and `alloy` at
+/// the place the mirror keeps the runtime. The child reads this file,
+/// so a shadow resolves `@pkg/x` and `@alloy` the way the compiler
+/// resolves them. The user's own file is never written.
+fn mirror_luau_text(root: &Path, config: Option<&Config>) -> String {
+    let mut luau = alloy::luau_config::read_dir(root)
+        .map(|(_, c)| c)
+        .unwrap_or_default();
+
+    if luau.language_mode.is_none() {
+        luau.language_mode = Some("strict".to_string());
+    }
+
+    if let Some(config) = config
+        && config.project.mount_aliases
+    {
+        for (name, m) in &config.mount {
+            if !luau.aliases.iter().any(|(a, _)| a == name) {
+                luau.aliases
+                    .push((name.clone(), format!("./{}", m.0.replace('\\', "/"))));
+            }
+        }
+    }
+
+    // The mirror holds no output tree, so an `alloy` alias the user
+    // wrote points at nothing here. The runtime is written under
+    // `[build] out`, and this alias names it there.
+    let target = match config {
+        Some(c) => format!(
+            "./{}/alloy",
+            c.build.out.to_string_lossy().replace('\\', "/")
+        ),
+
+        None => "./alloy".to_string(),
+    };
+
+    match luau
+        .aliases
+        .iter_mut()
+        .find(|(a, _)| a == RUNTIME_ALIAS.trim_start_matches('@'))
+    {
+        Some((_, t)) => *t = target,
+
+        None => luau
+            .aliases
+            .push((RUNTIME_ALIAS.trim_start_matches('@').to_string(), target)),
+    }
+
+    alloy::luau_config::render_luaurc(&luau)
 }
 
 /// The aliases a module path can use from `dir`: the Luau
@@ -8085,17 +8411,11 @@ fn module_hover(
     let spec = import_spec(line)?;
 
     // A module the server cannot find is the child's to answer.
-    let file = module_target(&spec, from, aliases)?;
-    let name = file
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    module_target(&spec, from, aliases)?;
 
-    Some(format!(
-        "```alloy\n{}\n```\n\n[{name}]({})",
-        line.trim(),
-        path_to_uri(&file)
-    ))
+    // No link: the editor's document links already offer to follow the
+    // path, on the same characters.
+    Some(format!("```alloy\n{}\n```", line.trim()))
 }
 
 /// Whether an import path holds `word` as one of its segments, the
@@ -10229,6 +10549,20 @@ fn covers(outer: Span, inner: Span) -> bool {
     outer.0 <= inner.0 && inner.1 <= outer.1
 }
 
+/// Whether a shadow position sits in the runtime require the emit
+/// writes at the head of a file, `local __alloy = require(...)`.
+fn in_runtime_require(shadow: &str, line: u32, character: u32) -> bool {
+    let Some(text) = shadow.lines().nth(line as usize) else {
+        return false;
+    };
+    let Some((start, end)) = alloy::typecheck::runtime_require_span(text) else {
+        return false;
+    };
+    let column = |at: usize| text[..at].encode_utf16().count() as u32;
+
+    (column(start)..=column(end)).contains(&character)
+}
+
 /// Drops a child diagnostic that reports the emit rather than the source:
 /// a layout lint about hoisted statements, any warning whose range
 /// touches generated text, or an unused-variable lint for a name that an
@@ -10308,6 +10642,16 @@ fn keep_diagnostic(
     if message.contains("Unknown require")
         && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
         && alloy::typecheck::quoted_on_line(&doc.source, sl as usize).is_none()
+    {
+        return false;
+    }
+
+    // Alloy writes the runtime require at the head of the shadow; the
+    // reader wrote no import of it, so a report about it names nothing
+    // to fix. The range is still in shadow terms here.
+    if message.contains("Unknown require")
+        && let Some(((sl, sc), _)) = d.get("range").and_then(range_of)
+        && in_runtime_require(&doc.shadow, sl, sc)
     {
         return false;
     }
@@ -10422,10 +10766,35 @@ fn keep_diagnostic(
     !(start..end.max(start + 1)).any(|o| doc.generated_offset(o))
 }
 
+/// Puts a report over the whole import statement, from its first word
+/// to the end of its quoted path.
+fn statement_range(d: &mut Value, doc: &Doc, line: usize) {
+    let Some(text) = doc.source.lines().nth(line) else {
+        return;
+    };
+    let start = text.len() - text.trim_start().len();
+    let start = text[..start].encode_utf16().count() as u32;
+    let end = quoted_span_on_line(&doc.source, line as u32)
+        .map(|(_, e)| e)
+        .unwrap_or_else(|| text.encode_utf16().count() as u32);
+    d["range"] = json!({
+        "start": { "line": line, "character": start },
+        "end": { "line": line, "character": end },
+    });
+}
+
 /// A child message as the editor should read it: a mirror path reads as
 /// the real one, and an unresolved require is an `UnknownModule` error
 /// over the whole import, naming the module the source asked for.
 fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
+    // The child's own words, before the folding below rewrites them: an
+    // `Unknown require` names the file it looked for, and that path
+    // says which require of the line the report is about.
+    let raw = d
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let here = st
         .docs
         .iter()
@@ -10448,40 +10817,66 @@ fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
         return;
     };
 
+    // The child writes `TypeError: Cannot require module <path>:
+    // Module does not return exactly 1 value.`
+    if message.contains(alloy::typecheck::NO_MODULE_RETURN) {
+        let line = d
+            .pointer("/range/start/line")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+
+        if let Some(spec) = alloy::typecheck::required_spec(&raw, &doc.source, line) {
+            d["message"] = json!(format!(
+                "UnknownModule: {}",
+                alloy::typecheck::no_module_return_message(&spec)
+            ));
+            d["severity"] = json!(1);
+            d["source"] = json!("Alloy");
+            d["code"] = json!("3.2");
+            statement_range(d, doc, line);
+
+            if let Some(url) = alloy::docs::book_url("3.2") {
+                d["codeDescription"] = json!({ "href": url });
+            }
+        }
+
+        return;
+    }
+
     // The child writes `TypeError: Unknown require: <path>`.
     if message.contains("Unknown require") {
         let line = d
             .pointer("/range/start/line")
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
-        let spec = alloy::typecheck::quoted_on_line(&doc.source, line).unwrap_or_default();
-        let source_rel = st
+        let spec = alloy::typecheck::required_spec(&raw, &doc.source, line).unwrap_or_default();
+        let doc_path = st
             .docs
             .iter()
             .find(|(_, other)| std::ptr::eq(*other, doc))
-            .and_then(|(uri, _)| uri_to_path(uri))
-            .map(|p| st.friendly_path(&p))
+            .and_then(|(uri, _)| uri_to_path(uri));
+        let source_rel = doc_path
+            .as_deref()
+            .map(|p| st.friendly_path(p))
             .unwrap_or_default();
+        let named = doc_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|dir| project_aliases(dir, st.root.as_deref()))
+            .and_then(|aliases| alloy::modules::alias_target(&spec, &aliases, st.root.as_deref()));
         d["message"] = json!(format!(
             "UnknownModule: {}",
-            alloy::typecheck::unknown_module_message(&spec, Path::new(&source_rel))
+            alloy::typecheck::unknown_module_message(
+                &spec,
+                Path::new(&source_rel),
+                named.as_deref()
+            )
         ));
         d["severity"] = json!(1);
         d["source"] = json!("Alloy");
         d["code"] = json!("3.2");
 
-        // The whole statement, from its first word to the end of the path.
-        if let Some(text) = doc.source.lines().nth(line) {
-            let start = text.len() - text.trim_start().len();
-            let start = text[..start].encode_utf16().count() as u32;
-            let end = quoted_span_on_line(&doc.source, line as u32)
-                .map(|(_, e)| e)
-                .unwrap_or_else(|| text.encode_utf16().count() as u32);
-            d["range"] = json!({
-                "start": { "line": line, "character": start },
-                "end": { "line": line, "character": end },
-            });
-        }
+        statement_range(d, doc, line);
 
         if let Some(url) = alloy::docs::book_url("3.2") {
             d["codeDescription"] = json!({ "href": url });
@@ -11385,6 +11780,42 @@ mod tests {
         (st, uri)
     }
 
+    /// The mirror's Luau configuration always names the runtime, so a
+    /// shadow resolves `@alloy` on disk with no sourcemap and no build.
+    #[test]
+    fn the_mirror_config_names_the_runtime_and_the_mounts() {
+        let dir = std::env::temp_dir().join(format!("alloy-mirror-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join(".config.luau"),
+            "return { luau = { aliases = { alloy = \"./build/alloy\", pkg = \"./vendor\" } } }\n",
+        )
+        .expect("config");
+        let config = Config::parse(
+            "[build]\nout = \"out\"\n\n[mount]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\npkg = [\"packages\", \"@game/ReplicatedStorage/Packages\"]\n",
+            Path::new("alloy.toml"),
+        )
+        .expect("alloy.toml");
+        let text = mirror_luau_text(&dir, Some(&config));
+        let json: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(json["languageMode"], "strict");
+        // The mirror holds no output tree, so the user's own `alloy`
+        // alias is replaced by the place the mirror writes the runtime.
+        assert_eq!(json["aliases"]["alloy"], "./out/alloy");
+        // A name the Luau configuration declares wins over the mount.
+        assert_eq!(json["aliases"]["pkg"], "./vendor");
+        assert_eq!(json["aliases"]["shared"], "./src/shared");
+
+        // With no alloy.toml the runtime sits at the root.
+        let bare = mirror_luau_text(&dir, None);
+        let bare: Value = serde_json::from_str(&bare).expect("json");
+        assert_eq!(bare["aliases"]["alloy"], "./alloy");
+        assert_eq!(bare["aliases"].get("shared"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A default import and an `import * as` hover as the module: the
     /// import line and the public names, not the module's table.
     #[test]
@@ -11406,19 +11837,18 @@ mod tests {
             None
         );
 
-        // On the path the answer names the file.
+        // On the path the answer is the import line and nothing else:
+        // the document link on the same characters offers to follow it.
         let hover = module_hover(src, "fluid", Some(&from), &aliases, true).expect("a path hover");
-        assert!(
-            hover.starts_with("```alloy\nimport fluid from \"@pkg/fluid\"\n```"),
-            "{hover}"
-        );
-        assert!(hover.contains("[fluid.luau](file://"), "{hover}");
-        assert!(!hover.contains("Exports"), "{hover}");
+        assert_eq!(hover, "```alloy\nimport fluid from \"@pkg/fluid\"\n```");
 
         // The alias segment answers the same import line.
         let by_alias =
             module_hover(src, "pkg", Some(&from), &aliases, true).expect("an alias hover");
-        assert!(by_alias.contains("[fluid.luau]"), "{by_alias}");
+        assert_eq!(by_alias, hover);
+
+        // A path that names no file is the child's to answer.
+        assert_eq!(module_hover(src, "gone", Some(&from), &aliases, true), None);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -12344,11 +12774,73 @@ local f = $nameof(RunService.Heartbeat)
 
     /// The alias labels an empty import path offers, `@name/` each.
     fn alias_labels(dir: &Path, root: &Path) -> Vec<String> {
-        module_entries(dir, Some(root), "", "sourcemap.json")
+        module_entries(dir, Some(root), "", "sourcemap.json", None)
             .into_iter()
             .map(|(label, _, _)| label)
             .filter(|l| l.starts_with('@') && l != "@self/" && l != "@game/")
             .collect()
+    }
+
+    /// The list of a directory leaves out the file being edited and
+    /// every `.server` or `.client` script: a module never imports
+    /// itself, and Roblox runs a script on its own.
+    #[test]
+    fn an_import_path_lists_neither_the_file_itself_nor_a_script() {
+        let dir = alias_root(
+            "self",
+            &[
+                ("alloy.toml", "[build]\nin = \"src\"\n"),
+                ("src/main.aly", ""),
+                ("src/helper.aly", ""),
+                ("src/boot.server.aly", ""),
+                ("src/hud.client.luau", ""),
+                ("src/plain.luau", ""),
+                ("src/sub/leaf.aly", ""),
+            ],
+        );
+        let src = dir.join("src");
+        let own = src.join("main.aly");
+        let labels = |head: &str| -> Vec<String> {
+            module_entries(&src, Some(&dir), head, "sourcemap.json", Some(&own))
+                .into_iter()
+                .map(|(label, _, _)| label)
+                .filter(|l| !l.starts_with('@'))
+                .collect()
+        };
+
+        assert_eq!(
+            labels(""),
+            vec![
+                "../".to_string(),
+                "helper".to_string(),
+                "plain".to_string(),
+                "sub/".to_string()
+            ]
+        );
+        // `./` lists the same directory, and drops the same names.
+        assert_eq!(
+            labels("./"),
+            vec![
+                "helper".to_string(),
+                "plain".to_string(),
+                "sub/".to_string()
+            ]
+        );
+        // The neighbour's own directory listing keeps `main`.
+        let other = src.join("helper.aly");
+        let from_other: Vec<String> =
+            module_entries(&src, Some(&dir), "./", "sourcemap.json", Some(&other))
+                .into_iter()
+                .map(|(label, _, _)| label)
+                .filter(|l| !l.starts_with('@'))
+                .collect();
+        assert_eq!(
+            from_other,
+            vec!["main".to_string(), "plain".to_string(), "sub/".to_string()],
+            "the neighbour's list keeps `main`"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

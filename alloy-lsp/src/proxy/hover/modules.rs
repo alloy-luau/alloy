@@ -49,9 +49,17 @@ impl Server {
             .find('\n')
             .map_or(doc.source.len(), |i| start + i);
         let spec_line = quoted.then(|| &doc.source[line_start..line_end]);
+        // A project global is a bare name. `Analytics.count` names a
+        // member, and a global that shares the word says nothing about
+        // it.
+        let after_separator = follows_a_separator(&doc.source, start);
         // A project global is declared in another file and needs no
         // import, so the file that wrote it is the one to read.
         let from_global = || {
+            if after_separator {
+                return None;
+            }
+
             let owner = st
                 .docs
                 .iter()
@@ -93,6 +101,12 @@ impl Server {
 
         true
     }
+}
+
+/// Whether a word starts right after a `.` or a `:`, which makes it a
+/// member of what stands before it and no name of its own.
+pub(crate) fn follows_a_separator(source: &str, start: usize) -> bool {
+    matches!(source[..start].chars().next_back(), Some('.' | ':'))
 }
 
 /// The hover of a `remote`: the declaration as the source wrote it,
@@ -404,4 +418,21 @@ pub(crate) fn service_hover(source: &str, word: &str, spec_line: Option<&str>) -
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Analytics.count` names a member. A project global that shares
+    /// the word said `global local count` about it, which is another
+    /// file's declaration and nothing to do with the module.
+    #[test]
+    fn a_member_is_no_project_global() {
+        let src = "import Analytics from \"./a\"\nprint(Analytics.count(), count)\n";
+        let at = |word: &str| follows_a_separator(src, src.find(word).expect("the word"));
+        assert!(at("count("));
+        assert!(!at("count)"));
+        assert!(!at("Analytics."));
+    }
 }

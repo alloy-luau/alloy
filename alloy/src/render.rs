@@ -297,18 +297,22 @@ pub fn apply_edits(src: &str, edits: &[Edit]) -> (String, SpanMap, Vec<EditError
         r.copy(at, e.start);
 
         // Each piece between newlines is generated; the newline itself is
-        // copied from the span, so the renderer's rule holds.
+        // copied from the span, so the renderer's rule holds. A piece
+        // anchors at the start of the line it lands on, so generated
+        // text never maps to a line the author reads elsewhere.
         let mut newline_at: Vec<u32> = old
             .match_indices('\n')
             .map(|(i, _)| e.start + i as u32)
             .collect();
         newline_at.reverse();
+        let mut anchor = e.start;
 
         for piece in e.text.split('\n') {
-            let _ = r.generate(e.start, piece);
+            let _ = r.generate(anchor, piece);
 
             if let Some(nl) = newline_at.pop() {
                 r.copy(nl, nl + 1);
+                anchor = nl + 1;
             }
         }
 

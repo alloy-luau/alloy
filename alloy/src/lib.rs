@@ -276,6 +276,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         &parsed.lexed.toks,
         &parsed.chunk,
         options.definitions,
+        options.ingot_rewrite,
         &options.thresholds,
         &options.import_privates,
     );
@@ -400,6 +401,17 @@ pub fn compile_file(
     let ingots = ingots.filter(|i| !i.is_empty());
     let layer = ingots.map(|i| i.before(path, source));
     let text = layer.as_ref().map_or(source, |l| l.text.as_str());
+    // An ingot's own statements stand where it put them, so a lint
+    // about the order of the source has nothing to read.
+    let rewritten = layer.as_ref().is_some_and(|l| l.text != source);
+    let options = &match rewritten {
+        true => EmitOptions {
+            ingot_rewrite: true,
+            ..options.clone()
+        },
+
+        false => options.clone(),
+    };
     let mut out = if path.ends_with(".alx") {
         compile_alx(text, options, jsx.cloned().unwrap_or_default())?.output
     } else {

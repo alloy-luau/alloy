@@ -137,6 +137,10 @@ pub struct EmitOptions {
     pub global_macros: Vec<MacroSource>,
     /// The `global attribute` declarations of the project, by name.
     pub global_attributes: Vec<(String, AttrDecl)>,
+    /// An ingot rewrote the source before the compile read it. The
+    /// order of the statements is then the ingot's, not the author's,
+    /// so `import_order` says nothing about it.
+    pub ingot_rewrite: bool,
     /// The file is a script whose globals the build hoisted into a
     /// module beside it. The declarations go, and the injected require
     /// brings the names back.
@@ -240,6 +244,7 @@ impl Default for EmitOptions {
             ambient_names: Vec::new(),
             global_macros: Vec::new(),
             global_attributes: Vec::new(),
+            ingot_rewrite: false,
             hoist_globals: false,
             side: None,
         }

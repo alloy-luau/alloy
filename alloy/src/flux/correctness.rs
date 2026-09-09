@@ -723,6 +723,7 @@ mod tests {
             &parsed.lexed.toks,
             &parsed.chunk,
             false,
+            false,
             &crate::lint::Thresholds::default(),
             &[],
         )
@@ -1063,6 +1064,7 @@ mod tests {
             src,
             &parsed.lexed.toks,
             &parsed.chunk,
+            false,
             false,
             &crate::lint::Thresholds::default(),
             &privates,

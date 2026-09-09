@@ -285,4 +285,21 @@ fn an_import_under_code_draws_the_order_lint() {
     )
     .unwrap();
     assert!(!clean.lints.iter().any(|l| l.name == "import_order"));
+
+    // An ingot rewrites the source before the lints read it, and its
+    // own statements stand where it put them. The lint says nothing.
+    let src = "print(\"hello\")\nimport { x } from \"./a\"\n\nprint(x)\n";
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        panic!("the source does not lex");
+    };
+    let lints = alloy::lint::run(
+        src,
+        &parsed.lexed.toks,
+        &parsed.chunk,
+        false,
+        true,
+        &Default::default(),
+        &[],
+    );
+    assert!(!lints.iter().any(|l| l.name == "import_order"));
 }

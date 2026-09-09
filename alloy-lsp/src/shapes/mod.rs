@@ -1281,7 +1281,47 @@ pub fn fold_private_views(text: &str) -> String {
     out.replace("__private.", ".")
 }
 
-/// A `__` field is a module's or a struct's own bookkeeping, hidden from
+/// The `__` fields Alloy's own emit writes, plus the Luau metamethods.
+/// A hover hides these; every other `__` name is the author's, or a
+/// package's, and it stays. jecs marks an entity with `__T`, and
+/// hiding it printed the type as an empty table.
+const HIDDEN_FIELDS: &[&str] = &[
+    // The emit's own bookkeeping.
+    "__alloy",
+    "__attrs",
+    "__err",
+    "__impl",
+    "__less",
+    "__new",
+    "__ok",
+    "__private",
+    "__value",
+    // The Luau metamethods.
+    "__add",
+    "__call",
+    "__concat",
+    "__div",
+    "__eq",
+    "__idiv",
+    "__index",
+    "__iter",
+    "__le",
+    "__len",
+    "__lt",
+    "__metatable",
+    "__mod",
+    "__mode",
+    "__mul",
+    "__namecall",
+    "__newindex",
+    "__pow",
+    "__sub",
+    "__tostring",
+    "__type",
+    "__unm",
+];
+
+/// A `__` field of Alloy's own emit is bookkeeping, hidden from
 /// completion; a hover hides it the same way. The metatable folds ran
 /// before this, so an `__index` a fold reads is gone by now.
 fn fold_hidden_fields(text: &mut String) {
@@ -1298,7 +1338,11 @@ fn fold_hidden_fields(text: &mut String) {
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .count();
-        let is_field = name_len > 2 && text[at + name_len..].starts_with(':');
+        let is_field = name_len > 2
+            && text[at + name_len..].starts_with(':')
+            && text
+                .get(at..at + name_len)
+                .is_some_and(|name| HIDDEN_FIELDS.contains(&name));
 
         if !opens_field || !is_field {
             from = at + 2;
@@ -1370,6 +1414,31 @@ fn fold_hidden_fields(text: &mut String) {
         text.replace_range(cut_start..cut_end, "");
         from = cut_start;
     }
+
+    fold_empty_tables(text);
+}
+
+/// A table the folds emptied keeps the layout of what it held: the
+/// child broke it over lines, so `{` and `}` sit on two. One pair of
+/// braces reads as `{}`.
+fn fold_empty_tables(text: &mut String) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find('{') {
+        let at = from + i;
+        let Some(close) = text[at + 1..].find('}').map(|k| at + 1 + k) else {
+            break;
+        };
+
+        if text[at + 1..close].trim().is_empty() {
+            text.replace_range(at..close + 1, "{}");
+            from = at + 2;
+
+            continue;
+        }
+
+        from = at + 1;
+    }
 }
 
 /// A Symbol prints as an empty table under a metatable with a printer;
@@ -1417,25 +1486,52 @@ mod tests {
 
         assert_eq!(
             fold(
-                "local fluid: { __SCHEDULER_INTERFACE: { tick: () -> () }, create: (string) -> Frame, mount: number }",
-                &known
-            ),
-            "local fluid: { create: (string) -> Frame, mount: number }"
-        );
-        assert_eq!(
-            fold(
-                "local m: {\n    __hidden: number,\n    open: string\n}",
+                "local m: {\n    __value: number,\n    open: string\n}",
                 &known
             ),
             "local m: {\n    open: string\n}"
         );
         assert_eq!(
             fold(
-                "local m: { open: string, __last: (a: number) -> () }",
+                "local m: { open: string, __tostring: (a: number) -> () }",
                 &known
             ),
             "local m: { open: string }"
         );
+    }
+
+    /// Only the names Alloy's own emit writes are bookkeeping. Another
+    /// library's `__` field is data the reader wants: jecs marks an
+    /// entity with `__T`, and a table of one such field is no empty
+    /// table.
+    #[test]
+    fn a_foreign_hidden_field_stays_in_a_hover() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "local fluid: { __SCHEDULER_INTERFACE: { tick: () -> () }, create: (string) -> Frame, mount: number }",
+                &known
+            ),
+            "local fluid: { __SCHEDULER_INTERFACE: { tick: () -> () }, create: (string) -> Frame, mount: number }"
+        );
+        assert_eq!(
+            fold("local Position: {\n    __T: T\n}", &known),
+            "local Position: {\n    __T: T\n}"
+        );
+    }
+
+    /// A table the folds emptied reads as `{}`, on one line, whatever
+    /// layout the child gave what it held.
+    #[test]
+    fn an_emptied_table_reads_on_one_line() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold("local m: {\n    __value: number\n}", &known),
+            "local m: {}"
+        );
+        assert_eq!(fold("local m: { __ok: number }", &known), "local m: {}");
     }
 
     #[test]
@@ -1648,7 +1744,7 @@ mod tests {
         let known = Known::default();
 
         assert_eq!(fold("intersect<T, ~nil>", &known), "T");
-        assert_eq!(fold("(a & ~nil) | { }", &known), "(a) | { }");
+        assert_eq!(fold("(a & ~nil) | { }", &known), "(a) | {}");
         assert_eq!(fold("Item & ~nil", &known), "Item");
         assert_eq!(fold("intersect<A, ~nil>[]", &known), "A[]");
         assert_eq!(fold("intersect<Item, Named>", &known), "Item & Named");

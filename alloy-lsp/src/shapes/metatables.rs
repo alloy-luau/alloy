@@ -12,8 +12,13 @@ use super::strings::{balanced_len, group_len, type_len};
 /// prints as the table alone: the metatable adds nothing a reader
 /// can use.
 pub(crate) fn fold_empty_metatables(text: &mut String) {
-    // An earlier fold may have closed the two spaces of the empty half.
-    for head in ["{ @metatable {  },", "{ @metatable { },"] {
+    // An earlier fold may have closed the two spaces of the empty half,
+    // or emptied a half the child printed over two lines.
+    for head in [
+        "{ @metatable {  },",
+        "{ @metatable { },",
+        "{ @metatable {},",
+    ] {
         while let Some(i) = text.find(head) {
             let Some(len) = group_len(&text[i..], '{', '}') else {
                 break;

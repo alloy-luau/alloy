@@ -1443,6 +1443,10 @@ fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
                 ClassMember::Field { .. } => Vec::new(),
             })
             .collect(),
+
+        // A namespace renders its members itself, one at a time, so the
+        // stitch never reaches them.
+        Stmt::Namespace(_) => Vec::new(),
     }
 }
 

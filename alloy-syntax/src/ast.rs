@@ -120,6 +120,8 @@ pub enum Stmt {
     Attribute(AttributeDecl),
     /// `macro name(params) ... end`.
     Macro(MacroDecl),
+    /// `namespace Name as members end`.
+    Namespace(NamespaceDecl),
     /// `delete expr`, which is `expr:Destroy()`.
     Delete {
         expr: Expr,
@@ -161,6 +163,7 @@ impl Stmt {
             Stmt::TypeAlias(t) => Some(t.name),
             Stmt::Remote(r) => Some(r.name),
             Stmt::Macro(m) => Some(m.name),
+            Stmt::Namespace(n) => Some(n.name),
 
             _ => None,
         }
@@ -199,6 +202,8 @@ impl Stmt {
             Stmt::Attribute(n) => n.span,
 
             Stmt::Macro(n) => n.span,
+
+            Stmt::Namespace(n) => n.span,
 
             Stmt::Local(n) => n.span,
 
@@ -349,6 +354,43 @@ pub struct MacroDecl {
     /// A trailing expression after the statements.
     pub tail: Option<Expr>,
     pub span: TokSpan,
+}
+
+/// `namespace Name as members end`: one name over a group of
+/// declarations. Members bind on the namespace table, not in the file.
+#[derive(Debug)]
+pub struct NamespaceDecl {
+    pub attributes: Vec<Attr>,
+    pub exported: bool,
+    /// `global namespace N as ... end`; every file reaches the name.
+    pub global: bool,
+    pub name: TokSpan,
+    pub members: Vec<NamespaceMember>,
+    pub span: TokSpan,
+}
+
+/// One declaration inside a namespace, with the visibility word that
+/// sits before it.
+#[derive(Debug)]
+pub struct NamespaceMember {
+    /// `private` or `public`; a member is public without one.
+    pub visibility: Option<TokSpan>,
+    pub stmt: Stmt,
+    pub span: TokSpan,
+}
+
+impl NamespaceMember {
+    /// Whether the member is visible outside the namespace.
+    pub fn is_private(&self, src: &str, toks: &[crate::lexer::Tok]) -> bool {
+        let Some(v) = self.visibility else {
+            return false;
+        };
+        let Some(tok) = toks.get(v.start as usize) else {
+            return false;
+        };
+
+        &src[tok.start as usize..tok.end as usize] == "private"
+    }
 }
 
 /// `import * as M from "p"`, `import M from "p"`, `import { a, type T,

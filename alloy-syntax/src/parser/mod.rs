@@ -584,6 +584,7 @@ pub fn is_alloy_reserved(word: &str) -> bool {
             | "remote"
             | "macro"
             | "attribute"
+            | "namespace"
             | "match"
             | "const"
             | "async"

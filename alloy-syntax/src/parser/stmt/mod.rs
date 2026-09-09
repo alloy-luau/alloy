@@ -6,6 +6,7 @@ mod declarations;
 mod enum_impl;
 mod imports;
 mod matching;
+mod namespaces;
 mod patterns;
 mod structs;
 
@@ -139,6 +140,7 @@ impl<'a> Parser<'a> {
                 self.text(),
                 "struct" | "trait" | "interface" | "remote" | "attribute" | "macro"
             ) && self.name_at(1))
+            || (self.at("namespace") && self.namespace_follows())
             || (self.at("export")
                 && matches!(self.text_at(1), "local" | "const" | "function" | "type"))
             || (self.at("global") && self.global_follows())
@@ -265,115 +267,13 @@ impl<'a> Parser<'a> {
 
             "@" => {
                 let attrs = self.attrs()?;
-                let attributes: Vec<TokSpan> = attrs.iter().map(|a| a.span).collect();
 
                 // A definitions file decorates declarations the same way.
                 if self.options.definitions && self.at("declare") {
                     return self.declare_stmt(start);
                 }
 
-                // `@attr global function f()` reads the way
-                // `@attr export function f()` does. A global exports too.
-                let is_global = self.at("global") && self.global_follows();
-                let exported = is_global || self.at("export");
-
-                if exported {
-                    self.bump();
-                }
-
-                // Declarations that take attributes.
-                let marked = |stmt: Stmt| match is_global {
-                    true => mark_global(stmt),
-
-                    false => stmt,
-                };
-
-                match self.text() {
-                    "struct" if self.name_at(1) => {
-                        return self.struct_decl(start, attrs, exported).map(marked);
-                    }
-
-                    "enum" if self.name_at(1) => {
-                        let mut stmt = self.enum_decl(start, exported)?;
-
-                        if let Stmt::Enum(e) = &mut stmt {
-                            e.attributes = attrs;
-                        }
-
-                        return Ok(marked(stmt));
-                    }
-
-                    "trait" if self.name_at(1) => {
-                        return self.trait_decl(start, attrs, exported).map(marked);
-                    }
-
-                    "remote" if self.name_at(1) || self.text_at(1) == "function" => {
-                        return self.remote_decl(start, attrs, exported).map(marked);
-                    }
-
-                    "impl" if self.name_at(1) => {
-                        return self.impl_decl(start, exported).map(marked);
-                    }
-
-                    _ => {}
-                }
-
-                let is_async = if self.at("async") && self.text_at(1) == "function" {
-                    Some(TokSpan::new(self.bump(), self.pos))
-                } else {
-                    None
-                };
-
-                let mut stmt = if self.at("local") || self.at("const") {
-                    let is_const = self.at("const");
-                    self.bump();
-
-                    let is_async = if self.at("async") && self.text_at(1) == "function" {
-                        Some(TokSpan::new(self.bump(), self.pos))
-                    } else {
-                        is_async
-                    };
-
-                    if self.at("function") {
-                        let mut s = self.local_function(start, attributes, is_const)?;
-
-                        if let Stmt::LocalFunction(f) = &mut s {
-                            f.body.is_async = is_async;
-                            f.attrs = attrs;
-                        }
-
-                        s
-                    } else {
-                        // `@attr local x = 1`: attributes on a local.
-                        self.pos -= 1;
-                        let mut s = self.local_stmt(start)?;
-
-                        if let Stmt::Local(l) = &mut s {
-                            l.attrs = attrs;
-                        }
-
-                        s
-                    }
-                } else {
-                    let mut s = self.function_stmt(start, attributes)?;
-
-                    if let Stmt::Function(f) = &mut s {
-                        f.body.is_async = is_async;
-                        f.attrs = attrs;
-                    }
-
-                    s
-                };
-
-                if exported {
-                    stmt = mark_exported(stmt);
-                }
-
-                if is_global {
-                    stmt = mark_global(stmt);
-                }
-
-                Ok(stmt)
+                self.attributed_stmt(start, attrs)
             }
 
             "struct"
@@ -402,6 +302,10 @@ impl<'a> Parser<'a> {
             }
 
             "macro" if self.name_at(1) && self.text_at(2) == "(" => self.macro_decl(start, false),
+
+            "namespace" if self.namespace_follows() => {
+                self.namespace_decl(start, Vec::new(), false)
+            }
 
             /*
             `global` is contextual, like `export`. It opens a declaration
@@ -488,6 +392,11 @@ impl<'a> Parser<'a> {
                 self.macro_decl(start, true)
             }
 
+            "export" if self.text_at(1) == "namespace" && self.name_at(2) => {
+                self.bump();
+                self.namespace_decl(start, Vec::new(), true)
+            }
+
             "export" if self.text_at(1) == "impl" && self.name_at(2) => {
                 self.bump();
                 self.impl_decl(start, true)
@@ -562,6 +471,124 @@ impl<'a> Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// A declaration under `@attr` lines, from the `@` at `start`. The
+    /// namespace member loop reads the attributes itself, so the two
+    /// callers share one dispatch.
+    pub(super) fn attributed_stmt(
+        &mut self,
+        start: usize,
+        attrs: Vec<Attr>,
+    ) -> Result<Stmt, ParseError> {
+        let attributes: Vec<TokSpan> = attrs.iter().map(|a| a.span).collect();
+
+        // `@attr global function f()` reads the way
+        // `@attr export function f()` does. A global exports too.
+        let is_global = self.at("global") && self.global_follows();
+        let exported = is_global || self.at("export");
+
+        if exported {
+            self.bump();
+        }
+
+        // Declarations that take attributes.
+        let marked = |stmt: Stmt| match is_global {
+            true => mark_global(stmt),
+
+            false => stmt,
+        };
+
+        match self.text() {
+            "struct" if self.name_at(1) => {
+                return self.struct_decl(start, attrs, exported).map(marked);
+            }
+
+            "enum" if self.name_at(1) => {
+                let mut stmt = self.enum_decl(start, exported)?;
+
+                if let Stmt::Enum(e) = &mut stmt {
+                    e.attributes = attrs;
+                }
+
+                return Ok(marked(stmt));
+            }
+
+            "trait" if self.name_at(1) => {
+                return self.trait_decl(start, attrs, exported).map(marked);
+            }
+
+            "remote" if self.name_at(1) || self.text_at(1) == "function" => {
+                return self.remote_decl(start, attrs, exported).map(marked);
+            }
+
+            "impl" if self.name_at(1) => {
+                return self.impl_decl(start, exported).map(marked);
+            }
+
+            "namespace" if self.namespace_follows() => {
+                return self.namespace_decl(start, attrs, exported).map(marked);
+            }
+
+            _ => {}
+        }
+
+        let is_async = if self.at("async") && self.text_at(1) == "function" {
+            Some(TokSpan::new(self.bump(), self.pos))
+        } else {
+            None
+        };
+
+        let mut stmt = if self.at("local") || self.at("const") {
+            let is_const = self.at("const");
+            self.bump();
+
+            let is_async = if self.at("async") && self.text_at(1) == "function" {
+                Some(TokSpan::new(self.bump(), self.pos))
+            } else {
+                is_async
+            };
+
+            if self.at("function") {
+                let mut s = self.local_function(start, attributes, is_const)?;
+
+                if let Stmt::LocalFunction(f) = &mut s {
+                    f.body.is_async = is_async;
+                    f.attrs = attrs;
+                }
+
+                s
+            } else {
+                // `@attr local x = 1`: attributes on a local.
+                self.pos -= 1;
+                let mut s = self.local_stmt(start)?;
+
+                if let Stmt::Local(l) = &mut s {
+                    l.attrs = attrs;
+                }
+
+                s
+            }
+        } else {
+            let mut s = self.function_stmt(start, attributes)?;
+
+            if let Stmt::Function(f) = &mut s {
+                f.body.is_async = is_async;
+                f.attrs = attrs;
+            }
+
+            s
+        };
+
+        if exported {
+            stmt = mark_exported(stmt);
+        }
+
+        if is_global {
+            stmt = mark_global(stmt);
+        }
+
+        Ok(stmt)
+    }
+
     /// Whether a declaration follows `global`, so the word is the
     /// modifier and not a name.
     pub(super) fn global_follows(&self) -> bool {
@@ -584,12 +611,6 @@ impl<'a> Parser<'a> {
     fn global_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
         if self.text_at(1) == "export" {
             return Err(self.err("`global` already reaches every file; drop `export`"));
-        }
-
-        // The namespace RFC is not compiled yet; the modifier parses so
-        // the message names the feature and not the word before it.
-        if self.text_at(1) == "namespace" {
-            return Err(self.err("`namespace` is not implemented yet"));
         }
 
         // `type` reads its own keyword, the way `export type` does.
@@ -615,6 +636,8 @@ impl<'a> Parser<'a> {
             "class" | "open" => self.class_stmt(start, true)?,
 
             "macro" => self.macro_decl(start, true)?,
+
+            "namespace" => self.namespace_decl(start, Vec::new(), true)?,
 
             "attribute" => self.attribute_decl(start, true)?,
 
@@ -718,6 +741,12 @@ fn mark_global(stmt: Stmt) -> Stmt {
             n.global = true;
 
             Stmt::Attribute(n)
+        }
+
+        Stmt::Namespace(mut n) => {
+            n.global = true;
+
+            Stmt::Namespace(n)
         }
 
         other => other,

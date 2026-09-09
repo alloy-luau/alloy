@@ -820,10 +820,69 @@ fn global_reaches_the_compile_time_declarations() {
     round_trip("global remote function Ask(id: number) -> number from server\n");
 }
 
-/// The two modifiers do not stack, and `namespace` says it is not ready.
+/// The two modifiers do not stack.
 #[test]
 fn global_rejects_the_forms_it_has_no_meaning_for() {
     rejects("export global function f()\nend\n");
     rejects("global export function f()\nend\n");
-    rejects("global namespace Math as\nend\n");
+}
+
+/// `namespace Name as ... end`: one name over a group of declarations.
+#[test]
+fn namespace_declarations_parse() {
+    round_trip("namespace Math as\nend\n");
+    round_trip("namespace Math as\n    const PI = 3.14\nend\n");
+    round_trip("namespace Math as\n    function clamp(x: number)\n    end\nend\n");
+    round_trip("namespace Math as\n    async function load()\n    end\nend\n");
+    round_trip("namespace Math as\n    struct Vec2 as\n        x: number\n    end\nend\n");
+    round_trip("namespace Math as\n    enum State as\n        Idle\n    end\nend\n");
+    round_trip(
+        "namespace Math as\n    trait Show as\n        function show(self): string\n    end\nend\n",
+    );
+    round_trip("namespace Math as\n    interface Named as\n        name: string\n    end\nend\n");
+    round_trip("namespace Math as\n    type Id = number\nend\n");
+    round_trip("namespace Math as\n    remote Hit(id: number) from client\nend\n");
+    round_trip("namespace Math as\n    attribute tag(name: string) on struct\nend\n");
+    round_trip("namespace Math as\n    macro twice(x)\n        x + x\n    end\nend\n");
+    round_trip(
+        "struct Vec2 as\n    x: number\nend\nnamespace Math as\n    impl Vec2 as\n        function len(self): number\n            return self.x\n        end\n    end\nend\n",
+    );
+    round_trip("export namespace Math as\n    const PI = 3.14\nend\n");
+    round_trip("global namespace Math as\n    const PI = 3.14\nend\n");
+}
+
+/// A member takes `public` or `private`, and the attributes sit above.
+#[test]
+fn namespace_members_take_visibility_and_attributes() {
+    round_trip("namespace Math as\n    private const E = 2.7\n    public const PI = 3.14\nend\n");
+    round_trip("namespace Math as\n    private function helper()\n    end\nend\n");
+    round_trip("namespace Math as\n    @deprecated\n    public function old()\n    end\nend\n");
+    round_trip("@deprecated(\"use Geometry\")\nnamespace Math as\nend\n");
+}
+
+/// Namespaces nest, and the inner one is a member of the outer.
+#[test]
+fn namespaces_nest() {
+    round_trip("namespace Outer as\n    namespace Inner as\n        const X = 1\n    end\nend\n");
+    round_trip("namespace Outer as\n    private namespace Inner as\n    end\nend\n");
+}
+
+/// `namespace` stays contextual before anything but `Name as`, and it
+/// is a reserved word for a binding.
+#[test]
+fn namespace_is_contextual_and_reserved() {
+    round_trip("local t = { namespace = 1 }\nprint(t.namespace)\n");
+    rejects("namespace Math as\n");
+
+    // A binding by the name reports the way `struct` and `enum` do.
+    let src = "local namespace = 1\n";
+    let lexed = alloy_syntax::lexer::lex(src).unwrap();
+    let (_, diagnostics) =
+        alloy_syntax::parser::parse_lenient(src, &lexed.toks, Default::default());
+    assert_eq!(diagnostics.len(), 1);
+    assert!(
+        diagnostics[0].message.contains("reserved word"),
+        "{}",
+        diagnostics[0].message
+    );
 }

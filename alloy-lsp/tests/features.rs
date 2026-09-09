@@ -1983,6 +1983,81 @@ fn a_guarded_index_answers_through_the_markup_lowering() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A `.alx` that never brings the factory into scope, so the markup
+/// cannot lower. Everything but the tags is ordinary Alloy.
+const MARKUP_WITHOUT_A_FACTORY: &str = "\
+struct Part as
+    Name: string,
+end
+
+local function App()
+    local parts: { Part }? = nil
+    local first = parts?[1]
+    print(first)
+    return <Frame Size={12}>
+        <TextLabel Text=\"hi\" />
+    </Frame>
+end
+
+return App
+";
+
+/// The markup used to leave the child the author's tags, which it reads
+/// as nothing: one tag it could not lower silenced the whole file. The
+/// regions blank to the width they had, so the code around them
+/// answers and the one markup error still reports on the tag.
+#[test]
+fn a_markup_file_that_cannot_lower_still_answers_around_its_tags() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-nofactory-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("panel.alx");
+    std::fs::write(&file, MARKUP_WITHOUT_A_FACTORY).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau-jsx", "version": 1,
+                "text": MARKUP_WITHOUT_A_FACTORY } } }),
+    );
+
+    // The tag is the one thing the file gets told about, and it is told
+    // once: the artifact behind the blanks is no one's text, so nothing
+    // the child says about it stands.
+    let reports = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("not in scope")));
+    assert_eq!(reports.len(), 1, "{reports:?}");
+
+    // A local reads its type, and the guarded index still answers.
+    let h = s.hover(&uri, 5, 11);
+    assert!(h.contains("{ Part }?"), "the binding: {h}");
+    let h = s.hover(&uri, 6, 11);
+    assert!(h.contains("Part?"), "the guarded index: {h}");
+
+    // A plain line lists the scope, the file's own names included.
+    let labels = s.completion_labels(&uri, 7, 15);
+    for name in ["first", "parts", "App", "print"] {
+        assert!(labels.iter().any(|l| l == name), "{name}: {}", labels.len());
+    }
+
+    // Inside a blanked region there is nothing to answer with. The tag
+    // itself still reads from the markup, which needs no lowering.
+    assert!(
+        s.completion_items(&uri, 8, 24).is_empty(),
+        "the hole of a blanked tag"
+    );
+    let h = s.hover(&uri, 8, 13);
+    assert!(h.contains("Roblox class `Frame`"), "the tag: {h}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One inlay hint's label, whether the child sent it whole or in parts.
 fn hint_text(hint: &Value) -> String {
     match &hint["label"] {

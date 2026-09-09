@@ -533,6 +533,24 @@ impl Server {
                     return true;
                 }
 
+                // The markup could not lower, so the artifact holds
+                // spaces where the tag stood. There is nothing behind
+                // the caret to answer with, and the position past the
+                // blank would answer about someone else's code.
+                if matches!(m, "textDocument/hover" | "textDocument/completion")
+                    && let Some(id) = message.get("id").cloned()
+                    && self.stands_in_blanked_markup(&uri, &message)
+                {
+                    let empty = match m {
+                        "textDocument/completion" => json!([]),
+
+                        _ => Value::Null,
+                    };
+                    self.respond(&id, empty);
+
+                    return true;
+                }
+
                 // `mo?[k]` and `mo![k]`: the bracket the author wrote
                 // has no position of its own, so the caret on it maps
                 // to the bracket the lowering wrote, where the child

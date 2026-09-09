@@ -319,6 +319,22 @@ impl Server {
         true
     }
 
+    /// Whether the caret sits in markup the shadow blanked, which
+    /// happens when the markup could not lower.
+    pub(crate) fn stands_in_blanked_markup(&self, uri: &str, message: &Value) -> bool {
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+        let st = self.state.lock().expect("state");
+
+        st.docs.get(uri).is_some_and(|doc| {
+            offset_of(&doc.source, line, character).is_some_and(|at| doc.in_blanked_markup(at))
+        })
+    }
+
     /// Answers a hover or completion inside `.alx` markup. Returns false
     /// when the cursor is not on markup, so the child answers.
     pub(crate) fn markup_answer(

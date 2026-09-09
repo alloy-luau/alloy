@@ -853,6 +853,25 @@ fn hole_range(src: &str, open: usize, close: usize, expression: &str) -> Option<
     (src.get(start..end)? == expression && !expression.is_empty()).then_some((start, end))
 }
 
+/// The byte ranges of the markup, and the source with every one of
+/// them blanked: `nil` and then spaces to the width the region had,
+/// with every newline kept. The text is Alloy the parser reads, and
+/// every byte outside a region keeps the offset it had, so a position
+/// still maps.
+///
+/// The editor compiles this when the markup cannot lower, so the code
+/// around a tag still answers. `None` when the markup does not parse,
+/// which leaves no region to blank.
+pub fn blank_markup(src: &str) -> Option<(Vec<(usize, usize)>, String)> {
+    let spans = luaux::compile::markup_spans(src).ok()?;
+
+    (!spans.is_empty()).then(|| {
+        let text = luaux::resolve::blank_luaux_regions(src, &spans);
+
+        (spans, text)
+    })
+}
+
 /// The names the file binds, by a token scan of the blanked source.
 ///
 /// luaux collects bindings with full_moon, which does not read Alloy
@@ -1234,6 +1253,25 @@ return Panel\n";
             assert!(compiled.output[out..].starts_with(needle), "{needle}");
             assert_eq!(map.to_source(out as u32), at, "{needle}");
         }
+    }
+
+    /// The blanked copy is Alloy the parser reads, keeps the width and
+    /// the lines of the source, and leaves everything outside the
+    /// markup where it was.
+    #[test]
+    fn blanking_the_markup_keeps_the_width_and_the_lines() {
+        let src = "local x = 1\nlocal e = <Frame Size={x}>\n    <Label />\n</Frame>\nreturn e\n";
+        let (spans, text) = blank_markup(src).expect("one region");
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(text.len(), src.len());
+        assert_eq!(text.matches('\n').count(), src.matches('\n').count());
+        assert!(text.starts_with("local x = 1\nlocal e = nil"), "{text}");
+        assert!(text.ends_with("\nreturn e\n"), "{text}");
+        assert!(!text.contains('<'), "{text}");
+
+        // A file with no markup has nothing to blank.
+        assert!(blank_markup("local x = 1\n").is_none());
     }
 
     #[test]

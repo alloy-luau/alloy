@@ -81,6 +81,10 @@ pub struct Doc {
     /// The names a `.d.aly` declares. A `global` of the same name is a
     /// clash the compile must hear about.
     pub ambient: Vec<String>,
+    /// For a `.alx` whose markup could not lower: the byte ranges the
+    /// shadow blanked. The artifact holds no text of the author's
+    /// there, so nothing answers inside one.
+    pub blanked: Vec<(usize, usize)>,
 }
 
 /// The source with the operators Luau has no reading for blanked, each
@@ -254,6 +258,7 @@ impl Doc {
             macros: Vec::new(),
             attributes: Vec::new(),
             ambient: Vec::new(),
+            blanked: Vec::new(),
         };
         doc.compile(options, jsx, ingots);
 
@@ -328,6 +333,47 @@ impl Doc {
             })
         };
 
+        // A `.alx` whose markup cannot lower, because the factory is
+        // not in scope or a tag names nothing, hands the child the
+        // author's tags. The child reads none of it, so one bad tag
+        // silences the whole file. Blanking every region to the width
+        // it had leaves Alloy the parser reads, and every byte outside
+        // a region keeps its offset, so the code around the markup
+        // answers and each position still maps.
+        let blanked = |source: &str| -> Option<(Vec<(usize, usize)>, Repair)> {
+            let (spans, text) = alloy::alx::blank_markup(source)?;
+            let compile = |text: &str| {
+                alloy::compile_file(&options.file_name, text, options, Some(jsx), ingots).ok()
+            };
+
+            // A dangling operator stops the parser here as anywhere
+            // else. The blanking keeps every offset, so the spots it
+            // reports are the author's own.
+            if let Some((filled, spots)) = repaired_source(&text)
+                && let Some(out) = compile(&filled)
+                && out.parsed_clean
+            {
+                return Some((
+                    spans,
+                    Repair {
+                        source: filled,
+                        output: out,
+                        spots,
+                    },
+                ));
+            }
+
+            Some((
+                spans,
+                Repair {
+                    output: compile(&text)?,
+                    source: text,
+                    spots: Vec::new(),
+                },
+            ))
+        };
+        self.blanked = Vec::new();
+
         match compiled {
             Ok(out) => {
                 self.repair = (!out.parsed_clean).then(|| repair(&self.source)).flatten();
@@ -342,6 +388,15 @@ impl Doc {
 
             Err(e) => {
                 self.repair = repair(&self.source);
+
+                if self.repair.is_none()
+                    && self.is_alx
+                    && let Some((spans, blank)) = blanked(&self.source)
+                {
+                    self.blanked = spans;
+                    self.repair = Some(blank);
+                }
+
                 self.shadow = match &self.repair {
                     Some(r) => r.output.check.clone(),
 
@@ -507,6 +562,14 @@ impl Doc {
     pub fn generated_offset(&self, offset: usize) -> bool {
         self.mapping()
             .is_some_and(|out| out.map.is_generated(offset as u32))
+    }
+
+    /// Whether a source byte sits in markup the shadow blanked. The
+    /// artifact holds nothing of the author's there.
+    pub fn in_blanked_markup(&self, offset: usize) -> bool {
+        self.blanked
+            .iter()
+            .any(|(start, end)| (*start..*end).contains(&offset))
     }
 
     /// Applies one LSP content change.
@@ -757,6 +820,46 @@ mod tests {
             None,
         );
         assert!(doc.repair.is_none());
+    }
+
+    /// A `.alx` whose markup cannot lower: the factory is not in scope.
+    /// The shadow used to be the author's markup, which the child reads
+    /// as nothing. It is now the file with the tags blanked, so the
+    /// code around them still compiles and maps.
+    #[test]
+    fn markup_that_cannot_lower_blanks_and_the_rest_compiles() {
+        let src = "local x = 1\nlocal e = <Frame Size={x}>\n</Frame>\nreturn e\n";
+        let options = EmitOptions {
+            file_name: "/w/p.alx".to_string(),
+            ..EmitOptions::default()
+        };
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        );
+
+        // The one error the file gets is the markup's own.
+        let error = doc.error.as_ref().expect("the markup error");
+        assert!(error.message.contains("not in scope"), "{}", error.message);
+        assert_eq!(doc.blanked.len(), 1);
+
+        // The lines around the tag are the author's, byte for byte, and
+        // the tag itself is gone.
+        assert!(doc.shadow.starts_with("local x = 1\n"), "{}", doc.shadow);
+        assert!(doc.shadow.contains("return e"), "{}", doc.shadow);
+        assert!(!doc.shadow.contains('<'), "{}", doc.shadow);
+
+        // `x` on the first line still maps both ways.
+        assert_eq!(doc.to_shadow(0, 6), (0, 6));
+        assert_eq!(doc.to_source(0, 6), (0, 6));
+
+        // Inside the tag there is nothing of the author's.
+        let at = src.find("<Frame").expect("the tag") + 2;
+        assert!(doc.in_blanked_markup(at));
+        assert!(!doc.in_blanked_markup(6));
     }
 
     #[test]

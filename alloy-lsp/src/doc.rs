@@ -5,8 +5,21 @@
 //! columns count UTF-16 units; the span map counts bytes.
 
 use alloy::{EmitOptions, Output};
+use alloy_syntax::lexer::TokKind;
 
 use crate::imports::Export;
+
+/// The compile of a repaired copy of the source. The child reads it in
+/// place of the artifact the author's own text makes, which stops at a
+/// syntax error and answers nothing past it.
+pub struct Repair {
+    /// The source with a placeholder after every dangling operator.
+    pub source: String,
+    pub output: Output,
+    /// Where each placeholder went: the byte offset in the author's
+    /// text and the length of the text the pass added there.
+    pub spots: Vec<(usize, usize)>,
+}
 
 pub struct Doc {
     pub source: String,
@@ -44,6 +57,11 @@ pub struct Doc {
     /// sees the Alloy source, which it cannot read.
     pub error: Option<alloy::CompileError>,
     pub is_alx: bool,
+    /// The repair pass's compile, when a dangling `.`, `:`, `?.` or
+    /// `!.` stopped the parser. `shadow` and every position map come
+    /// from it while it stands; `output` stays the author's own
+    /// compile, so the diagnostics still name what they always did.
+    pub repair: Option<Repair>,
     /// The `global` declarations of this file. The workspace's set is
     /// every document's, and it says what each file reaches for free.
     pub globals: Vec<alloy::globals::Global>,
@@ -54,6 +72,66 @@ pub struct Doc {
 /// `a .b`, which the child completes as the member access it is.
 fn plain_enough(source: &str) -> String {
     source.replace("?.", " .").replace("!.", " .")
+}
+
+/// The name the repair pass writes after a dangling member operator.
+/// The call keeps the statement a call, the one expression Luau reads
+/// as a statement, so `HashMap.new().` repairs in every position.
+const HOLE: &str = "__alloy_hole()";
+
+/// The byte offsets where a member operator ends a line and nothing
+/// follows it: `a.`, `a:`, `a?.`, `a!.`. The parser wants a name there.
+fn dangling_members(source: &str) -> Vec<usize> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(source) else {
+        return Vec::new();
+    };
+    let mut spots = Vec::new();
+
+    for (i, tok) in lexed.toks.iter().enumerate() {
+        let opens = match tok.kind {
+            TokKind::Dot | TokKind::Colon => true,
+
+            TokKind::Symbol => matches!(tok.text(source), "?." | "!."),
+
+            _ => false,
+        };
+
+        if !opens {
+            continue;
+        }
+
+        let end = tok.end as usize;
+
+        match lexed.toks.get(i + 1) {
+            Some(next) => {
+                if source[end..next.start as usize].contains('\n') {
+                    spots.push(end);
+                }
+            }
+
+            None => spots.push(end),
+        }
+    }
+
+    spots
+}
+
+/// The source with a placeholder after every dangling member operator,
+/// and where each one went. `None` when the source has none.
+fn repaired_source(source: &str) -> Option<(String, Vec<(usize, usize)>)> {
+    let spots = dangling_members(source);
+
+    if spots.is_empty() {
+        return None;
+    }
+
+    let mut text = source.to_string();
+
+    for at in spots.iter().rev() {
+        text.insert_str(*at, HOLE);
+    }
+
+    Some((text, spots.into_iter().map(|at| (at, HOLE.len())).collect()))
 }
 
 impl Doc {
@@ -81,6 +159,7 @@ impl Doc {
             import_sources: Vec::new(),
             error: None,
             is_alx: options.file_name.ends_with(".alx"),
+            repair: None,
             globals: Vec::new(),
         };
         doc.compile(options, jsx, ingots);
@@ -124,26 +203,150 @@ impl Doc {
         let compiled =
             alloy::compile_file(&options.file_name, &self.source, options, Some(jsx), ingots);
 
+        // A dangling `a.`, `a:`, `a?.` or `a!.` stops the parser. The
+        // artifact then breaks off at the operator, and the child has
+        // no answer for the caret sitting on it. A copy with a
+        // placeholder name after the operator parses, so the caret
+        // still reaches the member list of what stands before it.
+        let repair = |source: &str| -> Option<Repair> {
+            let (text, spots) = repaired_source(source)?;
+            let out =
+                alloy::compile_file(&options.file_name, &text, options, Some(jsx), ingots).ok()?;
+
+            out.parsed_clean.then_some(Repair {
+                source: text,
+                output: out,
+                spots,
+            })
+        };
+
         match compiled {
             Ok(out) => {
-                self.shadow = out.check.clone();
+                self.repair = (!out.parsed_clean).then(|| repair(&self.source)).flatten();
+                self.shadow = match &self.repair {
+                    Some(r) => r.output.check.clone(),
+
+                    None => out.check.clone(),
+                };
                 self.output = Some(out);
                 self.error = None;
             }
 
             Err(e) => {
-                self.shadow = plain_enough(&self.source);
+                self.repair = repair(&self.source);
+                self.shadow = match &self.repair {
+                    Some(r) => r.output.check.clone(),
+
+                    None => plain_enough(&self.source),
+                };
                 self.output = None;
                 self.error = Some(e);
             }
         }
     }
 
-    /// A source position as a shadow position.
-    pub fn to_shadow(&self, line: u32, character: u32) -> (u32, u32) {
-        let Some(out) = &self.output else {
+    /// The text the shadow came from: the repair pass's copy, or the
+    /// source.
+    fn compiled(&self) -> &str {
+        match &self.repair {
+            Some(r) => &r.source,
+
+            None => &self.source,
+        }
+    }
+
+    /// The compile the shadow and every position map belong to.
+    pub fn mapping(&self) -> Option<&Output> {
+        match &self.repair {
+            Some(r) => Some(&r.output),
+
+            None => self.output.as_ref(),
+        }
+    }
+
+    fn spots(&self) -> &[(usize, usize)] {
+        match &self.repair {
+            Some(r) => &r.spots,
+
+            None => &[],
+        }
+    }
+
+    /// A source byte offset in the text the compile read.
+    fn repaired_offset(&self, offset: usize) -> usize {
+        offset
+            + self
+                .spots()
+                .iter()
+                .filter(|(at, _)| *at < offset)
+                .map(|(_, len)| len)
+                .sum::<usize>()
+    }
+
+    /// A byte offset of the compiled text back in the source. A byte
+    /// inside a placeholder maps to the operator the placeholder
+    /// follows, so the author never sees text no one wrote.
+    fn out_of_repair(&self, offset: usize) -> usize {
+        let mut shift = 0usize;
+
+        for (at, len) in self.spots() {
+            let start = at + shift;
+
+            if offset < start {
+                break;
+            }
+
+            if offset < start + len {
+                return *at;
+            }
+
+            shift += len;
+        }
+
+        offset - shift
+    }
+
+    /// A source position in the text the compile read.
+    fn repaired_position(&self, line: u32, character: u32) -> (u32, u32) {
+        if self.repair.is_none() {
+            return (line, character);
+        }
+
+        let Some(offset) = offset_of(&self.source, line, character) else {
             return (line, character);
         };
+
+        position_of(self.compiled(), self.repaired_offset(offset))
+    }
+
+    /// A position of the compiled text back in the source.
+    fn out_of_repair_position(&self, line: u32, character: u32) -> (u32, u32) {
+        if self.repair.is_none() {
+            return (line, character);
+        }
+
+        let Some(offset) = offset_of(self.compiled(), line, character) else {
+            return (line, character);
+        };
+
+        position_of(&self.source, self.out_of_repair(offset))
+    }
+
+    /// Whether a source byte was copied into the shadow.
+    pub fn maps_to_shadow(&self, offset: usize) -> bool {
+        self.mapping().is_some_and(|out| {
+            out.map
+                .to_output(self.repaired_offset(offset) as u32)
+                .is_some()
+        })
+    }
+
+    /// A source position as a shadow position.
+    pub fn to_shadow(&self, line: u32, character: u32) -> (u32, u32) {
+        let Some(out) = self.mapping() else {
+            return (line, character);
+        };
+        let (line, character) = self.repaired_position(line, character);
 
         // For `.alx`, the map speaks lowered positions: same line, the
         // column through the word under it. An ingot's edit sits between
@@ -152,8 +355,8 @@ impl Doc {
             Some(low) => {
                 let (layered, line, character) = match (&out.layer, &out.layered) {
                     (Some(layer), Some(layered)) => {
-                        let at = offset_of(&self.source, line, character).unwrap_or(0);
-                        let (ls, le) = line_bounds(&self.source, at);
+                        let at = offset_of(self.compiled(), line, character).unwrap_or(0);
+                        let (ls, le) = line_bounds(self.compiled(), at);
                         let mapped = (at..=le)
                             .find_map(|o| layer.to_output(o as u32))
                             .or_else(|| (ls..at).rev().find_map(|o| layer.to_output(o as u32)))
@@ -163,7 +366,7 @@ impl Doc {
                         (layered.as_str(), l, c)
                     }
 
-                    _ => (self.source.as_str(), line, character),
+                    _ => (self.compiled(), line, character),
                 };
                 let from = line_text(layered, line);
                 let to = line_text(low, line);
@@ -172,7 +375,7 @@ impl Doc {
                 (low.as_str(), line, col)
             }
 
-            None => (self.source.as_str(), line, character),
+            None => (self.compiled(), line, character),
         };
 
         let Some(offset) = offset_of(text, line, character) else {
@@ -196,7 +399,7 @@ impl Doc {
     /// A shadow position as a source position. Generated text maps to
     /// the construct that produced it.
     pub fn to_source(&self, line: u32, character: u32) -> (u32, u32) {
-        let Some(out) = &self.output else {
+        let Some(out) = self.mapping() else {
             return (line, character);
         };
 
@@ -218,18 +421,27 @@ impl Doc {
                         let at = offset_of(layered, line, col).unwrap_or(0);
                         let original = layer.to_source(at as u32) as usize;
 
-                        position_of(&self.source, original.min(self.source.len()))
+                        let text = self.compiled();
+                        let (line, col) = position_of(text, original.min(text.len()));
+
+                        self.out_of_repair_position(line, col)
                     }
 
                     _ => {
-                        let to = line_text(&self.source, line);
+                        let to = line_text(self.compiled(), line);
+                        let col = alloy::alx::map_column(from, to, col as usize) as u32;
 
-                        (line, alloy::alx::map_column(from, to, col as usize) as u32)
+                        self.out_of_repair_position(line, col)
                     }
                 }
             }
 
-            None => position_of(&self.source, src.min(self.source.len())),
+            None => {
+                let text = self.compiled();
+                let (line, col) = position_of(text, src.min(text.len()));
+
+                self.out_of_repair_position(line, col)
+            }
         }
     }
 
@@ -245,7 +457,7 @@ impl Doc {
 
     /// The same, for a shadow byte offset.
     pub fn generated_offset(&self, offset: usize) -> bool {
-        let Some(out) = &self.output else {
+        let Some(out) = self.mapping() else {
             return false;
         };
 
@@ -272,7 +484,7 @@ impl Doc {
     /// lowering wrote, `create("Frame")` for `<Frame`, has a quote where
     /// the source has `<`; a call the author wrote reads the same.
     pub fn lowering_differs_before(&self, offset: usize) -> bool {
-        let Some(out) = &self.output else {
+        let Some(out) = self.mapping() else {
             return false;
         };
         let Some(low) = &out.lowered else {
@@ -281,7 +493,7 @@ impl Doc {
         let src = out.map.to_source(offset as u32) as usize;
         let (line, col) = position_of(low, src.min(low.len()));
         let from = line_text(low, line);
-        let to = line_text(&self.source, line);
+        let to = line_text(self.compiled(), line);
         let mapped = alloy::alx::map_column(from, to, col as usize);
         let before_low = from[..(col as usize).min(from.len())].chars().next_back();
         let before_src = to[..mapped.min(to.len())].chars().next_back();
@@ -395,6 +607,84 @@ mod tests {
         let text = "😀x";
         assert_eq!(offset_of(text, 0, 2), Some(4));
         assert_eq!(position_of(text, 4), (0, 2));
+    }
+
+    /// `HashMap.new().` with `end` after it: the parser wants a name,
+    /// the artifact stops there, and the child answered nothing. The
+    /// repair pass writes a placeholder, so the caret still sits on a
+    /// member of the call's result.
+    #[test]
+    fn a_dangling_member_operator_keeps_the_artifact() {
+        for op in [".", ":", "?.", "!."] {
+            let src = format!("local function go()\n    HashMap.new(){op}\nend\n");
+            let doc = Doc::new(
+                src.clone(),
+                1,
+                &EmitOptions::default(),
+                &alloy::luaux::Config::default(),
+                None,
+            );
+            let repair = doc.repair.as_ref().unwrap_or_else(|| panic!("{op}"));
+            assert!(repair.source.contains(&format!("HashMap.new(){op}{HOLE}")));
+            assert_eq!(repair.spots.len(), 1);
+
+            // The caret is past the operator. It maps to a shadow
+            // position, which is what the child needs to answer, and
+            // that position maps back to the caret.
+            let column = 17 + op.len() as u32;
+            let shadow = doc.to_shadow(1, column);
+            assert_ne!(shadow, (1, column), "{op}");
+            assert_eq!(doc.to_source(shadow.0, shadow.1), (1, column), "{op}");
+        }
+    }
+
+    /// The compiler still reports the syntax error: the repair is for
+    /// the child alone, so `output` stays the author's own compile.
+    #[test]
+    fn a_repair_leaves_the_diagnostics_alone() {
+        let src = "local m = HashMap.new()\nm.\nlocal rest = 1\n";
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        assert!(doc.repair.is_some());
+        let out = doc.output.as_ref().expect("output");
+        assert!(!out.parsed_clean);
+        assert!(
+            out.diagnostics
+                .iter()
+                .any(|d| d.message.contains("expected a name")),
+            "{:?}",
+            out.diagnostics
+        );
+    }
+
+    /// A source with no dangling operator compiles the way it always
+    /// did, and every position maps as before.
+    #[test]
+    fn a_clean_source_needs_no_repair() {
+        let src = "local m = HashMap.new()\nprint(m)\n";
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        assert!(doc.repair.is_none());
+        assert!(dangling_members(src).is_empty());
+    }
+
+    /// A `.` inside a string, a comment, or a number is no operator.
+    #[test]
+    fn the_repair_reads_tokens_not_text() {
+        assert!(dangling_members("local s = \"a.\"\nprint(s)\n").is_empty());
+        assert!(dangling_members("-- a.\nlocal x = 1\n").is_empty());
+        assert!(dangling_members("local x = 1.\nprint(x)\n").is_empty());
+        assert_eq!(dangling_members("local m = a\nm.\n"), vec![14]);
     }
 
     #[test]

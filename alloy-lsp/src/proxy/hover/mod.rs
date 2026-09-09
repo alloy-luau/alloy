@@ -194,16 +194,16 @@ impl Server {
             return false;
         };
 
-        let Some(out) = &doc.output else {
+        if doc.mapping().is_none() {
             return false;
-        };
+        }
 
         let Some(offset) = offset_of(&doc.source, line, character) else {
             return false;
         };
 
         // A copied byte has a shadow position; the child answers there.
-        if out.map.to_output(offset as u32).is_some() {
+        if doc.maps_to_shadow(offset) {
             return false;
         }
 

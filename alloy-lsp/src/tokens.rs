@@ -8,7 +8,7 @@
 use crate::doc::{Doc, offset_of};
 
 pub fn remap(data: &[u64], doc: &Doc) -> Vec<u64> {
-    let Some(out) = &doc.output else {
+    let Some(out) = doc.mapping() else {
         return data.to_vec();
     };
 

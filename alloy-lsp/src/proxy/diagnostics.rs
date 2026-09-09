@@ -637,8 +637,10 @@ pub(crate) fn keep_diagnostic(
 
     // The child reads the Alloy source when the compile stopped, and
     // reads none of it: every line draws a syntax error or an unknown
-    // global. The compile error alone says what is wrong.
-    if doc.output.is_none() {
+    // global. The compile error alone says what is wrong. A repaired
+    // artifact reads, but it holds a placeholder the author never
+    // wrote, so its reports name nothing to fix either.
+    if doc.output.is_none() || doc.repair.is_some() {
         return false;
     }
 

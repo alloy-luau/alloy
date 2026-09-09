@@ -226,11 +226,22 @@ impl<'s> Desugar<'s> {
                 variant_attrs.join(", ")
             ));
         }
+        // An enum with no variant has no type to write: `type E = `
+        // is not Luau, so the artifact says `never` and the report
+        // names what the body wants.
+        if e.variants.is_empty() {
+            self.diagnose(e.name, "an `enum` needs at least one variant");
+        }
+
+        let union = match types.is_empty() {
+            true => "never".to_string(),
+
+            false => types.join(" | "),
+        };
         self.generate(
             end_tok.start,
             &format!(
-                "function {name}.is(v) return {test} end{printer} {export}type {name} = {}",
-                types.join(" | ")
+                "function {name}.is(v) return {test} end{printer} {export}type {name} = {union}"
             ),
         );
 
@@ -1599,6 +1610,20 @@ impl<'s> Desugar<'s> {
 
 #[cfg(test)]
 mod tests {
+    /// `enum E as end` wrote `type E = `, which is not Luau. The body
+    /// wants a variant, and the report says so.
+    #[test]
+    fn an_empty_enum_reports_and_still_types() {
+        let out = crate::compile("enum Empty as end\nprint(Empty)\n").unwrap();
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert!(
+            messages.contains(&"an `enum` needs at least one variant"),
+            "{messages:?}"
+        );
+        assert!(out.check.contains("type Empty = never"), "{}", out.check);
+    }
+
     use crate::EmitOptions;
 
     fn messages(src: &str) -> Vec<String> {

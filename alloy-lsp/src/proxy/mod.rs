@@ -2249,6 +2249,51 @@ mod tests {
         assert!(!text.contains("|---|"), "no table is left");
     }
 
+    /// Every ambient std name reaches an expression, and a package
+    /// module that carries one of those names arrives as an auto-import,
+    /// which is another row: `Signal` in `packages/` left the std
+    /// `Signal` out of the list.
+    #[test]
+    pub(crate) fn an_auto_import_does_not_hide_a_std_name() {
+        let src = "local x = \n";
+        let (st, uri) = one_file(src);
+        let child = json!([
+            { "label": "print", "kind": 3 },
+            {
+                "label": "Signal",
+                "kind": 9,
+                "detail": "Auto-import",
+                "additionalTextEdits": [{ "newText": "local Signal = require(script.Signal)\n" }],
+            },
+        ]);
+        let items = st.std_completions(uri, 0, 10, &child);
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        for name in alloy::desugar::AMBIENT {
+            assert!(labels.contains(name), "`{name}` is missing: {labels:?}");
+        }
+
+        // A name the child already answered stays the child's.
+        let child = json!([{ "label": "Signal", "kind": 7 }]);
+        let items = st.std_completions(uri, 0, 10, &child);
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        assert!(!labels.contains(&"Signal"), "{labels:?}");
+    }
+
+    /// A type slot lists the std types, the type-only ones included.
+    #[test]
+    pub(crate) fn a_type_slot_lists_every_ambient_std_type() {
+        let src = "local t: \n";
+        let (st, uri) = one_file(src);
+        let items = st.std_completions(uri, 0, 9, &json!([{ "label": "string" }]));
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        for name in alloy::desugar::AMBIENT_TYPES {
+            assert!(labels.contains(name), "`{name}` is missing: {labels:?}");
+        }
+    }
+
     /// The child's member list gains the std's doc and signature.
     #[test]
     pub(crate) fn a_std_member_completion_carries_its_doc() {

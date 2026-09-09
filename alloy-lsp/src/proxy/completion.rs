@@ -442,11 +442,24 @@ impl State {
             && !raw_head.trim_end().ends_with("::")
             && !context::ternary_else(line_head);
 
-        let labels: Vec<&str> = result
+        let answer = result
             .get("items")
             .and_then(Value::as_array)
-            .or_else(|| result.as_array())
-            .map(|items| items.iter().filter_map(|i| i["label"].as_str()).collect())
+            .or_else(|| result.as_array());
+        let answered = answer.is_some_and(|items| !items.is_empty());
+        // An auto-import offers a name the file does not hold yet, so it
+        // names no binding the caret can write. A package module called
+        // `Signal` would otherwise hide the std `Signal`, and the child's
+        // row for it drops later, which left the name in no list at all.
+        // The clean pass drops the auto-import once the std name is here.
+        let labels: Vec<&str> = answer
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|i| !is_auto_import(i))
+                    .filter_map(|i| i["label"].as_str())
+                    .collect()
+            })
             .unwrap_or_default();
 
         if type_slot {
@@ -465,7 +478,7 @@ impl State {
 
         // A position the child answers with nothing takes nothing: the
         // std names and the keywords belong where a name can begin.
-        if labels.is_empty() {
+        if !answered {
             return Vec::new();
         }
 
@@ -710,28 +723,15 @@ impl State {
             }
         }
 
-        for name in [
-            "Future",
-            "Result",
-            "Array",
-            "HashMap",
-            "Set",
-            "Signal",
-            "SignalConnection",
-            "Signalish",
-            "Partial",
-            "Readonly",
-            "Sink",
-            "Queue",
-            "Heap",
-            "Scope",
-            "Iter",
-        ] {
+        // The list the parser marks as ambient in a type slot, so the
+        // two stay in step.
+        for name in alloy::desugar::AMBIENT_TYPES {
             push(
                 name,
                 7,
                 "alloy:std",
-                keywords::doc(name).map(str::to_string),
+                alloy::docs::type_markdown(name)
+                    .or_else(|| keywords::doc(name).map(str::to_string)),
             );
         }
 

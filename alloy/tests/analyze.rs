@@ -369,6 +369,72 @@ fn an_exporting_module_returns_one_value_to_require() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A module that ends in `return <expr>` has no export table, so the
+/// analyzer must read the returned value where an import binds it: a
+/// bare name, `* as`, and a name in braces all reach the same table.
+#[test]
+fn a_returning_module_types_through_its_value() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let defs = root.join("tools/types/globalTypes.d.luau");
+
+    if !defs.is_file() {
+        eprintln!("skipped: no definitions at {}", defs.display());
+
+        return;
+    }
+
+    let dir = std::env::temp_dir().join("alloy-analyze-returning");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
+    std::fs::write(
+        dir.join("alloy.luau"),
+        std::fs::read_to_string(root.join("std/alloy.luau")).unwrap(),
+    )
+    .unwrap();
+
+    let module = "local Palette = { dark = \"#111111\" }\n\nfunction Palette.tint(hex: string): string\n    return hex\nend\n\nreturn Palette\n";
+    std::fs::write(dir.join("palette.aly"), module).unwrap();
+
+    let main = "import Palette from \"./palette\"\nimport * as All from \"./palette\"\nimport { tint } from \"./palette\"\n\nlocal a: string = Palette.tint(All.dark)\nlocal b: string = tint(\"#222222\")\nprint(a, b)\n";
+
+    for (name, src) in [("palette", module), ("main", main)] {
+        let options = EmitOptions {
+            check: true,
+            file_name: format!("{name}.aly"),
+            std_require: "./alloy".to_string(),
+            plain_modules: alloy::modules::plain_modules(src, &dir.join("main.aly"), &[]),
+            ..EmitOptions::default()
+        };
+        let out = alloy::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{name}: {:?}", out.diagnostics);
+        std::fs::write(dir.join(format!("{name}.luau")), &out.check).unwrap();
+    }
+
+    let run = Command::new("luau-lsp")
+        .arg("analyze")
+        .arg("--flag:LuauSolverV2=true")
+        .arg(format!("--definitions={}", defs.display()))
+        .arg(dir.join("main.luau"))
+        .output();
+
+    let Ok(run) = run else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+
+    let text =
+        String::from_utf8_lossy(&run.stdout).into_owned() + &String::from_utf8_lossy(&run.stderr);
+    let bad: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("TypeError") || l.contains("SyntaxError"))
+        .collect();
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The globals of a project, through the analyzer. The build writes the
 /// require and the binding on the first line of each file that names
 /// one; `luau-lsp analyze` reads the emitted tree and must find every

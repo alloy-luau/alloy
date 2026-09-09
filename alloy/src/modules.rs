@@ -693,10 +693,10 @@ fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
     (from, aliases)
 }
 
-/// The specs of a source that name a module Alloy does not compile: a
-/// `.luau` or `.lua` file, or a data file. Such a module has no export
-/// table, so `import X from` binds the value it returns, not its
-/// `default` field.
+/// The specs of a source whose module has no export table: a `.luau`
+/// or `.lua` file, a data file, and an Alloy module that ends in
+/// `return <expr>`. Such a module returns one value, so `import X from`
+/// binds that value, not a `default` field of it.
 pub fn plain_modules(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
@@ -706,8 +706,11 @@ pub fn plain_modules(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -
         }
 
         let plain = crate::data::Format::of(&spec).is_some()
-            || resolve(&spec, from, aliases)
-                .is_some_and(|p| !p.extension().is_some_and(|e| e == "aly" || e == "alx"));
+            || resolve(&spec, from, aliases).is_some_and(|p| match is_alloy(&p) {
+                true => std::fs::read_to_string(&p).is_ok_and(|t| returns_value(&t)),
+
+                false => true,
+            });
 
         if plain {
             out.push(spec);
@@ -715,6 +718,11 @@ pub fn plain_modules(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -
     }
 
     out
+}
+
+/// Whether a path names a file the Alloy compiler reads.
+fn is_alloy(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "aly" || e == "alx")
 }
 
 /// The plain modules a file imports, under the nearest `alloy.toml`.
@@ -842,6 +850,229 @@ pub fn exports_default(source: &str) -> bool {
         .any(|s| matches!(s, Stmt::ExportDefault { .. }))
 }
 
+/// Whether a module ends its top-level statements in `return <expr>`.
+/// Luau reads that value as the module, and Alloy reads it the same
+/// way: the returned value is the module's default export.
+pub fn returns_value(source: &str) -> bool {
+    use alloy_syntax::ast::Stmt;
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+        return false;
+    };
+
+    matches!(
+        parsed.chunk.block.stmts.last(),
+        Some(Stmt::Return(r)) if !r.values.is_empty()
+    )
+}
+
+/// Whether a module returns a value and exports names too. The two
+/// rules each name one value for the module, so the build reports it.
+pub fn returns_and_exports(source: &str) -> bool {
+    returns_value(source) && exports_values(source)
+}
+
+/// Whether a module puts a value in its export table. `export type`
+/// and `export interface` name types alone, and a module of those
+/// still returns its own value.
+pub fn exports_values(source: &str) -> bool {
+    use alloy_syntax::ast::Stmt;
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+        return false;
+    };
+
+    parsed.chunk.block.stmts.iter().any(|stmt| match stmt {
+        Stmt::Struct(d) => d.exported,
+        Stmt::Enum(d) => d.exported,
+        Stmt::Trait(d) => d.exported,
+        Stmt::Class(d) => d.exported,
+        Stmt::Remote(d) => d.exported,
+        Stmt::Macro(d) => d.exported,
+        Stmt::Attribute(d) => d.exported,
+        Stmt::Function(d) => d.exported,
+        Stmt::LocalFunction(d) => d.exported,
+        Stmt::Local(d) => d.exported,
+        Stmt::Namespace(d) => d.exported,
+        Stmt::ExportDefault { .. } => true,
+        Stmt::ExportList(list) => !list.type_only && list.specs.iter().any(|sp| !sp.is_type),
+
+        _ => false,
+    })
+}
+
+/// The keys of the value a module returns, when the compiler can read
+/// them: a table literal with named keys, a local the file fills in by
+/// name, or a struct the file declares. `None` when the value's keys
+/// are out of reach, and an `import { }` of that module is left alone.
+pub fn returned_keys(source: &str) -> Option<Vec<String>> {
+    use alloy_syntax::ast::{Expr, Stmt};
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let parsed = alloy_syntax::parse_lenient(source, options).ok()?;
+    let toks = &parsed.lexed.toks;
+    let stmts = &parsed.chunk.block.stmts;
+    let text = |span: alloy_syntax::ast::TokSpan| -> String {
+        let a = toks[span.start as usize].start as usize;
+        let b = toks[(span.end as usize)
+            .saturating_sub(1)
+            .max(span.start as usize)]
+        .end as usize;
+
+        source[a..b].to_string()
+    };
+
+    let Some(Stmt::Return(r)) = stmts.last() else {
+        return None;
+    };
+
+    if r.values.len() != 1 {
+        return None;
+    }
+
+    match &r.values[0] {
+        Expr::Table { fields, .. } => table_keys(fields, toks, source),
+
+        // `local M = { }` with `M.f` filled in below it, the shape a
+        // Luau module is written in.
+        Expr::Name(n) => {
+            let name = text(*n);
+            let mut keys: Option<Vec<String>> = None;
+
+            for stmt in stmts {
+                let Stmt::Local(l) = stmt else {
+                    continue;
+                };
+
+                if l.names.len() != 1 || text(l.names[0].name) != name {
+                    continue;
+                }
+
+                let Some(Expr::Table { fields, .. }) = l.values.first() else {
+                    return None;
+                };
+
+                keys = Some(table_keys(fields, toks, source)?);
+            }
+
+            let mut keys = keys?;
+            keys.extend(assigned_keys(source, &name));
+            keys.dedup();
+
+            Some(keys)
+        }
+
+        // `new Vec2 { ... }`: the struct the file declares says which
+        // fields the value carries.
+        Expr::New { name, .. } => {
+            let head = match name.as_ref() {
+                Expr::Name(n) => text(*n),
+
+                _ => return None,
+            };
+
+            crate::declarations::shapes(source)
+                .into_iter()
+                .find_map(|s| match s {
+                    crate::declarations::Shape::Struct { name, fields, .. } if name == head => {
+                        Some(fields.into_iter().map(|(f, _)| f).collect())
+                    }
+
+                    _ => None,
+                })
+        }
+
+        _ => None,
+    }
+}
+
+/// The named keys of a table literal. A spread copies keys the reader
+/// cannot see here, so a table with one is out of reach.
+fn table_keys(
+    fields: &[alloy_syntax::ast::TableField],
+    toks: &[alloy_syntax::lexer::Tok],
+    source: &str,
+) -> Option<Vec<String>> {
+    use alloy_syntax::ast::TableField;
+
+    let mut out = Vec::new();
+
+    for field in fields {
+        match field {
+            TableField::Named { name, .. } => {
+                let t = toks[name.start as usize];
+                out.push(source[t.start as usize..t.end as usize].to_string());
+            }
+
+            TableField::Spread(_) => return None,
+
+            _ => {}
+        }
+    }
+
+    Some(out)
+}
+
+/// The keys a file writes onto one name after it binds it:
+/// `M.f = ...`, `function M.f()`, and `function M:f()`.
+fn assigned_keys(source: &str, name: &str) -> Vec<String> {
+    use alloy_syntax::ast::Stmt;
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let word = |span: alloy_syntax::ast::TokSpan| -> String {
+        match toks.get(span.start as usize) {
+            Some(t) => source[t.start as usize..t.end as usize].to_string(),
+
+            None => String::new(),
+        }
+    };
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        match stmt {
+            Stmt::Function(f) if f.path.len() == 2 && word(f.path[0]) == name => {
+                out.push(word(f.path[1]));
+            }
+
+            Stmt::Assign(a) => {
+                for target in &a.targets {
+                    if let alloy_syntax::ast::Expr::Index {
+                        object,
+                        key: alloy_syntax::ast::IndexKey::Field(k),
+                        ..
+                    } = target
+                        && matches!(object.as_ref(), alloy_syntax::ast::Expr::Name(n) if word(*n) == name)
+                    {
+                        out.push(word(*k));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    out
+}
+
 /// The message for `import X from "./m"` where `m` has no default. It
 /// names the export the author probably meant when one carries the
 /// binding's name.
@@ -884,6 +1115,40 @@ fn and_list(names: &[String]) -> String {
     }
 }
 
+/// What one module offers an import: the names it exports, whether it
+/// has a default, whether it returns a value instead of an export
+/// table, and the keys of that value when the compiler can read them.
+#[derive(Debug, Clone, Default)]
+struct Surface {
+    names: Vec<String>,
+    has_default: bool,
+    /// The module ends in `return <expr>` and exports no value.
+    returns: bool,
+    /// The module returns a value and exports names too, which is an
+    /// error: each rule names a different value for the module.
+    both: bool,
+    keys: Option<Vec<String>>,
+}
+
+impl Surface {
+    fn of(source: &str) -> Self {
+        let returns = returns_value(source);
+        let both = returns && exports_values(source);
+
+        Surface {
+            names: exported_names(source),
+            has_default: exports_default(source),
+            returns: returns && !both,
+            both,
+            keys: match returns && !both {
+                true => returned_keys(source),
+
+                false => None,
+            },
+        }
+    }
+}
+
 /// Every problem the imports of one source have: a module that names no
 /// file, a name the module does not export, and a name imported twice.
 /// `rel` is the source's path for the message, relative to the root.
@@ -914,7 +1179,7 @@ pub fn import_problems(
         &source[a as usize..b as usize]
     };
     let mut out = Vec::new();
-    let mut exports: HashMap<PathBuf, (Vec<String>, bool)> = HashMap::new();
+    let mut exports: HashMap<PathBuf, Surface> = HashMap::new();
     // Every name the file binds through an import. A type and a value
     // live in their own namespace, so `import * as M` and `import
     // { type M }` from the same module both bind and neither is a
@@ -1063,21 +1328,48 @@ pub fn import_problems(
         let type_only = matches!(&node.kind, ImportKind::TypeOnly(_));
         // A plain Luau module returns a table; its keys are not
         // declarations, so only an Alloy module's names are checked.
-        let alloy_module = target
-            .as_ref()
-            .is_some_and(|t| t.extension().is_some_and(|e| e == "aly" || e == "alx"));
-        let (names, has_default) = match &target {
+        let alloy_module = target.as_ref().is_some_and(|t| is_alloy(t));
+        let surface = match &target {
             Some(target) => exports
                 .entry(target.clone())
                 .or_insert_with(|| {
                     std::fs::read_to_string(target)
-                        .map(|t| (exported_names(&t), exports_default(&t)))
+                        .map(|t| Surface::of(&t))
                         .unwrap_or_default()
                 })
                 .clone(),
 
-            None => (Vec::new(), false),
+            None => Surface::default(),
         };
+        let Surface {
+            names,
+            has_default,
+            returns,
+            both,
+            keys,
+        } = surface;
+
+        // A module that returns a value names one value, and an
+        // `export` names another. The reader cannot tell which one an
+        // import binds, so the module has to pick.
+        if alloy_module && both {
+            out.push(ImportProblem {
+                start: path_start,
+                end: path_end,
+                kind: "ImportError",
+                message: format!("`{spec}` returns a value and exports names; use one"),
+            });
+
+            // Which value the import binds is the open question; every
+            // check below rests on the answer.
+            continue;
+        }
+
+        // The returned value is the module, the way a plain Luau module
+        // reads. A bare name binds it, and a name in braces reads a key
+        // of it when the compiler can see the keys.
+        let alloy_module = alloy_module && !returns;
+        let has_default = has_default || returns;
         // `import X from "./m"` reads the module's `export default`,
         // whatever `X` is called. A plain Luau or data module has no
         // export table, so its value is the default.
@@ -1147,6 +1439,14 @@ pub fn import_problems(
             // moves off the exported name.
             let (la, lb) = range(item.alias.unwrap_or(item.name));
 
+            // The module returns a table whose keys the compiler can
+            // read: a name in braces takes one key of it.
+            let missing_key = match (returns, &keys, type_only || item.is_type) {
+                (true, Some(keys), false) => !keys.contains(&name),
+
+                _ => false,
+            };
+
             if alloy_module && !names.contains(&name) {
                 out.push(ImportProblem {
                     start: a,
@@ -1155,6 +1455,16 @@ pub fn import_problems(
                     message: format!(
                         "\"{spec}\" does not export `{name}`; it exports {}",
                         and_list(&names)
+                    ),
+                });
+            } else if missing_key {
+                out.push(ImportProblem {
+                    start: a,
+                    end: b,
+                    kind: "ImportError",
+                    message: format!(
+                        "the module \"{spec}\" returns a table with no `{name}`; it has {}",
+                        and_list(keys.as_deref().unwrap_or_default())
                     ),
                 });
             } else {

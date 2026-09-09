@@ -31,6 +31,10 @@ fn every_case_matches_its_expected_output() {
         let options = alloy::EmitOptions {
             file_name: name,
             in_project,
+            // A module beside the case that returns a value has no
+            // export table, and the import forms read differently for
+            // one. The resolve runs against the cases directory.
+            plain_modules: alloy::modules::plain_modules(&src, &path, &[]),
             ..alloy::EmitOptions::default()
         };
         let out = alloy::compile_with(&src, &options).unwrap();

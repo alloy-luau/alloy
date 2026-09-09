@@ -303,3 +303,110 @@ fn an_import_under_code_draws_the_order_lint() {
     );
     assert!(!lints.iter().any(|l| l.name == "import_order"));
 }
+
+/// A module that ends in `return <expr>` and exports nothing has no
+/// export table. The returned value is the module: a bare name binds
+/// it, `* as` binds it, and a name in braces reads one key of it.
+#[test]
+fn a_returning_module_is_its_own_default() {
+    let dir = scratch("returning");
+    std::fs::write(
+        dir.join("palette.aly"),
+        "local Palette = { dark = \"#111111\" }\n\nfunction Palette.tint(hex: string): string\n    return hex\nend\n\nreturn Palette\n",
+    )
+    .unwrap();
+    let source = "import Palette from \"./palette\"\nimport * as All from \"./palette\"\nimport { tint, dark } from \"./palette\"\nprint(Palette, All, tint, dark)\n";
+    let main = dir.join("main.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+    assert!(problems.is_empty(), "{messages:?}");
+    // The module reads the way a plain Luau module does, so the emit
+    // binds the value itself and reads no `default` field.
+    assert_eq!(
+        alloy::modules::plain_modules(source, &main, &[]),
+        vec!["./palette".to_string()]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The keys of a returned table the compiler can read: a literal, a
+/// local the file fills in by name, and a struct the file constructs.
+#[test]
+fn a_named_import_reads_the_returned_keys() {
+    let dir = scratch("returned-keys");
+    std::fs::write(dir.join("flat.aly"), "return { a = 1, b = 2 }\n").unwrap();
+    std::fs::write(
+        dir.join("shaped.aly"),
+        "struct Config as\n    speed: number\n    label: string\nend\n\nreturn new Config { speed = 1, label = \"a\" }\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        alloy::modules::returned_keys(&std::fs::read_to_string(dir.join("flat.aly")).unwrap()),
+        Some(vec!["a".to_string(), "b".to_string()])
+    );
+    assert_eq!(
+        alloy::modules::returned_keys(&std::fs::read_to_string(dir.join("shaped.aly")).unwrap()),
+        Some(vec!["speed".to_string(), "label".to_string()])
+    );
+
+    let source = "import { a, c } from \"./flat\"\nimport { speed, missing } from \"./shaped\"\nprint(a, c, speed, missing)\n";
+    let main = dir.join("main.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+
+    assert_eq!(problems.len(), 2, "{messages:?}");
+    assert_eq!(
+        problems[0].message,
+        "the module \"./flat\" returns a table with no `c`; it has `a` and `b`"
+    );
+    assert_eq!(
+        problems[1].message,
+        "the module \"./shaped\" returns a table with no `missing`; it has `speed` and `label`"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A module cannot name its value twice. `return` says one value and
+/// `export` says another, and no reader can tell which an import binds.
+#[test]
+fn a_module_returns_or_exports_but_not_both() {
+    let dir = scratch("returns-and-exports");
+    std::fs::write(
+        dir.join("mixed.aly"),
+        "export function one() end\n\nlocal M = { a = 1 }\n\nreturn M\n",
+    )
+    .unwrap();
+    // A module of types alone has no value to export, so its own
+    // `return` stands.
+    std::fs::write(
+        dir.join("typed.aly"),
+        "export type Id = number\n\nreturn { make = 1 }\n",
+    )
+    .unwrap();
+    let source = "import M from \"./mixed\"\nimport T from \"./typed\"\nprint(M, T)\n";
+    let main = dir.join("main.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+
+    assert_eq!(problems.len(), 1, "{messages:?}");
+    assert_eq!(
+        problems[0].message,
+        "`./mixed` returns a value and exports names; use one"
+    );
+    // The report sits on the path, which is what has to change.
+    assert_eq!(
+        &source[problems[0].start as usize..problems[0].end as usize],
+        "\"./mixed\""
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

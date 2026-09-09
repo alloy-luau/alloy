@@ -1,0 +1,8 @@
+-- The three import forms over a module that returns its value. A bare
+-- name binds the value, `* as` binds the same value, and a name in
+-- braces reads one key of it.
+import Palette from "./returning_module"
+import * as All from "./returning_module"
+import { tint } from "./returning_module"
+
+print(Palette, All, tint)

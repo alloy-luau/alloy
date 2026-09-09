@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use alloy_syntax::ast::{
-    Assign, Block, CallArgs, Cond, Destructure, Expr, FunctionBody, GenericFor, ImportKind,
+    After, Assign, Block, CallArgs, Cond, Destructure, Expr, FunctionBody, GenericFor, ImportKind,
     IndexKey, Local, Pattern, Stmt, TableField, TokSpan,
 };
 
@@ -12,6 +12,17 @@ use crate::render::Renderer;
 use super::expressions::WORD_OPS;
 use super::types::{apply_bounds, array_element, generic_bounds, generic_head, strip_bounds};
 use super::*;
+
+/// The mechanism a `destroy x after n` uses. The file's own text picks
+/// it; `Unknown` leaves the choice to the runtime.
+enum Timed {
+    /// Debris takes an Instance, so the removal outlives the script.
+    Instance,
+    /// A table with this method, `destroy` or `Destroy`, on a timer.
+    Method(&'static str),
+    /// Nothing in the file names the type.
+    Unknown,
+}
 
 /// Whether a block, or a nested block of it, returns a value. A function
 /// literal inside has its own returns and does not count.
@@ -750,6 +761,10 @@ impl<'s> Desugar<'s> {
 
                 self.generate(close, &tail);
             }
+
+            Stmt::Destroy { expr, delay, span } => self.destroy(*span, expr, delay.as_ref()),
+
+            Stmt::After(a) => self.after_block(a),
 
             // The modifier is Alloy's; Luau reads the rest. `export`
             // takes its place, and the alias keeps every other byte.
@@ -1736,6 +1751,256 @@ impl<'s> Desugar<'s> {
         i
     }
 
+    // --- destroy and after -------------------------------------------------
+
+    /// `destroy x` and `destroy x after n`.
+    ///
+    /// Without a delay the runtime calls the one method the value has.
+    /// With one the emit picks the mechanism from the type the file
+    /// shows: Debris for an Instance, a timer for a table, and the
+    /// runtime helper when the file says nothing.
+    pub(crate) fn destroy(&mut self, span: TokSpan, expr: &Expr, delay: Option<&Expr>) {
+        let start = self.byte_start(span);
+        let end = self.byte_end(span);
+        let std = self.std();
+
+        let Some(delay) = delay else {
+            self.generate(start, &format!("{std}.destroy("));
+            self.expr(expr);
+            self.generate(end, ")");
+
+            return;
+        };
+
+        match self.timed_kind(expr) {
+            // Debris outlives the script that scheduled the removal.
+            Timed::Instance => {
+                self.generate(start, "game:GetService(\"Debris\"):AddItem(");
+                self.expr(expr);
+                self.generate(self.byte_end(expr.span()), ", ");
+                self.expr(delay);
+                self.generate(end, ")");
+            }
+
+            // The seconds go in front of the target, so they render to
+            // text; the target keeps its place, and a hover on it lands.
+            Timed::Method(name) => {
+                let seconds = self.render_to_string(delay);
+                self.generate(start, &format!("task.delay({seconds}, function() "));
+                self.expr(expr);
+                self.generate(end, &format!(":{name}() end)"));
+            }
+
+            Timed::Unknown => {
+                self.generate(start, &format!("{std}.destroy_after("));
+                self.expr(expr);
+                self.generate(self.byte_end(expr.span()), ", ");
+                self.expr(delay);
+                self.generate(end, ")");
+            }
+        }
+    }
+
+    /// `after 3 do ... end`, with the `where` condition read when the
+    /// timer fires and not when it is set.
+    pub(crate) fn after_block(&mut self, a: &After) {
+        self.generate(self.byte_start(a.span), "task.delay(");
+        self.expr(&a.delay);
+        let do_tok = self.find_tok_after(a.delay.span().end, "do");
+        let do_end = self.toks[do_tok as usize].end;
+
+        match &a.filter {
+            Some(c) => {
+                let cond = self.render_to_string(c);
+                self.generate(do_end, &format!(", function() if {cond} then"));
+            }
+
+            None => self.generate(do_end, ", function()"),
+        }
+
+        self.scopes.push(HashSet::new());
+        let body_start = self.block_start_or(&a.block, do_end);
+        self.copy(do_end, body_start);
+        self.block(&a.block);
+        let body_end = self.block_end_or(&a.block, body_start);
+        self.scopes.pop();
+        let end_tok = self.toks[a.span.end as usize - 1];
+        self.copy(body_end, end_tok.start);
+
+        if a.filter.is_some() {
+            self.generate(end_tok.start, "end ");
+        }
+
+        self.copy(end_tok.start, end_tok.end);
+        self.generate(end_tok.end, ")");
+    }
+
+    /// The mechanism a timed `destroy` uses, from what the file says
+    /// about the operand's type.
+    fn timed_kind(&self, expr: &Expr) -> Timed {
+        if self.builds_an_instance(expr) {
+            return Timed::Instance;
+        }
+
+        let Expr::Name(n) = expr else {
+            return Timed::Unknown;
+        };
+        let name = self.text_of(*n);
+
+        if let Some(ty) = self.annotation_of(name) {
+            let base = ty.trim_end_matches('?');
+
+            if base == "Instance" || crate::roblox_classes::INSTANCE_CLASSES.contains(&base) {
+                return Timed::Instance;
+            }
+
+            if let Some(method) = self.destroy_method_of(base) {
+                return Timed::Method(method);
+            }
+        }
+
+        match self.init_constructor_of(name) {
+            Some(built) if built == "Instance" => Timed::Instance,
+
+            Some(built) => match self.destroy_method_of(&built) {
+                Some(method) => Timed::Method(method),
+
+                None => Timed::Unknown,
+            },
+
+            None => Timed::Unknown,
+        }
+    }
+
+    /// `Instance.new(...)` or `new Instance(...)`.
+    fn builds_an_instance(&self, expr: &Expr) -> bool {
+        match self.constructed_name(expr) {
+            Some(name) => name == "Instance",
+
+            None => false,
+        }
+    }
+
+    /// The name a constructor call builds: `new Part(...)` and
+    /// `Part.new(...)` both give `Part`.
+    fn constructed_name(&self, expr: &Expr) -> Option<String> {
+        if let Expr::New { name, .. } = expr {
+            return match &**name {
+                Expr::Name(n) => Some(self.text_of(*n).to_string()),
+
+                _ => None,
+            };
+        }
+
+        let Expr::Call { func, .. } = expr else {
+            return None;
+        };
+        let Expr::Index {
+            object,
+            key: IndexKey::Field(f),
+            ..
+        } = &**func
+        else {
+            return None;
+        };
+
+        match (&**object, self.text_of(*f)) {
+            (Expr::Name(n), "new") => Some(self.text_of(*n).to_string()),
+
+            _ => None,
+        }
+    }
+
+    /// The annotation on `local name: T`, `const name: T`, or a
+    /// parameter of that name. The first one the file writes answers.
+    fn annotation_of(&self, name: &str) -> Option<String> {
+        let text = |i: usize| self.toks.get(i).map(|t| t.text(self.src)).unwrap_or("");
+
+        for i in 1..self.toks.len() {
+            if text(i) != name || text(i + 1) != ":" {
+                continue;
+            }
+
+            if !matches!(text(i - 1), "local" | "const" | "(" | ",") {
+                continue;
+            }
+
+            let head = text(i + 2);
+
+            if head.is_empty() || !head.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+                return None;
+            }
+
+            return Some(match text(i + 3) == "?" {
+                true => format!("{head}?"),
+
+                false => head.to_string(),
+            });
+        }
+
+        None
+    }
+
+    /// The name a `local name = ...` constructs: `new Part(...)` and
+    /// `Part.new(...)` both give `Part`.
+    fn init_constructor_of(&self, name: &str) -> Option<String> {
+        let text = |i: usize| self.toks.get(i).map(|t| t.text(self.src)).unwrap_or("");
+
+        for i in 1..self.toks.len() {
+            if text(i) != name || text(i + 1) != "=" {
+                continue;
+            }
+
+            if !matches!(text(i - 1), "local" | "const") {
+                continue;
+            }
+
+            if text(i + 2) == "new" {
+                return Some(text(i + 3).to_string());
+            }
+
+            if text(i + 3) == "." && text(i + 4) == "new" {
+                return Some(text(i + 2).to_string());
+            }
+
+            return None;
+        }
+
+        None
+    }
+
+    /// The `destroy` or `Destroy` an `impl` of this name writes.
+    fn destroy_method_of(&self, name: &str) -> Option<&'static str> {
+        let text = |i: usize| self.toks.get(i).map(|t| t.text(self.src)).unwrap_or("");
+        let mut i = 0;
+
+        while i + 2 < self.toks.len() {
+            if text(i) != "impl" || text(i + 1) != name {
+                i += 1;
+
+                continue;
+            }
+
+            let mut j = i + 2;
+
+            while j < self.toks.len() && text(j) != "impl" && text(j) != "struct" {
+                if text(j) == "function" {
+                    match text(j + 1) {
+                        "destroy" => return Some("destroy"),
+                        "Destroy" => return Some("Destroy"),
+                        _ => {}
+                    }
+                }
+
+                j += 1;
+            }
+
+            i = j;
+        }
+
+        None
+    }
+
     // --- loops -------------------------------------------------------------
 
     /// `for a, { x } in t where c do`: a filter and destructured variables.
@@ -1849,6 +2114,103 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    /// The four shapes a `destroy` lowers to: the plain call, Debris for
+    /// an Instance, a timer for a value with the method, and the runtime
+    /// helper when the file says neither.
+    #[test]
+    fn destroy_picks_its_mechanism_from_the_file() {
+        let out = crate::compile("local part = Instance.new(\"Part\")\ndestroy part\n").unwrap();
+        assert!(out.ship.contains("__alloy.destroy(part)"), "{}", out.ship);
+
+        let out =
+            crate::compile("local part: Part = workspace.Box\ndestroy part after 3\n").unwrap();
+        assert!(
+            out.ship
+                .contains("game:GetService(\"Debris\"):AddItem(part, 3)"),
+            "{}",
+            out.ship
+        );
+
+        let src = "struct T as\n    n: number\nend\n\nimpl T as\n    function Destroy(self)\n        self.n = 0\n    end\nend\n\nlocal t = new T { n = 1 }\ndestroy t after 2\nprint(t)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship
+                .contains("task.delay(2, function() t:Destroy() end)"),
+            "{}",
+            out.ship
+        );
+
+        let out =
+            crate::compile("function drop(x)\n    destroy x after 4\nend\nprint(drop)\n").unwrap();
+        assert!(
+            out.ship.contains("__alloy.destroy_after(x, 4)"),
+            "{}",
+            out.ship
+        );
+    }
+
+    /// `destroy t.field` calls the method and leaves the slot alone;
+    /// `delete t.field` is the one that empties it.
+    #[test]
+    fn destroy_leaves_the_slot_it_read() {
+        let out = crate::compile("local t = { part = nil }\ndestroy t.part\nprint(t)\n").unwrap();
+        assert!(out.ship.contains("__alloy.destroy(t.part)"), "{}", out.ship);
+        assert!(!out.ship.contains("t.part = nil\n"), "{}", out.ship);
+    }
+
+    /// `after n do ... end` is a `task.delay` over the block, and the
+    /// `where` condition sits inside the function, so it reads when the
+    /// timer fires.
+    #[test]
+    fn after_wraps_its_block_in_a_timer() {
+        let src = "after 2 do\n    print(1)\nend\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship.contains("task.delay(2, function()"),
+            "{}",
+            out.ship
+        );
+        assert!(out.ship.trim_end().ends_with("end)"), "{}", out.ship);
+        assert_eq!(out.ship.lines().count(), src.lines().count());
+
+        let src = "local ready = false\nafter 0 where ready do\n    print(1)\nend\nprint(ready)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship.contains("task.delay(0, function() if ready then"),
+            "{}",
+            out.ship
+        );
+        assert!(out.ship.contains("end end)"), "{}", out.ship);
+        assert_eq!(out.ship.lines().count(), src.lines().count());
+    }
+
+    /// A client file lowers the block the same way; the timer is not a
+    /// server thing.
+    #[test]
+    fn after_lowers_in_a_client_file() {
+        let options = crate::EmitOptions {
+            file_name: "ui.client.aly".to_string(),
+            ..crate::EmitOptions::default()
+        };
+        let out = crate::compile_with("after 1 do\n    print(1)\nend\n", &options).unwrap();
+        assert!(
+            out.ship.contains("task.delay(1, function()"),
+            "{}",
+            out.ship
+        );
+    }
+
+    /// `after` is reserved, so a local of that name reports.
+    #[test]
+    fn after_is_a_reserved_word() {
+        let got = messages("local after = 1\nprint(after)\n");
+        assert!(
+            got.iter()
+                .any(|m| m == "`after` is a reserved word and cannot be a name"),
+            "{got:?}"
+        );
     }
 
     #[test]

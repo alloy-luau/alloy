@@ -1341,6 +1341,28 @@ pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
 
         Stmt::Call(e, _) | Stmt::Delete { expr: e, .. } => vec![Child::Expr(e)],
 
+        Stmt::Destroy { expr, delay, .. } => {
+            let mut v = vec![Child::Expr(expr)];
+
+            if let Some(d) = delay {
+                v.push(Child::Expr(d));
+            }
+
+            v
+        }
+
+        Stmt::After(a) => {
+            let mut v = vec![Child::Expr(&a.delay)];
+
+            if let Some(f) = &a.filter {
+                v.push(Child::Expr(f));
+            }
+
+            v.push(Child::Block(&a.block));
+
+            v
+        }
+
         Stmt::Do(d) => vec![Child::Block(&d.block)],
 
         Stmt::While(w) => {
@@ -1530,7 +1552,7 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
 
         Stmt::Local(l) if local_needs_rewrite(l) => return true,
 
-        Stmt::Delete { .. } => return true,
+        Stmt::Delete { .. } | Stmt::Destroy { .. } | Stmt::After(_) => return true,
 
         Stmt::Function(f) if function_needs_rewrite(&f.body) => return true,
 

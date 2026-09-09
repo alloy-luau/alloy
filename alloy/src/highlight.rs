@@ -71,6 +71,8 @@ const KEYWORDS: &[&str] = &[
     "try",
     "new",
     "delete",
+    "destroy",
+    "after",
     "import",
     "export",
     "global",

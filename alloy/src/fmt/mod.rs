@@ -554,6 +554,8 @@ fn is_keyword(text: &str) -> bool {
             | "with"
             | "new"
             | "delete"
+            | "destroy"
+            | "after"
             | "async"
             | "await"
             | "try"

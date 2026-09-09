@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn a_statement_after_a_return_gives_no_syntax_error() {
         let src =
-            "local function after(n: number): number\n    return n\n    n = 1\nend\nreturn after\n";
+            "local function later(n: number): number\n    return n\n    n = 1\nend\nreturn later\n";
         assert_eq!(messages(src), Vec::<String>::new());
         let out = compile(src).unwrap();
         assert!(out.ship.contains("do return n end"), "{}", out.ship);

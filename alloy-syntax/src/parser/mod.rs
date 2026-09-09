@@ -592,6 +592,8 @@ pub fn is_alloy_reserved(word: &str) -> bool {
             | "try"
             | "new"
             | "delete"
+            | "destroy"
+            | "after"
             | "import"
             | "export"
     )

@@ -1,0 +1,25 @@
+local armed = false
+
+async function schedule()
+    after 1 do
+        after 2 where armed do
+            print("deep")
+        end
+
+        print("shallow")
+    end
+
+    await Future.delay(1)
+end
+
+armed = true
+
+after 0 do
+    for i = 1, 3 do
+        if i == 2 then
+            return
+        end
+    end
+end
+
+print(schedule, armed)

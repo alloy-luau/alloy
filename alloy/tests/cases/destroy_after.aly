@@ -1,0 +1,42 @@
+struct Timer as
+    left: number
+end
+
+impl Timer as
+    function destroy(self)
+        self.left = 0
+    end
+end
+
+local part = Instance.new("Part")
+destroy part
+
+local timer = new Timer { left = 5 }
+destroy timer
+
+destroy part after 3
+destroy timer after 1.5
+
+function drop(x)
+    destroy x after 4
+end
+
+after 2 do
+    print("late")
+end
+
+local ready = false
+
+after 0 where ready do
+    print("gated")
+end
+
+after 1 do
+    if ready then
+        return
+    end
+
+    print("still here")
+end
+
+print(drop, part, timer)

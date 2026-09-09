@@ -127,6 +127,15 @@ pub enum Stmt {
         expr: Expr,
         span: TokSpan,
     },
+    /// `destroy expr` and `destroy expr after seconds`.
+    Destroy {
+        expr: Expr,
+        /// The seconds of `after`, when the statement carries one.
+        delay: Option<Expr>,
+        span: TokSpan,
+    },
+    /// `after seconds do ... end`, with an optional `where` filter.
+    After(After),
     /// Tokens the lenient parser could not read. The span tiles the block
     /// like any statement, so the printer still reproduces the source.
     Error(TokSpan),
@@ -177,6 +186,7 @@ impl Stmt {
             | Stmt::Error(s)
             | Stmt::Call(_, s)
             | Stmt::Delete { span: s, .. }
+            | Stmt::Destroy { span: s, .. }
             | Stmt::ExportDefault { span: s, .. } => *s,
 
             Stmt::Import(n) => n.span,
@@ -210,6 +220,8 @@ impl Stmt {
             Stmt::Assign(n) => n.span,
 
             Stmt::Do(n) => n.span,
+
+            Stmt::After(n) => n.span,
 
             Stmt::Class(n) => n.span,
 
@@ -706,6 +718,18 @@ pub struct NumericFor {
     pub start: Expr,
     pub limit: Expr,
     pub step: Option<Expr>,
+    pub block: Block,
+    pub span: TokSpan,
+}
+
+/// `after 3 do ... end`: a block a timer runs later.
+#[derive(Debug)]
+pub struct After {
+    /// The seconds to wait.
+    pub delay: Expr,
+    /// `after 3 where ready do`: the block runs only when the condition
+    /// holds at the moment the timer fires.
+    pub filter: Option<Expr>,
     pub block: Block,
     pub span: TokSpan,
 }

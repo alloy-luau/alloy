@@ -132,6 +132,8 @@ impl<'a> Parser<'a> {
             || (self.at("const") && self.name_at(1))
             || (self.at("async") && self.text_at(1) == "function")
             || (self.at("delete") && self.name_at(1))
+            || (self.at("destroy") && self.name_at(1))
+            || self.at("after")
             || (self.at("import") && self.import_follows())
             || (self.at("enum") && self.name_at(1) && self.text_at(2) == "as")
             || (self.at("impl") && self.name_at(1))
@@ -235,6 +237,53 @@ impl<'a> Parser<'a> {
                     expr,
                     span: TokSpan::new(start, self.pos),
                 })
+            }
+
+            // `destroy x` and `destroy x after n`. The operand rule is
+            // `delete`'s, so a string or a number gets the same message.
+            "destroy" if !self.newline_after(0) && self.delete_operand_at(1) => {
+                self.bump();
+                let expr = self.suffixed_expr()?;
+                let delay = match self.at("after") && self.infix_word_here() {
+                    true => {
+                        self.bump();
+
+                        Some(self.expr()?)
+                    }
+
+                    false => None,
+                };
+
+                Ok(Stmt::Destroy {
+                    expr,
+                    delay,
+                    span: TokSpan::new(start, self.pos),
+                })
+            }
+
+            // `after n do ... end`, with `where` between the two.
+            "after" => {
+                self.bump();
+                let delay = self.expr()?;
+                let filter = match self.at("where") && self.infix_word_here() {
+                    true => {
+                        self.bump();
+
+                        Some(self.expr()?)
+                    }
+
+                    false => None,
+                };
+                self.expect("do")?;
+                let block = self.block()?;
+                self.expect_end(start)?;
+
+                Ok(Stmt::After(After {
+                    delay,
+                    filter,
+                    block,
+                    span: TokSpan::new(start, self.pos),
+                }))
             }
 
             "local" | "const" => self.local_stmt(start),

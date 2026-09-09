@@ -100,6 +100,54 @@ const HOLE: &str = "__alloy_hole()";
 /// placeholder carries the `]`, so `x?[` and `x![` repair too.
 const BRACKET_HOLE: &str = "__alloy_hole()]";
 
+/// The source, or a copy the lexer reads when the source stops it: on
+/// each line, a quote that opens a string and never closes becomes a
+/// space. The copy has the length of the source, so every byte offset
+/// still means what it did.
+fn lexable(source: &str) -> std::borrow::Cow<'_, str> {
+    if alloy_syntax::lexer::lex(source).is_ok() {
+        return std::borrow::Cow::Borrowed(source);
+    }
+
+    let mut bytes = source.as_bytes().to_vec();
+    let mut from = 0usize;
+
+    while from < bytes.len() {
+        let end = bytes[from..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |n| from + n);
+        let mut open: Option<(u8, usize)> = None;
+        let mut i = from;
+
+        while i < end {
+            match (open, bytes[i]) {
+                (Some(_), b'\\') => i += 1,
+
+                (Some((q, _)), c) if c == q => open = None,
+
+                (None, c @ (b'"' | b'\'')) => open = Some((c, i)),
+
+                _ => {}
+            }
+
+            i += 1;
+        }
+
+        if let Some((_, at)) = open {
+            bytes[at] = b' ';
+        }
+
+        from = end + 1;
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(text) => std::borrow::Cow::Owned(text),
+
+        Err(_) => std::borrow::Cow::Borrowed(source),
+    }
+}
+
 /// The byte offsets where an access operator ends a line and nothing
 /// follows it: `a.`, `a:`, `a?.`, `a!.`, `a?:`, `a!:`, `a[`, `a?[`,
 /// `a![`. Each carries the text the repair writes there. The parser
@@ -203,14 +251,20 @@ impl Doc {
         jsx: &alloy::luaux::Config,
         ingots: Option<&alloy::ingot::Ingots>,
     ) {
-        self.exports = crate::imports::exports_of(&self.source, self.is_alx);
+        // Every fact below reads the tokens, not the parse. A string
+        // the author has just opened stops the lexer, so all of them
+        // would go empty on the keystroke after the quote; the blanked
+        // copy keeps them, and it has the length of the source, so
+        // every offset still means what it did.
+        let text = lexable(&self.source);
+        let text = text.as_ref();
+        self.exports = crate::imports::exports_of(text, self.is_alx);
         // The path here is the real one; the workspace fills the path a
         // message names when it gathers the set.
         let path = std::path::Path::new(&options.file_name);
-        self.globals =
-            alloy::globals::declared(&alloy::globals::index_text(path, &self.source), path);
-        self.decls = alloy::declarations::summaries(&self.source, options.definitions);
-        let own = [(path.to_path_buf(), self.source.clone())];
+        self.globals = alloy::globals::declared(&alloy::globals::index_text(path, text), path);
+        self.decls = alloy::declarations::summaries(text, options.definitions);
+        let own = [(path.to_path_buf(), text.to_string())];
         self.macros = alloy::globals::macro_sources(&own);
         self.attributes = alloy::globals::attribute_decls(&own);
         self.ambient = match options.definitions {
@@ -218,19 +272,15 @@ impl Doc {
 
             false => Vec::new(),
         };
-        self.namespaces = alloy::declarations::namespace_names(&self.source);
-        self.namespace_ranges = alloy::declarations::namespace_ranges(&self.source);
-        self.bindings = alloy::declarations::bindings(&self.source);
-        self.shapes = alloy::declarations::shapes(&self.source);
-        self.interfaces = crate::shapes::interfaces(&self.source);
-        self.import_shapes = alloy::modules::import_shapes_for_file(
-            std::path::Path::new(&options.file_name),
-            &self.source,
-        );
-        self.import_sources = alloy::modules::import_sources_for_file(
-            std::path::Path::new(&options.file_name),
-            &self.source,
-        );
+        self.namespaces = alloy::declarations::namespace_names(text);
+        self.namespace_ranges = alloy::declarations::namespace_ranges(text);
+        self.bindings = alloy::declarations::bindings(text);
+        self.shapes = alloy::declarations::shapes(text);
+        self.interfaces = crate::shapes::interfaces(text);
+        self.import_shapes =
+            alloy::modules::import_shapes_for_file(std::path::Path::new(&options.file_name), text);
+        self.import_sources =
+            alloy::modules::import_sources_for_file(std::path::Path::new(&options.file_name), text);
         self.import_interfaces = self
             .import_sources
             .iter()

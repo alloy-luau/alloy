@@ -629,6 +629,26 @@ impl State {
                 }
             }
 
+            // `profile["|`: the keys the receiver's type names, each
+            // written with its quotes. An open quote is part of what
+            // the item replaces, so the key never doubles it.
+            Context::IndexKey {
+                prefix,
+                receiver,
+                quote,
+            } => {
+                let from = offset - prefix.len() - quote.map_or(0, char::len_utf8);
+                let q = quote.unwrap_or('"');
+
+                for field in self.index_keys(uri, &doc.source, offset, receiver) {
+                    let label = format!("{q}{}{q}", field.name);
+                    let mut item = word(&label, 21, Some(format!("A key of `{receiver}`.")), from);
+                    item["detail"] = json!(field.ty);
+                    item["sortText"] = json!(format!("0{}", field.name));
+                    items.push(item);
+                }
+            }
+
             // `destroy part |`: the timer form of the statement.
             Context::DestroyAfter { prefix } => {
                 items.push(word(
@@ -1048,6 +1068,45 @@ impl State {
     /// The fields a struct or a record type declares, read from the
     /// declaration's hover. A private field stays out unless the caret
     /// sits in the impl of that same type.
+    /// The string keys the type of a receiver names: the fields of a
+    /// record or of a struct. An array, a `HashMap`, and a
+    /// `{ [string]: T }` name none, so the list stays empty and the
+    /// child answers with the scope, where the key is an expression.
+    pub(crate) fn index_keys(
+        &self,
+        uri: &str,
+        source: &str,
+        offset: usize,
+        receiver: &str,
+    ) -> Vec<context::Field> {
+        let mut parts = receiver.split('.');
+        let head = parts.next().unwrap_or(receiver);
+        let Some(mut ty) = self.value_type(source, offset, head) else {
+            return Vec::new();
+        };
+
+        for field in parts {
+            match self.field_type(uri, &ty, field) {
+                Some(t) => ty = t,
+
+                None => return Vec::new(),
+            }
+        }
+
+        let ty = ty.trim().trim_end_matches('?').trim();
+
+        match ty.starts_with('{') {
+            true => context::record_entries(ty),
+
+            false => {
+                let name = ty.split('<').next().unwrap_or(ty).trim();
+                let inside = context::impl_target(source, offset).as_deref() == Some(name);
+
+                self.struct_fields(uri, name, inside)
+            }
+        }
+    }
+
     pub(crate) fn struct_fields(&self, uri: &str, name: &str, inside: bool) -> Vec<context::Field> {
         self.decls_in_scope(uri)
             .into_iter()
@@ -1172,6 +1231,13 @@ impl Server {
         };
 
         let mut items = st.context_items(uri, offset, &ctx);
+
+        // A receiver whose type names no key takes any expression
+        // there, so the scope the child lists is the right answer.
+        if items.is_empty() && matches!(ctx, context::Context::IndexKey { .. }) {
+            return false;
+        }
+
         let (extra, incomplete) = st.ingot_items(uri, line, character, trigger);
         items.extend(extra);
         drop(st);

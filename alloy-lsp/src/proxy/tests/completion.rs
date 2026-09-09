@@ -954,3 +954,49 @@ pub(crate) fn an_index_before_a_guard_follows_the_branch() {
         .unwrap_or_else(|| panic!("{shadow_line}"));
     assert!(shadow_line[..at].ends_with('.'), "{shadow_line}");
 }
+
+/// `profile["|` and `profile[|`: the keys the receiver's type names,
+/// each written with its quotes. `map[|` on an index signature names
+/// none, so the scope the child lists stands.
+#[test]
+pub(crate) fn an_open_index_offers_the_keys_of_its_receiver() {
+    let head = concat!(
+        "type P = { name: string, coins: number }\n",
+        "local profile: P = { name = \"a\", coins = 1 }\n",
+        "local po: P? = nil\n",
+        "local map: { [string]: number } = {}\n",
+    );
+
+    for (line, want) in [
+        ("local v = profile[", vec!["\"name\"", "\"coins\""]),
+        ("local v = profile[\"", vec!["\"name\"", "\"coins\""]),
+        ("local v = profile[\"na", vec!["\"name\"", "\"coins\""]),
+        ("local v = po?[", vec!["\"name\"", "\"coins\""]),
+        ("local v = po![", vec!["\"name\"", "\"coins\""]),
+        ("local v = map[", vec![]),
+        ("local v = profile[i + ", vec![]),
+    ] {
+        let src = format!("{head}{line}\n");
+        let (st, uri) = one_file(&src);
+        let offset = src.len() - 1;
+        let items = match context::detect(&src, offset) {
+            Some(ctx) => st.context_items(uri, offset, &ctx),
+            None => Vec::new(),
+        };
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert_eq!(labels, want, "{line}");
+    }
+
+    // The item replaces the quote the author opened, so the key never
+    // carries two.
+    let src = format!("{head}local v = profile[\"na\n");
+    let (st, uri) = one_file(&src);
+    let offset = src.len() - 1;
+    let ctx = context::detect(&src, offset).expect("an index key");
+    let items = st.context_items(uri, offset, &ctx);
+    assert_eq!(items[0]["textEdit"]["newText"], "\"name\"");
+    assert_eq!(
+        items[0]["textEdit"]["range"]["start"]["character"],
+        json!("local v = profile[".len())
+    );
+}

@@ -665,6 +665,32 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            // `profile["|`: the keys the receiver's type names. An
+            // array and a `{ [string]: T }` name none, and the empty
+            // list there hands the position back to the analyzer.
+            Context::IndexKey { prefix, receiver, quote } => {
+                let from = offset - prefix.len() - quote.map_or(0, char::len_utf8);
+                let q = quote.unwrap_or('"');
+                let ty = match context::declared(source, offset, receiver) {
+                    Some(context::Declared::Annotation(t)) => t,
+
+                    _ => String::new(),
+                };
+                let ty = ty.trim().trim_end_matches('?').trim();
+                let body = match ty.starts_with('{') {
+                    true => Some(ty.to_string()),
+
+                    false => s.decls.iter().find(|d| d.name == ty).map(|d| d.hover.clone()),
+                };
+
+                for field in body.map(|h| context::record_entries(&h)).unwrap_or_default() {
+                    let label = format!("{q}{}{q}", field.name);
+                    let mut item = word(&label, "field", Some(format!("A key of `{receiver}`.")), from);
+                    item["detail"] = json!(field.ty);
+                    items.push(item);
+                }
+            }
+
             Context::ImportSpec { .. } | Context::Nothing => {}
         }
 

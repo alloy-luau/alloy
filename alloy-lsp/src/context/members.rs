@@ -148,6 +148,90 @@ fn shadow_base(base: &str) -> String {
     }
 }
 
+/// The receiver of an index that never closed, what the author typed
+/// inside it, and the quote that opened the key. `profile["na|`
+/// answers `("profile", "na", Some('"'))` and `parts![|` answers
+/// `("parts", "", None)`. `None` when no bracket stands open on the
+/// line, when a literal opened it, or when the key is already whole.
+pub fn index_key_at(src: &str, offset: usize) -> Option<(String, String, Option<char>)> {
+    let line_start = src[..offset.min(src.len())]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let head = src.get(line_start..offset)?;
+    let open = open_bracket(head)?;
+    let inside = head[open + 1..].trim_start();
+    let (typed, quote) = match inside.chars().next() {
+        Some(q @ ('"' | '\'')) => {
+            let rest = &inside[q.len_utf8()..];
+
+            // A closed string is a whole key already.
+            match rest.contains(q) {
+                true => return None,
+
+                false => (rest.to_string(), Some(q)),
+            }
+        }
+
+        None => (String::new(), None),
+
+        // A key the author is writing as an expression, `t[i + 1]`, is
+        // no string; only a bare word can still become one.
+        Some(_) => match inside.chars().all(is_word_byte) {
+            true => (inside.to_string(), None),
+
+            false => return None,
+        },
+    };
+    let before = &head[..open];
+    let before = before.strip_suffix(['?', '!']).unwrap_or(before);
+    let start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word_byte(*c) || *c == '.')
+        .last()
+        .map(|(i, _)| i)?;
+    let receiver = &before[start..];
+
+    (!receiver.ends_with('.') && !receiver.starts_with(|c: char| c.is_numeric()))
+        .then(|| (receiver.to_string(), typed, quote))
+}
+
+/// The byte offset of the `[` still open at the end of `head`. Reads
+/// the line forward so a bracket inside a string counts for nothing.
+fn open_bracket(head: &str) -> Option<usize> {
+    let mut stack: Vec<(char, usize)> = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut chars = head.char_indices();
+
+    while let Some((i, c)) = chars.next() {
+        match quote {
+            Some(q) => match c {
+                '\\' => {
+                    chars.next();
+                }
+
+                _ if c == q => quote = None,
+
+                _ => {}
+            },
+
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+
+                '[' | '(' | '{' => stack.push((c, i)),
+
+                ']' | ')' | '}' => {
+                    stack.pop();
+                }
+
+                _ => {}
+            },
+        }
+    }
+
+    stack.last().filter(|(c, _)| *c == '[').map(|(_, i)| *i)
+}
+
 /// Every byte offset in `line` where `needle` starts a whole access:
 /// the byte before it names no word. A `.` before it is allowed, since
 /// the emit qualifies a std name as `__alloy.Name`.

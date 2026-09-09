@@ -28,7 +28,7 @@ pub use fields::{Field, instance_class, record_entries};
 #[allow(unused_imports)]
 pub use matches::match_arms;
 #[allow(unused_imports)]
-pub use members::{Access, guarded_member_column, member_at, member_column};
+pub use members::{Access, guarded_member_column, index_key_at, member_at, member_column};
 #[allow(unused_imports)]
 pub use scope::{Local, LocalKind, locals_in_scope};
 
@@ -137,6 +137,15 @@ pub enum Context {
     /// `new Instance("Part") { |`: a property of the class the string
     /// names. The emit turns the table into assignments.
     InstanceField { prefix: String, class: String },
+    /// `profile["|`, `profile[|`, `profile?[|`, `profile![|`: a string
+    /// key of the receiver's type. `prefix` is what the author typed
+    /// inside the bracket, and `quote` the opening quote when one
+    /// stands there.
+    IndexKey {
+        prefix: String,
+        receiver: String,
+        quote: Option<char>,
+    },
 }
 
 /// What the declaration of a name says about the name's type.
@@ -433,6 +442,17 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
     }
 
     let trimmed = before.trim_start();
+
+    // A key inside an index that never closed. The receiver's own type
+    // names the keys; the child sees the whole scope there instead,
+    // and after `?[` or `![` it sees the guard the emit wrote.
+    if let Some((receiver, typed, quote)) = members::index_key_at(src, offset) {
+        return Some(Context::IndexKey {
+            prefix: typed,
+            receiver,
+            quote,
+        });
+    }
 
     // A string that is no module path: the child answers alone, since it
     // knows the class names `Instance.new("` and `GetService("` take.

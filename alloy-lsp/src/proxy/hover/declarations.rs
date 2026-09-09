@@ -58,12 +58,18 @@ impl Server {
         // An attribute or a macro is keyed by its sigil; a bare name that
         // an import bound finds it that way.
         let sigils = [format!("@{key}"), format!("${key}")];
+        // `local Point = 1` binds the name in this file. Another file
+        // may declare a `Point` of its own, and that declaration says
+        // nothing about the binding the caret sits on.
+        let bound_here = binds_a_value(&doc.bindings, &key);
         let lookup = |name: &str| {
             doc.decls.iter().find(|d| d.name == name).or_else(|| {
-                st.docs
-                    .values()
-                    .flat_map(|d| d.decls.iter())
-                    .find(|d| d.name == name)
+                (!bound_here).then(|| {
+                    st.docs
+                        .values()
+                        .flat_map(|d| d.decls.iter())
+                        .find(|d| d.name == name)
+                })?
             })
         };
         let found = lookup(&key).or_else(|| sigils.iter().find_map(|k| lookup(k)));
@@ -362,4 +368,36 @@ pub(crate) fn array_element(lines: &[&str], case_line: usize) -> Option<String> 
     }
 
     None
+}
+
+/// Whether the file binds a name as a value of its own, `local Point`
+/// or `const Point`. A declaration of that name in another file says
+/// nothing about the binding the caret sits on.
+pub(crate) fn binds_a_value(bindings: &[alloy::declarations::Binding], name: &str) -> bool {
+    bindings.iter().any(|b| {
+        b.name == name
+            && matches!(
+                b.prefix.split_whitespace().next(),
+                Some("local") | Some("const")
+            )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `local Point = 1` hovered as another file's `struct Point`.
+    #[test]
+    fn a_local_is_not_another_file_s_declaration() {
+        let src = "local Point = 1\nconst MAX = 2\nstruct Vec2 as\n    x: number\nend\nprint(Point, MAX, Vec2)\n";
+        let bindings = alloy::declarations::bindings(src);
+        assert!(binds_a_value(&bindings, "Point"));
+        assert!(binds_a_value(&bindings, "MAX"));
+
+        // A struct's name is a declaration, not a value binding, so the
+        // workspace still answers for it.
+        assert!(!binds_a_value(&bindings, "Vec2"));
+        assert!(!binds_a_value(&bindings, "nothing"));
+    }
 }

@@ -34,7 +34,7 @@ const GROUPS: &[(&str, Pick)] = &[
     }),
 ];
 
-pub fn run(args: &[String]) -> ExitCode {
+pub(crate) fn run(args: &[String]) -> ExitCode {
     let color = ui::want_color();
     let topic = args.iter().find(|a| !a.starts_with("--"));
 

@@ -15,7 +15,7 @@ fn fail(message: &str) {
     eprintln!("{}", Painter::for_stderr().fail(message));
 }
 
-pub fn run(args: &[String]) -> ExitCode {
+pub(crate) fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("new") => match args.get(1) {
             Some(name) => new(name),

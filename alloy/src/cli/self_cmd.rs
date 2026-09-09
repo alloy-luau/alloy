@@ -17,7 +17,7 @@ fn fail(message: &str) {
 /// The two binaries that the install copies.
 const BINARIES: [&str; 2] = ["alloy", "alloy-lsp"];
 
-pub fn run(args: &[String]) -> ExitCode {
+pub(crate) fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("schema") => {
             print!("{}", alloy::schema::to_string());

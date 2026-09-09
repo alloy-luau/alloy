@@ -118,6 +118,23 @@ pub struct Compiled {
     pub warnings: Vec<Warning>,
     /// Resolution errors, in source order. Recovered from, never guessed at.
     pub errors: Vec<CompileError>,
+    /// Alloy patch: where each outermost markup region went, in source
+    /// order. A caller maps positions between the two texts with it.
+    pub regions: Vec<Region>,
+    /// Alloy patch: the output offset the helper preamble went to and
+    /// its length, when the file needed one.
+    pub preamble: Option<(usize, usize)>,
+}
+
+/// Alloy patch: one markup region and the text it became: the byte
+/// range it covers in the source, and the byte range that replaced it
+/// in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub src_start: usize,
+    pub src_end: usize,
+    pub out_start: usize,
+    pub out_end: usize,
 }
 
 /// Compiles with project aliases, recovering from resolution errors.
@@ -171,6 +188,7 @@ fn compile_inner(
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
     let mut helpers = crate::backend::Helpers::default();
+    let mut regions = Vec::new();
     let output = compile_with(
         source,
         backend,
@@ -179,12 +197,25 @@ fn compile_inner(
         &mut warnings,
         &mut errors,
         &mut helpers,
+        &mut regions,
     )?;
 
     // Only the outermost call injects: nested expressions are compiled on their
     // own but are spliced back into this file, so their helper usage belongs to
     // this preamble.
-    let output = crate::imports::inject(&output, helpers, resolver.bound(), &imports)?;
+    let (output, preamble) =
+        crate::imports::inject_at(&output, helpers, resolver.bound(), &imports)?;
+
+    // The preamble goes before the first statement, so every region that
+    // starts after it moves by its length.
+    if let Some((at, len)) = preamble {
+        for region in &mut regions {
+            if region.out_start >= at {
+                region.out_start += len;
+                region.out_end += len;
+            }
+        }
+    }
 
     // Source order, because a list of diagnostics is read top to bottom and
     // nested regions are compiled out of order.
@@ -194,6 +225,8 @@ fn compile_inner(
         output,
         warnings,
         errors,
+        regions,
+        preamble,
     })
 }
 
@@ -242,6 +275,7 @@ fn compile_with(
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<CompileError>,
     helpers: &mut crate::backend::Helpers,
+    regions: &mut Vec<Region>,
 ) -> Result<String, CompileError> {
     let mut lexer = Lexer::new(source);
     let mut scanner = Scanner::new(source);
@@ -279,7 +313,14 @@ fn compile_with(
         let emitted = backend.emit(&node, &context);
         errors.extend(context.take_errors().into_iter().map(CompileError::from));
 
+        let out_start = out.len();
         out.push_str(&emitted?);
+        regions.push(Region {
+            src_start: token.start,
+            src_end: end,
+            out_start,
+            out_end: out.len(),
+        });
         cursor = end;
 
         *helpers |= context.helpers();
@@ -333,6 +374,9 @@ pub fn compile_verified(
 /// point. Recursing here is what makes `{items:map(function() return <X/> end)}`
 /// work.
 #[allow(clippy::too_many_arguments)]
+/// A nested expression is compiled on its own text, so the regions the
+/// walk finds there are offsets into a hole, not into the file. Alloy
+/// patch: they go nowhere, and each nested call takes a scratch list.
 fn compile_embedded(
     node: &mut Node,
     backend: &dyn Backend,
@@ -366,13 +410,27 @@ fn compile_element(
         match attribute {
             Attribute::Spread { expression, .. } => {
                 *expression = compile_with(
-                    expression, backend, resolver, level, warnings, errors, helpers,
+                    expression,
+                    backend,
+                    resolver,
+                    level,
+                    warnings,
+                    errors,
+                    helpers,
+                    &mut Vec::new(),
                 )?;
             }
             Attribute::Named { value, .. } => {
                 if let AttributeValue::Expression(expression) = value {
                     *expression = compile_with(
-                        expression, backend, resolver, level, warnings, errors, helpers,
+                        expression,
+                        backend,
+                        resolver,
+                        level,
+                        warnings,
+                        errors,
+                        helpers,
+                        &mut Vec::new(),
                     )?;
                 }
             }
@@ -381,7 +439,14 @@ fn compile_element(
             // so relaxing the inference rule later cannot quietly skip a region.
             Attribute::Inferred { expression, .. } => {
                 *expression = compile_with(
-                    expression, backend, resolver, level, warnings, errors, helpers,
+                    expression,
+                    backend,
+                    resolver,
+                    level,
+                    warnings,
+                    errors,
+                    helpers,
+                    &mut Vec::new(),
                 )?;
             }
         }
@@ -480,7 +545,14 @@ fn compile_children(
                 }
 
                 *expression = compile_with(
-                    expression, backend, resolver, level, warnings, errors, helpers,
+                    expression,
+                    backend,
+                    resolver,
+                    level,
+                    warnings,
+                    errors,
+                    helpers,
+                    &mut Vec::new(),
                 )?;
                 // Rule 2 — checked after compiling, so nested LuauX has already
                 // become ordinary Luau and the expression parses.

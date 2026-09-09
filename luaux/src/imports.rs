@@ -88,6 +88,18 @@ pub fn inject(
     bound: &HashSet<String>,
     config: &Config,
 ) -> Result<String, CompileError> {
+    Ok(inject_at(output, helpers, bound, config)?.0)
+}
+
+/// The same, and where the preamble went: the byte offset of the
+/// insertion and its length. Alloy patch: a caller that maps positions
+/// between the source and the output has to shift everything past it.
+pub fn inject_at(
+    output: &str,
+    helpers: Helpers,
+    bound: &HashSet<String>,
+    config: &Config,
+) -> Result<(String, Option<(usize, usize)>), CompileError> {
     // Every `[factory]` entry the emission actually referenced has to name
     // something the file can reach — and only those. A Vide project that never
     // interpolates text should not be told to import a `compute` wrapper it
@@ -155,15 +167,18 @@ pub fn inject(
     }
 
     if statements.is_empty() {
-        return Ok(output.to_string());
+        return Ok((output.to_string(), None));
     }
 
     let preamble = format!("{}; ", statements.join("; "));
 
     Ok(match first_statement_offset(output) {
-        Some(offset) => format!("{}{preamble}{}", &output[..offset], &output[offset..]),
+        Some(offset) => (
+            format!("{}{preamble}{}", &output[..offset], &output[offset..]),
+            Some((offset, preamble.len())),
+        ),
         // Nothing but comments; there is no code to support anyway.
-        None => output.to_string(),
+        None => (output.to_string(), None),
     })
 }
 

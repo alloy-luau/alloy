@@ -1,0 +1,815 @@
+//! `namespace Name as ... end`: one table over a group of declarations.
+//!
+//! A namespace has no Luau form, so the emit gives each member a name of
+//! its own and puts it on a table. `struct Vec2` inside `namespace Math`
+//! renders as `Math_Vec2`, and the header line assigns `Math.Vec2`. The
+//! rendered name is what a type slot reads, so `Math.Vec2` in a type
+//! position becomes `Math_Vec2`; the proxy folds the name back for the
+//! reader.
+//!
+//! Every line of the source keeps its line in both artifacts: the header
+//! and the closing `end` carry the generated text, and a member renders
+//! where it stands.
+
+use alloy_syntax::ast::{Block, ImportKind, NamespaceDecl, NamespaceMember, Stmt, TokSpan};
+
+use super::Desugar;
+
+/// What one member of a namespace binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NsMember {
+    /// The name the source wrote.
+    pub name: String,
+    /// The name the emit renders it under, `Math_Vec2`.
+    pub rendered: String,
+    /// `private member`: a use from outside the namespace is an error.
+    pub private: bool,
+    /// The name binds a value, so the table carries it.
+    pub value: bool,
+    /// The name is a type, so a type slot reads the rendered name.
+    pub ty: bool,
+    /// The member is a namespace of its own.
+    pub nested: bool,
+}
+
+/// One namespace a file declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NamespaceInfo {
+    /// The name the source wrote.
+    pub name: String,
+    /// The table path the emit writes: `Math`, or `Math.Geo` for a
+    /// nested one.
+    pub path: String,
+    /// What a member's rendered name starts with: `Math_`.
+    pub prefix: String,
+    pub members: Vec<NsMember>,
+    /// The namespace this one sits in, by its key.
+    pub parent: Option<String>,
+    /// The byte range of the header, for a message.
+    pub start: u32,
+    pub end: u32,
+    /// The module exposes the namespace, so its type members carry
+    /// `export` and another file can name them.
+    pub exported: bool,
+}
+
+impl NamespaceInfo {
+    pub fn member(&self, name: &str) -> Option<&NsMember> {
+        self.members.iter().find(|m| m.name == name)
+    }
+}
+
+/// The key a namespace is indexed under: its path with `_` for the dot,
+/// so a nested one never collides with a top-level namespace.
+pub(crate) fn key_of(parent: Option<&str>, name: &str) -> String {
+    match parent {
+        Some(p) => format!("{p}_{name}"),
+
+        None => name.to_string(),
+    }
+}
+
+impl<'s> Desugar<'s> {
+    /// Reads every namespace of a block, with the members each one
+    /// binds and the name the emit gives them. The walk runs before the
+    /// prescan, so a member is known before any statement names it.
+    pub(crate) fn scan_namespaces(&mut self, block: &Block) {
+        // `namespace Math as ... end` and `export { Math }` below it
+        // export the group the way `export namespace` does.
+        for stmt in &block.stmts {
+            let Stmt::ExportList(list) = stmt else {
+                continue;
+            };
+
+            for spec in &list.specs {
+                let name = self.text_of(spec.name).to_string();
+                self.export_listed.insert(name);
+            }
+        }
+
+        self.scan_global_namespaces();
+        self.scan_imported_namespaces(&block.stmts);
+        self.scan_namespaces_in(&block.stmts, None);
+    }
+
+    /// The `global namespace` declarations of the project. Each one
+    /// reaches this file as a name, and its types reach it under the
+    /// names the emit gives them.
+    fn scan_global_namespaces(&mut self) {
+        let heads: Vec<String> = self
+            .options
+            .globals
+            .iter()
+            .filter(|g| g.namespace)
+            .map(|g| g.name.clone())
+            .collect();
+
+        for name in heads {
+            let head = format!("{name}_");
+            let members: Vec<NsMember> = self
+                .options
+                .globals
+                .iter()
+                .filter(|g| g.ty)
+                .filter_map(|g| {
+                    let rest = g.name.strip_prefix(&head)?;
+
+                    Some(NsMember {
+                        name: rest.to_string(),
+                        rendered: g.name.clone(),
+                        private: false,
+                        value: true,
+                        ty: true,
+                        nested: false,
+                    })
+                })
+                .collect();
+            self.namespaces.insert(
+                name.clone(),
+                NamespaceInfo {
+                    path: name.clone(),
+                    prefix: format!("{name}_"),
+                    name,
+                    members,
+                    parent: None,
+                    start: 0,
+                    end: 0,
+                    exported: false,
+                },
+            );
+        }
+    }
+
+    /// The namespaces the file imports. A module that exports
+    /// `namespace Math` exports its types as `Math_Vec2`, so the names
+    /// the import brought in say which namespaces reached this file.
+    fn scan_imported_namespaces(&mut self, stmts: &[Stmt]) {
+        if self.options.import_types.is_empty() {
+            return;
+        }
+
+        for stmt in stmts {
+            let Stmt::Import(i) = stmt else {
+                continue;
+            };
+            let spec = self.text_of(i.path).to_string();
+            let bare = spec.trim_matches(['"', '\'']).to_string();
+            let specs = match &i.kind {
+                ImportKind::Named(v) | ImportKind::TypeOnly(v) | ImportKind::Both(_, v) => {
+                    v.clone()
+                }
+
+                _ => continue,
+            };
+
+            for sp in specs {
+                let name = self.text_of(sp.name).to_string();
+                let local = sp
+                    .alias
+                    .map(|a| self.text_of(a).to_string())
+                    .unwrap_or_else(|| name.clone());
+                let head = format!("{name}_");
+                let members: Vec<NsMember> = self
+                    .options
+                    .import_types
+                    .iter()
+                    .filter(|(s, _)| *s == bare)
+                    .flat_map(|(_, types)| types.iter())
+                    .filter_map(|entry| {
+                        let full = crate::modules::type_head(entry);
+                        let rest = full.strip_prefix(&head)?;
+
+                        Some(NsMember {
+                            name: rest.to_string(),
+                            rendered: format!("{local}_{rest}"),
+                            private: false,
+                            value: true,
+                            ty: true,
+                            nested: false,
+                        })
+                    })
+                    .collect();
+
+                if members.is_empty() {
+                    continue;
+                }
+
+                self.namespaces.insert(
+                    local.clone(),
+                    NamespaceInfo {
+                        name: local.clone(),
+                        path: local,
+                        prefix: format!("{name}_"),
+                        members,
+                        parent: None,
+                        start: 0,
+                        end: 0,
+                        exported: false,
+                    },
+                );
+            }
+        }
+    }
+
+    fn scan_namespaces_in(&mut self, stmts: &[Stmt], parent: Option<&str>) {
+        for stmt in stmts {
+            let Stmt::Namespace(ns) = stmt.under_default() else {
+                continue;
+            };
+            let name = self.text_of(ns.name).to_string();
+            let key = key_of(parent, &name);
+            let (parent_path, parent_prefix) = match parent.and_then(|p| self.namespaces.get(p)) {
+                Some(i) => (i.path.clone(), i.prefix.clone()),
+
+                None => (String::new(), String::new()),
+            };
+            let (path, prefix) = match parent {
+                Some(_) => (
+                    format!("{parent_path}.{name}"),
+                    format!("{parent_prefix}{name}_"),
+                ),
+
+                None => (name.clone(), format!("{name}_")),
+            };
+            // A namespace an `export { ... }` list names exports too.
+            let exported = ns.exported
+                || ns.global
+                || match parent {
+                    Some(p) => self.namespaces.get(p).is_some_and(|i| i.exported),
+
+                    None => self.export_listed.contains(&name),
+                };
+            let mut members = Vec::new();
+
+            for m in &ns.members {
+                let private = m.is_private(self.src, self.toks);
+
+                for b in member_bindings(m) {
+                    let member = self.text_of(b.name).to_string();
+                    let rendered = match b.nested {
+                        true => format!("{path}.{member}"),
+
+                        false => format!("{prefix}{member}"),
+                    };
+
+                    if b.prefixed {
+                        self.member_names.insert(b.name.start, rendered.clone());
+                    }
+
+                    members.push(NsMember {
+                        name: member,
+                        rendered: match b.prefixed || b.nested {
+                            true => rendered,
+
+                            false => self.text_of(b.name).to_string(),
+                        },
+                        private,
+                        value: b.value,
+                        ty: b.ty,
+                        nested: b.nested,
+                    });
+                }
+            }
+
+            self.namespaces.insert(
+                key.clone(),
+                NamespaceInfo {
+                    name,
+                    path,
+                    prefix,
+                    members,
+                    parent: parent.map(str::to_string),
+                    start: self.byte_start(ns.span),
+                    end: self.byte_end(ns.span),
+                    exported,
+                },
+            );
+
+            // A nested namespace reads the outer prefix, so the entry
+            // above has to exist before the walk goes in.
+            let inner: Vec<&Stmt> = ns.members.iter().map(|m| &m.stmt).collect();
+
+            for one in inner {
+                self.scan_namespaces_in(std::slice::from_ref(one), Some(&key));
+            }
+        }
+    }
+
+    /// The name a bare reference takes inside a namespace body: the
+    /// innermost namespace that declares it wins, and a local of the
+    /// same name shadows it.
+    pub(crate) fn ns_member_name(&self, name: &str) -> Option<String> {
+        if self.ns_stack.is_empty() || self.is_local(name) {
+            return None;
+        }
+
+        for key in self.ns_stack.iter().rev() {
+            let Some(info) = self.namespaces.get(key) else {
+                continue;
+            };
+            let Some(m) = info.member(name) else {
+                continue;
+            };
+
+            return match m.rendered == name {
+                true => None,
+
+                false => Some(m.rendered.clone()),
+            };
+        }
+
+        None
+    }
+
+    /// The target an `impl` inside a namespace writes: a member of the
+    /// namespace renders under its own name.
+    pub(crate) fn impl_target_name(&self, span: TokSpan) -> String {
+        let name = self.text_of(span).to_string();
+
+        match self.ns_member_name(&name) {
+            Some(r) => r,
+
+            None => name,
+        }
+    }
+
+    /// The type of a namespace inside the byte range, when one sits
+    /// there: the range to replace and the name to write. `Math.Vec2`
+    /// in a type slot is `Math_Vec2`, and inside `namespace Math` the
+    /// bare `Vec2` is the same name.
+    pub(crate) fn namespace_type_at(&self, start: u32, end: u32) -> Option<(u32, u32, String)> {
+        if self.namespaces.is_empty() {
+            return None;
+        }
+
+        let mut best: Option<(u32, u32, String)> = None;
+
+        for span in &self.type_name_spans {
+            let (s, e) = (self.byte_start(*span), self.byte_end(*span));
+
+            if s < start || e > end {
+                continue;
+            }
+
+            if best.as_ref().is_some_and(|(bs, _, _)| *bs <= s) {
+                continue;
+            }
+
+            if let Some(hit) = self.namespace_type_of(*span, end) {
+                best = Some(hit);
+            }
+        }
+
+        // An edit that starts earlier owns the text; its own copy comes
+        // back through here for the name.
+        let (s, _, _) = best.as_ref()?;
+
+        match self.earliest_edit_start(start, end) {
+            Some(at) if at < *s => None,
+
+            _ => best,
+        }
+    }
+
+    /// The rewrite one type name asks for, when it names a namespace or
+    /// a type of the namespace under render.
+    fn namespace_type_of(&self, span: TokSpan, limit: u32) -> Option<(u32, u32, String)> {
+        let name = self.text_of(span).to_string();
+        let (s, e) = (self.byte_start(span), self.byte_end(span));
+
+        // `Math.Vec2`, and `Outer.Inner.Point` through a nested one.
+        if let Some(info) = self.namespaces.get(&name) {
+            let mut key = name.clone();
+            let mut info = info;
+            let mut at = span.end as usize;
+
+            while self.text_of(TokSpan::new(at, at + 1)) == "." {
+                let field = TokSpan::new(at + 1, at + 2);
+                let member = self.text_of(field).to_string();
+                let fe = self.byte_end(field);
+
+                if fe > limit {
+                    return None;
+                }
+
+                let m = info.member(&member)?;
+
+                if m.nested {
+                    key = key_of(Some(&key), &member);
+                    info = self.namespaces.get(&key)?;
+                    at = field.end as usize;
+
+                    continue;
+                }
+
+                return m.ty.then(|| (s, fe, m.rendered.clone()));
+            }
+
+            return None;
+        }
+
+        // Inside the namespace the bare name reads the same type.
+        let rendered = self.ns_type_name(&name)?;
+
+        Some((s, e, rendered))
+    }
+
+    /// The name a bare type takes inside a namespace body.
+    fn ns_type_name(&self, name: &str) -> Option<String> {
+        for key in self.ns_stack.iter().rev() {
+            let Some(info) = self.namespaces.get(key) else {
+                continue;
+            };
+            let Some(m) = info.member(name) else {
+                continue;
+            };
+
+            if !m.ty || m.rendered == name {
+                return None;
+            }
+
+            return Some(m.rendered.clone());
+        }
+
+        None
+    }
+
+    /// What each namespace of the file needs to be true: one name per
+    /// file, no `global` inside, and no use of a private member from
+    /// outside.
+    pub(crate) fn check_namespaces(&mut self, block: &Block) {
+        self.check_namespace_names(&block.stmts, None);
+        self.check_private_uses();
+    }
+
+    fn check_namespace_names(&mut self, stmts: &[Stmt], parent: Option<&str>) {
+        let mut seen: Vec<(String, TokSpan)> = Vec::new();
+
+        for stmt in stmts {
+            let Stmt::Namespace(ns) = stmt.under_default() else {
+                continue;
+            };
+            let name = self.text_of(ns.name).to_string();
+
+            if seen.iter().any(|(n, _)| *n == name) {
+                let message = format!("`{name}` is declared twice; a namespace has one name here");
+                self.diagnose(ns.name, &message);
+            } else {
+                seen.push((name.clone(), ns.name));
+            }
+
+            for m in &ns.members {
+                if crate::globals::is_global(&m.stmt) {
+                    self.diagnose(
+                        m.stmt.span(),
+                        "`global` reaches every file and a namespace member reaches its namespace; the two do not stack",
+                    );
+                }
+            }
+
+            let key = key_of(parent, &name);
+            let inner: Vec<&Stmt> = ns.members.iter().map(|m| &m.stmt).collect();
+
+            for one in inner {
+                self.check_namespace_names(std::slice::from_ref(one), Some(&key));
+            }
+        }
+    }
+
+    /// A private member named from outside its namespace. The scan runs
+    /// over the tokens, so a type slot reports the way a value does.
+    fn check_private_uses(&mut self) {
+        if self.namespaces.is_empty() {
+            return;
+        }
+
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+
+        for i in 0..self.toks.len().saturating_sub(2) {
+            let head = TokSpan::new(i, i + 1);
+            let dot = TokSpan::new(i + 1, i + 2);
+            let field = TokSpan::new(i + 2, i + 3);
+
+            if self.text_of(dot) != "." {
+                continue;
+            }
+
+            // A field of another value spelled the same is not the
+            // namespace: `t.Math.helper` names no namespace. A `:` in
+            // front is a type annotation, and the type reads the same.
+            if i > 0 && self.text_of(TokSpan::new(i - 1, i)) == "." {
+                continue;
+            }
+
+            let name = self.text_of(head).to_string();
+            let Some(info) = self.namespaces.get(&name) else {
+                continue;
+            };
+            let member = self.text_of(field).to_string();
+            let Some(m) = info.member(&member) else {
+                continue;
+            };
+
+            if !m.private {
+                continue;
+            }
+
+            // Inside the namespace the name is in scope; the path is
+            // the long way to write it.
+            let at = self.byte_start(head);
+
+            if at >= info.start && at < info.end {
+                continue;
+            }
+
+            hits.push((field, format!("`{member}` is private to `{}`", info.path)));
+        }
+
+        for (span, message) in hits {
+            self.diagnose(span, &message);
+        }
+    }
+
+    /// The name a dotted path renders under, when it names a member of
+    /// a namespace: `Math.Shape` is `Math_Shape`, and `A.B.C` walks the
+    /// nested namespaces.
+    pub(crate) fn namespace_path_name(&self, path: &str) -> Option<String> {
+        let mut parts = path.split('.');
+        let head = parts.next()?;
+        let mut key = head.to_string();
+        let mut info = self.namespaces.get(head)?;
+
+        for part in parts {
+            let m = info.member(part)?;
+
+            if !m.nested {
+                return Some(m.rendered.clone());
+            }
+
+            key = key_of(Some(&key), part);
+            info = self.namespaces.get(&key)?;
+        }
+
+        None
+    }
+
+    /// The enum a dotted pattern names, with the variant: `Math.Shape`
+    /// of `case Math.Shape.Circle` is the enum `Math_Shape`.
+    pub(crate) fn enum_of_path(&self, text: &str) -> Option<(String, String)> {
+        let (head, variant) = text.rsplit_once('.')?;
+        let name = self
+            .namespace_path_name(head)
+            .unwrap_or_else(|| head.to_string());
+
+        self.enums
+            .contains_key(&name)
+            .then(|| (name, variant.to_string()))
+    }
+
+    /// The path a message names a declaration by. `Math_Vec2` is the
+    /// name the emit writes; the reader knows it as `Math.Vec2`.
+    pub(crate) fn display_name(&self, rendered: &str) -> String {
+        for info in self.namespaces.values() {
+            if let Some(m) = info.members.iter().find(|m| m.rendered == rendered) {
+                return format!("{}.{}", info.path, m.name);
+            }
+        }
+
+        rendered.to_string()
+    }
+
+    /// The rendered name of a declaration: a namespace member takes the
+    /// namespace's prefix, and every other declaration keeps its own.
+    pub(crate) fn decl_name(&self, span: TokSpan) -> String {
+        match self.member_names.get(&span.start) {
+            Some(n) => n.clone(),
+
+            None => self.text_of(span).to_string(),
+        }
+    }
+
+    /// The byte the header ends at: the `as` that opens the body.
+    fn namespace_head_end(&self, ns: &NamespaceDecl) -> u32 {
+        for i in ns.span.start..ns.span.end {
+            let one = TokSpan::new(i as usize, i as usize + 1);
+
+            if self.text_of(one) == "as" {
+                return self.byte_end(one);
+            }
+        }
+
+        self.byte_start(ns.span)
+    }
+
+    /// Renders `namespace Name as ... end`.
+    pub(crate) fn namespace_decl(&mut self, ns: &NamespaceDecl) {
+        let key = key_of(self.ns_stack.last().map(String::as_str), &{
+            self.text_of(ns.name).to_string()
+        });
+        let Some(info) = self.namespaces.get(&key).cloned() else {
+            return;
+        };
+        let start = self.byte_start(ns.span);
+        let end_tok = self.toks[ns.span.end as usize - 1];
+        // The header line opens the table. A nested namespace is a field
+        // of the one around it, so it takes no `local`.
+        let header = match info.parent.is_some() {
+            true => format!("{} = {{}}", info.path),
+
+            false => format!("local {} = {{}}", info.path),
+        };
+        self.generate(start, &header);
+
+        // The header text goes and its line stays. The `as` token ends
+        // it, so the first member keeps the trivia in front of it.
+        let head_end = self.namespace_head_end(ns);
+        self.blank_lines(start, head_end);
+        let first = ns
+            .members
+            .first()
+            .map(|m| self.byte_start(m.span))
+            .unwrap_or(end_tok.start);
+        self.copy(head_end, first);
+
+        self.ns_stack.push(key.clone());
+        let saved_export = self.ns_export;
+        let mut cursor = first;
+
+        for m in &ns.members {
+            let m_start = self.byte_start(m.span);
+            self.copy(cursor, m_start);
+            self.namespace_member(&info, m);
+            cursor = self.byte_end(m.span);
+        }
+
+        self.ns_export = saved_export;
+        self.ns_stack.pop();
+        self.copy(cursor, end_tok.start);
+        // The closing `end` has nothing to close.
+        self.blank_lines(end_tok.start, end_tok.end);
+
+        if ns.exported {
+            self.exports.push((info.name.clone(), info.path.clone()));
+        }
+    }
+
+    /// One member: the declaration under its rendered name, then the
+    /// line that puts it on the table.
+    fn namespace_member(&mut self, info: &NamespaceInfo, m: &NamespaceMember) {
+        let span = m.span;
+        let start = self.byte_start(span);
+        let stmt_start = self.byte_start(m.stmt.span());
+        // A private member stays inside the module, whatever the
+        // namespace does.
+        self.ns_export = info.exported && !m.is_private(self.src, self.toks);
+
+        // `private` and `public` are Alloy's; Luau reads none of them.
+        if start < stmt_start {
+            self.blank_lines(start, stmt_start);
+        }
+
+        // A declaration whose head copies from source takes the prefix
+        // as an insert; one whose head is generated reads `decl_name`.
+        for b in member_bindings(m) {
+            if !b.prefixed || !copies_its_name(m.stmt.under_default()) {
+                continue;
+            }
+
+            let at = self.byte_start(b.name);
+            self.inserts.push((at, info.prefix.clone()));
+        }
+
+        // A type alias copies its own head, so the modifier goes in
+        // front of it.
+        if self.ns_export && matches!(m.stmt.under_default(), Stmt::TypeAlias(_)) {
+            self.generate(stmt_start, "export ");
+        }
+
+        // A member never leaks into the file, so a plain `function f()`
+        // takes the `local` a Luau global would not have.
+        if let Stmt::Function(f) = m.stmt.under_default()
+            && f.path.len() == 1
+        {
+            self.generate(stmt_start, "local ");
+        }
+
+        self.stmt(&m.stmt);
+
+        // The table takes every public member that binds a value. A
+        // private one stays a local, so `Math.helper` finds nothing at
+        // run time either.
+        let mut tail = String::new();
+        let private = m.is_private(self.src, self.toks);
+
+        for b in member_bindings(m) {
+            if !b.value || b.nested || private {
+                continue;
+            }
+
+            let name = self.text_of(b.name).to_string();
+            let rendered = self.decl_name(b.name);
+
+            if rendered == name {
+                continue;
+            }
+
+            tail.push_str(&format!(" {}.{name} = {rendered}", info.path));
+        }
+
+        if !tail.is_empty() {
+            self.generate(self.byte_end(span), &tail);
+        }
+    }
+}
+
+/// Whether a declaration's emit copies its own name from the source.
+/// Those take the namespace prefix as an insert; every other head is
+/// generated and reads `decl_name`.
+fn copies_its_name(stmt: &Stmt) -> bool {
+    matches!(
+        stmt,
+        Stmt::Function(_) | Stmt::LocalFunction(_) | Stmt::Local(_) | Stmt::TypeAlias(_)
+    )
+}
+
+/// One name a namespace member binds.
+pub(crate) struct MemberBinding {
+    pub name: TokSpan,
+    /// The name goes on the namespace table.
+    pub value: bool,
+    /// The name is a type, so a type slot reads the rendered name.
+    pub ty: bool,
+    /// The member is a namespace of its own.
+    pub nested: bool,
+    /// The emit renames the declaration. A macro and an attribute run
+    /// at compile time and keep the name the source wrote.
+    pub prefixed: bool,
+}
+
+fn binds(name: TokSpan, value: bool, ty: bool) -> MemberBinding {
+    MemberBinding {
+        name,
+        value,
+        ty,
+        nested: false,
+        prefixed: true,
+    }
+}
+
+/// Every name a member binds.
+pub(crate) fn member_bindings(m: &NamespaceMember) -> Vec<MemberBinding> {
+    match m.stmt.under_default() {
+        Stmt::Function(f) if f.path.len() == 1 => vec![binds(f.path[0], true, false)],
+
+        Stmt::LocalFunction(f) => vec![binds(f.name, true, false)],
+
+        Stmt::Local(l) => l
+            .names
+            .iter()
+            .filter(|b| b.destructure.is_none())
+            .map(|b| binds(b.name, true, false))
+            .collect(),
+
+        Stmt::Struct(d) => vec![binds(d.name, true, true)],
+
+        Stmt::Enum(d) => vec![binds(d.name, true, true)],
+
+        Stmt::Trait(d) => vec![binds(d.name, true, true)],
+
+        Stmt::Interface(d) => vec![binds(d.name, false, true)],
+
+        Stmt::TypeAlias(d) => vec![binds(d.name, false, true)],
+
+        Stmt::Class(d) => vec![binds(d.name, true, true)],
+
+        Stmt::Remote(d) => vec![binds(d.name, true, false)],
+
+        Stmt::Namespace(d) => vec![MemberBinding {
+            name: d.name,
+            value: true,
+            ty: false,
+            nested: true,
+            prefixed: false,
+        }],
+
+        // A macro and an attribute run at compile time. Neither reaches
+        // the output, so neither takes a name of its own.
+        Stmt::Macro(d) => vec![MemberBinding {
+            name: d.name,
+            value: false,
+            ty: false,
+            nested: false,
+            prefixed: false,
+        }],
+
+        Stmt::Attribute(d) => vec![MemberBinding {
+            name: d.name,
+            value: false,
+            ty: false,
+            nested: false,
+            prefixed: false,
+        }],
+
+        _ => Vec::new(),
+    }
+}

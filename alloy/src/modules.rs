@@ -20,7 +20,7 @@ use crate::config::Config;
 /// it in another module has to pass the parameters on, or Luau reads
 /// the alias as the bare name and asks for the argument that is gone.
 pub fn exported_types(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out = exported_namespace_types(source);
 
     for line in source.lines() {
         let rest = line.trim_start();
@@ -56,6 +56,119 @@ pub fn exported_types(source: &str) -> Vec<String> {
     }
 
     out
+}
+
+/// The types an exported namespace carries, under the names the emit
+/// gives them: `export namespace Math as struct Vec2 ... end` exports
+/// `Math_Vec2`. A namespace body is not a line the scan above can read,
+/// so this one goes through the parser.
+fn exported_namespace_types(source: &str) -> Vec<String> {
+    use alloy_syntax::ast::Stmt;
+
+    if !source.contains("namespace") {
+        return Vec::new();
+    }
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| -> String {
+        let a = toks[span.start as usize].start as usize;
+        let b = toks[(span.end as usize)
+            .saturating_sub(1)
+            .max(span.start as usize)]
+        .end as usize;
+
+        source[a..b].to_string()
+    };
+    let mut listed: Vec<String> = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let Stmt::ExportList(list) = stmt {
+            for spec in &list.specs {
+                listed.push(text(spec.name));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Namespace(ns) = stmt.under_default() else {
+            continue;
+        };
+        let name = text(ns.name);
+
+        if !ns.exported && !ns.global && !listed.contains(&name) {
+            continue;
+        }
+
+        collect_namespace_types(source, toks, ns, &name, &mut out);
+    }
+
+    out
+}
+
+/// The type members of one namespace, with a nested namespace folded
+/// into the name the same way.
+fn collect_namespace_types(
+    source: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    use alloy_syntax::ast::Stmt;
+
+    let text = |span: alloy_syntax::ast::TokSpan| -> String {
+        let a = toks[span.start as usize].start as usize;
+        let b = toks[(span.end as usize)
+            .saturating_sub(1)
+            .max(span.start as usize)]
+        .end as usize;
+
+        source[a..b].to_string()
+    };
+
+    for m in &ns.members {
+        if m.is_private(source, toks) {
+            continue;
+        }
+
+        let (name, generics) = match m.stmt.under_default() {
+            Stmt::Struct(d) => (text(d.name), d.generics.map(text)),
+
+            Stmt::Enum(d) => (text(d.name), None),
+
+            Stmt::Trait(d) => (text(d.name), None),
+
+            Stmt::Interface(d) => (text(d.name), d.generics.map(text)),
+
+            Stmt::TypeAlias(d) => {
+                let after = toks[d.name.end as usize - 1].end as usize;
+
+                (text(d.name), Some(source[after..].to_string()))
+            }
+
+            Stmt::Namespace(inner) => {
+                let deeper = format!("{prefix}_{}", text(inner.name));
+                collect_namespace_types(source, toks, inner, &deeper, out);
+
+                continue;
+            }
+
+            _ => continue,
+        };
+        let params = generics
+            .map(|g| type_params(g.trim_start()))
+            .unwrap_or_default();
+        out.push(format!("{prefix}_{name}{params}"));
+    }
 }
 
 /// The parameter list a declaration opens with, as Luau takes it: the
@@ -679,6 +792,7 @@ pub fn exported_names(source: &str) -> Vec<String> {
             Stmt::Remote(d) if d.exported => out.push(text(d.name)),
             Stmt::Macro(d) if d.exported => out.push(text(d.name)),
             Stmt::LocalFunction(d) if d.exported => out.push(text(d.name)),
+            Stmt::Namespace(d) if d.exported => out.push(text(d.name)),
 
             Stmt::Function(d) if d.exported => {
                 if let Some(first) = d.path.first() {

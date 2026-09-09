@@ -1,0 +1,12 @@
+-- `private` keeps a member inside its namespace. The table still
+-- carries it, so a sibling reaches it; the check is the compiler's.
+namespace Counter as
+    private local total = 0
+    public function bump(): number
+        total += 1
+
+        return total
+    end
+end
+
+print(Counter.bump())

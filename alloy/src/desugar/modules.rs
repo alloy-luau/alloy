@@ -46,6 +46,44 @@ impl<'s> Desugar<'s> {
             .unwrap_or_default()
     }
 
+    /// The type aliases an imported namespace asks for: a module that
+    /// exports `namespace Math` exports its types as `Math_Vec2`, and
+    /// the file that imports the namespace needs one alias each.
+    pub(crate) fn namespace_type_aliases(
+        &self,
+        quoted: &str,
+        name: &str,
+        local: &str,
+        temp: &str,
+    ) -> Vec<String> {
+        let spec = quoted
+            .strip_prefix(['"', '\''])
+            .and_then(|s| s.strip_suffix(['"', '\'']))
+            .unwrap_or(quoted);
+        let head = format!("{name}_");
+        let mut out = Vec::new();
+
+        for entry in self
+            .options
+            .import_types
+            .iter()
+            .filter(|(s, _)| s == spec)
+            .flat_map(|(_, types)| types.iter())
+        {
+            let full = crate::modules::type_head(entry);
+            let Some(rest) = full.strip_prefix(&head) else {
+                continue;
+            };
+            let args = entry[full.len()..].to_string();
+            let type_args = type_arguments(&args);
+            out.push(format!(
+                "type {local}_{rest}{args} = {temp}.{full}{type_args}"
+            ));
+        }
+
+        out
+    }
+
     /// Whether a quoted spec names a module Alloy does not compile. Such
     /// a module returns one value and has no export table, so its value
     /// is what a default import binds. A spec that carries the
@@ -172,6 +210,7 @@ impl<'s> Desugar<'s> {
                             types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
                         }
 
+                        types.extend(self.namespace_type_aliases(&path, &name, &local, &temp));
                         names.push(local);
                         values.push(format!("{temp}.{name}"));
                     }
@@ -216,6 +255,7 @@ impl<'s> Desugar<'s> {
                             types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
                         }
 
+                        types.extend(self.namespace_type_aliases(&path, &name, &local, &temp));
                         names.push(local);
                         values.push(format!("{temp}.{name}"));
                     }

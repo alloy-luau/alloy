@@ -1,0 +1,15 @@
+-- A namespace inside a namespace: the inner one is a field of the
+-- outer table, and its members take both names.
+namespace Outer as
+    const A = 1
+    namespace Inner as
+        const B = 2
+        struct Point as
+            x: number
+        end
+    end
+end
+
+local p: Outer.Inner.Point = { x = Outer.A + Outer.Inner.B }
+
+print(p)

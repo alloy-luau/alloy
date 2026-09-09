@@ -31,12 +31,14 @@ mod enums;
 mod expressions;
 mod macros;
 mod modules;
+pub(crate) mod namespaces;
 mod remotes;
 mod statements;
 mod structs;
 mod types;
 
 use macros::MacroRef;
+use namespaces::NamespaceInfo;
 pub(crate) use remotes::WIRE_WIDTHS;
 
 /// A message tied to a source byte range.
@@ -156,6 +158,9 @@ pub struct GlobalRef {
     /// The side the declaring file sits on. A global of one side is out
     /// of scope on the other; a shared module reaches both.
     pub side: Option<crate::directives::Side>,
+    /// The name is a `global namespace`. Its types reach a file as
+    /// `Math_Vec2`, so a type slot that writes `Math.Vec2` reads them.
+    pub namespace: bool,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -396,6 +401,12 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         self_prologue: None,
         not_constructible: HashMap::new(),
         mapped_used: Vec::new(),
+        namespaces: HashMap::new(),
+        member_names: HashMap::new(),
+        ns_stack: Vec::new(),
+        ns_export: false,
+        export_listed: HashSet::new(),
+        type_name_spans: chunk.type_names.clone(),
     };
 
     // A global macro is in scope before the file's own declarations, so
@@ -442,6 +453,12 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // What each `global` of this file needs to be true. The check runs
     // before the walk, so a file with a bad global still renders.
     d.check_globals(src, toks, chunk);
+
+    // A namespace names its members before the prescan reads them: a
+    // member renders under the namespace's prefix, and every table the
+    // prescan fills is keyed by that rendered name.
+    d.scan_namespaces(&chunk.block);
+    d.check_namespaces(&chunk.block);
 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
@@ -908,6 +925,24 @@ struct Desugar<'s> {
     /// Attributes, interfaces, and remotes declared in this file: names
     /// `new` cannot construct.
     not_constructible: HashMap<String, &'static str>,
+    /// The namespaces this file declares, by key: the name for a
+    /// top-level one, the path with `_` for the dot for a nested one.
+    namespaces: HashMap<String, NamespaceInfo>,
+    /// The name a namespace member renders under, by the token index of
+    /// its own name. `struct Vec2` in `namespace Math` is `Math_Vec2`.
+    member_names: HashMap<u32, String>,
+    /// The namespaces under render, outermost first.
+    ns_stack: Vec<String>,
+    /// The names a top-level `export { ... }` list carries, so a
+    /// namespace it names exports its types too.
+    export_listed: HashSet<String>,
+    /// The namespace under render exports, so its type members carry
+    /// `export` and another module can name them.
+    ns_export: bool,
+    /// Every bare type name a type span holds, as the parser read them.
+    /// A namespace's type renders under its own name, so the copy has
+    /// to know where each name sits.
+    type_name_spans: Vec<TokSpan>,
 }
 
 /// One instance method an `impl` block writes, in spans, so the type
@@ -1483,6 +1518,8 @@ fn local_needs_rewrite(l: &Local) -> bool {
 /// copies a statement whole when nothing does, which is the common path.
 fn stmt_needs_desugar(s: &Stmt) -> bool {
     match s {
+        Stmt::Namespace(_) => return true,
+
         Stmt::Assign(a) if a.op.end - a.op.start == 3 => return true,
 
         Stmt::Local(l) if local_needs_rewrite(l) => return true,
@@ -1737,6 +1774,20 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        // A namespace's type renders under a name of its own, and a
+        // type slot outside the namespace writes the path. Both read
+        // the same name here.
+        if let Some((s, e, text)) = self.namespace_type_at(start, end) {
+            // A `global namespace` reaches the file as that name, so
+            // the first line has to bind it.
+            self.use_global(&text.clone(), s);
+            self.r.copy(start, s);
+            self.generate(s, &text);
+            self.copy(e, end);
+
+            return;
+        }
+
         let edit = self.type_edits.iter().copied().find(|e| match e {
             TypeEdit::ArraySuffix {
                 modifier,
@@ -1852,6 +1903,37 @@ impl<'s> Desugar<'s> {
         self.copy(br_e, end);
     }
 
+    /// The first byte a type edit starts at inside a range, if any.
+    fn earliest_edit_start(&self, start: u32, end: u32) -> Option<u32> {
+        self.type_edits
+            .iter()
+            .filter_map(|e| {
+                let (s, x) = match e {
+                    TypeEdit::ArraySuffix {
+                        modifier,
+                        operand,
+                        brackets,
+                    } => (
+                        match modifier {
+                            Some(m) => self.byte_start(*m),
+
+                            None => self.byte_start(*operand),
+                        },
+                        self.byte_end(*brackets),
+                    ),
+
+                    TypeEdit::AmbientName(span) => (self.byte_start(*span), self.byte_end(*span)),
+
+                    TypeEdit::Mapped { table, .. } => {
+                        (self.byte_start(*table), self.byte_end(*table))
+                    }
+                };
+
+                (s >= start && x <= end).then_some(s)
+            })
+            .min()
+    }
+
     /// Copies a span through the renderer with no rewrite.
     fn copy_span(&mut self, span: TokSpan) {
         if !span.is_empty() {
@@ -1863,7 +1945,9 @@ impl<'s> Desugar<'s> {
     // --- scopes for ambient names -------------------------------------------
 
     fn declare_name(&mut self, span: TokSpan) {
-        let name = self.text_of(span).to_string();
+        // A namespace member is in scope under its rendered name, so a
+        // local of the member's own name still shadows it.
+        let name = self.decl_name(span);
 
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name);

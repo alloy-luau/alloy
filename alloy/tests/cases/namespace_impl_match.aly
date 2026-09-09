@@ -1,0 +1,28 @@
+-- An `impl` inside a namespace targets the namespace's own struct, and
+-- a `match` over its enum reads the variant with no prefix.
+namespace Shapes as
+    struct Circle as
+        r: number
+    end
+    impl Circle as
+        function area(self): number
+            return 3.14 * self.r * self.r
+        end
+    end
+    enum Kind as
+        Round
+        Flat
+    end
+    function name_of(k: Kind): string
+        match k with
+            case Round then return "round"
+            case Flat then return "flat"
+        end
+
+        return ""
+    end
+end
+
+local c = new Shapes.Circle { r = 2 }
+
+print(c:area(), Shapes.name_of(Shapes.Kind.Round))

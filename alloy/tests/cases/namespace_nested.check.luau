@@ -1,0 +1,15 @@
+local __alloy = require("@alloy") -- A namespace inside a namespace: the inner one is a field of the
+-- outer table, and its members take both names.
+local Outer = {}
+    const Outer_A = 1 Outer.A = Outer_A
+    Outer.Inner = {}
+        const Outer_Inner_B = 2 Outer.Inner.B = Outer_Inner_B
+        local Outer_Inner_Point = {} Outer_Inner_Point.__index = Outer_Inner_Point function Outer_Inner_Point.__new(f: { x: number }): Outer_Inner_Point  return (setmetatable(f, Outer_Inner_Point) :: any) end function Outer_Inner_Point.new(f: { x: number }): Outer_Inner_Point return Outer_Inner_Point.__new(f) end
+
+ type Outer_Inner_Point = typeof(setmetatable({} :: { x: number }, Outer_Inner_Point)) Outer_Inner_Point.__tostring = function(s: Outer_Inner_Point) return __alloy.show_struct("Outer.Inner.Point", s, { "x" }) end Outer.Inner.Point = Outer_Inner_Point
+    
+
+
+local p: Outer_Inner_Point = { x = Outer.A + Outer.Inner.B }
+
+print(p)

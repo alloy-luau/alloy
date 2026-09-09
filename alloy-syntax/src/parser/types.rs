@@ -273,7 +273,9 @@ impl<'a> Parser<'a> {
                             .push(TypeEdit::AmbientName(TokSpan::new(i, i + 1)));
                     }
 
-                    if self.at(".") {
+                    // `M.T`, and `Outer.Inner.Point` for a namespace
+                    // inside a namespace.
+                    while self.at(".") {
                         self.bump();
                         self.expect_name()?;
                     }

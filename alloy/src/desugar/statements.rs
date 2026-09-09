@@ -257,8 +257,7 @@ impl<'s> Desugar<'s> {
                     .iter()
                     .map(|v| (self.text_of(v.name).to_string(), v.payload.len()))
                     .collect();
-                self.enums
-                    .insert(self.text_of(e.name).to_string(), variants);
+                self.enums.insert(self.decl_name(e.name), variants);
             }
 
             Stmt::Import(i) => match &i.kind {
@@ -295,13 +294,13 @@ impl<'s> Desugar<'s> {
             Stmt::Trait(t) => {
                 self.declare_name(t.name);
                 self.not_constructible
-                    .insert(self.text_of(t.name).to_string(), "trait");
+                    .insert(self.decl_name(t.name), "trait");
             }
 
             Stmt::Remote(r) => {
                 self.declare_name(r.name);
                 self.not_constructible
-                    .insert(self.text_of(r.name).to_string(), "remote");
+                    .insert(self.decl_name(r.name), "remote");
             }
 
             Stmt::Attribute(a) => {
@@ -311,7 +310,7 @@ impl<'s> Desugar<'s> {
             }
 
             Stmt::Interface(i) => {
-                let name = self.text_of(i.name).to_string();
+                let name = self.decl_name(i.name);
                 self.not_constructible.insert(name.clone(), "interface");
                 // An interface with no base has its fields here; one
                 // with a base keeps the type function, which sees them.
@@ -396,6 +395,13 @@ impl<'s> Desugar<'s> {
     /// Reports if a statement needs rewriting. The tree check is exact for
     /// nodes; ambient names and word operators need the source text.
     pub(crate) fn stmt_needs_desugar(&self, s: &Stmt) -> bool {
+        // Inside a namespace every declaration renders under a name of
+        // its own, and every reference to a sibling takes that name, so
+        // the walk has to reach each statement.
+        if !self.ns_stack.is_empty() {
+            return true;
+        }
+
         if stmt_needs_desugar(s) {
             return true;
         }
@@ -479,6 +485,8 @@ impl<'s> Desugar<'s> {
             Stmt::Enum(e) => self.enum_decl(e),
 
             Stmt::Impl(i) => self.impl_decl(i),
+
+            Stmt::Namespace(ns) => self.namespace_decl(ns),
 
             Stmt::Match(m) => self.match_stmt(m),
 

@@ -86,6 +86,48 @@ print(remotes, count, delta)
 /// Compiles `src`, writes it beside a copy of the std, and runs
 /// `luau-lsp analyze` over it. The test skips when the tool or the
 /// Roblox definitions are missing.
+/// A namespace: values, a struct, an enum, an impl, and a nested
+/// namespace, each read back through the table and through the type
+/// name the emit gives it.
+const NAMESPACED: &str = r#"namespace Geom as
+    const ORIGIN = 0
+
+    struct Point as
+        x: number
+        y: number
+    end
+
+    impl Point as
+        function sum(self): number
+            return self.x + self.y
+        end
+    end
+
+    enum Kind as
+        Round
+        Flat
+    end
+
+    function name_of(k: Kind): string
+        match k with
+            case Round then return "round"
+            case Flat then return "flat"
+        end
+
+        return ""
+    end
+
+    namespace Deep as
+        type Id = number
+    end
+end
+
+local p: Geom.Point = new Geom.Point { x = Geom.ORIGIN, y = 1 }
+local id: Geom.Deep.Id = 7
+
+print(p:sum(), Geom.name_of(Geom.Kind.Round), id)
+"#;
+
 fn analyze(src: &str, name: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("tools/types/globalTypes.d.luau");
@@ -316,4 +358,11 @@ fn a_project_with_globals_analyzes() {
     assert!(bad.is_empty(), "{}\n---\n{emitted}", bad.join("\n"));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A namespace's artifact is Luau the analyzer reads: the table, the
+/// type names, and the impl on a member struct.
+#[test]
+fn a_namespace_analyzes_clean() {
+    analyze(NAMESPACED, "namespaced");
 }

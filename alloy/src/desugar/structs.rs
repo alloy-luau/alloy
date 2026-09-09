@@ -25,7 +25,9 @@ impl<'s> Desugar<'s> {
     /// `impl X ... end`: each method lands on `X`; operator traits map to
     /// metamethods.
     pub(crate) fn impl_decl(&mut self, i: &ImplDecl) {
-        let target_name = self.text_of(i.target).to_string();
+        // A struct of the namespace this `impl` sits in renders under
+        // the namespace's own name.
+        let target_name = self.impl_target_name(i.target);
         let start = self.byte_start(i.span);
         // The header runs to the end of the target, and past `<T>` when
         // the impl declares parameters: Luau has no such header.
@@ -403,14 +405,18 @@ impl<'s> Desugar<'s> {
     the derives. A `.d.aly` keeps only the type.
     */
     pub(crate) fn struct_decl(&mut self, st: &StructDecl) {
-        let name = self.text_of(st.name).to_string();
+        let name = self.decl_name(st.name);
         let start = self.byte_start(st.span);
         let end_tok = self.toks[st.span.end as usize - 1];
         let generics = st
             .generics
             .map(|g| strip_bounds(self.text_of(g)))
             .unwrap_or_default();
-        let export = if st.exported { "export " } else { "" };
+        let export = if st.exported || self.ns_export {
+            "export "
+        } else {
+            ""
+        };
 
         // Field types and defaults.
         let mut field_types = Vec::new();
@@ -610,7 +616,7 @@ impl<'s> Desugar<'s> {
             let fields: Vec<String> = field_names.iter().map(|f| luau_string(f)).collect();
             tail.push_str(&format!(
                 " {name}.__tostring = function(s{sn}) return {std}.show_struct({}, s, {{ {} }}) end",
-                luau_string(&name),
+                luau_string(&self.display_name(&name)),
                 fields.join(", ")
             ));
         }
@@ -639,10 +645,10 @@ impl<'s> Desugar<'s> {
                 .any(|a| a.name.is_some_and(|n| self.text_of(n) == "sealed"))
         {
             let keys: Vec<String> = field_names.iter().map(|f| format!("{f} = true")).collect();
+            let shown = luau_string(&self.display_name(&name));
             tail.push_str(&format!(
-                " {name}.__newindex = function(t, k, v) if ({{ {} }})[k] then rawset(t, k, v) else error(string.format(\"%s has no field %s\", {}, tostring(k)), 2) end end",
+                " {name}.__newindex = function(t, k, v) if ({{ {} }})[k] then rawset(t, k, v) else error(string.format(\"%s has no field %s\", {shown}, tostring(k)), 2) end end",
                 keys.join(", "),
-                luau_string(&name)
             ));
         }
 
@@ -833,10 +839,14 @@ impl<'s> Desugar<'s> {
     /// A trait is a type of its method signatures plus a table holding the
     /// default bodies, which `impl` copies onto the struct.
     pub(crate) fn trait_decl(&mut self, t: &TraitDecl) {
-        let name = self.text_of(t.name).to_string();
+        let name = self.decl_name(t.name);
         let start = self.byte_start(t.span);
         let end_tok = self.toks[t.span.end as usize - 1];
-        let export = if t.exported { "export " } else { "" };
+        let export = if t.exported || self.ns_export {
+            "export "
+        } else {
+            ""
+        };
         let sigs: Vec<String> = t
             .methods
             .iter()
@@ -974,10 +984,14 @@ impl<'s> Desugar<'s> {
     // --- interfaces ------------------------------------------------------------
 
     pub(crate) fn interface_decl(&mut self, i: &InterfaceDecl) {
-        let name = self.text_of(i.name).to_string();
+        let name = self.decl_name(i.name);
         let start = self.byte_start(i.span);
         let end_tok = self.toks[i.span.end as usize - 1];
-        let export = if i.exported { "export " } else { "" };
+        let export = if i.exported || self.ns_export {
+            "export "
+        } else {
+            ""
+        };
         let generics = i
             .generics
             .map(|g| strip_bounds(self.text_of(g)))
@@ -1085,7 +1099,7 @@ impl<'s> Desugar<'s> {
 
     /// Records a struct's name and fields for construction checks.
     pub(crate) fn note_struct(&mut self, st: &StructDecl) {
-        let name = self.text_of(st.name).to_string();
+        let name = self.decl_name(st.name);
         let fields = st
             .fields
             .iter()

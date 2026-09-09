@@ -36,6 +36,8 @@ pub enum Kind {
     Attribute,
     /// `global impl BasePart as ... end`: methods, no name to bind.
     Impl,
+    /// `global namespace Math as ... end`: one table over a group.
+    Namespace,
 }
 
 impl Kind {
@@ -50,6 +52,7 @@ impl Kind {
                 | Kind::Trait
                 | Kind::Class
                 | Kind::Remote
+                | Kind::Namespace
         )
     }
 
@@ -76,6 +79,7 @@ impl Kind {
             Kind::Macro => "macro",
             Kind::Attribute => "attribute",
             Kind::Impl => "impl",
+            Kind::Namespace => "namespace",
         }
     }
 }
@@ -297,8 +301,75 @@ pub fn declared_in(
                 push(text(d.target), Kind::Impl, d.target, d.span, String::new())
             }
 
+            // A namespace reaches a file as one name. Its public types
+            // reach it as `Math_Vec2`, the name the emit gives them, so
+            // each one is a global of its own.
+            Stmt::Namespace(d) if d.global => {
+                let name = text(d.name);
+                push(name, Kind::Namespace, d.name, d.span, String::new());
+
+                for (member, params) in namespace_types(src, toks, d, name) {
+                    push(&member, Kind::Type, d.name, d.span, params);
+                }
+            }
+
             _ => {}
         }
+    }
+
+    out
+}
+
+/// The public types of a `global namespace`, under the names the emit
+/// gives them, each with its parameter list.
+fn namespace_types(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    prefix: &str,
+) -> Vec<(String, String)> {
+    let text = |span: TokSpan| -> &str {
+        if span.end <= span.start || span.end as usize > toks.len() {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+    let mut out = Vec::new();
+
+    for m in &ns.members {
+        if m.is_private(src, toks) {
+            continue;
+        }
+
+        let (name, params) = match m.stmt.under_default() {
+            Stmt::Struct(d) => (text(d.name), params_of(d.generics.map(text))),
+
+            Stmt::Enum(d) => (text(d.name), String::new()),
+
+            Stmt::Trait(d) => (text(d.name), String::new()),
+
+            Stmt::Interface(d) => (text(d.name), params_of(d.generics.map(text))),
+
+            Stmt::TypeAlias(d) => {
+                let after = toks[d.name.end as usize - 1].end as usize;
+
+                (
+                    text(d.name),
+                    crate::modules::type_params(src[after..].trim_start()),
+                )
+            }
+
+            Stmt::Namespace(inner) => {
+                let deeper = format!("{prefix}_{}", text(inner.name));
+                out.extend(namespace_types(src, toks, inner, &deeper));
+
+                continue;
+            }
+
+            _ => continue,
+        };
+        out.push((format!("{prefix}_{name}"), params));
     }
 
     out
@@ -555,6 +626,7 @@ pub fn is_global(stmt: &Stmt) -> bool {
         Stmt::Macro(d) => d.global,
         Stmt::Attribute(d) => d.global,
         Stmt::Impl(d) => d.global,
+        Stmt::Namespace(d) => d.global,
 
         _ => false,
     }
@@ -685,6 +757,7 @@ pub fn refs_for(
         }
 
         out.push(crate::desugar::GlobalRef {
+            namespace: g.kind == Kind::Namespace,
             side: g.side,
             name: g.name.clone(),
             file: g.file.to_string_lossy().replace('\\', "/"),

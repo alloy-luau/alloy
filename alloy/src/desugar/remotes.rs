@@ -172,7 +172,7 @@ pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
 
 impl<'s> Desugar<'s> {
     pub(crate) fn remote_decl(&mut self, r: &RemoteDecl) {
-        let name = self.text_of(r.name).to_string();
+        let name = self.decl_name(r.name);
         let start = self.byte_start(r.span);
         let end = self.byte_end(r.span);
 

@@ -1,0 +1,14 @@
+-- A namespace over types. Luau has no `Math.Vec2` type path, so the
+-- struct declares `Math_Vec2` and every type slot reads that name.
+namespace Math as
+    struct Vec2 as
+        x: number
+        y: number
+    end
+    type Scale = number
+end
+
+local v: Math.Vec2 = { x = 1, y = 2 }
+local s: Math.Scale = 2
+
+print(v.x * s)

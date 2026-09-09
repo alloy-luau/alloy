@@ -436,7 +436,28 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        for stmt in &block.stmts {
+        let stmts: Vec<&Stmt> = block.stmts.iter().collect();
+        self.prescan_stmts(&stmts);
+    }
+
+    /// The body of the prescan, over a list of statements. A namespace
+    /// runs it again over its members, under the namespace's scope, so
+    /// a member is indexed by the name the emit gives it.
+    fn prescan_stmts(&mut self, stmts: &[&Stmt]) {
+        for stmt in stmts {
+            // A namespace member is a declaration of the file too. The
+            // scope makes `decl_name` give it the namespace's prefix.
+            if let Stmt::Namespace(ns) = stmt.under_default() {
+                let key = crate::desugar::namespaces::key_of(
+                    self.ns_stack.last().map(String::as_str),
+                    self.text_of(ns.name),
+                );
+                let inner: Vec<&Stmt> = ns.members.iter().map(|m| &m.stmt).collect();
+                self.ns_stack.push(key);
+                self.prescan_stmts(&inner);
+                self.ns_stack.pop();
+            }
+
             // `export default struct S` declares `S` like any other
             // top-level declaration; the prescan reads through it.
             let stmt = stmt.under_default();
@@ -449,12 +470,12 @@ impl<'s> Desugar<'s> {
 
             match stmt {
                 Stmt::Function(f) if f.path.len() == 1 && returns_result(&f.body) => {
-                    let name = self.text_of(f.path[0]).to_string();
+                    let name = self.decl_name(f.path[0]);
                     self.result_asyncs.insert(name);
                 }
 
                 Stmt::LocalFunction(f) if returns_result(&f.body) => {
-                    let name = self.text_of(f.name).to_string();
+                    let name = self.decl_name(f.name);
                     self.result_asyncs.insert(name);
                 }
 
@@ -465,7 +486,7 @@ impl<'s> Desugar<'s> {
                 && let Some((_, value)) = self.text_of(t.span).split_once('=')
                 && value.trim_start().starts_with("Result")
             {
-                self.result_aliases.insert(self.text_of(t.name).to_string());
+                self.result_aliases.insert(self.decl_name(t.name));
             }
 
             let declared = match stmt {
@@ -483,7 +504,7 @@ impl<'s> Desugar<'s> {
             };
 
             if let Some(name) = declared {
-                self.declared_types.insert(self.text_of(name).to_string());
+                self.declared_types.insert(self.decl_name(name));
             }
 
             match stmt {
@@ -530,7 +551,7 @@ impl<'s> Desugar<'s> {
                 },
 
                 Stmt::Enum(e) => {
-                    let name = self.text_of(e.name).to_string();
+                    let name = self.decl_name(e.name);
                     let variants: Vec<(String, usize)> = e
                         .variants
                         .iter()
@@ -540,7 +561,7 @@ impl<'s> Desugar<'s> {
                 }
 
                 Stmt::Impl(i) => {
-                    let target = self.text_of(i.target).to_string();
+                    let target = self.impl_target_name(i.target);
                     let names: HashSet<String> = i
                         .methods
                         .iter()
@@ -686,7 +707,7 @@ impl<'s> Desugar<'s> {
                 }
 
                 Stmt::Trait(t) => {
-                    let name = self.text_of(t.name).to_string();
+                    let name = self.decl_name(t.name);
                     let defaults = t
                         .methods
                         .iter()

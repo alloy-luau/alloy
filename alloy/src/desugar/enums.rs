@@ -49,7 +49,7 @@ impl<'s> Desugar<'s> {
     on the lines the declaration used.
     */
     pub(crate) fn enum_decl(&mut self, e: &EnumDecl) {
-        let name = self.text_of(e.name).to_string();
+        let name = self.decl_name(e.name);
         // The `as` token follows the name, whether or not `export` leads.
         let header_end = self.toks[e.name.end as usize].end;
         let start = self.byte_start(e.span);
@@ -139,7 +139,11 @@ impl<'s> Desugar<'s> {
             test.push_str(&format!(" or {t}"));
         }
 
-        let export = if e.exported { "export " } else { "" };
+        let export = if e.exported || self.ns_export {
+            "export "
+        } else {
+            ""
+        };
         // A variant with a payload prints as `Msg.Move(1, 2)`; a unit
         // variant is a string and prints as its name already.
         let mut printer = if self.options.definitions {
@@ -149,7 +153,7 @@ impl<'s> Desugar<'s> {
 
             format!(
                 " {name}.__tostring = function(v) return {std}.show_variant({}, v) end",
-                luau_string(&name)
+                luau_string(&self.display_name(&name))
             )
         };
 
@@ -236,7 +240,11 @@ impl<'s> Desugar<'s> {
     }
 
     pub(crate) fn renamed(&self, name: &str) -> Option<String> {
-        self.renames.iter().rev().find_map(|m| m.get(name).cloned())
+        self.renames
+            .iter()
+            .rev()
+            .find_map(|m| m.get(name).cloned())
+            .or_else(|| self.ns_member_name(name))
     }
 
     /// Reports if a bare name is a unit variant of a known enum.
@@ -670,11 +678,9 @@ impl<'s> Desugar<'s> {
                     Pattern::Path(span) => {
                         let text = self.text_of(*span).to_string();
 
-                        if let Some((e, v)) = text.split_once('.')
-                            && self.enums.contains_key(e)
-                        {
-                            enum_name.get_or_insert(e.to_string());
-                            named.push(v.to_string());
+                        if let Some((e, v)) = self.enum_of_path(&text) {
+                            enum_name.get_or_insert(e);
+                            named.push(v);
                         }
                     }
 
@@ -808,14 +814,14 @@ impl<'s> Desugar<'s> {
                 Pattern::Path(span) => {
                     // `Color.Red` covers the unit variant `Red` of `Color`.
                     let text = self.text_of(*span).to_string();
-                    let Some((e, v)) = text.split_once('.') else {
+                    let Some((e, v)) = self.enum_of_path(&text) else {
                         return false;
                     };
 
-                    match self.enums.get(e) {
-                        Some(vs) if vs.iter().any(|(n, c)| n == v && *c == 0) => {
-                            enum_name.get_or_insert(e.to_string());
-                            rows.push((v.to_string(), Vec::new()));
+                    match self.enums.get(&e) {
+                        Some(vs) if vs.iter().any(|(n, c)| *n == v && *c == 0) => {
+                            enum_name.get_or_insert(e);
+                            rows.push((v, Vec::new()));
                         }
 
                         _ => return false,

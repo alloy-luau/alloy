@@ -1,0 +1,13 @@
+-- A namespace over values: the header opens a table and each member
+-- lands on it. Inside the namespace a sibling needs no prefix.
+namespace Math as
+    const PI = 3.14
+    function clamp(x: number, lo: number, hi: number): number
+        return math.max(lo, math.min(hi, x))
+    end
+    function unit(x: number): number
+        return clamp(x, 0, 1)
+    end
+end
+
+print(Math.PI, Math.clamp(5, 0, 3), Math.unit(2))

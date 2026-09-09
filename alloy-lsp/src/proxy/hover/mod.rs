@@ -443,6 +443,7 @@ pub(crate) fn declares_a_name_at(source: &str, offset: usize) -> bool {
         "macro",
         "attribute",
         "remote",
+        "namespace",
     ];
     let offset = offset.min(source.len());
     let bytes = source.as_bytes();

@@ -1062,6 +1062,7 @@ fn declares_a_name_at(source: &str, offset: usize) -> bool {
         "macro",
         "attribute",
         "remote",
+        "namespace",
         "impl",
         "class",
         "import",

@@ -424,6 +424,11 @@ pub(crate) fn a_new_name_after_a_declaring_keyword_completes_to_nothing() {
     assert!(!declares_a_name_at(src, 36));
     assert!(declares_a_name_at(src, 45));
     assert!(!declares_a_name_at(src, src.len() - 2));
+
+    // `namespace` names one too: `namespace Na|me` drew the whole scope.
+    let src = "namespace Name as end\n";
+    assert!(declares_a_name_at(src, 12));
+    assert!(declares_a_name_at(src, 10));
 }
 #[test]
 pub(crate) fn a_doc_the_child_read_is_not_added_again() {

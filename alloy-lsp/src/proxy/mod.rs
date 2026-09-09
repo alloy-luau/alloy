@@ -58,7 +58,7 @@ use hover::{
     keep_annotation, method_owner, module_hover, name_by_declaration, name_method_receiver,
     name_solver_variable, name_trait_method, names_a_key, prefer_constructed_struct,
     remote_parameter_hover, remote_spec, restates_itself, restore_struct_arguments, restyle_hover,
-    std_member_hover, unlocal_parameter, without_self,
+    service_hover, std_member_hover, unlocal_parameter, without_self,
 };
 use navigation::data_module_of;
 #[allow(unused_imports)]

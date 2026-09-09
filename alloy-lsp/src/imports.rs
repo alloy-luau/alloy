@@ -723,6 +723,123 @@ pub fn rename_edits(
     out
 }
 
+// --- the Roblox services -------------------------------------------------
+
+/// The `(local, service)` pairs one import line binds, when its path
+/// names services. `import { RunService as Run } from "game"` binds
+/// `Run` to `RunService`; `import P from "game:Players"` binds `P` to
+/// `Players`.
+pub fn service_bindings(line: &str) -> Vec<(String, String)> {
+    use alloy::game_import::GamePath;
+
+    let text = line.trim();
+    let Some(rest) = text.strip_prefix("import ") else {
+        return Vec::new();
+    };
+    let Some(game) = spec_of(text)
+        .as_deref()
+        .and_then(alloy::game_import::game_path)
+    else {
+        return Vec::new();
+    };
+    let head = rest.split(" from ").next().unwrap_or("").trim();
+    let head = head.strip_prefix("type ").unwrap_or(head).trim_start();
+    let mut out = Vec::new();
+    let mut bind = |local: &str, name: &str| {
+        if local.is_empty() {
+            return;
+        }
+
+        out.push(match &game {
+            GamePath::Every => (local.to_string(), name.to_string()),
+
+            GamePath::One(service) => (local.to_string(), service.clone()),
+        });
+    };
+
+    match head.find('{') {
+        Some(open) => {
+            let close = head.rfind('}').unwrap_or(head.len());
+
+            for entry in head[open + 1..close].split(',') {
+                let words: Vec<&str> = entry.split_whitespace().collect();
+
+                match words.as_slice() {
+                    [name, "as", local] | ["type", name, "as", local] => bind(local, name),
+                    [name] | ["type", name] => bind(name, name),
+                    _ => {}
+                }
+            }
+        }
+
+        // `import Players from "game:Players"`, and `import * as P`,
+        // which is no form the path takes but still binds a name.
+        None => {
+            let name = head
+                .trim_start_matches('*')
+                .trim_start()
+                .strip_prefix("as ")
+                .unwrap_or(head)
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            bind(name, name);
+        }
+    }
+
+    out
+}
+
+/// Every service a file already imports, so no auto-import offers one
+/// twice and neither form is added beside the other.
+pub fn imported_services(src: &str) -> HashSet<String> {
+    src.lines()
+        .flat_map(service_bindings)
+        .map(|(_, service)| service)
+        .collect()
+}
+
+/// The edit that imports a Roblox service. A file that already reads
+/// `import { ... } from "game"` takes the name into those braces; any
+/// other file takes a line of its own.
+pub fn service_import_edit(src: &str, service: &str) -> Value {
+    let has_list = src.lines().any(|line| {
+        let t = line.trim();
+
+        t.starts_with("import {") && (t.ends_with("from \"game\"") || t.ends_with("from 'game'"))
+    });
+
+    if has_list {
+        return import_edit(
+            src,
+            "game",
+            &Export {
+                name: service.to_string(),
+                is_type: false,
+                is_default: false,
+                kind: 9,
+            },
+        );
+    }
+
+    let line = import_insertion_line(src);
+
+    json!({
+        "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 0 } },
+        "newText": format!("import {service} from \"game:{service}\"\n"),
+    })
+}
+
+/// The path an import line names, in either quote.
+fn spec_of(line: &str) -> Option<String> {
+    let at = line.rfind(" from ")? + " from ".len();
+    let rest = line[at..].trim();
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let body = &rest[quote.len_utf8()..];
+
+    Some(body[..body.find(quote)?].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -241,6 +241,23 @@ impl State {
                     return items;
                 }
 
+                // `import { X } from "game"`: the names in braces are
+                // the Roblox services.
+                if spec.as_deref() == Some("game") && !*type_only {
+                    for name in alloy::roblox_services::SERVICES {
+                        let mut item = word(
+                            name,
+                            9,
+                            Some(alloy::game_import::service_summary(name)),
+                            from,
+                        );
+                        item["detail"] = json!(format!("game:GetService(\"{name}\")"));
+                        items.push(item);
+                    }
+
+                    return items;
+                }
+
                 let data_format = spec.as_deref().and_then(alloy::data::Format::of);
 
                 // A data file exports no type.
@@ -706,6 +723,25 @@ impl State {
             }
 
             Context::ImportSpec { text, start } => {
+                // `"game:X"` names one service, so the segment after the
+                // colon is the service list.
+                if text.starts_with("game:") {
+                    let from = start + "game:".len();
+
+                    for name in alloy::roblox_services::SERVICES {
+                        let mut item = word(
+                            name,
+                            9,
+                            Some(alloy::game_import::service_summary(name)),
+                            from,
+                        );
+                        item["detail"] = json!(format!("game:GetService(\"{name}\")"));
+                        items.push(item);
+                    }
+
+                    return items;
+                }
+
                 let Some(path) = uri_to_path(uri) else {
                     return items;
                 };
@@ -729,8 +765,12 @@ impl State {
                     item["detail"] = json!(detail);
 
                     // A sibling module resolves as `./name`; a bare name
-                    // is an alias the project has to declare.
-                    if head.is_empty() && !label.starts_with(['@', '.']) {
+                    // is an alias the project has to declare. `game` is
+                    // neither: it names the services.
+                    if head.is_empty()
+                        && !label.starts_with(['@', '.'])
+                        && !label.starts_with("game")
+                    {
                         item["textEdit"]["newText"] = json!(format!("./{label}"));
                     }
 

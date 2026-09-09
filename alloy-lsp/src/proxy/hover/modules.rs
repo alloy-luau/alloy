@@ -40,8 +40,18 @@ impl Server {
                 .iter()
                 .find_map(|text| remote_hover(text, &word).or_else(|| const_hover(text, &word)))
         };
+        let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
+        let quoted = doc.source[line_start..start].matches('"').count() % 2 == 1
+            || doc.source[line_start..start].matches('\'').count() % 2 == 1;
+        // The line the caret sits on, for a word inside a path string:
+        // one file can name the same service on two lines.
+        let line_end = doc.source[start..]
+            .find('\n')
+            .map_or(doc.source.len(), |i| start + i);
+        let spec_line = quoted.then(|| &doc.source[line_start..line_end]);
         let answer = remote_hover(&doc.source, &word)
             .or_else(imported)
+            .or_else(|| service_hover(&doc.source, &word, spec_line))
             .or_else(|| {
                 let dir = path
                     .as_deref()
@@ -49,12 +59,8 @@ impl Server {
                     .unwrap_or(Path::new("."))
                     .to_path_buf();
                 let aliases = project_aliases(&dir, st.root.as_deref());
-                let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
-                let before = &doc.source[line_start..start];
-                let in_spec =
-                    before.matches('"').count() % 2 == 1 || before.matches('\'').count() % 2 == 1;
 
-                module_hover(&doc.source, &word, path.as_deref(), &aliases, in_spec)
+                module_hover(&doc.source, &word, path.as_deref(), &aliases, quoted)
             });
 
         let Some(answer) = answer else {
@@ -320,4 +326,66 @@ impl RemoteSpec {
             _ => true,
         }
     }
+}
+
+/// The hover of a Roblox service an import binds, on the binding and on
+/// the path. The child reads the emitted `game:GetService` and prints
+/// the whole class table; the import line and one line about the
+/// service say what the reader asked.
+///
+/// `spec_line` is the line the caret sits on when it sits inside a path
+/// string. `None` means the word is a binding, which any line of the
+/// file may have bound.
+pub(crate) fn service_hover(source: &str, word: &str, spec_line: Option<&str>) -> Option<String> {
+    let lines: Vec<&str> = match spec_line {
+        Some(line) => vec![line],
+
+        None => source.lines().collect(),
+    };
+
+    for line in lines {
+        let text = line.trim();
+
+        if !text.starts_with("import ") {
+            continue;
+        }
+
+        let bound = imports::service_bindings(text);
+
+        if bound.is_empty() {
+            continue;
+        }
+
+        // Inside the path, `game` names every service the line binds
+        // and `game:Players` names the one it spells out. Outside it,
+        // the word is the local the line binds.
+        let hit: Vec<&str> = match spec_line.is_some() {
+            true => match word == "game" || bound.iter().any(|(_, s)| s == word) {
+                true => bound.iter().map(|(_, s)| s.as_str()).collect(),
+
+                false => Vec::new(),
+            },
+
+            false => bound
+                .iter()
+                .filter(|(local, _)| local == word)
+                .map(|(_, s)| s.as_str())
+                .collect(),
+        };
+
+        if hit.is_empty() {
+            continue;
+        }
+
+        let mut out = format!("```alloy\n{text}\n```");
+
+        for service in hit {
+            out.push('\n');
+            out.push_str(&alloy::game_import::service_summary(service));
+        }
+
+        return Some(out);
+    }
+
+    None
 }

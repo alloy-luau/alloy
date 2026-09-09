@@ -836,6 +836,48 @@ fn a_binding_hovers_where_it_was_written() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const SERVICES: &str = "import Players from \"game:Players\"\nimport { ReplicatedStorage, RunService as Run } from \"game\"\n\nlocal remotes = ReplicatedStorage:WaitForChild(\"Remotes\")\n\nPlayers.PlayerAdded:Connect(function(player)\n    print(player.Name, remotes, Run.Heartbeat)\nend)\n";
+
+/// A service import binds `game:GetService`, so the hover names the
+/// service the reader wrote, on the binding and on the path.
+#[test]
+fn a_service_import_hovers_as_its_service() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-services-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("services.aly");
+    std::fs::write(&file, SERVICES).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": SERVICES } } }),
+    );
+
+    // `Players` where the file uses it, on line 6.
+    let h = s.hover(&uri, 5, 2);
+    assert!(h.contains("import Players from"), "the binding: {h}");
+    assert!(h.contains("a Roblox service"), "the binding: {h}");
+
+    // Inside the path of the second line, on `game`.
+    let h = s.hover(&uri, 1, 55);
+    assert!(h.contains("ReplicatedStorage"), "the path: {h}");
+    assert!(h.contains("RunService"), "the path: {h}");
+
+    // The alias the second line binds.
+    let h = s.hover(&uri, 6, 33);
+    assert!(h.contains("RunService"), "the alias: {h}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_multi_root_workspace_answers_hover() {
     let Some(child) = luau_lsp() else {

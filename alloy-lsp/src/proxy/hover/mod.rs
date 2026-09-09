@@ -12,7 +12,7 @@ pub(crate) use fields::{
     foreign_method_hover, function_name_of, remote_parameter_hover,
 };
 pub(crate) use members::{attach_std_member_docs, std_member_hover, std_receiver};
-pub(crate) use modules::{import_spec, module_hover, remote_spec};
+pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 pub(crate) use restyle::{
     declared_annotation, declared_signature, drop_bound_intersections, fold_std_shapes,
     is_byte_count, keep_annotation, name_by_declaration, name_method_receiver,

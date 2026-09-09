@@ -31,7 +31,7 @@ impl State {
         imports::auto_import_items(&doc.source, &path, &files, &prefix, &bound, &aliases)
     }
 
-    /// The child's module auto-imports, as Alloy imports.
+    /// The child's module and service auto-imports, as Alloy imports.
     ///
     /// luau-lsp offers a module by its instance path and inserts a
     /// `require`. Alloy writes `import name from "@pkg/name"`, so the
@@ -39,6 +39,11 @@ impl State {
     /// give it, and one edit that writes the import under the last one.
     /// A module a dot folder holds, one no alias and no `[build] in`
     /// reaches, and one the file already imports are dropped.
+    ///
+    /// A service row inserts `local X = game:GetService("X")`. Alloy
+    /// writes `import X from "game:X"` instead, or the name inside an
+    /// `import { ... } from "game"` line the file already has. A service
+    /// the file imports is no offer, so neither form joins the other.
     pub(crate) fn rewrite_child_auto_imports(&self, uri: &str, result: &mut Value) {
         let Some(doc) = self.docs.get(uri) else {
             return;
@@ -51,6 +56,7 @@ impl State {
         let mounts = self.instance_mounts();
         let input = self.input_dir();
         let taken = imports::imported_specs(&doc.source);
+        let services = imports::imported_services(&doc.source);
         let source = doc.source.clone();
         let items = match result {
             Value::Array(v) => v,
@@ -65,6 +71,20 @@ impl State {
         };
 
         items.retain_mut(|item| {
+            if let Some(service) = service_auto_import(item) {
+                if services.contains(&service) {
+                    return false;
+                }
+
+                item["label"] = json!(service);
+                item["detail"] = json!(format!("game:GetService(\"{service}\")"));
+                item["insertText"] = json!(service);
+                item["additionalTextEdits"] =
+                    json!([imports::service_import_edit(&source, &service)]);
+
+                return true;
+            }
+
             if !is_module_auto_import(item) {
                 return true;
             }
@@ -135,4 +155,23 @@ pub(crate) fn is_module_auto_import(item: &Value) -> bool {
                     .is_some_and(|t| t.contains("= require("))
             })
         })
+}
+
+/// The service an auto-import row would bind, when the row inserts
+/// `local X = game:GetService("X")`.
+pub(crate) fn service_auto_import(item: &Value) -> Option<String> {
+    if !is_auto_import(item) {
+        return None;
+    }
+
+    let edits = item.get("additionalTextEdits")?.as_array()?;
+
+    edits.iter().find_map(|e| {
+        let text = e.get("newText")?.as_str()?;
+        let at = text.find("= game:GetService(\"")? + "= game:GetService(\"".len();
+        let name = &text[at..];
+        let name = &name[..name.find('"')?];
+
+        alloy::game_import::is_service(name).then(|| name.to_string())
+    })
 }

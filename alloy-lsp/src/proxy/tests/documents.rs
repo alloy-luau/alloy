@@ -260,10 +260,13 @@ pub(crate) fn an_import_path_lists_neither_the_file_itself_nor_a_script() {
             .collect()
     };
 
+    // `game` and `game:` name the Roblox services, which no file holds.
     assert_eq!(
         labels(""),
         vec![
             "../".to_string(),
+            "game".to_string(),
+            "game:".to_string(),
             "helper".to_string(),
             "plain".to_string(),
             "sub/".to_string()

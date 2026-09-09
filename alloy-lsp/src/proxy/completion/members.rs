@@ -402,6 +402,15 @@ pub(crate) fn module_entries(
                 format!("the DataModel, from {sourcemap}"),
             ));
         }
+
+        // The Roblox services: `game` takes a list in braces, `game:X`
+        // names one service.
+        out.push((
+            "game".to_string(),
+            9,
+            "the Roblox services, in braces".to_string(),
+        ));
+        out.push(("game:".to_string(), 19, "one Roblox service".to_string()));
     }
 
     if let Some(rest) = head.strip_prefix("@game/") {

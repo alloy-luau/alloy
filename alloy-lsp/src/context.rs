@@ -35,7 +35,12 @@ pub enum Context {
     /// slot at this position.
     EnumPayload { prefix: String },
     /// `import |` or `import type |`.
-    ImportHead { prefix: String, type_only: bool },
+    ImportHead {
+        prefix: String,
+        type_only: bool,
+        /// The path after `from`, when the line already carries one.
+        spec: Option<String>,
+    },
     /// `import { a, b| } from "./m"`: names from the module.
     ImportNames {
         prefix: String,
@@ -1861,6 +1866,18 @@ pub fn declared(src: &str, offset: usize, name: &str) -> Option<Declared> {
         .find_map(|line| declared_in_line(line, name))
 }
 
+/// The path an import line names, in either quote.
+fn import_path(line: &str) -> Option<String> {
+    let i = line.find("from")?;
+    let rest = &line[i..];
+    let q = rest.find(['"', '\''])?;
+    let quote = rest.as_bytes()[q] as char;
+    let inner = &rest[q + 1..];
+    let end = inner.find(quote)?;
+
+    Some(inner[..end].to_string())
+}
+
 pub fn detect(src: &str, offset: usize) -> Option<Context> {
     let offset = offset.min(src.len());
     let line_start = src[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -2233,6 +2250,7 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             return Some(Context::ImportHead {
                 prefix: prefix.to_string(),
                 type_only,
+                spec: import_path(line),
             });
         }
 
@@ -2251,19 +2269,7 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
                 && entry.trim_end().chars().last().is_some_and(is_word)
                 && entry.ends_with(' ')
                 && prefix.is_empty();
-            // The path in either quote.
-            let spec = line
-                .find("from")
-                .and_then(|i| {
-                    let rest = &line[i..];
-                    let q = rest.find(['"', '\''])?;
-                    let quote = rest.as_bytes()[q] as char;
-                    let inner = &rest[q + 1..];
-                    let end = inner.find(quote)?;
-
-                    Some(&inner[..end])
-                })
-                .map(str::to_string);
+            let spec = import_path(line);
 
             return Some(Context::ImportNames {
                 prefix: prefix.to_string(),
@@ -3296,14 +3302,26 @@ mod tests {
             at("import |"),
             Some(Context::ImportHead {
                 prefix: String::new(),
-                type_only: false
+                type_only: false,
+                spec: None
             })
         );
         assert_eq!(
             at("import type |"),
             Some(Context::ImportHead {
                 prefix: String::new(),
-                type_only: true
+                type_only: true,
+                spec: None
+            })
+        );
+        // The path is already written: the default of that module is
+        // what belongs before `from`.
+        assert_eq!(
+            at("import | from \"./m\""),
+            Some(Context::ImportHead {
+                prefix: String::new(),
+                type_only: false,
+                spec: Some("./m".to_string())
             })
         );
         assert_eq!(

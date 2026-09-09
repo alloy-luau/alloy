@@ -580,6 +580,37 @@ fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
     (from, aliases)
 }
 
+/// The specs of a source that name a module Alloy does not compile: a
+/// `.luau` or `.lua` file, or a data file. Such a module has no export
+/// table, so `import X from` binds the value it returns, not its
+/// `default` field.
+pub fn plain_modules(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    for spec in import_specs(source) {
+        if out.contains(&spec) {
+            continue;
+        }
+
+        let plain = crate::data::Format::of(&spec).is_some()
+            || resolve(&spec, from, aliases)
+                .is_some_and(|p| !p.extension().is_some_and(|e| e == "aly" || e == "alx"));
+
+        if plain {
+            out.push(spec);
+        }
+    }
+
+    out
+}
+
+/// The plain modules a file imports, under the nearest `alloy.toml`.
+pub fn plain_modules_for_file(path: &Path, source: &str) -> Vec<String> {
+    let (from, aliases) = file_context(path);
+
+    plain_modules(source, &from, &aliases)
+}
+
 /// The import problems of a file under the nearest `alloy.toml`. `rel`
 /// is the path a message names, which reads best from the project root;
 /// `None` names the file as it was given.
@@ -676,6 +707,55 @@ pub fn exported_names(source: &str) -> Vec<String> {
     out
 }
 
+/// Whether a module has an `export default`, the value a bare
+/// `import X from "./m"` binds.
+pub fn exports_default(source: &str) -> bool {
+    use alloy_syntax::ast::Stmt;
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+        return false;
+    };
+
+    parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .any(|s| matches!(s, Stmt::ExportDefault { .. }))
+}
+
+/// The message for `import X from "./m"` where `m` has no default. It
+/// names the export the author probably meant when one carries the
+/// binding's name.
+fn no_default_message(spec: &str, local: &str, names: &[String]) -> String {
+    // The name written here when the module exports it, else the one
+    // name it exports.
+    let meant = names
+        .iter()
+        .find(|n| *n == local)
+        .or_else(|| names.first().filter(|_| names.len() == 1));
+
+    if let Some(name) = meant {
+        return format!(
+            "\"{spec}\" has no default export; write `import {{ {name} }} from \"{spec}\"` \
+             or add `export default` to it"
+        );
+    }
+
+    if names.is_empty() {
+        return format!("\"{spec}\" has no default export; add `export default` to it");
+    }
+
+    format!(
+        "\"{spec}\" has no default export; it exports {}, or add `export default` to it",
+        and_list(names)
+    )
+}
+
 /// `a`, `b` and `c` as `` `a`, `b` and `c` ``, for a message that lists
 /// what a module exports.
 fn and_list(names: &[String]) -> String {
@@ -720,7 +800,7 @@ pub fn import_problems(
         &source[a as usize..b as usize]
     };
     let mut out = Vec::new();
-    let mut exports: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut exports: HashMap<PathBuf, (Vec<String>, bool)> = HashMap::new();
     // Every name the file binds through an import. A type and a value
     // live in their own namespace, so `import * as M` and `import
     // { type M }` from the same module both bind and neither is a
@@ -770,6 +850,51 @@ pub fn import_problems(
                 message: crate::typecheck::unknown_module_message(&spec, rel, named.as_deref()),
             });
         }
+        let type_only = matches!(&node.kind, ImportKind::TypeOnly(_));
+        // A plain Luau module returns a table; its keys are not
+        // declarations, so only an Alloy module's names are checked.
+        let alloy_module = target
+            .as_ref()
+            .is_some_and(|t| t.extension().is_some_and(|e| e == "aly" || e == "alx"));
+        let (names, has_default) = match &target {
+            Some(target) => exports
+                .entry(target.clone())
+                .or_insert_with(|| {
+                    std::fs::read_to_string(target)
+                        .map(|t| (exported_names(&t), exports_default(&t)))
+                        .unwrap_or_default()
+                })
+                .clone(),
+
+            None => (Vec::new(), false),
+        };
+        // `import X from "./m"` reads the module's `export default`,
+        // whatever `X` is called. A plain Luau or data module has no
+        // export table, so its value is the default.
+        let default_binding = |name: &alloy_syntax::ast::TokSpan,
+                               out: &mut Vec<ImportProblem>,
+                               bound_values: &mut Vec<String>| {
+            let local = text(*name).to_string();
+            let (a, b) = range(*name);
+
+            if alloy_module && !has_default {
+                out.push(ImportProblem {
+                    start: a,
+                    end: b,
+                    kind: "ImportError",
+                    message: no_default_message(&spec, &local, &names),
+                });
+            } else if bound_values.contains(&local) {
+                out.push(ImportProblem {
+                    start: a,
+                    end: b,
+                    kind: "ImportError",
+                    message: format!("`{local}` is already imported in this file"),
+                });
+            }
+
+            bound_values.push(local);
+        };
         let specs = match &node.kind {
             ImportKind::Namespace(name) => {
                 let local = text(*name).to_string();
@@ -789,31 +914,19 @@ pub fn import_problems(
                 continue;
             }
 
+            ImportKind::Default(name) => {
+                default_binding(name, &mut out, &mut bound_values);
+
+                continue;
+            }
+
             ImportKind::Both(name, list) => {
-                bound_values.push(text(*name).to_string());
+                default_binding(name, &mut out, &mut bound_values);
 
                 list
             }
 
             ImportKind::Named(list) | ImportKind::TypeOnly(list) => list,
-        };
-        let type_only = matches!(&node.kind, ImportKind::TypeOnly(_));
-        // A plain Luau module returns a table; its keys are not
-        // declarations, so only an Alloy module's names are checked.
-        let alloy_module = target
-            .as_ref()
-            .is_some_and(|t| t.extension().is_some_and(|e| e == "aly" || e == "alx"));
-        let names = match &target {
-            Some(target) => exports
-                .entry(target.clone())
-                .or_insert_with(|| {
-                    std::fs::read_to_string(target)
-                        .map(|t| exported_names(&t))
-                        .unwrap_or_default()
-                })
-                .clone(),
-
-            None => Vec::new(),
         };
 
         for item in specs {

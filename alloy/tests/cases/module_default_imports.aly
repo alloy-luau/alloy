@@ -1,0 +1,11 @@
+-- A bare name reads the module's `export default`; `* as` takes the
+-- whole table, where the default sits under `default`. The two mix
+-- with a named list and with `import type`.
+import Theme from "./theme"
+import Palette, { swatch } from "./theme"
+import * as All from "./theme"
+import type { Shade } from "./theme"
+
+local dark: Shade = All.default
+
+print(Theme, Palette, swatch, All.default, dark)

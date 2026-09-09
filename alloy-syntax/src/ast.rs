@@ -91,9 +91,9 @@ pub enum Stmt {
     Import(Import),
     /// `export { a, b as c }` and `export { a } from "path"`.
     ExportList(ExportList),
-    /// `export default expr`.
+    /// `export default expr` and `export default <declaration>`.
     ExportDefault {
-        value: Expr,
+        value: DefaultExport,
         span: TokSpan,
     },
     /// `enum Name as ... end`.
@@ -127,6 +127,41 @@ pub enum Stmt {
 }
 
 impl Stmt {
+    /// The declaration an `export default` carries, or the statement
+    /// itself. A pass that reads the top level of a module reads
+    /// through the wrapper, so `export default struct S` declares `S`.
+    pub fn under_default(&self) -> &Stmt {
+        match self {
+            Stmt::ExportDefault {
+                value: DefaultExport::Decl(inner),
+                ..
+            } => inner,
+
+            other => other,
+        }
+    }
+
+    /// The name a declaration binds, for the one under an
+    /// `export default`.
+    pub fn declared_name(&self) -> Option<TokSpan> {
+        match self {
+            // `function M.f()` names a field of `M`, not a binding.
+            Stmt::Function(f) if f.path.len() == 1 => f.path.first().copied(),
+            Stmt::LocalFunction(f) => Some(f.name),
+            Stmt::Local(l) => l.names.first().map(|b| b.name),
+            Stmt::Struct(s) => Some(s.name),
+            Stmt::Enum(e) => Some(e.name),
+            Stmt::Trait(t) => Some(t.name),
+            Stmt::Interface(i) => Some(i.name),
+            Stmt::Class(c) => Some(c.name),
+            Stmt::TypeAlias(t) => Some(t.name),
+            Stmt::Remote(r) => Some(r.name),
+            Stmt::Macro(m) => Some(m.name),
+
+            _ => None,
+        }
+    }
+
     pub fn span(&self) -> TokSpan {
         match self {
             Stmt::Empty(s)
@@ -306,9 +341,11 @@ pub struct Import {
 
 #[derive(Debug)]
 pub enum ImportKind {
-    /// `* as M` and `M`: the whole module.
+    /// `* as M`: the whole module, its default under `M.default`.
     Namespace(TokSpan),
-    /// `M, { a, b as c }`: the whole module and names picked from it.
+    /// `M`: the module's `export default`, under any name.
+    Default(TokSpan),
+    /// `M, { a, b as c }`: the default and names picked from the module.
     Both(TokSpan, Vec<ImportSpec>),
     /// `{ a, b as c, type T }`.
     Named(Vec<ImportSpec>),
@@ -321,6 +358,18 @@ pub struct ImportSpec {
     pub name: TokSpan,
     pub alias: Option<TokSpan>,
     pub is_type: bool,
+}
+
+/// What `export default` carries: an expression, or a declaration that
+/// also binds its name in the module.
+#[derive(Debug)]
+pub enum DefaultExport {
+    /// `export default expr`.
+    Value(Expr),
+    /// `export default function make() end`, and the other
+    /// declarations. The inner statement's span starts at its own
+    /// keyword, so it renders as a plain declaration.
+    Decl(Box<Stmt>),
 }
 
 #[derive(Debug)]

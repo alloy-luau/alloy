@@ -1654,6 +1654,7 @@ fn lints_of(path: &Path, source: &str) -> Vec<Lint> {
         import_types: alloy::modules::import_types_for_file(path, source),
         import_enums: alloy::modules::import_enums_for_file(path, source),
         import_privates: alloy::modules::import_privates_for_file(path, source),
+        plain_modules: alloy::modules::plain_modules_for_file(path, source),
         import_result_asyncs: alloy::modules::import_result_asyncs_for_file(path, source),
         import_trait_defaults: alloy::modules::import_trait_defaults_for_file(path, source),
         ..alloy::EmitOptions::default()
@@ -2062,6 +2063,7 @@ fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> 
         import_types: alloy::modules::import_types_for_file(Path::new(path), &source),
         import_enums: alloy::modules::import_enums_for_file(Path::new(path), &source),
         import_privates: alloy::modules::import_privates_for_file(Path::new(path), &source),
+        plain_modules: alloy::modules::plain_modules_for_file(Path::new(path), &source),
         import_result_asyncs: alloy::modules::import_result_asyncs_for_file(
             Path::new(path),
             &source,

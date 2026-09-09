@@ -13,8 +13,8 @@ local _m2 = require("./inventory") local add_item = _m2.add type Inventory = _m2
 -- A type-only import. `erase_type_imports` blanks it in the ship artifact.
 local _m3 = require("./inventory") type Item = _m3.Item
 
--- A default export imports as the module value. Same as `* as`.
-local theme = require("./theme")
+-- A bare name takes the module's `export default`, under any name.
+local theme = require("./theme").default
 
 -- `@alias` comes from .luaurc or .config.luau.
 local Signal = require("@packages/signal")

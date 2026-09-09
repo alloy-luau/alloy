@@ -13,7 +13,7 @@ import { add as add_item, type Inventory } from "./inventory"
 -- A type-only import. `erase_type_imports` blanks it in the ship artifact.
 import type { Item } from "./inventory"
 
--- A default export imports as the module value. Same as `* as`.
+-- A bare name takes the module's `export default`, under any name.
 import theme from "./theme"
 
 -- `@alias` comes from .luaurc or .config.luau.

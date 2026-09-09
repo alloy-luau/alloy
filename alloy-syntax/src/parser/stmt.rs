@@ -394,10 +394,23 @@ impl<'a> Parser<'a> {
 
             "export" if self.text_at(1) == "default" && !self.newline_after(1) => {
                 self.pos += 2;
+
+                // A declaration parses as itself, from its own keyword,
+                // so it renders as a plain declaration and the module
+                // exports the name it binds.
+                if self.default_decl_follows() {
+                    let decl = self.stmt()?;
+
+                    return Ok(Stmt::ExportDefault {
+                        value: DefaultExport::Decl(Box::new(decl)),
+                        span: TokSpan::new(start, self.pos),
+                    });
+                }
+
                 let value = self.expr()?;
 
                 Ok(Stmt::ExportDefault {
-                    value,
+                    value: DefaultExport::Value(value),
                     span: TokSpan::new(start, self.pos),
                 })
             }
@@ -1812,6 +1825,21 @@ impl<'a> Parser<'a> {
         })))
     }
 
+    /// Whether a declaration follows `export default`. Anything else
+    /// is an expression: `export default function() end` is a value.
+    fn default_decl_follows(&self) -> bool {
+        match self.text() {
+            "function" => self.name_at(1),
+
+            "async" => self.text_at(1) == "function" && self.name_at(2),
+
+            "struct" | "enum" | "trait" | "interface" | "class" | "remote" | "macro" | "local"
+            | "const" | "type" => self.name_at(1),
+
+            _ => false,
+        }
+    }
+
     // --- modules -----------------------------------------------------------
 
     /// `import` is a keyword before `*`, `{`, `type {`, or `Name from`.
@@ -1857,7 +1885,7 @@ impl<'a> Parser<'a> {
 
                 ImportKind::Both(module, self.import_specs()?)
             } else {
-                ImportKind::Namespace(module)
+                ImportKind::Default(module)
             }
         };
 

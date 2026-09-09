@@ -391,7 +391,8 @@ pub fn complete(offset: u32) -> String {
                 items.push(word("from", "keyword", Some("The side that fires the remote: `from client`, `from server`, or `from client or server`.".to_string()), offset - prefix.len()));
             }
 
-            Context::ImportHead { prefix, type_only } => {
+            // The playground has one file, so no module answers a spec.
+            Context::ImportHead { prefix, type_only, .. } => {
                 let from = offset - prefix.len();
 
                 if !*type_only {

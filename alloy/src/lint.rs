@@ -1647,7 +1647,7 @@ pub fn run(
         let Stmt::Import(im) = stmt else { continue };
         let after = toks[im.span.end as usize - 1].end;
         let bound: Vec<u32> = match &im.kind {
-            ImportKind::Namespace(n) => vec![n.start],
+            ImportKind::Namespace(n) | ImportKind::Default(n) => vec![n.start],
 
             ImportKind::Both(n, specs) => std::iter::once(n.start)
                 .chain(specs.iter().map(|s| s.alias.unwrap_or(s.name).start))

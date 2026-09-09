@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use alloy_syntax::ast::{Expr, Stmt};
+use alloy_syntax::ast::{DefaultExport, Expr, Stmt};
 use alloy_syntax::lexer::TokKind;
 use serde_json::{Value, json};
 
@@ -17,6 +17,19 @@ pub struct Export {
     pub is_default: bool,
     /// The completion item kind.
     pub kind: u64,
+}
+
+/// The completion kind of a declaration under an `export default`.
+fn default_kind(stmt: &Stmt) -> u64 {
+    match stmt {
+        Stmt::Function(_) | Stmt::LocalFunction(_) | Stmt::Macro(_) => 3,
+        Stmt::Struct(_) => 7,
+        Stmt::Enum(_) => 13,
+        Stmt::Trait(_) | Stmt::Interface(_) | Stmt::TypeAlias(_) => 8,
+        Stmt::Class(_) => 7,
+
+        _ => 6,
+    }
 }
 
 /// The exports of one file, from its top-level statements. Markup is
@@ -101,10 +114,20 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
                 }
             }
 
-            Stmt::ExportDefault {
-                value: Expr::Name(span),
-                ..
-            } => push(name_of(*span), false, true, 6),
+            // `export default`: imported bare, under any name. The
+            // name here is what an auto-import writes, and the
+            // declaration under one binds it in the module too.
+            Stmt::ExportDefault { value, .. } => match value {
+                DefaultExport::Value(Expr::Name(span)) => push(name_of(*span), false, true, 6),
+
+                DefaultExport::Decl(inner) => {
+                    if let Some(name) = inner.declared_name() {
+                        push(name_of(name), false, true, default_kind(inner));
+                    }
+                }
+
+                DefaultExport::Value(_) => {}
+            },
 
             _ => {}
         }
@@ -161,6 +184,45 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
     }
 
     out
+}
+
+/// Where a module's `export default` sits: the byte range of the name
+/// it binds, else of the `export` word. A default import's binding
+/// points here.
+pub fn default_span(src: &str, is_alx: bool) -> Option<(u32, u32)> {
+    let blanked;
+    let text = if is_alx {
+        match alloy::luaux::compile::markup_spans(src) {
+            Ok(spans) => {
+                blanked = alloy::luaux::resolve::blank_luaux_regions(src, &spans);
+
+                blanked.as_str()
+            }
+
+            Err(_) => src,
+        }
+    } else {
+        src
+    };
+    let parsed = alloy_syntax::parse_lenient(text, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let at = |span: alloy_syntax::ast::TokSpan| -> (u32, u32) {
+        let t = toks[span.start as usize];
+
+        (t.start, t.end)
+    };
+
+    parsed.chunk.block.stmts.iter().find_map(|stmt| match stmt {
+        Stmt::ExportDefault { value, span } => Some(match value {
+            DefaultExport::Decl(inner) => inner.declared_name().map_or(at(*span), at),
+
+            DefaultExport::Value(Expr::Name(n)) => at(*n),
+
+            DefaultExport::Value(_) => at(*span),
+        }),
+
+        _ => None,
+    })
 }
 
 /// The module a plain file re-exports: `local M = require("./x")` with
@@ -434,6 +496,18 @@ pub fn import_edit(src: &str, spec: &str, export: &Export) -> Value {
     })
 }
 
+/// The edit that binds a whole module under `name`:
+/// `import * as Name from "spec"` on a new line. An Alloy module's
+/// value is its export table, and a bare name would read its default.
+pub fn namespace_import_edit(src: &str, spec: &str, name: &str) -> Value {
+    let line = import_insertion_line(src);
+
+    json!({
+        "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 0 } },
+        "newText": format!("import * as {name} from \"{spec}\"\n"),
+    })
+}
+
 /// The specs a file already imports, so an auto-import never offers a
 /// module the file reads.
 pub fn imported_specs(src: &str) -> HashSet<String> {
@@ -675,6 +749,24 @@ mod tests {
         assert!(names.contains(&("T".into(), true, false)));
         assert!(names.contains(&("c".into(), false, false)));
         assert!(names.contains(&("f".into(), false, true)), "{names:?}");
+    }
+
+    #[test]
+    fn a_declaration_under_export_default_is_the_default() {
+        let src = "export function keep() end\nexport default struct Theme as\n    primary: string\nend\n";
+        let exports: Vec<(String, bool, u64)> = exports_of(src, false)
+            .into_iter()
+            .map(|e| (e.name, e.is_default, e.kind))
+            .collect();
+        assert!(exports.contains(&("keep".into(), false, 3)), "{exports:?}");
+        assert!(exports.contains(&("Theme".into(), true, 7)), "{exports:?}");
+    }
+
+    #[test]
+    fn a_whole_module_import_binds_under_a_name() {
+        let src = "--!strict\nlocal x = 1\n";
+        let edit = namespace_import_edit(src, "./ui/panel", "Panel");
+        assert_eq!(edit["newText"], "import * as Panel from \"./ui/panel\"\n");
     }
 
     #[test]

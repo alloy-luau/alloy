@@ -180,7 +180,9 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
         }
 
         Stmt::Import(i) => match &i.kind {
-            ImportKind::Namespace(n) => declares.push(name_of(src, toks, *n)),
+            ImportKind::Namespace(n) | ImportKind::Default(n) => {
+                declares.push(name_of(src, toks, *n))
+            }
 
             ImportKind::Both(n, specs) => {
                 declares.push(name_of(src, toks, *n));
@@ -500,6 +502,7 @@ fn write_modules(
             import_types: crate::modules::import_types(&source, &path, &aliases),
             import_enums: crate::modules::import_enums(&source, &path, &aliases),
             import_privates: crate::modules::import_privates(&source, &path, &aliases),
+            plain_modules: crate::modules::plain_modules(&source, &path, &aliases),
             import_result_asyncs: crate::modules::import_result_asyncs(&source, &path, &aliases),
             import_trait_defaults: crate::modules::import_trait_defaults(&source, &path, &aliases),
             ..EmitOptions::default()
@@ -687,6 +690,7 @@ pub fn spec(
         import_types: crate::modules::import_types(source, &root.join(source_rel), &aliases),
         import_enums: crate::modules::import_enums(source, &root.join(source_rel), &aliases),
         import_privates: crate::modules::import_privates(source, &root.join(source_rel), &aliases),
+        plain_modules: crate::modules::plain_modules(source, &root.join(source_rel), &aliases),
         import_result_asyncs: crate::modules::import_result_asyncs(
             source,
             &root.join(source_rel),

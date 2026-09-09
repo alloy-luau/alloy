@@ -1,0 +1,16 @@
+-- A default sits beside named exports; they are separate names. The
+-- declaration under `export default` binds here too, so the file uses
+-- it like any other.
+export local VERSION = 2
+
+export default struct Theme as
+    primary: string
+end
+
+export function name(): string
+    return "theme"
+end
+
+local built = Theme.new({ primary = "blue" })
+
+print(built, VERSION, name())

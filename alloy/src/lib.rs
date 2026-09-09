@@ -873,9 +873,12 @@ mod tests {
             compile("import jecs, { world, type Entity } from \"@pkg/jecs\"\nprint(jecs, world)\n")
                 .unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        // `jecs` is the module's default, and the named list reads the
+        // module itself, so both sit on the hoisted require.
         assert!(
             out.ship.starts_with(
-                "local jecs = require(\"@pkg/jecs\") local world = jecs.world type Entity = jecs.Entity\n"
+                "local _m1 = require(\"@pkg/jecs\") local jecs = _m1.default local world = _m1.world \
+                 type Entity = _m1.Entity\n"
             ),
             "{}",
             out.ship

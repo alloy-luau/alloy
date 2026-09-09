@@ -15,10 +15,10 @@ use std::collections::HashMap;
 use crate::lint::Lint;
 use alloy_syntax::ast::{
     Assign, Attr, AttributeDecl, Binding, Block, CallArgs, ChildName, Chunk, ClassMember, Cond,
-    Destructure, EnumDecl, ExportList, Expr, Field, FieldPattern, FunctionBody, GenericFor, If,
-    ImplDecl, Import, ImportKind, IndexKey, InterfaceDecl, Local, MatchExpr, MatchStmt, Pattern,
-    PatternLocal, RemoteDecl, Stmt, StructDecl, TableField, TokSpan, TraitDecl, TraitMethod,
-    TypeEdit, While,
+    DefaultExport, Destructure, EnumDecl, ExportList, Expr, Field, FieldPattern, FunctionBody,
+    GenericFor, If, ImplDecl, Import, ImportKind, IndexKey, InterfaceDecl, Local, MatchExpr,
+    MatchStmt, Pattern, PatternLocal, RemoteDecl, Stmt, StructDecl, TableField, TokSpan, TraitDecl,
+    TraitMethod, TypeEdit, While,
 };
 use alloy_syntax::lexer::{Tok, TokKind};
 
@@ -29,6 +29,11 @@ use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 /// `typeof` test on one names it at run time, but the checker cannot
 /// refine a value by it, so the check artifact narrows by a cast.
 const ALIAS_DATATYPES: &[&str] = &["RBXScriptSignal"];
+
+/// The local an `export default <expr>` binds, when the expression is
+/// not already a name. The export table is written after the last line,
+/// so the value needs a binding to name there.
+const DEFAULT_LOCAL: &str = "_default";
 
 /// A message tied to a source byte range.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +101,11 @@ pub struct EmitOptions {
     /// so `private_access` reports a read across a module boundary. See
     /// `crate::modules::import_privates`.
     pub import_privates: Vec<(String, Vec<String>)>,
+    /// The specs that name a module Alloy does not compile: a `.luau`
+    /// or `.lua` file, or a data file. Such a module has no export
+    /// table, so `import X from` binds the value it returns, not
+    /// `require(...).default`. See `crate::modules::plain_modules`.
+    pub plain_modules: Vec<String>,
 }
 
 /// `HashMap<string, number>` as `("HashMap", "string, number")`, for the
@@ -277,6 +287,7 @@ impl Default for EmitOptions {
             import_trait_defaults: Vec::new(),
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
+            plain_modules: Vec::new(),
         }
     }
 }
@@ -830,9 +841,39 @@ impl<'s> Desugar<'s> {
             .unwrap_or_default()
     }
 
+    /// Whether a quoted spec names a module Alloy does not compile. Such
+    /// a module returns one value and has no export table, so its value
+    /// is what a default import binds. A spec that carries the
+    /// extension says so on its own, with no project to resolve it.
+    fn is_plain_module(&self, quoted: &str) -> bool {
+        let spec = quoted
+            .strip_prefix(['"', '\''])
+            .and_then(|s| s.strip_suffix(['"', '\'']))
+            .unwrap_or(quoted);
+
+        self.options.plain_modules.iter().any(|s| s == spec)
+            || spec.ends_with(".luau")
+            || spec.ends_with(".lua")
+            || crate::data::Format::of(spec).is_some()
+    }
+
+    /// What a default import reads off the required module: the
+    /// `default` field of an Alloy module's export table, and the whole
+    /// value of a plain Luau or data module.
+    fn default_suffix(&self, quoted: &str) -> &'static str {
+        match self.is_plain_module(quoted) {
+            true => "",
+
+            false => ".default",
+        }
+    }
+
     fn import_stmt(&mut self, i: &Import) {
         let anchor = self.byte_start(i.span);
-        let path = crate::data::strip_literal(self.text_of(i.path));
+        // The spec as written: `strip_literal` drops a data extension,
+        // and the extension is what says the module is not Alloy's.
+        let spec = self.text_of(i.path).to_string();
+        let path = crate::data::strip_literal(&spec);
 
         match &i.kind {
             ImportKind::Namespace(n) => {
@@ -840,11 +881,32 @@ impl<'s> Desugar<'s> {
                 self.generate(anchor, &format!("local {name} = require({path})"));
             }
 
-            // `import M, { a } from "p"`: the module binds by its name, and
-            // the names read from it: `local M = require("p") local a = M.a`.
+            // `import M from "p"`: the module's `export default`, under
+            // the name written here.
+            ImportKind::Default(n) => {
+                let name = self.text_of(*n).to_string();
+                let suffix = self.default_suffix(&spec);
+                self.generate(anchor, &format!("local {name} = require({path}){suffix}"));
+            }
+
+            // `import M, { a } from "p"`: the default binds as `M`, and
+            // the names read from the module beside it.
             ImportKind::Both(module, specs) => {
                 let base = self.text_of(*module).to_string();
-                let mut text = format!("local {base} = require({path})");
+                // A plain module's value is the whole table, so the
+                // binding is what the names read from. An Alloy
+                // module's default is one field of its export table, so
+                // the table takes a name of its own.
+                let (temp, mut text) = match self.is_plain_module(&spec) {
+                    true => (base.clone(), format!("local {base} = require({path})")),
+
+                    false => {
+                        let temp = self.hoist_import(&path, anchor);
+                        let text = format!("local {base} = {temp}.default");
+
+                        (temp, text)
+                    }
+                };
                 let mut names = Vec::new();
                 let mut values = Vec::new();
                 let mut types = Vec::new();
@@ -859,16 +921,16 @@ impl<'s> Desugar<'s> {
                     let args = self.module_type_params(&path, &name);
 
                     if sp.is_type {
-                        types.push(format!("type {local}{args} = {base}.{name}{args}"));
+                        types.push(format!("type {local}{args} = {temp}.{name}{args}"));
                     } else {
                         // A struct or an enum is a value and a type; the
                         // type comes along when the module exports one.
                         if self.module_exports_type(&path, &name) {
-                            types.push(format!("type {local}{args} = {base}.{name}{args}"));
+                            types.push(format!("type {local}{args} = {temp}.{name}{args}"));
                         }
 
                         names.push(local);
-                        values.push(format!("{base}.{name}"));
+                        values.push(format!("{temp}.{name}"));
                     }
                 }
 
@@ -1005,6 +1067,83 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// `export default` puts the value under `default` in the export
+    /// table, the way TypeScript compiles one. A declaration keeps its
+    /// own emit and the table names it; any other expression binds a
+    /// local first, because the table is written after the last line.
+    fn export_default(&mut self, span: TokSpan, value: &DefaultExport) {
+        let anchor = self.byte_start(span);
+
+        if self.has_default_export {
+            self.diagnostics.push(Diagnostic {
+                start: anchor,
+                end: self.byte_end(span),
+                message: "a module has one `export default`; export this one by name".to_string(),
+            });
+        }
+
+        self.has_default_export = true;
+
+        match value {
+            DefaultExport::Decl(inner) => {
+                // A type is not a value, and the export table carries
+                // values. `export type` is the way to send one out.
+                let is_type = matches!(inner.as_ref(), Stmt::TypeAlias(_));
+
+                if let Stmt::TypeAlias(t) = inner.as_ref() {
+                    let name = self.text_of(t.name).to_string();
+                    self.diagnostics.push(Diagnostic {
+                        start: anchor,
+                        end: self.byte_end(span),
+                        message: format!(
+                            "`export default` takes a value, not a type; write \
+                             `export type {name} = ...` and import it in braces"
+                        ),
+                    });
+                }
+
+                let name = inner
+                    .declared_name()
+                    .map(|n| self.text_of(n).to_string())
+                    .unwrap_or_default();
+
+                if name.is_empty() {
+                    self.diagnostics.push(Diagnostic {
+                        start: anchor,
+                        end: self.byte_end(span),
+                        message: "`export default` needs a name here, or a value".to_string(),
+                    });
+                } else if !is_type {
+                    self.exports.push(("default".to_string(), name));
+                }
+
+                // `function f()` at the top level is a global; the name
+                // a module exports is its own.
+                if matches!(inner.as_ref(), Stmt::Function(_)) {
+                    self.generate(self.byte_start(inner.span()), "local ");
+                }
+
+                // The `export default` words are dropped; the
+                // declaration renders from its own keyword.
+                self.stmt(inner);
+            }
+
+            // A name is already a binding: the table reads it directly
+            // and the statement emits nothing.
+            DefaultExport::Value(Expr::Name(n)) => {
+                let name = self.text_of(*n).to_string();
+                self.exports.push(("default".to_string(), name));
+            }
+
+            DefaultExport::Value(expr) => {
+                self.generate(anchor, &format!("local {DEFAULT_LOCAL} = "));
+                self.expr(expr);
+                self.exports
+                    .push(("default".to_string(), DEFAULT_LOCAL.to_string()));
+            }
+        }
+    }
+
     /// `export local x = 1` becomes `local x = 1` and exports `x`.
     fn exported_local(&mut self, span: TokSpan, l: &Local) {
         for b in &l.names {
@@ -1042,16 +1181,6 @@ impl<'s> Desugar<'s> {
         let types_only = self.exports.is_empty();
 
         if types_only && !exports_a_type(block) {
-            return;
-        }
-
-        if self.has_default_export {
-            self.diagnostics.push(Diagnostic {
-                start: at,
-                end: at,
-                message: "a module cannot mix `export default` with named exports".to_string(),
-            });
-
             return;
         }
 
@@ -3266,6 +3395,9 @@ impl<'s> Desugar<'s> {
         }
 
         for stmt in &block.stmts {
+            // `export default struct S` declares `S` like any other
+            // top-level declaration; the prescan reads through it.
+            let stmt = stmt.under_default();
             let returns_result = |body: &FunctionBody| {
                 body.is_async.is_some()
                     && body
@@ -3334,7 +3466,7 @@ impl<'s> Desugar<'s> {
                 }
 
                 Stmt::Import(i) => match &i.kind {
-                    ImportKind::Namespace(n) => {
+                    ImportKind::Namespace(n) | ImportKind::Default(n) => {
                         self.imported_names.insert(self.text_of(*n).to_string());
                     }
 
@@ -6095,7 +6227,7 @@ impl<'s> Desugar<'s> {
             }
 
             Stmt::Import(i) => match &i.kind {
-                ImportKind::Namespace(n) => self.declare_name(*n),
+                ImportKind::Namespace(n) | ImportKind::Default(n) => self.declare_name(*n),
 
                 ImportKind::Both(n, specs) => {
                     self.declare_name(*n);
@@ -6304,12 +6436,7 @@ impl<'s> Desugar<'s> {
 
             Stmt::ExportList(e) => self.export_list(e),
 
-            Stmt::ExportDefault { value, span } => {
-                let anchor = self.byte_start(*span);
-                self.has_default_export = true;
-                self.generate(anchor, "return ");
-                self.expr(value);
-            }
+            Stmt::ExportDefault { value, span } => self.export_default(*span, value),
 
             Stmt::Enum(e) => self.enum_decl(e),
 
@@ -10109,7 +10236,11 @@ fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
 
         Stmt::Import(_) | Stmt::ExportList(_) => Vec::new(),
 
-        Stmt::ExportDefault { value, .. } => vec![Child::Expr(value)],
+        Stmt::ExportDefault { value, .. } => match value {
+            DefaultExport::Value(e) => vec![Child::Expr(e)],
+
+            DefaultExport::Decl(inner) => stmt_children(inner),
+        },
 
         Stmt::Enum(e) => e
             .variants

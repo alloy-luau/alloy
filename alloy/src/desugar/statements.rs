@@ -485,7 +485,7 @@ impl<'s> Desugar<'s> {
                 let at = self.token_named(g, &head).unwrap_or(g);
                 hits.push((
                     at,
-                    format!("nothing declares the trait `{head}`; a bound names one"),
+                    format!("`{head}` names no trait or interface; a bound needs one"),
                 ));
             }
         }

@@ -586,7 +586,7 @@ fn a_bound_that_names_nothing_reports() {
     let hits = messages("local function f<T: Undefined>() end\n\nprint(f)\n");
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert!(
-        hits[0].contains("nothing declares the trait `Undefined`"),
+        hits[0].contains("`Undefined` names no trait or interface; a bound needs one"),
         "{hits:?}"
     );
 

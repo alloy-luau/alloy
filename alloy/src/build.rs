@@ -267,6 +267,12 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             base_options
                 .extensions
                 .extend(crate::extensions::collect(&source));
+            // An `impl` on a struct another file declares attaches at
+            // run time through the require. The declaring file's check
+            // artifact declares the methods, so the type follows.
+            base_options
+                .foreign_impls
+                .extend(crate::extensions::struct_impls(&source));
         }
     }
 

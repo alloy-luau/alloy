@@ -595,3 +595,49 @@ fn a_local_of_the_same_name_takes_no_const_report() {
         .collect();
     assert!(hits.is_empty(), "{hits:?}");
 }
+
+/// `impl Vec as` in one file on a `global struct` another declares: the
+/// methods reach the global's table at run time, and the declaring
+/// file's check artifact declares them, so every file types them.
+#[test]
+fn an_impl_in_another_file_attaches_to_a_global_struct() {
+    let dir = temp_project("foreign-impl");
+    fs::write(
+        dir.join("src/a.aly"),
+        "global struct Vec as\n    x: number\n    y: number\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        "impl Vec as\n    function length(self): number\n        return self.x + self.y\n    end\n\n    function origin(): Vec\n        return new Vec { x = 0, y = 0 }\n    end\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/c.aly"),
+        "local v = Vec.origin()\n\nprint(v:length())\n",
+    )
+    .unwrap();
+    let report = build(&dir);
+    let hits: Vec<String> = messages(&report);
+    assert!(hits.is_empty(), "{hits:?}");
+
+    // The check artifact declares both; the ship artifact writes no key
+    // the source has not got.
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let flux = alloy::build::flux_project(&dir, &config).unwrap();
+    let check = flux
+        .checks
+        .iter()
+        .find(|c| c.rel.to_string_lossy() == "a.aly")
+        .map(|c| c.check.clone())
+        .unwrap_or_default();
+    assert!(
+        check.contains("Vec.length = (nil :: any) :: (self: Vec) -> number"),
+        "{check}"
+    );
+    assert!(
+        check.contains("Vec.origin = (nil :: any) :: () -> Vec"),
+        "{check}"
+    );
+    assert!(!output(&dir, "a.luau").contains("nil :: any"), "ship");
+}

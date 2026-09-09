@@ -44,6 +44,20 @@ pub fn is_primitive(name: &str) -> bool {
 /// Every extension the source declares. A struct or enum declared in the
 /// file is never foreign, whatever its name.
 pub fn collect(src: &str) -> Vec<Extension> {
+    impls(src, false)
+}
+
+/// Every `impl X as` the source writes on a struct or an enum another
+/// file declares. The runtime attaches those methods to the table the
+/// require brought in; the declaring file's check artifact declares
+/// them, so every file reads the same shape.
+pub fn struct_impls(src: &str) -> Vec<Extension> {
+    impls(src, true)
+}
+
+/// The methods of the `impl` blocks of one file. `own` picks which
+/// targets count: a type of the project, or a foreign one.
+fn impls(src: &str, own: bool) -> Vec<Extension> {
     let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
         return Vec::new();
     };
@@ -86,7 +100,14 @@ pub fn collect(src: &str) -> Vec<Extension> {
 
         let target = text(i.target);
 
-        if local.contains(target) || !is_foreign(target) {
+        if local.contains(target) || is_foreign(target) == own {
+            continue;
+        }
+
+        // A trait's own methods come from the trait, and a generic
+        // target's signatures name parameters the declaring file has
+        // not got. Neither travels to the declaring file.
+        if own && (i.trait_name.is_some() || i.generics.is_some() || target.contains('.')) {
             continue;
         }
 

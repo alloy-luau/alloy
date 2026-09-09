@@ -667,11 +667,52 @@ impl<'s> Desugar<'s> {
             ));
         }
 
+        tail.push_str(&self.foreign_impl_lines(&name));
         self.generate(end_tok.start, &format!(" {tail}"));
 
         if st.exported {
             self.exports.push((name.clone(), name));
         }
+    }
+
+    /// The methods another file's `impl` puts on this type, declared on
+    /// the class table. The runtime attaches them through the require;
+    /// without the declaration the checker calls the write an added
+    /// property and every reader a missing key. The check artifact
+    /// alone carries them: the ship artifact must write no key the
+    /// source did not.
+    pub(crate) fn foreign_impl_lines(&self, name: &str) -> String {
+        if !self.options.check {
+            return String::new();
+        }
+
+        let mut out = String::new();
+
+        for e in self
+            .options
+            .foreign_impls
+            .iter()
+            .filter(|e| e.target == name)
+        {
+            let mut params: Vec<String> = Vec::new();
+
+            if !e.is_static {
+                params.push(format!("self: {name}"));
+            }
+
+            if !e.params.is_empty() {
+                params.push(e.params.clone());
+            }
+
+            let ret = e.ret.clone().unwrap_or_else(|| "()".to_string());
+            out.push_str(&format!(
+                " {name}.{} = (nil :: any) :: ({}) -> {ret}",
+                e.name,
+                params.join(", ")
+            ));
+        }
+
+        out
     }
 
     /// Copies the lines in a range as blank lines, keeping the newlines.

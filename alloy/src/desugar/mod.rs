@@ -83,6 +83,11 @@ pub struct EmitOptions {
     /// their names routes through the dispatcher in every file, not only
     /// in the file that declares the impl.
     pub extensions: Vec<crate::extensions::Extension>,
+    /// The `impl` blocks other files write on a struct or an enum this
+    /// one declares. The check artifact declares each method on the
+    /// class table, so the type carries what the runtime attaches. See
+    /// `crate::extensions::struct_impls`.
+    pub foreign_impls: Vec<crate::extensions::Extension>,
     /// The limits of the complexity lints.
     pub thresholds: crate::lint::Thresholds,
     /// Render the test artifact: a `@test` function stays in the output
@@ -216,6 +221,7 @@ impl Default for EmitOptions {
             shapes: Vec::new(),
             check: false,
             extensions: Vec::new(),
+            foreign_impls: Vec::new(),
             thresholds: crate::lint::Thresholds::default(),
             tests: false,
             import_types: Vec::new(),

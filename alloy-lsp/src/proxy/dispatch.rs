@@ -967,6 +967,7 @@ impl Server {
                             // `string (5 bytes)` measures the key the
                             // emit wrote, not the name the source has.
                             let says_nothing = restates_itself(&text)
+                                || invents_a_type(&text, doc)
                                 || (is_byte_count(&text) && names_a_key(doc, line, character));
 
                             // A std member: the type above, then what

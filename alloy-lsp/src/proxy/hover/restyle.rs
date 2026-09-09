@@ -486,6 +486,41 @@ pub(crate) fn restates_itself(text: &str) -> bool {
     }
 }
 
+/// Whether a hover invents a type for a name that is not one: the
+/// child writes `type undefined_var = unknown` for a word it cannot
+/// resolve, and the word is a value the file never declared.
+pub(crate) fn invents_a_type(text: &str, doc: &Doc) -> bool {
+    let Some((_, body)) = text.split_once('\n') else {
+        return false;
+    };
+    let Some(inner) = body.trim().strip_suffix("```") else {
+        return false;
+    };
+    let Some(rest) = inner.trim().strip_prefix("type ") else {
+        return false;
+    };
+    let Some((head, value)) = rest.split_once(" = ") else {
+        return false;
+    };
+    let name = head.trim();
+
+    if head.contains('\n') || !matches!(value.trim(), "unknown" | "any") {
+        return false;
+    }
+
+    // The file may declare exactly that alias, and then the hover reads
+    // what the author wrote.
+    !doc.source.lines().any(|line| {
+        let l = line.trim_start();
+        let l = l.strip_prefix("export ").unwrap_or(l).trim_start();
+        let l = l.strip_prefix("global ").unwrap_or(l).trim_start();
+
+        l.strip_prefix("type ")
+            .and_then(|r| r.trim_start().strip_prefix(name))
+            .is_some_and(|r| !r.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+    })
+}
+
 /// Whether a hover is the byte length of a string, `string (5 bytes)`.
 pub(crate) fn is_byte_count(text: &str) -> bool {
     let Some((_, body)) = text.split_once('\n') else {

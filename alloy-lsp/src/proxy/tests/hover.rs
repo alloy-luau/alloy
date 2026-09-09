@@ -415,6 +415,29 @@ pub(crate) fn a_type_alias_to_itself_is_no_hover() {
         "```alloy\ntype Profile = { name: string }\n```"
     ));
 }
+/// `print(undefined_var)`: the child answers `type undefined_var =
+/// unknown`, which names a type the file has not got and the caret is
+/// not on. A hover that invents one says nothing.
+#[test]
+pub(crate) fn an_unknown_name_hovers_to_nothing() {
+    let (st, uri) = super::support::one_file("print(undefined_var)\n");
+    let doc = st.docs.get(uri).expect("doc");
+    assert!(invents_a_type(
+        "```alloy\ntype undefined_var = unknown\n```",
+        doc
+    ));
+    assert!(invents_a_type("```alloy\ntype gone = any\n```", doc));
+    assert!(!invents_a_type(
+        "```alloy\ntype Point = { x: number }\n```",
+        doc
+    ));
+
+    // The file's own alias to `unknown` still reads.
+    let (st, uri) = super::support::one_file("export type Thing = unknown\nlocal t: Thing = 1\n");
+    let doc = st.docs.get(uri).expect("doc");
+    assert!(!invents_a_type("```alloy\ntype Thing = unknown\n```", doc));
+}
+
 #[test]
 pub(crate) fn a_new_name_after_a_declaring_keyword_completes_to_nothing() {
     let src = "enum Col\nlocal x = fo\nfunction hud(a\nimport x from \"./x\"\nprint(x)\n";

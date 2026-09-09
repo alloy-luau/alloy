@@ -190,6 +190,9 @@ fn declaration_word(line: &str) -> Option<&'static str> {
         ("remote ", "remote"),
         ("interface ", "interface"),
         ("type ", "type"),
+        ("namespace ", "namespace"),
+        ("local ", "local"),
+        ("const ", "local"),
     ] {
         if t.starts_with(word) {
             return Some(target);

@@ -30,6 +30,7 @@ pub const ALLOY_KEYWORDS: &[&str] = &[
     "is",
     "macro",
     "match",
+    "namespace",
     "new",
     "on",
     "private",

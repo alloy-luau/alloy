@@ -87,7 +87,7 @@ fn value_openers(text: &str) -> i32 {
     for (at, word) in words_at(text) {
         match word {
             "function" | "match" | "repeat" | "struct" | "enum" | "interface" | "impl"
-            | "trait" | "macro" => count += 1,
+            | "trait" | "macro" | "namespace" => count += 1,
 
             "for" | "while" => {
                 count += 1;

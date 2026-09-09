@@ -736,6 +736,8 @@ impl State {
                     ("remote", "A remote declaration."),
                     ("interface", "An interface declaration."),
                     ("type", "A type alias."),
+                    ("local", "A local or const binding."),
+                    ("namespace", "A namespace declaration."),
                 ] {
                     items.push(word(target, 21, Some(doc_text.to_string()), from));
                 }

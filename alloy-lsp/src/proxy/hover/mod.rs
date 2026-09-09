@@ -514,9 +514,11 @@ pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
     match key {
         "@derive" | "@sealed" => &["struct", "enum"],
 
-        "@cfg" => &["function", "local"],
+        "@cfg" => &["function", "local", "namespace"],
 
-        "@test" | "@native" | "@checked" | "@deprecated" | "@inline" | "@noinline" => &["function"],
+        "@deprecated" => &["function", "namespace"],
+
+        "@test" | "@native" | "@checked" | "@inline" | "@noinline" => &["function"],
 
         "@unreliable" | "@ratelimit" | "@timeout" | "@validate" | "@immediate" => &["remote"],
 
@@ -534,6 +536,8 @@ pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
             "remote",
             "interface",
             "type",
+            "local",
+            "namespace",
         ],
     }
 }

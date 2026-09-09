@@ -507,6 +507,13 @@ impl<'s> Scan<'s> {
     /// bound to a local, as `unused_function`.
     pub(crate) fn unused_variable(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
+            // A namespace is one name. Its members read as `Math.PI`
+            // from outside, which is not the token this scan looks for,
+            // so the namespace's own name is the one that must be read.
+            if self.inside_block(i, &["namespace"]) {
+                continue;
+            }
+
             let (names, is_function): (Vec<usize>, bool) = match self.t(i) {
                 "local" | "const" if self.statement_start(i) => {
                     let names = self.local_names(i);
@@ -540,7 +547,8 @@ impl<'s> Scan<'s> {
                     if !self.at(f, "function")
                         || !self.is_name(f + 1)
                         || !self.at(f + 2, "(")
-                        || self.inside_block(i, &["impl", "trait", "struct", "declare"])
+                        || self
+                            .inside_block(i, &["impl", "trait", "struct", "declare", "namespace"])
                         || self.has_attribute(i)
                     {
                         continue;

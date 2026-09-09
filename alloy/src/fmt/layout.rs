@@ -54,7 +54,7 @@ impl<'s> Formatter<'s> {
 
             "match" => !matches!(prev, Some(".") | Some(":")),
 
-            "struct" | "enum" | "trait" | "impl" | "interface" | "macro" => {
+            "struct" | "enum" | "trait" | "impl" | "interface" | "macro" | "namespace" => {
                 self.items[i].newlines_before > 0
                     || i == 0
                     || prev == Some("export")

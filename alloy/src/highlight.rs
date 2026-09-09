@@ -78,6 +78,7 @@ const KEYWORDS: &[&str] = &[
     "type",
     "remote",
     "macro",
+    "namespace",
     "attribute",
     "on",
     "where",

@@ -185,6 +185,7 @@ pub const WORDS: &[&str] = &[
     "local",
     "macro",
     "match",
+    "namespace",
     "new",
     "nil",
     "not",

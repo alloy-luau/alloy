@@ -61,6 +61,118 @@ impl Server {
         true
     }
 
+    /// The references of a namespace and of one of its members. The
+    /// emit renames a member, so the child, which reads the artifact,
+    /// answers with the name the reader never wrote.
+    pub(crate) fn namespace_references(&self, uri: &str, message: &Value, id: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+
+        let st = self.state.lock().expect("state");
+
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        if !keywords::is_word_at(&doc.source, offset) {
+            return false;
+        }
+
+        let (start, end) = keywords::word_range(&doc.source, offset);
+        let word = doc.source[start..end].to_string();
+        // The namespace this name belongs to: the group itself, or the
+        // one that declares a member by this name.
+        let owner = st.docs.iter().find_map(|(u, d)| {
+            let hit = d.namespace_ranges.iter().find(|n| {
+                n.path.rsplit('.').next() == Some(word.as_str())
+                    || (offset >= n.start
+                        && offset <= n.end
+                        && n.members.iter().any(|(m, _)| *m == word))
+                    || (doc.source[..start].ends_with('.')
+                        && n.members.iter().any(|(m, _)| *m == word))
+            });
+
+            hit.map(|n| (u.clone(), n.clone()))
+        });
+        let Some((home, owner)) = owner else {
+            return false;
+        };
+        let is_group = owner.path.rsplit('.').next() == Some(word.as_str());
+        let mut out: Vec<Value> = Vec::new();
+
+        for (u, d) in &st.docs {
+            // A namespace the module keeps to itself is named in that
+            // file alone; the same spelling elsewhere is another one.
+            if !owner.exported && *u != home {
+                continue;
+            }
+
+            for (s, e) in name_uses(&d.source, &word) {
+                // A member reads bare inside its namespace and by the
+                // path outside; a name of the same spelling anywhere
+                // else is not this one.
+                if !is_group {
+                    let inside = *u == home && s >= owner.start && s <= owner.end;
+
+                    if !inside {
+                        continue;
+                    }
+                }
+
+                out.push(json!({
+                    "uri": u,
+                    "range": range_value(position_of(&d.source, s), position_of(&d.source, e)),
+                }));
+            }
+
+            if is_group {
+                continue;
+            }
+
+            // `Math.PI` outside the namespace: the member after the dot.
+            let path = format!("{}.{word}", owner.path);
+            let mut from = 0;
+
+            while let Some(i) = d.source[from..].find(&path) {
+                let at = from + i;
+                let member = at + owner.path.len() + 1;
+                out.push(json!({
+                    "uri": u,
+                    "range": range_value(
+                        position_of(&d.source, member),
+                        position_of(&d.source, member + word.len()),
+                    ),
+                }));
+                from = at + path.len();
+            }
+        }
+
+        out.sort_by_key(|v| {
+            (
+                v["uri"].as_str().unwrap_or("").to_string(),
+                v["range"]["start"]["line"].as_u64().unwrap_or(0),
+                v["range"]["start"]["character"].as_u64().unwrap_or(0),
+            )
+        });
+        out.dedup();
+        drop(st);
+        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": out }));
+
+        true
+    }
+
     /// Go to definition for a name Alloy declares: a struct, an enum or a
     /// variant, a trait, an interface, a type alias, a macro, or an
     /// attribute, in this file first and then any file of the workspace.

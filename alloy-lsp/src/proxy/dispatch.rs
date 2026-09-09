@@ -543,7 +543,8 @@ impl Server {
                 let uri = text_document_uri(&message).unwrap_or_default();
 
                 if let Some(id) = message.get("id").cloned()
-                    && self.global_references(&uri, &message, &id)
+                    && (self.global_references(&uri, &message, &id)
+                        || self.namespace_references(&uri, &message, &id))
                 {
                     return true;
                 }

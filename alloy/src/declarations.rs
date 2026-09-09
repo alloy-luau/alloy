@@ -518,6 +518,8 @@ pub struct NamespaceSpan {
     pub end: usize,
     /// Each member: its name and whether it is private.
     pub members: Vec<(String, bool)>,
+    /// The module exposes the group, so another file may name it.
+    pub exported: bool,
 }
 
 /// Every namespace of a source, outermost first, with the members each
@@ -580,6 +582,7 @@ fn namespace_range(
         start: toks[ns.span.start as usize].start as usize,
         end: toks[ns.span.end as usize - 1].end as usize,
         members,
+        exported: ns.exported || ns.global,
     });
 }
 
@@ -780,6 +783,21 @@ mod tests {
         let d = summaries(src, false);
         let f = d.iter().find(|x| x.name == "M.f").unwrap();
         assert_eq!(f.hover, "```alloy\nfunction M.f(x: number): number\n```");
+    }
+
+    #[test]
+    fn the_ranges_carry_the_body_and_the_members() {
+        let src = "export namespace Math as\n    const PI = 3.14\n    private const seed = 7\nend\n\nprint(Math.PI)\n";
+        let r = namespace_ranges(src);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].path, "Math");
+        assert!(r[0].exported);
+        assert_eq!(
+            r[0].members,
+            vec![("PI".to_string(), false), ("seed".to_string(), true)]
+        );
+        assert_eq!(&src[r[0].start..r[0].start + 6], "export");
+        assert_eq!(&src[r[0].end - 3..r[0].end], "end");
     }
 
     #[test]

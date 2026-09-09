@@ -335,6 +335,10 @@ pub const TABLE: &[(&str, &str)] = &[
         "```alloy\n@unreliable\nremote ...\n```\nAn UnreliableRemoteEvent behind the remote: a fire may drop or arrive out of order, which suits state the next fire replaces. Roblox drops a payload over 900 bytes.",
     ),
     (
+        "@immediate",
+        "```alloy\n@immediate\nremote ...\n```\nA fire goes out at once instead of joining the per-frame batch: for a remote whose latency matters more than its bandwidth.\n\n**Applies to** `remote`",
+    ),
+    (
         "@ratelimit",
         "```alloy\n@ratelimit(count, seconds)\n```\nA per-player token bucket on the server, for client-to-server remotes.",
     ),

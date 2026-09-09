@@ -469,3 +469,93 @@ fn a_namespace_inside_a_block_reports() {
     );
     assert_eq!(inner.len(), 1, "{inner:?}");
 }
+
+/// `alloy doc namespace` gives a member `public` or `private`. An
+/// `export` there exported nothing and wrote `local local function`.
+#[test]
+fn export_on_a_member_reports_and_the_emit_stays_luau() {
+    let hits = messages(
+        "namespace M as\n    export function get(): number\n        return 1\n    end\nend\n\nprint(M.get())\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].contains("`export` on a namespace member"),
+        "{hits:?}"
+    );
+
+    let out = ship(
+        "namespace M as\n    export function get(): number\n        return 1\n    end\nend\n\nprint(M.get())\n",
+    );
+    assert!(out.contains("local function M_get()"), "{out}");
+    assert!(!out.contains("local local"), "{out}");
+    assert!(!out.contains("return {"), "{out}");
+}
+
+/// The export table named the source name, which nothing binds.
+#[test]
+fn an_exported_namespace_returns_the_group_alone() {
+    let out = ship(
+        "export namespace Math as\n    const pi = 3\n\n    function twice(x: number): number\n        return x * 2\n    end\nend\n",
+    );
+    assert!(out.contains("return { Math = Math }"), "{out}");
+    assert!(!out.contains("pi = pi"), "{out}");
+}
+
+/// A nested member reaches through the outer table: the `export` was
+/// what broke `Outer.Inner.x`.
+#[test]
+fn a_nested_member_reaches_through_the_outer_table() {
+    let out = clean(
+        "namespace Outer as\n    namespace Inner as\n        const x = 1\n    end\nend\n\nprint(Outer.Inner.x)\n",
+    );
+    assert!(out.contains("Outer.Inner.x = Outer_Inner_x"), "{out}");
+    assert!(out.contains("print(Outer.Inner.x)"), "{out}");
+}
+
+/// A member shadowing a name of the file wins inside the namespace.
+#[test]
+fn a_member_shadows_an_outer_local_inside_the_body() {
+    let out = clean(
+        "local x = 1\n\nnamespace Foo as\n    const x = 2\n\n    function get(): number\n        return x\n    end\nend\n\nprint(x, Foo.get())\n",
+    );
+    assert!(out.contains("return Foo_x"), "{out}");
+    assert!(out.contains("print(x, Foo.get())"), "{out}");
+}
+
+/// A local of the body still shadows the member.
+#[test]
+fn a_local_of_the_body_shadows_the_member() {
+    let out = clean(
+        "namespace Foo as\n    const x = 2\n\n    function get(): number\n        local x = 5\n\n        return x\n    end\nend\n\nprint(Foo.get())\n",
+    );
+    assert!(out.contains("local x = 5"), "{out}");
+    assert!(!out.contains("return Foo_x"), "{out}");
+}
+
+/// A member reads a name of the file that no member declares.
+#[test]
+fn a_member_reads_the_parent_scope() {
+    let out = clean(
+        "local MAX = 100\n\nnamespace Foo as\n    function get(): number\n        return MAX\n    end\nend\n\nprint(Foo.get())\n",
+    );
+    assert!(out.contains("return MAX"), "{out}");
+}
+
+/// `@deprecated` has no Luau form on a namespace, so a lint reports the
+/// use. Inside the body a member reads a sibling and nothing fires.
+#[test]
+fn a_deprecated_namespace_reports_at_a_use() {
+    let src = "@deprecated(\"use Geometry\")\nnamespace Old as\n    const x = 1\n\n    function get(): number\n        return x\n    end\nend\n\nprint(Old.get())\n";
+    let options = alloy::EmitOptions {
+        file_name: "t.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with(src, &options).unwrap();
+    let hits: Vec<&alloy::lint::Lint> = out
+        .lints
+        .iter()
+        .filter(|l| l.name == "deprecated_namespace")
+        .collect();
+    assert_eq!(hits.len(), 1, "{:?}", out.lints);
+    assert_eq!(hits[0].message, "`Old` is deprecated; use Geometry");
+}

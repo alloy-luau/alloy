@@ -330,6 +330,13 @@ pub const LINTS: &[LintInfo] = &[
     },
     // --- suspicious ------------------------------------------------------------
     LintInfo {
+        name: "deprecated_namespace",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a use of a namespace declared `@deprecated`",
+        detail: "`@deprecated` on a `function` passes through to Luau, which reports a call to it. A namespace has no Luau form, so this lint reports the use instead. The message the attribute carries prints after the name. Inside the namespace the members read each other by their own names, and nothing fires.",
+    },
+    LintInfo {
         name: "and_or_ternary",
         group: Group::Suspicious,
         default: Level::Warn,

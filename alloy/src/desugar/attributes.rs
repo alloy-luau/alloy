@@ -460,11 +460,14 @@ impl<'s> Desugar<'s> {
             // scope makes `decl_name` give it the namespace's prefix.
             if let Stmt::Namespace(ns) = stmt.under_default() {
                 let key = crate::desugar::namespaces::key_of(
-                    self.ns_stack.last().map(String::as_str),
+                    self.ns_stack.last().map(|f| f.key.as_str()),
                     self.text_of(ns.name),
                 );
                 let inner: Vec<&Stmt> = ns.members.iter().map(|m| &m.stmt).collect();
-                self.ns_stack.push(key);
+                self.ns_stack.push(crate::desugar::namespaces::NsFrame {
+                    key,
+                    scope: self.scope_depth(),
+                });
                 self.prescan_stmts(&inner);
                 self.ns_stack.pop();
             }

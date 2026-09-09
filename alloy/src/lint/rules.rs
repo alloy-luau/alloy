@@ -196,6 +196,84 @@ fn export_impl(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
     out
 }
 
+/// A use of a namespace the file declares `@deprecated`. The attribute
+/// has no Luau form on a namespace, so nothing else reports it.
+fn deprecated_namespaces(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
+    let text = |span: alloy_syntax::ast::TokSpan| -> &str {
+        match toks.get(span.start as usize) {
+            Some(t) => t.text(src),
+
+            None => "",
+        }
+    };
+    // The name, the message the attribute carries, and the byte range
+    // of the declaration. A member reads a sibling by its own name, so
+    // a hit inside the body is the long way to write it, not a use.
+    let mut marked: Vec<(&str, String, u32, u32)> = Vec::new();
+
+    for stmt in &chunk.block.stmts {
+        let Stmt::Namespace(ns) = stmt.under_default() else {
+            continue;
+        };
+        let Some(attr) = ns
+            .attributes
+            .iter()
+            .find(|a| a.name.map(text) == Some("deprecated"))
+        else {
+            continue;
+        };
+        let note = attr
+            .args
+            .first()
+            .map(|e| {
+                let s = &src[toks[e.span().start as usize].start as usize
+                    ..toks[e.span().end as usize - 1].end as usize];
+
+                format!("; {}", s.trim_matches(['"', '\'']))
+            })
+            .unwrap_or_default();
+        let start = toks[ns.span.start as usize].start;
+        let end = toks[ns.span.end as usize - 1].end;
+        marked.push((text(ns.name), note, start, end));
+    }
+
+    if marked.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != TokKind::Ident {
+            continue;
+        }
+
+        // A field of another value spelled the same names no namespace.
+        if i > 0 && matches!(toks[i - 1].text(src), "." | ":" | "?." | "?:") {
+            continue;
+        }
+
+        let Some((name, note, start, end)) = marked.iter().find(|(n, _, _, _)| *n == t.text(src))
+        else {
+            continue;
+        };
+
+        if t.start >= *start && t.start < *end {
+            continue;
+        }
+
+        out.push(Lint {
+            name: "deprecated_namespace",
+            start: t.start,
+            end: t.end,
+            message: format!("`{name}` is deprecated{note}"),
+            fix: None,
+        });
+    }
+
+    out
+}
+
 pub fn run(
     src: &str,
     toks: &[Tok],
@@ -212,6 +290,7 @@ pub fn run(
 
     lints.extend(directive_lints(src));
     lints.extend(export_impl(src, toks, chunk));
+    lints.extend(deprecated_namespaces(src, toks, chunk));
 
     let text = |i: usize| toks[i].text(src);
     let st = structure(src, toks);

@@ -59,6 +59,17 @@ impl NamespaceInfo {
     }
 }
 
+/// One namespace under render: its key, and the scope depth its body
+/// opened at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NsFrame {
+    pub key: String,
+    /// How many scopes stood open when the body started. A local
+    /// declared at or past this depth is inside the namespace and
+    /// shadows a member; one below it does not.
+    pub scope: usize,
+}
+
 /// The key a namespace is indexed under: its path with `_` for the dot,
 /// so a nested one never collides with a top-level namespace.
 pub(crate) fn key_of(parent: Option<&str>, name: &str) -> String {
@@ -299,17 +310,24 @@ impl<'s> Desugar<'s> {
     /// innermost namespace that declares it wins, and a local of the
     /// same name shadows it.
     pub(crate) fn ns_member_name(&self, name: &str) -> Option<String> {
-        if self.ns_stack.is_empty() || self.is_local(name) {
+        if self.ns_stack.is_empty() {
             return None;
         }
 
-        for key in self.ns_stack.iter().rev() {
-            let Some(info) = self.namespaces.get(key) else {
+        for frame in self.ns_stack.iter().rev() {
+            let Some(info) = self.namespaces.get(&frame.key) else {
                 continue;
             };
             let Some(m) = info.member(name) else {
                 continue;
             };
+
+            // A local of the namespace body shadows the member. A local
+            // of the file around it does not: the member is the nearer
+            // declaration.
+            if self.is_local_since(frame.scope, name) {
+                return None;
+            }
 
             return match m.rendered == name {
                 true => None,
@@ -430,8 +448,8 @@ impl<'s> Desugar<'s> {
 
     /// The name a bare type takes inside a namespace body.
     fn ns_type_name(&self, name: &str) -> Option<String> {
-        for key in self.ns_stack.iter().rev() {
-            let Some(info) = self.namespaces.get(key) else {
+        for frame in self.ns_stack.iter().rev() {
+            let Some(info) = self.namespaces.get(&frame.key) else {
                 continue;
             };
             let Some(m) = info.member(name) else {
@@ -454,6 +472,7 @@ impl<'s> Desugar<'s> {
     pub(crate) fn check_namespaces(&mut self, block: &Block) {
         self.check_namespace_names(&block.stmts, None);
         self.check_nesting(&block.stmts);
+        self.check_member_exports(&block.stmts);
         self.check_private_uses();
     }
 
@@ -482,6 +501,26 @@ impl<'s> Desugar<'s> {
             self.diagnose(
                 span,
                 "a namespace goes at the top level of a file or inside another namespace; the emit gives its members names of the file",
+            );
+        }
+    }
+
+    /// `export` on a namespace member. `alloy doc namespace` gives a
+    /// member `public` or `private`; the group is what `export` sends.
+    fn check_member_exports(&mut self, stmts: &[Stmt]) {
+        let mut hits: Vec<TokSpan> = Vec::new();
+        collect_member_exports(stmts, &mut hits);
+
+        for span in hits {
+            let word = TokSpan::new(span.start as usize, span.start as usize + 1);
+            let at = match self.text_of(word) == "export" {
+                true => word,
+
+                false => span,
+            };
+            self.diagnose(
+                at,
+                "`export` on a namespace member exports nothing; `export namespace` sends the group, and a member takes `public` or `private`",
             );
         }
     }
@@ -647,7 +686,7 @@ impl<'s> Desugar<'s> {
 
     /// Renders `namespace Name as ... end`.
     pub(crate) fn namespace_decl(&mut self, ns: &NamespaceDecl) {
-        let key = key_of(self.ns_stack.last().map(String::as_str), &{
+        let key = key_of(self.ns_stack.last().map(|f| f.key.as_str()), &{
             self.text_of(ns.name).to_string()
         });
         let Some(info) = self.namespaces.get(&key).cloned() else {
@@ -697,8 +736,14 @@ impl<'s> Desugar<'s> {
             .unwrap_or(end_tok.start);
         self.copy(head_end, first);
 
-        self.ns_stack.push(key.clone());
+        self.ns_stack.push(NsFrame {
+            key: key.clone(),
+            scope: self.scope_depth(),
+        });
         let saved_export = self.ns_export;
+        // A member exports nothing on its own; the group carries the
+        // export. `check_member_exports` reports the `export` word.
+        let mark = self.exports.len();
         let mut cursor = first;
 
         for m in &ns.members {
@@ -710,6 +755,7 @@ impl<'s> Desugar<'s> {
 
         self.ns_export = saved_export;
         self.ns_stack.pop();
+        self.exports.truncate(mark);
         self.copy(cursor, end_tok.start);
         // The closing `end` has nothing to close.
         self.blank_lines(end_tok.start, end_tok.end);
@@ -755,8 +801,11 @@ impl<'s> Desugar<'s> {
         // takes the `local` a Luau global would not have. With
         // attributes above it the modifier goes after their lines, so
         // the attributed path writes it instead.
+        // `export function f` already writes the `local` itself, in the
+        // export arm of `stmt`.
         if let Stmt::Function(f) = m.stmt.under_default()
             && f.path.len() == 1
+            && !f.exported
         {
             match f.attrs.is_empty() {
                 true => self.generate(stmt_start, "local "),
@@ -912,5 +961,54 @@ pub(crate) fn member_bindings(m: &NamespaceMember) -> Vec<MemberBinding> {
         }],
 
         _ => Vec::new(),
+    }
+}
+
+/// Every namespace member of a block that wears `export`, with the
+/// span of its declaration. A nested namespace's members count too.
+fn collect_member_exports(stmts: &[Stmt], out: &mut Vec<TokSpan>) {
+    for stmt in stmts {
+        let Stmt::Namespace(ns) = stmt.under_default() else {
+            continue;
+        };
+
+        for m in &ns.members {
+            let inner = m.stmt.under_default();
+
+            // `export impl` is the project-wide form of a foreign impl.
+            // It binds no name on the table, so it is not a member
+            // export; the `export_impl` lint has the word to say. A
+            // `global` member sets the export flag too, and
+            // `check_namespace_names` already reports that one.
+            if !matches!(inner, Stmt::Impl(_))
+                && !crate::globals::is_global(inner)
+                && is_exported(inner)
+            {
+                out.push(inner.span());
+            }
+
+            collect_member_exports(std::slice::from_ref(&m.stmt), out);
+        }
+    }
+}
+
+/// Whether a declaration wears `export`.
+fn is_exported(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Function(d) => d.exported,
+        Stmt::LocalFunction(d) => d.exported,
+        Stmt::Local(d) => d.exported,
+        Stmt::Struct(d) => d.exported,
+        Stmt::Enum(d) => d.exported,
+        Stmt::Trait(d) => d.exported,
+        Stmt::Interface(d) => d.exported,
+        Stmt::Class(d) => d.exported,
+        Stmt::TypeAlias(d) => d.exported,
+        Stmt::Remote(d) => d.exported,
+        Stmt::Macro(d) => d.exported,
+        Stmt::Attribute(d) => d.exported,
+        Stmt::Namespace(d) => d.exported,
+
+        _ => false,
     }
 }

@@ -38,7 +38,7 @@ mod structs;
 mod types;
 
 use macros::MacroRef;
-use namespaces::NamespaceInfo;
+use namespaces::{NamespaceInfo, NsFrame};
 pub(crate) use remotes::WIRE_WIDTHS;
 
 /// A message tied to a source byte range.
@@ -932,8 +932,10 @@ struct Desugar<'s> {
     /// The name a namespace member renders under, by the token index of
     /// its own name. `struct Vec2` in `namespace Math` is `Math_Vec2`.
     member_names: HashMap<u32, String>,
-    /// The namespaces under render, outermost first.
-    ns_stack: Vec<String>,
+    /// The namespaces under render, outermost first. Each one carries
+    /// the scope depth its body opened at, so a local of the body
+    /// shadows a member and a local outside it does not.
+    ns_stack: Vec<NsFrame>,
     /// The names a top-level `export { ... }` list carries, so a
     /// namespace it names exports its types too.
     export_listed: HashSet<String>,
@@ -2022,6 +2024,18 @@ impl<'s> Desugar<'s> {
 
     fn is_local(&self, name: &str) -> bool {
         self.scopes.iter().any(|s| s.contains(name))
+    }
+
+    /// How many scopes stand open. A namespace frame keeps the depth of
+    /// its body, so `is_local_since` can tell a local of the body from
+    /// one of the file around it.
+    pub(crate) fn scope_depth(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Whether a name is a local declared at or past `depth`.
+    pub(crate) fn is_local_since(&self, depth: usize, name: &str) -> bool {
+        self.scopes.iter().skip(depth).any(|s| s.contains(name))
     }
 
     /// Reports what a `global` of this file needs: a project to reach,

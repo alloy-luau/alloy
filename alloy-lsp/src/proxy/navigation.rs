@@ -60,6 +60,29 @@ impl Server {
             return true;
         }
 
+        // A project global: the name reaches this file with no import,
+        // and the emit binds it on the first line, so the child would
+        // land there. The declaration is what the reader means.
+        let word = &doc.source[word_start..word_end];
+
+        if !doc.globals.iter().any(|g| g.name == word)
+            && let Some((target_uri, target)) = st.docs.iter().find_map(|(u, d)| {
+                d.globals
+                    .iter()
+                    .find(|g| g.name == word)
+                    .map(|g| (u.clone(), g))
+            })
+        {
+            let target_doc = &st.docs[&target_uri];
+            let s = position_of(&target_doc.source, target.offset as usize);
+            let e = position_of(&target_doc.source, target.offset as usize + word.len());
+            let result = json!([{ "uri": target_uri, "range": range_value(s, e) }]);
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         // `import M from "./m"`: the binding names the module's
         // `export default`, wherever that sits.
         if let Some(result) = st.default_import_definition(uri, &doc.source, offset) {

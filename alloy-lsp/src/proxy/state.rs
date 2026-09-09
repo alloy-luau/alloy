@@ -90,6 +90,56 @@ impl State {
         }
     }
 
+    /// The `global` declarations of every open document, each with the
+    /// path a message names: the file relative to `[build] in`. A
+    /// script's globals belong to the module the build hoists them into.
+    pub(crate) fn project_globals(&self) -> Vec<alloy::globals::Global> {
+        let mut out = Vec::new();
+
+        for (uri, doc) in &self.docs {
+            let Some(rel) = self.project_rel(uri) else {
+                continue;
+            };
+
+            if rel.to_string_lossy().ends_with(".d.aly") {
+                continue;
+            }
+
+            let script = alloy::modules::is_script(&rel.to_string_lossy());
+
+            for g in &doc.globals {
+                let mut g = g.clone();
+                g.file = match script {
+                    true => PathBuf::from(alloy::globals::hoist_name(&rel.to_string_lossy())),
+
+                    false => rel.clone(),
+                };
+                out.push(g);
+            }
+        }
+
+        out.sort_by(|a, b| (&a.file, a.offset).cmp(&(&b.file, b.offset)));
+        out
+    }
+
+    /// The path of a document relative to `[build] in`, the way the
+    /// build and a message name it.
+    pub(crate) fn project_rel(&self, uri: &str) -> Option<PathBuf> {
+        let path = uri_to_path(uri)?;
+        let root = self.root.as_deref()?;
+        let config = Config::find_within(path.parent()?, root)?;
+        let base = config
+            .parent()?
+            .join(&Config::load(&config).ok()?.build.input);
+
+        Some(
+            normalize(&path)
+                .strip_prefix(normalize(&base))
+                .ok()?
+                .to_path_buf(),
+        )
+    }
+
     /// The `[lint]` table of the workspace's alloy.toml, or the defaults.
     pub(crate) fn lint_config(&self) -> alloy::config::LintConfig {
         self.root
@@ -142,6 +192,20 @@ impl State {
                     &mirror_luau_text(&root, Some(&config)),
                 );
 
+                let globals = self.project_globals();
+                let rel = self.project_rel(uri).unwrap_or_default();
+                let script = alloy::modules::is_script(&rel.to_string_lossy());
+                let sources: Vec<(PathBuf, String)> = self
+                    .docs
+                    .iter()
+                    .filter_map(|(u, d)| Some((self.project_rel(u)?, d.source.clone())))
+                    .collect();
+                let ambient_clashes = alloy::globals::ambient_names(&sources)
+                    .into_iter()
+                    .filter(|(n, _)| globals.iter().any(|g| &g.name == n))
+                    .map(|(n, f)| (n, f.to_string_lossy().replace('\\', "/")))
+                    .collect();
+
                 EmitOptions {
                     wait_timeout: config.emit.wait_timeout,
                     file_name,
@@ -149,6 +213,12 @@ impl State {
                     definitions,
                     erase_type_imports: config.emit.erase_type_imports,
                     extensions: self.extensions.clone(),
+                    global_macros: alloy::globals::macro_sources(&sources),
+                    global_attributes: alloy::globals::attribute_decls(&sources),
+                    globals: alloy::globals::refs_for(&globals, &rel, &HashMap::new()),
+                    hoist_globals: script,
+                    ambient_clashes,
+                    in_project: true,
                     ..EmitOptions::default()
                 }
             }

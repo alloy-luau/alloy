@@ -1,6 +1,65 @@
 use super::*;
 
 impl State {
+    /// Completion items for the project's globals: names every file
+    /// reaches without an import, the way the std names are reached.
+    /// The detail says which file declares each one.
+    pub(crate) fn global_completions(&self, uri: &str, labels: &[&str], types: bool) -> Vec<Value> {
+        let mine: Vec<String> = self
+            .docs
+            .get(uri)
+            .map(|d| d.globals.iter().map(|g| g.name.clone()).collect())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for g in self.project_globals() {
+            let fits = match types {
+                true => g.kind.is_type(),
+
+                false => g.kind.is_value() || matches!(g.kind, alloy::globals::Kind::Macro),
+            };
+
+            if !fits
+                || mine.contains(&g.name)
+                || labels.contains(&g.name.as_str())
+                || !seen.insert(g.name.clone())
+            {
+                continue;
+            }
+
+            let kind = match g.kind {
+                alloy::globals::Kind::Function | alloy::globals::Kind::Macro => 3,
+                alloy::globals::Kind::Value => 21,
+                alloy::globals::Kind::Struct | alloy::globals::Kind::Class => 7,
+                alloy::globals::Kind::Enum => 13,
+                alloy::globals::Kind::Trait | alloy::globals::Kind::Interface => 8,
+                alloy::globals::Kind::Type => 7,
+                _ => 6,
+            };
+            let file = g.file.to_string_lossy().replace('\\', "/");
+            let doc = self
+                .docs
+                .values()
+                .flat_map(|d| d.decls.iter())
+                .find(|d| d.name == g.name)
+                .map(|d| d.hover.clone());
+            let mut item = json!({
+                "label": g.name,
+                "kind": kind,
+                "detail": format!("global in {file}"),
+            });
+
+            if let Some(d) = doc {
+                item["documentation"] = json!({ "kind": "markdown", "value": d });
+            }
+
+            out.push(item);
+        }
+
+        out
+    }
+
     /// Completion items for the ambient std names, `HashMap` and the
     /// rest. The child knows them only as `__alloy.Name`, so a name typed
     /// at the start of an expression never reaches its list.
@@ -80,25 +139,27 @@ impl State {
             return Vec::new();
         }
 
-        let mut items: Vec<Value> = alloy::desugar::AMBIENT
-            .iter()
-            .filter(|name| !labels.contains(name))
-            .map(|name| {
-                let kind = if matches!(*name, "Ok" | "Err") { 3 } else { 7 };
+        let mut items: Vec<Value> = self.global_completions(uri, &labels, false);
+        items.extend(
+            alloy::desugar::AMBIENT
+                .iter()
+                .filter(|name| !labels.contains(name))
+                .map(|name| {
+                    let kind = if matches!(*name, "Ok" | "Err") { 3 } else { 7 };
 
-                // A std type reads with the names it carries, the way
-                // its hover does.
-                let doc = alloy::docs::type_markdown(name)
-                    .or_else(|| crate::keywords::doc(name).map(str::to_string));
+                    // A std type reads with the names it carries, the way
+                    // its hover does.
+                    let doc = alloy::docs::type_markdown(name)
+                        .or_else(|| crate::keywords::doc(name).map(str::to_string));
 
-                json!({
-                    "label": name,
-                    "kind": kind,
-                    "detail": "alloy:std",
-                    "documentation": doc.map(|d| json!({ "kind": "markdown", "value": d })),
-                })
-            })
-            .collect();
+                    json!({
+                        "label": name,
+                        "kind": kind,
+                        "detail": "alloy:std",
+                        "documentation": doc.map(|d| json!({ "kind": "markdown", "value": d })),
+                    })
+                }),
+        );
 
         // The Alloy keywords: the child lists Luau's own.
         items.extend(
@@ -179,6 +240,16 @@ impl State {
             for name in declared_type_parameters(&doc.source) {
                 push(&name, 25, "type parameter", None);
             }
+        }
+
+        // A global type is in every type slot of the project, the way a
+        // std type is, and no import brings it in.
+        for item in self.global_completions(uri, labels, true) {
+            let name = item["label"].as_str().unwrap_or_default().to_string();
+            let kind = item["kind"].as_u64().unwrap_or(7);
+            let detail = item["detail"].as_str().unwrap_or("global").to_string();
+            let doc = item["documentation"]["value"].as_str().map(str::to_string);
+            push(&name, kind, &detail, doc);
         }
 
         // The list the parser marks as ambient in a type slot, so the

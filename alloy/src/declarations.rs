@@ -105,7 +105,13 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
         }
     }
 
+    // `global` says more than `export`: the name reaches every file.
     let export = |exported: bool| if exported { "export " } else { "" };
+    let modifier = |exported: bool, global: bool| match global {
+        true => "global ",
+
+        false => export(exported),
+    };
     let start_of = |span: TokSpan| toks[span.start as usize].start as usize;
     let mut out = Vec::new();
     let mut notes_first: Vec<String> = Vec::new();
@@ -191,7 +197,10 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
             Stmt::Struct(d) => {
                 let name = text(d.name);
                 let generics = d.generics.map(text).unwrap_or("");
-                let mut lines = vec![format!("{}struct {name}{generics} as", export(d.exported))];
+                let mut lines = vec![format!(
+                    "{}struct {name}{generics} as",
+                    modifier(d.exported, d.global)
+                )];
                 lines.extend(d.fields.iter().map(|f| format!("    {}", text(f.span))));
                 lines.push("end".to_string());
 
@@ -210,7 +219,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                 };
                 let mut lines = vec![format!(
                     "{}interface {name}{generics}{extends} as",
-                    export(d.exported)
+                    modifier(d.exported, d.global)
                 )];
                 lines.extend(d.fields.iter().map(|f| format!("    {}", text(f.span))));
                 lines.push("end".to_string());
@@ -220,7 +229,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
             Stmt::Enum(d) => {
                 let name = text(d.name);
-                let mut lines = vec![format!("{}enum {name} as", export(d.exported))];
+                let mut lines = vec![format!("{}enum {name} as", modifier(d.exported, d.global))];
                 lines.extend(d.variants.iter().map(|v| format!("    {}", text(v.span))));
                 lines.push("end".to_string());
 
@@ -243,7 +252,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                 let params: Vec<String> = d.params.iter().map(|p| param_text(p, &text)).collect();
                 let header = format!(
                     "{}macro {}({})",
-                    export(d.exported),
+                    modifier(d.exported, d.global),
                     text(d.name),
                     params.join(", ")
                 );
@@ -282,7 +291,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
             Stmt::Trait(d) => {
                 let name = text(d.name);
-                let mut lines = vec![format!("{}trait {name} as", export(d.exported))];
+                let mut lines = vec![format!("{}trait {name} as", modifier(d.exported, d.global))];
                 lines.extend(
                     d.methods
                         .iter()
@@ -514,7 +523,9 @@ pub struct Binding {
     pub doc: Option<String>,
 }
 
-const DECL_WORDS: [&str; 6] = ["export", "local", "const", "async", "function", "type"];
+const DECL_WORDS: [&str; 7] = [
+    "global", "export", "local", "const", "async", "function", "type",
+];
 
 /// Every binding in the source with its declaring keywords, at any
 /// depth. A scan over the lexer's tokens, not the tree: the hover only

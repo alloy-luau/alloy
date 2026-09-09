@@ -259,13 +259,64 @@ impl Server {
         }
     }
 
+    /// The module a script's globals move into, written into the
+    /// mirror beside the script. The script's shadow requires it, so
+    /// the child needs the file to be there.
+    pub(crate) fn write_hoisted(&self, uri: &str, source: &str) {
+        let Some(path) = uri_to_path(uri) else {
+            return;
+        };
+
+        if !alloy::modules::is_script(&path.to_string_lossy()) {
+            return;
+        }
+
+        let (options, jsx) = {
+            let st = self.state.lock().expect("state");
+            let (mut o, j) = st.options_for(uri);
+            let rel = st.project_rel(uri).unwrap_or_default();
+            let module_rel = PathBuf::from(alloy::globals::hoist_name(&rel.to_string_lossy()));
+            o.globals =
+                alloy::globals::refs_for(&st.project_globals(), &module_rel, &HashMap::new());
+            o.hoist_globals = false;
+
+            (o, j)
+        };
+        let name = alloy::globals::hoist_name(
+            &path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        );
+        let module_path = path.with_file_name(name);
+        let module_src = alloy::globals::hoisted_module(&alloy::globals::index_text(&path, source));
+        let mut options = options;
+        options.file_name = module_path.to_string_lossy().into_owned();
+        let text = match alloy::compile_file(
+            &options.file_name,
+            &module_src,
+            &options,
+            Some(&jsx),
+            None,
+        ) {
+            Ok(out) => out.check,
+
+            Err(_) => return,
+        };
+        self.state
+            .lock()
+            .expect("state")
+            .write_mirror(&module_path, &text);
+    }
+
     /// Opens or replaces a document and its shadow.
     pub(crate) fn open_doc(&self, uri: &str, text: String, version: i64, by_editor: bool) {
-        let (mut options, jsx, ingots) = {
+        let (mut options, jsx, ingots, had_globals) = {
             let st = self.state.lock().expect("state");
             let (o, j) = st.options_for(uri);
+            let had = st.docs.get(uri).map(|d| global_names(&d.globals));
 
-            (o, j, st.ingots.clone())
+            (o, j, st.ingots.clone(), had.unwrap_or_default())
         };
 
         // A value import of a struct or an enum binds its type too.
@@ -281,6 +332,8 @@ impl Server {
         }
 
         let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
+        let source = doc.source.clone();
+        let fresh_globals = global_names(&doc.globals);
         let (shadow, existed) = {
             let mut st = self.state.lock().expect("state");
             let shadow = st.child_uri(uri);
@@ -333,7 +386,60 @@ impl Server {
             self.to_child(&message);
         }
 
+        self.write_hoisted(uri, &source);
+
+        if had_globals != fresh_globals {
+            self.refresh_globals(uri);
+        }
+
         self.publish(uri);
+    }
+
+    /// Sends every other document to the child again. A global the
+    /// workspace gained, lost, or renamed changes what each file binds
+    /// on its first line, so every other shadow is stale.
+    pub(crate) fn refresh_globals(&self, except: &str) {
+        let uris: Vec<String> = {
+            let st = self.state.lock().expect("state");
+
+            st.docs.keys().filter(|u| *u != except).cloned().collect()
+        };
+
+        for uri in uris {
+            let (options, jsx, ingots) = {
+                let st = self.state.lock().expect("state");
+                let (o, j) = st.options_for(&uri);
+
+                (o, j, st.ingots.clone())
+            };
+            let message = {
+                let mut st = self.state.lock().expect("state");
+                let shadow = st.child_uri(&uri);
+                let Some(doc) = st.docs.get_mut(&uri) else {
+                    continue;
+                };
+                doc.compile(&options, &jsx, ingots.as_deref());
+                let text = doc.shadow.clone();
+                let version = doc.version;
+
+                if let Some(path) = uri_to_path(&uri) {
+                    st.write_mirror(&path, &text);
+                }
+
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": { "uri": shadow, "version": version },
+                        "contentChanges": [{ "text": text }]
+                    }
+                })
+            };
+
+            if child_sees(&uri) {
+                self.to_child(&message);
+            }
+        }
     }
 
     pub(crate) fn change_doc(&self, uri: &str, version: i64, changes: &[Value]) {
@@ -377,7 +483,10 @@ impl Server {
             options.plain_modules = alloy::modules::plain_modules_for_file(&path, &doc.source);
         }
 
+        let had_globals = global_names(&doc.globals);
         doc.compile(&options, &jsx, ingots.as_deref());
+        let fresh_globals = global_names(&doc.globals);
+        let source = doc.source.clone();
         let shadow_text = doc.shadow.clone();
         let shadow = st.child_uri(uri);
 
@@ -397,6 +506,12 @@ impl Server {
 
         if child_sees(uri) {
             self.to_child(&message);
+        }
+
+        self.write_hoisted(uri, &source);
+
+        if had_globals != fresh_globals {
+            self.refresh_globals(uri);
         }
 
         self.publish(uri);
@@ -1356,6 +1471,12 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// The alias the shadow requires the runtime by. The mirror's Luau
 /// configuration points it at the file the mirror holds, so a shadow
 /// resolves the runtime on disk, with no sourcemap and no build.
+/// The names a document declares as global, in order, for the compare
+/// that says whether the workspace's set changed.
+fn global_names(globals: &[alloy::globals::Global]) -> Vec<String> {
+    globals.iter().map(|g| g.name.clone()).collect()
+}
+
 pub(crate) const RUNTIME_ALIAS: &str = "@alloy";
 
 /// The Luau configuration the mirror gets for a project root: the

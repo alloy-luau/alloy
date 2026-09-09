@@ -38,6 +38,9 @@ pub struct Doc {
     /// sees the Alloy source, which it cannot read.
     pub error: Option<alloy::CompileError>,
     pub is_alx: bool,
+    /// The `global` declarations of this file. The workspace's set is
+    /// every document's, and it says what each file reaches for free.
+    pub globals: Vec<alloy::globals::Global>,
 }
 
 /// The source with the operators Luau has no reading for blanked, each
@@ -70,6 +73,7 @@ impl Doc {
             import_sources: Vec::new(),
             error: None,
             is_alx: options.file_name.ends_with(".alx"),
+            globals: Vec::new(),
         };
         doc.compile(options, jsx, ingots);
 
@@ -84,6 +88,11 @@ impl Doc {
         ingots: Option<&alloy::ingot::Ingots>,
     ) {
         self.exports = crate::imports::exports_of(&self.source, self.is_alx);
+        // The path here is the real one; the workspace fills the path a
+        // message names when it gathers the set.
+        let path = std::path::Path::new(&options.file_name);
+        self.globals =
+            alloy::globals::declared(&alloy::globals::index_text(path, &self.source), path);
         self.decls = alloy::declarations::summaries(&self.source, options.definitions);
         self.bindings = alloy::declarations::bindings(&self.source);
         self.shapes = alloy::declarations::shapes(&self.source);

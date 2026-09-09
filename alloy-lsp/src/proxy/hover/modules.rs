@@ -49,8 +49,20 @@ impl Server {
             .find('\n')
             .map_or(doc.source.len(), |i| start + i);
         let spec_line = quoted.then(|| &doc.source[line_start..line_end]);
+        // A project global is declared in another file and needs no
+        // import, so the file that wrote it is the one to read.
+        let from_global = || {
+            let owner = st
+                .docs
+                .iter()
+                .find(|(u, d)| u.as_str() != uri && d.globals.iter().any(|g| g.name == word))
+                .map(|(_, d)| d)?;
+
+            remote_hover(&owner.source, &word).or_else(|| const_hover(&owner.source, &word))
+        };
         let answer = remote_hover(&doc.source, &word)
             .or_else(imported)
+            .or_else(from_global)
             .or_else(|| service_hover(&doc.source, &word, spec_line))
             .or_else(|| {
                 let dir = path
@@ -122,7 +134,11 @@ pub(crate) fn const_hover(source: &str, word: &str) -> Option<String> {
     for line in source.lines() {
         let text = line.trim();
 
-        if let Some(rest) = text.strip_prefix("export const ") {
+        if let Some(rest) = text
+            .strip_prefix("export const ")
+            .or_else(|| text.strip_prefix("global const "))
+            .or_else(|| text.strip_prefix("global local "))
+        {
             let name: String = rest
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')

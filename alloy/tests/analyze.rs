@@ -166,6 +166,30 @@ end
 print(drop, part, timer, ready)
 "#;
 
+/// `Future.reject` under an annotation, `Future.any` where every future
+/// fails, and an `await` of a table with an `andThen` of its own.
+const REJECTED: &str = r#"local one: Future<number> = Future.reject("no disk")
+local two: Future<number> = Future.reject("no net")
+
+local async function pick(): Result<number, string>
+    local v = try await Future.any([ one, two ])
+
+    return Ok(v)
+end
+
+local async function hand_written(): number
+    local obj = {
+        andThen = function(self, on_resolve: (number) -> number): number
+            return on_resolve(42)
+        end,
+    }
+
+    return await obj
+end
+
+print(pick, hand_written)
+"#;
+
 fn analyze(src: &str, name: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("tools/types/globalTypes.d.luau");
@@ -256,6 +280,16 @@ fn a_derived_struct_meets_the_serialize_bound() {
 #[test]
 fn a_mixed_race_lands_on_the_union() {
     analyze(RACED, "raced");
+}
+
+/// A rejected Future never settles with a payload, so it stands where a
+/// `Future<T>` is asked for. `Future<never>` did not: `andThen` puts the
+/// Future in a parameter of its own, which makes the alias invariant.
+/// `await` also takes any value with an `andThen`, as `alloy doc await`
+/// says, whatever that method types its own callback as.
+#[test]
+fn a_reject_and_a_hand_written_awaitable_analyze() {
+    analyze(REJECTED, "rejected");
 }
 
 /// `import Players from "game:Players"` binds the service class, so a

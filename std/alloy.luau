@@ -318,7 +318,11 @@ function Future.resolve<T>(value: T): Future<T>
 	return (self :: any) :: Future<T>
 end
 
-function Future.reject(err: any): Future<never>
+-- The payload of a rejected Future is never read, so a reject stands
+-- wherever a payload is asked for. `Future<never>` would not: `andThen`
+-- puts the Future in a parameter of its own, which makes the alias
+-- invariant, and `never` is then no subtype of `number`.
+function Future.reject(err: any): Future<any>
 	local self = new_future()
 	settle(self, REJECTED, err, nil)
 	return (self :: any) :: Future<any>
@@ -385,9 +389,13 @@ export type Awaitable<T> = Future<T>
 --- `race` bind the whole argument type and read `T` back off
 --- `__value`, which is covariant, so a mixed list lands on the union
 --- of the value types instead of the meet.
+--- The callbacks read `any`: `alloy.await` hands `andThen` two of its
+--- own and reads neither back, and a hand-written `andThen` types its
+--- own callback, `(number) -> number`, which `((any) -> ...any)?` does
+--- not accept.
 export type Settled<T> = {
 	read __value: T,
-	read andThen: (self: any, on_resolve: ((any) -> ...any)?, on_reject: ((any) -> ...any)?) -> any,
+	read andThen: (self: any, on_resolve: any, on_reject: any) -> any,
 }
 
 --- `await`: a Future, or anything with `andThen`. Yields until settled,

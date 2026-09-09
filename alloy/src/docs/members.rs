@@ -514,8 +514,8 @@ pub const MEMBERS: &[(&str, &[Member])] = &[
             Member {
                 name: "reject",
                 kind: MemberKind::Static,
-                signature: "Future.reject(error: any): Future<never>",
-                doc: "A Future that has already failed with `error`. An `await` on it rethrows, and `try await` returns that `Err` from the function.",
+                signature: "Future.reject(error: any): Future<any>",
+                doc: "A Future that has already failed with `error`. An `await` on it rethrows, and `try await` returns that `Err` from the function. The payload reads `any`: a rejected Future never settles with one, so it stands where a `Future<T>` is asked for.",
                 example: "local bad = Future.reject(\"no disk\")\nbad:andThen(nil, function(e) print(e) end)",
             },
             Member {

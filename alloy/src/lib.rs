@@ -20,8 +20,6 @@ pub mod docs;
 pub mod extensions;
 pub mod flux;
 pub mod fmt;
-pub mod fmt_alx;
-pub mod fmt_structure;
 pub mod ingot;
 pub mod jsonc;
 pub mod lint;

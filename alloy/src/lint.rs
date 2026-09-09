@@ -879,7 +879,7 @@ fn directive_lints(src: &str) -> Vec<Lint> {
 /// runs, and in the checker's words.
 pub fn const_reassignments(src: &str, toks: &[Tok]) -> Vec<(u32, u32, String)> {
     let text = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or("");
-    let lines = crate::fmt_structure::token_lines(src, toks);
+    let lines = crate::fmt::structure::token_lines(src, toks);
     let starts = |i: usize| {
         i == 0
             || lines[i - 1] != lines[i]

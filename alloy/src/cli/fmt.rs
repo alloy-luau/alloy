@@ -83,7 +83,7 @@ pub(crate) fn fmt_cmd(args: &[String]) -> ExitCode {
         // own, so the options are settled per file.
         let options = config.fmt.for_source(&source);
         let result = if name.ends_with(".alx") {
-            alloy::fmt_alx::format_alx_file(&source, &options)
+            alloy::fmt::alx::format_alx_file(&source, &options)
         } else {
             alloy::fmt::format_file(&source, &options)
         };

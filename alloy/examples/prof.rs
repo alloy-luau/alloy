@@ -39,7 +39,7 @@ fn main() {
         t.elapsed().as_secs_f64() * 1e3
     );
     let t = Instant::now();
-    let st = alloy::fmt_structure::structure(&src, &parsed.lexed.toks);
+    let st = alloy::fmt::structure::structure(&src, &parsed.lexed.toks);
     println!(
         "structure        {:>7.1} ms",
         t.elapsed().as_secs_f64() * 1e3

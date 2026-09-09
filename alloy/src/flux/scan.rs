@@ -3,7 +3,7 @@
 
 use alloy_syntax::lexer::{Tok, TokKind};
 
-use crate::fmt_structure::Structure;
+use crate::fmt::structure::Structure;
 use crate::lint::{Fix, Lint};
 
 /// One file's tokens with the helpers every Flux lint reads them

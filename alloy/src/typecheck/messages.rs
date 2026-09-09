@@ -1345,6 +1345,20 @@ mod tests {
         );
         assert_eq!(got.at, None);
 
+        // An optional Instance is not one: the reader has to narrow it.
+        let src = "local maybe: Part? = nil\ndestroy maybe\n";
+        let got = resited(
+            "Expected this to be 'Destroyable', but got 'Part?'",
+            src,
+            2,
+            9,
+        );
+
+        assert_eq!(
+            got.message,
+            "`destroy` needs an Instance or a value with a destroy method; `maybe` is a Part?"
+        );
+
         let src = "local part = Instance.new(\"Part\")\ndestroy part after \"soon\"\n";
         let got = resited(
             "Expected this to be 'number?', but got 'string'",

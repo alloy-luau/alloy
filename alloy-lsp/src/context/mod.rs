@@ -583,12 +583,20 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         });
     }
 
-    // The body of a declaration.
-    match bodies::enclosing_body(src, line_start) {
-        Some(Body::Struct) => {
-            let at_column = head.trim().is_empty();
+    // The body of a declaration. The opener's own line counts: the
+    // body starts at the `as`, so `struct S as |` takes a field, not
+    // every name in scope.
+    let opener = bodies::opens_a_body(head);
+    let body = opener.or_else(|| bodies::enclosing_body(src, line_start));
+    // The member column: the line holds nothing but the caret's word,
+    // or the caret sits right after the `as` that opened the body.
+    let at_body_column = head.trim().is_empty() || opener.is_some();
 
-            if let Some(colon) = head.find(':') {
+    match body {
+        Some(Body::Struct) => {
+            // `struct S<T: Sized> as |` carries a colon of its own; the
+            // caret is still at the first field.
+            if let Some(colon) = head.find(':').filter(|_| opener.is_none()) {
                 // The `=` ends the annotation: what follows is a value,
                 // and the child reads it.
                 if head[colon + 1..].contains('=') {
@@ -601,7 +609,7 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
                 });
             }
 
-            if at_column {
+            if at_body_column {
                 // The `end` the author just typed closes the body, so
                 // the body's words no longer belong on the line.
                 if prefix == "end" {
@@ -623,7 +631,7 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
                 });
             }
 
-            if head.trim().is_empty() && prefix != "end" {
+            if at_body_column && prefix != "end" {
                 return Some(Context::VariantStart {
                     prefix: prefix.to_string(),
                 });
@@ -632,33 +640,27 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             return Some(Context::Nothing);
         }
 
-        Some(Body::Impl) => {
-            let at_column = head.trim().is_empty();
-
-            if at_column {
-                if prefix == "end" {
-                    return Some(Context::Nothing);
-                }
-
-                return Some(Context::MemberStart {
-                    prefix: prefix.to_string(),
-                });
+        Some(Body::Impl) if at_body_column => {
+            if prefix == "end" {
+                return Some(Context::Nothing);
             }
+
+            return Some(Context::MemberStart {
+                prefix: prefix.to_string(),
+            });
         }
 
-        Some(Body::Trait) => {
-            let at_column = head.trim().is_empty();
-
-            if at_column {
-                if prefix == "end" {
-                    return Some(Context::Nothing);
-                }
-
-                return Some(Context::TraitMemberStart {
-                    prefix: prefix.to_string(),
-                });
+        Some(Body::Trait) if at_body_column => {
+            if prefix == "end" {
+                return Some(Context::Nothing);
             }
+
+            return Some(Context::TraitMemberStart {
+                prefix: prefix.to_string(),
+            });
         }
+
+        Some(Body::Impl | Body::Trait) => {}
 
         None => {}
     }
@@ -1061,6 +1063,60 @@ mod tests {
         );
     }
 
+    /// `struct S as |`: the body starts at the `as`, so the caret on
+    /// the opener's line takes the body's words. It drew every name in
+    /// scope before.
+    #[test]
+    fn the_opener_line_is_the_body_column() {
+        assert_eq!(
+            at("struct S as |"),
+            Some(Context::FieldStart {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("export interface I as |"),
+            Some(Context::FieldStart {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("enum E as |"),
+            Some(Context::VariantStart {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("impl S as |"),
+            Some(Context::MemberStart {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("trait T as |"),
+            Some(Context::TraitMemberStart {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("struct Pair<A: Sized> as |"),
+            Some(Context::FieldStart {
+                prefix: String::new()
+            })
+        );
+
+        // A one-liner closes the body, and a type slot still names a
+        // type: neither is the member column.
+        assert_eq!(at("struct S as end |"), None);
+        assert_eq!(
+            at("impl Drawable for |"),
+            Some(Context::TypeSlot {
+                prefix: String::new(),
+                prefers: Prefers::Concrete
+            })
+        );
+    }
+
     #[test]
     fn type_slots_and_bodies_have_their_own_lists() {
         let ty = |p: &str| {
@@ -1339,7 +1395,14 @@ mod tests {
                 interface: true
             })
         );
-        assert_eq!(at("enum Test as |"), None);
+        // Past the `as` the body begins, and the body's own words are
+        // what the caret takes.
+        assert_eq!(
+            at("enum Test as |"),
+            Some(Context::VariantStart {
+                prefix: String::new()
+            })
+        );
         assert_eq!(at("enum |"), None);
     }
 
@@ -1371,8 +1434,18 @@ mod tests {
                 interface: false
             })
         );
-        assert_eq!(at("impl Test as |"), None);
-        assert_eq!(at("trait Shape as |"), None);
+        assert_eq!(
+            at("impl Test as |"),
+            Some(Context::MemberStart {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("trait Shape as |"),
+            Some(Context::TraitMemberStart {
+                prefix: String::new()
+            })
+        );
     }
 
     #[test]

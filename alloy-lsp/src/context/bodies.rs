@@ -63,6 +63,37 @@ pub(crate) fn enclosing_body(src: &str, line_start: usize) -> Option<Body> {
     None
 }
 
+/// The body a line opens, for a caret on the opener's own line:
+/// `struct S as |`. The body starts at the `as`, so the words the
+/// body takes belong there as much as on the line below.
+///
+/// Only an opener that ends in `as` counts. `impl Drawable for |Point`
+/// still names a type, so the caret is in a type slot, not at a member.
+pub(crate) fn opens_a_body(head: &str) -> Option<Body> {
+    let decl = head.trim();
+    let decl = decl.strip_prefix("export ").unwrap_or(decl).trim_start();
+    let decl = decl.strip_prefix("global ").unwrap_or(decl).trim_start();
+
+    if !decl
+        .strip_suffix("as")
+        .is_some_and(|h| h.ends_with(char::is_whitespace) || h.ends_with('>'))
+    {
+        return None;
+    }
+
+    match decl.split_whitespace().next() {
+        Some("struct" | "interface") => Some(Body::Struct),
+
+        Some("enum") => Some(Body::Enum),
+
+        Some("impl") => Some(Body::Impl),
+
+        Some("trait") => Some(Body::Trait),
+
+        _ => None,
+    }
+}
+
 /// Whether the cursor sits inside the parentheses of a variant, on a
 /// line of an `enum` body: `Move(num|`. The head is the line up to the
 /// word being typed.

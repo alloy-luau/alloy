@@ -98,29 +98,53 @@ struct State {
 }
 
 impl State {
-    /// The completion items the ingots offer at a position.
+    /// The completion items the ingots offer at a position, and whether
+    /// the list changes as more is typed. An ingot that builds its items
+    /// from the word under the cursor, a class name with a number in it,
+    /// answers a different list on the next keystroke; the editor has to
+    /// ask again rather than filter the one it holds.
     fn ingot_items(
         &self,
         uri: &str,
         line: u32,
         character: u32,
         trigger: Option<&str>,
-    ) -> Vec<Value> {
+    ) -> (Vec<Value>, bool) {
         let Some(ingots) = &self.ingots else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
         let Some(doc) = self.docs.get(uri) else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
         let Some(offset) = offset_of(&doc.source, line, character) else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
         let Some(path) = uri_to_path(uri) else {
+            return (Vec::new(), false);
+        };
+        let (items, incomplete) =
+            ingots.complete(&path.to_string_lossy(), &doc.source, offset as u32, trigger);
+
+        (crate::ingots::completion_items(doc, &items), incomplete)
+    }
+
+    /// The props the ingots read on a markup tag of a document, as the
+    /// markup completion takes them.
+    fn ingot_props(&self, uri: &str) -> Vec<markup::IngotProp> {
+        let (Some(ingots), Some(path)) = (&self.ingots, uri_to_path(uri)) else {
             return Vec::new();
         };
-        let items = ingots.complete(&path.to_string_lossy(), &doc.source, offset as u32, trigger);
 
-        crate::ingots::completion_items(doc, &items)
+        ingots
+            .props(&path.to_string_lossy())
+            .into_iter()
+            .map(|(name, doc, ingot, insert)| markup::IngotProp {
+                name: name.to_string(),
+                doc: doc.to_string(),
+                ingot: ingot.to_string(),
+                insert: insert.to_string(),
+            })
+            .collect()
     }
 
     /// The colors the ingots find in a document, as LSP color
@@ -1785,8 +1809,29 @@ impl State {
                 }
             }
 
-            Context::ImportHead { prefix, type_only } => {
+            Context::ImportHead {
+                prefix,
+                type_only,
+                spec,
+            } => {
                 let from = offset - prefix.len();
+
+                // `import | from "./m"`: the module's default binds
+                // here, under any name. Its own name reads best.
+                if !*type_only
+                    && let Some(spec) = spec
+                    && let Some(default) = self
+                        .exports_of_target(self.resolve_spec(uri, spec))
+                        .into_iter()
+                        .find(|e| e.is_default)
+                {
+                    items.push(word(
+                        &default.name,
+                        default.kind,
+                        Some(format!("The default export of `{spec}`.")),
+                        from,
+                    ));
+                }
 
                 if !*type_only {
                     items.push(word(
@@ -1878,30 +1923,16 @@ impl State {
                         return items;
                     }
 
-                    let mut exports: Vec<imports::Export> = Vec::new();
-
-                    if let Some(resolved) = resolved {
-                        let target = imports::module_path(&resolved);
-
-                        // An open document first; else the file on disk,
-                        // which a plain Luau module in a package is.
-                        for (u, d) in &self.docs {
-                            let Some(p) = uri_to_path(u) else { continue };
-
-                            if imports::module_path(&p) == target {
-                                exports.extend(d.exports.iter().cloned());
-                            }
-                        }
-
-                        if exports.is_empty()
-                            && let Some(file) = imports::module_file(&target)
-                        {
-                            exports = imports::exports_of_file(&file, 0);
-                        }
-                    }
+                    let exports = self.exports_of_target(resolved);
 
                     for e in &exports {
                         if *type_only && !e.is_type {
+                            continue;
+                        }
+
+                        // The default is not a name in braces; a bare
+                        // `import X from` reads it.
+                        if e.is_default {
                             continue;
                         }
 
@@ -2664,15 +2695,52 @@ impl Server {
         }
     }
 
-    /// `textDocument/onTypeFormatting`: the `>` that ends an opening tag
-    /// gets the closing tag written after the cursor. Markup lives in
-    /// `.alx` alone, so no other file answers.
+    /// `alloy/closeTag`: the element name the `>` before the position
+    /// opens, as `{ "name": "Frame" }`, or null. Markup lives in `.alx`
+    /// alone, so no other file answers.
     ///
-    /// The edit starts at the cursor and inserts, which leaves the caret
-    /// between the two tags: the LSP spec puts no cursor in a text edit,
-    /// and an editor that applies one keeps its caret where the edit
-    /// begins.
-    fn close_markup_tag(&self, uri: &str, message: &Value, id: &Value) {
+    /// The editor writes the closing tag itself, as a snippet whose
+    /// `$0` holds the caret between the two tags. A text edit carries no
+    /// caret, so the insert belongs to the client.
+    fn close_tag_name(&self, message: &Value, id: &Value) {
+        let uri = message
+            .pointer("/params/uri")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| text_document_uri(message))
+            .unwrap_or_default();
+        let st = self.state.lock().expect("state");
+        let at = message
+            .pointer("/params/position")
+            .and_then(position_of_value);
+        let name = match st.editor.auto_close_tags && uri.ends_with(".alx") {
+            true => at
+                .zip(st.docs.get(&uri))
+                .and_then(|((line, character), doc)| {
+                    let offset = offset_of(&doc.source, line, character)?;
+
+                    markup::close_tag(&doc.source, offset)
+                }),
+
+            false => None,
+        };
+        drop(st);
+
+        match name {
+            Some(name) => self.respond(id, json!({ "name": name })),
+
+            None => self.respond(id, Value::Null),
+        }
+    }
+
+    /// `textDocument/onTypeFormatting` with a newline: Enter on a line
+    /// that opens a block writes the block's `end` one line below.
+    ///
+    /// The editor sends the request after its own auto-indent, so the
+    /// caret already sits on an indented line of its own. The edit
+    /// inserts at the caret, which leaves the caret where it is and puts
+    /// the `end` under the opener.
+    fn end_after_opener(&self, uri: &str, message: &Value, id: &Value) {
         let st = self.state.lock().expect("state");
         let ch = message
             .pointer("/params/ch")
@@ -2681,34 +2749,13 @@ impl Server {
         let at = message
             .pointer("/params/position")
             .and_then(position_of_value);
+        let edit = match (st.editor.auto_end, ch, at) {
+            (true, "\n", Some((line, character))) => st.end_edit(uri, line, character),
 
-        if !st.editor.auto_close_tags || ch != ">" || !uri.ends_with(".alx") {
-            drop(st);
-            self.respond(id, json!([]));
-
-            return;
-        }
-
-        let name = at
-            .zip(st.docs.get(uri))
-            .and_then(|((line, character), doc)| {
-                let offset = offset_of(&doc.source, line, character)?;
-
-                markup::close_tag(&doc.source, offset)
-            });
+            _ => None,
+        };
         drop(st);
-
-        match (name, at) {
-            (Some(name), Some((line, character))) => self.respond(
-                id,
-                json!([{
-                    "range": range_value((line, character), (line, character)),
-                    "newText": format!("</{name}>"),
-                }]),
-            ),
-
-            _ => self.respond(id, json!([])),
-        }
+        self.respond(id, edit.unwrap_or_else(|| json!([])));
     }
 
     // --- editor -> child ------------------------------------------------------
@@ -3041,7 +3088,13 @@ impl Server {
             Some("textDocument/onTypeFormatting") => {
                 if let Some(id) = message.get("id").cloned() {
                     let uri = text_document_uri(&message).unwrap_or_default();
-                    self.close_markup_tag(&uri, &message, &id);
+                    self.end_after_opener(&uri, &message, &id);
+                }
+            }
+
+            Some("alloy/closeTag") => {
+                if let Some(id) = message.get("id").cloned() {
+                    self.close_tag_name(&message, &id);
                 }
             }
 
@@ -3936,6 +3989,15 @@ impl Server {
             return false;
         }
 
+        // `import M from "./m"`: the binding names the module's
+        // `export default`, wherever that sits.
+        if let Some(result) = st.default_import_definition(uri, &doc.source, offset) {
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         let (start, end) = keywords::word_range(&doc.source, offset);
         let word = &doc.source[start..end];
         let raw_before = &doc.source[..start];
@@ -4050,9 +4112,15 @@ impl Server {
         };
 
         let mut items = st.context_items(uri, offset, &ctx);
-        items.extend(st.ingot_items(uri, line, character, trigger));
+        let (extra, incomplete) = st.ingot_items(uri, line, character, trigger);
+        items.extend(extra);
         drop(st);
-        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": items }));
+        let result = match incomplete {
+            true => json!({ "isIncomplete": true, "items": items }),
+
+            false => json!(items),
+        };
+        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
 
         true
     }
@@ -4177,7 +4245,11 @@ impl Server {
             },
 
             _ => match markup::completion_spot(&doc.source, offset) {
-                Some(spot) => Value::Array(markup::completions(&spot, &bound, &doc.source)),
+                Some(spot) => {
+                    let props = st.ingot_props(uri);
+
+                    Value::Array(markup::completions(&spot, &bound, &doc.source, &props))
+                }
 
                 None => return false,
             },
@@ -4764,14 +4836,11 @@ impl Server {
                 }
 
                 "textDocument/completion" => {
-                    // The child lists a newline as a trigger for its `end`
-                    // completion. That request wants nothing else: adding
-                    // names would pop a list of them on every Enter.
-                    if let Some(uri) = &ctx
-                        && let Some((line, character)) = position
-                        && trigger.as_deref() == Some("\n")
-                    {
-                        st.auto_end(uri, line, character, result);
+                    // Enter opens no list. The `end` of an open block
+                    // arrives as an on-type edit, and any other name here
+                    // pops a popup the reader has to dismiss.
+                    if trigger.as_deref() == Some("\n") {
+                        *result = json!([]);
                     }
 
                     if let Some(uri) = &ctx
@@ -4815,7 +4884,9 @@ impl Server {
                             extra.extend(st.directive_completions(uri, line, character));
                         }
 
-                        extra.extend(st.ingot_items(uri, line, character, trigger.as_deref()));
+                        let (from_ingots, incomplete) =
+                            st.ingot_items(uri, line, character, trigger.as_deref());
+                        extra.extend(from_ingots);
 
                         if !extra.is_empty() {
                             match result {
@@ -4832,6 +4903,27 @@ impl Server {
                                 Value::Null => *result = Value::Array(extra),
 
                                 _ => {}
+                            }
+                        }
+
+                        // An ingot's list is made from the word being
+                        // typed, so the child's answer stops being the
+                        // whole answer.
+                        if incomplete {
+                            let list = match result {
+                                Value::Array(items) => Some(std::mem::take(items)),
+
+                                Value::Object(obj) => {
+                                    obj.insert("isIncomplete".into(), json!(true));
+
+                                    None
+                                }
+
+                                _ => None,
+                            };
+
+                            if let Some(items) = list {
+                                *result = json!({ "isIncomplete": true, "items": items });
                             }
                         }
 
@@ -4876,6 +4968,7 @@ impl Server {
                 alloy::modules::import_result_asyncs_for_file(&path, &text);
             options.import_trait_defaults =
                 alloy::modules::import_trait_defaults_for_file(&path, &text);
+            options.plain_modules = alloy::modules::plain_modules_for_file(&path, &text);
         }
 
         let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
@@ -4972,6 +5065,7 @@ impl Server {
                 alloy::modules::import_result_asyncs_for_file(&path, &doc.source);
             options.import_trait_defaults =
                 alloy::modules::import_trait_defaults_for_file(&path, &doc.source);
+            options.plain_modules = alloy::modules::plain_modules_for_file(&path, &doc.source);
         }
 
         doc.compile(&options, &jsx, ingots.as_deref());
@@ -5220,14 +5314,19 @@ impl Server {
             .and_then(Value::as_str)
             .map(str::to_string);
         let st = self.state.lock().expect("state");
-        let items = st.ingot_items(uri, line, character, trigger.as_deref());
+        let (items, incomplete) = st.ingot_items(uri, line, character, trigger.as_deref());
 
         if items.is_empty() {
             return false;
         }
 
         drop(st);
-        self.respond(id, json!(items));
+        let result = match incomplete {
+            true => json!({ "isIncomplete": true, "items": items }),
+
+            false => json!(items),
+        };
+        self.respond(id, result);
 
         true
     }
@@ -5748,6 +5847,100 @@ fn imports_map(path: &Path, renames: &[Rename]) -> PathBuf {
 }
 
 impl State {
+    /// The definition a default import's binding names: the
+    /// `export default` of the module the line reads. `import M from`
+    /// and `import M, { a } from` both bind it. A plain Luau module has
+    /// no such declaration, and the path link already opens the file.
+    fn default_import_definition(&self, uri: &str, source: &str, offset: usize) -> Option<Value> {
+        let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = source[offset..]
+            .find('\n')
+            .map_or(source.len(), |i| offset + i);
+        let line = &source[line_start..line_end];
+
+        if !line.trim_start().starts_with("import ") {
+            return None;
+        }
+
+        let (start, end) = keywords::word_range(source, offset);
+        let word = &source[start..end];
+        let at = start - line_start;
+        let head = &line[..at];
+
+        // The binding sits between `import` and the braces or `from`;
+        // a name in braces is a named import, which the child answers.
+        if matches!(word, "import" | "type" | "as" | "from")
+            || head.contains('{')
+            || head.contains(" from ")
+            || !head.trim_start().starts_with("import")
+        {
+            return None;
+        }
+
+        let spec = import_spec(line)?;
+        let file = imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
+        let is_alx = file.extension().is_some_and(|e| e == "alx");
+
+        if !is_alx && !file.extension().is_some_and(|e| e == "aly") {
+            return None;
+        }
+
+        let text = std::fs::read_to_string(&file).ok()?;
+        let (a, b) = imports::default_span(&text, is_alx)?;
+        let s = position_of(&text, a as usize);
+        let e = position_of(&text, b as usize);
+
+        Some(json!([{ "uri": path_to_uri(&file), "range": range_value(s, e) }]))
+    }
+
+    /// The file a spec names from the file at `uri`: `@alias/x` goes
+    /// through the project's aliases, and a relative spec is path
+    /// arithmetic.
+    fn resolve_spec(&self, uri: &str, spec: &str) -> Option<PathBuf> {
+        let path = uri_to_path(uri)?;
+        let dir = path.parent()?;
+
+        match spec.strip_prefix('@') {
+            Some(rest) => {
+                let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
+
+                project_aliases(dir, self.root.as_deref())
+                    .into_iter()
+                    .find(|(a, _)| a == alias)
+                    .map(|(_, base)| imports::lexical(&base, tail))
+            }
+
+            None => Some(imports::lexical(dir, spec)),
+        }
+    }
+
+    /// What the module at a resolved path exports. An open document
+    /// answers first; else the file on disk, which a plain Luau module
+    /// in a package is.
+    fn exports_of_target(&self, resolved: Option<PathBuf>) -> Vec<imports::Export> {
+        let mut exports: Vec<imports::Export> = Vec::new();
+        let Some(resolved) = resolved else {
+            return exports;
+        };
+        let target = imports::module_path(&resolved);
+
+        for (u, d) in &self.docs {
+            let Some(p) = uri_to_path(u) else { continue };
+
+            if imports::module_path(&p) == target {
+                exports.extend(d.exports.iter().cloned());
+            }
+        }
+
+        if exports.is_empty()
+            && let Some(file) = imports::module_file(&target)
+        {
+            exports = imports::exports_of_file(&file, 0);
+        }
+
+        exports
+    }
+
     /// Auto-import items for a completion at a source position.
     fn auto_imports(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
         let Some(doc) = self.docs.get(uri) else {
@@ -5780,97 +5973,44 @@ impl State {
 }
 
 impl State {
-    /// The `end` an open block still wants, as the one item a newline
-    /// completion answers.
+    /// The `end` an open block still wants, as the edit a newline
+    /// on-type request answers with.
     ///
-    /// The caret lands on the empty line between the opener and the
-    /// `end`, which is where the next word goes. A snippet places it
-    /// with `$0`; an editor that takes no snippet gets the plain text
-    /// and its caret after the `end`, as the child's own item does.
+    /// The editor already made the indented line under the opener and
+    /// left the caret on it. The edit adds the `end` a line below, at
+    /// the opener's own indentation. It writes nothing when the caret
+    /// line holds text, when the block is closed, or when an `end`
+    /// already stands under the opener.
     ///
     /// The child sees the shadow, where `struct`, `trait`, and `match`
-    /// are already Luau, so the item comes from the Alloy source here.
-    /// Any `end` the child sent goes, so the editor lists one.
-    fn auto_end(&self, uri: &str, line: u32, character: u32, result: &mut Value) {
-        let items = match result {
-            Value::Array(v) => v,
-
-            Value::Object(o) => match o.get_mut("items").and_then(Value::as_array_mut) {
-                Some(v) => v,
-
-                None => return,
-            },
-
-            Value::Null => {
-                *result = json!([]);
-
-                match result.as_array_mut() {
-                    Some(v) => v,
-
-                    None => return,
-                }
-            }
-
-            _ => return,
-        };
-        items.retain(|i| i.get("label").and_then(Value::as_str) != Some("end"));
-
-        // The opener is the line the user left with Enter.
-        let opener = match (self.editor.auto_end, line.checked_sub(1)) {
-            (true, Some(opener)) => opener,
-
-            _ => return,
-        };
-        let Some(doc) = self.docs.get(uri) else {
-            return;
-        };
-        let Some(indent) = block_end::needs_end(&doc.source, opener) else {
-            return;
-        };
-        let Some(offset) = offset_of(&doc.source, line, character) else {
-            return;
-        };
+    /// are already Luau, so the answer comes from the Alloy source here.
+    fn end_edit(&self, uri: &str, line: u32, character: u32) -> Option<Value> {
+        // The opener is the line the reader left with Enter.
+        let opener = line.checked_sub(1)?;
+        let doc = self.docs.get(uri)?;
+        let indent = block_end::needs_end(&doc.source, opener)?;
+        let offset = offset_of(&doc.source, line, character)?;
         let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = doc.source[offset..]
+            .find('\n')
+            .map_or(doc.source.len(), |i| offset + i);
+        let blank = |text: &str| text.chars().all(|c| c == ' ' || c == '\t');
 
-        // Enter left the cursor on a line of its own indentation. With
-        // anything else before it the line is the user's, not ours.
-        if !doc.source[line_start..offset]
-            .chars()
-            .all(|c| c == ' ' || c == '\t')
-        {
-            return;
+        // Enter left the caret on a line of its own indentation. With
+        // text on either side the line is the reader's, not ours, and
+        // an insert at the caret would cut it in two.
+        if !blank(&doc.source[line_start..offset]) || !blank(&doc.source[offset..line_end]) {
+            return None;
         }
 
-        // The body indents one step past the opener, in whatever the
-        // opener line already uses.
-        let step = match indent.contains('\t') {
-            true => "\t".to_string(),
-
-            false => " ".repeat(alloy::fmt::INDENT),
-        };
-        let body = match self.snippets {
-            true => format!("{indent}{step}$0\n{indent}end"),
-
-            false => format!("{indent}{step}\n{indent}end"),
-        };
-        // The edit replaces the indentation the editor wrote on the new
-        // line, so the text lands the same whatever that was.
-        let mut item = json!({
-            "label": "end",
-            "kind": 14,
-            "detail": "close the block",
-            "preselect": true,
-            "textEdit": {
-                "range": range_value((line, 0), (line, character)),
-                "newText": body,
-            },
-        });
-
-        if self.snippets {
-            item["insertTextFormat"] = json!(2);
+        if end_follows(&doc.source, offset, &indent) {
+            return None;
         }
 
-        items.push(item);
+        Some(json!([{
+            "range": range_value((line, character), (line, character)),
+            "newText": format!("\n{indent}end"),
+        }]))
     }
 
     /// The keyword wins while the typed word begins one.
@@ -5945,6 +6085,13 @@ impl State {
                 item["sortText"] = json!(format!("!{word}"));
             }
         }
+
+        // The word is the whole keyword and the list holds it alone. An
+        // item the reader has already typed asks for an accept and
+        // writes nothing, so the empty list closes the popup instead.
+        if items.len() == 1 {
+            items.clear();
+        }
     }
 
     /// The child's module auto-imports, as Alloy imports.
@@ -6007,16 +6154,28 @@ impl State {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let export = imports::Export {
-                name: name.clone(),
-                is_type: false,
-                is_default: true,
-                kind: 9,
+            // An Alloy module binds whole under `* as`; a bare name
+            // would read its `export default`. A plain Luau module
+            // returns one value, which is what a bare name takes.
+            let is_alloy = file.extension().is_some_and(|e| e == "aly" || e == "alx");
+            let edit = match is_alloy {
+                true => imports::namespace_import_edit(&source, &spec, &name),
+
+                false => imports::import_edit(
+                    &source,
+                    &spec,
+                    &imports::Export {
+                        name: name.clone(),
+                        is_type: false,
+                        is_default: true,
+                        kind: 9,
+                    },
+                ),
             };
             item["label"] = json!(name);
             item["detail"] = json!(spec);
             item["insertText"] = json!(name);
-            item["additionalTextEdits"] = json!([imports::import_edit(&source, &spec, &export)]);
+            item["additionalTextEdits"] = json!([edit]);
 
             true
         });
@@ -6810,6 +6969,24 @@ fn hint_label(hint: &Value) -> String {
 
         _ => String::new(),
     }
+}
+
+/// Whether an `end` already stands under the opener: the first line
+/// with text after `offset` is `end` at `indent`.
+fn end_follows(src: &str, offset: usize, indent: &str) -> bool {
+    let mut lines = src[offset..].lines();
+    lines.next();
+    let Some(line) = lines.find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    let text = line.trim_start();
+    let own = &line[..line.len() - text.len()];
+    let word = text
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or_default();
+
+    own == indent && word == "end"
 }
 
 /// The list as the source can use it. A `:` names a member, so the
@@ -11533,8 +11710,9 @@ fn edit_capabilities(message: &mut Value) {
     // The proxy formats `.aly` itself, with `alloy fmt`.
     caps.insert("documentFormattingProvider".into(), Value::Bool(true));
 
-    // On-type formatting closes a markup tag: `>` first, then whatever
-    // the child asked for, so a trigger of its own still arrives.
+    // On-type formatting writes the `end` of a block after Enter: the
+    // newline first, then whatever the child asked for, so a trigger of
+    // its own still arrives.
     let mut more: Vec<Value> = Vec::new();
 
     if let Some(child) = &child_on_type {
@@ -11546,7 +11724,7 @@ fn edit_capabilities(message: &mut Value) {
             .unwrap_or_default();
 
         for c in first.chain(rest) {
-            if c != ">" && !more.contains(c) {
+            if c != "\n" && !more.contains(c) {
                 more.push(c.clone());
             }
         }
@@ -11554,7 +11732,7 @@ fn edit_capabilities(message: &mut Value) {
 
     caps.insert(
         "documentOnTypeFormattingProvider".into(),
-        json!({ "firstTriggerCharacter": ">", "moreTriggerCharacter": more }),
+        json!({ "firstTriggerCharacter": "\n", "moreTriggerCharacter": more }),
     );
 
     // The lints' rewrites are code actions, whatever the child offers.
@@ -12069,18 +12247,17 @@ mod tests {
                 .collect()
         };
 
-        // `impl T as end`, the caret past `end`.
+        // `impl T as end`, the caret past `end`. The word is the whole
+        // keyword and nothing else survives, so the list is empty and
+        // the popup closes.
         let mut result = child();
         st.keyword_first(uri, 0, 13, &mut result);
-        assert_eq!(labels(&result), ["end"]);
-        assert_eq!(result[0]["preselect"], json!(true));
-        assert_eq!(result[0]["sortText"], json!("!end"));
+        assert!(labels(&result).is_empty(), "{result}");
 
         // `if x == nil then return 0 end`, the caret past `end`.
         let mut result = child();
         st.keyword_first(uri, 2, 33, &mut result);
-        assert_eq!(labels(&result), ["end"]);
-        assert_eq!(result[0]["preselect"], json!(true));
+        assert!(labels(&result).is_empty(), "{result}");
 
         // Half a keyword keeps the keywords it begins, and no module.
         let mut result = child();
@@ -12093,6 +12270,62 @@ mod tests {
         let mut result = child();
         st.keyword_first(uri, 3, 12, &mut result);
         assert_eq!(labels(&result).len(), 4);
+    }
+
+    /// A whole keyword with more names behind it keeps the list, and
+    /// takes the first row. `else` is `elseif` as far as the letters go,
+    /// so the reader still needs to see both.
+    #[test]
+    fn a_whole_keyword_with_company_stays_in_the_list() {
+        let src = "local elsewhere = 1\nif elsewhere == 1 then\nelse\n";
+        let (st, uri) = one_file(src);
+        let mut result = json!([
+            { "label": "elsewhere", "kind": 6, "sortText": "4" },
+            { "label": "print", "kind": 3, "sortText": "4" },
+        ]);
+        st.keyword_first(uri, 2, 4, &mut result);
+        let mut labels: Vec<String> = result
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or("").to_string())
+            .collect();
+        labels.sort();
+        assert_eq!(labels, ["else", "elseif", "elsewhere"]);
+
+        let exact = result
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["label"] == json!("else"))
+            .expect("the keyword");
+        assert_eq!(exact["preselect"], json!(true));
+        assert_eq!(exact["sortText"], json!("!else"));
+    }
+
+    /// After Enter on an opener the `end` arrives as one edit at the
+    /// caret, so the caret keeps the line the editor indented.
+    #[test]
+    fn the_newline_edit_writes_the_end_below_the_caret() {
+        let (st, uri) = one_file("function f()\n    \n");
+        let edit = st.end_edit(uri, 1, 4).expect("an edit");
+        assert_eq!(edit[0]["newText"], json!("\nend"));
+        assert_eq!(
+            edit[0]["range"],
+            json!({ "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 4 } })
+        );
+
+        // Text on the caret line, and a closed block, write nothing.
+        let (st, uri) = one_file("function f()\n    local x = 1\n");
+        assert_eq!(st.end_edit(uri, 1, 4), None);
+        let (st, uri) = one_file("function f()\n\nend\n");
+        assert_eq!(st.end_edit(uri, 1, 0), None);
+
+        // An `end` already under the opener is the one the block has.
+        assert!(end_follows("f()\n\nend\n", 4, ""));
+        assert!(!end_follows("f()\n\n    end\n", 4, ""));
+        assert!(!end_follows("f()\n\nendless()\n", 4, ""));
+        assert!(!end_follows("f()\n", 4, ""));
     }
 
     /// A hover on a std member reads the member's own section, not the

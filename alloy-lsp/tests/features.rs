@@ -369,10 +369,11 @@ fn start_env(child: &Path, init_params: Value, env: &[(&str, &str)]) -> Session 
             || init["capabilities"]["hoverProvider"].is_object(),
         "{init}"
     );
-    // The proxy closes a markup tag on `>`, whatever the child registers.
+    // The proxy writes the `end` of a block on Enter, whatever the
+    // child registers.
     assert_eq!(
         init["capabilities"]["documentOnTypeFormattingProvider"]["firstTriggerCharacter"],
-        json!(">"),
+        json!("\n"),
         "{init}"
     );
     write(
@@ -1810,7 +1811,7 @@ fn newline_items(s: &mut Session, uri: &str, line: u32, character: u32) -> Vec<V
         .unwrap_or_default()
 }
 
-/// `.alx`: the `>` that ends an opening tag writes the closing tag.
+/// `.alx`: the `>` that ends an opening tag names the element to close.
 const MARKUP: &str = "\
 local function Panel(props: { label: string })
     return <Frame>
@@ -1820,8 +1821,25 @@ end
 return Panel
 ";
 
+/// The element `alloy/closeTag` names at a position, or null.
+fn close_tag(s: &mut Session, uri: &str, line: u32, character: u32) -> Value {
+    s.request(
+        "alloy/closeTag",
+        json!({ "uri": uri, "position": { "line": line, "character": character } }),
+    )
+}
+
+/// The edits a newline on-type request answers with.
+fn newline_edits(s: &mut Session, uri: &str, line: u32, character: u32) -> Value {
+    s.request(
+        "textDocument/onTypeFormatting",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character },
+                "ch": "\n", "options": { "tabSize": 4, "insertSpaces": true } }),
+    )
+}
+
 #[test]
-fn the_closing_tag_follows_the_cursor_in_alx() {
+fn the_server_names_the_tag_the_editor_closes() {
     let Some(child) = luau_lsp() else {
         eprintln!("luau-lsp not found; skipping");
         return;
@@ -1846,16 +1864,12 @@ fn the_closing_tag_follows_the_cursor_in_alx() {
     );
 
     // `<Frame>` on line 1 ends at column 18; the cursor sits after `>`.
-    let edits = s.request(
-        "textDocument/onTypeFormatting",
-        json!({ "textDocument": { "uri": uri }, "position": { "line": 1, "character": 18 },
-                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
-    );
     // The tag already closes below, so nothing is written twice.
-    assert_eq!(edits, json!([]), "closed already: {edits}");
+    let answer = close_tag(&mut s, &uri, 1, 18);
+    assert_eq!(answer, Value::Null, "closed already: {answer}");
 
-    // A tag with no closing tag yet: the edit inserts at the cursor, so
-    // the caret stays between the two tags.
+    // A tag with no closing tag yet: the editor writes `</Frame>` and
+    // the snippet holds the caret between the two.
     let typed = "local e = <Frame>\n";
     write(
         &mut s.stdin,
@@ -1863,19 +1877,8 @@ fn the_closing_tag_follows_the_cursor_in_alx() {
             "textDocument": { "uri": uri, "version": 2 },
             "contentChanges": [ { "text": typed } ] } }),
     );
-    let edits = s.request(
-        "textDocument/onTypeFormatting",
-        json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 17 },
-                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
-    );
-    assert_eq!(
-        edits,
-        json!([{
-            "range": { "start": { "line": 0, "character": 17 }, "end": { "line": 0, "character": 17 } },
-            "newText": "</Frame>",
-        }]),
-        "open tag: {edits}"
-    );
+    let answer = close_tag(&mut s, &uri, 0, 17);
+    assert_eq!(answer, json!({ "name": "Frame" }), "open tag: {answer}");
 
     // A self-closing tag closes itself.
     let typed = "local e = <Frame />\n";
@@ -1885,18 +1888,14 @@ fn the_closing_tag_follows_the_cursor_in_alx() {
             "textDocument": { "uri": uri, "version": 3 },
             "contentChanges": [ { "text": typed } ] } }),
     );
-    let edits = s.request(
-        "textDocument/onTypeFormatting",
-        json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 19 },
-                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
-    );
-    assert_eq!(edits, json!([]), "self closing: {edits}");
+    let answer = close_tag(&mut s, &uri, 0, 19);
+    assert_eq!(answer, Value::Null, "self closing: {answer}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn a_newline_completes_the_end_of_an_open_block() {
+fn a_newline_writes_the_end_of_an_open_block() {
     let Some(child) = luau_lsp() else {
         eprintln!("luau-lsp not found; skipping");
         return;
@@ -1915,7 +1914,6 @@ fn a_newline_completes_the_end_of_an_open_block() {
         json!({ "processId": std::process::id(), "rootUri": root, "capabilities": {
             "textDocument": { "completion": { "completionItem": { "snippetSupport": true } } } } }),
     );
-    // The proxy owns on-type formatting, whatever the child registers.
     let uri = format!("file://{}", file.display());
     write(
         &mut s.stdin,
@@ -1923,42 +1921,37 @@ fn a_newline_completes_the_end_of_an_open_block() {
             "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": opener } } }),
     );
 
-    let end_item = |s: &mut Session, line: u32, character: u32| -> Value {
-        let items = newline_items(s, &uri, line, character);
-        let ends: Vec<Value> = items
-            .iter()
-            .filter(|i| i["label"] == json!("end"))
-            .cloned()
-            .collect();
-        assert_eq!(ends.len(), 1, "one `end` on a newline: {items:#?}");
-
-        ends[0].clone()
-    };
-
-    // Enter after `function test()` leaves the cursor on line 1.
-    let item = end_item(&mut s, 1, 0);
-    assert_eq!(item["label"], json!("end"));
-    assert_eq!(item["insertTextFormat"], json!(2), "a snippet: {item}");
-    assert_eq!(item["textEdit"]["newText"], json!("    $0\nend"), "{item}");
+    // Enter after `function test()` leaves the cursor on line 1. The
+    // `end` goes one line below it, at the opener's indentation.
+    let edits = newline_edits(&mut s, &uri, 1, 0);
     assert_eq!(
-        item["textEdit"]["range"],
-        json!({ "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 0 } }),
-        "{item}"
+        edits,
+        json!([{
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 0 } },
+            "newText": "\nend",
+        }]),
+        "after an opener: {edits}"
     );
 
-    // Each Alloy opener answers, and the indentation follows the opener.
-    for (text, want) in [
-        ("struct Point as\n", "    $0\nend"),
-        ("impl Point as\n", "    $0\nend"),
-        ("trait Show as\n", "    $0\nend"),
-        ("enum Color as\n", "    $0\nend"),
-        ("match m with\n", "    $0\nend"),
-        ("do\n", "    $0\nend"),
-        ("if x then\n", "    $0\nend"),
-        ("for i = 1, 2 do\n", "    $0\nend"),
-        ("while x do\n", "    $0\nend"),
-        ("local t = {}\nfunction t.f()\n", "    $0\nend"),
-        ("if x then\n    while y do\n", "        $0\n    end"),
+    // Enter opens no popup: the newline completion answers nothing.
+    let items = newline_items(&mut s, &uri, 1, 0);
+    assert!(items.is_empty(), "a popup on Enter: {items:#?}");
+
+    // Each Alloy opener answers, and the indentation follows the
+    // opener, whatever the editor wrote on the new line.
+    for (text, line, character, want) in [
+        ("struct Point as\n", 1, 0, "\nend"),
+        ("impl Point as\n", 1, 0, "\nend"),
+        ("trait Show as\n", 1, 0, "\nend"),
+        ("enum Color as\n", 1, 0, "\nend"),
+        ("match m with\n", 1, 0, "\nend"),
+        ("do\n", 1, 0, "\nend"),
+        ("if x then\n", 1, 0, "\nend"),
+        ("for i = 1, 2 do\n", 1, 0, "\nend"),
+        ("while x do\n", 1, 0, "\nend"),
+        ("local t = {}\nfunction t.f()\n", 2, 0, "\nend"),
+        ("function test()\n    ", 1, 4, "\nend"),
+        ("if x then\n    while y do\n        ", 2, 8, "\n    end"),
     ] {
         write(
             &mut s.stdin,
@@ -1966,24 +1959,30 @@ fn a_newline_completes_the_end_of_an_open_block() {
                 "textDocument": { "uri": uri, "version": 9 },
                 "contentChanges": [ { "text": text } ] } }),
         );
-        let line = text.matches('\n').count() as u32;
-        let item = end_item(&mut s, line, 0);
-        assert_eq!(item["textEdit"]["newText"], json!(want), "{text}: {item}");
+        let edits = newline_edits(&mut s, &uri, line, character);
+        assert_eq!(edits[0]["newText"], json!(want), "{text}: {edits}");
+        assert_eq!(
+            edits[0]["range"]["start"],
+            json!({ "line": line, "character": character }),
+            "{text}: {edits}"
+        );
     }
 
-    // A balanced file wants nothing.
-    let text = "function test()\nend\n";
-    write(
-        &mut s.stdin,
-        &json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
-            "textDocument": { "uri": uri, "version": 10 },
-            "contentChanges": [ { "text": text } ] } }),
-    );
-    let items = newline_items(&mut s, &uri, 1, 0);
-    assert!(
-        items.iter().all(|i| i["label"] != json!("end")),
-        "balanced: {items:#?}"
-    );
+    // A balanced file, and a line the reader has written on, want
+    // nothing.
+    for (text, line, character) in [
+        ("function test()\nend\n", 1, 0),
+        ("function test()\n    local x = 1\n", 1, 4),
+    ] {
+        write(
+            &mut s.stdin,
+            &json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+                "textDocument": { "uri": uri, "version": 10 },
+                "contentChanges": [ { "text": text } ] } }),
+        );
+        let edits = newline_edits(&mut s, &uri, line, character);
+        assert_eq!(edits, json!([]), "{text}: {edits}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2026,18 +2025,11 @@ fn the_editor_can_turn_both_helpers_off() {
         );
     }
 
-    let edits = s.request(
-        "textDocument/onTypeFormatting",
-        json!({ "textDocument": { "uri": alx_uri }, "position": { "line": 0, "character": 17 },
-                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
-    );
-    assert_eq!(edits, json!([]), "tags off: {edits}");
+    let answer = close_tag(&mut s, &alx_uri, 0, 17);
+    assert_eq!(answer, Value::Null, "tags off: {answer}");
 
-    let items = newline_items(&mut s, &aly_uri, 1, 0);
-    assert!(
-        items.iter().all(|i| i["label"] != json!("end")),
-        "end off: {items:#?}"
-    );
+    let edits = newline_edits(&mut s, &aly_uri, 1, 0);
+    assert_eq!(edits, json!([]), "end off: {edits}");
 
     // The editor turns them back on without a restart.
     write(
@@ -2045,12 +2037,11 @@ fn the_editor_can_turn_both_helpers_off() {
         &json!({ "jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {
             "settings": { "autoCloseTags": true, "autoEnd": true } } }),
     );
-    let edits = s.request(
-        "textDocument/onTypeFormatting",
-        json!({ "textDocument": { "uri": alx_uri }, "position": { "line": 0, "character": 17 },
-                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
-    );
-    assert_eq!(edits[0]["newText"], json!("</Frame>"), "tags on: {edits}");
+    let answer = close_tag(&mut s, &alx_uri, 0, 17);
+    assert_eq!(answer["name"], json!("Frame"), "tags on: {answer}");
+
+    let edits = newline_edits(&mut s, &aly_uri, 1, 0);
+    assert_eq!(edits[0]["newText"], json!("\nend"), "end on: {edits}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

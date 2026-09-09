@@ -21,9 +21,10 @@ pub fn defaults() -> Value {
             "typeHintMaxLength": 4000,
         },
         "completion": {
-            // The proxy answers the `end` of an open block itself, from
-            // the Alloy source: the child sees the shadow, where
-            // `struct`, `trait`, and `match` are already gone.
+            // The proxy writes the `end` of an open block itself, as an
+            // on-type edit from the Alloy source: the child sees the
+            // shadow, where `struct`, `trait`, and `match` are already
+            // gone, and its own item would open a popup on every Enter.
             "autocompleteEnd": false,
         },
     })
@@ -33,9 +34,10 @@ pub fn defaults() -> Value {
 /// editor turns one off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Editor {
-    /// Write `</Name>` after the `>` that closes an opening tag.
+    /// Name the element the editor closes after the `>` that ends an
+    /// opening tag.
     pub auto_close_tags: bool,
-    /// Offer the `end` of an open block after Enter.
+    /// Write the `end` of an open block after Enter.
     pub auto_end: bool,
 }
 

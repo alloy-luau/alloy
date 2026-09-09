@@ -710,6 +710,14 @@ mod tests {
         assert_eq!(fmt(long), want);
     }
 
+    /// A service import keeps the form the reader wrote, and the
+    /// import list keeps its order: the formatter sorts nothing.
+    #[test]
+    fn a_service_import_keeps_its_form_and_its_order() {
+        let src = "import { RunService, Players } from \"game\"\nimport TweenService from \"game:TweenService\"\nimport { ReplicatedStorage as RS } from \"game\"\n";
+        assert_eq!(fmt(src), src);
+    }
+
     #[test]
     fn a_magic_trailing_comma_keeps_a_group_expanded() {
         let src = "local t = {\n    a = 1,\n    b = 2,\n}\n";

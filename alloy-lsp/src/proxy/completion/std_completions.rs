@@ -12,6 +12,10 @@ impl State {
             .unwrap_or_default();
         let mut out = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
+        // The side of the file asking. A global of the other side is
+        // out of scope here, and the compiler reports a use of one, so
+        // the list must not offer it.
+        let side = self.side_at(uri);
 
         for g in self.project_globals() {
             let fits = match types {
@@ -21,6 +25,7 @@ impl State {
             };
 
             if !fits
+                || !alloy::globals::reaches(g.side, side)
                 || mine.contains(&g.name)
                 || labels.contains(&g.name.as_str())
                 || !seen.insert(g.name.clone())

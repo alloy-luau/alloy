@@ -277,6 +277,27 @@ impl State {
         alloy::directives::mount_side(&place)
     }
 
+    /// The side of a document, or none when the file is shared. The
+    /// source comes from the document the state holds.
+    pub(crate) fn side_at(&self, uri: &str) -> Option<alloy::directives::Side> {
+        self.side_of(uri, self.docs.get(uri).map(|d| d.source.as_str())?)
+    }
+
+    /// Whether one `global` declaration of `owner` reaches the file
+    /// `uri`. A file reaches the globals of its own side and the shared
+    /// ones. The compiler reads the same rule, so a name the editor
+    /// offers is a name that compiles.
+    pub(crate) fn global_reaches(
+        &self,
+        uri: &str,
+        owner: &str,
+        g: &alloy::globals::Global,
+    ) -> bool {
+        let theirs = g.side_directive.unwrap_or_else(|| self.side_at(owner));
+
+        alloy::globals::reaches(theirs, self.side_at(uri))
+    }
+
     /// The path of a document relative to `[build] in`, the way the
     /// build and a message name it.
     pub(crate) fn project_rel(&self, uri: &str) -> Option<PathBuf> {

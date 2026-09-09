@@ -36,17 +36,25 @@ impl Server {
         let (start, end) = keywords::word_range(&doc.source, offset);
         let word = doc.source[start..end].to_string();
 
-        if !st
-            .docs
-            .values()
-            .any(|d| d.globals.iter().any(|g| g.name == word))
-        {
+        // The global this file reaches by that name. A global of the
+        // other side is another name; nothing here refers to it.
+        let Some(side) = st.docs.iter().find_map(|(u, d)| {
+            d.globals
+                .iter()
+                .find(|g| g.name == word && st.global_reaches(uri, u, g))
+                .map(|g| g.side_directive.unwrap_or_else(|| st.side_at(u)))
+        }) else {
             return false;
-        }
+        };
 
         let mut out: Vec<Value> = Vec::new();
 
         for (u, d) in &st.docs {
+            // A file that cannot reach the global writes another name.
+            if !alloy::globals::reaches(side, st.side_at(u)) {
+                continue;
+            }
+
             for (s, e) in name_uses(&d.source, &word) {
                 out.push(json!({
                     "uri": u,
@@ -238,7 +246,7 @@ impl Server {
             && let Some((target_uri, target)) = st.docs.iter().find_map(|(u, d)| {
                 d.globals
                     .iter()
-                    .find(|g| g.name == word)
+                    .find(|g| g.name == word && st.global_reaches(uri, u, g))
                     .map(|g| (u.clone(), g))
             })
         {

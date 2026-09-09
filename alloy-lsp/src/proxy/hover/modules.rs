@@ -63,7 +63,12 @@ impl Server {
             let owner = st
                 .docs
                 .iter()
-                .find(|(u, d)| u.as_str() != uri && d.globals.iter().any(|g| g.name == word))
+                .find(|(u, d)| {
+                    u.as_str() != uri
+                        && d.globals
+                            .iter()
+                            .any(|g| g.name == word && st.global_reaches(uri, u, g))
+                })
                 .map(|(_, d)| d)?;
 
             remote_hover(&owner.source, &word).or_else(|| const_hover(&owner.source, &word))

@@ -135,3 +135,81 @@ fn a_space_after_a_side_directive_lists_the_sides() {
     assert_eq!(labels(1, 19), ["client", "server", "shared"]);
     assert!(labels(2, 10).is_empty());
 }
+
+/// Nine combinations: a client, a server, and a shared global, each
+/// asked for from a client, a server, and a shared file. A file sees
+/// its own side and the shared names, and nothing else.
+#[test]
+fn a_completion_offers_the_globals_of_the_asking_side() {
+    let st = files(&[
+        ("file:///c.client.aly", "global const CLIENT_ONE = 1\n"),
+        ("file:///s.server.aly", "global const SERVER_ONE = 2\n"),
+        ("file:///h.aly", "global const SHARED_ONE = 3\n"),
+        ("file:///use.client.aly", "print(1)\n"),
+        ("file:///use.server.aly", "print(1)\n"),
+        ("file:///use.aly", "print(1)\n"),
+    ]);
+    let labels = |uri: &str| -> Vec<String> {
+        let mut out: Vec<String> = st
+            .global_completions(uri, &[], false)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect();
+        out.sort();
+
+        out
+    };
+
+    assert_eq!(
+        labels("file:///use.client.aly"),
+        ["CLIENT_ONE", "SHARED_ONE"]
+    );
+    assert_eq!(
+        labels("file:///use.server.aly"),
+        ["SERVER_ONE", "SHARED_ONE"]
+    );
+    assert_eq!(labels("file:///use.aly"), ["SHARED_ONE"]);
+}
+
+/// The same rule for the definition, the hover, and the references: a
+/// global of the other side is out of scope, so nothing answers for it.
+#[test]
+fn the_other_side_answers_no_global() {
+    let st = files(&[
+        (
+            "file:///c.client.aly",
+            "--- The client's own.\nglobal const THEME = 1\n",
+        ),
+        ("file:///use.server.aly", "print(THEME)\n"),
+        ("file:///use.client.aly", "print(THEME)\n"),
+    ]);
+    let reaches = |uri: &str| {
+        st.docs.iter().any(|(u, d)| {
+            d.globals
+                .iter()
+                .any(|g| g.name == "THEME" && st.global_reaches(uri, u, g))
+        })
+    };
+
+    assert!(reaches("file:///use.client.aly"));
+    assert!(!reaches("file:///use.server.aly"));
+}
+
+/// A global a script declares moves into a module the build writes
+/// beside it. The completion detail names the script, which is the file
+/// the reader can open.
+#[test]
+fn the_detail_names_the_script_that_declares_the_global() {
+    let st = files(&[
+        ("file:///main.server.aly", "global const LIMIT = 1\n"),
+        ("file:///other.server.aly", "print(LIMIT)\n"),
+    ]);
+    let detail = st
+        .global_completions("file:///other.server.aly", &[], false)
+        .into_iter()
+        .find(|i| i["label"] == "LIMIT")
+        .and_then(|i| i["detail"].as_str().map(str::to_string))
+        .expect("the item");
+
+    assert_eq!(detail, "global in main.server.aly");
+}

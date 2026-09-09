@@ -46,6 +46,20 @@ impl Server {
             return false;
         }
 
+        let (word_start, word_end) = keywords::word_range(&doc.source, offset);
+
+        // A Roblox service: the emitted `local` is generated text, so
+        // the child lands at the start of the import line. The name the
+        // line binds is where the reader means to go.
+        if let Some(result) =
+            service_definition(&doc.source, uri, &doc.source[word_start..word_end])
+        {
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         // `import M from "./m"`: the binding names the module's
         // `export default`, wherever that sits.
         if let Some(result) = st.default_import_definition(uri, &doc.source, offset) {
@@ -281,4 +295,43 @@ pub(crate) fn data_source_of(path: PathBuf) -> PathBuf {
     }
 
     path
+}
+
+/// The definition a Roblox service binding names: the name its import
+/// line binds. The emit writes the `local` as generated text, which
+/// carries no column of its own.
+pub(crate) fn service_definition(source: &str, uri: &str, word: &str) -> Option<Value> {
+    let mut at = 0usize;
+
+    for line in source.lines() {
+        if imports::service_bindings(line)
+            .iter()
+            .any(|(local, _)| local == word)
+            && let Some(col) = whole_word(line, word)
+        {
+            let s = position_of(source, at + col);
+            let e = position_of(source, at + col + word.len());
+
+            return Some(json!([{ "uri": uri, "range": range_value(s, e) }]));
+        }
+
+        at += line.len() + 1;
+    }
+
+    None
+}
+
+/// Where a word sits in a line on its own, not inside a longer name:
+/// `Run` in `{ RunService as Run }` is the second match, not the first.
+fn whole_word(line: &str, word: &str) -> Option<usize> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+    line.match_indices(word)
+        .find(|(at, _)| {
+            let before = line[..*at].chars().next_back();
+            let after = line[at + word.len()..].chars().next();
+
+            !before.is_some_and(is_word) && !after.is_some_and(is_word)
+        })
+        .map(|(at, _)| at)
 }

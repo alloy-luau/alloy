@@ -200,3 +200,26 @@ pub(crate) fn a_service_auto_import_writes_an_import_line() {
         assert_eq!(result.as_array().unwrap().len(), 0, "{src}");
     }
 }
+
+/// Go to definition on a service binding lands on the name the import
+/// line binds, alias included.
+#[test]
+pub(crate) fn a_service_binding_goes_to_its_import() {
+    let src = "import Players from 'game:Players'\nimport { RunService as Run } from 'game'\n\nprint(Players, Run)\n";
+    let at = |word: &str| service_definition(src, "file:///t.aly", word);
+
+    assert_eq!(
+        at("Players"),
+        Some(json!([{ "uri": "file:///t.aly", "range": {
+            "start": { "line": 0, "character": 7 },
+            "end": { "line": 0, "character": 14 } } }]))
+    );
+    // The alias, not the `RunService` it renames.
+    assert_eq!(
+        at("Run"),
+        Some(json!([{ "uri": "file:///t.aly", "range": {
+            "start": { "line": 1, "character": 23 },
+            "end": { "line": 1, "character": 26 } } }]))
+    );
+    assert_eq!(at("print"), None);
+}

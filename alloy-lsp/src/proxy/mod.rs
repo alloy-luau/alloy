@@ -60,7 +60,8 @@ use hover::{
     remote_parameter_hover, remote_spec, restates_itself, restore_struct_arguments, restyle_hover,
     service_hover, std_member_hover, unlocal_parameter, without_self,
 };
-use navigation::data_module_of;
+#[allow(unused_imports)]
+use navigation::{data_module_of, service_definition};
 #[allow(unused_imports)]
 use typing::{append_initializer, end_follows};
 

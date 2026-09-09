@@ -279,6 +279,9 @@ impl Server {
             o.globals =
                 alloy::globals::refs_for(&st.project_globals(), &module_rel, &HashMap::new());
             o.hoist_globals = false;
+            // The module keeps the script's side; its own name has no
+            // suffix to say it.
+            o.side = st.side_of(uri, source);
 
             (o, j)
         };

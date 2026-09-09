@@ -55,7 +55,10 @@ impl<'s> Formatter<'s> {
             "match" => !matches!(prev, Some(".") | Some(":")),
 
             "struct" | "enum" | "trait" | "impl" | "interface" | "macro" => {
-                self.items[i].newlines_before > 0 || i == 0 || prev == Some("export")
+                self.items[i].newlines_before > 0
+                    || i == 0
+                    || prev == Some("export")
+                    || prev == Some("global")
             }
 
             "class" => prev == Some("declare"),

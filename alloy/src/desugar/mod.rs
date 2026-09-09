@@ -130,6 +130,10 @@ pub struct EmitOptions {
     /// module beside it. The declarations go, and the injected require
     /// brings the names back.
     pub hoist_globals: bool,
+    /// The side the project's tree gives the file, for a name that
+    /// says none. The module a script's globals moved into takes the
+    /// script's side this way too.
+    pub side: Option<crate::directives::Side>,
 }
 
 /// One `global` of the project, as the file being compiled reaches it.
@@ -218,6 +222,7 @@ impl Default for EmitOptions {
             global_macros: Vec::new(),
             global_attributes: Vec::new(),
             hoist_globals: false,
+            side: None,
         }
     }
 }
@@ -241,6 +246,10 @@ pub struct Rendered {
     /// its first use. The build reads them for the require graph.
     pub globals_used: Vec<(String, u32)>,
 }
+
+/// What `--@alloy-side` says when it sits anywhere but over a global.
+pub const SIDE_ON_GLOBAL: &str =
+    "`--@alloy-side` sits above a global; `--@alloy-file-side` is the one for a whole file";
 
 /// The std names that are ambient in Alloy source.
 pub const AMBIENT: &[&str] = &[
@@ -334,7 +343,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         scopes: vec![HashSet::new()],
         uses_std: false,
         globals_used: Vec::new(),
-        file_side: crate::directives::effective_side(src, &options.file_name),
+        // The name and the directive are the file's own word; the
+        // caller's side is the tree's, which is the weakest.
+        file_side: crate::directives::effective_side(src, &options.file_name).or(options.side),
         own_names: match options.hoist_globals {
             // A hoisted global lives in the module beside the script,
             // so the script reaches it the way every other file does.
@@ -1902,6 +1913,40 @@ impl<'s> Desugar<'s> {
     fn check_globals(&mut self, src: &str, toks: &[Tok], chunk: &Chunk) {
         let decls = crate::globals::declared_in(src, toks, chunk, std::path::Path::new(""));
 
+        // `--@alloy-side` names the side of the global under it, so
+        // anywhere else it says nothing. `--@alloy-file-side` is the
+        // directive for the whole file.
+        let scanned = crate::directives::scan(src);
+
+        let lines: Vec<&str> = src.lines().collect();
+
+        for (line, _) in &scanned.decl_sides {
+            // The declaration under the directive, past blank lines,
+            // comments, and attributes.
+            let mut at = line + 1;
+
+            while lines.get(at).is_some_and(|l| {
+                let t = l.trim();
+
+                t.is_empty() || t.starts_with("--") || t.starts_with('@')
+            }) {
+                at += 1;
+            }
+
+            let is_global = decls
+                .iter()
+                .any(|g| src[..g.start as usize].matches('\n').count() == at);
+
+            if !is_global {
+                let (start, end) = crate::directives::span_of_line(src, *line);
+                self.diagnostics.push(Diagnostic {
+                    start: start as u32,
+                    end: end as u32,
+                    message: SIDE_ON_GLOBAL.to_string(),
+                });
+            }
+        }
+
         if decls.is_empty() {
             return;
         }
@@ -2000,16 +2045,21 @@ impl<'s> Desugar<'s> {
             return;
         };
 
-        // A global of one side does not reach the other. A shared
-        // module reaches both, the way a remote's two sides do.
-        if let (Some(theirs), Some(mine)) = (g.side, self.file_side)
-            && theirs != mine
+        // A global of one side reaches that side alone. A shared file
+        // runs on either side, so it cannot hold one.
+        if let Some(theirs) = g.side
+            && self.file_side != Some(theirs)
         {
             let word = theirs.name();
+            let message = match self.file_side {
+                Some(_) => format!("`{name}` is global on the {word} only"),
+
+                None => format!("`{name}` is global on the {word}; this file is shared"),
+            };
             self.diagnostics.push(Diagnostic {
                 start: at,
                 end: at + name.len() as u32,
-                message: format!("`{name}` is global on the {word} only"),
+                message,
             });
 
             return;

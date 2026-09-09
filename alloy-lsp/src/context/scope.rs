@@ -363,7 +363,7 @@ fn bindings_of(line: &str) -> Vec<(Local, Bind)> {
 
             None => rest,
         };
-        let bind = match before.is_empty() || before == "export" {
+        let bind = match before.is_empty() || matches!(before, "export" | "global") {
             true => Bind::Outer,
 
             false => Bind::Inner,

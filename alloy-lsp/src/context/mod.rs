@@ -470,7 +470,8 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             .checked_sub(2)
             .map(|i| opening_word(head_words[i]));
         let type_decl = head_words.first() == Some(&"type")
-            || (head_words.first() == Some(&"export") && head_words.get(1) == Some(&"type"));
+            || (matches!(head_words.first(), Some(&"export") | Some(&"global"))
+                && head_words.get(1) == Some(&"type"));
 
         if matches!(last, "satisfies" | "is" | "extends" | "impl")
             || (last == "for" && head_words.first() == Some(&"impl"))

@@ -415,6 +415,27 @@ impl Server {
                     return true;
                 }
 
+                // A space triggers a completion only for the side of a
+                // directive; every other space answers nothing, so no
+                // list opens where the author is typing words.
+                if m == "textDocument/completion"
+                    && let Some(id) = message.get("id").cloned()
+                    && message.pointer("/params/context/triggerCharacter") == Some(&json!(" "))
+                {
+                    let items = {
+                        let st = self.state.lock().expect("state");
+                        let (line, character) = message
+                            .pointer("/params/position")
+                            .and_then(position_of_value)
+                            .unwrap_or((0, 0));
+
+                        st.side_word_completions(&uri, line, character)
+                    };
+                    self.respond(&id, json!(items));
+
+                    return true;
+                }
+
                 // A closing quote asks for nothing: the editor sends the
                 // quote as a trigger either way, and a list that pops up
                 // there takes the next Enter.

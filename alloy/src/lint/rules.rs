@@ -58,7 +58,9 @@ pub fn const_reassignments(src: &str, toks: &[Tok]) -> Vec<(u32, u32, String)> {
     let mut names: Vec<&str> = Vec::new();
 
     for i in 0..toks.len() {
-        if text(i) != "const" || !(starts(i) || text(i.wrapping_sub(1)) == "export") {
+        if text(i) != "const"
+            || !(starts(i) || matches!(text(i.wrapping_sub(1)), "export" | "global"))
+        {
             continue;
         }
 
@@ -128,6 +130,72 @@ struct Fn {
 }
 
 /// Runs the token and statement lints on one file.
+/// `export_impl`: an `impl` on a foreign type wearing the old keyword.
+/// `export` said "project wide" before `global` existed; `global impl`
+/// says it now, and the rewrite is the one word.
+fn export_impl(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
+    let text = |span: alloy_syntax::ast::TokSpan| -> &str {
+        if span.end <= span.start || span.end as usize > toks.len() {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+    // A struct or an enum of this file is never foreign, whatever its name.
+    let mut local: Vec<&str> = Vec::new();
+
+    for stmt in &chunk.block.stmts {
+        match stmt {
+            Stmt::Struct(d) => local.push(text(d.name)),
+
+            Stmt::Enum(d) => local.push(text(d.name)),
+
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+
+    for stmt in &chunk.block.stmts {
+        let Stmt::Impl(i) = stmt else {
+            continue;
+        };
+        let target = text(i.target);
+
+        if !i.exported
+            || i.global
+            || local.contains(&target)
+            || !crate::extensions::is_foreign(target)
+        {
+            continue;
+        }
+
+        let Some(word) = toks.get(i.span.start as usize) else {
+            continue;
+        };
+
+        if word.text(src) != "export" {
+            continue;
+        }
+
+        out.push(Lint {
+            name: "export_impl",
+            start: word.start,
+            end: word.end,
+            message: format!(
+                "`impl {target}` works project wide; `global impl` is the word for that"
+            ),
+            fix: Some(crate::lint::Fix {
+                start: word.start,
+                end: word.end,
+                replacement: "global".to_string(),
+            }),
+        });
+    }
+
+    out
+}
+
 pub fn run(
     src: &str,
     toks: &[Tok],
@@ -143,6 +211,7 @@ pub fn run(
     }
 
     lints.extend(directive_lints(src));
+    lints.extend(export_impl(src, toks, chunk));
 
     let text = |i: usize| toks[i].text(src);
     let st = structure(src, toks);
@@ -256,7 +325,8 @@ pub fn run(
 
         let prev = i.checked_sub(1).map(text);
         let prev2 = i.checked_sub(2).map(text);
-        let exported = prev == Some("export") || (prev == Some("async") && prev2 == Some("export"));
+        let exported = matches!(prev, Some("export") | Some("global"))
+            || (prev == Some("async") && matches!(prev2, Some("export") | Some("global")));
         let private =
             prev == Some("private") || (prev == Some("async") && prev2 == Some("private"));
         let in_impl = !private && impl_ranges.iter().any(|(a, b)| *a < i && i < *b);

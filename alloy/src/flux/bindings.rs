@@ -304,7 +304,7 @@ impl<'s> Scan<'s> {
             while head > 0
                 && matches!(
                     self.t(head - 1),
-                    "local" | "export" | "async" | "private" | "public"
+                    "local" | "export" | "global" | "async" | "private" | "public"
                 )
             {
                 head -= 1;
@@ -532,7 +532,9 @@ impl<'s> Scan<'s> {
                 // `function f` and `async function f` at statement level:
                 // a plain name, not exported, not a method of an `impl`
                 // or a `trait`. A global reads from anywhere in the file.
-                "function" | "async" if self.statement_start(i) && self.prev(i) != "export" => {
+                "function" | "async"
+                    if self.statement_start(i) && !matches!(self.prev(i), "export" | "global") =>
+                {
                     let f = if self.at(i, "async") { i + 1 } else { i };
 
                     if !self.at(f, "function")
@@ -766,7 +768,7 @@ impl<'s> Scan<'s> {
                 }
 
                 w @ ("struct" | "enum" | "trait" | "interface" | "type")
-                    if self.statement_start(i) || self.prev(i) == "export" =>
+                    if self.statement_start(i) || matches!(self.prev(i), "export" | "global") =>
                 {
                     let n = i + 1;
 

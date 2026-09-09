@@ -94,9 +94,12 @@ pub struct Global {
     pub kind: Kind,
     /// The parameter list of a generic type, `<T>`; empty otherwise.
     pub type_params: String,
-    /// The side the declaring file sits on: its name, or its
-    /// `--@alloy-side` directive. A shared module has none.
+    /// The side this global reaches: the directive above it when it
+    /// has one, else the side of the declaring file.
     pub side: Option<crate::directives::Side>,
+    /// The `--@alloy-side` right above the declaration, when it has
+    /// one. It beats every rule the file's own side follows.
+    pub side_directive: Option<Option<crate::directives::Side>>,
 }
 
 /// The names a Luau or Roblox program already has. A global by one of
@@ -192,12 +195,15 @@ pub fn declared_in(
         }
     };
     let side = crate::directives::effective_side(src, &file.to_string_lossy());
+    let scanned = crate::directives::scan(src);
     let mut out = Vec::new();
     let mut push = |name: &str, kind: Kind, name_span: TokSpan, span: TokSpan, params: String| {
         if name.is_empty() {
             return;
         }
 
+        let line = src[..at(span) as usize].matches('\n').count();
+        let directive = scanned.side_above(src, line);
         out.push(Global {
             name: name.to_string(),
             file: file.to_path_buf(),
@@ -209,7 +215,8 @@ pub fn declared_in(
                 .unwrap_or(0),
             kind,
             type_params: params,
-            side,
+            side: directive.unwrap_or(side),
+            side_directive: directive,
         });
     };
 

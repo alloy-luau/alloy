@@ -73,6 +73,7 @@ const KEYWORDS: &[&str] = &[
     "delete",
     "import",
     "export",
+    "global",
     "from",
     "type",
     "remote",

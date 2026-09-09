@@ -67,9 +67,10 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
             head_at = i;
             head = text(i);
 
-            // `export` carries the declaration behind it; the word
-            // after it is the one that says what the statement is.
-            if head == "export" && i + 1 < toks.len() {
+            // `export` and `global` carry the declaration behind
+            // them; the word after is the one that says what the
+            // statement is.
+            if matches!(head, "export" | "global") && i + 1 < toks.len() {
                 head_at = i + 1;
                 head = text(i + 1);
             }

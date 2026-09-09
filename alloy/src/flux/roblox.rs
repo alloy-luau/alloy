@@ -386,7 +386,7 @@ impl<'s> Scan<'s> {
     /// An `export` with no comment line right above it.
     fn missing_doc(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
-            if !self.at(i, "export") || !self.statement_start(i) {
+            if !(self.at(i, "export") || self.at(i, "global")) || !self.statement_start(i) {
                 continue;
             }
 

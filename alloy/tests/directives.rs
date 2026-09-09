@@ -212,7 +212,7 @@ const REMOTE: &str = "remote Buy(item: string) from client\n";
 #[test]
 fn a_side_directive_shapes_the_remote_the_way_the_file_name_does() {
     let by_name = compile_as(REMOTE, "shop.server.aly");
-    let by_directive = compile_as(&format!("--@alloy-side server\n{REMOTE}"), "shop.aly");
+    let by_directive = compile_as(&format!("--@alloy-file-side server\n{REMOTE}"), "shop.aly");
     assert!(
         by_directive.diagnostics.is_empty(),
         "{:?}",
@@ -241,7 +241,7 @@ fn a_side_directive_shapes_the_remote_the_way_the_file_name_does() {
 #[test]
 fn a_side_that_contradicts_the_file_name_reports() {
     let out = compile_as(
-        &format!("--@alloy-side client\n{REMOTE}"),
+        &format!("--@alloy-file-side client\n{REMOTE}"),
         "shop.server.aly",
     );
     let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
@@ -253,7 +253,7 @@ fn a_side_that_contradicts_the_file_name_reports() {
 
     // The same directive in a file the name agrees with is clean.
     let agrees = compile_as(
-        &format!("--@alloy-side server\n{REMOTE}"),
+        &format!("--@alloy-file-side server\n{REMOTE}"),
         "shop.server.aly",
     );
     assert!(agrees.diagnostics.is_empty(), "{:?}", agrees.diagnostics);
@@ -261,9 +261,14 @@ fn a_side_that_contradicts_the_file_name_reports() {
 
 #[test]
 fn a_side_that_names_neither_client_nor_server_reports() {
-    let messages = messages("--@alloy-side middle\nlocal a = 1\n");
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("the sides are `client` and `server`"));
+    let bad = messages("--@alloy-file-side middle\nlocal a = 1\n");
+    assert_eq!(bad.len(), 1);
+    assert!(bad[0].contains("the sides are `client`, `server`, and `shared`"));
+
+    // `--@alloy-side` belongs over a global; anywhere else it reports.
+    let stray = messages("--@alloy-side client\nlocal a = 1\n");
+    assert_eq!(stray.len(), 1, "{stray:?}");
+    assert!(stray[0].contains("sits above a global"), "{stray:?}");
 }
 
 // --- 5. the preserved line ---------------------------------------------------

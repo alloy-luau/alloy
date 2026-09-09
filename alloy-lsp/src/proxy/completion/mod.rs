@@ -317,6 +317,42 @@ impl State {
         items
     }
 
+    /// The list a space opens: the sides after `--@alloy-side` and
+    /// `--@alloy-file-side`, and nothing anywhere else.
+    ///
+    /// The editor asks on a space only when the server lists one as a
+    /// trigger, so the space is in the list, and every other space
+    /// answers an empty list, which opens no popup.
+    pub(crate) fn side_word_completions(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return Vec::new();
+        };
+
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let head = doc.source[line_start..offset].trim_start();
+        let opens = ["--@alloy-file-side ", "--@alloy-side "].contains(&head);
+
+        if !opens {
+            return Vec::new();
+        }
+
+        alloy::directives::SIDE_WORDS
+            .iter()
+            .map(|(word, doc_text)| {
+                json!({
+                    "label": word,
+                    "kind": 14,
+                    "detail": "Alloy side",
+                    "documentation": { "kind": "markdown", "value": doc_text },
+                })
+            })
+            .collect()
+    }
+
     /// Completion items for the comment directives. In a comment that
     /// holds nothing yet, `--`, `--@`, or `--!` lists them; on a line
     /// with nothing before the cursor, they come last, so a bare request
@@ -357,7 +393,7 @@ impl State {
         let (_, start_char) = position_of(&doc.source, edit_start);
         let alloy_only = typed.starts_with('@');
         let luau_only = typed.starts_with('!');
-        let directives: [(&str, &str); 11] = [
+        let directives: [(&str, &str); 12] = [
             (
                 "--@alloy-ignore",
                 "Silences the next line that holds code, or this line when it sits at the end of one: the compiler's, the lints, and the checker's diagnostics. Text after the name is the reason.",
@@ -383,8 +419,12 @@ impl State {
                 "Sets a lint's level for this file, over `[lint]` in alloy.toml: `--@alloy-lint raw_require=allow`. Several are separated by commas, and a group name sets its whole group.",
             ),
             (
+                "--@alloy-file-side",
+                "`client`, `server`, or `shared`: this file sees that side of every remote, the way a `.client.aly` or `.server.aly` name does.",
+            ),
+            (
                 "--@alloy-side",
-                "`client` or `server`: this file sees that side of every remote, the way a `.client.aly` or `.server.aly` name does.",
+                "`client`, `server`, or `shared` for the `global` under it. It says nothing about the rest of the file; `--@alloy-file-side` is the one for that.",
             ),
             (
                 "--@alloy-preserve",

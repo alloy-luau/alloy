@@ -666,6 +666,31 @@ pub const TABLES: &[Table] = &[
         open: Some(ingot_options_value),
     },
     Table {
+        name: "contexts",
+        doc: "Which folders hold client code, server code, and shared code. A file's side follows: it decides which half of a `remote` the file sees, and which `global` names it reaches. An entry is a folder name, matched against every segment of the file's path under `[build] in`, so `client` matches `src/client/x.aly` and `src/features/client/x.aly`; an entry with a `/` is a path from the project root. A `.client` or `.server` name, and `--@alloy-file-side`, both win over this table; the DataModel service the file lands under is read only when this table says nothing.",
+        keys: &[
+            key(
+                "client",
+                Ty::StrList,
+                "[]",
+                "The folders that hold client code.",
+            ),
+            key(
+                "server",
+                Ty::StrList,
+                "[]",
+                "The folders that hold server code.",
+            ),
+            key(
+                "shared",
+                Ty::StrList,
+                "[]",
+                "The folders that hold code both sides run.",
+            ),
+        ],
+        open: None,
+    },
+    Table {
         name: "alx",
         doc: "How `.alx` markup lowers: the factory it calls and the names it maps. The shape `luaux.toml` has, kept in this file so a project needs no second one; a `luaux.toml` beside it still reads when this table is empty. `alloy doc markup` explains the keys.",
         keys: &[],

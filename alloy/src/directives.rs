@@ -7,7 +7,8 @@
 //! silences the same way, and is itself an error when the line it
 //! covers has none. `--@alloy-ignore-start` and `--@alloy-ignore-end`
 //! silence a region. `--@alloy-lint` sets a lint's level for the file.
-//! `--@alloy-side` says which side of a remote the file sees.
+//! `--@alloy-file-side` says which side of a remote the file sees;
+//! `--@alloy-side` says it for the one global under it.
 //! `--@alloy-preserve` keeps `alloy flux --fix` off a line. All reach
 //! the checker's errors through the language server, which drops a
 //! diagnostic on a silenced line before the editor sees it.
@@ -70,8 +71,12 @@ pub struct Directives {
     levels: Vec<(String, Level)>,
     /// The `--@alloy-ignore-start` regions, closed and unclosed.
     regions: Vec<Region>,
-    /// The side `--@alloy-side` declares, and the line it sits on.
-    pub side: Option<(usize, Side)>,
+    /// The side `--@alloy-file-side` declares for the whole file, and
+    /// the line it sits on. `None` inside the pair means shared.
+    pub file_side: Option<(usize, Option<Side>)>,
+    /// Every `--@alloy-side`, by the line it sits on. Each one belongs
+    /// to the declaration under it, not to the file.
+    pub decl_sides: Vec<(usize, Option<Side>)>,
     /// Lines `--@alloy-preserve` keeps `--fix` off.
     preserved: HashSet<usize>,
     /// A directive the scan could read but not accept: the line and
@@ -89,6 +94,7 @@ const NOCHECK: &str = "--@alloy-nocheck";
 pub const EXPECT: &str = "--@alloy-expect-error";
 const LINT: &str = "--@alloy-lint";
 const SIDE: &str = "--@alloy-side";
+const FILE_SIDE: &str = "--@alloy-file-side";
 const PRESERVE: &str = "--@alloy-preserve";
 
 /// Every directive name, in the order the docs list them.
@@ -100,7 +106,24 @@ pub const NAMES: &[&str] = &[
     NOCHECK,
     LINT,
     SIDE,
+    FILE_SIDE,
     PRESERVE,
+];
+
+/// The words a side directive takes.
+pub const SIDE_WORDS: &[(&str, &str)] = &[
+    (
+        "client",
+        "The file, or the global under the directive, is the client's.",
+    ),
+    (
+        "server",
+        "The file, or the global under the directive, is the server's.",
+    ),
+    (
+        "shared",
+        "The file, or the global under the directive, runs on either side.",
+    ),
 ];
 
 /// The prefix every directive shares.
@@ -133,7 +156,8 @@ pub fn unmet_message(reason: Option<&str>) -> String {
 
 /// Reads the directives of a source.
 ///
-/// `--@alloy-lint`, `--@alloy-side`, `--@alloy-ignore-start`, and
+/// `--@alloy-lint`, `--@alloy-file-side`, `--@alloy-side`,
+/// `--@alloy-ignore-start`, and
 /// `--@alloy-ignore-end` sit on a line of their own. `--@alloy-ignore`,
 /// `--@alloy-expect-error`, and `--@alloy-preserve` sit on their own
 /// line or at the end of a line with code.
@@ -159,6 +183,12 @@ pub fn scan(src: &str) -> Directives {
 
         if let Some(rest) = leading(trimmed, LINT) {
             out.read_levels(i, rest);
+
+            continue;
+        }
+
+        if let Some(rest) = leading(trimmed, FILE_SIDE) {
+            out.read_file_side(i, rest);
 
             continue;
         }
@@ -433,38 +463,79 @@ impl Directives {
         }
     }
 
-    /// Reads `--@alloy-side client` or `--@alloy-side server`.
-    fn read_side(&mut self, at: usize, rest: &str) {
-        let side = match rest.split_whitespace().next() {
-            Some("client") => Side::Client,
-            Some("server") => Side::Server,
+    /// The side word of a directive: `client`, `server`, or `shared`,
+    /// where shared is no side at all.
+    fn read_side_word(&mut self, at: usize, name: &str, rest: &str) -> Option<Option<Side>> {
+        match rest.split_whitespace().next() {
+            Some("client") => Some(Some(Side::Client)),
+            Some("server") => Some(Some(Side::Server)),
+            Some("shared") => Some(None),
 
             other => {
                 let what = other.unwrap_or("");
                 self.errors.push((
                     at,
                     format!(
-                        "the `{SIDE}` directive says `{what}`; the sides are `client` and `server`"
+                        "the `{name}` directive says `{what}`; the sides are `client`, `server`, and `shared`"
                     ),
                 ));
 
-                return;
+                None
             }
+        }
+    }
+
+    /// Reads `--@alloy-side client`: the side of the global under it.
+    fn read_side(&mut self, at: usize, rest: &str) {
+        if let Some(side) = self.read_side_word(at, SIDE, rest) {
+            self.decl_sides.push((at, side));
+        }
+    }
+
+    /// Reads `--@alloy-file-side client`: the side of the whole file.
+    fn read_file_side(&mut self, at: usize, rest: &str) {
+        let Some(side) = self.read_side_word(at, FILE_SIDE, rest) else {
+            return;
         };
 
-        match self.side {
+        match self.file_side {
             Some((_, first)) if first != side => self.errors.push((
                 at,
                 format!(
-                    "this file already has a `{SIDE}` directive, which says `{}`",
-                    first.name()
+                    "this file already has a `{FILE_SIDE}` directive, which says `{}`",
+                    first.map(Side::name).unwrap_or("shared")
                 ),
             )),
 
             Some(_) => {}
 
-            None => self.side = Some((at, side)),
+            None => self.file_side = Some((at, side)),
         }
+    }
+
+    /// The side `--@alloy-side` gives the declaration that starts on
+    /// `line`: the directive right above it, past blank and comment
+    /// lines. `None` when no directive covers the declaration.
+    pub fn side_above(&self, src: &str, line: usize) -> Option<Option<Side>> {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut at = line;
+
+        while at > 0 {
+            at -= 1;
+            let text = lines.get(at).map(|l| l.trim()).unwrap_or("");
+
+            if let Some((_, side)) = self.decl_sides.iter().find(|(l, _)| *l == at) {
+                return Some(*side);
+            }
+
+            if text.is_empty() || text.starts_with("--") || text.starts_with('@') {
+                continue;
+            }
+
+            return None;
+        }
+
+        None
     }
 
     /// Whether a diagnostic on `line` (zero-based) shows. A diagnostic
@@ -569,15 +640,15 @@ impl Directives {
     /// names the other side. The scan has no file name, so the caller
     /// asks for this once it knows one.
     pub fn side_problem(&self, file_name: &str) -> Option<(usize, String)> {
-        let (at, side) = self.side?;
+        let (at, side) = self.file_side?;
         let named = file_side(file_name)?;
 
-        (named != side).then(|| {
+        (Some(named) != side).then(|| {
             (
                 at,
                 format!(
-                    "the `{SIDE} {}` directive contradicts the file name, which says `{}`",
-                    side.name(),
+                    "the `{FILE_SIDE} {}` directive contradicts the file name, which says `{}`",
+                    side.map(Side::name).unwrap_or("shared"),
                     named.name()
                 ),
             )
@@ -593,7 +664,8 @@ impl Directives {
             && self.levels.is_empty()
             && self.regions.is_empty()
             && self.preserved.is_empty()
-            && self.side.is_none()
+            && self.file_side.is_none()
+            && self.decl_sides.is_empty()
             && self.errors.is_empty()
     }
 }
@@ -615,12 +687,53 @@ pub fn file_side(file: &str) -> Option<Side> {
     }
 }
 
-/// The side a file sees: the `--@alloy-side` directive, else the name.
+/// The side a DataModel place puts a file on. `ServerScriptService`
+/// and `ServerStorage` do not replicate, so a file there is the
+/// server's. `StarterPlayer`, `StarterGui`, and `StarterPack` are
+/// copied into each player, so a file there is the client's. Every
+/// other service replicates to both, `ReplicatedFirst` included, so a
+/// file there is shared.
+pub fn mount_side(place: &[String]) -> Option<Side> {
+    match place.first().map(String::as_str) {
+        Some("ServerScriptService" | "ServerStorage") => Some(Side::Server),
+
+        Some("StarterPlayer" | "StarterGui" | "StarterPack") => Some(Side::Client),
+
+        _ => None,
+    }
+}
+
+/// The side a file sees, from the strongest word to the weakest: the
+/// name suffix, `--@alloy-side`, then the place the tree gives the
+/// file. A file no rule reaches is shared, and runs on either side.
+///
+/// One function answers this for every reader: the globals of a
+/// project and the surface of a `remote` both take the same side.
+pub fn side_of(
+    src: &str,
+    file_name: &str,
+    context: Option<Option<Side>>,
+    place: Option<&[String]>,
+) -> Option<Side> {
+    if let Some(side) = file_side(file_name) {
+        return Some(side);
+    }
+
+    if let Some((_, side)) = scan(src).file_side {
+        return side;
+    }
+
+    if let Some(side) = context {
+        return side;
+    }
+
+    place.and_then(mount_side)
+}
+
+/// The side a file sees with no tree to ask: the name, else the
+/// `--@alloy-side` directive.
 pub fn effective_side(src: &str, file_name: &str) -> Option<Side> {
-    scan(src)
-        .side
-        .map(|(_, s)| s)
-        .or_else(|| file_side(file_name))
+    side_of(src, file_name, None, None)
 }
 
 /// The word of a `--@alloy-` comment that names no directive, or `None`
@@ -891,13 +1004,18 @@ mod tests {
     // --- 4. the side of a file -------------------------------------------------
 
     #[test]
-    fn a_side_directive_names_the_side() {
-        let d = scan("--@alloy-side client\nlocal a = 1\n");
-        assert_eq!(d.side, Some((0, Side::Client)));
+    fn a_file_side_directive_names_the_side() {
+        let d = scan("--@alloy-file-side client\nlocal a = 1\n");
+        assert_eq!(d.file_side, Some((0, Some(Side::Client))));
         assert!(d.errors.is_empty());
         assert_eq!(
-            effective_side("--@alloy-side server\n", "shared.aly"),
+            effective_side("--@alloy-file-side server\n", "shared.aly"),
             Some(Side::Server)
+        );
+        // `shared` is a side word too: it says the file runs on either.
+        assert_eq!(
+            effective_side("--@alloy-file-side shared\n", "shared.aly"),
+            None
         );
         // With no directive the file name decides.
         assert_eq!(
@@ -907,20 +1025,83 @@ mod tests {
         assert_eq!(effective_side("local a = 1\n", "shared.aly"), None);
     }
 
+    /// `--@alloy-side` names the side of the global under it, and only
+    /// that; the file's own side comes from `--@alloy-file-side`.
+    #[test]
+    fn a_side_directive_names_the_declaration_under_it() {
+        let src = "--@alloy-side client\nglobal const A = 1\n\nglobal const B = 2\n";
+        let d = scan(src);
+        assert_eq!(d.decl_sides, vec![(0, Some(Side::Client))]);
+        assert_eq!(d.side_above(src, 1), Some(Some(Side::Client)));
+        assert_eq!(d.side_above(src, 3), None);
+        // It says nothing about the file.
+        assert_eq!(effective_side(src, "shared.aly"), None);
+    }
+
     #[test]
     fn a_side_that_contradicts_the_file_name_is_an_error() {
-        let d = scan("--@alloy-side client\n");
+        let d = scan("--@alloy-file-side client\n");
         assert!(d.side_problem("main.server.aly").is_some());
         assert!(d.side_problem("ui.client.aly").is_none());
         assert!(d.side_problem("shared.aly").is_none());
 
-        let bad = scan("--@alloy-side middle\n");
+        let bad = scan("--@alloy-file-side middle\n");
         assert_eq!(bad.errors.len(), 1);
-        assert!(bad.errors[0].1.contains("`client` and `server`"));
+        assert!(bad.errors[0].1.contains("`client`, `server`, and `shared`"));
 
-        let twice = scan("--@alloy-side client\n--@alloy-side server\n");
+        let twice = scan("--@alloy-file-side client\n--@alloy-file-side server\n");
         assert_eq!(twice.errors.len(), 1);
-        assert_eq!(twice.side, Some((0, Side::Client)));
+        assert_eq!(twice.file_side, Some((0, Some(Side::Client))));
+    }
+
+    /// The DataModel place a file lands at names its side when nothing
+    /// else does.
+    #[test]
+    fn the_mount_names_the_side_of_a_file_with_no_suffix() {
+        let server = ["ServerScriptService".to_string(), "Game".to_string()];
+        let client = [
+            "StarterPlayer".to_string(),
+            "StarterPlayerScripts".to_string(),
+        ];
+        let shared = ["ReplicatedStorage".to_string(), "Shared".to_string()];
+        let first = ["ReplicatedFirst".to_string()];
+        assert_eq!(mount_side(&server), Some(Side::Server));
+        assert_eq!(mount_side(&client), Some(Side::Client));
+        assert_eq!(mount_side(&shared), None);
+        assert_eq!(mount_side(&first), None);
+        assert_eq!(mount_side(&["StarterGui".to_string()]), Some(Side::Client));
+        assert_eq!(mount_side(&["StarterPack".to_string()]), Some(Side::Client));
+        assert_eq!(
+            mount_side(&["ServerStorage".to_string()]),
+            Some(Side::Server)
+        );
+        assert_eq!(mount_side(&["Workspace".to_string()]), None);
+
+        // The suffix beats the place, and the file-wide directive sits
+        // between them.
+        assert_eq!(
+            side_of("local a = 1\n", "ui.client.aly", None, Some(&server)),
+            Some(Side::Client)
+        );
+        assert_eq!(
+            side_of("--@alloy-file-side client\n", "x.aly", None, Some(&server)),
+            Some(Side::Client)
+        );
+        assert_eq!(
+            side_of("local a = 1\n", "x.aly", None, Some(&server)),
+            Some(Side::Server)
+        );
+        // `[contexts]` sits under the directive and over the place.
+        assert_eq!(
+            side_of(
+                "local a = 1\n",
+                "x.aly",
+                Some(Some(Side::Client)),
+                Some(&server)
+            ),
+            Some(Side::Client)
+        );
+        assert_eq!(side_of("local a = 1\n", "x.aly", None, Some(&shared)), None);
     }
 
     // --- 5. the preserved line -------------------------------------------------

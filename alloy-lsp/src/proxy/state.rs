@@ -109,6 +109,9 @@ impl State {
 
             for g in &doc.globals {
                 let mut g = g.clone();
+                g.side = g
+                    .side_directive
+                    .unwrap_or_else(|| self.side_of(uri, &doc.source));
                 g.file = match script {
                     true => PathBuf::from(alloy::globals::hoist_name(&rel.to_string_lossy())),
 
@@ -120,6 +123,37 @@ impl State {
 
         out.sort_by(|a, b| (&a.file, a.offset).cmp(&(&b.file, b.offset)));
         out
+    }
+
+    /// The side a document sees: its name, then `--@alloy-side`, then
+    /// the place the project's tree gives it.
+    pub(crate) fn side_of(&self, uri: &str, source: &str) -> Option<alloy::directives::Side> {
+        let name = uri_to_path(uri)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| uri.to_string());
+
+        if let Some(side) = alloy::directives::effective_side(source, &name) {
+            return Some(side);
+        }
+
+        let root = self.root.as_deref()?;
+        let path = uri_to_path(uri)?;
+        let config_path = Config::find_within(path.parent()?, root)?;
+        let config = Config::load(&config_path).ok()?;
+        let base = config_path.parent()?.to_path_buf();
+        let tree = alloy::project::Tree::load(&base, &config);
+        let rel = self.project_rel(uri)?;
+        let from_root = config.build.input.join(&rel);
+
+        // `[contexts]` names the folders that hold one side's code;
+        // the tree's service is the word under that.
+        if let Some(side) = config.contexts.side_of(&rel, &from_root) {
+            return side;
+        }
+
+        let place = alloy::project::instance_path(&tree, &from_root)?;
+
+        alloy::directives::mount_side(&place)
     }
 
     /// The path of a document relative to `[build] in`, the way the
@@ -217,6 +251,10 @@ impl State {
                     global_attributes: alloy::globals::attribute_decls(&sources),
                     globals: alloy::globals::refs_for(&globals, &rel, &HashMap::new()),
                     hoist_globals: script,
+                    side: self.side_of(
+                        uri,
+                        self.docs.get(uri).map(|d| d.source.as_str()).unwrap_or(""),
+                    ),
                     ambient_clashes,
                     in_project: true,
                     ..EmitOptions::default()

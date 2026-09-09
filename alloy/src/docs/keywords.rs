@@ -22,6 +22,7 @@ pub const ALLOY_KEYWORDS: &[&str] = &[
     "extends",
     "for",
     "from",
+    "global",
     "impl",
     "import",
     "in",

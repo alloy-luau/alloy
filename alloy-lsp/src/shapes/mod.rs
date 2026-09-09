@@ -80,13 +80,13 @@ fn record_aliases(source: &str) -> Vec<Interface> {
 
     while let Some(i) = rest.find("type ") {
         let head = &rest[i..];
-        // The word opens a declaration when nothing but `export` or
-        // `local` stands before it on its line. Trimming the text back
-        // to the previous line's last byte reads a `type` in the middle
-        // of one as a declaration.
+        // The word opens a declaration when nothing but `export`,
+        // `global`, or `local` stands before it on its line. Trimming
+        // the text back to the previous line's last byte reads a `type`
+        // in the middle of one as a declaration.
         let raw = &rest[..i];
         let lead = raw[raw.rfind('\n').map_or(0, |k| k + 1)..].trim();
-        let opens = matches!(lead, "" | "export" | "local");
+        let opens = matches!(lead, "" | "export" | "global" | "local");
         rest = &rest[i + "type ".len()..];
 
         if !opens {

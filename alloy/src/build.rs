@@ -306,9 +306,25 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             .find(|(script, _)| script == rel)
             .map(|(_, module)| module.clone())
     };
+    // The side of a file: its name, then `--@alloy-side`, then the
+    // place the tree gives it. A module under `ServerScriptService`
+    // never reaches the client, whatever its name.
+    let side_of = |rel: &Path, text: &str| {
+        let from_root = build.input.join(rel);
+        let place = crate::project::instance_path(&tree, &from_root);
+        let context = config.contexts.side_of(rel, &from_root);
+
+        crate::directives::side_of(text, &display_path(rel), context, place.as_deref())
+    };
     let mut project_globals = crate::globals::index(&included);
 
     for g in &mut project_globals {
+        // The file's side, unless the global carries a directive of
+        // its own.
+        if let Some((rel, text)) = included.iter().find(|(rel, _)| rel == &g.file) {
+            g.side = g.side_directive.unwrap_or_else(|| side_of(rel, text));
+        }
+
         if let Some(module) = hoist_of(&g.file) {
             g.file = module;
         }
@@ -432,6 +448,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             global_macros: global_macros.clone(),
             global_attributes: global_attributes.clone(),
             hoist_globals: hoist_of(&rel).is_some(),
+            side: side_of(&rel, &source),
             in_project: true,
             ambient_clashes: ambient_clashes.clone(),
             import_types: crate::modules::import_types(&source, &path, &module_aliases),
@@ -619,6 +636,9 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             let module_options = EmitOptions {
                 file_name: display_path(&module_rel),
                 hoist_globals: false,
+                // The module keeps the script's side; its own name has
+                // no suffix to say it.
+                side: side_of(&rel, &source),
                 globals: crate::globals::refs_for(&project_globals, &module_rel, &ship_globals),
                 ..options.clone()
             };

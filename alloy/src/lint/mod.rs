@@ -375,9 +375,9 @@ pub const LINTS: &[LintInfo] = &[
     LintInfo {
         name: "export_impl",
         group: Group::Style,
-        default: Level::Warn,
+        default: Level::Allow,
         summary: "`export impl` on a foreign type, where `global impl` says it",
-        detail: "An `impl` on a foreign type such as `BasePart` or `string` works project wide. `export` said that before `global` existed, and it still parses; `global impl` is the spelling now. `alloy flux --fix` rewrites the keyword.",
+        detail: "An `impl` on a foreign type such as `BasePart` or `string` works project wide. `export` said that before `global` existed; `global impl` is the spelling now. Off by default while `export impl` is still accepted: `[lint.rules] export_impl = \"warn\"` turns it on, and `alloy flux --fix` rewrites the keyword.",
     },
     LintInfo {
         name: "manual_safe_access",

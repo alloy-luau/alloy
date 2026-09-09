@@ -163,7 +163,8 @@ fn opens_a_header(src: &str, toks: &[Tok], i: usize) -> bool {
 
     let prev = &toks[i - 1];
 
-    prev.text(src) == "export" || src[prev.end as usize..toks[i].start as usize].contains('\n')
+    matches!(prev.text(src), "export" | "global")
+        || src[prev.end as usize..toks[i].start as usize].contains('\n')
 }
 
 /// The parser's first complaint about a whole file, if it has one. A
@@ -538,6 +539,7 @@ fn is_keyword(text: &str) -> bool {
             | "false"
             | "const"
             | "export"
+            | "global"
             | "import"
             | "from"
             | "struct"

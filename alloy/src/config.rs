@@ -37,6 +37,82 @@ pub struct Config {
     /// the names it maps. A project with `.alx` files sets it here; a
     /// `luaux.toml` beside the file still reads when the table is empty.
     pub alx: Alx,
+    /// The `[contexts]` table: which folders hold client code, server
+    /// code, and shared code. A project that keeps a `client` folder
+    /// under ReplicatedStorage says so here, and a file's side follows.
+    pub contexts: Contexts,
+}
+
+/// `[contexts]`: folder names, or paths from the root, by side.
+///
+/// Each entry is a folder name, matched against every segment of the
+/// file's path under `[build] in`, so `client` matches `src/client/x.aly`
+/// and `src/features/client/x.aly`. An entry that holds a `/` is a path
+/// from the project root instead, and matches the files under it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct Contexts {
+    pub client: Vec<String>,
+    pub server: Vec<String>,
+    pub shared: Vec<String>,
+}
+
+impl Contexts {
+    pub fn is_empty(&self) -> bool {
+        self.client.is_empty() && self.server.is_empty() && self.shared.is_empty()
+    }
+
+    /// The side the table gives a file, `None` when it names none.
+    /// `rel` is the path under `[build] in`, `from_root` the path from
+    /// the project root. The deepest folder that matches wins, so a
+    /// `client` folder inside a `shared` one is the client's.
+    pub fn side_of(&self, rel: &Path, from_root: &Path) -> Option<Option<crate::directives::Side>> {
+        use crate::directives::Side;
+
+        let segments: Vec<String> = rel
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+
+                _ => None,
+            })
+            .collect();
+        let root_text = from_root.to_string_lossy().replace('\\', "/");
+        let mut best: Option<(usize, Option<Side>)> = None;
+        let groups: [(&[String], Option<Side>); 3] = [
+            (&self.client, Some(Side::Client)),
+            (&self.server, Some(Side::Server)),
+            (&self.shared, None),
+        ];
+
+        for (names, side) in groups {
+            for name in names {
+                let depth = match name.contains('/') {
+                    // A path from the root: the deepest folder of the
+                    // path is what it matches at.
+                    true => {
+                        let prefix = name.trim_end_matches('/');
+
+                        if root_text == prefix || root_text.starts_with(&format!("{prefix}/")) {
+                            Some(prefix.split('/').count())
+                        } else {
+                            None
+                        }
+                    }
+
+                    false => segments.iter().rposition(|s| s == name).map(|i| i + 1),
+                };
+
+                if let Some(depth) = depth
+                    && best.is_none_or(|(d, _)| depth > d)
+                {
+                    best = Some((depth, side));
+                }
+            }
+        }
+
+        best.map(|(_, side)| side)
+    }
 }
 
 /// The `[alx]` table: the markup settings, the shape `luaux.toml` has,
@@ -898,6 +974,13 @@ mount_aliases = true
 # alias = [path, mount]: the folder at path lands at mount in the DataModel
 # shared = ["src/shared", "@game/ReplicatedStorage/Shared"]
 # server = ["src/server", "@game/ServerScriptService/Server"]
+
+# [contexts]
+# which folders hold which side's code; a folder name matches any segment
+# of a file's path, and an entry with a "/" is a path from this file
+# client = ["client", "ui"]
+# server = ["server"]
+# shared = ["shared"]
 
 # [ingots]
 # an extension that ships as an executable: a path relative to this file,

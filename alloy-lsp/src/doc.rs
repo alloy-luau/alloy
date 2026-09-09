@@ -61,8 +61,9 @@ pub struct Doc {
     /// sees the Alloy source, which it cannot read.
     pub error: Option<alloy::CompileError>,
     pub is_alx: bool,
-    /// The repair pass's compile, when a dangling `.`, `:`, `?.` or
-    /// `!.` stopped the parser. `shadow` and every position map come
+    /// The repair pass's compile, when a dangling `.`, `:`, `?.`,
+    /// `!.`, `?:`, `!:`, `[`, `?[` or `![` stopped the parser.
+    /// `shadow` and every position map come
     /// from it while it stands; `output` stays the author's own
     /// compile, so the diagnostics still name what they always did.
     pub repair: Option<Repair>,
@@ -94,44 +95,47 @@ fn plain_enough(source: &str) -> String {
 /// as a statement, so `HashMap.new().` repairs in every position.
 const HOLE: &str = "__alloy_hole()";
 
-/// The byte offsets where a member operator ends a line and nothing
-/// follows it: `a.`, `a:`, `a?.`, `a!.`. The parser wants a name there.
-fn dangling_members(source: &str) -> Vec<usize> {
+/// The same for a bracket that never closed: `x[` becomes
+/// `x[__alloy_hole()]`, one index the parser reads through. The
+/// placeholder carries the `]`, so `x?[` and `x![` repair too.
+const BRACKET_HOLE: &str = "__alloy_hole()]";
+
+/// The byte offsets where an access operator ends a line and nothing
+/// follows it: `a.`, `a:`, `a?.`, `a!.`, `a?:`, `a!:`, `a[`, `a?[`,
+/// `a![`. Each carries the text the repair writes there. The parser
+/// wants a name after a separator and a key inside a bracket.
+fn dangling_members(source: &str) -> Vec<(usize, &'static str)> {
     let Ok(lexed) = alloy_syntax::lexer::lex(source) else {
         return Vec::new();
     };
     let mut spots = Vec::new();
 
     for (i, tok) in lexed.toks.iter().enumerate() {
-        let opens = match tok.kind {
-            TokKind::Dot | TokKind::Colon => true,
+        let fill = match tok.kind {
+            TokKind::Dot | TokKind::Colon => HOLE,
 
-            TokKind::Symbol => matches!(tok.text(source), "?." | "!."),
+            TokKind::Symbol if tok.text(source) == "[" => BRACKET_HOLE,
 
-            _ => false,
+            _ => continue,
         };
-
-        if !opens {
-            continue;
-        }
 
         let end = tok.end as usize;
 
         match lexed.toks.get(i + 1) {
             Some(next) => {
                 if source[end..next.start as usize].contains('\n') {
-                    spots.push(end);
+                    spots.push((end, fill));
                 }
             }
 
-            None => spots.push(end),
+            None => spots.push((end, fill)),
         }
     }
 
     spots
 }
 
-/// The source with a placeholder after every dangling member operator,
+/// The source with a placeholder after every dangling access operator,
 /// and where each one went. `None` when the source has none.
 fn repaired_source(source: &str) -> Option<(String, Vec<(usize, usize)>)> {
     let spots = dangling_members(source);
@@ -142,11 +146,17 @@ fn repaired_source(source: &str) -> Option<(String, Vec<(usize, usize)>)> {
 
     let mut text = source.to_string();
 
-    for at in spots.iter().rev() {
-        text.insert_str(*at, HOLE);
+    for (at, fill) in spots.iter().rev() {
+        text.insert_str(*at, fill);
     }
 
-    Some((text, spots.into_iter().map(|at| (at, HOLE.len())).collect()))
+    Some((
+        text,
+        spots
+            .into_iter()
+            .map(|(at, fill)| (at, fill.len()))
+            .collect(),
+    ))
 }
 
 impl Doc {
@@ -235,11 +245,11 @@ impl Doc {
         let compiled =
             alloy::compile_file(&options.file_name, &self.source, options, Some(jsx), ingots);
 
-        // A dangling `a.`, `a:`, `a?.` or `a!.` stops the parser. The
-        // artifact then breaks off at the operator, and the child has
-        // no answer for the caret sitting on it. A copy with a
-        // placeholder name after the operator parses, so the caret
-        // still reaches the member list of what stands before it.
+        // A dangling `a.`, `a:`, `a?.`, `a!.` or `a[` stops the
+        // parser. The artifact then breaks off at the operator, and
+        // the child has no answer for the caret sitting on it. A copy
+        // with a placeholder after the operator parses, so the caret
+        // still reaches the list of what stands before it.
         let repair = |source: &str| -> Option<Repair> {
             let (text, spots) = repaired_source(source)?;
             let out =
@@ -647,7 +657,7 @@ mod tests {
     /// member of the call's result.
     #[test]
     fn a_dangling_member_operator_keeps_the_artifact() {
-        for op in [".", ":", "?.", "!."] {
+        for op in [".", ":", "?.", "!.", "?:", "!:"] {
             let src = format!("local function go()\n    HashMap.new(){op}\nend\n");
             let doc = Doc::new(
                 src.clone(),
@@ -716,7 +726,52 @@ mod tests {
         assert!(dangling_members("local s = \"a.\"\nprint(s)\n").is_empty());
         assert!(dangling_members("-- a.\nlocal x = 1\n").is_empty());
         assert!(dangling_members("local x = 1.\nprint(x)\n").is_empty());
-        assert_eq!(dangling_members("local m = a\nm.\n"), vec![14]);
+        assert_eq!(dangling_members("local m = a\nm.\n"), vec![(14, HOLE)]);
+        assert!(dangling_members("local s = \"a[\"\nprint(s)\n").is_empty());
+    }
+
+    /// `x[`, `x?[` and `x![` with nothing after the bracket: the key
+    /// and the `]` are both missing, so the placeholder carries them.
+    #[test]
+    fn a_dangling_bracket_keeps_the_artifact() {
+        for op in ["[", "?[", "!["] {
+            let src = format!("local t = {{ a = 1 }}\nlocal v = t{op}\nprint(v)\n");
+            let doc = Doc::new(
+                src.clone(),
+                1,
+                &EmitOptions::default(),
+                &alloy::luaux::Config::default(),
+                None,
+            );
+            let repair = doc.repair.as_ref().unwrap_or_else(|| panic!("{op}"));
+            assert!(
+                repair.source.contains(&format!("t{op}{BRACKET_HOLE}")),
+                "{op}: {}",
+                repair.source
+            );
+            assert_eq!(repair.spots.len(), 1);
+
+            // The caret sits inside the bracket. It maps to a shadow
+            // position, and that position maps back to the caret.
+            let column = 11 + op.len() as u32;
+            let shadow = doc.to_shadow(1, column);
+            assert_eq!(doc.to_source(shadow.0, shadow.1), (1, column), "{op}");
+        }
+    }
+
+    /// A bracket that opens a key on the next line parses on its own,
+    /// so the repair never runs and the artifact stays the author's.
+    #[test]
+    fn a_bracket_that_closes_needs_no_repair() {
+        let src = "local t = { a = 1 }\nlocal v = t[\n    \"a\"\n]\nprint(v)\n";
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        assert!(doc.repair.is_none());
     }
 
     #[test]

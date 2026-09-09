@@ -1120,7 +1120,7 @@ fn luau_string(text: &str) -> String {
 }
 
 /// A child of a node, in source order.
-enum Child<'a> {
+pub(crate) enum Child<'a> {
     Expr(&'a Expr),
     Block(&'a Block),
     /// A function body, which starts a fresh temp scope.
@@ -1321,7 +1321,7 @@ fn expr_children(e: &Expr) -> Vec<Child<'_>> {
     }
 }
 
-fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
+pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
     match s {
         Stmt::Empty(_)
         | Stmt::Break(_)

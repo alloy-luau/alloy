@@ -453,7 +453,37 @@ impl<'s> Desugar<'s> {
     /// outside.
     pub(crate) fn check_namespaces(&mut self, block: &Block) {
         self.check_namespace_names(&block.stmts, None);
+        self.check_nesting(&block.stmts);
         self.check_private_uses();
+    }
+
+    /// A namespace inside a function or a block. The emit gives its
+    /// members file-level names and a table the file returns, so the
+    /// only places one stands are the top level and another namespace.
+    fn check_nesting(&mut self, stmts: &[Stmt]) {
+        let mut buried = Vec::new();
+
+        for stmt in stmts {
+            match stmt.under_default() {
+                // The members are checked as their own level.
+                Stmt::Namespace(ns) => {
+                    let inner: Vec<&Stmt> = ns.members.iter().map(|m| &m.stmt).collect();
+
+                    for one in inner {
+                        self.check_nesting(std::slice::from_ref(one));
+                    }
+                }
+
+                other => buried_namespaces(other, &mut buried),
+            }
+        }
+
+        for span in buried {
+            self.diagnose(
+                span,
+                "a namespace goes at the top level of a file or inside another namespace; the emit gives its members names of the file",
+            );
+        }
     }
 
     fn check_namespace_names(&mut self, stmts: &[Stmt], parent: Option<&str>) {
@@ -765,6 +795,30 @@ impl<'s> Desugar<'s> {
                 None => tail,
             };
             self.generate(self.byte_end(span), &text);
+        }
+    }
+}
+
+/// Every namespace under a statement, at any depth. A namespace of
+/// its own is not one: its members are their own level.
+fn buried_namespaces(stmt: &Stmt, out: &mut Vec<TokSpan>) {
+    for child in crate::desugar::stmt_children(stmt) {
+        match child {
+            crate::desugar::Child::Block(b) => block_namespaces(b, out),
+
+            crate::desugar::Child::Function(f) => block_namespaces(&f.block, out),
+
+            crate::desugar::Child::Expr(_) => {}
+        }
+    }
+}
+
+fn block_namespaces(block: &Block, out: &mut Vec<TokSpan>) {
+    for stmt in &block.stmts {
+        match stmt.under_default() {
+            Stmt::Namespace(ns) => out.push(ns.name),
+
+            other => buried_namespaces(other, out),
         }
     }
 }

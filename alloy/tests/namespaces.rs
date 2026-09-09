@@ -452,3 +452,20 @@ fn a_compile_time_member_keeps_its_own_name() {
     assert!(out.contains("print(2 * 2)"), "{out}");
     assert!(!out.contains("M.twice"), "{out}");
 }
+
+/// A namespace inside a function has nowhere to put its members: the
+/// emit gives each one a name of the file.
+#[test]
+fn a_namespace_inside_a_block_reports() {
+    let hits = messages(
+        "function outer()\n    namespace Inner as\n        const A = 1\n    end\n\n    return Inner.A\nend\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(hits[0].contains("goes at the top level"), "{hits:?}");
+
+    // A member's own body is a block too.
+    let inner = messages(
+        "namespace M as\n    function f()\n        namespace Bad as\n        end\n    end\nend\n",
+    );
+    assert_eq!(inner.len(), 1, "{inner:?}");
+}

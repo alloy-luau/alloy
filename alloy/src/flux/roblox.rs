@@ -3,7 +3,7 @@
 //! mover; a `TODO`, a stray `print`, an export with no comment. The
 //! names and levels sit in `lint::LINTS`.
 
-use crate::flux_scan::Scan;
+use super::scan::Scan;
 use crate::lint::Lint;
 
 /// Runs the Roblox and pedantic lints on one file.

@@ -1678,11 +1678,11 @@ pub fn run(
         }
     }
 
-    let scan = crate::flux_scan::Scan::new(src, toks, &st).with_privates(import_privates);
+    let scan = crate::flux::scan::Scan::new(src, toks, &st).with_privates(import_privates);
     lints.extend(crate::flux::run(&scan));
-    lints.extend(crate::flux_correctness::run(&scan));
-    lints.extend(crate::flux_complexity::run(&scan, thresholds));
-    lints.extend(crate::flux_roblox::run(&scan));
+    lints.extend(crate::flux::correctness::run(&scan));
+    lints.extend(crate::flux::complexity::run(&scan, thresholds));
+    lints.extend(crate::flux::roblox::run(&scan));
     lints.sort_by_key(|l| l.start);
     lints
 }

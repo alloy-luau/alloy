@@ -3,7 +3,7 @@
 //! work inside a loop that belongs above it. The limits come from
 //! `[flux]`; the names and levels sit in `lint::LINTS`.
 
-use crate::flux_scan::{IfParts, Scan};
+use super::scan::{IfParts, Scan};
 use crate::lint::{Lint, Thresholds};
 
 /// Runs the complexity and perf lints on one file.

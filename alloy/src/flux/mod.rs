@@ -9,10 +9,16 @@
 //!
 //! The names and levels sit in `lint::LINTS` with the other lints.
 
+pub(crate) mod bindings;
+pub(crate) mod complexity;
+pub(crate) mod correctness;
+pub(crate) mod roblox;
+pub(crate) mod scan;
+
 use alloy_syntax::lexer::TokKind;
 
 use crate::desugar::PRIMITIVES;
-use crate::flux_scan::Scan;
+use crate::flux::scan::Scan;
 use crate::lint::Lint;
 use crate::roblox_classes::DATATYPES;
 

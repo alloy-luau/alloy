@@ -1,0 +1,26 @@
+--- Writes a line to the output.
+global function log(msg: string)
+    print(msg)
+end
+
+global local counter = 0
+
+global const MAX = 10
+
+global type Id = number
+
+global struct Vec2 as
+    x: number
+    y: number
+end
+
+global enum State as
+    Idle
+    Busy
+end
+
+global interface Named as
+    name: string
+end
+
+log(`{counter} {MAX}`)

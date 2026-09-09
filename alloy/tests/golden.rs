@@ -1,7 +1,9 @@
 //! Golden tests: every `.aly` under `tests/cases` compiles to the `.luau`
 //! beside it, and every output has the line count of its source. A new
 //! case is two files. A `<name>.check.luau` beside them, where one
-//! exists, is the check artifact of the same source.
+//! exists, is the check artifact of the same source. A case whose name
+//! starts with `global_` compiles as one file of a project, since
+//! `global` needs one.
 
 use std::fs;
 use std::path::Path;
@@ -22,8 +24,13 @@ fn every_case_matches_its_expected_output() {
         let expected = fs::read_to_string(path.with_extension("luau")).unwrap();
         // The file name reaches `$dbg` messages, so the goldens are
         // generated from inside the cases directory with the bare name.
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        // `global` needs a project, so a case named for it compiles as
+        // one file of one.
+        let in_project = name.starts_with("global_");
         let options = alloy::EmitOptions {
-            file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            file_name: name,
+            in_project,
             ..alloy::EmitOptions::default()
         };
         let out = alloy::compile_with(&src, &options).unwrap();

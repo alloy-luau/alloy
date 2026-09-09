@@ -247,3 +247,73 @@ fn an_exporting_module_returns_one_value_to_require() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The globals of a project, through the analyzer. The build writes the
+/// require and the binding on the first line of each file that names
+/// one; `luau-lsp analyze` reads the emitted tree and must find every
+/// name, every type, and no error of its own.
+#[test]
+fn a_project_with_globals_analyzes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let defs = root.join("tools/types/globalTypes.d.luau");
+
+    if !defs.is_file() {
+        eprintln!("skipped: no definitions at {}", defs.display());
+
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("alloy-analyze-globals-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/shared")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nout = \"out\"\nartifact = \"check\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
+    std::fs::write(
+        dir.join("src/shared/log.aly"),
+        "--- Writes a line.\nglobal function log(msg: string)\n    print(msg)\nend\n\nglobal struct Vec2 as\n    x: number\n    y: number\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/shared/ids.aly"),
+        "global type Id = number\n\nglobal const MAX = 10\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.aly"),
+        "local n: Id = MAX\nlog(`start {n}`)\n\nfunction origin(): Vec2\n    return new Vec2 { x = 0, y = 0 }\nend\n\nprint(origin().x)\n",
+    )
+    .unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let main = dir.join("out/main.luau");
+    let run = Command::new("luau-lsp")
+        .arg("analyze")
+        .arg("--flag:LuauSolverV2=true")
+        .arg(format!("--definitions={}", defs.display()))
+        .arg(&main)
+        .output();
+
+    let Ok(run) = run else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+
+    let text =
+        String::from_utf8_lossy(&run.stdout).into_owned() + &String::from_utf8_lossy(&run.stderr);
+    let bad: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("TypeError") || l.contains("SyntaxError"))
+        .collect();
+    let emitted = std::fs::read_to_string(&main).unwrap();
+    assert!(bad.is_empty(), "{}\n---\n{emitted}", bad.join("\n"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

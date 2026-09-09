@@ -1119,14 +1119,8 @@ impl Server {
                                     .and_then(|(l, c)| offset_of(&doc.shadow, l, c));
                                 let generated = offset
                                     .is_some_and(|o| doc.generated_offset(o.saturating_sub(1)));
-                                // A parameter hint on a call the lowering
-                                // wrote, `create("TextLabel")` behind a tag,
-                                // lands on the tag: the byte before it is
-                                // not the author's.
-                                let lowered_call = h.get("kind").and_then(Value::as_u64) == Some(2)
-                                    && offset.is_some_and(|o| doc.lowering_differs_before(o));
 
-                                !error_type && !generated && !lowered_call
+                                !error_type && !generated
                             });
 
                             // A label the child sends in parts folds as

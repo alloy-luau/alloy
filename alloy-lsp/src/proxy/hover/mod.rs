@@ -95,12 +95,6 @@ impl Server {
             .and_then(position_of_value)?;
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
-
-        // A `.alx` lowering moves columns of its own; leave it alone.
-        if doc.is_alx {
-            return None;
-        }
-
         let offset = offset_of(&doc.source, line, character)?;
         let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
         let source_line = doc.source.lines().nth(line as usize)?;
@@ -161,11 +155,6 @@ impl Server {
             .and_then(position_of_value)?;
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
-
-        if doc.is_alx {
-            return None;
-        }
-
         let offset = offset_of(&doc.source, line, character)?;
         let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
         let (base, access, at) = context::index_at(&doc.source, offset)?;
@@ -206,7 +195,7 @@ impl Server {
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
 
-        if doc.is_alx || member_position(doc, line, character).is_some() {
+        if member_position(doc, line, character).is_some() {
             return None;
         }
 
@@ -492,12 +481,6 @@ pub(crate) fn optional_index_hover(
     line: u32,
     character: u32,
 ) -> Option<String> {
-    // A `.alx` lowering moves columns of its own, and the child has no
-    // type for the value there either.
-    if doc.is_alx {
-        return None;
-    }
-
     let offset = offset_of(&doc.source, line, character)?;
 
     if context::index_at(&doc.source, offset)?.1 != context::Access::Optional {

@@ -1863,6 +1863,133 @@ end
 return Panel
 ";
 
+/// A `.alx` file with a guarded index and a chain, on plain lines and
+/// inside a `{ }` hole of a tag. The lowering moves the columns of a
+/// markup line, so the map has to cross it byte for byte.
+const GUARDED_MARKUP: &str = "\
+local React = (nil :: any) :: { createElement: (...any) -> any }
+
+struct Part as
+    Name: string,
+    Size: number,
+end
+
+local function size_of(part: Part): number
+    return part.Size
+end
+
+local function Panel(props: { parts: { Part }? })
+    local parts = props.parts
+    local one = parts?[1]
+    local name = parts?[1]?.Name
+    local a = parts?[1]?.
+    local b = parts![1].
+    return <Frame Size={size_of(parts![1])}>
+        <TextLabel Text={parts?[1]?.Name} />
+    </Frame>
+end
+
+return Panel
+";
+
+/// The markup lowering used to move every column of the line it wrote,
+/// so a member through a guarded index answered from somewhere else.
+/// Each answer below reads the same as it does in a `.aly`.
+#[test]
+fn a_guarded_index_answers_through_the_markup_lowering() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-guarded-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("panel.alx");
+    std::fs::write(&file, GUARDED_MARKUP).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau-jsx", "version": 1,
+                "text": GUARDED_MARKUP } } }),
+    );
+    s.drain(Duration::from_secs(5));
+    // The first answer warms the child; it has the file only now.
+    let _ = s.hover(&uri, 0, 6);
+
+    let holds = |labels: &[String]| {
+        labels.iter().any(|l| l == "Name") && labels.iter().any(|l| l == "Size")
+    };
+
+    // `parts?[1]?.` and `parts![1].` with nothing after them: the
+    // repair pass carries the line, and the member list is the
+    // element's.
+    let labels = s.completion_labels(&uri, 15, 25);
+    assert!(holds(&labels), "optional index: {labels:?}");
+    let labels = s.completion_labels(&uri, 16, 24);
+    assert!(holds(&labels), "asserted index: {labels:?}");
+
+    // The same chain written out, on a plain line and in a hole.
+    let h = s.hover(&uri, 14, 29);
+    assert!(h.contains("string"), "chain on a plain line: {h}");
+    let h = s.hover(&uri, 18, 37);
+    assert!(h.contains("string"), "chain in a hole: {h}");
+
+    // Every column of a markup line maps, not only the ones inside a
+    // word: the two guards of the hole read as the operators they are,
+    // and the receiver reads its own type.
+    let h = s.hover(&uri, 18, 30);
+    assert!(h.contains("a?[k]"), "the guard of the index: {h}");
+    let h = s.hover(&uri, 18, 34);
+    assert!(h.contains("a?.b"), "the guard of the chain: {h}");
+    let h = s.hover(&uri, 18, 26);
+    assert!(h.contains("{Part}?"), "the receiver in a hole: {h}");
+
+    // A binding of a guarded index gets its element type as a hint.
+    let hints = s.request(
+        "textDocument/inlayHint",
+        json!({ "textDocument": { "uri": uri },
+            "range": { "start": { "line": 0, "character": 0 },
+                       "end": { "line": 23, "character": 0 } } }),
+    );
+    let one: Vec<String> = hints
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|h| h["position"]["line"] == 13)
+        .map(hint_text)
+        .collect();
+    assert!(one.iter().any(|l| l == ": Part?"), "{hints}");
+
+    // A name inside a hole goes to where the file declares it.
+    let defs = s.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 17, "character": 26 } }),
+    );
+    assert_eq!(defs[0]["range"]["start"]["line"], 7, "{defs}");
+    assert_eq!(defs[0]["range"]["start"]["character"], 15, "{defs}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One inlay hint's label, whether the child sent it whole or in parts.
+fn hint_text(hint: &Value) -> String {
+    match &hint["label"] {
+        Value::String(text) => text.clone(),
+
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["value"].as_str())
+            .collect::<String>(),
+
+        _ => String::new(),
+    }
+}
+
 /// The element `alloy/closeTag` names at a position, or null.
 fn close_tag(s: &mut Session, uri: &str, line: u32, character: u32) -> Value {
     s.request(

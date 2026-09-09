@@ -439,36 +439,7 @@ impl Doc {
             return (line, character);
         };
         let (line, character) = self.repaired_position(line, character);
-
-        // For `.alx`, the map speaks lowered positions: same line, the
-        // column through the word under it. An ingot's edit sits between
-        // the author's text and the lowering.
-        let (text, line, character) = match &out.lowered {
-            Some(low) => {
-                let (layered, line, character) = match (&out.layer, &out.layered) {
-                    (Some(layer), Some(layered)) => {
-                        let at = offset_of(self.compiled(), line, character).unwrap_or(0);
-                        let (ls, le) = line_bounds(self.compiled(), at);
-                        let mapped = (at..=le)
-                            .find_map(|o| layer.to_output(o as u32))
-                            .or_else(|| (ls..at).rev().find_map(|o| layer.to_output(o as u32)))
-                            .unwrap_or(0) as usize;
-                        let (l, c) = position_of(layered, mapped.min(layered.len()));
-
-                        (layered.as_str(), l, c)
-                    }
-
-                    _ => (self.compiled(), line, character),
-                };
-                let from = line_text(layered, line);
-                let to = line_text(low, line);
-                let col = alloy::alx::map_column(from, to, character as usize) as u32;
-
-                (low.as_str(), line, col)
-            }
-
-            None => (self.compiled(), line, character),
-        };
+        let text = self.compiled();
 
         let Some(offset) = offset_of(text, line, character) else {
             return (line, character);
@@ -500,45 +471,14 @@ impl Doc {
         };
 
         let src = out.map.to_source(offset as u32) as usize;
+        let text = self.compiled();
+        let (line, col) = position_of(text, src.min(text.len()));
 
-        match &out.lowered {
-            Some(low) => {
-                let (line, col) = position_of(low, src.min(low.len()));
-                let from = line_text(low, line);
-
-                match (&out.layer, &out.layered) {
-                    (Some(layer), Some(layered)) => {
-                        let to = line_text(layered, line);
-                        let col = alloy::alx::map_column(from, to, col as usize) as u32;
-                        let at = offset_of(layered, line, col).unwrap_or(0);
-                        let original = layer.to_source(at as u32) as usize;
-
-                        let text = self.compiled();
-                        let (line, col) = position_of(text, original.min(text.len()));
-
-                        self.out_of_repair_position(line, col)
-                    }
-
-                    _ => {
-                        let to = line_text(self.compiled(), line);
-                        let col = alloy::alx::map_column(from, to, col as usize) as u32;
-
-                        self.out_of_repair_position(line, col)
-                    }
-                }
-            }
-
-            None => {
-                let text = self.compiled();
-                let (line, col) = position_of(text, src.min(text.len()));
-
-                self.out_of_repair_position(line, col)
-            }
-        }
+        self.out_of_repair_position(line, col)
     }
 
     /// Whether a shadow position sits in text no author wrote: the
-    /// desugar's, or an ingot's edit behind a `.alx` lowering.
+    /// desugar's, the markup lowering's, or an ingot's edit.
     pub fn generated_at(&self, line: u32, character: u32) -> bool {
         let Some(offset) = offset_of(&self.shadow, line, character) else {
             return false;
@@ -549,48 +489,8 @@ impl Doc {
 
     /// The same, for a shadow byte offset.
     pub fn generated_offset(&self, offset: usize) -> bool {
-        let Some(out) = self.mapping() else {
-            return false;
-        };
-
-        if out.map.is_generated(offset as u32) {
-            return true;
-        }
-
-        let (Some(low), Some(layer), Some(layered)) = (&out.lowered, &out.layer, &out.layered)
-        else {
-            return false;
-        };
-        let src = out.map.to_source(offset as u32) as usize;
-        let (line, col) = position_of(low, src.min(low.len()));
-        let from = line_text(low, line);
-        let to = line_text(layered, line);
-        let col = alloy::alx::map_column(from, to, col as usize) as u32;
-        let at = offset_of(layered, line, col).unwrap_or(0);
-
-        layer.is_generated(at as u32)
-    }
-
-    /// For `.alx`: whether the byte before a shadow offset differs from
-    /// the byte before the source position it maps to. A call the
-    /// lowering wrote, `create("Frame")` for `<Frame`, has a quote where
-    /// the source has `<`; a call the author wrote reads the same.
-    pub fn lowering_differs_before(&self, offset: usize) -> bool {
-        let Some(out) = self.mapping() else {
-            return false;
-        };
-        let Some(low) = &out.lowered else {
-            return false;
-        };
-        let src = out.map.to_source(offset as u32) as usize;
-        let (line, col) = position_of(low, src.min(low.len()));
-        let from = line_text(low, line);
-        let to = line_text(self.compiled(), line);
-        let mapped = alloy::alx::map_column(from, to, col as usize);
-        let before_low = from[..(col as usize).min(from.len())].chars().next_back();
-        let before_src = to[..mapped.min(to.len())].chars().next_back();
-
-        before_low != before_src
+        self.mapping()
+            .is_some_and(|out| out.map.is_generated(offset as u32))
     }
 
     /// Applies one LSP content change.
@@ -652,11 +552,6 @@ pub fn position_of(text: &str, offset: usize) -> (u32, u32) {
 }
 
 /// The byte bounds of the line holding `offset`, end exclusive of `\n`.
-/// The text of line `line`, without its newline; empty past the end.
-fn line_text(text: &str, line: u32) -> &str {
-    text.split('\n').nth(line as usize).unwrap_or("")
-}
-
 fn line_bounds(text: &str, offset: usize) -> (usize, usize) {
     let start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
     let end = text[offset..].find('\n').map_or(text.len(), |i| offset + i);

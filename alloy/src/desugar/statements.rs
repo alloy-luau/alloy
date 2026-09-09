@@ -408,6 +408,9 @@ impl<'s> Desugar<'s> {
         }
 
         AMBIENT.iter().any(|n| text.contains(n))
+            // A project global reaches this file without an import, so
+            // the walk has to see the name and record the use.
+            || self.options.globals.iter().any(|g| text.contains(&g.name))
             || text.contains("import(")
             || text.contains("import<<")
             || self.structs.iter().any(|name| struct_called(text, name))
@@ -729,6 +732,15 @@ impl<'s> Desugar<'s> {
                 }
 
                 self.generate(close, &tail);
+            }
+
+            // The modifier is Alloy's; Luau reads the rest. `export`
+            // takes its place, and the alias keeps every other byte.
+            Stmt::TypeAlias(t) if t.global => {
+                let start = self.byte_start(t.span);
+                let after = self.toks[t.span.start as usize].end;
+                self.generate(start, "export");
+                self.copy(after, self.byte_end(t.span));
             }
 
             Stmt::Function(f) if function_needs_rewrite(&f.body) => {

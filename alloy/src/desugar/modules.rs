@@ -73,7 +73,33 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// A name that is already global needs no import, and an import of
+    /// one hides that the name reaches every file. The spec reports.
+    fn reject_global_imports(&mut self, i: &Import) {
+        let specs = match &i.kind {
+            ImportKind::Both(_, specs) | ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
+                specs.clone()
+            }
+
+            _ => Vec::new(),
+        };
+
+        for sp in specs {
+            let name = self.text_of(sp.name).to_string();
+
+            if self.options.globals.iter().any(|g| g.name == name) {
+                self.diagnostics.push(Diagnostic {
+                    start: self.byte_start(sp.name),
+                    end: self.byte_end(sp.name),
+                    message: format!("`{name}` is global; it is in scope without an import"),
+                });
+            }
+        }
+    }
+
     pub(crate) fn import_stmt(&mut self, i: &Import) {
+        self.reject_global_imports(i);
+
         let anchor = self.byte_start(i.span);
         // The spec as written: `strip_literal` drops a data extension,
         // and the extension is what says the module is not Alloy's.

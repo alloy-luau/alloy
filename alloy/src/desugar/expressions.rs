@@ -76,6 +76,10 @@ impl<'s> Desugar<'s> {
                     let std = self.std();
                     self.generate(anchor, &format!("{std}.{name}"));
                 } else {
+                    // A project global keeps the name it was written
+                    // with; the first line binds it.
+                    let name = name.to_string();
+                    self.use_global(&name, anchor);
                     self.copy_span(*span);
                 }
             }

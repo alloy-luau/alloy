@@ -141,6 +141,11 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
     shapes
 }
 
+/// A path as a message writes it: forward slashes on every platform.
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// The Alloy sources under `input`, sorted.
 pub fn sources(input: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut list = Vec::new();
@@ -250,6 +255,82 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
     }
 
+    // `global` is project wide too: the index says which file declares
+    // each name, so a file that uses one requires that file and binds
+    // the name on its first line.
+    let mut texts: Vec<(PathBuf, String)> = Vec::new();
+
+    for path in &sources {
+        let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
+
+        if let Ok(text) = std::fs::read_to_string(path) {
+            texts.push((rel, text));
+        }
+    }
+
+    let included: Vec<(PathBuf, String)> = texts
+        .iter()
+        .filter(|(rel, _)| !exclude.is_match(rel))
+        .cloned()
+        .collect();
+    let project_globals = crate::globals::index(&included);
+    // A `.d.aly` declares a name with no module behind it. A `global`
+    // by that name gives the name two declarations and no way to pick.
+    let ambient_clashes: Vec<(String, String)> = crate::globals::ambient_names(&included)
+        .into_iter()
+        .filter(|(n, _)| project_globals.iter().any(|g| &g.name == n))
+        .map(|(n, f)| (n, display_path(&f)))
+        .collect();
+    // Under a mount the ship artifact reaches a global's module by its
+    // instance path, the way it reaches the runtime.
+    let mut ship_globals: HashMap<PathBuf, String> = HashMap::new();
+
+    for g in &project_globals {
+        if let Some(place) = crate::project::instance_path(&tree, &build.input.join(&g.file)) {
+            ship_globals.insert(g.file.clone(), format!("@game/{}", place.join("/")));
+        }
+    }
+
+    // A file the project excludes gets no require injected, so a global
+    // in it, or a use of one from it, would fail at runtime.
+    for (rel, text) in &texts {
+        if !exclude.is_match(rel) {
+            continue;
+        }
+
+        for g in crate::globals::declared(text, rel) {
+            report.diagnostics.push((
+                rel.clone(),
+                Diagnostic {
+                    start: g.start,
+                    end: g.end,
+                    message: format!(
+                        "`{}` is global, and `[build] exclude` drops this file, so no file reaches it",
+                        g.name
+                    ),
+                },
+            ));
+        }
+
+        let refs = crate::globals::refs_for(&project_globals, rel, &ship_globals);
+
+        for (name, at) in crate::globals::used(text, &refs) {
+            report.diagnostics.push((
+                rel.clone(),
+                Diagnostic {
+                    start: at,
+                    end: at + name.len() as u32,
+                    message: format!(
+                        "`{name}` is global, and `[build] exclude` drops this file, so the require is never written"
+                    ),
+                },
+            ));
+        }
+    }
+
+    // Which globals each file named, for the require graph below.
+    let mut global_uses: Vec<(PathBuf, Vec<(String, u32)>)> = Vec::new();
+
     // `[alx]` in alloy.toml, or a `luaux.toml` beside it, picks the UI
     // library for `.alx`.
     let jsx_config = config.markup(root);
@@ -303,6 +384,9 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
             ship_std_require,
+            globals: crate::globals::refs_for(&project_globals, &rel, &ship_globals),
+            in_project: true,
+            ambient_clashes: ambient_clashes.clone(),
             import_types: crate::modules::import_types(&source, &path, &module_aliases),
             import_enums: crate::modules::import_enums(&source, &path, &module_aliases),
             import_privates: crate::modules::import_privates(&source, &path, &module_aliases),
@@ -380,6 +464,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         imports.push((rel.clone(), compiled.imports.clone()));
+        global_uses.push((rel.clone(), compiled.globals_used.clone()));
 
         // A module that names no file, a name the module does not
         // export, and a name imported twice: each fails at runtime, so
@@ -493,6 +578,12 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     }
 
     report.lints.extend(circular_imports(&imports));
+    report
+        .diagnostics
+        .extend(global_cycles(&imports, &global_uses, &project_globals));
+    report
+        .diagnostics
+        .sort_by(|a, b| (&a.0, a.1.start).cmp(&(&b.0, b.1.start)));
     report
         .lints
         .sort_by(|a, b| (&a.0, a.1.start).cmp(&(&b.0, b.1.start)));
@@ -832,6 +923,89 @@ fn circular_imports(imports: &[(PathBuf, Vec<crate::ImportRef>)]) -> Vec<(PathBu
                         sources[*to].display()
                     ),
                     fix: None,
+                },
+            )
+        })
+        .collect()
+}
+
+/// A global whose module leads back to a file that uses it. The
+/// injected require closes the loop, and neither file names the other,
+/// so the build reports it where the use sits.
+fn global_cycles(
+    imports: &[(PathBuf, Vec<crate::ImportRef>)],
+    uses: &[(PathBuf, Vec<(String, u32)>)],
+    globals: &[crate::globals::Global],
+) -> Vec<(PathBuf, Diagnostic)> {
+    let sources: Vec<PathBuf> = imports.iter().map(|(p, _)| p.clone()).collect();
+    let index = |path: &Path| sources.iter().position(|s| s == path);
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+
+    for (i, (from, list)) in imports.iter().enumerate() {
+        for im in list {
+            if let Some(to) = resolve_import(from, &im.path, &sources)
+                && let Some(j) = index(&to)
+            {
+                edges.push((i, j));
+            }
+        }
+    }
+
+    // The injected require is an edge too: a file that names a global
+    // requires the file that declares it.
+    let mut injected: Vec<(usize, usize, &str, u32)> = Vec::new();
+
+    for (rel, names) in uses {
+        let Some(i) = index(rel) else {
+            continue;
+        };
+
+        for (name, at) in names {
+            let Some(g) = globals.iter().find(|g| &g.name == name) else {
+                continue;
+            };
+            let Some(j) = index(&g.file) else {
+                continue;
+            };
+            edges.push((i, j));
+            injected.push((i, j, name, *at));
+        }
+    }
+
+    // Whether `start` reaches `goal` along the edges.
+    let reaches = |start: usize, goal: usize| {
+        let mut seen = vec![false; sources.len()];
+        let mut stack = vec![start];
+
+        while let Some(n) = stack.pop() {
+            if n == goal {
+                return true;
+            }
+
+            if std::mem::replace(&mut seen[n], true) {
+                continue;
+            }
+
+            stack.extend(edges.iter().filter(|(a, _)| *a == n).map(|(_, b)| *b));
+        }
+
+        false
+    };
+
+    injected
+        .iter()
+        .filter(|(user, decl, _, _)| reaches(*decl, *user))
+        .map(|(user, decl, name, at)| {
+            (
+                sources[*user].clone(),
+                Diagnostic {
+                    start: *at,
+                    end: at + name.len() as u32,
+                    message: format!(
+                        "`{name}` is global in `{}`, and that file leads back to `{}`, which uses it; the requires form a cycle",
+                        display_path(&sources[*decl]),
+                        display_path(&sources[*user])
+                    ),
                 },
             )
         })

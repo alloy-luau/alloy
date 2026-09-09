@@ -266,6 +266,7 @@ impl<'a> Parser<'a> {
                             | "Iter"
                     ) && self.text_at(1) != ".";
                     let i = self.bump();
+                    self.type_names.push(TokSpan::new(i, i + 1));
 
                     if is_ambient {
                         self.type_edits

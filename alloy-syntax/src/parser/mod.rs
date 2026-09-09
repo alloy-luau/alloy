@@ -93,6 +93,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         diagnostics: Vec::new(),
         method_context: 0,
         type_edits: Vec::new(),
+        type_names: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
@@ -107,6 +108,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
     Ok(Chunk {
         block,
         type_edits: p.type_edits,
+        type_names: p.type_names,
     })
 }
 
@@ -143,6 +145,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         diagnostics: Vec::new(),
         method_context: 0,
         type_edits: Vec::new(),
+        type_names: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
@@ -182,6 +185,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
     let chunk = Chunk {
         block,
         type_edits: p.type_edits,
+        type_names: p.type_names,
     };
 
     (chunk, p.diagnostics)
@@ -201,6 +205,7 @@ pub fn parse_expr(src: &str, toks: &[Tok]) -> Result<Expr, ParseError> {
         diagnostics: Vec::new(),
         method_context: 0,
         type_edits: Vec::new(),
+        type_names: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
@@ -230,6 +235,7 @@ struct Parser<'a> {
     method_context: u32,
     /// Alloy syntax inside type spans, for emit.
     type_edits: Vec<TypeEdit>,
+    type_names: Vec<TokSpan>,
     /// Above zero inside the then-branch of a ternary, where `:` closes
     /// the branch instead of opening a method call.
     no_method_call: u32,

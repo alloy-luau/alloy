@@ -21,6 +21,7 @@ pub mod extensions;
 pub mod flux;
 pub mod fmt;
 pub mod game_import;
+pub mod globals;
 pub mod ingot;
 pub mod jsonc;
 pub mod lint;
@@ -74,6 +75,9 @@ pub struct Output {
     pub data_refs: Vec<ImportRef>,
     /// The `@test` functions, in order: name and whether it is async.
     pub tests: Vec<(String, bool)>,
+    /// The project globals the file named, each with the byte offset of
+    /// its first use. The build reads them for the require graph.
+    pub globals_used: Vec<(String, u32)>,
     /// Zero-based lines an `--@alloy-expect-error` covers that the
     /// compiler or a lint reported on.
     pub expected_hits: Vec<usize>,
@@ -161,10 +165,31 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         message: e.message,
     })?;
 
-    let ship_options = options.ship_std_require.as_ref().map(|s| EmitOptions {
-        std_require: s.clone(),
-        ..options.clone()
-    });
+    // The ship artifact reaches the runtime and every global module by
+    // the instance path a mount gives it; the check artifact keeps the
+    // file path. Only the specs differ, so one options clone carries both.
+    let ship_globals: Vec<desugar::GlobalRef> = options
+        .globals
+        .iter()
+        .map(|g| desugar::GlobalRef {
+            require: g.ship_require.clone().unwrap_or_else(|| g.require.clone()),
+            ..g.clone()
+        })
+        .collect();
+    let ship_options = match options.ship_std_require.is_some()
+        || options.globals.iter().any(|g| g.ship_require.is_some())
+    {
+        true => Some(EmitOptions {
+            std_require: options
+                .ship_std_require
+                .clone()
+                .unwrap_or_else(|| options.std_require.clone()),
+            globals: ship_globals,
+            ..options.clone()
+        }),
+
+        false => None,
+    };
     let mut rendered = desugar::render(
         src,
         &parsed.lexed.toks,
@@ -335,6 +360,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         imports,
         data_refs: data::references(src),
         tests: rendered.tests,
+        globals_used: rendered.globals_used,
         expected_hits,
         lowered: None,
         layer: None,

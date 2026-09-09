@@ -30,6 +30,10 @@ pub struct Chunk {
     pub block: Block,
     /// Alloy type syntax found inside type spans, for emit to rewrite.
     pub type_edits: Vec<TypeEdit>,
+    /// Every bare type name a type span holds, in order. A type is a
+    /// span, not a tree, so the parser records the names it read; the
+    /// compiler asks which of them a project global owns.
+    pub type_names: Vec<TokSpan>,
 }
 
 /// A piece of Alloy syntax inside a type span. Types stay spans, so the

@@ -110,6 +110,36 @@ pub struct EmitOptions {
     /// table, so `import X from` binds the value it returns, not
     /// `require(...).default`. See `crate::modules::plain_modules`.
     pub plain_modules: Vec<String>,
+    /// The `global` declarations of the project, as this file reaches
+    /// them. A file that names one gets the require and the binding on
+    /// its first line. See `crate::globals`.
+    pub globals: Vec<GlobalRef>,
+    /// Whether the file compiles inside a project. `global` needs one:
+    /// without alloy.toml there is no set of files to reach.
+    pub in_project: bool,
+    /// A `global` this file declares whose name a definitions file of
+    /// the project already declares, with that file. Two declarations,
+    /// no way to pick.
+    pub ambient_clashes: Vec<(String, String)>,
+}
+
+/// One `global` of the project, as the file being compiled reaches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalRef {
+    pub name: String,
+    /// The declaring file, as a message names it.
+    pub file: String,
+    /// The require spec that reaches the declaring module from here.
+    pub require: String,
+    /// The ship artifact's require when it differs: under a mount it is
+    /// the instance path, while the check artifact keeps the file path.
+    pub ship_require: Option<String>,
+    /// Whether the name binds a value.
+    pub value: bool,
+    /// Whether the name is a type too, so the file needs an alias.
+    pub ty: bool,
+    /// The parameter list of a generic type, `<T>`.
+    pub type_params: String,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -170,6 +200,9 @@ impl Default for EmitOptions {
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
             plain_modules: Vec::new(),
+            globals: Vec::new(),
+            in_project: false,
+            ambient_clashes: Vec::new(),
         }
     }
 }
@@ -189,6 +222,9 @@ pub struct Rendered {
     pub ext_used: bool,
     /// The `@test` functions: name and whether it is async.
     pub tests: Vec<(String, bool)>,
+    /// The project globals the file named, each with the byte offset of
+    /// its first use. The build reads them for the require graph.
+    pub globals_used: Vec<(String, u32)>,
 }
 
 /// The std names that are ambient in Alloy source.
@@ -282,6 +318,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         type_edits: edits,
         scopes: vec![HashSet::new()],
         uses_std: false,
+        globals_used: Vec::new(),
+        own_names: top_level_names(src, toks, chunk),
         exports: Vec::new(),
         has_default_export: false,
         enums: HashMap::from([(
@@ -336,6 +374,21 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         );
     }
 
+    // A type slot names a global the same way a value does. The parser
+    // recorded every bare type name; the ones a global owns need the
+    // alias the first line writes.
+    if !options.globals.is_empty() {
+        for span in &chunk.type_names {
+            let name = d.text_of(*span).to_string();
+            let at = d.byte_start(*span);
+            d.use_global(&name, at);
+        }
+    }
+
+    // What each `global` of this file needs to be true. The check runs
+    // before the walk, so a file with a bad global still renders.
+    d.check_globals(src, toks, chunk);
+
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
     d.scan_reduce_inserts(&chunk.block);
@@ -380,6 +433,14 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         );
         prefix_len = line.len() as u32;
         d.generate(insert_at, &line);
+    }
+
+    // Every global the file named: the require of its module, then the
+    // binding. The text holds no newline, so the line count stands.
+    let global_line = d.global_prologue();
+
+    if !global_line.is_empty() {
+        d.generate(insert_at, &global_line);
     }
 
     for kind in d.mapped_used.clone() {
@@ -435,6 +496,105 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         uses_std: d.uses_std,
         ext_used: d.ext_hit,
         tests: d.test_names,
+        globals_used: d.globals_used,
+    }
+}
+
+/// Every name the top level of a file binds: a local, a function, a
+/// declaration, an import. A global by one of these names is the file's
+/// own name, so nothing is injected over it.
+fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
+    let text = |span: TokSpan| -> String {
+        if span.end <= span.start || span.end as usize > toks.len() {
+            return String::new();
+        }
+
+        src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+            .to_string()
+    };
+    let mut out = HashSet::new();
+
+    for stmt in &chunk.block.stmts {
+        match stmt {
+            Stmt::Local(l) => {
+                for b in &l.names {
+                    out.insert(text(b.name));
+                }
+            }
+
+            Stmt::Function(f) => {
+                if let Some(first) = f.path.first() {
+                    out.insert(text(*first));
+                }
+            }
+
+            Stmt::LocalFunction(f) => {
+                out.insert(text(f.name));
+            }
+
+            Stmt::Struct(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Enum(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Trait(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Interface(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Class(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::TypeAlias(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Remote(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Macro(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Attribute(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Import(i) => {
+                for name in import_names(i) {
+                    out.insert(text(name));
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    out
+}
+
+/// Every name an `import` binds.
+fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
+    use alloy_syntax::ast::ImportKind;
+
+    match &i.kind {
+        ImportKind::Namespace(n) | ImportKind::Default(n) => vec![*n],
+
+        ImportKind::Both(n, specs) => std::iter::once(*n)
+            .chain(specs.iter().map(|s| s.alias.unwrap_or(s.name)))
+            .collect(),
+
+        ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
+            specs.iter().map(|s| s.alias.unwrap_or(s.name)).collect()
+        }
     }
 }
 
@@ -532,6 +692,12 @@ struct Desugar<'s> {
     scopes: Vec<HashSet<String>>,
     /// Whether the file needs the std require.
     uses_std: bool,
+    /// The project globals this file named, first use first. Each one
+    /// puts a require and a binding on the first line.
+    globals_used: Vec<(String, u32)>,
+    /// Every name the top level of this file binds. A file that
+    /// declares a name of its own keeps it; no global is injected over it.
+    own_names: HashSet<String>,
     /// Names the module exports, as `name = value` pairs for the table.
     exports: Vec<(String, String)>,
     /// `export default` was seen.
@@ -1227,6 +1393,10 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
 
         Stmt::GenericFor(f) if for_needs_rewrite(f) => return true,
 
+        // `global type X = T` is `export type X = T` to Luau; the
+        // project index is what the modifier adds.
+        Stmt::TypeAlias(t) if t.global => return true,
+
         Stmt::Import(_)
         | Stmt::ExportList(_)
         | Stmt::ExportDefault { .. }
@@ -1638,6 +1808,168 @@ impl<'s> Desugar<'s> {
 
     fn is_local(&self, name: &str) -> bool {
         self.scopes.iter().any(|s| s.contains(name))
+    }
+
+    /// Reports what a `global` of this file needs: a project to reach,
+    /// a module to live in, and a name nothing else owns.
+    fn check_globals(&mut self, src: &str, toks: &[Tok], chunk: &Chunk) {
+        let decls = crate::globals::declared_in(src, toks, chunk, std::path::Path::new(""));
+
+        if decls.is_empty() {
+            return;
+        }
+
+        let file = self.options.file_name.clone();
+
+        for g in &decls {
+            let mut say = |message: String| {
+                self.diagnostics.push(Diagnostic {
+                    start: g.start,
+                    end: g.end,
+                    message,
+                });
+            };
+
+            if !self.options.in_project {
+                say("`global` needs a project; there is no everywhere to reach".to_string());
+
+                continue;
+            }
+
+            if self.options.definitions {
+                say("a declaration file declares; `global` belongs in a module".to_string());
+
+                continue;
+            }
+
+            if crate::modules::is_script(&file) {
+                say(format!(
+                    "a script is not a module, so nothing can reach it; `{}` needs a module file",
+                    g.name
+                ));
+
+                continue;
+            }
+
+            if crate::globals::LUAU_GLOBALS.contains(&g.name.as_str()) {
+                say(format!(
+                    "`{}` is a Luau global; a project global cannot take its name",
+                    g.name
+                ));
+
+                continue;
+            }
+
+            if let Some((_, ambient)) = self
+                .options
+                .ambient_clashes
+                .iter()
+                .find(|(n, _)| n == &g.name)
+            {
+                say(format!(
+                    "`{}` is declared in {ambient} and global in {file}",
+                    g.name
+                ));
+
+                continue;
+            }
+
+            if let Some(other) = self.options.globals.iter().find(|o| o.name == g.name) {
+                say(format!(
+                    "`{}` is global in both {file} and {}",
+                    g.name, other.file
+                ));
+
+                continue;
+            }
+
+            if AMBIENT.contains(&g.name.as_str()) || AMBIENT_TYPES.contains(&g.name.as_str()) {
+                self.lints.push(crate::lint::Lint {
+                    name: "shadowed_global",
+                    start: g.start,
+                    end: g.end,
+                    message: format!(
+                        "`{}` is a std name; the global shadows it in every file",
+                        g.name
+                    ),
+                    fix: None,
+                });
+            }
+        }
+    }
+
+    /// Records a use of a project global. The name reaches the file
+    /// without an import, so the emit puts the require and the binding
+    /// on the first line. A name the file binds itself is the file's own.
+    pub(crate) fn use_global(&mut self, name: &str, at: u32) {
+        if self.own_names.contains(name)
+            || self.is_local(name)
+            || self.globals_used.iter().any(|(n, _)| n == name)
+            || !self.options.globals.iter().any(|g| g.name == name)
+        {
+            return;
+        }
+
+        self.globals_used.push((name.to_string(), at));
+    }
+
+    /// The require and the bindings for every global the file named, as
+    /// one line. Names from one module share one require.
+    fn global_prologue(&self) -> String {
+        if self.globals_used.is_empty() || self.options.definitions {
+            return String::new();
+        }
+
+        // The module order follows the first use, so two builds of one
+        // file write the same line.
+        let mut modules: Vec<&str> = Vec::new();
+        let mut used: Vec<&GlobalRef> = Vec::new();
+
+        for (name, _) in &self.globals_used {
+            let Some(g) = self.options.globals.iter().find(|g| &g.name == name) else {
+                continue;
+            };
+
+            let spec = g.require.as_str();
+
+            if !modules.contains(&spec) {
+                modules.push(spec);
+            }
+
+            used.push(g);
+        }
+
+        let mut out = String::new();
+
+        for (i, spec) in modules.iter().enumerate() {
+            let temp = format!("_g{}", i + 1);
+            out.push_str(&format!("local {temp} = require({}) ", luau_string(spec)));
+            let here: Vec<&&GlobalRef> = used.iter().filter(|g| g.require == *spec).collect();
+            let names: Vec<String> = here
+                .iter()
+                .filter(|g| g.value)
+                .map(|g| g.name.clone())
+                .collect();
+
+            if !names.is_empty() {
+                let values: Vec<String> = names.iter().map(|n| format!("{temp}.{n}")).collect();
+                out.push_str(&format!(
+                    "local {} = {} ",
+                    names.join(", "),
+                    values.join(", ")
+                ));
+            }
+
+            for g in here.iter().filter(|g| g.ty) {
+                let args = crate::modules::type_params(&g.type_params);
+                out.push_str(&format!(
+                    "type {}{} = {temp}.{}{} ",
+                    g.name, g.type_params, g.name, args
+                ));
+            }
+        }
+
+        out
     }
 
     // --- blocks and statements --------------------------------------------

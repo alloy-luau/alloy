@@ -373,6 +373,13 @@ pub const LINTS: &[LintInfo] = &[
     },
     // --- style -----------------------------------------------------------------
     LintInfo {
+        name: "export_impl",
+        group: Group::Style,
+        default: Level::Warn,
+        summary: "`export impl` on a foreign type, where `global impl` says it",
+        detail: "An `impl` on a foreign type such as `BasePart` or `string` works project wide. `export` said that before `global` existed, and it still parses; `global impl` is the spelling now. `alloy flux --fix` rewrites the keyword.",
+    },
+    LintInfo {
         name: "manual_safe_access",
         group: Group::Style,
         default: Level::Warn,
@@ -586,6 +593,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "The body movers are deprecated. `LinearVelocity` replaces `BodyVelocity`, `AlignPosition` replaces `BodyPosition`, `AlignOrientation` replaces `BodyGyro`, `VectorForce` replaces `BodyForce` and `BodyThrust`, `AngularVelocity` replaces `BodyAngularVelocity`, and `LineForce` with `AlignOrientation` replaces `RocketPropulsion`. Each needs an `Attachment`; no automatic rewrite.",
     },
     // --- pedantic --------------------------------------------------------------
+    LintInfo {
+        name: "shadowed_global",
+        group: Group::Pedantic,
+        default: Level::Allow,
+        summary: "a `global` by the name of a std name",
+        detail: "Pedantic. The std names `Signal`, `HashMap`, and the rest are ambient in every file. A `global` by one of those names wins over the std everywhere, and a reader who knows the std reads the wrong one. The project's name still works; the lint asks for a name of its own.",
+    },
     LintInfo {
         name: "explicit_any",
         group: Group::Pedantic,

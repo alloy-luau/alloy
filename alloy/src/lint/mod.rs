@@ -224,6 +224,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "A parameter typed `T?`, or the result of a function that returns `T?`, is indexed with `.` or called with `:` while nothing in the function checks it for nil. Guard it with `if x then`, `x and`, `assert(x)`, or use `?.` and `?:`, which stop the chain at nil.",
     },
     LintInfo {
+        name: "needless_assert",
+        group: Group::Correctness,
+        default: Level::Warn,
+        summary: "a `!` on a value the file types as never nil",
+        detail: "`x!` throws when `x` is nil and hands on the type without the `?`. On a local, a `const`, or a parameter the file annotates with no `?`, neither half does anything: the check never fires and the type is already the one it would give. The `!` reads as a warning to whoever comes next, so drop it. `alloy flux --fix` removes it.",
+    },
+    LintInfo {
         name: "dropped_result",
         group: Group::Correctness,
         default: Level::Warn,

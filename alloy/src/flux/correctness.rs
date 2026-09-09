@@ -18,6 +18,7 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.identical_branches(&mut out);
     s.empty_block(&mut out);
     s.bool_comparison(&mut out);
+    s.needless_guard(&mut out);
     s.if_returns(&mut out);
     s.redundant_return(&mut out);
     s.local_then_return(&mut out);
@@ -467,6 +468,168 @@ impl<'s> Scan<'s> {
             .any(|j| self.t(j) == name && self.t(j + 1) == ":" && self.t(j + 2) == "boolean")
     }
 
+    /// The exclusive end of the type annotation that starts at `from`:
+    /// the `,`, `=`, `)` or `;` that closes it at depth zero.
+    fn annotation_end(&self, from: usize) -> usize {
+        let mut depth = 0i32;
+        let mut j = from;
+
+        while j < self.toks.len() {
+            match self.t(j) {
+                "(" | "[" | "{" | "<" | "<<" => depth += 1,
+
+                ")" | "]" | "}" | ">" | ">>" if depth == 0 => break,
+
+                ")" | "]" | "}" | ">" | ">>" => depth -= 1,
+
+                "," | "=" | ";" if depth == 0 => break,
+
+                _ => {}
+            }
+
+            j += 1;
+        }
+
+        j
+    }
+
+    /// Every name the file annotates, with whether its type ends in
+    /// `?`. Reads `local`, `const`, and the parameters of a function.
+    /// A field of a record type binds nothing, so it stays out.
+    fn annotated_bindings(&self) -> Vec<(&'s str, bool)> {
+        let mut out = Vec::new();
+
+        for i in 0..self.toks.len() {
+            let params = self.at(i, "function");
+            let mut j = match (matches!(self.t(i), "local" | "const"), params) {
+                (true, _) => i + 1,
+
+                // `function name<T>(a: A, b: B)`: the head runs to the
+                // `(` over the path and the generics alone, so a call
+                // never reads as a signature.
+                (_, true) => {
+                    let mut k = i + 1;
+
+                    while matches!(self.t(k), "." | ":" | "<" | ">" | ",")
+                        || self.is_name(k)
+                        || self.at(k, "async")
+                    {
+                        k += 1;
+                    }
+
+                    match self.at(k, "(") {
+                        true => k + 1,
+
+                        false => continue,
+                    }
+                }
+
+                _ => continue,
+            };
+
+            let stop = match params {
+                true => self.matching(j - 1).unwrap_or(self.toks.len()),
+
+                false => self.toks.len(),
+            };
+
+            while j < stop && self.is_name(j) {
+                match self.at(j + 1, ":") {
+                    true => {
+                        let end = self.annotation_end(j + 2);
+                        out.push((self.t(j), end > j + 2 && self.at(end - 1, "?")));
+                        j = end;
+                    }
+
+                    false => j += 1,
+                }
+
+                if !self.at(j, ",") {
+                    break;
+                }
+
+                j += 1;
+            }
+        }
+
+        out
+    }
+
+    /// Whether every annotation the file gives `name` has no `?`.
+    /// False when the file annotates it nowhere: a type nobody wrote is
+    /// no ground for a diagnostic.
+    fn never_optional(&self, name: &str, bindings: &[(&'s str, bool)]) -> bool {
+        let mut seen = false;
+
+        for (bound, optional) in bindings {
+            if *bound != name {
+                continue;
+            }
+
+            if *optional {
+                return false;
+            }
+
+            seen = true;
+        }
+
+        seen
+    }
+
+    /// `p!` and `p?[k]` where `p` carries a type with no `?`. The
+    /// assert can never throw and the guard can never stop the chain,
+    /// so both operators only cost a reader a second look.
+    fn needless_guard(&self, out: &mut Vec<Lint>) {
+        let bindings = self.annotated_bindings();
+
+        if bindings.is_empty() {
+            return;
+        }
+
+        for i in 1..self.toks.len() {
+            let guard = self.t(i);
+
+            if !matches!(guard, "!" | "?") || !self.is_name(i - 1) {
+                continue;
+            }
+
+            // `a.b!` asserts a field, whose type the annotations of the
+            // file do not name. Only a bound name reads here.
+            if matches!(self.prev(i - 1), "." | ":" | "?." | "?:") {
+                continue;
+            }
+
+            // `?` alone is the ternary; the bracket after it makes the
+            // safe index.
+            if guard == "?" && !self.at(i + 1, "[") {
+                continue;
+            }
+
+            let name = self.t(i - 1);
+
+            if !self.never_optional(name, &bindings) {
+                continue;
+            }
+
+            let (lint, message) = match guard {
+                "!" => (
+                    "needless_assert",
+                    format!(
+                        "`{name}` is never nil, so the `!` asserts what already holds; remove it"
+                    ),
+                ),
+
+                _ => (
+                    "optional_access",
+                    format!(
+                        "`{name}` is never nil, so `?[` guards what already holds; index it with `[`"
+                    ),
+                ),
+            };
+            self.lint(out, lint, i, i, message, Some(String::new()));
+        }
+    }
+
     /// `if c then return a else return b end`: a boolean by hand, or a
     /// ternary by hand.
     fn if_returns(&self, out: &mut Vec<Lint>) {
@@ -745,6 +908,56 @@ mod tests {
             .map(|l| l.name)
             .filter(|n| crate::lint::level_of(&config, n) != crate::lint::Level::Allow)
             .collect()
+    }
+
+    /// `!` and `?[` on a name the file types with no `?`: the check
+    /// never fires, so both operators go. An optional keeps them.
+    #[test]
+    fn a_guard_on_a_name_that_is_never_nil_fires() {
+        assert_eq!(
+            names("local m: { [string]: number } = {}\nprint(m![\"k\"])\n"),
+            vec!["needless_assert"]
+        );
+        assert_eq!(
+            names("local m: { [string]: number } = {}\nprint(m?[\"k\"])\n"),
+            vec!["optional_access"]
+        );
+        assert_eq!(
+            names("local function f(p: Part)\n    print(p!.Name)\nend\n"),
+            vec!["needless_assert"]
+        );
+        assert_eq!(
+            fixed("local m: { [string]: number } = {}\nprint(m![\"k\"])\n"),
+            "local m: { [string]: number } = {}\nprint(m[\"k\"])\n"
+        );
+
+        // An optional needs both, and a field carries no annotation the
+        // file can read.
+        assert_eq!(
+            names("local m: { [string]: number }? = nil\nprint(m![\"k\"])\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names("local function f(p: Part?)\n    print(p!.Name)\nend\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names("local function f(p: Part)\n    print(p.Parent!.Name)\nend\n"),
+            Vec::<&str>::new()
+        );
+        // A name nothing annotates says nothing either way.
+        assert_eq!(names("print(m![\"k\"])\n"), Vec::<&str>::new());
+        // The ternary is no safe index.
+        assert_eq!(
+            names("local n: number = 1\nlocal s = n > 0 ? \"up\" : \"down\"\nprint(s)\n"),
+            Vec::<&str>::new()
+        );
+        // A record field of a type is no binding: `name` there says
+        // nothing about the local the assert reads.
+        assert_eq!(
+            names("type P = { a: number, name: string }\nprint(name!.x)\n"),
+            Vec::<&str>::new()
+        );
     }
 
     #[test]

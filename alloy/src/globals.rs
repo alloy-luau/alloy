@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use alloy_syntax::ast::{Stmt, TokSpan};
 
+use crate::luaux;
+
 /// What a `global` declaration binds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -460,6 +462,21 @@ fn join_tokens(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> S
     }
 
     out
+}
+
+/// The text of a source as the index reads it. A `.alx` file holds
+/// markup the Alloy parser does not take, so the markup regions blank;
+/// every other byte, and every offset, stays where it is.
+pub fn index_text(path: &Path, src: &str) -> String {
+    if path.extension().and_then(|e| e.to_str()) != Some("alx") {
+        return src.to_string();
+    }
+
+    match luaux::compile::markup_spans(src) {
+        Ok(spans) => luaux::resolve::blank_luaux_regions(src, &spans),
+
+        Err(_) => src.to_string(),
+    }
 }
 
 /// The name of the module a script's globals move into, from the

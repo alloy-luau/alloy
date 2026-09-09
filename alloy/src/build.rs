@@ -279,6 +279,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
 
         if let Ok(text) = std::fs::read_to_string(path) {
+            let text = crate::globals::index_text(&rel, &text);
             texts.push((rel, text));
         }
     }

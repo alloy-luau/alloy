@@ -1533,12 +1533,35 @@ end
 
 alloy.Heap = Heap
 
+-- What a Scope holds for an Instance, keyed weakly by the Instance:
+-- `scope:add(conn, part)` records the pair. `delete part` cleans the
+-- pairs before the Instance goes away, so no handler runs against an
+-- Instance that is half gone.
+local owned = setmetatable({}, { __mode = "k" })
+
+local function drop_owned(owner: any)
+	local items = owned[owner]
+	if items == nil then
+		return
+	end
+	owned[owner] = nil
+	for i = #items, 1, -1 do
+		local entry = items[i]
+		-- A scope that no longer holds the item already cleaned it.
+		if entry.scope:remove(entry.item) then
+			alloy.delete(entry.item)
+		end
+	end
+end
+
 --- A cleanup bag. `add` takes anything `delete` accepts, or a function,
 --- and gives it back; `clean` runs them newest first and empties the
 --- bag. A Scope has `Destroy`, so `delete scope` cleans it, and a scope
---- may hold another scope.
+--- may hold another scope. The second argument of `add` names the
+--- Instance the item belongs to: `delete` on that Instance cleans the
+--- item first.
 export type Scope = {
-	add: <T>(self: Scope, item: T) -> T,
+	add: <T>(self: Scope, item: T, owner: Instance?) -> T,
 	remove: (self: Scope, item: any) -> boolean,
 	clean: (self: Scope) -> (),
 	extend: (self: Scope) -> Scope,
@@ -1553,8 +1576,16 @@ function Scope.new(): Scope
 	return (setmetatable({ _items = {} }, Scope) :: any) :: Scope
 end
 
-function Scope.add(self, item)
+function Scope.add(self, item, owner)
 	table.insert(self._items, item)
+	if owner ~= nil then
+		local items = owned[owner]
+		if items == nil then
+			items = {}
+			owned[owner] = items
+		end
+		table.insert(items, { scope = self, item = item })
+	end
 	return item
 end
 
@@ -2120,11 +2151,23 @@ export type Deletable =
 	| { read Destroy: (self: any) -> () }
 	| { read destroy: (self: any) -> () }
 
+--- What `destroy` accepts: an Instance, or a value with a destroy
+--- method. A connection and a thread are not destroyed; `delete` takes
+--- those.
+export type Destroyable =
+	Instance
+	| { read destroy: (self: any) -> () }
+	| { read Destroy: (self: any) -> () }
+
 --- `delete x`. A connection disconnects, anything else destroys; the
 --- Roblox spelling wins over the lowercase one, so a user class with
 --- either spelling works. An Instance is asked for nothing it lacks,
 --- since indexing a missing member throws on it.
 function alloy.delete(target: Deletable)
+	-- A handler that runs while an Instance goes away reads a parent
+	-- that is already nil. What a scope holds for the value goes
+	-- first, so no handler sees the half state.
+	drop_owned(target)
 	local kind = typeof(target)
 	if kind == "Instance" then
 		(target :: any):Destroy()
@@ -2159,6 +2202,52 @@ function alloy.delete(target: Deletable)
 		return
 	end
 	error(`delete: cannot delete a {kind}`, 2)
+end
+
+--- The destroy method a value carries, `Destroy` or `destroy`. The
+--- Roblox spelling wins, so a class with both keeps its own.
+local function destroy_method(target: any): string?
+	if target.Destroy ~= nil then
+		return "Destroy"
+	end
+	if target.destroy ~= nil then
+		return "destroy"
+	end
+	return nil
+end
+
+--- `destroy x`. It calls the one method and does nothing else: no
+--- disconnect, no cancel, no call of a function.
+function alloy.destroy(target: Destroyable)
+	drop_owned(target)
+	local kind = typeof(target)
+	if kind == "Instance" then
+		(target :: any):Destroy()
+		return
+	end
+	if kind == "table" then
+		local t = target :: any
+		local method = destroy_method(t)
+		if method == nil then
+			error("destroy: the value has no Destroy or destroy method", 2)
+		end
+		t[method](t)
+		return
+	end
+	error(`destroy: cannot destroy a {kind}`, 2)
+end
+
+--- `destroy x after n` where the file does not say what `x` is. An
+--- Instance goes to Debris, which outlives the script that scheduled
+--- it; anything else waits on a timer.
+function alloy.destroy_after(target: Destroyable, seconds: number)
+	if typeof(target) == "Instance" then
+		game:GetService("Debris"):AddItem(target :: any, seconds)
+		return
+	end
+	task_lib.delay(seconds, function()
+		alloy.destroy(target)
+	end)
 end
 
 function alloy.tests()

@@ -735,8 +735,15 @@ end
 
 task.defer = task.spawn
 
+-- The engine runs a delayed call later, so the double parks it beside
+-- the threads a `task.wait` parked. `shim.step` fires both.
 function task.delay(seconds, f, ...)
-	return task.spawn(f, ...)
+	local args = table.pack(...)
+	local thread = coroutine.create(function()
+		f(table.unpack(args, 1, args.n))
+	end)
+	table.insert(parked, thread)
+	return thread
 end
 
 function task.wait(seconds)
@@ -762,6 +769,14 @@ function shim.step()
 		end
 	end
 	return #threads
+end
+
+-- Debris: the one service with behavior of its own. `AddItem` parks the
+-- removal, so a test steps it like any other delayed call.
+function methods.AddItem(self, item, seconds)
+	task.delay(seconds, function()
+		item:Destroy()
+	end)
 end
 
 -- ---------------------------------------------------------------------------

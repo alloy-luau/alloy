@@ -1,0 +1,120 @@
+//! Capability edits: what the child answers to initialize, reworked for what the proxy can give and the child cannot.
+
+use super::*;
+
+pub(crate) fn map_range_value(value: &mut Value, doc: &Doc) {
+    if let Some(((sl, sc), (el, ec))) = range_of(value) {
+        let start = doc.to_source(sl, sc);
+        // The end is exclusive: map the last byte inside the range and
+        // step past it, so an end in generated text does not fall back
+        // to the anchor before the start.
+        let end = if (el, ec) > (sl, sc) && ec > 0 {
+            let (l, c) = doc.to_source(el, ec - 1);
+
+            (l, c + 1)
+        } else {
+            doc.to_source(el, ec)
+        };
+        let end = if end < start { start } else { end };
+        *value = range_value(start, end);
+    }
+}
+
+/// The child's capabilities, as the editor should see them: no
+/// formatting of a shadow, semantic tokens whole and never by range or
+/// delta, and rename follow-up for Alloy files.
+pub(crate) fn edit_capabilities(message: &mut Value) {
+    let Some(caps) = message
+        .pointer_mut("/result/capabilities")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    let child_on_type = caps.remove("documentOnTypeFormattingProvider");
+
+    for key in [
+        "documentFormattingProvider",
+        "documentRangeFormattingProvider",
+    ] {
+        caps.remove(key);
+    }
+
+    // The proxy formats `.aly` itself, with `alloy fmt`.
+    caps.insert("documentFormattingProvider".into(), Value::Bool(true));
+
+    // On-type formatting writes the `end` of a block after Enter: the
+    // newline first, then whatever the child asked for, so a trigger of
+    // its own still arrives.
+    let mut more: Vec<Value> = Vec::new();
+
+    if let Some(child) = &child_on_type {
+        let first = child.get("firstTriggerCharacter").into_iter();
+        let rest = child
+            .get("moreTriggerCharacter")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+
+        for c in first.chain(rest) {
+            if c != "\n" && !more.contains(c) {
+                more.push(c.clone());
+            }
+        }
+    }
+
+    caps.insert(
+        "documentOnTypeFormattingProvider".into(),
+        json!({ "firstTriggerCharacter": "\n", "moreTriggerCharacter": more }),
+    );
+
+    // The lints' rewrites are code actions, whatever the child offers.
+    let kinds = json!({ "codeActionKinds": ["quickfix", "source.fixAll"] });
+    match caps.get_mut("codeActionProvider") {
+        Some(Value::Object(existing)) => {
+            existing.insert("codeActionKinds".into(), kinds["codeActionKinds"].clone());
+        }
+
+        _ => {
+            caps.insert("codeActionProvider".into(), kinds);
+        }
+    }
+
+    if let Some(Value::Object(tokens)) = caps.get_mut("semanticTokensProvider") {
+        tokens.remove("range");
+        tokens.insert("full".to_string(), Value::Bool(true));
+    }
+
+    // `@` and `$` open an attribute and a macro or intrinsic, and `(`
+    // an attribute's arguments: the editor asks on them only when the
+    // server lists them.
+    if let Some(Value::Object(completion)) = caps.get_mut("completionProvider") {
+        let list = completion
+            .entry("triggerCharacters")
+            .or_insert_with(|| json!([]));
+
+        if let Some(chars) = list.as_array_mut() {
+            for c in ["@", "$", "("] {
+                if !chars.iter().any(|v| v == c) {
+                    chars.push(json!(c));
+                }
+            }
+        }
+    }
+
+    let workspace = caps.entry("workspace").or_insert_with(|| json!({}));
+
+    if let Some(w) = workspace.as_object_mut() {
+        w.insert(
+            "fileOperations".to_string(),
+            json!({
+                "didRename": {
+                    "filters": [
+                        { "pattern": { "glob": "**/*.{aly,alx}", "matches": "file" } },
+                        { "pattern": { "glob": "**", "matches": "folder" } }
+                    ]
+                }
+            }),
+        );
+    }
+}

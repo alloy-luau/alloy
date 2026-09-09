@@ -845,6 +845,65 @@ pub fn resite_report(
         .or_else(|| array_element_report(message, text, line, col))
         .or_else(|| unmet_bound_report(message, source, text, line, col))
         .or_else(|| covered_arm_report(message, text, line))
+        .or_else(|| destroy_report(message, text))
+        .or_else(|| after_report(message, text))
+}
+
+/// The seconds of `after`. The emit hands them to `task.delay` or to
+/// Debris, and both take an optional number, so the checker asks for a
+/// `number?` where the source says a number.
+fn after_report(message: &str, text: &str) -> Option<Resited> {
+    if quoted_after(message, "Expected this to be '")? != "number?" {
+        return None;
+    }
+
+    let got = quoted_after(message.split_once("but got ")?.1, "'")?;
+    let seconds = after_seconds(text)?;
+
+    Some(Resited {
+        kind: "TypeError",
+        message: format!("`after` needs a number of seconds; `{seconds}` is a {got}"),
+        at: None,
+    })
+}
+
+/// The text between `after` and the `do` or the `where` that ends it.
+/// `destroy x after n` has neither, so the seconds run to the line end.
+fn after_seconds(text: &str) -> Option<&str> {
+    let body = text.trim_start();
+    let rest = match body.strip_prefix("after ") {
+        Some(rest) => rest,
+
+        None => body.split_once(" after ")?.1,
+    };
+    let end = rest
+        .find(" do")
+        .or_else(|| rest.find(" where"))
+        .unwrap_or(rest.len());
+
+    Some(rest[..end].trim())
+}
+
+/// `destroy x` on a value that has no destroy method. The checker names
+/// the union the std declares; the reader wrote `destroy`, so the
+/// sentence names the word and the operand.
+fn destroy_report(message: &str, text: &str) -> Option<Resited> {
+    if quoted_after(message, "Expected this to be '")? != "Destroyable" {
+        return None;
+    }
+
+    let got = quoted_after(message.split_once("but got ")?.1, "'")?;
+    let operand = text.trim_start().strip_prefix("destroy ")?.trim();
+    // `destroy x after n` reports on the operand, so the seconds go.
+    let operand = operand.split(" after ").next()?.trim();
+
+    Some(Resited {
+        kind: "TypeError",
+        message: format!(
+            "`destroy` needs an Instance or a value with a destroy method; `{operand}` is a {got}"
+        ),
+        at: None,
+    })
 }
 
 /// A `case` an arm above already covers. The emit tests the arms in
@@ -1265,6 +1324,61 @@ mod tests {
     }
 
     const STRUCT_SRC: &str = "struct Loadout as\n    weapon: string\n    ammo: number\nend\n\nlocal kit = new Loadout { weapon = \"Bow\", ammo = 12 }\nlocal n = kit.amo\nkit.wepon = \"Sword\"\n";
+
+    /// `destroy` and `after` each report in their own words: the
+    /// checker names the std's union and the optional the timer takes,
+    /// and neither is what the source wrote.
+    #[test]
+    fn destroy_and_after_report_in_their_own_words() {
+        let src = "local count = 3\ndestroy count\n";
+        let got = resited(
+            "Expected this to be 'Destroyable', but got 'number'",
+            src,
+            2,
+            9,
+        );
+
+        assert_eq!(got.kind, "TypeError");
+        assert_eq!(
+            got.message,
+            "`destroy` needs an Instance or a value with a destroy method; `count` is a number"
+        );
+        assert_eq!(got.at, None);
+
+        let src = "local part = Instance.new(\"Part\")\ndestroy part after \"soon\"\n";
+        let got = resited(
+            "Expected this to be 'number?', but got 'string'",
+            src,
+            2,
+            20,
+        );
+
+        assert_eq!(
+            got.message,
+            "`after` needs a number of seconds; `\"soon\"` is a string"
+        );
+
+        let src = "after \"late\" do\n    print(1)\nend\n";
+        let got = resited("Expected this to be 'number?', but got 'string'", src, 1, 7);
+
+        assert_eq!(
+            got.message,
+            "`after` needs a number of seconds; `\"late\"` is a string"
+        );
+
+        // A `number?` on a line that writes no `after` is not this.
+        let src = "local n: number? = f(1)\n";
+        assert!(
+            resite_report(
+                "Expected this to be 'number?', but got 'string'",
+                &[],
+                src,
+                1,
+                20,
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn a_field_read_names_the_field_and_its_place() {

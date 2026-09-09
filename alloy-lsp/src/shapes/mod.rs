@@ -489,6 +489,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_array_alias(&mut out);
     fold_read_arrays(&mut out);
     fold_deletable(&mut out);
+    fold_destroyable(&mut out);
     fold_iter_shapes(&mut out);
     out = fold_call_receivers(&out);
     fold_hidden_fields(&mut out);
@@ -660,6 +661,16 @@ fn fold_deletable(text: &mut String) {
 
     while let Some(at) = text.find(UNION) {
         text.replace_range(at..at + UNION.len(), "Deletable");
+    }
+}
+
+/// `destroy` takes an Instance or a value with a destroy method. The
+/// union of the three reads as the name the doc gives it.
+fn fold_destroyable(text: &mut String) {
+    const UNION: &str = "Instance | { read Destroy: (any) -> () } | { read destroy: (any) -> () }";
+
+    while let Some(at) = text.find(UNION) {
+        text.replace_range(at..at + UNION.len(), "Destroyable");
     }
 }
 

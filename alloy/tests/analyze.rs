@@ -128,6 +128,44 @@ local id: Geom.Deep.Id = 7
 print(p:sum(), Geom.name_of(Geom.Kind.Round), id)
 "#;
 
+/// Every form of `destroy` and `after`: the plain call, Debris for an
+/// Instance, a timer for a value with the method, the runtime helper,
+/// and a block with and without a `where`.
+const TIMED: &str = r#"struct Timer as
+    left: number
+end
+
+impl Timer as
+    function destroy(self)
+        self.left = 0
+    end
+end
+
+local part: Part = new Instance("Part")
+local timer = new Timer { left = 5 }
+
+destroy part
+destroy timer
+destroy part after 3
+destroy timer after 1.5
+
+function drop(x: Instance)
+    destroy x after 4
+end
+
+local ready = false
+
+after 2 do
+    print("late")
+end
+
+after 0 where ready do
+    print("gated")
+end
+
+print(drop, part, timer, ready)
+"#;
+
 fn analyze(src: &str, name: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("tools/types/globalTypes.d.luau");
@@ -185,6 +223,13 @@ fn analyze(src: &str, name: &str) {
         .collect();
 
     assert!(bad.is_empty(), "{}\n---\n{}", bad.join("\n"), out.check);
+}
+
+/// The check artifact of every `destroy` and `after` form is Luau the
+/// analyzer reads with no report of its own.
+#[test]
+fn destroy_and_after_analyze_as_luau() {
+    analyze(TIMED, "timed");
 }
 
 #[test]

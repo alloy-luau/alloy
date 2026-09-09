@@ -118,8 +118,40 @@ pub fn friendly_text(message: &str) -> String {
         .or_else(|| unsolved_generic(message))
         .or_else(|| solver_gave_up(message))
         .unwrap_or_else(|| cut_explanation(message));
+    let text = without_import_temp(&text);
 
     table_beside_array(&text).unwrap_or(text)
+}
+
+/// The local an import emits, `_m1`, in front of a name the message
+/// prints: `Unknown type '_m1.x'`. The reader wrote `x` on the import
+/// line and never saw the local, so the path in front of it goes.
+fn without_import_temp(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut at = 0;
+
+    while at < text.len() {
+        let rest = &text[at..];
+        let temp = rest.strip_prefix("_m").map(|r| {
+            let digits = r.chars().take_while(char::is_ascii_digit).count();
+
+            (digits, r[digits..].starts_with('.'))
+        });
+        let starts_a_word = at == 0 || !(bytes[at - 1] as char).is_alphanumeric();
+
+        match temp {
+            Some((digits, true)) if digits > 0 && starts_a_word => at += 2 + digits + 1,
+
+            _ => {
+                let ch = rest.chars().next().unwrap_or('\0');
+                out.push(ch);
+                at += ch.len_utf8();
+            }
+        }
+    }
+
+    out
 }
 
 /// The checker's own step limit, worded as an order to the reader. It
@@ -370,6 +402,35 @@ mod tests {
         assert_eq!(
             friendly_text(text),
             "Expected this to be 'number' but got 'string'"
+        );
+    }
+}
+
+#[cfg(test)]
+mod import_temp_tests {
+    use super::*;
+
+    /// `import type { x }` of a value read `Unknown type '_m1.x'`. The
+    /// local is the emit's; the reader wrote `x`.
+    #[test]
+    fn a_message_drops_the_import_local() {
+        assert_eq!(
+            friendly_text("TypeError: Unknown type '_m1.x'"),
+            "TypeError: Unknown type 'x'"
+        );
+        assert_eq!(
+            friendly_text("TypeError: Unknown type '_m12.Vec2'"),
+            "TypeError: Unknown type 'Vec2'"
+        );
+
+        // A name of the reader's that begins the same way stays whole.
+        assert_eq!(
+            friendly_text("TypeError: Unknown type 'x_m1.y'"),
+            "TypeError: Unknown type 'x_m1.y'"
+        );
+        assert_eq!(
+            friendly_text("TypeError: Unknown type '_market'"),
+            "TypeError: Unknown type '_market'"
         );
     }
 }

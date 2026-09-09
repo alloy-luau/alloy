@@ -539,6 +539,18 @@ impl Server {
                 }
             }
 
+            Some(m @ "textDocument/references") => {
+                let uri = text_document_uri(&message).unwrap_or_default();
+
+                if let Some(id) = message.get("id").cloned()
+                    && self.global_references(&uri, &message, &id)
+                {
+                    return true;
+                }
+
+                self.forward_request(message, Some(m));
+            }
+
             Some(
                 m @ ("textDocument/definition"
                 | "textDocument/declaration"

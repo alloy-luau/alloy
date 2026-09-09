@@ -2183,6 +2183,26 @@ fn a_global_reaches_another_file_in_the_editor() {
     );
     assert_eq!(target["range"]["start"]["line"], json!(1), "{def}");
 
+    // References span the project: the declaration and every file that
+    // names the global, with no import to follow.
+    let refs = s.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 1 },
+            "context": { "includeDeclaration": true }
+        }),
+    );
+    let uris: Vec<String> = refs
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r["uri"].as_str().map(str::to_string))
+        .collect();
+    assert!(uris.iter().any(|u| u.ends_with("shared/log.aly")), "{refs}");
+    assert!(uris.iter().any(|u| u.ends_with("main.aly")), "{refs}");
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -4,6 +4,63 @@ use super::hover::import_spec;
 use super::*;
 
 impl Server {
+    /// The references of a project global: the declaration, and every
+    /// file that names it. A global reaches every file with no import,
+    /// so the child, which reads one file's requires, cannot find them.
+    pub(crate) fn global_references(&self, uri: &str, message: &Value, id: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+
+        let st = self.state.lock().expect("state");
+
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        if !keywords::is_word_at(&doc.source, offset) {
+            return false;
+        }
+
+        let (start, end) = keywords::word_range(&doc.source, offset);
+        let word = doc.source[start..end].to_string();
+
+        if !st
+            .docs
+            .values()
+            .any(|d| d.globals.iter().any(|g| g.name == word))
+        {
+            return false;
+        }
+
+        let mut out: Vec<Value> = Vec::new();
+
+        for (u, d) in &st.docs {
+            for (s, e) in name_uses(&d.source, &word) {
+                out.push(json!({
+                    "uri": u,
+                    "range": range_value(position_of(&d.source, s), position_of(&d.source, e)),
+                }));
+            }
+        }
+
+        drop(st);
+        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": out }));
+
+        true
+    }
+
     /// Go to definition for a name Alloy declares: a struct, an enum or a
     /// variant, a trait, an interface, a type alias, a macro, or an
     /// attribute, in this file first and then any file of the workspace.
@@ -357,4 +414,30 @@ fn whole_word(line: &str, word: &str) -> Option<usize> {
             !before.is_some_and(is_word) && !after.is_some_and(is_word)
         })
         .map(|(at, _)| at)
+}
+
+/// Every use of a name in a source, as byte ranges. The lexer leaves
+/// comments and strings out, and a name after a `.` or a `:` is a
+/// field of something else, not this one.
+fn name_uses(src: &str, name: &str) -> Vec<(usize, usize)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    for (i, t) in lexed.toks.iter().enumerate() {
+        if t.text(src) != name {
+            continue;
+        }
+
+        let after_dot = i
+            .checked_sub(1)
+            .is_some_and(|p| matches!(lexed.toks[p].text(src), "." | ":" | "?." | "?:"));
+
+        if !after_dot {
+            out.push((t.start as usize, t.end as usize));
+        }
+    }
+
+    out
 }

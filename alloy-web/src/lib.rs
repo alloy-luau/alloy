@@ -6,7 +6,7 @@
 //! other calls read what it compiled.
 
 #[allow(dead_code)]
-#[path = "../../alloy-lsp/src/context.rs"]
+#[path = "../../alloy-lsp/src/context/mod.rs"]
 mod context;
 #[allow(dead_code)]
 #[path = "../../alloy-lsp/src/keywords.rs"]

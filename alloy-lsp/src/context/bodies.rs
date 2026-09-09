@@ -1,0 +1,288 @@
+//! The body of a declaration around the caret: a `struct`, an `enum`,
+//! an `impl`, or a `trait`, and where an attribute or a payload sits
+//! inside one.
+
+use super::strings::{block_closers, block_openers, is_word};
+
+/// The body the cursor sits in, when a declaration opened above it
+/// and no `end` at the margin closed it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Body {
+    Struct,
+    Enum,
+    Impl,
+    Trait,
+}
+
+/// The declaration body around `line_start`: the nearest line at the
+/// margin above that opens one, unless a margin `end` or another
+/// margin statement sits between. Inside an `impl`, a method's own
+/// block counts too: a cursor within one is in ordinary code.
+pub(crate) fn enclosing_body(src: &str, line_start: usize) -> Option<Body> {
+    let mut depth = 0i32;
+
+    for line in src[..line_start].lines().rev() {
+        let trimmed = line.trim_start();
+        let at_margin = trimmed.len() == line.len();
+
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+
+        if !at_margin {
+            // The blocks a method's body opens and closes, seen from
+            // below: a closer first, then its opener.
+            depth += block_closers(trimmed) - block_openers(trimmed);
+
+            continue;
+        }
+
+        let decl = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let decl = decl.strip_prefix("@").map_or(decl, |_| "");
+
+        // A declaration that closes on its own line, `struct T as end`
+        // or `impl T end`, opens no body below it.
+        if decl.split_whitespace().last() == Some("end") {
+            return None;
+        }
+
+        return match decl.split_whitespace().next() {
+            Some("struct" | "interface") if decl.contains(" as") || decl.ends_with("as") => {
+                Some(Body::Struct)
+            }
+            Some("enum") if decl.contains(" as") => Some(Body::Enum),
+            // A negative depth means a method opened a block the walk
+            // never closed: the caret sits in that method's body, which
+            // is ordinary code, not the member column.
+            Some("impl") if depth >= 0 => Some(Body::Impl),
+            Some("trait") if depth >= 0 => Some(Body::Trait),
+            _ => None,
+        };
+    }
+
+    None
+}
+
+/// Whether the cursor sits inside the parentheses of a variant, on a
+/// line of an `enum` body: `Move(num|`. The head is the line up to the
+/// word being typed.
+pub(crate) fn in_enum_payload(src: &str, line_start: usize, head: &str) -> bool {
+    // `Name(` with the parenthesis still open, attributes aside.
+    let t = head.trim_start();
+    let mut rest = t;
+
+    while let Some(after) = rest.strip_prefix('@') {
+        let end = after
+            .find(|c: char| {
+                !(is_word(c) || c == '(' || c == ')' || c == ',' || c == ' ' || c == '"')
+            })
+            .unwrap_or(after.len());
+        rest = after[end..].trim_start();
+
+        if rest == t {
+            break;
+        }
+    }
+
+    let name_len = rest.chars().take_while(|c| is_word(*c)).count();
+    let after_name = rest[name_len..].trim_start();
+
+    if name_len == 0 || !after_name.starts_with('(') {
+        return false;
+    }
+
+    let opens = after_name.matches('(').count();
+    let closes = after_name.matches(')').count();
+
+    if opens <= closes {
+        return false;
+    }
+
+    // The nearest declaration above is an `enum` that is still open.
+    for line in src[..line_start].lines().rev() {
+        let l = line.trim_start();
+        let l = l.strip_prefix("export ").unwrap_or(l);
+
+        if l.starts_with("enum ") {
+            return true;
+        }
+
+        if l == "end"
+            || l.starts_with("struct ")
+            || l.starts_with("impl ")
+            || l.starts_with("trait ")
+            || l.starts_with("interface ")
+            || l.starts_with("function ")
+            || l.starts_with("local ")
+        {
+            return false;
+        }
+    }
+
+    false
+}
+
+/// The text after a declaration's name and its `<...>` parameters.
+fn declaration_name(rest: &str) -> Option<&str> {
+    let rest = rest.trim_start();
+    let name_len = rest
+        .chars()
+        .take_while(|c| is_word(*c) || *c == '.')
+        .count();
+
+    if name_len == 0 {
+        return None;
+    }
+
+    let mut after = &rest[name_len..];
+
+    if after.starts_with('<') {
+        let close = after.find('>')?;
+        after = &after[close + 1..];
+    }
+
+    Some(after)
+}
+
+/// `struct Name `, `enum Name<T> `, `export interface Name `: the head
+/// of a declaration whose body opener comes next. `Some(true)` for an
+/// interface, which may take `extends` first.
+pub(crate) fn declaration_head(head: &str) -> Option<bool> {
+    let t = head.trim_start();
+    let t = t.strip_prefix("export ").map(str::trim_start).unwrap_or(t);
+    let (rest, interface, is_impl) = if let Some(r) = t.strip_prefix("struct ") {
+        (r, false, false)
+    } else if let Some(r) = t.strip_prefix("enum ") {
+        (r, false, false)
+    } else if let Some(r) = t.strip_prefix("trait ") {
+        (r, false, false)
+    } else if let Some(r) = t.strip_prefix("impl ") {
+        (r, false, true)
+    } else {
+        (t.strip_prefix("interface ")?, true, false)
+    };
+    let mut after = declaration_name(rest)?;
+
+    // `impl Trait for Type as`: the target closes the header.
+    if is_impl && let Some(target) = after.trim_start().strip_prefix("for ") {
+        after = declaration_name(target)?;
+    }
+
+    (after.ends_with([' ', '\t']) && after.trim().is_empty()).then_some(interface)
+}
+
+/// The declaration keyword a line starts with, `export` aside.
+fn declaration_word(line: &str) -> Option<&'static str> {
+    let t = line.trim_start();
+    let t = t.strip_prefix("export ").map(str::trim_start).unwrap_or(t);
+    let t = t
+        .strip_prefix("local ")
+        .or_else(|| t.strip_prefix("const "))
+        .map(str::trim_start)
+        .unwrap_or(t);
+    let t = t.strip_prefix("async ").map(str::trim_start).unwrap_or(t);
+
+    for (word, target) in [
+        ("function ", "function"),
+        ("struct ", "struct"),
+        ("enum ", "enum"),
+        ("remote ", "remote"),
+        ("interface ", "interface"),
+        ("type ", "type"),
+    ] {
+        if t.starts_with(word) {
+            return Some(target);
+        }
+    }
+
+    None
+}
+
+/// What an attribute at this position would go on: a remote's parameter
+/// inside its parentheses, a field or a variant inside a struct or an
+/// enum, or the declaration the next non-attribute line starts.
+pub(crate) fn attribute_target(
+    src: &str,
+    line_start: usize,
+    line_end: usize,
+    head: &str,
+) -> Option<&'static str> {
+    let opens = head.matches('(').count();
+    let closes = head.matches(')').count();
+
+    if opens > closes {
+        return if head.trim_start().starts_with("remote ")
+            || head.trim_start().starts_with("export remote ")
+        {
+            Some("param")
+        } else {
+            None
+        };
+    }
+
+    // An indented line sits in a body: the nearest column-zero line above
+    // names it. A column-zero `end` or another statement ends the search.
+    let indented = head.starts_with(' ') || head.starts_with('\t');
+
+    if indented {
+        for line in src[..line_start].lines().rev() {
+            if line.trim().is_empty() || !line.starts_with(|c: char| !c.is_whitespace()) {
+                continue;
+            }
+
+            return match declaration_word(line) {
+                Some("struct") | Some("interface") => Some("field"),
+                Some("enum") => Some("variant"),
+                _ => None,
+            };
+        }
+
+        return None;
+    }
+
+    // At column zero the attribute precedes a declaration: skip the other
+    // attribute lines, blanks, and comments to the first one.
+    for line in src[line_end..].lines().skip(1) {
+        let t = line.trim_start();
+
+        if t.is_empty() || t.starts_with('@') || t.starts_with("--") {
+            continue;
+        }
+
+        return declaration_word(line);
+    }
+
+    None
+}
+
+/// The type the `impl` block around the caret is for: the `X` of
+/// `impl X` and of `impl Trait for X`. The first line at the margin
+/// above the caret decides.
+pub fn impl_target(src: &str, offset: usize) -> Option<String> {
+    let line = src[..offset.min(src.len())]
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty() && !l.starts_with(char::is_whitespace))?;
+    let rest = line.trim().strip_prefix("impl ")?;
+    let target = rest.rsplit(" for ").next().unwrap_or(rest).trim();
+    let name: String = target.chars().take_while(|c| is_word(*c)).collect();
+
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn self_takes_the_type_the_impl_is_for() {
+        let one = "impl Msg as\n    function tag(self)\n        match self with\n";
+        assert_eq!(impl_target(one, one.len()), Some("Msg".to_string()));
+
+        let two = "impl Shape for Circle as\n    function area(self)\n";
+        assert_eq!(impl_target(two, two.len()), Some("Circle".to_string()));
+
+        let none = "local function f()\n    match self with\n";
+        assert_eq!(impl_target(none, none.len()), None);
+    }
+}

@@ -364,13 +364,32 @@ impl<'s> Desugar<'s> {
 
         match e.from {
             None => {
+                let mut types = Vec::new();
+
                 for sp in &e.specs {
                     let name = self.text_of(sp.name).to_string();
                     let exported = sp
                         .alias
                         .map(|a| self.text_of(a).to_string())
-                        .unwrap_or(name.clone());
-                    self.exports.push((exported, name));
+                        .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(&name).to_string());
+
+                    // A type is no value: the module sends it out as an
+                    // alias, not as a field of the export table. A
+                    // namespace member reads by the name the emit gave
+                    // it, `Geom_Point`.
+                    if e.type_only || sp.is_type {
+                        let target = self
+                            .namespace_path_name(&name)
+                            .unwrap_or_else(|| name.clone());
+                        types.push(format!("export type {exported} = {target}"));
+                    } else {
+                        self.exports.push((exported, name));
+                    }
+                }
+
+                if !types.is_empty() {
+                    self.generate(anchor, &types.join(" "));
+                    self.blank_lines(anchor, self.byte_end(e.span));
                 }
             }
 

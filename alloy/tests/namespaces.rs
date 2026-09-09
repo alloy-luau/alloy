@@ -403,3 +403,52 @@ fn an_attribute_that_misses_the_target_reports() {
         "{hits:?}"
     );
 }
+
+// --- 6. the members a namespace takes ---------------------------------------
+
+/// A trait with a default body, inside a namespace.
+#[test]
+fn a_trait_member_keeps_its_default_body() {
+    let out = clean(
+        "namespace M as\n    trait Shape as\n        function area(self): number\n        function describe(self): string\n            return \"shape\"\n        end\n    end\nend\n\nprint(M.Shape)\n",
+    );
+    assert!(out.contains("type M_Shape ="), "{out}");
+    assert!(
+        out.contains("function M_Shape.describe(self): string"),
+        "{out}"
+    );
+}
+
+/// `export type { Geom.Point as Position }` sends one type of a
+/// namespace out under a name of its own.
+#[test]
+fn an_export_list_sends_one_type_of_a_namespace() {
+    let out = clean(
+        "namespace Geom as\n    type Point = { x: number, y: number }\nend\n\nexport type { Geom.Point as Position }\n",
+    );
+    assert!(out.contains("export type Position = Geom_Point"), "{out}");
+}
+
+/// A remote's parameter reads a struct of a namespace.
+#[test]
+fn a_remote_takes_a_namespaced_struct() {
+    let (_, check, hits) = compile(
+        "namespace Types as\n    struct Damage as\n        amount: number\n    end\nend\n\nexport remote Hit(damage: Types.Damage) from client\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+    assert!(
+        check.contains("fire: (damage: Types_Damage) -> ()"),
+        "{check}"
+    );
+}
+
+/// A macro and an attribute run at compile time, so neither takes a
+/// name of its own and neither reaches the table.
+#[test]
+fn a_compile_time_member_keeps_its_own_name() {
+    let out = clean(
+        "namespace M as\n    macro twice(x)\n        x * 2\n    end\n    attribute tag(name: string) on field\nend\n\nprint($twice(2))\n",
+    );
+    assert!(out.contains("print(2 * 2)"), "{out}");
+    assert!(!out.contains("M.twice"), "{out}");
+}

@@ -194,3 +194,11 @@ fn an_exported_namespace_hovers_at_the_import() {
         point.hover
     );
 }
+
+/// The name a namespace declares is the author's: no list opens there.
+#[test]
+fn a_namespace_name_opens_no_list() {
+    let src = "namespace Name as\nend\n";
+    let at = "namespace Na".len();
+    assert_eq!(context::detect(src, at), None);
+}

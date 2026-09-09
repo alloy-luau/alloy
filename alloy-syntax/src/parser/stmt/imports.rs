@@ -79,7 +79,17 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
 
-            let name = self.expect_name()?;
+            let start = self.pos;
+            let mut name = self.expect_name()?;
+
+            // `export type { Geom.Point as Position }`: a member of a
+            // namespace reads by its path, so the name spans the dots.
+            while self.at(".") && self.name_at(1) {
+                self.bump();
+                self.bump();
+                name = TokSpan::new(start, self.pos);
+            }
+
             let alias = if self.eat("as") {
                 Some(self.expect_name()?)
             } else {

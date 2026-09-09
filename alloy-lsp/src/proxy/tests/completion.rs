@@ -817,3 +817,41 @@ pub(crate) fn a_private_field_leaves_the_constructor_signature() {
         "({ name: string }) -> Cfg"
     );
 }
+
+/// `player.` names a value: the constructor belongs to `Player.new`,
+/// and the emit's metatable is the only reason the child offered it.
+#[test]
+pub(crate) fn a_value_offers_no_constructor() {
+    let src = "struct Player as\n    read name: string\nend\n\nlocal player = new Player { name = \"a\" }\nprint(player.name)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let child = || {
+        json!([
+            { "label": "new", "kind": 3, "detail": "({ name: string }) -> Player" },
+            { "label": "name", "kind": 5, "detail": "string" },
+        ])
+    };
+    let labels = |result: &Value| -> Vec<String> {
+        result
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+
+    // `player.` on line 5, past the dot.
+    let mut result = child();
+    clean_completion(&mut result, doc, 5, 13, true);
+    assert_eq!(labels(&result), ["name"]);
+
+    // `Player.` names the type, and the constructor stays.
+    let src = "struct Player as\n    read name: string\nend\n\nlocal p = Player.new({ name = \"a\" })\nprint(p)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut result = child();
+    clean_completion(&mut result, doc, 4, 17, true);
+    let mut got = labels(&result);
+    got.sort();
+    assert_eq!(got, ["name", "new"]);
+}

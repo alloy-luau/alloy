@@ -638,6 +638,26 @@ pub(crate) fn strip_std_prefix(value: &mut Value) {
     }
 }
 
+/// Whether the receiver of a member access is a name the scope binds:
+/// a local, a parameter, a `for` variable, an arm's binding. A type's
+/// own name binds none of those.
+fn receiver_is_a_local(doc: &Doc, line: u32, character: u32) -> bool {
+    let Some(offset) = offset_of(&doc.source, line, character) else {
+        return false;
+    };
+    let Some((receiver, _, _, _)) = context::member_at(&doc.source, offset) else {
+        return false;
+    };
+
+    if receiver.is_empty() || !receiver.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return false;
+    }
+
+    context::locals_in_scope(&doc.source, offset)
+        .iter()
+        .any(|l| l.name == receiver)
+}
+
 /// The list as the source can use it. A `:` names a member, so the
 /// list holds members alone, each without the receiver its signature
 /// carries. A detail the reader cannot write goes, and an empty
@@ -671,6 +691,27 @@ pub(crate) fn clean_completion(
                 i.get("label").and_then(Value::as_str),
                 Some("new") | Some("from_table")
             )
+        });
+    }
+
+    // `player.` names a value, and the constructor belongs to the
+    // type: `Player.new(...)`. The emit puts `new` on the metatable, so
+    // the child offers it on the value too, where it builds nothing.
+    if !colon && receiver_is_a_local(doc, line, character) {
+        let shapes: HashSet<&str> = doc
+            .shapes
+            .iter()
+            .chain(doc.import_shapes.iter())
+            .map(|s| s.name())
+            .collect();
+
+        items.retain(|i| {
+            i.get("label").and_then(Value::as_str) != Some("new")
+                || !i
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .and_then(|d| d.rsplit("->").next())
+                    .is_some_and(|ret| shapes.contains(ret.trim()))
         });
     }
 

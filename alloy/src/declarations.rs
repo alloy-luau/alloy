@@ -455,7 +455,27 @@ fn namespace_summaries(
         }
     }
 
-    let mut hover = format!("```alloy\n{modifier}namespace {path} as\nend\n```");
+    // `@deprecated("use Geometry")` has no Luau form on a namespace, so
+    // the hover is where the reader meets it.
+    let deprecated = ns.attributes.iter().find_map(|a| {
+        if a.name.map(text) != Some("deprecated") {
+            return None;
+        }
+
+        let note = a
+            .args
+            .first()
+            .map(|e| text(e.span()).trim_matches(['"', '\'']).to_string())
+            .filter(|t| !t.is_empty());
+
+        Some(match note {
+            Some(t) => format!("\n\n**Deprecated.** {t}"),
+
+            None => "\n\n**Deprecated.**".to_string(),
+        })
+    });
+    let deprecated = deprecated.unwrap_or_default();
+    let mut hover = format!("```alloy\n{modifier}namespace {path} as\nend\n```{deprecated}");
 
     if !members.is_empty() {
         hover.push_str(&format!("\n\nMembers: {}.", members.join(", ")));
@@ -463,7 +483,7 @@ fn namespace_summaries(
 
     if let Some(d) = doc_before(src, start_of(ns.span)) {
         hover = format!(
-            "```alloy\n{modifier}namespace {path} as\nend\n```\n\n{d}{}",
+            "```alloy\n{modifier}namespace {path} as\nend\n```{deprecated}\n\n{d}{}",
             match members.is_empty() {
                 true => String::new(),
 
@@ -739,6 +759,18 @@ mod tests {
 
         let e = d.iter().find(|x| x.name == "Math.E").unwrap();
         assert!(e.hover.contains("`E` is private to `Math`."), "{}", e.hover);
+    }
+
+    #[test]
+    fn a_deprecated_namespace_says_so_in_its_hover() {
+        let src = "@deprecated(\"use Geometry\")\nnamespace Old as\n    const x = 1\nend\n";
+        let d = summaries(src, false);
+        let ns = d.iter().find(|x| x.name == "Old").unwrap();
+        assert!(
+            ns.hover.contains("**Deprecated.** use Geometry"),
+            "{}",
+            ns.hover
+        );
     }
 
     #[test]

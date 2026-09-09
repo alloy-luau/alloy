@@ -2240,3 +2240,81 @@ fn a_space_completes_the_side_of_a_directive() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file added on disk after the server started declares a global.
+/// The poll reads it, every open document is compiled again, and the
+/// name resolves where it did not before.
+#[test]
+fn a_global_added_on_disk_reaches_the_open_files() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-newglobal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n",
+    )
+    .unwrap();
+    let src = "local n: number = shout(\"hi\")\nprint(n)\n";
+    let file = dir.join("src/main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start_env(
+        &child,
+        json!({ "processId": std::process::id(), "rootUri": format!("file://{}", dir.display()), "capabilities": {} }),
+        &[("ALLOY_LSP_POLL_SECS", "1")],
+    );
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // Nothing declares `shout` yet.
+    s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("shout")));
+
+    // A file with the global lands on disk after the server started.
+    std::fs::write(
+        dir.join("src/shout.aly"),
+        "--- Writes a loud line.\nglobal function shout(msg: string): number\n    print(msg)\n    return 1\nend\n",
+    )
+    .unwrap();
+
+    // The poll reads it, and the open file is compiled again: the name
+    // resolves, so the report on it is gone.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut hover = String::new();
+
+    while Instant::now() < deadline {
+        s.drain(Duration::from_secs(2));
+        hover = s.hover(&uri, 0, 20);
+
+        if hover.contains("Writes a loud line.") {
+            break;
+        }
+    }
+
+    assert!(hover.contains("Writes a loud line."), "{hover}");
+
+    s.drain(Duration::from_secs(2));
+    let last: Vec<String> = s
+        .seen
+        .iter()
+        .rfind(|m| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri)
+        .and_then(|m| m["params"]["diagnostics"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|d| d["message"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !last.iter().any(|d| d.contains("shout")),
+        "{last:?}\n{hover}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

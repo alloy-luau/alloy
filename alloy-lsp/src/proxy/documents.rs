@@ -391,7 +391,9 @@ impl Server {
 
         self.write_hoisted(uri, &source);
 
-        if had_globals != fresh_globals {
+        // A pass over the workspace opens every file; one refresh at
+        // the end of it costs one recompile each, not one per file.
+        if had_globals != fresh_globals && self.scan.try_lock().is_ok() {
             self.refresh_globals(uri);
         }
 
@@ -642,6 +644,8 @@ impl Server {
             }
         }
 
+        let mut opened = false;
+
         for path in files {
             let uri = path_to_uri(&path);
             let already = self.state.lock().expect("state").docs.contains_key(&uri);
@@ -652,7 +656,20 @@ impl Server {
 
             if let Ok(text) = std::fs::read_to_string(&path) {
                 self.open_doc(&uri, text, 0, false);
+                opened = true;
             }
+        }
+
+        // The globals of the workspace are known once every file is
+        // open, so every file that names one is compiled again here.
+        let has_globals = {
+            let st = self.state.lock().expect("state");
+
+            st.docs.values().any(|d| !d.globals.is_empty())
+        };
+
+        if opened && has_globals {
+            self.refresh_globals("");
         }
 
         let runtime = {

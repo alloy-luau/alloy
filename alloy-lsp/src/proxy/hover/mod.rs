@@ -492,6 +492,12 @@ pub(crate) fn optional_index_hover(
     line: u32,
     character: u32,
 ) -> Option<String> {
+    // A `.alx` lowering moves columns of its own, and the child has no
+    // type for the value there either.
+    if doc.is_alx {
+        return None;
+    }
+
     let offset = offset_of(&doc.source, line, character)?;
 
     if context::index_at(&doc.source, offset)?.1 != context::Access::Optional {

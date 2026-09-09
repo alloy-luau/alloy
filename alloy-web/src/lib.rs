@@ -12,7 +12,7 @@ mod context;
 #[path = "../../alloy-lsp/src/keywords.rs"]
 mod keywords;
 #[allow(dead_code)]
-#[path = "../../alloy-lsp/src/shapes.rs"]
+#[path = "../../alloy-lsp/src/shapes/mod.rs"]
 mod shapes;
 
 use std::cell::RefCell;

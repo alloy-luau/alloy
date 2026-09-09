@@ -41,7 +41,7 @@ pub mod schema;
 /// the source wrote. The language server owns the file; the CLI reads
 /// it so the terminal and the editor say the same thing.
 #[allow(dead_code)]
-#[path = "../../alloy-lsp/src/shapes.rs"]
+#[path = "../../alloy-lsp/src/shapes/mod.rs"]
 pub mod shapes;
 pub mod testbuild;
 pub mod typecheck;

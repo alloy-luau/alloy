@@ -1176,7 +1176,14 @@ fn type_declarations(source: &str, name: &str) -> Vec<(usize, usize)> {
 /// of "`N` is a type, not a value" is the sentence.
 fn unknown_type_report(message: &str, source: &str, text: &str, line: usize) -> Option<Resited> {
     let name = quoted_after(message, "Unknown type '")?;
-    let col = word_column(text, name)?;
+    // A struct's header and its `end` are generated text, so a field's
+    // type carries no span of its own and the map falls back to the
+    // declaration's first byte. The body is where the name stands.
+    let (line, text, col) = match word_column(text, name) {
+        Some(col) => (line, text, col),
+
+        None => declared_type_site(source, line, name)?,
+    };
     let at = Some((line, col));
 
     if type_declarations(source, name).is_empty() {
@@ -1306,6 +1313,46 @@ fn member_column(line: &str, name: &str) -> Option<usize> {
 }
 
 /// The one-based column of a name on a line, as a whole word.
+/// The line inside a declaration block that names a type, with its
+/// text and its one-based column. A report on the block's header or on
+/// its `end` sites there instead.
+fn declared_type_site<'s>(
+    source: &'s str,
+    line: usize,
+    name: &str,
+) -> Option<(usize, &'s str, usize)> {
+    const HEADS: [&str; 6] = [
+        "struct ",
+        "enum ",
+        "interface ",
+        "class ",
+        "trait ",
+        "remote ",
+    ];
+    let lines: Vec<&str> = source.lines().collect();
+    let at = line.checked_sub(1)?;
+
+    if at >= lines.len() {
+        return None;
+    }
+
+    let opens = |text: &str| {
+        let body = text.trim_start();
+        let body = body.strip_prefix("export ").unwrap_or(body);
+        let body = body.strip_prefix("global ").unwrap_or(body);
+
+        HEADS.iter().any(|h| body.starts_with(h))
+    };
+    let head = (0..=at).rev().find(|i| opens(lines[*i]))?;
+    let close = (head + 1..lines.len()).find(|i| lines[*i].trim() == "end")?;
+
+    if line > close + 1 {
+        return None;
+    }
+
+    (head + 1..close).find_map(|i| word_column(lines[i], name).map(|col| (i + 1, lines[i], col)))
+}
+
 fn word_column(line: &str, name: &str) -> Option<usize> {
     line.match_indices(name)
         .find(|(at, _)| {
@@ -1496,6 +1543,32 @@ mod tests {
 
         assert_eq!(got.message, "`scale` is a value, not a type");
         assert_eq!(got.at, Some((2, 12)));
+    }
+
+    /// A struct's header and its `end` are generated text, so a field's
+    /// type carries no span and the map falls back to the declaration's
+    /// first byte. The report sites on the field instead.
+    #[test]
+    fn an_unknown_field_type_sites_inside_the_struct() {
+        let source = "struct Inner as
+    x: Undefined
+end
+";
+        let head = resited("Unknown type 'Undefined'", source, 1, 1);
+        assert_eq!(head.at, Some((2, 8)));
+
+        let close = resited("Unknown type 'Undefined'", source, 3, 1);
+        assert_eq!(close.at, Some((2, 8)));
+
+        // A one-line struct sites on its own line already.
+        let one = resited(
+            "Unknown type 'Undefined'",
+            "struct S as x: Undefined end
+",
+            1,
+            16,
+        );
+        assert_eq!(one.at, Some((1, 16)));
     }
 
     #[test]

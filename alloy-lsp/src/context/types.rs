@@ -72,6 +72,20 @@ pub(crate) fn takes_a_type(head: &str) -> bool {
         }
     }
 
+    // `local x: number | `: a union or an intersection continues the
+    // slot the head opened, so the caret still takes a type.
+    if let Some(base) = head.strip_suffix("| ").or_else(|| head.strip_suffix("& ")) {
+        let cut = base.trim_end_matches(|c: char| is_word(c) || " ?[]{}<>,.()|&".contains(c));
+
+        if cut.len() < base.len()
+            && let Some(through) = head.get(..cut.len() + 1)
+        {
+            return takes_a_type(through);
+        }
+
+        return false;
+    }
+
     if head.ends_with("-> ") {
         return true;
     }
@@ -83,4 +97,24 @@ pub(crate) fn takes_a_type(head: &str) -> bool {
 
     // `c ? a : b` ends its else with a `:` that takes a value.
     annotation && !head.trim_end().ends_with("::") && !super::ternary_else(head)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `local x: number | ` takes a type. The head read as a value and
+    /// drew the child's globals.
+    #[test]
+    fn a_union_continues_the_type_slot() {
+        assert!(takes_a_type("local x: number | "));
+        assert!(takes_a_type("local x: number | string | "));
+        assert!(takes_a_type("local x: Result<number, string> | "));
+        assert!(takes_a_type("local function f(): number | "));
+        assert!(takes_a_type("    inner: number & "));
+
+        // No annotation opened the head, so the `|` says nothing.
+        assert!(!takes_a_type("local x = a | "));
+        assert!(!takes_a_type("| "));
+    }
 }

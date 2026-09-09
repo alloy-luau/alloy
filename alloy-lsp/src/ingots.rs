@@ -233,4 +233,39 @@ mod tests {
         assert_eq!(items[0]["textEdit"]["newText"], "hover:");
         assert!(items[1].get("command").is_none());
     }
+
+    /// An ingot that answers the word being typed: `w-1` names `w-11`,
+    /// which no fixed list holds. Each item edits the whole word, so the
+    /// digits already typed do not double.
+    #[test]
+    fn items_built_from_a_prefix_replace_the_word() {
+        let source = "local x = <Frame ClassName=\"w-1\" />\n".to_string();
+        let start = source.find("w-1").expect("the class") as u64;
+        let doc = Doc::new(
+            source,
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let span = json!([start, start + 3]);
+        let items = completion_items(
+            &doc,
+            &[
+                json!({ "label": "w-1", "kind": "property", "detail": "width 4 pixels", "insert": "w-1", "span": span }),
+                json!({ "label": "w-11", "kind": "property", "detail": "width 44 pixels", "insert": "w-11", "span": span }),
+                json!({ "label": "w-1/2", "kind": "property", "detail": "width 50% of the parent", "insert": "w-1/2", "span": span }),
+            ],
+        );
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[1]["label"], "w-11");
+        assert_eq!(items[1]["detail"], "width 44 pixels");
+        assert_eq!(items[1]["kind"], 10);
+        assert_eq!(items[1]["textEdit"]["newText"], "w-11");
+        assert_eq!(items[1]["textEdit"]["range"]["start"]["character"], 28);
+        assert_eq!(items[1]["textEdit"]["range"]["end"]["character"], 31);
+        // A number is no half word, so no item reopens the list.
+        assert!(items.iter().all(|i| i.get("command").is_none()));
+    }
 }

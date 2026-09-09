@@ -141,7 +141,7 @@ fn the_format_hook_runs_after_anneal_and_the_editor_hooks_answer() {
         "no hover on `local`"
     );
 
-    let items = ingots.complete("a.aly", "local x = $", 11, Some("$"));
+    let (items, _) = ingots.complete("a.aly", "local x = $", 11, Some("$"));
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["label"], "$shout");
     assert_eq!(items[0]["snippet"], true);
@@ -153,6 +153,46 @@ fn the_format_hook_runs_after_anneal_and_the_editor_hooks_answer() {
         actions[0]["edits"][0],
         serde_json::json!([6, 7, "$shout(a)"])
     );
+}
+
+/// A prop such as `ClassName` is on no Roblox class and in no component
+/// type, so the editor takes the name and the words for it from the
+/// ingot that reads it.
+#[test]
+fn an_ingot_declares_the_props_it_reads_on_a_tag() {
+    let dir = std::env::temp_dir().join("alloy-ingot-props-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let binary = shout_dir()
+        .join("../../../target/debug/examples/shout")
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    std::fs::write(
+        dir.join("ingot.toml"),
+        format!(
+            "name = \"styler\"\napi = 1\nbinary = \"{binary}\"\nkinds = [\"alx\"]\nhooks = [\"complete\"]\n\n[props]\nClassName = {{ doc = \"the utility list\", insert = \"ClassName=\\\"$1\\\"\" }}\n"
+        ),
+    )
+    .unwrap();
+    let text = format!(
+        "[ingots]\nstyler = \"{}\"\n",
+        dir.display().to_string().replace('\\', "/")
+    );
+    let config = Config::parse(&text, Path::new("alloy.toml")).unwrap();
+    let ingots = Ingots::load(&std::env::temp_dir(), &config);
+    assert!(ingots.problems.is_empty(), "{:?}", ingots.problems);
+
+    assert_eq!(
+        ingots.props("src/a.alx"),
+        vec![(
+            "ClassName",
+            "the utility list",
+            "styler",
+            "ClassName=\"$1\""
+        )]
+    );
+    // The ingot wants `.alx` only, so no other file lists the prop.
+    assert!(ingots.props("src/a.aly").is_empty());
 }
 
 #[test]

@@ -38,7 +38,7 @@
 //! {"op": "lint", ...}      // reply {"ok": true, "findings": [{"span": [2, 9], "lint": "x", "message": "..."}]}
 //! {"op": "format", ...}    // reply {"ok": true, "edits": [...]}
 //! {"op": "hover", ..., "offset": 12}      // reply {"ok": true, "hover": {"contents": "md", "span": [10, 14]}}
-//! {"op": "complete", ..., "offset": 12}   // reply {"ok": true, "items": [{"label": "x"}]}
+//! {"op": "complete", ..., "offset": 12}   // reply {"ok": true, "items": [{"label": "x"}], "incomplete": false}
 //! {"op": "actions", ..., "span": [0, 4]}  // reply {"ok": true, "actions": [{"title": "t", "edits": [...]}]}
 //! {"op": "colors", ...}                   // reply {"ok": true, "colors": [{"span": [3, 13], "red": 1, "green": 0, "blue": 0, "alpha": 1}]}
 //! {"op": "present", ..., "span": [3, 13], "color": {"red": 1, ...}}  // reply {"ok": true, "labels": ["bg-red-500"]}
@@ -202,6 +202,41 @@ impl Hover {
         self.span = Some(span);
 
         self
+    }
+}
+
+/// The answer to one completion request: the items, and whether the
+/// list is the whole answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Completions {
+    pub items: Vec<CompletionItem>,
+    /// Whether a longer word gives a different list. The editor caches
+    /// a complete list and filters it itself, which hides an item the
+    /// ingot makes from what the user typed; `true` asks it again on
+    /// the next keystroke.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
+}
+
+impl Completions {
+    pub fn new(items: Vec<CompletionItem>) -> Self {
+        Self {
+            items,
+            incomplete: false,
+        }
+    }
+
+    /// Marks the list as one the next keystroke changes.
+    pub fn incomplete(mut self, yes: bool) -> Self {
+        self.incomplete = yes;
+
+        self
+    }
+}
+
+impl From<Vec<CompletionItem>> for Completions {
+    fn from(items: Vec<CompletionItem>) -> Self {
+        Completions::new(items)
     }
 }
 
@@ -464,16 +499,18 @@ pub trait Handler {
         Ok(None)
     }
 
-    /// Completion items at an offset. They join the host's list.
+    /// Completion items at an offset. They join the host's list. A
+    /// `Vec<CompletionItem>` converts into the answer; mark it
+    /// incomplete when the list is made from the word being typed.
     fn complete(
         &mut self,
         file: &File,
         offset: u32,
         trigger: Option<&str>,
-    ) -> Result<Vec<CompletionItem>, String> {
+    ) -> Result<Completions, String> {
         let _ = (file, offset, trigger);
 
-        Ok(Vec::new())
+        Ok(Completions::default())
     }
 
     /// Code actions for a span. They join the host's list.
@@ -640,9 +677,9 @@ fn answer(handler: &mut impl Handler, request: Request) -> Vec<u8> {
             file,
             offset,
             trigger,
-        } => handler
-            .complete(&file, offset, trigger.as_deref())
-            .map(|items| serde_json::json!({ "ok": true, "items": items })),
+        } => handler.complete(&file, offset, trigger.as_deref()).map(
+            |c| serde_json::json!({ "ok": true, "items": c.items, "incomplete": c.incomplete }),
+        ),
 
         Request::Actions {
             file,

@@ -266,6 +266,10 @@ fn info(dir: &Path) -> ExitCode {
         println!("  lint       {name} ({}) {}", l.default, l.summary);
     }
 
+    for (name, prop) in &manifest.props {
+        println!("  prop       {name} {}", prop.doc());
+    }
+
     ExitCode::SUCCESS
 }
 
@@ -339,7 +343,9 @@ fn run_one(dir: &Path, file: &Path, args: &[String]) -> ExitCode {
     }
 
     if let Some(offset) = value("--complete") {
-        for item in ingots.complete(&path, &source, offset, None) {
+        let (items, _) = ingots.complete(&path, &source, offset, None);
+
+        for item in items {
             println!(
                 "{}  {}",
                 item["label"].as_str().unwrap_or(""),

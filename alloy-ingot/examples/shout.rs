@@ -7,8 +7,8 @@
 //! comment onto the first line; the format hook trims trailing spaces.
 
 use alloy_ingot::{
-    CodeAction, CompletionItem, DiagnosticRef, Edit, File, Finding, Handler, Hover, ItemKind,
-    Settings, serve,
+    CodeAction, CompletionItem, Completions, DiagnosticRef, Edit, File, Finding, Handler, Hover,
+    ItemKind, Settings, serve,
 };
 
 #[derive(Default)]
@@ -125,21 +125,21 @@ impl Handler for Shout {
         file: &File,
         offset: u32,
         _trigger: Option<&str>,
-    ) -> Result<Vec<CompletionItem>, String> {
+    ) -> Result<Completions, String> {
         let before = &file.source[..(offset as usize).min(file.source.len())];
 
         if !before.ends_with('$') {
-            return Ok(Vec::new());
+            return Ok(Completions::default());
         }
 
-        Ok(vec![
+        Ok(Completions::new(vec![
             CompletionItem::new(self.sigil())
                 .kind(ItemKind::Function)
                 .detail("shout ingot")
                 .documentation("Upper-cases a string at run time.")
                 .snippet(format!("{}(${{1:s}})", self.sigil()))
                 .over((offset - 1, offset)),
-        ])
+        ]))
     }
 
     fn actions(

@@ -346,15 +346,19 @@ impl Ingots {
         None
     }
 
-    /// Every completion item the ingots offer, as the guest shapes them.
+    /// Every completion item the ingots offer, as the guest shapes them,
+    /// and whether the next keystroke gives a different list. An ingot
+    /// that builds its items from the word being typed says so, and the
+    /// editor asks again instead of filtering what it holds.
     pub fn complete(
         &self,
         path: &str,
         source: &str,
         offset: u32,
         trigger: Option<&str>,
-    ) -> Vec<Value> {
+    ) -> (Vec<Value>, bool) {
         let mut items = Vec::new();
+        let mut incomplete = false;
 
         for ingot in self.with_hook(Hook::Complete, path) {
             let mut request = self.file(path, source);
@@ -364,10 +368,33 @@ impl Ingots {
 
             if let Ok(reply) = ingot.request(&request, EDITOR_TIMEOUT) {
                 items.extend(reply["items"].as_array().cloned().unwrap_or_default());
+                incomplete |= reply["incomplete"].as_bool() == Some(true);
             }
         }
 
-        items
+        (items, incomplete)
+    }
+
+    /// The props the ingots read on a markup tag of a file: the name,
+    /// what it is for, the ingot that reads it, and the snippet the
+    /// editor inserts. Neither the Roblox class nor the component
+    /// declares one, so the editor lists them from here.
+    pub fn props(&self, path: &str) -> Vec<(&str, &str, &str, &str)> {
+        let kind = kind_of(path);
+        let mut out = Vec::new();
+
+        for ingot in self.list.iter().filter(|i| i.manifest.wants(kind)) {
+            for (name, decl) in &ingot.manifest.props {
+                out.push((
+                    name.as_str(),
+                    decl.doc(),
+                    ingot.name.as_str(),
+                    decl.insert(),
+                ));
+            }
+        }
+
+        out
     }
 
     /// Every code action the ingots offer for a span.

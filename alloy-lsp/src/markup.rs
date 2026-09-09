@@ -677,8 +677,26 @@ pub fn hover(spot: &Spot, bound: &HashSet<String>) -> Option<Value> {
     Some(json!({ "contents": { "kind": "markdown", "value": text } }))
 }
 
+/// A prop an ingot reads on a tag: the name, what it is for, and the
+/// ingot that reads it. Neither the Roblox class nor the component
+/// declares such a prop, so the list comes from the ingot's manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngotProp {
+    pub name: String,
+    pub doc: String,
+    pub ingot: String,
+    /// The snippet the item inserts, `ClassName="$1"` for a styling
+    /// ingot. Empty takes the hole form every other prop uses.
+    pub insert: String,
+}
+
 /// Completion items for a slot.
-pub fn completions(spot: &Spot, bound: &HashSet<String>, src: &str) -> Vec<Value> {
+pub fn completions(
+    spot: &Spot,
+    bound: &HashSet<String>,
+    src: &str,
+    props: &[IngotProp],
+) -> Vec<Value> {
     let mut items = Vec::new();
 
     match spot {
@@ -718,6 +736,32 @@ pub fn completions(spot: &Spot, bound: &HashSet<String>, src: &str) -> Vec<Value
             existing,
         } => {
             let taken: HashSet<&str> = existing.iter().map(String::as_str).collect();
+            // The props an ingot reads. They come first: a name such as
+            // `ClassName` belongs to no class, so nothing else offers
+            // it, and the ingot's own words say what it holds.
+            let mut from_ingots: HashSet<&str> = HashSet::new();
+
+            for p in props {
+                if !p.name.starts_with(prefix.as_str()) || taken.contains(p.name.as_str()) {
+                    continue;
+                }
+
+                from_ingots.insert(p.name.as_str());
+                let insert = match p.insert.is_empty() {
+                    true => format!("{}={{$1}}", p.name),
+
+                    false => p.insert.clone(),
+                };
+                items.push(json!({
+                    "label": p.name,
+                    "kind": 10,
+                    "detail": format!("prop of the {} ingot", p.ingot),
+                    "documentation": { "kind": "markdown", "value": p.doc },
+                    "insertText": insert,
+                    "insertTextFormat": 2,
+                    "sortText": format!("0{}", p.name),
+                }));
+            }
 
             // A component takes the props its parameter type declares,
             // not a Roblox class's properties.
@@ -738,7 +782,10 @@ pub fn completions(spot: &Spot, bound: &HashSet<String>, src: &str) -> Vec<Value
                 // The framework reads `key` itself, so a tag may set it
                 // on any component and no declaration lists it.
                 for prop in alloy::alx::FREE_PROPS {
-                    if prop.starts_with(prefix.as_str()) && !taken.contains(prop) {
+                    if prop.starts_with(prefix.as_str())
+                        && !taken.contains(prop)
+                        && !from_ingots.contains(prop)
+                    {
                         items.push(json!({
                             "label": prop,
                             "kind": 10,
@@ -955,6 +1002,7 @@ mod tests {
             },
             &HashSet::new(),
             "",
+            &[],
         );
         assert!(items.iter().any(|i| i["label"] == "TextLabel"));
         let items = completions(
@@ -965,6 +1013,7 @@ mod tests {
             },
             &HashSet::new(),
             "",
+            &[],
         );
         assert!(
             items
@@ -1010,7 +1059,7 @@ mod tests {
         let at = src.find("there").expect("text");
 
         assert_eq!(completion_spot(src, at), Some(Spot::Text));
-        assert!(completions(&Spot::Text, &HashSet::new(), src).is_empty());
+        assert!(completions(&Spot::Text, &HashSet::new(), src, &[]).is_empty());
         // A hole is code, and the child answers it.
         let hole = "local function V()\n    return <TextLabel>{x}</TextLabel>\nend\n";
         let inside = hole.find("x}").expect("hole");
@@ -1050,11 +1099,63 @@ mod tests {
             },
             &HashSet::new(),
             src,
+            &[],
         );
         // The declared prop, then the two the markup reads itself.
         assert_eq!(items.len(), 3);
         assert_eq!(items[0]["label"], "label");
         assert_eq!(items[1]["label"], "key");
         assert_eq!(items[2]["label"], "ClassName");
+    }
+
+    /// `ClassName` is on no Roblox class, so the tag lists it only when
+    /// an ingot says it reads one.
+    #[test]
+    fn an_ingot_prop_completes_on_a_roblox_tag_and_mid_word() {
+        let props = vec![IngotProp {
+            name: "ClassName".into(),
+            doc: "Utility classes.".into(),
+            ingot: "enamel".into(),
+            insert: "ClassName=\"$1\"".into(),
+        }];
+        let slot = |prefix: &str, existing: Vec<String>| Spot::AttributeSlot {
+            class: "Frame".into(),
+            prefix: prefix.to_string(),
+            existing,
+        };
+        let items = completions(&slot("Cla", vec![]), &HashSet::new(), "", &props);
+        let first = &items[0];
+
+        assert_eq!(first["label"], "ClassName");
+        assert_eq!(first["insertText"], "ClassName=\"$1\"");
+        assert_eq!(first["detail"], "prop of the enamel ingot");
+        assert_eq!(first["documentation"]["value"], "Utility classes.");
+
+        // At the attribute column, and never twice on the same tag.
+        let items = completions(&slot("", vec![]), &HashSet::new(), "", &props);
+        assert_eq!(items[0]["label"], "ClassName");
+
+        let items = completions(
+            &slot("", vec!["ClassName".to_string()]),
+            &HashSet::new(),
+            "",
+            &props,
+        );
+        assert!(items.iter().all(|i| i["label"] != "ClassName"));
+
+        // On a component the ingot's words replace the generic ones.
+        let src = "local function Badge(props: { label: string }) end";
+        let items = completions(
+            &Spot::AttributeSlot {
+                class: "Badge".into(),
+                prefix: "Class".into(),
+                existing: vec![],
+            },
+            &HashSet::new(),
+            src,
+            &props,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["detail"], "prop of the enamel ingot");
     }
 }

@@ -105,6 +105,44 @@ fn default_level() -> String {
     "warn".to_string()
 }
 
+/// One prop the ingot reads on a markup tag. The editor completes the
+/// name on a tag of a file kind the ingot wants and shows `doc` beside
+/// it. A bare string is the doc.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum PropDecl {
+    Doc(String),
+    Table {
+        #[serde(default)]
+        doc: String,
+        /// The snippet the editor inserts, `ClassName="$1"` for a prop
+        /// that holds a string. Unset inserts `name={$1}`, the form
+        /// every other prop takes.
+        #[serde(default)]
+        insert: Option<String>,
+    },
+}
+
+impl PropDecl {
+    pub fn doc(&self) -> &str {
+        match self {
+            PropDecl::Doc(d) => d,
+            PropDecl::Table { doc, .. } => doc,
+        }
+    }
+
+    /// The snippet the item inserts; empty means the `name={$1}` form.
+    pub fn insert(&self) -> &str {
+        match self {
+            PropDecl::Table {
+                insert: Some(i), ..
+            } => i,
+
+            _ => "",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -135,6 +173,11 @@ pub struct Manifest {
     pub option_docs: BTreeMap<String, String>,
     #[serde(default)]
     pub lints: BTreeMap<String, LintDecl>,
+    /// The props the ingot reads on a markup tag, `ClassName` for a
+    /// styling ingot. Neither the class nor the component declares
+    /// them, so the editor takes the names from here.
+    #[serde(default)]
+    pub props: BTreeMap<String, PropDecl>,
 }
 
 impl Manifest {
@@ -209,6 +252,19 @@ impl Manifest {
             }
         }
 
+        for name in self.props.keys() {
+            let mut chars = name.chars();
+
+            if !chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return Err(format!(
+                    "prop `{name}` of `{}`: a prop name is a letter and then letters, digits, or `_`",
+                    self.name
+                ));
+            }
+        }
+
         for (name, lint) in &self.lints {
             if !matches!(lint.default.as_str(), "allow" | "warn" | "deny") {
                 return Err(format!(
@@ -275,6 +331,10 @@ greeting = "hello"
 default = "warn"
 summary = "an example the scaffold ships"
 detail = "Replace this lint with your own, or remove it."
+
+# the props the ingot reads on a markup tag; the editor completes them
+# [props]
+# ClassName = {{ doc = "what it holds", insert = "ClassName=\"$1\"" }}
 "#
     )
 }
@@ -316,6 +376,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("snake_case"), "{e}");
+    }
+
+    #[test]
+    fn a_prop_declaration_carries_its_doc() {
+        let m = Manifest::parse(
+            "name = \"x\"\napi = 1\nhooks = [\"complete\"]\n[props]\nClassName = { doc = \"the utility list\" }\nStyle = \"a table of properties\"\n",
+        )
+        .unwrap();
+        assert_eq!(m.props["ClassName"].doc(), "the utility list");
+        assert_eq!(m.props["Style"].doc(), "a table of properties");
+
+        let e = Manifest::parse(
+            "name = \"x\"\napi = 1\nhooks = [\"complete\"]\n[props]\n\"class-name\" = \"no\"\n",
+        )
+        .unwrap_err();
+        assert!(e.contains("a prop name is a letter"), "{e}");
     }
 
     #[test]

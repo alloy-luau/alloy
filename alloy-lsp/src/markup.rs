@@ -50,6 +50,130 @@ fn opens_markup(src: &str, lt: usize) -> bool {
     )
 }
 
+/// Whether `c` can stand in a tag name.
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '.'
+}
+
+/// The element the `>` next to `offset` opens, when the editor should
+/// write its closing tag. `offset` is the cursor, so the `>` sits on
+/// either side of it.
+///
+/// The test is text-based, like `completion_spot`: the file the user is
+/// typing has no closing tag yet, so the markup parser cannot read it.
+/// None for a closing tag, a self-closing tag, a `>` in a string, in a
+/// `{ }` hole, or outside markup, and for an element that already has
+/// its closing tag.
+pub fn close_tag(src: &str, offset: usize) -> Option<String> {
+    let offset = offset.min(src.len());
+    let bytes = src.as_bytes();
+    let gt = match bytes.get(offset) {
+        Some(b'>') => offset,
+
+        _ if offset > 0 && bytes.get(offset - 1) == Some(&b'>') => offset - 1,
+
+        _ => return None,
+    };
+
+    // `->`, `>=`, `>>`, and `<>` end in the same byte and open nothing.
+    if matches!(
+        bytes.get(gt.wrapping_sub(1)),
+        Some(b'-' | b'=' | b'<' | b'>')
+    ) {
+        return None;
+    }
+
+    let lt = src[..gt].rfind('<')?;
+
+    if !opens_markup(src, lt) {
+        return None;
+    }
+
+    let tag = &src[lt + 1..gt];
+
+    // `</Frame>` closes; it opens nothing.
+    if tag.starts_with('/') {
+        return None;
+    }
+
+    // The `>` belongs to this tag only when nothing inside the tag has
+    // ended it already, and when it sits outside every hole and string.
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+
+    for c in tag.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+
+            (Some(_), _) => {}
+
+            (None, '"' | '\'') => quote = Some(c),
+
+            (None, '{') => depth += 1,
+
+            (None, '}') => depth -= 1,
+
+            (None, '>') if depth == 0 => return None,
+
+            _ => {}
+        }
+    }
+
+    if depth != 0 || quote.is_some() {
+        return None;
+    }
+
+    // `<Frame />` closes itself.
+    if tag.trim_end().ends_with('/') {
+        return None;
+    }
+
+    let name: String = tag.chars().take_while(|c| is_name_char(*c)).collect();
+
+    if name.is_empty() || already_closed(src, gt + 1, &name) {
+        return None;
+    }
+
+    Some(name)
+}
+
+/// Whether an element of this name already has a closing tag after
+/// `from` that no nested opener of the same name takes.
+fn already_closed(src: &str, from: usize, name: &str) -> bool {
+    let rest = &src[from.min(src.len())..];
+    let mut depth = 0i32;
+    let mut at = 0;
+
+    while let Some(k) = rest[at..].find('<') {
+        let after_lt = at + k + 1;
+        let closing = rest[after_lt..].starts_with('/');
+        let start = after_lt + usize::from(closing);
+        at = after_lt;
+
+        if !rest[start..].starts_with(name) || rest[start + name.len()..].starts_with(is_name_char)
+        {
+            continue;
+        }
+
+        if closing {
+            if depth == 0 {
+                return true;
+            }
+
+            depth -= 1;
+        } else {
+            let end = rest[start..].find('>').map_or(rest.len(), |e| start + e);
+
+            // A self-closing tag needs no closing tag of its own.
+            if !rest[start..end].trim_end().ends_with('/') {
+                depth += 1;
+            }
+        }
+    }
+
+    false
+}
+
 /// The spot for a completion: text-based, so an unfinished tag counts.
 pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
     let offset = offset.min(src.len());
@@ -84,8 +208,6 @@ pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
     if depth > 0 {
         return None;
     }
-
-    let is_name_char = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
 
     if tag.chars().all(is_name_char) {
         return Some(Spot::TagSlot {
@@ -684,6 +806,67 @@ mod tests {
         // A hole's own expression is not a tag.
         let inner = src.find("rows").unwrap() + 1;
         assert_eq!(hover_spot(src, inner), None);
+    }
+
+    /// The cursor sits after the `>` the user typed, at the end.
+    fn closes(src: &str) -> Option<String> {
+        close_tag(src, src.len())
+    }
+
+    /// The cursor sits after the first `mark` in the text.
+    fn closes_after(src: &str, mark: &str) -> Option<String> {
+        close_tag(src, src.find(mark).unwrap() + mark.len())
+    }
+
+    #[test]
+    fn an_opening_tag_names_the_tag_to_close() {
+        assert_eq!(closes("return <Frame>").as_deref(), Some("Frame"));
+        assert_eq!(closes("return <Frame Size={x}>").as_deref(), Some("Frame"));
+        assert_eq!(
+            closes("return <Badge label=\"a\">").as_deref(),
+            Some("Badge")
+        );
+        assert_eq!(
+            closes("return <Frame>\n    <Badge>").as_deref(),
+            Some("Badge")
+        );
+        assert_eq!(closes("return <ui.Frame>").as_deref(), Some("ui.Frame"));
+        // The cursor may sit on the `>` instead of after it.
+        let src = "return <Frame>";
+        assert_eq!(close_tag(src, src.len() - 1).as_deref(), Some("Frame"));
+    }
+
+    #[test]
+    fn nothing_closes_what_is_no_opening_tag() {
+        // Self-closing, closing, and a fragment.
+        assert_eq!(closes("return <Frame />"), None);
+        assert_eq!(closes("return <Frame></Frame>"), None);
+        assert_eq!(closes("return <>"), None);
+        // A comparison, an arrow, and a generic argument.
+        assert_eq!(closes_after("local ok = a > b", "a >"), None);
+        assert_eq!(closes_after("local ok = a >= b", "a >"), None);
+        assert_eq!(closes_after("type F = (a: number) -> b", "->"), None);
+        assert_eq!(closes("local m: Map<string, number>"), None);
+        // A `>` inside a string and inside a hole.
+        assert_eq!(closes_after("return <Frame Tip=\"a > b\">", "\"a >"), None);
+        assert_eq!(closes_after("return <Frame Size={a > b}>", "{a >"), None);
+        // Past the tag: the `>` of the body text, not of the tag.
+        assert_eq!(closes_after("return <Frame>a > b", "a >"), None);
+    }
+
+    #[test]
+    fn an_element_that_already_closes_takes_no_second_tag() {
+        let src = "return <Frame></Frame>";
+        let at = src.find('>').unwrap() + 1;
+        assert_eq!(close_tag(src, at), None);
+        // The closing tag of the parent belongs to another name.
+        let src = "return <Frame>\n    <Badge>\n</Frame>";
+        let at = src.find("<Badge>").unwrap() + "<Badge>".len();
+        assert_eq!(close_tag(src, at).as_deref(), Some("Badge"));
+        // A nested opener of the same name takes the closing tag below.
+        let src = "return <Frame>\n    <Frame></Frame>\n</Frame>";
+        let at = src.find('>').unwrap() + 1;
+        assert_eq!(close_tag(src, at), None);
     }
 
     #[test]

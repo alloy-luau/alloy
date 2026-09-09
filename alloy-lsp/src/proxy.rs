@@ -85,6 +85,8 @@ struct State {
     runtimes: std::cell::RefCell<std::collections::HashSet<PathBuf>>,
     /// The child's settings, answered on `workspace/configuration`.
     settings: Value,
+    /// The proxy's own editor options, from the same settings object.
+    editor: settings::Editor,
     /// Questions in flight, by request id.
     asked: HashMap<String, Asked>,
     next_id: u64,
@@ -2662,6 +2664,53 @@ impl Server {
         }
     }
 
+    /// `textDocument/onTypeFormatting`: the `>` that ends an opening tag
+    /// gets the closing tag written after the cursor. Markup lives in
+    /// `.alx` alone, so no other file answers.
+    ///
+    /// The edit starts at the cursor and inserts, which leaves the caret
+    /// between the two tags: the LSP spec puts no cursor in a text edit,
+    /// and an editor that applies one keeps its caret where the edit
+    /// begins.
+    fn close_markup_tag(&self, uri: &str, message: &Value, id: &Value) {
+        let st = self.state.lock().expect("state");
+        let ch = message
+            .pointer("/params/ch")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let at = message
+            .pointer("/params/position")
+            .and_then(position_of_value);
+
+        if !st.editor.auto_close_tags || ch != ">" || !uri.ends_with(".alx") {
+            drop(st);
+            self.respond(id, json!([]));
+
+            return;
+        }
+
+        let name = at
+            .zip(st.docs.get(uri))
+            .and_then(|((line, character), doc)| {
+                let offset = offset_of(&doc.source, line, character)?;
+
+                markup::close_tag(&doc.source, offset)
+            });
+        drop(st);
+
+        match (name, at) {
+            (Some(name), Some((line, character))) => self.respond(
+                id,
+                json!([{
+                    "range": range_value((line, character), (line, character)),
+                    "newText": format!("</{name}>"),
+                }]),
+            ),
+
+            _ => self.respond(id, json!([])),
+        }
+    }
+
     // --- editor -> child ------------------------------------------------------
 
     /// Handles one message from the editor. Returns false on `exit`.
@@ -2710,6 +2759,7 @@ impl Server {
                 let mirror_path = st.mirror.to_string_lossy().into_owned();
 
                 if let Some(options) = message.pointer("/params/initializationOptions") {
+                    st.editor = settings::editor(options, st.editor);
                     let over = settings::from_editor(options);
                     settings::merge(&mut st.settings, &over);
                 }
@@ -2782,6 +2832,7 @@ impl Server {
                 let mut st = self.state.lock().expect("state");
 
                 if let Some(settings) = message.pointer("/params/settings") {
+                    st.editor = settings::editor(settings, st.editor);
                     let over = settings::from_editor(settings);
                     settings::merge(&mut st.settings, &over);
                 }
@@ -2984,6 +3035,13 @@ impl Server {
                 if let Some(id) = message.get("id").cloned() {
                     let uri = text_document_uri(&message).unwrap_or_default();
                     self.format_document(&uri, &id);
+                }
+            }
+
+            Some("textDocument/onTypeFormatting") => {
+                if let Some(id) = message.get("id").cloned() {
+                    let uri = text_document_uri(&message).unwrap_or_default();
+                    self.close_markup_tag(&uri, &message, &id);
                 }
             }
 
@@ -4711,6 +4769,13 @@ impl Server {
                     // names would pop a list of them on every Enter.
                     if let Some(uri) = &ctx
                         && let Some((line, character)) = position
+                        && trigger.as_deref() == Some("\n")
+                    {
+                        st.auto_end(uri, line, character, result);
+                    }
+
+                    if let Some(uri) = &ctx
+                        && let Some((line, character)) = position
                         && trigger.as_deref() != Some("\n")
                     {
                         st.mark_enum_members(uri, line, character, result);
@@ -5715,6 +5780,99 @@ impl State {
 }
 
 impl State {
+    /// The `end` an open block still wants, as the one item a newline
+    /// completion answers.
+    ///
+    /// The caret lands on the empty line between the opener and the
+    /// `end`, which is where the next word goes. A snippet places it
+    /// with `$0`; an editor that takes no snippet gets the plain text
+    /// and its caret after the `end`, as the child's own item does.
+    ///
+    /// The child sees the shadow, where `struct`, `trait`, and `match`
+    /// are already Luau, so the item comes from the Alloy source here.
+    /// Any `end` the child sent goes, so the editor lists one.
+    fn auto_end(&self, uri: &str, line: u32, character: u32, result: &mut Value) {
+        let items = match result {
+            Value::Array(v) => v,
+
+            Value::Object(o) => match o.get_mut("items").and_then(Value::as_array_mut) {
+                Some(v) => v,
+
+                None => return,
+            },
+
+            Value::Null => {
+                *result = json!([]);
+
+                match result.as_array_mut() {
+                    Some(v) => v,
+
+                    None => return,
+                }
+            }
+
+            _ => return,
+        };
+        items.retain(|i| i.get("label").and_then(Value::as_str) != Some("end"));
+
+        // The opener is the line the user left with Enter.
+        let opener = match (self.editor.auto_end, line.checked_sub(1)) {
+            (true, Some(opener)) => opener,
+
+            _ => return,
+        };
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(indent) = block_end::needs_end(&doc.source, opener) else {
+            return;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return;
+        };
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+
+        // Enter left the cursor on a line of its own indentation. With
+        // anything else before it the line is the user's, not ours.
+        if !doc.source[line_start..offset]
+            .chars()
+            .all(|c| c == ' ' || c == '\t')
+        {
+            return;
+        }
+
+        // The body indents one step past the opener, in whatever the
+        // opener line already uses.
+        let step = match indent.contains('\t') {
+            true => "\t".to_string(),
+
+            false => " ".repeat(alloy::fmt::INDENT),
+        };
+        let body = match self.snippets {
+            true => format!("{indent}{step}$0\n{indent}end"),
+
+            false => format!("{indent}{step}\n{indent}end"),
+        };
+        // The edit replaces the indentation the editor wrote on the new
+        // line, so the text lands the same whatever that was.
+        let mut item = json!({
+            "label": "end",
+            "kind": 14,
+            "detail": "close the block",
+            "preselect": true,
+            "textEdit": {
+                "range": range_value((line, 0), (line, character)),
+                "newText": body,
+            },
+        });
+
+        if self.snippets {
+            item["insertTextFormat"] = json!(2);
+        }
+
+        items.push(item);
+    }
+
     /// The keyword wins while the typed word begins one.
     ///
     /// `end` in `if x then return end`, and in a one-line `struct T as
@@ -11363,16 +11521,41 @@ fn edit_capabilities(message: &mut Value) {
         return;
     };
 
+    let child_on_type = caps.remove("documentOnTypeFormattingProvider");
+
     for key in [
         "documentFormattingProvider",
         "documentRangeFormattingProvider",
-        "documentOnTypeFormattingProvider",
     ] {
         caps.remove(key);
     }
 
     // The proxy formats `.aly` itself, with `alloy fmt`.
     caps.insert("documentFormattingProvider".into(), Value::Bool(true));
+
+    // On-type formatting closes a markup tag: `>` first, then whatever
+    // the child asked for, so a trigger of its own still arrives.
+    let mut more: Vec<Value> = Vec::new();
+
+    if let Some(child) = &child_on_type {
+        let first = child.get("firstTriggerCharacter").into_iter();
+        let rest = child
+            .get("moreTriggerCharacter")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+
+        for c in first.chain(rest) {
+            if c != ">" && !more.contains(c) {
+                more.push(c.clone());
+            }
+        }
+    }
+
+    caps.insert(
+        "documentOnTypeFormattingProvider".into(),
+        json!({ "firstTriggerCharacter": ">", "moreTriggerCharacter": more }),
+    );
 
     // The lints' rewrites are code actions, whatever the child offers.
     let kinds = json!({ "codeActionKinds": ["quickfix", "source.fixAll"] });

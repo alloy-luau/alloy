@@ -369,6 +369,12 @@ fn start_env(child: &Path, init_params: Value, env: &[(&str, &str)]) -> Session 
             || init["capabilities"]["hoverProvider"].is_object(),
         "{init}"
     );
+    // The proxy closes a markup tag on `>`, whatever the child registers.
+    assert_eq!(
+        init["capabilities"]["documentOnTypeFormattingProvider"]["firstTriggerCharacter"],
+        json!(">"),
+        "{init}"
+    );
     write(
         &mut s.stdin,
         &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
@@ -1785,6 +1791,266 @@ fn a_dot_called_method_reads_the_same_as_in_the_terminal() {
         0,
         "{diags:#?}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The completion items a newline trigger answers with.
+fn newline_items(s: &mut Session, uri: &str, line: u32, character: u32) -> Vec<Value> {
+    let r = s.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character },
+                "context": { "triggerKind": 2, "triggerCharacter": "\n" } }),
+    );
+
+    r.get("items")
+        .and_then(Value::as_array)
+        .or_else(|| r.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// `.alx`: the `>` that ends an opening tag writes the closing tag.
+const MARKUP: &str = "\
+local function Panel(props: { label: string })
+    return <Frame>
+        <Badge label={props.label} />
+    </Frame>
+end
+return Panel
+";
+
+#[test]
+fn the_closing_tag_follows_the_cursor_in_alx() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-closetag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("panel.alx");
+    std::fs::write(&file, MARKUP).unwrap();
+
+    let root = format!("file://{}", dir.display());
+    let mut s = start_with(
+        &child,
+        json!({ "processId": std::process::id(), "rootUri": root, "capabilities": {} }),
+    );
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau-jsx", "version": 1, "text": MARKUP } } }),
+    );
+
+    // `<Frame>` on line 1 ends at column 18; the cursor sits after `>`.
+    let edits = s.request(
+        "textDocument/onTypeFormatting",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 1, "character": 18 },
+                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
+    );
+    // The tag already closes below, so nothing is written twice.
+    assert_eq!(edits, json!([]), "closed already: {edits}");
+
+    // A tag with no closing tag yet: the edit inserts at the cursor, so
+    // the caret stays between the two tags.
+    let typed = "local e = <Frame>\n";
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [ { "text": typed } ] } }),
+    );
+    let edits = s.request(
+        "textDocument/onTypeFormatting",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 17 },
+                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
+    );
+    assert_eq!(
+        edits,
+        json!([{
+            "range": { "start": { "line": 0, "character": 17 }, "end": { "line": 0, "character": 17 } },
+            "newText": "</Frame>",
+        }]),
+        "open tag: {edits}"
+    );
+
+    // A self-closing tag closes itself.
+    let typed = "local e = <Frame />\n";
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": { "uri": uri, "version": 3 },
+            "contentChanges": [ { "text": typed } ] } }),
+    );
+    let edits = s.request(
+        "textDocument/onTypeFormatting",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 19 },
+                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
+    );
+    assert_eq!(edits, json!([]), "self closing: {edits}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_newline_completes_the_end_of_an_open_block() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-autoend-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("blocks.aly");
+    let opener = "function test()\n";
+    std::fs::write(&file, opener).unwrap();
+
+    let root = format!("file://{}", dir.display());
+    let mut s = start_with(
+        &child,
+        json!({ "processId": std::process::id(), "rootUri": root, "capabilities": {
+            "textDocument": { "completion": { "completionItem": { "snippetSupport": true } } } } }),
+    );
+    // The proxy owns on-type formatting, whatever the child registers.
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": opener } } }),
+    );
+
+    let end_item = |s: &mut Session, line: u32, character: u32| -> Value {
+        let items = newline_items(s, &uri, line, character);
+        let ends: Vec<Value> = items
+            .iter()
+            .filter(|i| i["label"] == json!("end"))
+            .cloned()
+            .collect();
+        assert_eq!(ends.len(), 1, "one `end` on a newline: {items:#?}");
+
+        ends[0].clone()
+    };
+
+    // Enter after `function test()` leaves the cursor on line 1.
+    let item = end_item(&mut s, 1, 0);
+    assert_eq!(item["label"], json!("end"));
+    assert_eq!(item["insertTextFormat"], json!(2), "a snippet: {item}");
+    assert_eq!(item["textEdit"]["newText"], json!("    $0\nend"), "{item}");
+    assert_eq!(
+        item["textEdit"]["range"],
+        json!({ "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 0 } }),
+        "{item}"
+    );
+
+    // Each Alloy opener answers, and the indentation follows the opener.
+    for (text, want) in [
+        ("struct Point as\n", "    $0\nend"),
+        ("impl Point as\n", "    $0\nend"),
+        ("trait Show as\n", "    $0\nend"),
+        ("enum Color as\n", "    $0\nend"),
+        ("match m with\n", "    $0\nend"),
+        ("do\n", "    $0\nend"),
+        ("if x then\n", "    $0\nend"),
+        ("for i = 1, 2 do\n", "    $0\nend"),
+        ("while x do\n", "    $0\nend"),
+        ("local t = {}\nfunction t.f()\n", "    $0\nend"),
+        ("if x then\n    while y do\n", "        $0\n    end"),
+    ] {
+        write(
+            &mut s.stdin,
+            &json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+                "textDocument": { "uri": uri, "version": 9 },
+                "contentChanges": [ { "text": text } ] } }),
+        );
+        let line = text.matches('\n').count() as u32;
+        let item = end_item(&mut s, line, 0);
+        assert_eq!(item["textEdit"]["newText"], json!(want), "{text}: {item}");
+    }
+
+    // A balanced file wants nothing.
+    let text = "function test()\nend\n";
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": { "uri": uri, "version": 10 },
+            "contentChanges": [ { "text": text } ] } }),
+    );
+    let items = newline_items(&mut s, &uri, 1, 0);
+    assert!(
+        items.iter().all(|i| i["label"] != json!("end")),
+        "balanced: {items:#?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_editor_can_turn_both_helpers_off() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-helpers-off-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let aly = dir.join("blocks.aly");
+    let alx = dir.join("panel.alx");
+    let opener = "function test()\n";
+    let tag = "local e = <Frame>\n";
+    std::fs::write(&aly, opener).unwrap();
+    std::fs::write(&alx, tag).unwrap();
+
+    let root = format!("file://{}", dir.display());
+    let mut s = start_with(
+        &child,
+        json!({ "processId": std::process::id(), "rootUri": root,
+                "initializationOptions": { "autoCloseTags": false, "autoEnd": false },
+                "capabilities": { "textDocument": { "completion": { "completionItem": { "snippetSupport": true } } } } }),
+    );
+    let aly_uri = format!("file://{}", aly.display());
+    let alx_uri = format!("file://{}", alx.display());
+
+    for (uri, language, text) in [
+        (&aly_uri, "alloy-luau", opener),
+        (&alx_uri, "alloy-luau-jsx", tag),
+    ] {
+        write(
+            &mut s.stdin,
+            &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+                "textDocument": { "uri": uri, "languageId": language, "version": 1, "text": text } } }),
+        );
+    }
+
+    let edits = s.request(
+        "textDocument/onTypeFormatting",
+        json!({ "textDocument": { "uri": alx_uri }, "position": { "line": 0, "character": 17 },
+                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
+    );
+    assert_eq!(edits, json!([]), "tags off: {edits}");
+
+    let items = newline_items(&mut s, &aly_uri, 1, 0);
+    assert!(
+        items.iter().all(|i| i["label"] != json!("end")),
+        "end off: {items:#?}"
+    );
+
+    // The editor turns them back on without a restart.
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {
+            "settings": { "autoCloseTags": true, "autoEnd": true } } }),
+    );
+    let edits = s.request(
+        "textDocument/onTypeFormatting",
+        json!({ "textDocument": { "uri": alx_uri }, "position": { "line": 0, "character": 17 },
+                "ch": ">", "options": { "tabSize": 4, "insertSpaces": true } }),
+    );
+    assert_eq!(edits[0]["newText"], json!("</Frame>"), "tags on: {edits}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

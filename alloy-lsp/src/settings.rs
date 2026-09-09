@@ -21,9 +21,43 @@ pub fn defaults() -> Value {
             "typeHintMaxLength": 4000,
         },
         "completion": {
-            "autocompleteEnd": true,
+            // The proxy answers the `end` of an open block itself, from
+            // the Alloy source: the child sees the shadow, where
+            // `struct`, `trait`, and `match` are already gone.
+            "autocompleteEnd": false,
         },
     })
+}
+
+/// The proxy's own editor options. Both features are on until the
+/// editor turns one off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Editor {
+    /// Write `</Name>` after the `>` that closes an opening tag.
+    pub auto_close_tags: bool,
+    /// Offer the `end` of an open block after Enter.
+    pub auto_end: bool,
+}
+
+impl Default for Editor {
+    fn default() -> Self {
+        Self {
+            auto_close_tags: true,
+            auto_end: true,
+        }
+    }
+}
+
+/// The proxy's own options from the editor's settings object. A key the
+/// editor leaves out keeps the value it has, so a settings change that
+/// names one feature does not reset the other.
+pub fn editor(options: &Value, current: Editor) -> Editor {
+    let flag = |name: &str, now: bool| options.get(name).and_then(Value::as_bool).unwrap_or(now);
+
+    Editor {
+        auto_close_tags: flag("autoCloseTags", current.auto_close_tags),
+        auto_end: flag("autoEnd", current.auto_end),
+    }
 }
 
 /// Deep-merges `over` into `base`: objects merge key by key, anything
@@ -88,6 +122,10 @@ pub fn from_editor(options: &Value) -> Value {
     // section from the first message and passes the flags itself.
     if let Some(o) = out.as_object_mut() {
         o.remove("fflags");
+
+        // The proxy's own options; the child knows neither name.
+        o.remove("autoCloseTags");
+        o.remove("autoEnd");
     }
 
     out
@@ -209,6 +247,25 @@ mod tests {
         let flags = child_flags(&json!({ "luauLsp": { "fflags": { "enableNewSolver": false } } }));
         assert!(flags.iter().all(|f| f.contains("Stringifier")));
         assert_eq!(child_flags(&json!({}))[0], "--flag:LuauSolverV2=true");
+    }
+
+    #[test]
+    fn the_proxys_own_options_stay_out_of_the_child_settings() {
+        let s = from_editor(&json!({ "luauLsp": {}, "autoCloseTags": false, "autoEnd": false }));
+        assert!(s.get("autoCloseTags").is_none());
+        assert!(s.get("autoEnd").is_none());
+    }
+
+    #[test]
+    fn the_editor_options_default_on_and_keep_what_they_have() {
+        let both = Editor::default();
+        assert!(both.auto_close_tags && both.auto_end);
+        let off = editor(&json!({ "autoCloseTags": false }), both);
+        assert!(!off.auto_close_tags);
+        assert!(off.auto_end);
+        // A later settings change that names neither key changes nothing.
+        assert_eq!(editor(&json!({ "inlayHints": {} }), off), off);
+        assert!(editor(&json!({ "autoCloseTags": true }), off).auto_close_tags);
     }
 
     #[test]

@@ -724,6 +724,8 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_deletable(&mut out);
     fold_iter_shapes(&mut out);
     out = fold_call_receivers(&out);
+    fold_hidden_fields(&mut out);
+    fold_empty_metatables(&mut out);
     fold_quoted_types(&mut out, known);
     fold_generic_arity(&mut out);
 
@@ -768,6 +770,113 @@ fn fold_iter_shapes(text: &mut String) {
         let name = format!("Iter<{}>", element.trim());
         text.replace_range(at..at + len, &name);
         from = at + name.len();
+    }
+}
+
+/// A table with an empty metatable, `{ @metatable {  }, { x: T } }`,
+/// prints as the table alone: the metatable adds nothing a reader
+/// can use.
+fn fold_empty_metatables(text: &mut String) {
+    // An earlier fold may have closed the two spaces of the empty half.
+    for head in ["{ @metatable {  },", "{ @metatable { },"] {
+        while let Some(i) = text.find(head) {
+            let Some(len) = group_len(&text[i..], '{', '}') else {
+                break;
+            };
+            let inner = text[i + head.len()..i + len - 1].trim().to_string();
+            text.replace_range(i..i + len, &inner);
+        }
+    }
+}
+
+/// A `__` field is a module's or a struct's own bookkeeping, hidden from
+/// completion; a hover hides it the same way. The metatable folds ran
+/// before this, so an `__index` a fold reads is gone by now.
+fn fold_hidden_fields(text: &mut String) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find("__") {
+        let at = from + i;
+        let opens_field = text[..at].ends_with("{ ")
+            || text[..at].ends_with(", ")
+            || text[..at]
+                .rfind('\n')
+                .is_some_and(|nl| text[nl + 1..at].trim().is_empty() && at > nl + 1);
+        let name_len = text[at..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .count();
+        let is_field = name_len > 2 && text[at + name_len..].starts_with(':');
+
+        if !opens_field || !is_field {
+            from = at + 2;
+
+            continue;
+        }
+
+        // The field ends at a comma or a closing brace at its own depth.
+        let mut depth = 0i32;
+        let mut end = None;
+
+        for (k, c) in text[at..].char_indices() {
+            match c {
+                '{' | '(' | '[' | '<' => depth += 1,
+                '}' | ')' | ']' => {
+                    if depth == 0 {
+                        end = Some(at + k);
+                        break;
+                    }
+
+                    depth -= 1;
+                }
+                '>' if !text[..at + k].ends_with('-') => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                ',' if depth == 0 => {
+                    end = Some(at + k + 1);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let Some(end) = end else {
+            from = at + 2;
+
+            continue;
+        };
+        // The cut takes the trailing whitespace of a comma, or the
+        // separator before a last field.
+        let mut cut_end = end;
+
+        if text[at..end].ends_with(',') {
+            while text[cut_end..].starts_with([' ', '\n']) {
+                cut_end += 1;
+            }
+        }
+
+        let mut cut_start = at;
+
+        if !text[at..end].ends_with(',') {
+            // A last field: the separator before it goes, and the
+            // layout before the closing brace stays.
+            while cut_start > 0 && text[..cut_start].ends_with([' ', '\n']) {
+                cut_start -= 1;
+            }
+
+            if text[..cut_start].ends_with(',') {
+                cut_start -= 1;
+            }
+
+            while cut_end > at && text[..cut_end].ends_with([' ', '\n']) {
+                cut_end -= 1;
+            }
+        }
+
+        text.replace_range(cut_start..cut_end, "");
+        from = cut_start;
     }
 }
 
@@ -3807,6 +3916,46 @@ mod tests {
         assert_eq!(
             fold("Expected this to be 'Array<number>'", &known),
             "Expected this to be 'number[]'"
+        );
+    }
+
+    #[test]
+    fn an_empty_metatable_leaves_a_hover() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "local a: (n: number) -> { @metatable {  },\n{\n    callback: () -> (),\n    priority: number\n} }",
+                &known
+            ),
+            "local a: (n: number) -> {\n    callback: () -> (),\n    priority: number\n}"
+        );
+    }
+
+    #[test]
+    fn a_hidden_field_leaves_a_hover() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "local fluid: { __SCHEDULER_INTERFACE: { tick: () -> () }, create: (string) -> Frame, mount: number }",
+                &known
+            ),
+            "local fluid: { create: (string) -> Frame, mount: number }"
+        );
+        assert_eq!(
+            fold(
+                "local m: {\n    __hidden: number,\n    open: string\n}",
+                &known
+            ),
+            "local m: {\n    open: string\n}"
+        );
+        assert_eq!(
+            fold(
+                "local m: { open: string, __last: (a: number) -> () }",
+                &known
+            ),
+            "local m: { open: string }"
         );
     }
 

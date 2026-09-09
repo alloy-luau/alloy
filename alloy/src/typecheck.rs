@@ -456,13 +456,18 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     let mut cmd = Command::new(&binary);
     cmd.current_dir(&mirror)
         .arg("analyze")
-        .arg("--flag:LuauSolverV2=true")
         // A printed type must arrive whole: `friendly_type_message`
         // folds an emitted table back to the name the source wrote, and
         // the default limit cuts it to `*TRUNCATED*` first. The language
         // server raises the same two flags, so both say one thing.
         .arg("--flag:LuauTypeMaximumStringifierLength=200000")
         .arg("--flag:LuauTableTypeMaximumStringifierLength=200000");
+
+    // `[flux] new_solver = false` runs the old solver, which evaluates
+    // no type function.
+    if config.flux.new_solver {
+        cmd.arg("--flag:LuauSolverV2=true");
+    }
 
     for d in &definitions {
         cmd.arg(format!("--definitions={}", d.display()));

@@ -153,6 +153,15 @@ fn main() -> ExitCode {
         workspace_root = Some(root);
     }
 
+    // `[flux] new_solver = false` in the root's alloy.toml runs the old
+    // solver, the way `--old-solver` does.
+    let new_solver = new_solver
+        && !workspace_root
+            .as_deref()
+            .and_then(|r| alloy::config::Config::find_within(r, r))
+            .and_then(|p| alloy::config::Config::load(&p).ok())
+            .is_some_and(|c| !c.flux.new_solver);
+
     let mut child_args: Vec<String> = vec!["lsp".to_string(), "--stdio".to_string()];
 
     // The editor's `fflags` section arrives in the first message.

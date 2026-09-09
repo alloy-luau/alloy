@@ -714,6 +714,11 @@ pub struct FluxConfig {
     /// The luau-lsp binary. Unset means `luau-lsp` on the PATH, then
     /// `~/.alloy/bin` and `~/.ember/bin`.
     pub luau_lsp: Option<String>,
+    /// Run the checker's new solver. `false` runs the old one, which
+    /// evaluates no type function; a package whose type functions fail
+    /// under the new solver checks clean there, as it does in an editor
+    /// that runs the old one.
+    pub new_solver: bool,
     /// `too_many_arguments` fires past this many parameters.
     pub too_many_arguments: usize,
     /// `too_many_lines` fires past this many lines in one function.
@@ -734,6 +739,7 @@ impl Default for FluxConfig {
             roblox_types: true,
             security_level: "PluginSecurity".to_string(),
             luau_lsp: None,
+            new_solver: true,
             too_many_arguments: t.too_many_arguments,
             too_many_lines: t.too_many_lines,
             max_nesting: t.max_nesting,

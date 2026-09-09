@@ -328,6 +328,12 @@ pub const TABLES: &[Table] = &[
                 "The luau-lsp binary. Unset means `luau-lsp` on the PATH, then `~/.alloy/bin` and `~/.ember/bin`.",
             ),
             key(
+                "new_solver",
+                BOOL,
+                "true",
+                "Run the checker's new solver. `false` runs the old one, which evaluates no type function, the way an editor on the old solver does.",
+            ),
+            key(
                 "too_many_arguments",
                 INT,
                 "7",

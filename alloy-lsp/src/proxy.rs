@@ -3569,8 +3569,12 @@ impl Server {
                     .unwrap_or(Path::new("."))
                     .to_path_buf();
                 let aliases = project_aliases(&dir, st.root.as_deref());
+                let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
+                let before = &doc.source[line_start..start];
+                let in_spec =
+                    before.matches('"').count() % 2 == 1 || before.matches('\'').count() % 2 == 1;
 
-                module_hover(&doc.source, &word, path.as_deref(), &aliases)
+                module_hover(&doc.source, &word, path.as_deref(), &aliases, in_spec)
             });
 
         let Some(answer) = answer else {
@@ -8065,73 +8069,41 @@ fn module_hover(
     word: &str,
     from: Option<&Path>,
     aliases: &[(String, PathBuf)],
+    in_spec: bool,
 ) -> Option<String> {
-    let line = source
-        .lines()
-        .find(|l| import_binds_module(l.trim(), word))?;
-    let spec = import_spec(line)?;
-
-    // A data file imports as the table the build writes from it; its
-    // type is the answer, not a list of keys.
-    if spec.ends_with(".json") || spec.ends_with(".toml") {
+    // On the binding the child's answer stands: the module's table, as
+    // it prints. On the path the answer is the file the path names.
+    if !in_spec {
         return None;
     }
 
+    let line = source.lines().find(|l| {
+        let l = l.trim();
+
+        l.starts_with("import ") && import_spec(l).is_some_and(|spec| spec_names(&spec, word))
+    })?;
+    let spec = import_spec(line)?;
+
     // A module the server cannot find is the child's to answer.
     let file = module_target(&spec, from, aliases)?;
-    let names: Vec<String> = imports::exports_of_file(&file, 0)
-        .into_iter()
-        // A `__` name is the module's own bookkeeping, not a name the
-        // reader writes.
-        .filter(|e| !e.is_default && !e.name.starts_with("__"))
-        .map(|e| match e.is_type {
-            true => format!("`type {}`", e.name),
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
-            false => format!("`{}`", e.name),
-        })
-        .collect();
-    // A package exports dozens of names; the line stays readable and
-    // the count says how many are left.
-    const SHOWN: usize = 24;
-    let more = names.len().saturating_sub(SHOWN);
-    let listed = names.iter().take(SHOWN).cloned().collect::<Vec<_>>();
-    let surface = match (names.is_empty(), more) {
-        (true, _) => String::new(),
-
-        (false, 0) => format!("\n\nExports: {}", listed.join(", ")),
-
-        (false, n) => format!("\n\nExports: {}, and {n} more", listed.join(", ")),
-    };
-
-    Some(format!("```alloy\n{}\n```{surface}", line.trim()))
+    Some(format!(
+        "```alloy\n{}\n```\n\n[{name}]({})",
+        line.trim(),
+        path_to_uri(&file)
+    ))
 }
 
-/// Whether an import line binds `word` to the whole module: `* as word`
-/// or the default binding. A name in braces is one export, not the
-/// module.
-fn import_binds_module(head: &str, word: &str) -> bool {
-    let Some(rest) = head.strip_prefix("import ") else {
-        return false;
-    };
-    let rest = rest.trim_start();
-
-    if let Some(after) = rest.strip_prefix("* as ") {
-        return after
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .next()
-            == Some(word);
-    }
-
-    if rest.starts_with('{') || rest.starts_with("type ") {
-        return false;
-    }
-
-    let bound: String = rest
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-
-    bound == word
+/// Whether an import path holds `word` as one of its segments, the
+/// alias included: `@pkg/fluid` names `pkg` and `fluid`.
+fn spec_names(spec: &str, word: &str) -> bool {
+    spec.trim_start_matches('@')
+        .split('/')
+        .any(|segment| segment == word || segment.trim_end_matches(".luau") == word)
 }
 
 /// The spec of an import line, whichever quote it uses.
@@ -11428,24 +11400,25 @@ mod tests {
         let src = "import fluid from \"@pkg/fluid\"\nimport { create } from \"@pkg/fluid\"\nimport * as f2 from \"./packages/fluid\"\nprint(fluid, create, f2)\n";
         let from = dir.join("main.aly");
         let aliases = vec![("pkg".to_string(), pkg.clone())];
-        let hover = module_hover(src, "fluid", Some(&from), &aliases).expect("a module hover");
+        // On the binding the child's table stands.
+        assert_eq!(
+            module_hover(src, "fluid", Some(&from), &aliases, false),
+            None
+        );
+
+        // On the path the answer names the file.
+        let hover = module_hover(src, "fluid", Some(&from), &aliases, true).expect("a path hover");
         assert!(
             hover.starts_with("```alloy\nimport fluid from \"@pkg/fluid\"\n```"),
             "{hover}"
         );
-        assert!(hover.contains("Exports: `create`, `mount`"), "{hover}");
-        // The module's own bookkeeping is no export.
-        assert!(!hover.contains("__SCHEDULER_INTERFACE"), "{hover}");
+        assert!(hover.contains("[fluid.luau](file://"), "{hover}");
+        assert!(!hover.contains("Exports"), "{hover}");
 
-        // `import * as` answers the same way, through a relative spec.
-        let namespace = module_hover(src, "f2", Some(&from), &aliases).expect("a namespace hover");
-        assert!(
-            namespace.contains("Exports: `create`, `mount`"),
-            "{namespace}"
-        );
-
-        // A name in braces is one export, not the module.
-        assert_eq!(module_hover(src, "create", Some(&from), &aliases), None);
+        // The alias segment answers the same import line.
+        let by_alias =
+            module_hover(src, "pkg", Some(&from), &aliases, true).expect("an alias hover");
+        assert!(by_alias.contains("[fluid.luau]"), "{by_alias}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

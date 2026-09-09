@@ -2338,3 +2338,58 @@ fn a_global_added_on_disk_reaches_the_open_files() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A big project must not hold the editor. The workspace scan compiles
+/// every file; on the request thread it used to keep the first
+/// `didOpen`, and every request after it, until the whole pass ended.
+#[test]
+fn a_hover_answers_while_a_large_workspace_opens() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-large-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n",
+    )
+    .unwrap();
+
+    for i in 0..500 {
+        std::fs::write(
+            dir.join(format!("src/part{i}.aly")),
+            format!(
+                "struct Part{i} as\n    value: number\nend\n\n\
+                 export function take{i}(p: Part{i}): number\n    return p.value\nend\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let src = "struct Main as\n    total: number\nend\n\nlocal m = new Main { total = 1 }\nprint(m.total)\n";
+    let file = dir.join("src/main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // The scan of the other 500 files runs beside this hover.
+    let asked = Instant::now();
+    let hover = s.hover(&uri, 5, 8);
+    let took = asked.elapsed();
+    assert!(hover.contains("total"), "{hover}");
+    assert!(
+        took < Duration::from_secs(2),
+        "hover took {took:?}: {hover}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

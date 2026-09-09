@@ -85,6 +85,12 @@ pub fn trace(text: &str) {
     log(Level::Trace, text);
 }
 
+/// Logs a phase and the seconds it took. The workspace scan runs beside
+/// the requests, so its cost only shows in a line that measures it.
+pub fn took(label: &str, since: std::time::Instant) {
+    info(&format!("{label} in {:.2}s", since.elapsed().as_secs_f64()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

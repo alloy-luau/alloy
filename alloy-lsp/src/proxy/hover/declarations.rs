@@ -69,6 +69,9 @@ impl Server {
                         .values()
                         .flat_map(|d| d.decls.iter())
                         .find(|d| d.name == name)
+                        // The modules this file imports, for the moment
+                        // the workspace pass has not opened them yet.
+                        .or_else(|| doc.import_decls.iter().find(|d| d.name == name))
                 })?
             })
         };

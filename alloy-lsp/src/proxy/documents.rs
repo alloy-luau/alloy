@@ -312,34 +312,66 @@ impl Server {
             .write_mirror(&module_path, &text);
     }
 
-    /// Opens or replaces a document and its shadow.
-    pub(crate) fn open_doc(&self, uri: &str, text: String, version: i64, by_editor: bool) {
-        let (mut options, jsx, ingots, had_globals) = {
+    /// The compile options of one document: the project's, and the
+    /// import maps the file's own text asks for. A value import of a
+    /// struct or an enum binds its type too, and the maps say which.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn compile_options(
+        &self,
+        uri: &str,
+        text: &str,
+    ) -> (
+        EmitOptions,
+        alloy::luaux::Config,
+        Option<std::sync::Arc<alloy::ingot::Ingots>>,
+    ) {
+        let (mut options, jsx, ingots) = {
             let st = self.state.lock().expect("state");
             let (o, j) = st.options_for(uri);
-            let had = st.docs.get(uri).map(|d| global_names(&d.globals));
 
-            (o, j, st.ingots.clone(), had.unwrap_or_default())
+            (o, j, st.ingots.clone())
         };
 
-        // A value import of a struct or an enum binds its type too.
         if let Some(path) = uri_to_path(uri) {
-            options.import_types = alloy::modules::import_types_for_file(&path, &text);
-            options.import_enums = alloy::modules::import_enums_for_file(&path, &text);
-            options.import_privates = alloy::modules::import_privates_for_file(&path, &text);
+            options.import_types = alloy::modules::import_types_for_file(&path, text);
+            options.import_enums = alloy::modules::import_enums_for_file(&path, text);
+            options.import_privates = alloy::modules::import_privates_for_file(&path, text);
             options.import_result_asyncs =
-                alloy::modules::import_result_asyncs_for_file(&path, &text);
+                alloy::modules::import_result_asyncs_for_file(&path, text);
             options.import_trait_defaults =
-                alloy::modules::import_trait_defaults_for_file(&path, &text);
-            options.plain_modules = alloy::modules::plain_modules_for_file(&path, &text);
+                alloy::modules::import_trait_defaults_for_file(&path, text);
+            options.plain_modules = alloy::modules::plain_modules_for_file(&path, text);
         }
 
+        (options, jsx, ingots)
+    }
+
+    /// Opens or replaces a document and its shadow.
+    pub(crate) fn open_doc(&self, uri: &str, text: String, version: i64, by_editor: bool) {
+        let had_globals = {
+            let st = self.state.lock().expect("state");
+
+            st.docs
+                .get(uri)
+                .map(|d| global_names(&d.globals))
+                .unwrap_or_default()
+        };
+        let (options, jsx, ingots) = self.compile_options(uri, &text);
         let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
         let source = doc.source.clone();
         let fresh_globals = global_names(&doc.globals);
         let (shadow, existed) = {
             let mut st = self.state.lock().expect("state");
             let shadow = st.child_uri(uri);
+
+            // The editor's buffer wins over the disk. The workspace
+            // pass reads a file the editor opened while the pass ran,
+            // and its text is one version behind: the child takes no
+            // change that goes backwards, so it would keep the text it
+            // has and never hear the next edit.
+            if !by_editor && st.editor_open.contains(uri) {
+                return;
+            }
 
             if by_editor {
                 st.editor_open.insert(uri.to_string());
@@ -411,39 +443,61 @@ impl Server {
         };
 
         for uri in uris {
-            let (options, jsx, ingots) = {
-                let st = self.state.lock().expect("state");
-                let (o, j) = st.options_for(&uri);
+            self.wait_for_requests();
+            self.resend_doc(&uri);
+        }
+    }
 
-                (o, j, st.ingots.clone())
-            };
-            let message = {
-                let mut st = self.state.lock().expect("state");
-                let shadow = st.child_uri(&uri);
-                let Some(doc) = st.docs.get_mut(&uri) else {
-                    continue;
-                };
-                doc.compile(&options, &jsx, ingots.as_deref());
-                let text = doc.shadow.clone();
-                let version = doc.version;
+    /// Compiles one document again and gives the child the fresh
+    /// shadow. The compile runs outside the state lock: it is the slow
+    /// part, and a hover waits for the same lock.
+    ///
+    /// The child keeps what it read of a module until a document that
+    /// requires it changes, so a stale shadow sent again teaches it
+    /// nothing. The compile is what makes the text new.
+    pub(crate) fn resend_doc(&self, uri: &str) {
+        let Some((source, version)) = ({
+            let st = self.state.lock().expect("state");
 
-                if let Some(path) = uri_to_path(&uri) {
-                    st.write_mirror(&path, &text);
-                }
+            st.docs.get(uri).map(|d| (d.source.clone(), d.version))
+        }) else {
+            return;
+        };
+        let (options, jsx, ingots) = self.compile_options(uri, &source);
+        let fresh = Doc::new(source.clone(), version, &options, &jsx, ingots.as_deref());
+        let message = {
+            let mut st = self.state.lock().expect("state");
+            let shadow = st.child_uri(uri);
 
-                json!({
-                    "jsonrpc": "2.0",
-                    "method": "textDocument/didChange",
-                    "params": {
-                        "textDocument": { "uri": shadow, "version": version },
-                        "contentChanges": [{ "text": text }]
-                    }
-                })
-            };
-
-            if child_sees(&uri) {
-                self.to_child(&message);
+            // The editor typed while this compile ran: its own
+            // recompile is the one to keep.
+            if st
+                .docs
+                .get(uri)
+                .is_some_and(|d| d.source != source || d.version != version)
+            {
+                return;
             }
+
+            let text = fresh.shadow.clone();
+            st.docs.insert(uri.to_string(), fresh);
+
+            if let Some(path) = uri_to_path(uri) {
+                st.write_mirror(&path, &text);
+            }
+
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": { "uri": shadow, "version": version },
+                    "contentChanges": [{ "text": text }]
+                }
+            })
+        };
+
+        if child_sees(uri) {
+            self.to_child(&message);
         }
     }
 
@@ -551,11 +605,27 @@ impl Server {
         }));
     }
 
+    /// The whole pass: the mirror the child reads, then a shadow for
+    /// every source. The file poll runs it again when the project
+    /// changes on disk.
     pub(crate) fn open_workspace(&self) {
+        let files = self.open_mirror();
+        self.open_shadows(files);
+    }
+
+    /// The mirror the child reads: its Luau configuration, a copy of
+    /// every plain file, the project's sourcemap, and the runtime. The
+    /// pass compiles nothing, so it takes milliseconds, and the child
+    /// must hold all of it before it sees the first document: it
+    /// resolves a require against the files that are there. Returns
+    /// the Alloy sources the walk found, for the shadow pass.
+    pub(crate) fn open_mirror(&self) -> Vec<PathBuf> {
+        let started = std::time::Instant::now();
+        self.state.lock().expect("state").forget_disk();
         self.load_ingots();
         let root = self.state.lock().expect("state").root.clone();
         let Some(root) = root else {
-            return;
+            return Vec::new();
         };
 
         // One pass at a time: the file poll and the editor both start
@@ -589,6 +659,8 @@ impl Server {
 
         files.sort();
         files.dedup();
+        log::took(&format!("scan: walked {} sources", files.len()), started);
+        let mirrored = std::time::Instant::now();
 
         // Plain files copy into the mirror, so requires to them resolve.
         // The root's Luau configuration sets strict mode when it sets no
@@ -644,34 +716,6 @@ impl Server {
             }
         }
 
-        let mut opened = false;
-
-        for path in files {
-            let uri = path_to_uri(&path);
-            let already = self.state.lock().expect("state").docs.contains_key(&uri);
-
-            if already {
-                continue;
-            }
-
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                self.open_doc(&uri, text, 0, false);
-                opened = true;
-            }
-        }
-
-        // The globals of the workspace are known once every file is
-        // open, so every file that names one is compiled again here.
-        let has_globals = {
-            let st = self.state.lock().expect("state");
-
-            st.docs.values().any(|d| !d.globals.is_empty())
-        };
-
-        if opened && has_globals {
-            self.refresh_globals("");
-        }
-
         let runtime = {
             let mut st = self.state.lock().expect("state");
             // The runtime goes where the build puts it, the place the
@@ -700,7 +744,53 @@ impl Server {
                 }
             }
         }));
-        log::info("workspace shadows opened");
+        log::took("scan: mirrored the plain files", mirrored);
+        log::took("workspace mirror written", started);
+
+        files
+    }
+
+    /// A shadow for every source of the project. The pass compiles each
+    /// file, so it runs off the request thread.
+    pub(crate) fn open_shadows(&self, files: Vec<PathBuf>) {
+        let shadows = std::time::Instant::now();
+
+        // One pass at a time, the way `open_mirror` holds it.
+        let _pass = self.scan.lock().unwrap_or_else(|e| e.into_inner());
+        let mut opened = false;
+
+        for path in files {
+            self.wait_for_requests();
+            let uri = path_to_uri(&path);
+            let already = self.state.lock().expect("state").docs.contains_key(&uri);
+
+            if already {
+                continue;
+            }
+
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                self.open_doc(&uri, text, 0, false);
+                opened = true;
+            }
+        }
+
+        log::took("scan: opened the shadows", shadows);
+
+        // The globals of the workspace are known once every file is
+        // open, so every file that names one is compiled again here.
+        let has_globals = {
+            let st = self.state.lock().expect("state");
+
+            st.docs.values().any(|d| !d.globals.is_empty())
+        };
+
+        if opened && has_globals {
+            let globals = std::time::Instant::now();
+            self.refresh_globals("");
+            log::took("scan: compiled the globals again", globals);
+        }
+
+        log::took("workspace shadows opened", shadows);
     }
 
     /// Polls the project's folders and re-reads what changed. Not every
@@ -725,11 +815,19 @@ impl Server {
             }
 
             let now = tree_stamp(&roots);
+            // A pass is already running: it reads the same tree, so
+            // this tick has nothing to add.
+            let idle = self.scan.try_lock().is_ok();
+            log::trace(&format!(
+                "poll: {} files, changed {}, idle {idle}",
+                now.0,
+                stamp != Some(now)
+            ));
 
             // The first pass rescans too: a package install between the
             // startup pass and this one would otherwise be the baseline and
             // never read. A rescan that finds nothing new costs one walk.
-            if stamp != Some(now) {
+            if stamp != Some(now) && idle {
                 stamp = Some(now);
                 self.rescan_workspace();
             }
@@ -775,6 +873,7 @@ impl Server {
     /// that each plain module changed, and every document that imports
     /// one is sent again, or its import keeps the type it had.
     pub(crate) fn rescan_workspace(&self) {
+        self.state.lock().expect("state").forget_disk();
         let root = self.state.lock().expect("state").root.clone();
         let Some(root) = root else {
             return;
@@ -855,43 +954,28 @@ impl Server {
     /// it. A new module alone leaves the import as it was typed.
     pub(crate) fn refresh_importers(&self, changed: &[PathBuf]) {
         let changed: Vec<PathBuf> = changed.iter().map(|p| normalize(p)).collect();
-        let messages: Vec<(String, Value)> = {
+        let importers: Vec<String> = {
             let st = self.state.lock().expect("state");
 
             st.docs
                 .iter()
-                .filter_map(|(uri, doc)| {
-                    let path = uri_to_path(uri)?;
+                .filter(|(uri, doc)| {
+                    let Some(path) = uri_to_path(uri) else {
+                        return false;
+                    };
 
-                    if !child_sees(uri) {
-                        return None;
-                    }
-
-                    let names = alloy::modules::import_targets_for_file(&path, &doc.source)
-                        .iter()
-                        .any(|t| changed.contains(&normalize(t)));
-
-                    if !names {
-                        return None;
-                    }
-
-                    Some((
-                        uri.clone(),
-                        json!({
-                            "jsonrpc": "2.0",
-                            "method": "textDocument/didChange",
-                            "params": {
-                                "textDocument": { "uri": st.child_uri(uri), "version": doc.version },
-                                "contentChanges": [{ "text": doc.shadow }]
-                            }
-                        }),
-                    ))
+                    child_sees(uri)
+                        && alloy::modules::import_targets_for_file(&path, &doc.source)
+                            .iter()
+                            .any(|t| changed.contains(&normalize(t)))
                 })
+                .map(|(uri, _)| uri.clone())
                 .collect()
         };
 
-        for (uri, message) in messages {
-            self.to_child(&message);
+        for uri in importers {
+            self.wait_for_requests();
+            self.resend_doc(&uri);
             self.publish(&uri);
         }
     }

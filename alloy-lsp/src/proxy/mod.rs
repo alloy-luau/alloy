@@ -69,7 +69,7 @@ use typing::{append_initializer, end_follows};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use alloy::EmitOptions;
 use alloy::config::Config;

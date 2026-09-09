@@ -13,6 +13,9 @@ pub(crate) struct Pending {
     pub(crate) range: Option<((u32, u32), (u32, u32))>,
 }
 
+/// An `alloy.toml` and the path it was read from.
+pub(crate) type Project = std::sync::Arc<(PathBuf, Config)>;
+
 /// A question the server asked the editor.
 pub(crate) enum Asked {
     /// Apply this workspace edit if the answer is the update action.
@@ -61,9 +64,64 @@ pub(crate) struct State {
     /// Whether the editor takes a watcher registration. Without one the
     /// server polls the project's folders itself.
     pub(crate) watch_registration: bool,
+    /// The `alloy.toml` a folder answers to, remembered. Every compile
+    /// asks for it, and a pass over the workspace compiles every file,
+    /// so a fresh read for each pair costs the pass minutes.
+    pub(crate) configs: std::cell::RefCell<HashMap<PathBuf, Option<Project>>>,
+    /// The project tree of a base folder, remembered for the same
+    /// reason: `Tree::load` walks the whole project from disk.
+    pub(crate) trees: std::cell::RefCell<HashMap<PathBuf, Arc<alloy::project::Tree>>>,
+    /// The roots whose `.luaurc` the mirror already holds.
+    pub(crate) luau_configs: std::cell::RefCell<HashSet<PathBuf>>,
 }
 
 impl State {
+    /// Drops what the state remembers of the disk. A pass over the
+    /// workspace calls it first, so a changed `alloy.toml` or a new
+    /// file reaches the next compile.
+    pub(crate) fn forget_disk(&self) {
+        self.configs.borrow_mut().clear();
+        self.trees.borrow_mut().clear();
+        self.luau_configs.borrow_mut().clear();
+    }
+
+    /// The `alloy.toml` over a folder, with its path. The climb stops
+    /// at the workspace root: a sibling project under the same parent
+    /// must not lend its configuration.
+    pub(crate) fn config_at(&self, dir: &Path) -> Option<Project> {
+        if let Some(hit) = self.configs.borrow().get(dir) {
+            return hit.clone();
+        }
+
+        let found = match &self.root {
+            Some(root) => Config::find_within(dir, root),
+
+            None => Config::find(dir),
+        };
+        let loaded = found
+            .and_then(|p| Config::load(&p).ok().map(|c| (p, c)))
+            .map(Arc::new);
+        self.configs
+            .borrow_mut()
+            .insert(dir.to_path_buf(), loaded.clone());
+
+        loaded
+    }
+
+    /// The project tree under a base folder.
+    pub(crate) fn tree_at(&self, base: &Path, config: &Config) -> Arc<alloy::project::Tree> {
+        if let Some(hit) = self.trees.borrow().get(base) {
+            return hit.clone();
+        }
+
+        let tree = Arc::new(alloy::project::Tree::load(base, config));
+        self.trees
+            .borrow_mut()
+            .insert(base.to_path_buf(), tree.clone());
+
+        tree
+    }
+
     /// The structs and enums of every open document, for the folds.
     pub(crate) fn known_shapes(&self) -> crate::shapes::Known {
         self.known_shapes_at(None)
@@ -130,6 +188,59 @@ impl State {
         out
     }
 
+    /// What every file of the project reaches without an import: the
+    /// global macros, the global attributes, and the names a `.d.aly`
+    /// declares that a `global` also takes. Each document holds its
+    /// own, so the set is a walk of the open documents, not a parse of
+    /// every source again.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn project_declarations(
+        &self,
+        globals: &[alloy::globals::Global],
+    ) -> (
+        Vec<alloy::desugar::MacroSource>,
+        Vec<(String, alloy::desugar::AttrDecl)>,
+        Vec<(String, String)>,
+    ) {
+        let mut macros = Vec::new();
+        let mut attributes = Vec::new();
+        let mut clashes = Vec::new();
+
+        for (uri, doc) in &self.docs {
+            macros.extend(doc.macros.iter().cloned());
+            attributes.extend(doc.attributes.iter().cloned());
+
+            if doc.ambient.is_empty() {
+                continue;
+            }
+
+            let Some(rel) = self.project_rel(uri) else {
+                continue;
+            };
+            let file = rel.to_string_lossy().replace('\\', "/");
+
+            for name in &doc.ambient {
+                if globals.iter().any(|g| &g.name == name) {
+                    clashes.push((name.clone(), file.clone()));
+                }
+            }
+        }
+
+        (macros, attributes, clashes)
+    }
+
+    /// Writes the mirror's Luau configuration for a project root once.
+    /// Building the text reads the aliases from disk, and every compile
+    /// asks for it, so the write waits for `forget_disk`.
+    pub(crate) fn ensure_luau_config(&self, root: &Path, config: &Config) {
+        if self.luau_configs.borrow().contains(root) {
+            return;
+        }
+
+        self.write_mirror(&root.join(".luaurc"), &mirror_luau_text(root, Some(config)));
+        self.luau_configs.borrow_mut().insert(root.to_path_buf());
+    }
+
     /// The side a document sees: its name, then `--@alloy-side`, then
     /// the place the project's tree gives it.
     pub(crate) fn side_of(&self, uri: &str, source: &str) -> Option<alloy::directives::Side> {
@@ -141,12 +252,11 @@ impl State {
             return Some(side);
         }
 
-        let root = self.root.as_deref()?;
         let path = uri_to_path(uri)?;
-        let config_path = Config::find_within(path.parent()?, root)?;
-        let config = Config::load(&config_path).ok()?;
+        let found = self.config_at(path.parent()?)?;
+        let (config_path, config) = (&found.0, &found.1);
         let base = config_path.parent()?.to_path_buf();
-        let tree = alloy::project::Tree::load(&base, &config);
+        let tree = self.tree_at(&base, config);
         let rel = self.project_rel(uri)?;
         let from_root = config.build.input.join(&rel);
 
@@ -168,13 +278,9 @@ impl State {
         let root = self.root.as_deref()?;
         // With no alloy.toml the workspace root is the input; a file
         // outside it keeps its own path.
-        let found = path.parent().and_then(|d| Config::find_within(d, root));
+        let found = path.parent().and_then(|d| self.config_at(d));
         let base = match found {
-            Some(config) => {
-                let input = Config::load(&config).ok()?.build.input;
-
-                config.parent()?.join(input)
-            }
+            Some(config) => config.0.parent()?.join(&config.1.build.input),
 
             None => root.to_path_buf(),
         };
@@ -191,9 +297,8 @@ impl State {
     pub(crate) fn lint_config(&self) -> alloy::config::LintConfig {
         self.root
             .as_deref()
-            .and_then(|r| alloy::config::Config::find_within(r, r))
-            .and_then(|p| alloy::config::Config::load(&p).ok())
-            .map(|c| c.lint)
+            .and_then(|r| self.config_at(r))
+            .map(|c| c.1.lint.clone())
             .unwrap_or_default()
     }
 
@@ -204,27 +309,23 @@ impl State {
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         // The climb stops at the workspace root: a sibling project
         // under the same parent must not lend its configuration.
-        let found = match &self.root {
-            Some(root) => Config::find_within(&dir, root),
-
-            None => Config::find(&dir),
-        };
-        let config = found.and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
+        let config = self.config_at(&dir);
         let file_name = path.to_string_lossy().into_owned();
         let definitions = file_name.ends_with(".d.aly");
         let config_dir = config
             .as_ref()
-            .and_then(|(p, _)| p.parent().map(Path::to_path_buf))
+            .and_then(|c| c.0.parent().map(Path::to_path_buf))
             .or_else(|| self.root.clone())
             .unwrap_or_else(|| dir.clone());
         let jsx = config
             .as_ref()
-            .map(|(_, c)| c.markup(&config_dir))
+            .map(|c| c.1.markup(&config_dir))
             .unwrap_or_else(|| alloy::luaux::Config::load(&config_dir).map_err(|e| e.message))
             .unwrap_or_default();
 
         let options = match config {
-            Some((config_path, config)) => {
+            Some(found) => {
+                let (config_path, config) = (&found.0, &found.1);
                 let root = normalize(config_path.parent().unwrap_or(Path::new(".")));
                 // The shadow requires the runtime by an alias, and the
                 // mirror's Luau configuration names the place the runtime
@@ -234,24 +335,13 @@ impl State {
                 // project that has built one. The ship artifact still
                 // writes the instance path.
                 self.ensure_runtime(&normalize(&root.join(&config.build.out)));
-                self.write_mirror(
-                    &root.join(".luaurc"),
-                    &mirror_luau_text(&root, Some(&config)),
-                );
+                self.ensure_luau_config(&root, config);
 
                 let globals = self.project_globals();
                 let rel = self.project_rel(uri).unwrap_or_default();
                 let script = alloy::modules::is_script(&rel.to_string_lossy());
-                let sources: Vec<(PathBuf, String)> = self
-                    .docs
-                    .iter()
-                    .filter_map(|(u, d)| Some((self.project_rel(u)?, d.source.clone())))
-                    .collect();
-                let ambient_clashes = alloy::globals::ambient_names(&sources)
-                    .into_iter()
-                    .filter(|(n, _)| globals.iter().any(|g| &g.name == n))
-                    .map(|(n, f)| (n, f.to_string_lossy().replace('\\', "/")))
-                    .collect();
+                let (global_macros, global_attributes, ambient_clashes) =
+                    self.project_declarations(&globals);
 
                 EmitOptions {
                     wait_timeout: config.emit.wait_timeout,
@@ -260,8 +350,8 @@ impl State {
                     definitions,
                     erase_type_imports: config.emit.erase_type_imports,
                     extensions: self.extensions.clone(),
-                    global_macros: alloy::globals::macro_sources(&sources),
-                    global_attributes: alloy::globals::attribute_decls(&sources),
+                    global_macros,
+                    global_attributes,
                     globals: alloy::globals::refs_for(&globals, &rel, &HashMap::new()),
                     hoist_globals: script,
                     side: self.side_of(

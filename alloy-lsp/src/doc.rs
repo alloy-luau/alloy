@@ -50,6 +50,10 @@ pub struct Doc {
     /// The interfaces of the modules the file imports. A file names an
     /// interface it took from another module.
     pub import_interfaces: Vec<crate::shapes::Interface>,
+    /// The declarations of the modules the file imports. A hover on an
+    /// imported name reads them, so it answers before the workspace
+    /// pass has opened the module.
+    pub import_decls: Vec<alloy::declarations::Declaration>,
     /// The text of those modules, for a declaration the file uses but
     /// does not hold: a `remote`, an exported `const`.
     pub import_sources: Vec<String>,
@@ -65,6 +69,17 @@ pub struct Doc {
     /// The `global` declarations of this file. The workspace's set is
     /// every document's, and it says what each file reaches for free.
     pub globals: Vec<alloy::globals::Global>,
+    /// The `global macro` declarations of this file. Every compile in
+    /// the project takes the set of every open document. The set is one
+    /// clone of these lists; reading it from the sources again would
+    /// parse the whole workspace once per file.
+    pub macros: Vec<alloy::desugar::MacroSource>,
+    /// The `global attribute` declarations of this file, kept for the
+    /// same reason as `macros`.
+    pub attributes: Vec<(String, alloy::desugar::AttrDecl)>,
+    /// The names a `.d.aly` declares. A `global` of the same name is a
+    /// clash the compile must hear about.
+    pub ambient: Vec<String>,
 }
 
 /// The source with the operators Luau has no reading for blanked, each
@@ -154,6 +169,7 @@ impl Doc {
             bindings: Vec::new(),
             shapes: Vec::new(),
             import_shapes: Vec::new(),
+            import_decls: Vec::new(),
             interfaces: Vec::new(),
             import_interfaces: Vec::new(),
             import_sources: Vec::new(),
@@ -161,6 +177,9 @@ impl Doc {
             is_alx: options.file_name.ends_with(".alx"),
             repair: None,
             globals: Vec::new(),
+            macros: Vec::new(),
+            attributes: Vec::new(),
+            ambient: Vec::new(),
         };
         doc.compile(options, jsx, ingots);
 
@@ -181,6 +200,14 @@ impl Doc {
         self.globals =
             alloy::globals::declared(&alloy::globals::index_text(path, &self.source), path);
         self.decls = alloy::declarations::summaries(&self.source, options.definitions);
+        let own = [(path.to_path_buf(), self.source.clone())];
+        self.macros = alloy::globals::macro_sources(&own);
+        self.attributes = alloy::globals::attribute_decls(&own);
+        self.ambient = match options.definitions {
+            true => self.decls.iter().map(|d| d.name.clone()).collect(),
+
+            false => Vec::new(),
+        };
         self.namespaces = alloy::declarations::namespace_names(&self.source);
         self.namespace_ranges = alloy::declarations::namespace_ranges(&self.source);
         self.bindings = alloy::declarations::bindings(&self.source);
@@ -198,6 +225,11 @@ impl Doc {
             .import_sources
             .iter()
             .flat_map(|text| crate::shapes::interfaces(text))
+            .collect();
+        self.import_decls = self
+            .import_sources
+            .iter()
+            .flat_map(|text| alloy::declarations::summaries(text, false))
             .collect();
         // `file_name` is the real path, which is what the ingots see.
         let compiled =

@@ -8,6 +8,10 @@ pub struct Server {
     /// runs on its own thread, and two passes at once would open a
     /// document twice.
     pub(crate) scan: Mutex<()>,
+    /// How many editor messages the request thread has in hand. A pass
+    /// over the workspace waits while one is: the pass takes the state
+    /// lock for every file, and a hover wants the same lock.
+    pub(crate) busy: std::sync::atomic::AtomicUsize,
 }
 
 impl Server {
@@ -27,10 +31,31 @@ impl Server {
             child_in: Mutex::new(child_in),
             client_out: Mutex::new(client_out),
             scan: Mutex::new(()),
+            busy: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     pub(crate) fn to_child(&self, message: &Value) {
+        // The document and its version say which shadow the child took,
+        // and the child keeps no answer for a change it did not take.
+        if log::level() >= log::Level::Trace {
+            log::trace(&format!(
+                "child <- {} {} v{} id={}",
+                message
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("(response)"),
+                message
+                    .pointer("/params/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                message
+                    .pointer("/params/textDocument/version")
+                    .unwrap_or(&Value::Null),
+                message.get("id").map(id_key).unwrap_or_default()
+            ));
+        }
+
         let mut w = self.child_in.lock().expect("child stdin");
 
         if let Err(e) = crate::rpc::write_message(&mut *w, message) {
@@ -51,7 +76,30 @@ impl Server {
     }
 
     /// Handles one message from the editor. Returns false on `exit`.
-    pub fn handle_client(&self, mut message: Value) -> bool {
+    pub fn handle_client(self: &Arc<Self>, message: Value) -> bool {
+        use std::sync::atomic::Ordering;
+
+        self.busy.fetch_add(1, Ordering::Relaxed);
+        let more = self.dispatch_client(message);
+        self.busy.fetch_sub(1, Ordering::Relaxed);
+
+        more
+    }
+
+    /// Waits while the request thread holds a message, a tenth of a
+    /// second at most. A pass over the workspace calls it between
+    /// files, so an editor request never waits behind the whole pass.
+    pub(crate) fn wait_for_requests(&self) {
+        use std::sync::atomic::Ordering;
+
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
+
+        while self.busy.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn dispatch_client(self: &Arc<Self>, mut message: Value) -> bool {
         let method = message
             .get("method")
             .and_then(Value::as_str)
@@ -155,8 +203,20 @@ impl Server {
 
             Some("initialized") => {
                 self.to_child(&message);
-                self.open_workspace();
                 self.watch_project_files();
+
+                // The mirror comes first, and on this thread: the child
+                // resolves a require against the files that stand in
+                // it, so the whole mirror must be there before the
+                // first document reaches it. It compiles nothing.
+                let files = self.open_mirror();
+
+                // The shadows compile every file of the project. On
+                // this thread they would hold the editor's first
+                // `didOpen`, and every request after it, until the
+                // last file, so they run on their own thread.
+                let scanner = Arc::clone(self);
+                std::thread::spawn(move || scanner.open_shadows(files));
             }
 
             Some("exit") => {
@@ -294,6 +354,16 @@ impl Server {
                         .unwrap_or_default()
                         .to_string();
                     let kind = change.get("type").and_then(Value::as_i64).unwrap_or(2);
+
+                    // The configuration decides how every file
+                    // compiles, so the state forgets what it read of
+                    // the disk and the next compile reads it again.
+                    if uri.ends_with("/alloy.toml")
+                        || uri.ends_with("/.luaurc")
+                        || uri.ends_with("/luaux.toml")
+                    {
+                        self.state.lock().expect("state").forget_disk();
+                    }
 
                     if uri.ends_with("/alloy.toml") {
                         self.load_ingots();

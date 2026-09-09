@@ -224,9 +224,13 @@ pub(crate) fn container_class(name: &str) -> &str {
 
 /// The Roblox class of a script file.
 pub(crate) fn script_class(file: &str) -> &'static str {
-    if file.contains(".server.") {
+    // The side is the last word of the stem. `main.server.globals.luau`
+    // is a module the build wrote beside a script, not a script.
+    let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+
+    if stem.ends_with(".server") {
         "Script"
-    } else if file.contains(".client.") {
+    } else if stem.ends_with(".client") {
         "LocalScript"
     } else {
         "ModuleScript"

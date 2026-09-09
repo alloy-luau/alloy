@@ -229,6 +229,15 @@ impl<'s> Desugar<'s> {
     }
 
     pub(crate) fn stmt(&mut self, stmt: &Stmt) {
+        // A hoisted global lives in the module beside the script; its
+        // lines here go blank, and the injected require binds the name.
+        if self.options.hoist_globals && crate::globals::is_global(stmt) {
+            let span = stmt.span();
+            self.blank_lines(self.byte_start(span), self.byte_end(span));
+
+            return;
+        }
+
         // Declarations come first so a later statement sees them.
         match stmt {
             Stmt::Local(l) => {

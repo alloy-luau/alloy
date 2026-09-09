@@ -141,6 +141,21 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
     shapes
 }
 
+/// The module a script's globals are hoisted into: `main.server.aly`
+/// gives `main.server.globals.aly`, beside it.
+fn hoist_path(rel: &Path) -> PathBuf {
+    let name = rel.file_name().map(|n| n.to_string_lossy().into_owned());
+    let Some(name) = name else {
+        return rel.to_path_buf();
+    };
+    let stem = name
+        .strip_suffix(".aly")
+        .or_else(|| name.strip_suffix(".alx"))
+        .unwrap_or(&name);
+
+    rel.with_file_name(format!("{stem}.globals.aly"))
+}
+
 /// A path as a message writes it: forward slashes on every platform.
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
@@ -273,7 +288,35 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         .filter(|(rel, _)| !exclude.is_match(rel))
         .cloned()
         .collect();
-    let project_globals = crate::globals::index(&included);
+    // A script cannot be required, so its globals move into a module
+    // beside it. The script requires that module the way every other
+    // file does, and the declarations leave the script blank.
+    let hoists: Vec<(PathBuf, PathBuf)> = included
+        .iter()
+        .filter(|(rel, text)| {
+            crate::modules::is_script(&rel.to_string_lossy())
+                && !crate::globals::declared(text, rel).is_empty()
+        })
+        .map(|(rel, _)| (rel.clone(), hoist_path(rel)))
+        .collect();
+    let hoist_of = |rel: &Path| {
+        hoists
+            .iter()
+            .find(|(script, _)| script == rel)
+            .map(|(_, module)| module.clone())
+    };
+    let mut project_globals = crate::globals::index(&included);
+
+    for g in &mut project_globals {
+        if let Some(module) = hoist_of(&g.file) {
+            g.file = module;
+        }
+    }
+
+    // A macro expands and an attribute is read where it is written, so
+    // the declaration travels to every file instead of a require.
+    let global_macros = crate::globals::macro_sources(&included);
+    let global_attributes = crate::globals::attribute_decls(&included);
     // A `.d.aly` declares a name with no module behind it. A `global`
     // by that name gives the name two declarations and no way to pick.
     let ambient_clashes: Vec<(String, String)> = crate::globals::ambient_names(&included)
@@ -385,6 +428,9 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             std_require,
             ship_std_require,
             globals: crate::globals::refs_for(&project_globals, &rel, &ship_globals),
+            global_macros: global_macros.clone(),
+            global_attributes: global_attributes.clone(),
+            hoist_globals: hoist_of(&rel).is_some(),
             in_project: true,
             ambient_clashes: ambient_clashes.clone(),
             import_types: crate::modules::import_types(&source, &path, &module_aliases),
@@ -548,6 +594,89 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
         for d in data_diagnostics {
             report.diagnostics.push((rel.clone(), d));
+        }
+
+        // The module a script's globals moved into. Its text is the
+        // script with the rest blanked, so every offset still points at
+        // the line the author wrote.
+        if let Some(module_rel) = hoist_of(&rel) {
+            for (name, at) in crate::globals::script_leaks(&source) {
+                report.diagnostics.push((
+                    rel.clone(),
+                    Diagnostic {
+                        start: at,
+                        end: at + name.len() as u32,
+                        message: format!(
+                            "a global in a script may use only imports, other globals, and literals; move `{name}` into a module"
+                        ),
+                    },
+                ));
+            }
+
+            let module_out = output_for(&module_rel).unwrap_or_else(|| module_rel.clone());
+            expected.insert(out.join(&module_out));
+            let module_options = EmitOptions {
+                file_name: display_path(&module_rel),
+                hoist_globals: false,
+                globals: crate::globals::refs_for(&project_globals, &module_rel, &ship_globals),
+                ..options.clone()
+            };
+            let module_src = crate::globals::hoisted_module(&source);
+            let module_path = path.with_file_name(
+                module_rel
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default(),
+            );
+
+            match crate::compile_file(
+                &module_path.to_string_lossy(),
+                &module_src,
+                &module_options,
+                jsx,
+                Some(&ingots),
+            ) {
+                Ok(module) => {
+                    for d in &module.diagnostics {
+                        report.diagnostics.push((rel.clone(), d.clone()));
+                    }
+
+                    if keep {
+                        report.checks.push(crate::typecheck::CheckSource {
+                            rel: module_rel.clone(),
+                            source: module_src.clone(),
+                            check: module.check.clone(),
+                            map: module.map.clone(),
+                            lint_lines: Vec::new(),
+                            error_lines: Vec::new(),
+                            parsed_clean: module.parsed_clean,
+                            expected_hits: Vec::new(),
+                        });
+                    }
+
+                    if write {
+                        let ship = crate::project::rewrite_requires(&tree, &module.ship);
+                        let text = match build.artifact {
+                            Artifact::Ship => &ship,
+
+                            Artifact::Check => &module.check,
+                        };
+                        let target = out.join(&module_out);
+
+                        if let Some(parent) = target.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+
+                        if std::fs::read_to_string(&target).ok().as_deref() != Some(text.as_str()) {
+                            std::fs::write(&target, text)?;
+                        }
+
+                        report.written.push(module_out.clone());
+                    }
+                }
+
+                Err(e) => report.failures.push((rel.clone(), e.located(&module_src))),
+            }
         }
 
         if !write {

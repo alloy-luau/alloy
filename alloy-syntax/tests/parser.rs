@@ -811,11 +811,19 @@ fn global_is_contextual() {
     round_trip("local t = { global = 1 }\nprint(t.global)\n");
 }
 
-/// The two modifiers do not stack, and neither reaches a macro.
+/// `global` reaches every declaration the language has.
+#[test]
+fn global_reaches_the_compile_time_declarations() {
+    round_trip("global macro twice(x)\n    x + x\nend\n");
+    round_trip("global attribute tag(name: string) on struct\n");
+    round_trip("global remote Hit(id: number) from client\n");
+    round_trip("global remote function Ask(id: number) -> number from server\n");
+}
+
+/// The two modifiers do not stack, and `namespace` says it is not ready.
 #[test]
 fn global_rejects_the_forms_it_has_no_meaning_for() {
     rejects("export global function f()\nend\n");
     rejects("global export function f()\nend\n");
-    rejects("global macro twice(x)\n    x\nend\n");
-    rejects("global attribute tag(name: string) on struct\n");
+    rejects("global namespace Math as\nend\n");
 }

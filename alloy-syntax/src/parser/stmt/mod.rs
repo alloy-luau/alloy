@@ -567,7 +567,7 @@ impl<'a> Parser<'a> {
     pub(super) fn global_follows(&self) -> bool {
         match self.text_at(1) {
             "local" | "const" | "function" | "type" | "struct" | "enum" | "trait" | "interface"
-            | "remote" | "impl" | "class" | "macro" | "attribute" | "export" => true,
+            | "remote" | "impl" | "class" | "macro" | "attribute" | "namespace" | "export" => true,
 
             "async" => self.text_at(2) == "function",
 
@@ -586,14 +586,10 @@ impl<'a> Parser<'a> {
             return Err(self.err("`global` already reaches every file; drop `export`"));
         }
 
-        // A macro expands where it is written and an attribute is read
-        // by the file that declares it, so neither reaches another file.
-        if matches!(self.text_at(1), "macro" | "attribute") {
-            let word = self.text_at(1).to_string();
-
-            return Err(self.err(&format!(
-                "`global` does not apply to `{word}`; export it and import it"
-            )));
+        // The namespace RFC is not compiled yet; the modifier parses so
+        // the message names the feature and not the word before it.
+        if self.text_at(1) == "namespace" {
+            return Err(self.err("`namespace` is not implemented yet"));
         }
 
         // `type` reads its own keyword, the way `export type` does.
@@ -617,6 +613,10 @@ impl<'a> Parser<'a> {
             "impl" => self.impl_decl(start, true)?,
 
             "class" | "open" => self.class_stmt(start, true)?,
+
+            "macro" => self.macro_decl(start, true)?,
+
+            "attribute" => self.attribute_decl(start, true)?,
 
             "async" => {
                 let is_async = Some(TokSpan::new(self.bump(), self.pos));
@@ -706,6 +706,18 @@ fn mark_global(stmt: Stmt) -> Stmt {
             n.global = true;
 
             Stmt::Remote(n)
+        }
+
+        Stmt::Macro(mut n) => {
+            n.global = true;
+
+            Stmt::Macro(n)
+        }
+
+        Stmt::Attribute(mut n) => {
+            n.global = true;
+
+            Stmt::Attribute(n)
         }
 
         other => other,

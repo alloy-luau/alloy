@@ -121,6 +121,15 @@ pub struct EmitOptions {
     /// the project already declares, with that file. Two declarations,
     /// no way to pick.
     pub ambient_clashes: Vec<(String, String)>,
+    /// The `global macro` declarations of the project. A macro expands
+    /// where it is written, so the declaration travels, not a require.
+    pub global_macros: Vec<MacroSource>,
+    /// The `global attribute` declarations of the project, by name.
+    pub global_attributes: Vec<(String, AttrDecl)>,
+    /// The file is a script whose globals the build hoisted into a
+    /// module beside it. The declarations go, and the injected require
+    /// brings the names back.
+    pub hoist_globals: bool,
 }
 
 /// One `global` of the project, as the file being compiled reaches it.
@@ -140,6 +149,9 @@ pub struct GlobalRef {
     pub ty: bool,
     /// The parameter list of a generic type, `<T>`.
     pub type_params: String,
+    /// The side the declaring file sits on. A global of one side is out
+    /// of scope on the other; a shared module reaches both.
+    pub side: Option<crate::directives::Side>,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -152,7 +164,7 @@ struct FieldType {
 
 /// One `attribute name(params) on targets` the file declares: the
 /// targets it takes, and each parameter's name and type.
-type AttrDecl = (Vec<String>, Vec<(String, Option<String>)>);
+pub type AttrDecl = (Vec<String>, Vec<(String, Option<String>)>);
 
 /// A struct another file declares, for the wire layout of a remote
 /// that carries it: each field with its type text and its width.
@@ -203,6 +215,9 @@ impl Default for EmitOptions {
             globals: Vec::new(),
             in_project: false,
             ambient_clashes: Vec::new(),
+            global_macros: Vec::new(),
+            global_attributes: Vec::new(),
+            hoist_globals: false,
         }
     }
 }
@@ -319,7 +334,17 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         scopes: vec![HashSet::new()],
         uses_std: false,
         globals_used: Vec::new(),
-        own_names: top_level_names(src, toks, chunk),
+        file_side: crate::directives::effective_side(src, &options.file_name),
+        own_names: match options.hoist_globals {
+            // A hoisted global lives in the module beside the script,
+            // so the script reaches it the way every other file does.
+            true => top_level_names(src, toks, chunk)
+                .into_iter()
+                .filter(|n| !options.globals.iter().any(|g| &g.name == n))
+                .collect(),
+
+            false => top_level_names(src, toks, chunk),
+        },
         exports: Vec::new(),
         has_default_export: false,
         enums: HashMap::from([(
@@ -361,6 +386,24 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         not_constructible: HashMap::new(),
         mapped_used: Vec::new(),
     };
+
+    // A global macro is in scope before the file's own declarations, so
+    // a file that declares the same name wins over the project's.
+    for m in &options.global_macros {
+        d.macros.insert(
+            m.name.clone(),
+            MacroRef {
+                params: m.params.clone(),
+                variadic: m.variadic,
+                body: m.body.clone(),
+                tail: m.tail.clone(),
+            },
+        );
+    }
+
+    for (name, decl) in &options.global_attributes {
+        d.attr_decls.insert(name.clone(), decl.clone());
+    }
 
     for m in &options.macros {
         d.macros.insert(
@@ -497,6 +540,48 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ext_used: d.ext_hit,
         tests: d.test_names,
         globals_used: d.globals_used,
+    }
+}
+
+/// The names one top-level statement binds.
+pub fn bound_names(src: &str, toks: &[Tok], stmt: &Stmt) -> Vec<String> {
+    let text = |span: TokSpan| -> String {
+        if span.end <= span.start || span.end as usize > toks.len() {
+            return String::new();
+        }
+
+        src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+            .to_string()
+    };
+
+    match stmt {
+        Stmt::Local(l) => l.names.iter().map(|b| text(b.name)).collect(),
+
+        Stmt::Function(f) => f.path.first().map(|n| text(*n)).into_iter().collect(),
+
+        Stmt::LocalFunction(f) => vec![text(f.name)],
+
+        Stmt::Struct(d) => vec![text(d.name)],
+
+        Stmt::Enum(d) => vec![text(d.name)],
+
+        Stmt::Trait(d) => vec![text(d.name)],
+
+        Stmt::Interface(d) => vec![text(d.name)],
+
+        Stmt::Class(d) => vec![text(d.name)],
+
+        Stmt::TypeAlias(d) => vec![text(d.name)],
+
+        Stmt::Remote(d) => vec![text(d.name)],
+
+        Stmt::Macro(d) => vec![text(d.name)],
+
+        Stmt::Attribute(d) => vec![text(d.name)],
+
+        Stmt::Import(i) => import_names(i).into_iter().map(text).collect(),
+
+        _ => Vec::new(),
     }
 }
 
@@ -695,6 +780,8 @@ struct Desugar<'s> {
     /// The project globals this file named, first use first. Each one
     /// puts a require and a binding on the first line.
     globals_used: Vec<(String, u32)>,
+    /// The side this file sits on, from its name or its directive.
+    file_side: Option<crate::directives::Side>,
     /// Every name the top level of this file binds. A file that
     /// declares a name of its own keeps it; no global is injected over it.
     own_names: HashSet<String>,
@@ -1842,15 +1929,6 @@ impl<'s> Desugar<'s> {
                 continue;
             }
 
-            if crate::modules::is_script(&file) {
-                say(format!(
-                    "a script is not a module, so nothing can reach it; `{}` needs a module file",
-                    g.name
-                ));
-
-                continue;
-            }
-
             if crate::globals::LUAU_GLOBALS.contains(&g.name.as_str()) {
                 say(format!(
                     "`{}` is a Luau global; a project global cannot take its name",
@@ -1874,7 +1952,16 @@ impl<'s> Desugar<'s> {
                 continue;
             }
 
-            if let Some(other) = self.options.globals.iter().find(|o| o.name == g.name) {
+            // A script's globals live in the module the build hoists
+            // them into, so that module is this file, not another.
+            let own = crate::globals::hoist_name(&file);
+
+            if let Some(other) = self
+                .options
+                .globals
+                .iter()
+                .find(|o| o.name == g.name && !(self.options.hoist_globals && o.file == own))
+            {
                 say(format!(
                     "`{}` is global in both {file} and {}",
                     g.name, other.file
@@ -1905,8 +1992,26 @@ impl<'s> Desugar<'s> {
         if self.own_names.contains(name)
             || self.is_local(name)
             || self.globals_used.iter().any(|(n, _)| n == name)
-            || !self.options.globals.iter().any(|g| g.name == name)
         {
+            return;
+        }
+
+        let Some(g) = self.options.globals.iter().find(|g| g.name == name) else {
+            return;
+        };
+
+        // A global of one side does not reach the other. A shared
+        // module reaches both, the way a remote's two sides do.
+        if let (Some(theirs), Some(mine)) = (g.side, self.file_side)
+            && theirs != mine
+        {
+            let word = theirs.name();
+            self.diagnostics.push(Diagnostic {
+                start: at,
+                end: at + name.len() as u32,
+                message: format!("`{name}` is global on the {word} only"),
+            });
+
             return;
         }
 

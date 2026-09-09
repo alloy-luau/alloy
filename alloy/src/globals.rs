@@ -28,6 +28,10 @@ pub enum Kind {
     Class,
     Type,
     Remote,
+    /// `global macro twice(x) ... end`: `$twice` expands in every file.
+    Macro,
+    /// `global attribute tag(...) on struct`: `@tag` reads in every file.
+    Attribute,
     /// `global impl BasePart as ... end`: methods, no name to bind.
     Impl,
 }
@@ -67,6 +71,8 @@ impl Kind {
             Kind::Class => "class",
             Kind::Type => "type",
             Kind::Remote => "remote",
+            Kind::Macro => "macro",
+            Kind::Attribute => "attribute",
             Kind::Impl => "impl",
         }
     }
@@ -86,6 +92,9 @@ pub struct Global {
     pub kind: Kind,
     /// The parameter list of a generic type, `<T>`; empty otherwise.
     pub type_params: String,
+    /// The side the declaring file sits on: its name, or its
+    /// `--@alloy-side` directive. A shared module has none.
+    pub side: Option<crate::directives::Side>,
 }
 
 /// The names a Luau or Roblox program already has. A global by one of
@@ -180,6 +189,7 @@ pub fn declared_in(
             None => 0,
         }
     };
+    let side = crate::directives::effective_side(src, &file.to_string_lossy());
     let mut out = Vec::new();
     let mut push = |name: &str, kind: Kind, name_span: TokSpan, span: TokSpan, params: String| {
         if name.is_empty() {
@@ -197,6 +207,7 @@ pub fn declared_in(
                 .unwrap_or(0),
             kind,
             type_params: params,
+            side,
         });
     };
 
@@ -262,6 +273,17 @@ pub fn declared_in(
                 push(text(d.name), Kind::Type, d.name, d.span, params);
             }
 
+            // A macro expands at compile time and an attribute is read
+            // at compile time, so neither needs a require. The compiler
+            // carries the declaration itself to every file.
+            Stmt::Macro(d) if d.global => {
+                push(text(d.name), Kind::Macro, d.name, d.span, String::new())
+            }
+
+            Stmt::Attribute(d) if d.global => {
+                push(text(d.name), Kind::Attribute, d.name, d.span, String::new())
+            }
+
             Stmt::Impl(d) if d.global => {
                 push(text(d.target), Kind::Impl, d.target, d.span, String::new())
             }
@@ -312,6 +334,258 @@ pub fn ambient_names(files: &[(PathBuf, String)]) -> Vec<(String, PathBuf)> {
 
         for d in crate::declarations::summaries(src, true) {
             out.push((d.name, rel.clone()));
+        }
+    }
+
+    out
+}
+
+/// The `global macro` declarations of the project, as the compiler
+/// takes them. A macro expands where it is written, so the declaration
+/// travels to every file instead of a require.
+pub fn macro_sources(files: &[(PathBuf, String)]) -> Vec<crate::desugar::MacroSource> {
+    let mut out = Vec::new();
+
+    for (rel, src) in files {
+        let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+            continue;
+        };
+        let toks = &parsed.lexed.toks;
+        let _ = rel;
+
+        for stmt in &parsed.chunk.block.stmts {
+            let Stmt::Macro(m) = stmt else {
+                continue;
+            };
+
+            if !m.global {
+                continue;
+            }
+
+            out.push(crate::desugar::MacroSource {
+                name: token_text(src, toks, m.name),
+                params: m
+                    .params
+                    .iter()
+                    .filter(|p| !p.is_vararg)
+                    .map(|p| token_text(src, toks, p.name))
+                    .collect(),
+                variadic: m.params.iter().any(|p| p.is_vararg),
+                body: join_tokens(src, toks, m.body.span),
+                tail: m.tail.as_ref().map(|t| join_tokens(src, toks, t.span())),
+            });
+        }
+    }
+
+    out
+}
+
+/// The `global attribute` declarations of the project: each name with
+/// the targets it takes and its parameters, the way the file that
+/// declares it holds them.
+pub fn attribute_decls(files: &[(PathBuf, String)]) -> Vec<(String, crate::desugar::AttrDecl)> {
+    let mut out = Vec::new();
+
+    for (_, src) in files {
+        let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+            continue;
+        };
+        let toks = &parsed.lexed.toks;
+
+        for stmt in &parsed.chunk.block.stmts {
+            let Stmt::Attribute(a) = stmt else {
+                continue;
+            };
+
+            if !a.global {
+                continue;
+            }
+
+            let targets = a
+                .targets
+                .iter()
+                .map(|t| token_text(src, toks, *t))
+                .collect();
+            let params = a
+                .params
+                .iter()
+                .map(|p| {
+                    (
+                        token_text(src, toks, p.name),
+                        p.ty.map(|t| span_text(src, toks, t).trim().to_string()),
+                    )
+                })
+                .collect();
+            out.push((token_text(src, toks, a.name), (targets, params)));
+        }
+    }
+
+    out
+}
+
+/// The text of the first token of a span.
+fn token_text(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> String {
+    match toks.get(span.start as usize) {
+        Some(t) => src[t.start as usize..t.end as usize].to_string(),
+
+        None => String::new(),
+    }
+}
+
+/// The source a span covers, as written.
+fn span_text(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> String {
+    if span.end <= span.start || span.end as usize > toks.len() {
+        return String::new();
+    }
+
+    src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+        .to_string()
+}
+
+/// The tokens of a span joined by one space, the shape a macro body
+/// takes for its expansion.
+fn join_tokens(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> String {
+    let mut out = String::new();
+
+    for i in span.start..span.end {
+        let Some(t) = toks.get(i as usize) else {
+            break;
+        };
+
+        if !out.is_empty() {
+            out.push(' ');
+        }
+
+        out.push_str(&src[t.start as usize..t.end as usize]);
+    }
+
+    out
+}
+
+/// The name of the module a script's globals move into, from the
+/// script's own file name: `main.server.aly` gives
+/// `main.server.globals.aly`.
+pub fn hoist_name(file: &str) -> String {
+    let stem = file
+        .strip_suffix(".aly")
+        .or_else(|| file.strip_suffix(".alx"))
+        .unwrap_or(file);
+
+    format!("{stem}.globals.aly")
+}
+
+/// The module a script's globals are hoisted into: the script's text
+/// with everything but its imports and its globals blanked. A script
+/// cannot be required, so its globals move to a module beside it, and
+/// the script requires that module like every other file.
+///
+/// The blank keeps every newline, so a line of the module is the line
+/// of the script that wrote it.
+pub fn hoisted_module(src: &str) -> String {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return String::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut out = src.as_bytes().to_vec();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if matches!(stmt, Stmt::Import(_)) || is_global(stmt) {
+            continue;
+        }
+
+        let span = stmt.span();
+        let (Some(first), Some(last)) = (
+            toks.get(span.start as usize),
+            toks.get((span.end as usize).saturating_sub(1)),
+        ) else {
+            continue;
+        };
+
+        for byte in out
+            .iter_mut()
+            .take(last.end as usize)
+            .skip(first.start as usize)
+        {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Whether a statement carries the `global` modifier.
+pub fn is_global(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Function(d) => d.global,
+        Stmt::LocalFunction(d) => d.global,
+        Stmt::Local(d) => d.global,
+        Stmt::Struct(d) => d.global,
+        Stmt::Enum(d) => d.global,
+        Stmt::Trait(d) => d.global,
+        Stmt::Interface(d) => d.global,
+        Stmt::Class(d) => d.global,
+        Stmt::TypeAlias(d) => d.global,
+        Stmt::Remote(d) => d.global,
+        Stmt::Macro(d) => d.global,
+        Stmt::Attribute(d) => d.global,
+        Stmt::Impl(d) => d.global,
+
+        _ => false,
+    }
+}
+
+/// The names a script's globals reach for that the hoisted module will
+/// not hold: a top-level name of the script that is not an import and
+/// not a global itself. Each one with the offset it sits at.
+///
+/// A global in a script has to stand on its own, since it moves into a
+/// module of its own. Only imports, other globals, and literals travel.
+pub fn script_leaks(src: &str) -> Vec<(String, u32)> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut kept: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut left_behind: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let names = crate::desugar::bound_names(src, toks, stmt);
+
+        if matches!(stmt, Stmt::Import(_)) || is_global(stmt) {
+            kept.extend(names);
+        } else {
+            left_behind.extend(names);
+        }
+    }
+
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if !is_global(stmt) {
+            continue;
+        }
+
+        let span = stmt.span();
+
+        for i in span.start..span.end {
+            let Some(t) = toks.get(i as usize) else {
+                break;
+            };
+            let word = &src[t.start as usize..t.end as usize];
+            let after_dot = i > span.start
+                && toks
+                    .get(i as usize - 1)
+                    .is_some_and(|p| matches!(&src[p.start as usize..p.end as usize], "." | ":"));
+
+            if after_dot || kept.contains(word) || !left_behind.contains(word) {
+                continue;
+            }
+
+            if !out.iter().any(|(n, _): &(String, u32)| n == word) {
+                out.push((word.to_string(), t.start));
+            }
         }
     }
 
@@ -380,11 +654,14 @@ pub fn refs_for(
     let mut out = Vec::new();
 
     for g in globals {
-        if g.kind == Kind::Impl || g.file == user {
+        // An `impl` binds no name, and a macro and an attribute travel
+        // as declarations, not as a require.
+        if matches!(g.kind, Kind::Impl | Kind::Macro | Kind::Attribute) || g.file == user {
             continue;
         }
 
         out.push(crate::desugar::GlobalRef {
+            side: g.side,
             name: g.name.clone(),
             file: g.file.to_string_lossy().replace('\\', "/"),
             require: require_from(user, &g.file),

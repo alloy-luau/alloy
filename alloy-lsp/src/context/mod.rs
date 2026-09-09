@@ -543,6 +543,11 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         });
     }
 
+    // `case [first, |`: the slots of an array pattern bind names.
+    if matches::in_array_pattern(head) {
+        return Some(Context::Nothing);
+    }
+
     // A new name the author is choosing.
     if names_a_parameter(head) {
         return Some(Context::Nothing);
@@ -1061,6 +1066,20 @@ mod tests {
                 prefix: String::new()
             })
         );
+    }
+
+    /// `case [|`: an array pattern's slots bind names of the author's
+    /// own, so the arm takes no list there.
+    #[test]
+    fn an_array_pattern_takes_no_list() {
+        assert_eq!(at("    case [|"), Some(Context::Nothing));
+        assert_eq!(at("    case [first, |"), Some(Context::Nothing));
+        assert_eq!(at("    case [first, ...re|"), Some(Context::Nothing));
+
+        // A closed bracket ends the pattern, and `case` with no bracket
+        // still lists the variants.
+        assert_ne!(at("    case [a] |"), Some(Context::Nothing));
+        assert!(matches!(at("    case |"), Some(Context::MatchCase { .. })));
     }
 
     /// `struct S as |`: the body starts at the `as`, so the caret on

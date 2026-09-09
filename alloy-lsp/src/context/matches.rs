@@ -24,6 +24,22 @@ fn last_word_at(text: &str, word: &str) -> Option<usize> {
     found
 }
 
+/// Whether the caret sits in the slots of an array pattern, `case
+/// [first, |`. Every slot binds a name the author chooses, so no list
+/// belongs there.
+pub(crate) fn in_array_pattern(head: &str) -> bool {
+    let arm = head.trim_start();
+    let Some(rest) = arm.strip_prefix("case") else {
+        return false;
+    };
+
+    if rest.starts_with(is_word) {
+        return false;
+    }
+
+    rest.matches('[').count() > rest.matches(']').count()
+}
+
 /// The scrutinee of a `match` head: the text between `match` and the
 /// `with` that ends the head. `local r = match x with` and `return
 /// match x with` read the same as the statement form.

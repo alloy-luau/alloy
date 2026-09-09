@@ -81,6 +81,9 @@ pub fn code_for(message: &str) -> Option<&'static str> {
     let m = message.to_ascii_lowercase();
     let rules: &[(&[&str], &str)] = &[
         (&["names no module"], "3.2"),
+        // The export list's own reports read "binding", which the
+        // pattern rule below would take.
+        (&["of this module", "exported twice"], "3.2"),
         (&["not exhaustive"], "4.2"),
         (&["remote"], "4.3"),
         (&["directive"], "4.4"),

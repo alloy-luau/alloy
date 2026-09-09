@@ -128,6 +128,10 @@ pub struct EmitOptions {
     /// the project already declares, with that file. Two declarations,
     /// no way to pick.
     pub ambient_clashes: Vec<(String, String)>,
+    /// Every name a `.d.aly` of the project declares. Such a name has
+    /// no module behind it, so a check that asks whether a name exists
+    /// has to read the list.
+    pub ambient_names: Vec<String>,
     /// The `global macro` declarations of the project. A macro expands
     /// where it is written, so the declaration travels, not a require.
     pub global_macros: Vec<MacroSource>,
@@ -233,6 +237,7 @@ impl Default for EmitOptions {
             globals: Vec::new(),
             in_project: false,
             ambient_clashes: Vec::new(),
+            ambient_names: Vec::new(),
             global_macros: Vec::new(),
             global_attributes: Vec::new(),
             hoist_globals: false,
@@ -416,6 +421,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ns_export: false,
         ns_force_local: false,
         export_listed: HashSet::new(),
+        export_listed_types: HashSet::new(),
         type_name_spans: chunk.type_names.clone(),
     };
 
@@ -469,6 +475,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // prescan fills is keyed by that rendered name.
     d.scan_namespaces(&chunk.block);
     d.check_namespaces(&chunk.block);
+    d.check_exports(&chunk.block);
 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
@@ -948,6 +955,10 @@ struct Desugar<'s> {
     /// The names a top-level `export { ... }` list carries, so a
     /// namespace it names exports its types too.
     export_listed: HashSet<String>,
+    /// The type aliases a top-level `export type { ... }` list names
+    /// under their own names. Luau has no way to re-export an alias, so
+    /// the declaration takes the `export` word instead.
+    export_listed_types: HashSet<String>,
     /// The next function header takes `local`: a namespace member never
     /// leaks into the file, and a plain `function f()` would be a Luau
     /// global. The attributed path reads it, since the modifier goes
@@ -1630,6 +1641,10 @@ fn exports_a_type(block: &Block) -> bool {
         Stmt::Attribute(a) => a.exported,
 
         Stmt::Macro(m) => m.exported,
+
+        // `export type { T }`, and a mixed list with a `type` spec in
+        // it: the list sends a type out and binds no value.
+        Stmt::ExportList(e) => e.type_only || e.specs.iter().any(|sp| sp.is_type),
 
         _ => false,
     })

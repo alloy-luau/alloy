@@ -87,6 +87,19 @@ impl<'s> Desugar<'s> {
     pub(crate) fn scan_namespaces(&mut self, block: &Block) {
         // `namespace Math as ... end` and `export { Math }` below it
         // export the group the way `export namespace` does.
+        // The type aliases the file declares, so an `export type { T }`
+        // list can say which name is one of its own.
+        let mut aliases: Vec<String> = Vec::new();
+
+        for stmt in &block.stmts {
+            if let Stmt::TypeAlias(t) = stmt.under_default()
+                && !t.exported
+                && !t.global
+            {
+                aliases.push(self.text_of(t.name).to_string());
+            }
+        }
+
         for stmt in &block.stmts {
             let Stmt::ExportList(list) = stmt else {
                 continue;
@@ -94,6 +107,18 @@ impl<'s> Desugar<'s> {
 
             for spec in &list.specs {
                 let name = self.text_of(spec.name).to_string();
+
+                // `export type { T }` of a type the file declares: Luau
+                // has no re-export for an alias, and `export type T = T`
+                // is a cycle. The declaration takes the word instead.
+                if list.from.is_none()
+                    && (list.type_only || spec.is_type)
+                    && spec.alias.is_none()
+                    && aliases.contains(&name)
+                {
+                    self.export_listed_types.insert(name.clone());
+                }
+
                 self.export_listed.insert(name);
             }
         }
@@ -993,7 +1018,7 @@ fn collect_member_exports(stmts: &[Stmt], out: &mut Vec<TokSpan>) {
 }
 
 /// Whether a declaration wears `export`.
-fn is_exported(stmt: &Stmt) -> bool {
+pub(crate) fn is_exported(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Function(d) => d.exported,
         Stmt::LocalFunction(d) => d.exported,

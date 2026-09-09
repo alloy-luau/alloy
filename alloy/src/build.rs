@@ -342,11 +342,13 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     let global_attributes = crate::globals::attribute_decls(&included);
     // A `.d.aly` declares a name with no module behind it. A `global`
     // by that name gives the name two declarations and no way to pick.
-    let ambient_clashes: Vec<(String, String)> = crate::globals::ambient_names(&included)
-        .into_iter()
+    let ambient = crate::globals::ambient_names(&included);
+    let ambient_clashes: Vec<(String, String)> = ambient
+        .iter()
         .filter(|(n, _)| project_globals.iter().any(|g| &g.name == n))
-        .map(|(n, f)| (n, display_path(&f)))
+        .map(|(n, f)| (n.clone(), display_path(f)))
         .collect();
+    let ambient_names: Vec<String> = ambient.into_iter().map(|(n, _)| n).collect();
     // Under a mount the ship artifact reaches a global's module by its
     // instance path, the way it reaches the runtime.
     let mut ship_globals: HashMap<PathBuf, String> = HashMap::new();
@@ -457,6 +459,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             side: side_of(&rel, &source),
             in_project: true,
             ambient_clashes: ambient_clashes.clone(),
+            ambient_names: ambient_names.clone(),
             import_types: crate::modules::import_types(&source, &path, &module_aliases),
             import_enums: crate::modules::import_enums(&source, &path, &module_aliases),
             import_privates: crate::modules::import_privates(&source, &path, &module_aliases),

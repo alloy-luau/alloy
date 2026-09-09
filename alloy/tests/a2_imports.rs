@@ -181,3 +181,59 @@ fn a_module_with_several_exports_lists_them() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Compiles one file and gives its diagnostic messages back.
+fn messages(src: &str) -> Vec<String> {
+    let options = alloy::EmitOptions {
+        file_name: "t.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with(src, &options).unwrap();
+
+    out.diagnostics.iter().map(|d| d.message.clone()).collect()
+}
+
+/// The export table takes one entry per name. Two `export local x`
+/// lines put `x` in it twice and the second won with nothing said.
+#[test]
+fn a_name_exported_twice_reports() {
+    let hits = messages("export local x = 1\nexport local x = 2\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].contains("`x` is exported twice; a module sends one binding per name"),
+        "{hits:?}"
+    );
+}
+
+/// `export { z }` of a name the module has not got. The list knows the
+/// module's bindings, so the report is Alloy's, not Luau's.
+#[test]
+fn an_export_list_names_a_binding_of_the_module() {
+    let hits = messages("export { z }\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].contains("`z` is not a binding of this module"),
+        "{hits:?}"
+    );
+
+    // A local, an import, and a declaration all count.
+    assert!(
+        messages("local a = 1\n\nstruct S as\n    x: number\nend\n\nexport { a, S }\n").is_empty()
+    );
+}
+
+/// A module whose only export is `export type { T }` binds no value.
+/// Luau needs a module to return one, so the alias takes the `export`
+/// word and the module returns an empty table.
+#[test]
+fn a_types_only_export_list_returns_an_empty_table() {
+    let options = alloy::EmitOptions {
+        file_name: "t.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with("type T = number\nexport type { T }\n", &options).unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(out.ship.contains("export type T = number"), "{}", out.ship);
+    assert!(!out.ship.contains("export type T = T"), "{}", out.ship);
+    assert!(out.ship.contains("return {}"), "{}", out.ship);
+}

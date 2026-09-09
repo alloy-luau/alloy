@@ -413,6 +413,13 @@ impl<'s> Desugar<'s> {
             return true;
         }
 
+        // An `export type { T }` list below the alias adds the word.
+        if let Stmt::TypeAlias(t) = s
+            && self.export_listed_types.contains(self.text_of(t.name))
+        {
+            return true;
+        }
+
         if stmt_needs_desugar(s) {
             return true;
         }
@@ -768,6 +775,18 @@ impl<'s> Desugar<'s> {
 
             // The modifier is Alloy's; Luau reads the rest. `export`
             // takes its place, and the alias keeps every other byte.
+            // `export type { T }` below it sends the alias out; Luau
+            // has no other way to re-export one.
+            Stmt::TypeAlias(t)
+                if !t.exported
+                    && !t.global
+                    && self.export_listed_types.contains(self.text_of(t.name)) =>
+            {
+                let start = self.byte_start(t.span);
+                self.generate(start, "export ");
+                self.copy(start, self.byte_end(t.span));
+            }
+
             Stmt::TypeAlias(t) if t.global => {
                 let start = self.byte_start(t.span);
                 let after = self.toks[t.span.start as usize].end;

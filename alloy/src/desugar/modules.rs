@@ -359,6 +359,196 @@ impl<'s> Desugar<'s> {
         self.generate(anchor, &lines.join(" "));
     }
 
+    /// What an `export { ... }` list needs to be true, and what a
+    /// module's export table needs: every name in a list is a binding
+    /// of the module, and no name goes out twice.
+    pub(crate) fn check_exports(&mut self, block: &Block) {
+        let mut values: Vec<String> = Vec::new();
+        let mut types: Vec<String> = Vec::new();
+
+        for stmt in &block.stmts {
+            self.binding_names(stmt, &mut values, &mut types);
+        }
+
+        // The name each `export` puts in the export table, in the order
+        // they are written, with the token to report a repeat on.
+        let mut sent: Vec<(String, TokSpan)> = Vec::new();
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::ExportList(e) if e.from.is_none() => {
+                    for sp in &e.specs {
+                        let name = self.text_of(sp.name).to_string();
+                        let known = match e.type_only || sp.is_type {
+                            true => types.contains(&name) || values.contains(&name),
+
+                            false => values.contains(&name),
+                        };
+
+                        // A dotted name reads a namespace member; the
+                        // namespace check owns that path.
+                        if !known && !name.contains('.') {
+                            hits.push((
+                                sp.name,
+                                format!("`{name}` is not a binding of this module"),
+                            ));
+
+                            continue;
+                        }
+
+                        // A type goes out as an alias, not as a field
+                        // of the export table.
+                        if !(e.type_only || sp.is_type) {
+                            let out = sp.alias.unwrap_or(sp.name);
+                            sent.push((self.text_of(out).to_string(), out));
+                        }
+                    }
+                }
+
+                // A `global` exports too, and two globals of one name
+                // are the globals check's report, not this one.
+                other
+                    if crate::desugar::namespaces::is_exported(other.under_default())
+                        && !crate::globals::is_global(other.under_default()) =>
+                {
+                    let mut one = Vec::new();
+                    let mut none = Vec::new();
+                    self.binding_names(other, &mut one, &mut none);
+
+                    let _ = none;
+
+                    for name in one {
+                        let span = self.name_span(other, &name);
+                        sent.push((name, span));
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        for (i, (name, span)) in sent.iter().enumerate() {
+            if sent[..i].iter().any(|(n, _)| n == name) {
+                hits.push((
+                    *span,
+                    format!("`{name}` is exported twice; a module sends one binding per name"),
+                ));
+            }
+        }
+
+        for (span, message) in hits {
+            self.diagnose(span, &message);
+        }
+    }
+
+    /// The names one top-level statement binds: values first, then the
+    /// names that are types alone.
+    fn binding_names(&self, stmt: &Stmt, values: &mut Vec<String>, types: &mut Vec<String>) {
+        let value = |v: &mut Vec<String>, span: TokSpan| v.push(self.text_of(span).to_string());
+
+        match stmt.under_default() {
+            Stmt::Local(l) => {
+                for b in &l.names {
+                    match b.destructure {
+                        Some(_) => {}
+
+                        None => value(values, b.name),
+                    }
+                }
+            }
+
+            Stmt::LocalFunction(f) => value(values, f.name),
+
+            Stmt::Function(f) if f.path.len() == 1 => value(values, f.path[0]),
+
+            Stmt::Struct(d) => {
+                value(values, d.name);
+                value(types, d.name);
+            }
+
+            Stmt::Enum(d) => {
+                value(values, d.name);
+                value(types, d.name);
+            }
+
+            Stmt::Trait(d) => {
+                value(values, d.name);
+                value(types, d.name);
+            }
+
+            Stmt::Class(d) => {
+                value(values, d.name);
+                value(types, d.name);
+            }
+
+            Stmt::Interface(d) => value(types, d.name),
+
+            Stmt::TypeAlias(d) => value(types, d.name),
+
+            Stmt::Remote(d) => value(values, d.name),
+
+            Stmt::Namespace(d) => value(values, d.name),
+
+            Stmt::Macro(d) => value(values, d.name),
+
+            Stmt::Attribute(d) => value(values, d.name),
+
+            Stmt::Import(i) => match &i.kind {
+                ImportKind::Namespace(n) | ImportKind::Default(n) => value(values, *n),
+
+                ImportKind::Both(n, specs) => {
+                    value(values, *n);
+
+                    for sp in specs {
+                        let at = sp.alias.unwrap_or(sp.name);
+
+                        match sp.is_type {
+                            true => value(types, at),
+
+                            false => value(values, at),
+                        }
+                    }
+                }
+
+                ImportKind::Named(specs) => {
+                    for sp in specs {
+                        let at = sp.alias.unwrap_or(sp.name);
+
+                        match sp.is_type {
+                            true => value(types, at),
+
+                            false => value(values, at),
+                        }
+                    }
+                }
+
+                ImportKind::TypeOnly(specs) => {
+                    for sp in specs {
+                        value(types, sp.alias.unwrap_or(sp.name));
+                    }
+                }
+            },
+
+            _ => {}
+        }
+    }
+
+    /// The token a statement declares `name` at, for a message.
+    fn name_span(&self, stmt: &Stmt, name: &str) -> TokSpan {
+        let span = stmt.span();
+
+        for i in span.start..span.end {
+            let one = TokSpan::new(i as usize, i as usize + 1);
+
+            if self.text_of(one) == name {
+                return one;
+            }
+        }
+
+        span
+    }
+
     pub(crate) fn export_list(&mut self, e: &ExportList) {
         let anchor = self.byte_start(e.span);
 
@@ -378,6 +568,13 @@ impl<'s> Desugar<'s> {
                     // namespace member reads by the name the emit gave
                     // it, `Geom_Point`.
                     if e.type_only || sp.is_type {
+                        // A type alias of this file takes the `export`
+                        // word on its own line; an alias of itself is a
+                        // cycle, and Luau reads none.
+                        if self.export_listed_types.contains(&name) {
+                            continue;
+                        }
+
                         let target = self
                             .namespace_path_name(&name)
                             .unwrap_or_else(|| name.clone());

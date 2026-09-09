@@ -288,6 +288,44 @@ fn deprecated_namespaces(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
     out
 }
 
+/// An `import` under a statement that runs. The emit lifts every
+/// `require` to the top of the file, so the line reads in an order the
+/// run does not follow.
+fn import_order(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
+    let mut out = Vec::new();
+    let mut ran = false;
+
+    for stmt in &chunk.block.stmts {
+        let Stmt::Import(i) = stmt else {
+            // A declaration binds a name and a call runs; both stand
+            // in front of the import in the source and behind it in the
+            // emit.
+            ran |= !matches!(stmt, Stmt::Empty(_));
+
+            continue;
+        };
+
+        if !ran {
+            continue;
+        }
+
+        let start = toks[i.span.start as usize].start;
+        let end = toks[i.span.end as usize - 1].end;
+        out.push(Lint {
+            name: "import_order",
+            start,
+            end,
+            message: format!(
+                "`{}` is required before the code above it runs; the imports go at the top of the file",
+                src[start as usize..end as usize].trim()
+            ),
+            fix: None,
+        });
+    }
+
+    out
+}
+
 pub fn run(
     src: &str,
     toks: &[Tok],
@@ -305,6 +343,7 @@ pub fn run(
     lints.extend(directive_lints(src));
     lints.extend(export_impl(src, toks, chunk));
     lints.extend(deprecated_namespaces(src, toks, chunk));
+    lints.extend(import_order(src, toks, chunk));
 
     let text = |i: usize| toks[i].text(src);
     let st = structure(src, toks);

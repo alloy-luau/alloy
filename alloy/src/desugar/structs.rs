@@ -21,6 +21,24 @@ use super::*;
 /// refine a value by it, so the check artifact narrows by a cast.
 pub(crate) const ALIAS_DATATYPES: &[&str] = &["RBXScriptSignal"];
 
+/// The traits an `impl` writes a metamethod for: the trait's name, the
+/// method it asks for, and the metamethod the emit sets. `alloy doc
+/// trait` lists the same set.
+pub(crate) const OPERATOR_TRAITS: &[(&str, &str, &str)] = &[
+    ("Add", "add", "__add"),
+    ("Sub", "sub", "__sub"),
+    ("Mul", "mul", "__mul"),
+    ("Div", "div", "__div"),
+    ("Eq", "eq", "__eq"),
+    ("Lt", "lt", "__lt"),
+    ("Le", "le", "__le"),
+    ("Display", "to_string", "__tostring"),
+    ("Call", "call", "__call"),
+    ("Len", "len", "__len"),
+    ("Concat", "concat", "__concat"),
+    ("Drop", "drop", "Destroy"),
+];
+
 impl<'s> Desugar<'s> {
     /// `impl X ... end`: each method lands on `X`; operator traits map to
     /// metamethods.
@@ -48,6 +66,27 @@ impl<'s> Desugar<'s> {
             self.blank_lines(start, self.byte_end(i.span));
 
             return;
+        }
+
+        // The header carries no type slot into the emit, so a name that
+        // is nowhere reads as a Luau global inside the body, or says
+        // nothing at all when the body is empty.
+        if !self.knows_type(&target_name) {
+            let message = format!(
+                "nothing declares `{target_name}`; an `impl` targets a struct, an enum, or a foreign type"
+            );
+            self.diagnose(i.target, &message);
+        }
+
+        if let Some(t) = i.trait_name
+            && !super::attributes::BUILTIN_BOUNDS.contains(&self.text_of(t))
+            && !OPERATOR_TRAITS
+                .iter()
+                .any(|(n, _, _)| *n == self.text_of(t))
+            && !self.knows_type(self.text_of(t))
+        {
+            let name = self.text_of(t).to_string();
+            self.diagnose(t, &format!("nothing declares the trait `{name}`"));
         }
 
         // A foreign target gets a registry table instead of its metatable.
@@ -104,6 +143,32 @@ impl<'s> Desugar<'s> {
         let split = !foreign && self.has_private_view(&target_name);
 
         self.impl_target = Some(target_name.clone());
+
+        // A method of a field's name is written on the class table, and
+        // a field lives on the instance; the method wins on every
+        // instance that leaves the field nil.
+        if let Some(fields) = self.struct_fields.get(&target_name).cloned() {
+            let mut clashes = Vec::new();
+
+            for m in &i.methods {
+                let Some(first) = m.path.first() else {
+                    continue;
+                };
+                let name = self.text_of(*first).to_string();
+
+                if fields.iter().any(|(f, _)| *f == name) {
+                    clashes.push((*first, name));
+                }
+            }
+
+            for (span, name) in clashes {
+                let shown = self.display_name(&target_name);
+                let message = format!(
+                    "`{name}` is a field of `{shown}` and a method of its impl; one name holds one of the two"
+                );
+                self.diagnose(span, &message);
+            }
+        }
 
         for m in &i.methods {
             let is_private = m.visibility.is_some_and(|v| self.text_of(v) == "private");
@@ -212,22 +277,8 @@ impl<'s> Desugar<'s> {
 
         if let Some(t) = i.trait_name {
             let trait_name = self.text_of(t).to_string();
-            let mapping: &[(&str, &str, &str)] = &[
-                ("Add", "add", "__add"),
-                ("Sub", "sub", "__sub"),
-                ("Mul", "mul", "__mul"),
-                ("Div", "div", "__div"),
-                ("Eq", "eq", "__eq"),
-                ("Lt", "lt", "__lt"),
-                ("Le", "le", "__le"),
-                ("Display", "to_string", "__tostring"),
-                ("Call", "call", "__call"),
-                ("Len", "len", "__len"),
-                ("Concat", "concat", "__concat"),
-                ("Drop", "drop", "Destroy"),
-            ];
 
-            for (tr, method, meta) in mapping {
+            for (tr, method, meta) in OPERATOR_TRAITS {
                 if trait_name == *tr {
                     // `delete` takes a `Deletable`, whose `Destroy` is
                     // `(self: any) -> ()`; the check artifact says so.

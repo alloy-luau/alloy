@@ -359,6 +359,24 @@ impl<'s> Desugar<'s> {
         self.generate(anchor, &lines.join(" "));
     }
 
+    /// An `import` inside a function or a block. The emit lifts every
+    /// `require` to the top of the file, so a buried one binds nothing
+    /// where it stands.
+    pub(crate) fn check_import_places(&mut self, block: &Block) {
+        let mut buried = Vec::new();
+
+        for stmt in &block.stmts {
+            crate::desugar::modules::buried_imports(stmt, &mut buried);
+        }
+
+        for span in buried {
+            self.diagnose(
+                span,
+                "an import belongs at the top level of a file; the emit lifts the require above the block it sits in",
+            );
+        }
+    }
+
     /// What an `export { ... }` list needs to be true, and what a
     /// module's export table needs: every name in a list is a binding
     /// of the module, and no name goes out twice.
@@ -810,6 +828,29 @@ fn type_arguments(params: &str) -> String {
         .collect();
 
     format!("<{}>", names.join(", "))
+}
+
+/// Every `import` under a statement, at any depth.
+pub(crate) fn buried_imports(stmt: &Stmt, out: &mut Vec<TokSpan>) {
+    for child in crate::desugar::stmt_children(stmt) {
+        match child {
+            crate::desugar::Child::Block(b) => block_imports(b, out),
+
+            crate::desugar::Child::Function(f) => block_imports(&f.block, out),
+
+            crate::desugar::Child::Expr(_) => {}
+        }
+    }
+}
+
+fn block_imports(block: &Block, out: &mut Vec<TokSpan>) {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Import(i) => out.push(i.span),
+
+            other => buried_imports(other, out),
+        }
+    }
 }
 
 #[cfg(test)]

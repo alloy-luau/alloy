@@ -385,6 +385,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         imported_names: HashSet::new(),
         ret_types: Vec::new(),
         result_aliases: HashSet::new(),
+        fn_ret_types: HashMap::new(),
         enum_decls: HashMap::new(),
         impl_methods: HashMap::new(),
         renames: Vec::new(),
@@ -476,6 +477,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.scan_namespaces(&chunk.block);
     d.check_namespaces(&chunk.block);
     d.check_exports(&chunk.block);
+    d.check_import_places(&chunk.block);
 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
@@ -849,6 +851,10 @@ struct Desugar<'s> {
     /// Type aliases the file declares whose value is a `Result`, so a
     /// function that returns one still takes `try`.
     result_aliases: HashSet<String>,
+    /// The return type each top-level function of this file declares.
+    /// `try` reads it: an operand whose type is no Result is an error
+    /// at the `try`, not at the `return` under it.
+    fn_ret_types: HashMap<String, String>,
     /// The enums this file declares, from the prescan, so a use before
     /// the declaration still checks. `enums` also holds `Result`, which
     /// the std owns and whose table carries more than its variants.

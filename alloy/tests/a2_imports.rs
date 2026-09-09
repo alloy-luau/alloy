@@ -237,3 +237,52 @@ fn a_types_only_export_list_returns_an_empty_table() {
     assert!(!out.ship.contains("export type T = T"), "{}", out.ship);
     assert!(out.ship.contains("return {}"), "{}", out.ship);
 }
+
+/// The emit lifts every `require` to the top of the file, so an import
+/// inside a function binds nothing where it stands.
+#[test]
+fn an_import_inside_a_block_reports() {
+    let hits = messages("local function f()\n    import { x } from \"./a\"\nend\n\nprint(f)\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].contains("an import belongs at the top level of a file"),
+        "{hits:?}"
+    );
+}
+
+/// An import under code still compiles, the way TypeScript hoists one.
+/// The `import_order` lint says the require runs first.
+#[test]
+fn an_import_under_code_draws_the_order_lint() {
+    let options = alloy::EmitOptions {
+        file_name: "t.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with(
+        "print(\"hello\")\nimport { x } from \"./a\"\n\nprint(x)\n",
+        &options,
+    )
+    .unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    let hits: Vec<&alloy::lint::Lint> = out
+        .lints
+        .iter()
+        .filter(|l| l.name == "import_order")
+        .collect();
+    assert_eq!(hits.len(), 1, "{:?}", out.lints);
+    assert!(
+        hits[0]
+            .message
+            .contains("the imports go at the top of the file"),
+        "{}",
+        hits[0].message
+    );
+
+    // Imports first: nothing fires.
+    let clean = alloy::compile_with(
+        "import { x } from \"./a\"\n\nprint(\"hello\")\nprint(x)\n",
+        &options,
+    )
+    .unwrap();
+    assert!(!clean.lints.iter().any(|l| l.name == "import_order"));
+}

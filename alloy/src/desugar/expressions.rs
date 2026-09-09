@@ -455,6 +455,36 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The type of a `try` operand when the file declares it and it is
+    /// no Result. A type the file cannot name gives `None`: the checker
+    /// reads those, and a guess here would be a false report.
+    fn non_result_type(&self, operand: &Expr) -> Option<String> {
+        let Expr::Call {
+            func, method: None, ..
+        } = operand
+        else {
+            return None;
+        };
+        let Expr::Name(n) = &**func else {
+            return None;
+        };
+        let ty = self.fn_ret_types.get(self.text_of(*n))?.trim();
+
+        if ty.contains("Result") || self.result_aliases.contains(ty) {
+            return None;
+        }
+
+        // Only a type this file can name for certain. A generic
+        // parameter, an alias, or an imported name types elsewhere.
+        let known = PRIMITIVES.contains(&ty)
+            || self.structs.contains(ty)
+            || self.enum_decls.contains_key(ty)
+            || ty == "nil"
+            || ty == "()";
+
+        known.then(|| ty.to_string())
+    }
+
     /// `try expr`: hoist the Result, return it on Err, yield the payload.
     pub(crate) fn try_expr(&mut self, operand: &Expr, span: TokSpan) -> String {
         let anchor = self.byte_start(span);
@@ -467,6 +497,13 @@ impl<'s> Desugar<'s> {
                 span,
                 "`try` works only inside a function that returns Result; it returns the Err from that function",
             );
+        }
+
+        // A value that is no Result has no `Err` to return. The
+        // operand's own type says so, where the file declares it.
+        if let Some(ty) = self.non_result_type(operand) {
+            let text = self.text_of(operand.span()).trim().to_string();
+            self.diagnose(span, &format!("`try` needs a Result; `{text}` is `{ty}`"));
         }
 
         let value = match operand {

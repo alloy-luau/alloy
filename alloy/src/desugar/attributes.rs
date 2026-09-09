@@ -12,6 +12,22 @@ use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 use super::types::{literal_kind, literal_type, strip_bounds};
 use super::*;
 
+/// The traits the std declares, which a bound may name without the
+/// file declaring one. `resolve_bound` routes them to the std table.
+pub(crate) const BUILTIN_BOUNDS: &[&str] = &[
+    "Display",
+    "Debug",
+    "Clone",
+    "Eq",
+    "PartialEq",
+    "Ord",
+    "Add",
+    "Sub",
+    "Mul",
+    "Div",
+    "Serialize",
+];
+
 /// The targets a built-in attribute takes, or `None` when the name is
 /// not one. The list mirrors `builtin_attribute_targets` in alloy-lsp.
 pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]> {
@@ -496,6 +512,24 @@ impl<'s> Desugar<'s> {
                 _ => {}
             }
 
+            // The declared return type of each function of this file,
+            // for the `try` check.
+            let signature = match stmt {
+                Stmt::Function(f) if f.path.len() == 1 => Some((f.path[0], &f.body)),
+
+                Stmt::LocalFunction(f) => Some((f.name, &f.body)),
+
+                _ => None,
+            };
+
+            if let Some((name, body)) = signature
+                && let Some(rt) = body.ret_type
+            {
+                let ty = self.text_of(rt).trim().trim_start_matches(':').trim();
+                let key = self.decl_name(name);
+                self.fn_ret_types.insert(key, ty.to_string());
+            }
+
             if let Stmt::TypeAlias(t) = stmt
                 && let Some((_, value)) = self.text_of(t.span).split_once('=')
                 && value.trim_start().starts_with("Result")
@@ -765,19 +799,7 @@ impl<'s> Desugar<'s> {
     /// A bound with each operator trait routed to the runtime type, unless
     /// the file declares a trait of that name.
     pub(crate) fn resolve_bound(&mut self, bound: &str) -> String {
-        const BUILTIN: &[&str] = &[
-            "Display",
-            "Debug",
-            "Clone",
-            "Eq",
-            "PartialEq",
-            "Ord",
-            "Add",
-            "Sub",
-            "Mul",
-            "Div",
-            "Serialize",
-        ];
+        const BUILTIN: &[&str] = BUILTIN_BOUNDS;
         let parts: Vec<String> = bound
             .split('&')
             .map(|part| {
@@ -810,6 +832,45 @@ impl<'s> Desugar<'s> {
         }
 
         out
+    }
+
+    /// Whether a name in a type position resolves to something: a
+    /// declaration of this file, an import, a project global, a name a
+    /// `.d.aly` declares, an engine class, or a name of the std.
+    ///
+    /// The header of an `impl` and the bound of a generic carry no type
+    /// slot into the emit, so nothing else reports a name that is not
+    /// there.
+    pub(crate) fn knows_type(&self, name: &str) -> bool {
+        let head = name.split('<').next().unwrap_or(name).trim();
+
+        if head.is_empty() {
+            return true;
+        }
+
+        // A dotted path reads a namespace or a module record; the head
+        // is the name that has to exist.
+        if let Some((base, _)) = head.split_once('.') {
+            return self.knows_type(base);
+        }
+
+        self.structs.contains(head)
+            || self.enums.contains_key(head)
+            || self.enum_decls.contains_key(head)
+            || self.traits.contains_key(head)
+            || self.declared_types.contains(head)
+            || self.own_names.contains(head)
+            || self.imported_names.contains(head)
+            || self.namespaces.contains_key(head)
+            || self.attr_decls.contains_key(head)
+            || self.is_local(head)
+            || AMBIENT.contains(&head)
+            || AMBIENT_TYPES.contains(&head)
+            || PRIMITIVES.contains(&head)
+            || crate::extensions::is_foreign(head)
+            || crate::globals::LUAU_GLOBALS.contains(&head)
+            || self.options.globals.iter().any(|g| g.name == head)
+            || self.options.ambient_names.iter().any(|n| n == head)
     }
 
     /// A type that is not an Alloy struct or enum: an engine class, a

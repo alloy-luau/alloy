@@ -855,6 +855,18 @@ impl<'s> Desugar<'s> {
                     rows.push((vname, args.iter().collect()));
                 }
 
+                // A struct has one shape, so a pattern that names one
+                // covers it when each field it names binds. A bare
+                // table pattern tests fields on a value of any shape
+                // and covers nothing.
+                Pattern::Struct { .. } => {
+                    if !self.struct_pattern_covers(p) {
+                        return false;
+                    }
+
+                    return true;
+                }
+
                 _ => return false,
             }
         }
@@ -889,6 +901,24 @@ impl<'s> Desugar<'s> {
 
             self.payloads_cover(&payloads, *arity)
         })
+    }
+
+    /// Whether a struct pattern covers the shape it names: the name is
+    /// a struct this file declares, and every field it names binds.
+    fn struct_pattern_covers(&self, p: &Pattern) -> bool {
+        let Pattern::Struct { name, fields, .. } = p else {
+            return matches!(p, Pattern::Wildcard(_) | Pattern::Bind(_));
+        };
+        let Some(n) = name else {
+            return false;
+        };
+
+        self.structs.contains(self.text_of(*n))
+            && fields.iter().all(|f| match &f.pattern {
+                None => true,
+
+                Some(inner) => self.struct_pattern_covers(inner),
+            })
     }
 
     /// Reports if the payload rows of one variant cover every payload.

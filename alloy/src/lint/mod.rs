@@ -663,6 +663,13 @@ pub const LINTS: &[LintInfo] = &[
         summary: "an exported declaration with no comment above it",
         detail: "Pedantic. An `export` is the interface of the module. A comment line right above it, `--` or `---`, says what it is for; the language server shows it on hover.",
     },
+    LintInfo {
+        name: "import_order",
+        group: Group::Pedantic,
+        default: Level::Allow,
+        summary: "an `import` under code that runs",
+        detail: "Pedantic. The emit lifts every `require` to the top of the file, the way TypeScript hoists an import, so a module loads before the line above the import runs. The line reads as if the order were the other way. Move the imports to the top of the file.",
+    },
     // --- naming ----------------------------------------------------------------
     LintInfo {
         name: "camel_case_name",

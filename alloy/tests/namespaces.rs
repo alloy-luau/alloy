@@ -559,3 +559,78 @@ fn a_deprecated_namespace_reports_at_a_use() {
     assert_eq!(hits.len(), 1, "{:?}", out.lints);
     assert_eq!(hits[0].message, "`Old` is deprecated; use Geometry");
 }
+
+// --- 6. names an emit-only slot carries -------------------------------------
+
+/// `impl Undefined as end` emitted `do end` and said nothing; with a
+/// body the checker reported inside it, not on the head.
+#[test]
+fn an_impl_on_a_name_that_is_nowhere_reports() {
+    let hits = messages("impl Undefined as end\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(hits[0].contains("nothing declares `Undefined`"), "{hits:?}");
+
+    // A struct of the file, an engine class, and a primitive all pass.
+    clean(
+        "struct S as\n    x: number\nend\n\nimpl S as\n    function get(self): number\n        return self.x\n    end\nend\n\nlocal s = new S { x = 1 }\n\nprint(s:get())\n",
+    );
+    let foreign = messages(
+        "export impl Vector3 as\n    function flat(self): Vector3\n        return self\n    end\nend\n",
+    );
+    assert!(foreign.is_empty(), "{foreign:?}");
+}
+
+/// A bound is erased in the emit, so nothing checked the name in it.
+#[test]
+fn a_bound_that_names_nothing_reports() {
+    let hits = messages("local function f<T: Undefined>() end\n\nprint(f)\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].contains("nothing declares the trait `Undefined`"),
+        "{hits:?}"
+    );
+
+    // A trait of the file and a std bound both pass.
+    let ok = messages(
+        "trait Shape as\n    function area(self): number\nend\n\nlocal function f<T: Shape>(v: T): number\n    return v:area()\nend\n\nlocal function g<T: Clone>(v: T): T\n    return v\nend\n\nprint(f, g)\n",
+    );
+    assert!(ok.is_empty(), "{ok:?}");
+}
+
+/// A method of a field's name overwrote the field with nothing said.
+#[test]
+fn a_field_and_a_method_of_one_name_report() {
+    let hits = messages(
+        "struct Circle as\n    radius: number\n    diameter: number\nend\n\nimpl Circle as\n    function diameter(self): number\n        return self.radius * 2\n    end\nend\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].contains("`diameter` is a field of `Circle` and a method of its impl"),
+        "{hits:?}"
+    );
+}
+
+/// `try` on a value that is no Result had no report of its own.
+#[test]
+fn try_on_a_value_that_is_no_result_reports() {
+    let hits = messages(
+        "local function f(): number\n    return 1\nend\n\nlocal x: number = try f()\n\nprint(x)\n",
+    );
+    assert!(
+        hits.iter()
+            .any(|m| m == "`try` needs a Result; `f()` is `number`"),
+        "{hits:?}"
+    );
+}
+
+/// A struct has one shape, so a pattern over one covers it. The payload
+/// of a variant reads the same way.
+#[test]
+fn a_struct_pattern_covers_its_shape() {
+    clean(
+        "struct Point as\n    x: number\n    y: number\nend\n\nlocal p = new Point { x = 1, y = 2 }\nlocal r = match p with\n    case Point { x, y } then x + y\nend\n\nprint(r)\n",
+    );
+    clean(
+        "struct Damage as\n    amount: number\nend\n\nenum Hit as\n    Critical(Damage)\n    Normal(Damage)\nend\n\nlocal hit = Hit.Normal(new Damage { amount = 1 })\nlocal r = match hit with\n    case Critical(Damage { amount }) then amount\n    case Normal(d) then d.amount\nend\n\nprint(r)\n",
+    );
+}

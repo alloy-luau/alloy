@@ -457,6 +457,51 @@ impl<'s> Desugar<'s> {
                 .any(|m| text.contains(m.as_str()))
     }
 
+    /// A bound `<T: Shape>` names a trait, and the emit erases the
+    /// bound, so nothing else reports a name that is nowhere.
+    pub(crate) fn check_bounds(&mut self, generics: Option<TokSpan>) {
+        let Some(g) = generics else {
+            return;
+        };
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+
+        for (_, bound) in generic_bounds(self.text_of(g)) {
+            for part in bound.split('&') {
+                let head = part
+                    .trim()
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+
+                if head.is_empty()
+                    || super::attributes::BUILTIN_BOUNDS.contains(&head.as_str())
+                    || self.knows_type(&head)
+                {
+                    continue;
+                }
+
+                let at = self.token_named(g, &head).unwrap_or(g);
+                hits.push((
+                    at,
+                    format!("nothing declares the trait `{head}`; a bound names one"),
+                ));
+            }
+        }
+
+        for (span, message) in hits {
+            self.diagnose(span, &message);
+        }
+    }
+
+    /// The token inside `span` whose text is `name`.
+    fn token_named(&self, span: TokSpan, name: &str) -> Option<TokSpan> {
+        (span.start..span.end)
+            .map(|i| TokSpan::new(i as usize, i as usize + 1))
+            .find(|one| self.text_of(*one) == name)
+    }
+
     pub(crate) fn stmt_inner(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Struct(st) => self.struct_decl(st),
@@ -1357,6 +1402,8 @@ impl<'s> Desugar<'s> {
             self.copy(cursor, as_);
             cursor = self.toks[a.end as usize].start;
         }
+
+        self.check_bounds(body.generics);
 
         // A bound `<T: Shape>` has no Luau form: the generic list loses it
         // and each parameter typed `T` becomes `(T & Shape)`.

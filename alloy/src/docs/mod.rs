@@ -34,6 +34,9 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["reserved word"], "ReservedWord"),
         (&["in macro expansion"], "MacroError"),
         (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),
+        // The `impl` header names a struct and an enum in one sentence;
+        // the enum rule below would take it.
+        (&["an `impl` targets"], "StructError"),
         (&["remote"], "WireType"),
         (&["directive"], "DirectiveError"),
         (&["result"], "ResultError"),
@@ -84,6 +87,7 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         // The export list's own reports read "binding", which the
         // pattern rule below would take.
         (&["of this module", "exported twice"], "3.2"),
+        (&["an `impl` targets"], "3.6"),
         (&["not exhaustive"], "4.2"),
         (&["remote"], "4.3"),
         (&["directive"], "4.4"),

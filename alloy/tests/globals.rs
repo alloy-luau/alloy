@@ -562,3 +562,36 @@ fn a_global_in_a_script_that_reads_a_local_reports() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A `global const` is set once wherever it is read. The `const` check
+/// used to read the declaring file alone, so an assignment in another
+/// file said nothing.
+#[test]
+fn an_assignment_to_a_global_const_reports_in_every_file() {
+    let dir = temp_project("const");
+    fs::write(dir.join("src/a.aly"), "global const MAX = 100\n").unwrap();
+    fs::write(dir.join("src/b.aly"), "MAX = 200\n\nprint(MAX)\n").unwrap();
+    let report = build(&dir);
+    let hit = one_saying(&messages(&report), "is a `const`");
+    assert!(hit.contains("`MAX` is a `const` of a.aly"), "{hit}");
+    assert!(hit.starts_with("b.aly"), "{hit}");
+}
+
+/// A local of the file wins: the global never reaches a name the file
+/// binds itself.
+#[test]
+fn a_local_of_the_same_name_takes_no_const_report() {
+    let dir = temp_project("const-shadow");
+    fs::write(dir.join("src/a.aly"), "global const MAX = 100\n").unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        "local MAX = 1\nMAX = 200\n\nprint(MAX)\n",
+    )
+    .unwrap();
+    let report = build(&dir);
+    let hits: Vec<String> = messages(&report)
+        .into_iter()
+        .filter(|m| m.contains("is a `const`"))
+        .collect();
+    assert!(hits.is_empty(), "{hits:?}");
+}

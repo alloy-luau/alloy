@@ -96,6 +96,9 @@ pub struct Global {
     pub start: u32,
     pub end: u32,
     pub kind: Kind,
+    /// The declaration wrote `const`, so an assignment anywhere in the
+    /// project is an error.
+    pub constant: bool,
     /// The parameter list of a generic type, `<T>`; empty otherwise.
     pub type_params: String,
     /// The side this global reaches: the directive above it when it
@@ -218,6 +221,7 @@ pub fn declared_in(
                 .map(|t| t.end)
                 .unwrap_or(0),
             kind,
+            constant: false,
             type_params: params,
             side: directive.unwrap_or(side),
             side_directive: directive,
@@ -314,6 +318,26 @@ pub fn declared_in(
             }
 
             _ => {}
+        }
+    }
+
+    // `global const N = 3`: an assignment to `N` in any file is an
+    // error, the same as one in the declaring file.
+    for stmt in &chunk.block.stmts {
+        let Stmt::Local(l) = stmt else {
+            continue;
+        };
+
+        if !l.global || !l.is_const {
+            continue;
+        }
+
+        for b in &l.names {
+            let name = text(b.name);
+
+            if let Some(g) = out.iter_mut().find(|g| g.name == name) {
+                g.constant = true;
+            }
         }
     }
 
@@ -758,6 +782,7 @@ pub fn refs_for(
 
         out.push(crate::desugar::GlobalRef {
             namespace: g.kind == Kind::Namespace,
+            constant: g.constant,
             side: g.side,
             name: g.name.clone(),
             file: g.file.to_string_lossy().replace('\\', "/"),

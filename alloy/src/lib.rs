@@ -226,7 +226,21 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     let parsed_clean = diagnostics.is_empty();
     diagnostics.extend(rendered.diagnostics);
 
-    for (start, end, message) in lint::const_reassignments(src, &parsed.lexed.toks) {
+    // A `global const` of another file is in scope here with no import,
+    // so an assignment to one reads the same as one in its own file.
+    let const_globals: Vec<(String, String)> = globals::used(src, &options.globals)
+        .into_iter()
+        .filter_map(|(name, _)| {
+            options
+                .globals
+                .iter()
+                .find(|g| g.constant && g.name == name)
+                .map(|g| (name, g.file.clone()))
+        })
+        .collect();
+
+    for (start, end, message) in lint::const_reassignments(src, &parsed.lexed.toks, &const_globals)
+    {
         diagnostics.push(Diagnostic {
             start,
             end,

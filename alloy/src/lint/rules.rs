@@ -47,7 +47,15 @@ fn directive_lints(src: &str) -> Vec<Lint> {
 /// `alloy doc const` says a reassignment is a compile error. Luau
 /// reports it as a syntax error in the emit, which only `alloy flux`
 /// runs, and in the checker's words.
-pub fn const_reassignments(src: &str, toks: &[Tok]) -> Vec<(u32, u32, String)> {
+///
+/// `globals` names the `global const` declarations of the project this
+/// file reaches, each with the file that declares it. A `global` is in
+/// scope everywhere, so an assignment to one here reads the same way.
+pub fn const_reassignments(
+    src: &str,
+    toks: &[Tok],
+    globals: &[(String, String)],
+) -> Vec<(u32, u32, String)> {
     let text = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or("");
     let lines = crate::fmt::structure::token_lines(src, toks);
     let starts = |i: usize| {
@@ -77,7 +85,7 @@ pub fn const_reassignments(src: &str, toks: &[Tok]) -> Vec<(u32, u32, String)> {
         names.push(text(j));
     }
 
-    if names.is_empty() {
+    if names.is_empty() && globals.is_empty() {
         return Vec::new();
     }
 
@@ -85,7 +93,6 @@ pub fn const_reassignments(src: &str, toks: &[Tok]) -> Vec<(u32, u32, String)> {
 
     for (i, t) in toks.iter().enumerate() {
         if t.kind != TokKind::Ident
-            || !names.contains(&text(i))
             || !starts(i)
             || !matches!(
                 text(i + 1),
@@ -96,11 +103,18 @@ pub fn const_reassignments(src: &str, toks: &[Tok]) -> Vec<(u32, u32, String)> {
         }
 
         let name = text(i);
-        out.push((
-            t.start,
-            t.end,
-            format!("`{name}` is a `const`; its value is set once and a reassignment is an error"),
-        ));
+        // A `const` of this file wins: the file's own declaration is
+        // the nearer one, and a global by that name never reaches here.
+        let message = if names.contains(&name) {
+            format!("`{name}` is a `const`; its value is set once and a reassignment is an error")
+        } else if let Some((_, file)) = globals.iter().find(|(n, _)| n == name) {
+            format!(
+                "`{name}` is a `const` of {file}; its value is set once and a reassignment is an error"
+            )
+        } else {
+            continue;
+        };
+        out.push((t.start, t.end, message));
     }
 
     out

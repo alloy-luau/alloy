@@ -161,6 +161,9 @@ pub struct GlobalRef {
     /// The name is a `global namespace`. Its types reach a file as
     /// `Math_Vec2`, so a type slot that writes `Math.Vec2` reads them.
     pub namespace: bool,
+    /// The declaration wrote `const`, so an assignment in any file of
+    /// the project is an error.
+    pub constant: bool,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.

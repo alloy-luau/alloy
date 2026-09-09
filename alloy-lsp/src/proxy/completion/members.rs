@@ -1,0 +1,609 @@
+use super::*;
+
+impl State {
+    /// Narrows a remote's member list to what the file may reach. The
+    /// emit types one surface for both sides, so `Toast.fire` is in the
+    /// list of a `.client.aly` file that cannot reach it; the
+    /// declaration and the file's side say which members stand.
+    pub(crate) fn filter_remote_members(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let items = match result {
+            Value::Array(items) => items,
+
+            Value::Object(obj) => match obj.get_mut("items").and_then(Value::as_array_mut) {
+                Some(items) => items,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+        let labels: HashSet<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        // Every remote carries these two; no other value in the
+        // language does.
+        if !(labels.contains("spec") && labels.contains("instance")) {
+            return;
+        }
+
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return;
+        };
+        let Some((base, _, '.', _)) = context::member_at(&doc.source, offset) else {
+            return;
+        };
+
+        if base.contains('.') {
+            return;
+        }
+
+        let here = remote_spec(&doc.source, &base);
+        let spec = match here {
+            Some(spec) => Some(spec),
+
+            // The declaration sits in the module the file imports it
+            // from; a name no import bound is not this remote.
+            None => imports::bound_names(&doc.source)
+                .contains(&base)
+                .then(|| {
+                    self.docs
+                        .values()
+                        .find_map(|d| remote_spec(&d.source, &base))
+                })
+                .flatten(),
+        };
+        let Some(spec) = spec else {
+            return;
+        };
+        let side = uri_to_path(uri)
+            .map(|p| p.to_string_lossy().into_owned())
+            .and_then(|name| alloy::directives::effective_side(&doc.source, &name));
+
+        items.retain(|i| {
+            i["label"]
+                .as_str()
+                .is_none_or(|label| spec.holds(label, side))
+        });
+    }
+}
+
+/// Gives an item the call its signature describes, when it carries no
+/// insert of its own: `earn(${1:amount})$0`, or `alive()` for a
+/// signature with no argument.
+pub(crate) fn set_call(item: &mut Value, label: &str, detail: &str, snippets: bool) {
+    if item.get("insertText").is_some() || item.pointer("/textEdit/newText").is_some() {
+        return;
+    }
+
+    let Some(insert) = call_snippet(label, detail) else {
+        return;
+    };
+
+    match snippets {
+        true => {
+            item["insertText"] = json!(insert);
+            item["insertTextFormat"] = json!(2);
+        }
+
+        // With no snippet support the placeholders would land as
+        // literal text; an empty pair is what the editor can take.
+        false => item["insertText"] = json!(format!("{label}()")),
+    }
+}
+
+/// The snippet a signature calls for: one placeholder per parameter,
+/// named the way the signature names it.
+pub(crate) fn call_snippet(label: &str, detail: &str) -> Option<String> {
+    let rest = match detail.strip_prefix('<') {
+        Some(after) => &detail[after.find('>')? + 2..],
+
+        None => detail,
+    };
+    let inner = rest.strip_prefix('(')?;
+    let mut depth = 0i32;
+    let mut prev = ' ';
+    let mut end = None;
+
+    for (i, c) in inner.char_indices() {
+        if c == '>' && prev == '-' {
+            prev = c;
+
+            continue;
+        }
+
+        prev = c;
+
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+            ')' if depth == 0 => {
+                end = Some(i);
+
+                break;
+            }
+            ')' | '}' | ']' | '>' => depth -= 1,
+            _ => {}
+        }
+    }
+
+    let params = &inner[..end?];
+
+    if params.trim().is_empty() {
+        return Some(format!("{label}()"));
+    }
+
+    let mut slots = Vec::new();
+    let mut depth = 0i32;
+    let mut prev = ' ';
+    let mut part = String::new();
+
+    for c in params.chars().chain(std::iter::once(',')) {
+        if c == '>' && prev == '-' {
+            prev = c;
+            part.push(c);
+
+            continue;
+        }
+
+        prev = c;
+
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+            ')' | '}' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                // A vararg takes as many arguments as the caller has,
+                // so it fills no slot of its own.
+                if part.trim_start().starts_with("...") {
+                    part.clear();
+
+                    continue;
+                }
+
+                let name = part
+                    .split(':')
+                    .next()
+                    .unwrap_or(&part)
+                    .trim()
+                    .trim_end_matches('?')
+                    .to_string();
+                let name = match name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !name.is_empty()
+                {
+                    true => name,
+
+                    false => format!("v{}", slots.len() + 1),
+                };
+                slots.push(format!("${{{}:{name}}}", slots.len() + 1));
+                part.clear();
+
+                continue;
+            }
+            _ => {}
+        }
+
+        part.push(c);
+    }
+
+    match slots.is_empty() {
+        true => Some(format!("{label}()")),
+
+        false => Some(format!("{label}({})$0", slots.join(", "))),
+    }
+}
+
+/// A record type without the fields the struct keeps private: the
+/// detail of `to_table` prints every one, which names what the type
+/// hides from a reader outside the impl.
+pub(crate) fn hide_record(detail: &str, private: &HashSet<String>) -> String {
+    let Some(open) = detail.find("{ ") else {
+        return detail.to_string();
+    };
+    let Some(close) = detail[open..].find(" }") else {
+        return detail.to_string();
+    };
+    let body = &detail[open + 2..open + close];
+    let kept: Vec<&str> = body
+        .split(", ")
+        .filter(|part| {
+            let name = part.split(':').next().unwrap_or(part).trim();
+
+            !private.contains(name.trim_end_matches('?'))
+        })
+        .collect();
+
+    format!(
+        "{}{{ {} }}{}",
+        &detail[..open],
+        kept.join(", "),
+        &detail[open + close + 2..]
+    )
+}
+
+/// Whether the child's own mapping already puts the caret after the
+/// same access. The emit copies most of them, and moving one that
+/// landed right would cost the member list it already answers.
+pub(crate) fn lands_on_member(
+    doc: &Doc,
+    line: u32,
+    character: u32,
+    base: &str,
+    sep: char,
+    prefix: usize,
+) -> bool {
+    let (sl, sc) = doc.to_shadow(line, character);
+    let Some(text) = doc.shadow.lines().nth(sl as usize) else {
+        return false;
+    };
+    let Some(at) = offset_of(text, 0, sc) else {
+        return false;
+    };
+    let head = &text[..at.min(text.len())];
+    let head = &head[..head.len() - prefix.min(head.len())];
+    let receiver = base.rsplit('.').next().unwrap_or(base);
+
+    head.strip_suffix(sep)
+        .is_some_and(|h| h.ends_with(receiver))
+}
+
+/// The separator right before the word at `offset`, when one is there.
+pub(crate) fn sep_of(source: &str, offset: usize) -> Option<char> {
+    let head = &source[..offset.min(source.len())];
+    let word = head.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+
+    word.chars().next_back().filter(|c| matches!(c, '.' | ':'))
+}
+
+/// The separator a member access at the caret uses, `.` or `:`, when
+/// the caret sits in a member name. `None` anywhere else.
+pub(crate) fn member_position(doc: &Doc, line: u32, character: u32) -> Option<char> {
+    let text = doc.source.lines().nth(line as usize)?;
+    let head: String = text.chars().take(character as usize).collect();
+    let word = head.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+    let sep = word.chars().next_back()?;
+
+    (matches!(sep, '.' | ':') && !word.ends_with("::")).then_some(sep)
+}
+
+/// A signature without the receiver a colon passes: `(Account, number)
+/// -> number` reads `(number) -> number`.
+pub(crate) fn drop_receiver(detail: &str) -> Option<String> {
+    // `<U>(read T[], f: ...) -> U[]` keeps its type parameters.
+    let (head, rest) = match detail.strip_prefix('<') {
+        Some(after) => {
+            let close = after.find('>')? + 2;
+
+            (&detail[..close], &detail[close..])
+        }
+
+        None => ("", detail),
+    };
+    let inner = rest.strip_prefix('(')?;
+    let mut depth = 0i32;
+    let mut cut = None;
+    let mut prev = ' ';
+
+    for (k, c) in inner.char_indices() {
+        // The `>` of a `->` closes nothing; reading it as a bracket
+        // walks the depth below zero and cuts the wrong parameter.
+        if c == '>' && prev == '-' {
+            prev = c;
+
+            continue;
+        }
+
+        prev = c;
+
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+            ')' if depth == 0 => {
+                cut = Some((k, k));
+
+                break;
+            }
+            ')' | '}' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                cut = Some((k, k + 1));
+
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let (_, end) = cut?;
+    let tail = inner[end..].trim_start();
+
+    Some(format!("{head}({tail}"))
+}
+
+/// The private fields of every struct the file declares.
+pub(crate) fn private_fields(doc: &Doc) -> HashSet<String> {
+    doc.shapes
+        .iter()
+        .chain(doc.import_shapes.iter())
+        .filter_map(|s| match s {
+            alloy::declarations::Shape::Struct { fields, .. } => Some(fields),
+
+            _ => None,
+        })
+        .flatten()
+        .filter(|(_, private)| *private)
+        .map(|(f, _)| f.clone())
+        .collect()
+}
+
+/// A constructor signature without the fields the struct keeps private:
+/// they have a default, so no caller writes them.
+pub(crate) fn hide_private(detail: &str, private: &HashSet<String>) -> String {
+    let Some(open) = detail.find("({ ") else {
+        return detail.to_string();
+    };
+    let Some(close) = detail[open..].find(" }) -> ") else {
+        return detail.to_string();
+    };
+    let body = &detail[open + 3..open + close];
+    let kept: Vec<&str> = body
+        .split(", ")
+        .filter(|part| {
+            let name = part.split(':').next().unwrap_or(part).trim();
+
+            !private.contains(name.trim_end_matches('?'))
+        })
+        .collect();
+
+    format!(
+        "{}({{ {} }}{}",
+        &detail[..open],
+        kept.join(", "),
+        &detail[open + close + 2..]
+    )
+}
+
+/// The entries a module path can continue with: the project's aliases
+/// and `@self` when nothing is typed, the children of
+/// the sourcemap under `@game/`, and otherwise the directories and the
+/// modules of the resolved directory. Each is `(label, kind, detail)`.
+pub(crate) fn module_entries(
+    dir: &Path,
+    root: Option<&Path>,
+    head: &str,
+    sourcemap: &str,
+    own: Option<&Path>,
+) -> Vec<(String, u64, String)> {
+    let mut out = Vec::new();
+
+    if head.is_empty() {
+        out.push((
+            "@self/".to_string(),
+            19,
+            "this file's directory".to_string(),
+        ));
+        out.push(("../".to_string(), 19, "the parent directory".to_string()));
+
+        for (name, target) in project_aliases(dir, root) {
+            out.push((
+                format!("@{name}/"),
+                19,
+                format!("alias: {}", target.display()),
+            ));
+        }
+
+        if root.is_some_and(|r| r.join(sourcemap).is_file()) {
+            out.push((
+                "@game/".to_string(),
+                19,
+                format!("the DataModel, from {sourcemap}"),
+            ));
+        }
+    }
+
+    if let Some(rest) = head.strip_prefix("@game/") {
+        if let Some(root) = root
+            && let Ok(text) = std::fs::read_to_string(root.join(sourcemap))
+            && let Ok(tree) = serde_json::from_str::<Value>(&text)
+        {
+            let mut node = &tree;
+
+            for part in rest.split('/').filter(|p| !p.is_empty()) {
+                let Some(next) = node
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .and_then(|c| c.iter().find(|c| c["name"] == part))
+                else {
+                    return out;
+                };
+                node = next;
+            }
+
+            for child in node
+                .get("children")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(name) = child["name"].as_str() {
+                    let class = child["className"].as_str().unwrap_or("Instance");
+                    let has_children = child
+                        .get("children")
+                        .and_then(Value::as_array)
+                        .is_some_and(|c| !c.is_empty());
+                    let label = if has_children {
+                        format!("{name}/")
+                    } else {
+                        name.to_string()
+                    };
+                    out.push((label, 19, class.to_string()));
+                }
+            }
+        }
+
+        return out;
+    }
+
+    // A directory to list: relative, `@self`, or an alias.
+    let base = if let Some(rest) = head.strip_prefix("@self/") {
+        Some(imports::lexical(dir, rest))
+    } else if let Some(rest) = head.strip_prefix('@') {
+        let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
+
+        project_aliases(dir, root)
+            .into_iter()
+            .find(|(n, _)| n == alias)
+            .map(|(_, target)| imports::lexical(&target, tail))
+    } else {
+        Some(imports::lexical(dir, head))
+    };
+
+    let Some(base) = base else {
+        return out;
+    };
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return out;
+    };
+    let mut seen = HashSet::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+
+        if name.starts_with('.') || name == "node_modules" || name == "target" {
+            continue;
+        }
+
+        // A module never imports itself.
+        if own.is_some_and(|own| normalize(&path) == normalize(own)) {
+            continue;
+        }
+
+        if path.is_dir() {
+            if seen.insert(name.clone()) {
+                out.push((format!("{name}/"), 19, "directory".to_string()));
+            }
+
+            continue;
+        }
+
+        // A data file keeps its extension: the path names the file, and
+        // the emit drops the extension itself.
+        if let Some(format) = alloy::data::Format::of(&name) {
+            if seen.insert(name.clone()) {
+                out.push((name.clone(), 17, format!("{} data", format.name())));
+            }
+
+            continue;
+        }
+
+        let stem = ["d.aly", "aly", "alx", "luau", "lua"]
+            .iter()
+            .find_map(|ext| name.strip_suffix(&format!(".{ext}")));
+
+        // A `.server` or `.client` file is a script, not a module: it
+        // returns nothing, and Roblox runs it on its own.
+        if let Some(stem) = stem
+            && stem != "init"
+            && !alloy::modules::is_script(&name)
+            && seen.insert(stem.to_string())
+        {
+            out.push((stem.to_string(), 9, name.clone()));
+        }
+    }
+
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+
+    out
+}
+
+/// A snippet without its placeholders, for an editor that takes none.
+pub(crate) fn plain_snippet(insert: &str) -> String {
+    let mut out = String::new();
+    let mut rest = insert;
+
+    while let Some(i) = rest.find('$') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+
+        if let Some(body) = after.strip_prefix('{') {
+            let end = body.find('}').unwrap_or(body.len());
+            out.push_str(body[..end].split_once(':').map_or("", |(_, name)| name));
+            rest = &body[(end + 1).min(body.len())..];
+        } else {
+            let end = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
+            rest = &after[end..];
+        }
+    }
+
+    out.push_str(rest);
+
+    collapse_empty_arguments(&out)
+}
+
+/// `Score($1, $2)` loses both placeholders in a plain insert; the
+/// separators they stood between would read as empty arguments.
+pub(crate) fn collapse_empty_arguments(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+
+    while let Some(open) = rest.find('(') {
+        let Some(close) = rest[open..].find(')').map(|i| open + i) else {
+            break;
+        };
+        let inner = &rest[open + 1..close];
+        out.push_str(&rest[..=open]);
+
+        if !inner
+            .trim_matches(|c: char| c == ',' || c.is_whitespace())
+            .is_empty()
+        {
+            out.push_str(inner);
+        }
+
+        out.push(')');
+        rest = &rest[close + 1..];
+    }
+
+    out.push_str(rest);
+
+    out
+}
+
+pub(crate) fn payload_types(signature: &str) -> Vec<String> {
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = signature.rfind(')') else {
+        return Vec::new();
+    };
+    let inner = &signature[open + 1..close];
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' | '{' | '<' | '[' => depth += 1,
+            ')' | '}' | '>' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(inner[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    let last = inner[start..].trim();
+
+    if !last.is_empty() {
+        out.push(last.to_string());
+    }
+
+    out
+}

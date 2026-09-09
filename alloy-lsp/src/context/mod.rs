@@ -105,6 +105,12 @@ pub enum Context {
     TypeSlot { prefix: String, prefers: Prefers },
     /// `new |`: a struct, or a class the engine constructs.
     NewTarget { prefix: String },
+    /// `destroy part |`: the `after` that puts the removal on a timer.
+    DestroyAfter { prefix: String },
+    /// `after 3 |`: the `do` that opens the block, and the `where` that
+    /// puts a condition on it. `filtered` is true once a `where` is
+    /// written, so only the `do` is left.
+    AfterDo { prefix: String, filtered: bool },
     /// `case |`: a variant of an enum, or `default`. `scrutinee` holds
     /// the text between the enclosing `match` and its `with`, when a
     /// `match` is open above the caret.
@@ -506,6 +512,25 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             return Some(Context::MatchCase {
                 prefix: prefix.to_string(),
                 scrutinee: matches::match_scrutinee(src, offset),
+            });
+        }
+
+        // `destroy part |`: the operand is written, so `after` is the
+        // one word left.
+        if head_words.first() == Some(&"destroy") && head_words.len() == 2 {
+            return Some(Context::DestroyAfter {
+                prefix: prefix.to_string(),
+            });
+        }
+
+        // `after 3 |` and `after 3 where ready |`.
+        if head_words.first() == Some(&"after")
+            && head_words.len() >= 2
+            && !head_words.contains(&"do")
+        {
+            return Some(Context::AfterDo {
+                prefix: prefix.to_string(),
+                filtered: head_words.contains(&"where"),
             });
         }
     }

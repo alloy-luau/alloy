@@ -58,6 +58,70 @@ pub(crate) fn the_keyword_wins_over_an_auto_import() {
     st.keyword_first(uri, 3, 12, &mut result);
     assert_eq!(labels(&result).len(), 4);
 }
+/// `destroy` brings the timer form with it, and the three positions
+/// the two words open each offer what belongs there.
+#[test]
+pub(crate) fn destroy_and_after_reach_the_completion() {
+    let src = "local part = Instance.new(\"Part\")\ndes\n";
+    let (st, uri) = one_file(src);
+    let mut result = json!([{ "label": "print", "kind": 3, "sortText": "4" }]);
+    st.keyword_first(uri, 1, 3, &mut result);
+    let items = result.as_array().unwrap();
+    let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+    assert!(labels.contains(&"destroy"), "{labels:?}");
+
+    let snippet = items
+        .iter()
+        .find(|i| i["label"] == json!("destroy x after n"))
+        .expect("the timer form");
+    assert_eq!(
+        snippet["insertText"],
+        json!("destroy ${1:value} after ${2:seconds}")
+    );
+    assert_eq!(snippet["insertTextFormat"], json!(2));
+    assert_eq!(snippet["filterText"], json!("destroy"));
+
+    // `after` is a statement keyword of its own.
+    let src = "aft\n";
+    let (st, uri) = one_file(src);
+    let mut result = json!([{ "label": "print", "kind": 3, "sortText": "4" }]);
+    st.keyword_first(uri, 0, 3, &mut result);
+    let labels: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(labels.contains(&"after"), "{labels:?}");
+
+    // Past the operand of a `destroy`, only `after` belongs.
+    assert_eq!(
+        context_labels("local part = script.Part\ndestroy part \n", "destroy part "),
+        ["after"]
+    );
+
+    // Past the seconds, the block opens with `do`, and `where` puts a
+    // condition on it. A `where` already written leaves the `do`.
+    assert_eq!(context_labels("after 3 \n", "after 3 "), ["do", "where"]);
+    assert_eq!(
+        context_labels(
+            "local ready = true\nafter 3 where ready \n",
+            "after 3 where ready "
+        ),
+        ["do"]
+    );
+}
+/// The labels the context at the end of `head` offers.
+fn context_labels(src: &str, head: &str) -> Vec<String> {
+    let at = src.rfind(head).expect("the head") + head.len();
+    let (st, uri) = one_file(src);
+    let ctx = context::detect(src, at).expect("a context");
+
+    st.context_items(uri, at, &ctx)
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect()
+}
 /// A whole keyword with more names behind it keeps the list, and
 /// takes the first row. `else` is `elseif` as far as the letters go,
 /// so the reader still needs to see both.

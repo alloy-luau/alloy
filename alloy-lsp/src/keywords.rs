@@ -146,6 +146,7 @@ pub use alloy::docs::ALLOY_KEYWORDS;
 /// `if x then return end` drew `EncodingService` from a package before
 /// the list held `end` itself.
 pub const WORDS: &[&str] = &[
+    "after",
     "and",
     "as",
     "async",
@@ -163,6 +164,7 @@ pub const WORDS: &[&str] = &[
     "declare",
     "default",
     "delete",
+    "destroy",
     "do",
     "else",
     "elseif",
@@ -243,6 +245,28 @@ mod tests {
         assert!(hover("local t = { new = 1 }", 13).is_none());
         assert!(hover("local v = new V { }", 11).is_some());
         assert!(hover("local p: Partial<V> = {}", 10).is_some());
+    }
+
+    /// `destroy` and `after` answer from the table, and each one used
+    /// as a member is the member.
+    #[test]
+    fn destroy_and_after_hover() {
+        let src = "destroy part after 3\n";
+        let (s, e, text) = hover(src, 0).unwrap();
+        assert_eq!(&src[s..e], "destroy");
+        assert!(text.contains("destroy method and nothing else"), "{text}");
+
+        let at = src.find("after").unwrap();
+        let (s, e, text) = hover(src, at).unwrap();
+        assert_eq!(&src[s..e], "after");
+        assert!(text.contains("Runs a block later"), "{text}");
+
+        let (s, _, _) = hover("after 3 where ready do", 8).unwrap();
+        assert_eq!(s, 8);
+
+        // A method of that name is the method; the child answers.
+        assert!(hover("bag:destroy()", 4).is_none());
+        assert!(hover("function destroy(self) end", 9).is_none());
     }
 
     #[test]

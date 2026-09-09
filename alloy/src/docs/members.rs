@@ -814,8 +814,8 @@ pub const MEMBERS: &[(&str, &[Member])] = &[
             Member {
                 name: "add",
                 kind: MemberKind::Method,
-                signature: "Scope:add<T>(item: T): T",
-                doc: "Adds a cleanup and gives `item` straight back, so a binding reads as it did before. It takes anything `delete` accepts, or a function.",
+                signature: "Scope:add<T>(item: T, owner: Instance?): T",
+                doc: "Adds a cleanup and gives `item` straight back, so a binding reads as it did before. It takes anything `delete` accepts, or a function. `owner` names the Instance the item belongs to: `delete` on that Instance cleans the item before the Destroy.",
                 example: "local scope = Scope.new()\nlocal stop = scope:add(function() print(\"bye\") end)\nprint(stop ~= nil)",
             },
             Member {

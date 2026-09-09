@@ -192,7 +192,15 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "delete",
-        "```alloy\ndelete expr\n```\nDestroys the value: an Instance, a connection, a thread, a function, or a table with a `Destroy`, `Disconnect`, `destroy`, or `disconnect` method; the Roblox spelling wins when a table has both. The std names that shape `Deletable`. `delete t.field` and `delete t[key]` then set the slot to nil, so the table holds nothing destroyed.",
+        "```alloy\ndelete expr\n```\nCleans the value up, whatever it is: an Instance is destroyed, an `RBXScriptConnection` and a `SignalConnection` disconnect, a thread is cancelled, a function is called, a `Scope` closes, a `Signal` is destroyed, and any other table takes its `Destroy`, `Disconnect`, `destroy`, or `disconnect` method; the Roblox spelling wins when a table has both. The std names that shape `Deletable`. `delete t.field` and `delete t[key]` then set the slot to nil, so the table holds nothing destroyed.\n\nWhat a scope holds for an Instance goes first: `scope:add(connection, part)` names the Instance an item belongs to, and `delete part` disconnects the item before the Destroy, so no handler runs against an Instance that is half gone.\n\n`delete` takes no timer. `destroy x after n` is the one that waits.",
+    ),
+    (
+        "destroy",
+        "```alloy\ndestroy expr\ndestroy expr after seconds\n```\nCalls the value's destroy method and nothing else. The operand is an Instance or a value whose type has a `destroy` or a `Destroy`; the std names that shape `Destroyable`, and any other type is a compile error naming it. Use `delete` for a connection, a thread, or a scope.\n\n`destroy x after n` waits `n` seconds first. An Instance goes to `Debris:AddItem(x, n)`, which outlives the script that scheduled it; a value with a method goes on a `task.delay`. The emit picks by the type the file shows, and asks `typeof(x)` at run time when the file shows none.",
+    ),
+    (
+        "after",
+        "```alloy\nafter 3 do\n    part.Transparency = 1\nend\n\nafter 3 where alive do\n    respawn()\nend\n```\nRuns a block later: `task.delay(seconds, function() ... end)`. The seconds are a number. `return` leaves the block, not the function around it, since the block is a function of its own.\n\n`where` puts a condition on it, and the condition is read when the timer fires, not when the block is scheduled. A local the code changes in between is read at its new value.\n\n`after` is also the word in `destroy x after n`. It is reserved either way, so no name may be `after`.",
     ),
     (
         "attribute",

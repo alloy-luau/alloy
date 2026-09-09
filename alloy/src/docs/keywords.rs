@@ -3,6 +3,7 @@
 /// The Alloy keywords a plain completion offers. The child lists Luau's
 /// own; these are the words the emit removes.
 pub const ALLOY_KEYWORDS: &[&str] = &[
+    "after",
     "as",
     "async",
     "attribute",
@@ -17,6 +18,7 @@ pub const ALLOY_KEYWORDS: &[&str] = &[
     "declare",
     "default",
     "delete",
+    "destroy",
     "enum",
     "export",
     "extends",

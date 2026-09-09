@@ -422,6 +422,19 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            Context::DestroyAfter { prefix } => {
+                items.push(word("after", "keyword", Some("`destroy x after n` waits `n` seconds, then destroys `x`.".to_string()), offset - prefix.len()));
+            }
+
+            Context::AfterDo { prefix, filtered } => {
+                let from = offset - prefix.len();
+                items.push(word("do", "keyword", Some("Opens the block the timer runs.".to_string()), from));
+
+                if !filtered {
+                    items.push(word("where", "keyword", Some("A condition on the block, read when the timer fires.".to_string()), from));
+                }
+            }
+
             Context::ImportStar => {
                 items.push(word("as", "keyword", Some("The name the module takes here.".to_string()), offset));
             }

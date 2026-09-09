@@ -629,6 +629,35 @@ impl State {
                 }
             }
 
+            // `destroy part |`: the timer form of the statement.
+            Context::DestroyAfter { prefix } => {
+                items.push(word(
+                    "after",
+                    14,
+                    Some("`destroy x after n` waits `n` seconds, then destroys `x`.".to_string()),
+                    offset - prefix.len(),
+                ));
+            }
+
+            Context::AfterDo { prefix, filtered } => {
+                let from = offset - prefix.len();
+                items.push(word(
+                    "do",
+                    14,
+                    Some("Opens the block the timer runs.".to_string()),
+                    from,
+                ));
+
+                if !filtered {
+                    items.push(word(
+                        "where",
+                        14,
+                        Some("A condition on the block, read when the timer fires.".to_string()),
+                        from,
+                    ));
+                }
+            }
+
             Context::ImportStar => {
                 items.push(word(
                     "as",

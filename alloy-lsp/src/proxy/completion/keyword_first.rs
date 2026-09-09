@@ -62,6 +62,34 @@ impl State {
             }
         }
 
+        // `destroy x after n` is the second form of the word, and the
+        // word alone does not say the timer exists.
+        if "destroy".starts_with(word.as_str()) {
+            const INSERT: &str = "destroy ${1:value} after ${2:seconds}";
+            let mut item = json!({
+                "label": "destroy x after n",
+                "kind": 15,
+                "detail": "Alloy keyword",
+                "filterText": "destroy",
+                "sortText": "0destroy1",
+            });
+
+            match self.snippets {
+                true => {
+                    item["insertText"] = json!(INSERT);
+                    item["insertTextFormat"] = json!(2);
+                }
+
+                false => item["insertText"] = json!(plain_snippet(INSERT)),
+            }
+
+            if let Some(doc) = keywords::doc("destroy") {
+                item["documentation"] = json!({ "kind": "markdown", "value": doc });
+            }
+
+            items.push(item);
+        }
+
         if !keywords::is_keyword(&word) {
             return;
         }

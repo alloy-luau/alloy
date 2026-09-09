@@ -146,6 +146,50 @@ impl Server {
         Some((shadow_line_no, shadow_line[..column].chars().count() as u32))
     }
 
+    /// The shadow position a hover on a guarded index belongs at.
+    /// `mo?[k]` lowers to `(if mo == nil then nil else mo[k])` and
+    /// `mo![k]` to `(if mo == nil then error(..) else mo)[k]`, so the
+    /// bracket the author wrote has no position of its own; the
+    /// bracket the lowering wrote reads the element.
+    pub(crate) fn index_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
+        if !is_alloy_uri(uri) {
+            return None;
+        }
+
+        let (line, character) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+
+        if doc.is_alx {
+            return None;
+        }
+
+        let offset = offset_of(&doc.source, line, character)?;
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let (base, access, at) = context::index_at(&doc.source, offset)?;
+        let source_line = doc.source.lines().nth(line as usize)?;
+        let (shadow_line_no, _) = doc.to_shadow(line, character);
+        let shadow_line = doc.shadow.lines().nth(shadow_line_no as usize)?;
+        // The column right after the lowered `[`; the caret belongs on
+        // the bracket itself, which is the byte before it.
+        let column = context::member_column(
+            source_line,
+            shadow_line,
+            &base,
+            access,
+            '[',
+            0,
+            at + 1 - line_start,
+        )?;
+
+        Some((
+            shadow_line_no,
+            shadow_line[..column - 1].chars().count() as u32,
+        ))
+    }
+
     /// The shadow position an expression completion belongs at. The emit
     /// qualifies a std name, `Ok(v)` to `__alloy.Ok(v)`, so a caret at
     /// that name maps past a `.` the source never wrote and the child
@@ -226,6 +270,16 @@ impl Server {
             // A `:` opens a type far more often than it closes a
             // ternary; the `?` is what makes it the else.
             if word == ":" && !ternary_else_at(&doc.source, *start) {
+                return false;
+            }
+
+            // A bracket that indexes a value opens no array literal,
+            // and the caret on it asks for the element the index
+            // answers. The `?` or `!` in front still reads as itself.
+            if matches!(word, "[" | "?[")
+                && offset == *end - 1
+                && indexes_a_value(&doc.source, *end - 1)
+            {
                 return false;
             }
 
@@ -427,6 +481,39 @@ pub(crate) fn ternary_else_at(source: &str, at: usize) -> bool {
     }
 
     false
+}
+
+/// The type of `x?[k]` reads `T?`: the guard answers nil, and the
+/// child sees only the index inside it. An asserted index needs
+/// nothing, since `!` already dropped the `?`.
+pub(crate) fn optional_index_hover(
+    text: &str,
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let offset = offset_of(&doc.source, line, character)?;
+
+    if context::index_at(&doc.source, offset)?.1 != context::Access::Optional {
+        return None;
+    }
+
+    let body = text.strip_prefix("```alloy\n")?.strip_suffix("\n```")?;
+
+    (!body.contains('\n') && !body.ends_with('?')).then(|| format!("```alloy\n{body}?\n```"))
+}
+
+/// Whether the `[` at `at` indexes a value: something stands before
+/// it that an index reads. A `[` that opens an array literal follows
+/// an operator, a comma, or nothing at all.
+pub(crate) fn indexes_a_value(source: &str, at: usize) -> bool {
+    let head = source[..at]
+        .strip_suffix(['?', '!'])
+        .unwrap_or(&source[..at]);
+
+    head.chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | ')' | ']' | '"' | '\'' | '`'))
 }
 
 /// Whether `offset` sits in a name a declaring keyword introduces: the

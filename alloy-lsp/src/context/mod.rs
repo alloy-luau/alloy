@@ -28,7 +28,9 @@ pub use fields::{Field, instance_class, record_entries};
 #[allow(unused_imports)]
 pub use matches::match_arms;
 #[allow(unused_imports)]
-pub use members::{Access, guarded_member_column, index_key_at, member_at, member_column};
+pub use members::{
+    Access, guarded_member_column, index_at, index_key_at, member_at, member_column,
+};
 #[allow(unused_imports)]
 pub use scope::{Local, LocalKind, locals_in_scope};
 

@@ -533,6 +533,18 @@ impl Server {
                     return true;
                 }
 
+                // `mo?[k]` and `mo![k]`: the bracket the author wrote
+                // has no position of its own, so the caret on it maps
+                // to the bracket the lowering wrote, where the child
+                // reads the element the index answers.
+                if m == "textDocument/hover"
+                    && let Some(home) = self.index_home(&uri, &message)
+                {
+                    self.forward_request_at(message, method.as_deref(), home);
+
+                    return true;
+                }
+
                 if m == "textDocument/hover"
                     && let Some(id) = message.get("id").cloned()
                     && (self.case_binding_hover(&uri, &message, &id)
@@ -1031,6 +1043,12 @@ impl Server {
                             // highlights `const`, `async`, and `export`,
                             // which the Luau one drops.
                             text = text.replace("```luau", "```alloy");
+
+                            if let Some(optional) =
+                                optional_index_hover(&text, doc, line, character)
+                            {
+                                text = optional;
+                            }
 
                             // `type Player = Player` restates the token
                             // under the cursor and says nothing, and

@@ -546,3 +546,39 @@ fn a_chain_link_names_the_receiver_type() {
         "function Array:find(self: read number[], f: (number, number) -> boolean): number?"
     );
 }
+
+/// The bracket of `x?[k]` reads `T?`: the guard answers nil, and the
+/// child sees only the index inside it. `x![k]` keeps `T`, and a plain
+/// index keeps whatever the child said.
+#[test]
+fn a_guarded_index_reads_the_element_type() {
+    let src = concat!(
+        "type P = { name: string }\n",
+        "local mo: { [string]: P }? = nil\n",
+        "local m: { [string]: P } = {}\n",
+        "local a = mo?[\"k\"]\nlocal b = mo![\"k\"]\nlocal c = m[\"k\"]\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).unwrap();
+    let text = "```alloy\nP\n```";
+    let column = |line: u32| {
+        doc.source
+            .lines()
+            .nth(line as usize)
+            .and_then(|l| l.find('['))
+            .expect("a bracket") as u32
+    };
+
+    assert_eq!(
+        optional_index_hover(text, doc, 3, column(3)).as_deref(),
+        Some("```alloy\nP?\n```")
+    );
+    assert_eq!(optional_index_hover(text, doc, 4, column(4)), None);
+    assert_eq!(optional_index_hover(text, doc, 5, column(5)), None);
+
+    // A type that already answers nil takes no second `?`.
+    assert_eq!(
+        optional_index_hover("```alloy\nP?\n```", doc, 3, column(3)),
+        None
+    );
+}

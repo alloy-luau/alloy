@@ -142,6 +142,7 @@ impl<'a> Parser<'a> {
 
         Ok(Stmt::Attribute(AttributeDecl {
             exported,
+            global: false,
             name,
             params,
             targets,

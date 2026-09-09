@@ -241,6 +241,9 @@ pub struct Attr {
 pub struct StructDecl {
     pub attributes: Vec<Attr>,
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub name: TokSpan,
     pub generics: Option<TokSpan>,
     pub fields: Vec<Field>,
@@ -265,6 +268,9 @@ pub struct Field {
 pub struct TraitDecl {
     pub attributes: Vec<Attr>,
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub name: TokSpan,
     pub methods: Vec<TraitMethod>,
     pub span: TokSpan,
@@ -285,6 +291,9 @@ pub struct TraitMethod {
 #[derive(Debug)]
 pub struct InterfaceDecl {
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub name: TokSpan,
     pub generics: Option<TokSpan>,
     pub extends: Vec<TokSpan>,
@@ -298,6 +307,9 @@ pub struct InterfaceDecl {
 pub struct RemoteDecl {
     pub attributes: Vec<Attr>,
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub is_function: bool,
     pub name: TokSpan,
     pub params: Vec<Param>,
@@ -311,6 +323,9 @@ pub struct RemoteDecl {
 #[derive(Debug)]
 pub struct AttributeDecl {
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub name: TokSpan,
     pub params: Vec<Param>,
     pub targets: Vec<TokSpan>,
@@ -321,6 +336,9 @@ pub struct AttributeDecl {
 #[derive(Debug)]
 pub struct MacroDecl {
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub name: TokSpan,
     pub params: Vec<Param>,
     pub body: Block,
@@ -387,6 +405,9 @@ pub struct ExportList {
 pub struct EnumDecl {
     pub attributes: Vec<Attr>,
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub name: TokSpan,
     pub variants: Vec<Variant>,
     pub span: TokSpan,
@@ -408,6 +429,9 @@ pub struct Variant {
 #[derive(Debug)]
 pub struct ImplDecl {
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub trait_name: Option<TokSpan>,
     /// The dotted target name.
     pub target: TokSpan,
@@ -557,6 +581,9 @@ pub struct Local {
     pub is_const: bool,
     /// `export local x = 1`; the module exposes the binding by value.
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub names: Vec<Binding>,
     pub values: Vec<Expr>,
     pub span: TokSpan,
@@ -655,6 +682,9 @@ pub struct Function {
     pub attrs: Vec<Attr>,
     /// `export function f()`; the module exposes the function by value.
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     /// `private function` or `public function` in an `impl`.
     pub visibility: Option<TokSpan>,
     /// Every name token in the dotted path, with the `:` method name included.
@@ -671,6 +701,9 @@ pub struct LocalFunction {
     pub attrs: Vec<Attr>,
     /// `export local function f()`; accepted beside `export local`.
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     /// `const function f()` instead of `local function f()`.
     pub is_const: bool,
     pub name: TokSpan,
@@ -721,6 +754,9 @@ there, so no `extends` exists here either.
 #[derive(Debug)]
 pub struct Class {
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     /// `open class`; the inheritance RFC lets an open class be extended.
     pub open: bool,
     pub name: TokSpan,
@@ -758,6 +794,9 @@ pub struct Declare {
 #[derive(Debug)]
 pub struct TypeAlias {
     pub exported: bool,
+    /// `global function f()`; the name is in scope in every file of
+    /// the project. A global exports too, so an import still resolves.
+    pub global: bool,
     pub name: TokSpan,
     pub span: TokSpan,
 }

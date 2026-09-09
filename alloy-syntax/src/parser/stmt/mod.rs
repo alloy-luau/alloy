@@ -141,6 +141,7 @@ impl<'a> Parser<'a> {
             ) && self.name_at(1))
             || (self.at("export")
                 && matches!(self.text_at(1), "local" | "const" | "function" | "type"))
+            || (self.at("global") && self.global_follows())
             || (self.at("type") && self.type_is_alias())
     }
 
@@ -271,15 +272,26 @@ impl<'a> Parser<'a> {
                     return self.declare_stmt(start);
                 }
 
-                let exported = self.at("export");
+                // `@attr global function f()` reads the way
+                // `@attr export function f()` does. A global exports too.
+                let is_global = self.at("global") && self.global_follows();
+                let exported = is_global || self.at("export");
 
                 if exported {
                     self.bump();
                 }
 
                 // Declarations that take attributes.
+                let marked = |stmt: Stmt| match is_global {
+                    true => mark_global(stmt),
+
+                    false => stmt,
+                };
+
                 match self.text() {
-                    "struct" if self.name_at(1) => return self.struct_decl(start, attrs, exported),
+                    "struct" if self.name_at(1) => {
+                        return self.struct_decl(start, attrs, exported).map(marked);
+                    }
 
                     "enum" if self.name_at(1) => {
                         let mut stmt = self.enum_decl(start, exported)?;
@@ -288,16 +300,20 @@ impl<'a> Parser<'a> {
                             e.attributes = attrs;
                         }
 
-                        return Ok(stmt);
+                        return Ok(marked(stmt));
                     }
 
-                    "trait" if self.name_at(1) => return self.trait_decl(start, attrs, exported),
+                    "trait" if self.name_at(1) => {
+                        return self.trait_decl(start, attrs, exported).map(marked);
+                    }
 
                     "remote" if self.name_at(1) || self.text_at(1) == "function" => {
-                        return self.remote_decl(start, attrs, exported);
+                        return self.remote_decl(start, attrs, exported).map(marked);
                     }
 
-                    "impl" if self.name_at(1) => return self.impl_decl(start, exported),
+                    "impl" if self.name_at(1) => {
+                        return self.impl_decl(start, exported).map(marked);
+                    }
 
                     _ => {}
                 }
@@ -353,6 +369,10 @@ impl<'a> Parser<'a> {
                     stmt = mark_exported(stmt);
                 }
 
+                if is_global {
+                    stmt = mark_global(stmt);
+                }
+
                 Ok(stmt)
             }
 
@@ -382,6 +402,17 @@ impl<'a> Parser<'a> {
             }
 
             "macro" if self.name_at(1) && self.text_at(2) == "(" => self.macro_decl(start, false),
+
+            /*
+            `global` is contextual, like `export`. It opens a declaration
+            only when a declaration follows, so a variable named global
+            keeps parsing as an expression.
+            */
+            "global" if self.global_follows() => self.global_stmt(start),
+
+            "export" if self.text_at(1) == "global" => {
+                Err(self.err("`global` already reaches every file; drop `export`"))
+            }
 
             /*
             `export` is contextual, like `type`. It opens a declaration only
@@ -527,6 +558,157 @@ impl<'a> Parser<'a> {
 
             _ => self.expr_stmt(start),
         }
+    }
+}
+
+impl<'a> Parser<'a> {
+    /// Whether a declaration follows `global`, so the word is the
+    /// modifier and not a name.
+    pub(super) fn global_follows(&self) -> bool {
+        match self.text_at(1) {
+            "local" | "const" | "function" | "type" | "struct" | "enum" | "trait" | "interface"
+            | "remote" | "impl" | "class" | "macro" | "attribute" | "export" => true,
+
+            "async" => self.text_at(2) == "function",
+
+            "open" => self.text_at(2) == "class",
+
+            _ => false,
+        }
+    }
+
+    /// `global <declaration>`: the declaration parses from `global`, so
+    /// its span covers the word and the emit replaces the whole thing.
+    /// A global exports too, and the project injects the binding in
+    /// every file that names it.
+    fn global_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
+        if self.text_at(1) == "export" {
+            return Err(self.err("`global` already reaches every file; drop `export`"));
+        }
+
+        // A macro expands where it is written and an attribute is read
+        // by the file that declares it, so neither reaches another file.
+        if matches!(self.text_at(1), "macro" | "attribute") {
+            let word = self.text_at(1).to_string();
+
+            return Err(self.err(&format!(
+                "`global` does not apply to `{word}`; export it and import it"
+            )));
+        }
+
+        // `type` reads its own keyword, the way `export type` does.
+        if self.text_at(1) == "type" {
+            return self.type_alias(start);
+        }
+
+        self.bump();
+
+        let stmt = match self.text() {
+            "struct" => self.struct_decl(start, Vec::new(), true)?,
+
+            "enum" => self.enum_decl(start, true)?,
+
+            "trait" => self.trait_decl(start, Vec::new(), true)?,
+
+            "interface" => self.interface_decl(start, true)?,
+
+            "remote" => self.remote_decl(start, Vec::new(), true)?,
+
+            "impl" => self.impl_decl(start, true)?,
+
+            "class" | "open" => self.class_stmt(start, true)?,
+
+            "async" => {
+                let is_async = Some(TokSpan::new(self.bump(), self.pos));
+                let mut stmt = self.function_stmt(start, Vec::new())?;
+
+                if let Stmt::Function(f) = &mut stmt {
+                    f.body.is_async = is_async;
+                }
+
+                mark_exported(stmt)
+            }
+
+            "function" => mark_exported(self.function_stmt(start, Vec::new())?),
+
+            _ => mark_exported(self.local_stmt(start)?),
+        };
+
+        Ok(mark_global(stmt))
+    }
+}
+
+/// The statement with its global flag set. `global` reaches every
+/// declaration `export` reaches, so the match covers the same nodes.
+fn mark_global(stmt: Stmt) -> Stmt {
+    match stmt {
+        Stmt::Local(mut n) => {
+            n.global = true;
+
+            Stmt::Local(n)
+        }
+
+        Stmt::Function(mut n) => {
+            n.global = true;
+
+            Stmt::Function(n)
+        }
+
+        Stmt::LocalFunction(mut n) => {
+            n.global = true;
+
+            Stmt::LocalFunction(n)
+        }
+
+        Stmt::Struct(mut n) => {
+            n.global = true;
+
+            Stmt::Struct(n)
+        }
+
+        Stmt::Enum(mut n) => {
+            n.global = true;
+
+            Stmt::Enum(n)
+        }
+
+        Stmt::Trait(mut n) => {
+            n.global = true;
+
+            Stmt::Trait(n)
+        }
+
+        Stmt::Interface(mut n) => {
+            n.global = true;
+
+            Stmt::Interface(n)
+        }
+
+        Stmt::Class(mut n) => {
+            n.global = true;
+
+            Stmt::Class(n)
+        }
+
+        Stmt::TypeAlias(mut n) => {
+            n.global = true;
+
+            Stmt::TypeAlias(n)
+        }
+
+        Stmt::Impl(mut n) => {
+            n.global = true;
+
+            Stmt::Impl(n)
+        }
+
+        Stmt::Remote(mut n) => {
+            n.global = true;
+
+            Stmt::Remote(n)
+        }
+
+        other => other,
     }
 }
 

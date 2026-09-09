@@ -781,3 +781,41 @@ fn max_depth_follows_the_option() {
     let toks = alloy_syntax::lexer::lex("return 1\n").unwrap().toks;
     assert!(alloy_syntax::parser::parse_with("return 1\n", &toks, zero).is_err());
 }
+
+/// `global` in front of a declaration: the modifier `export` sits at,
+/// for the names a project reaches without an import.
+#[test]
+fn global_declarations_parse() {
+    round_trip("global function log(msg: string)\n    print(msg)\nend\n");
+    round_trip("global async function fetch()\nend\n");
+    round_trip("global const MAX = 10\n");
+    round_trip("global local count = 0\n");
+    round_trip("global local function helper()\nend\n");
+    round_trip("global struct Vec2 as\n    x: number\n    y: number\nend\n");
+    round_trip("global enum State as\n    Idle\n    Busy\nend\n");
+    round_trip("global trait Show as\n    function show(self): string\nend\n");
+    round_trip("global interface Named as\n    name: string\nend\n");
+    round_trip("global type Id = number\n");
+    round_trip("global class Point as\n    x\nend\n");
+    round_trip(
+        "global impl BasePart as\n    function flat(self): BasePart\n        return self\n    end\nend\n",
+    );
+    round_trip("@deprecated\nglobal function old()\nend\n");
+}
+
+/// `global` stays contextual: a name spelled global still reads as a name.
+#[test]
+fn global_is_contextual() {
+    round_trip("local global = 1\nprint(global)\n");
+    round_trip("global = 2\n");
+    round_trip("local t = { global = 1 }\nprint(t.global)\n");
+}
+
+/// The two modifiers do not stack, and neither reaches a macro.
+#[test]
+fn global_rejects_the_forms_it_has_no_meaning_for() {
+    rejects("export global function f()\nend\n");
+    rejects("global export function f()\nend\n");
+    rejects("global macro twice(x)\n    x\nend\n");
+    rejects("global attribute tag(name: string) on struct\n");
+}

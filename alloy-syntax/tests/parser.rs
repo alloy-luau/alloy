@@ -242,6 +242,10 @@ const CORPUS: &[&str] = &[
     "export { a } from './m'",
     "export type { T } from './m'",
     "export default { x = 1 }",
+    // The Roblox services: one service by path, or a list from `game`.
+    "import Players from 'game:Players'",
+    "import { Players, ReplicatedStorage } from 'game'",
+    "import { Players as P } from 'game'",
     "local import = 1\nimport = import + 1",
     // --- alloy: enums, impls, match ---
     "enum Color as Red, Green, Blue end",

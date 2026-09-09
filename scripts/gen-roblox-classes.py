@@ -87,3 +87,33 @@ props += ["];", "",
           "}", ""]
 (root / "crates/alloy/src/roblox_props.rs").write_text("\n".join(props))
 print("classes with types", sum(1 for v in own.values() if v))
+
+# The service list, for `import X from "game:X"`. globalTypes.d.luau
+# carries no Service tag, so the list comes from two rules: every
+# Instance class whose name ends in `Service`, and the seed below, which
+# names the services that do not. A name already in the generated file
+# is kept, so a hand addition survives a regeneration.
+SEED = [
+    "AnimationClipProvider", "Chat", "ContentProvider", "CoreGui", "CorePackages",
+    "DebuggerManager", "Debris", "Geometry", "HSRDataContentProvider",
+    "KeyframeSequenceProvider", "Lighting", "MeshContentProvider", "NetworkClient",
+    "NetworkServer", "Players", "PluginManager", "ReplicatedFirst", "ReplicatedStorage",
+    "RobloxReplicatedStorage", "ScriptContext", "Selection", "ServerStorage",
+    "SharedTableRegistry", "SlimContentProvider", "SolidModelContentProvider",
+    "StarterGui", "StarterPack", "StarterPlayer", "Stats", "TaskScheduler", "Teams",
+    "TemporaryCageMeshProvider", "VirtualInputManager", "VirtualUser", "Visit",
+    "VoiceChatInternal", "Workspace", "WrapDeformMeshProvider",
+]
+services_rs = root / "crates/alloy/src/roblox_services.rs"
+kept = set(re.findall(r'^    "(\w+)",$', services_rs.read_text(), re.M)) if services_rs.exists() else set()
+services = sorted(({n for n in instances if n.endswith("Service")} | set(SEED) | kept) & set(instances))
+svc = ['//! The Roblox services `import X from "game:X"` names, generated from',
+       "//! luau-lsp's `globalTypes.d.luau` by `scripts/gen-roblox-classes.py`.",
+       "//! The definitions carry no Service tag, so two rules build the list:",
+       "//! every Instance class whose name ends in `Service`, and a seed in the",
+       "//! script for the services that do not. A name here survives a",
+       "//! regeneration, so a missing service is one line to add.", "",
+       "pub const SERVICES: &[&str] = &["]
+svc += [f'    "{n}",' for n in services] + ["];", ""]
+services_rs.write_text("\n".join(svc))
+print("services", len(services))

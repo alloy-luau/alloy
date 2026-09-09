@@ -79,6 +79,17 @@ impl<'s> Desugar<'s> {
         // and the extension is what says the module is not Alloy's.
         let spec = self.text_of(i.path).to_string();
         let path = crate::data::strip_literal(&spec);
+        let bare = spec.trim_matches(['"', '\'']);
+
+        // `"game"` and `"game:Players"` name services, not modules, so
+        // the import binds `game:GetService` calls instead of a
+        // `require`. A form the spec does not allow still lowers to the
+        // service it names; `import_problems` reports the form.
+        if let Some(game) = crate::game_import::game_path(bare) {
+            self.service_import(i, &game);
+
+            return;
+        }
 
         match &i.kind {
             ImportKind::Namespace(n) => {
@@ -232,6 +243,54 @@ impl<'s> Desugar<'s> {
                 self.generate(anchor, &parts.join(" "));
             }
         }
+    }
+
+    /// `import { Players } from "game"` and `import P from "game:Players"`
+    /// both bind `game:GetService`. Every binding lands on the import's
+    /// own line, so the line count holds and the analyzer reads the
+    /// service class the definitions declare.
+    fn service_import(&mut self, i: &Import, game: &crate::game_import::GamePath) {
+        use crate::game_import::GamePath;
+
+        let anchor = self.byte_start(i.span);
+        // The path names the service for every form of `"game:X"`; a
+        // `"game"` import takes each service from the name written.
+        let named = |this: &Self, name: TokSpan, alias: Option<TokSpan>| {
+            let written = this.text_of(name).to_string();
+            let local = alias
+                .map(|a| this.text_of(a).to_string())
+                .unwrap_or(written.clone());
+            let service = match game {
+                GamePath::Every => written,
+
+                GamePath::One(service) => service.clone(),
+            };
+
+            crate::game_import::get_service(&local, &service)
+        };
+        let mut lines = Vec::new();
+
+        match &i.kind {
+            ImportKind::Namespace(n) | ImportKind::Default(n) => {
+                lines.push(named(self, *n, None));
+            }
+
+            ImportKind::Both(n, specs) => {
+                lines.push(named(self, *n, None));
+
+                for sp in specs {
+                    lines.push(named(self, sp.name, sp.alias));
+                }
+            }
+
+            ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
+                for sp in specs {
+                    lines.push(named(self, sp.name, sp.alias));
+                }
+            }
+        }
+
+        self.generate(anchor, &lines.join(" "));
     }
 
     pub(crate) fn export_list(&mut self, e: &ExportList) {

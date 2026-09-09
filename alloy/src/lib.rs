@@ -20,6 +20,7 @@ pub mod docs;
 pub mod extensions;
 pub mod flux;
 pub mod fmt;
+pub mod game_import;
 pub mod ingot;
 pub mod jsonc;
 pub mod lint;
@@ -29,6 +30,7 @@ pub mod project;
 pub mod render;
 pub mod roblox_classes;
 pub mod roblox_props;
+pub mod roblox_services;
 pub mod rojo;
 pub mod schema;
 /// The fold that turns the checker's printed types back into the names

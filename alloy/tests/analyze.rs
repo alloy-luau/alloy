@@ -71,6 +71,18 @@ local both: string[] = await Future.all([ a, b ])
 print(first, same, both)
 "#;
 
+/// A Roblox service as an import lowers to `game:GetService`, so the
+/// analyzer types the binding as the service class.
+const SERVICES: &str = r#"import Players from "game:Players"
+import { ReplicatedStorage, RunService as Run } from "game"
+
+local remotes: Instance = ReplicatedStorage:WaitForChild("Remotes")
+local count: number = #Players:GetPlayers()
+local delta: number = Run.Heartbeat:Wait()
+
+print(remotes, count, delta)
+"#;
+
 /// Compiles `src`, writes it beside a copy of the std, and runs
 /// `luau-lsp analyze` over it. The test skips when the tool or the
 /// Roblox definitions are missing.
@@ -157,6 +169,13 @@ fn a_derived_struct_meets_the_serialize_bound() {
 #[test]
 fn a_mixed_race_lands_on_the_union() {
     analyze(RACED, "raced");
+}
+
+/// `import Players from "game:Players"` binds the service class, so a
+/// member of it checks and the binding is no `Instance`.
+#[test]
+fn a_service_import_types_as_its_class() {
+    analyze(SERVICES, "services");
 }
 
 /// A module of types alone and a module of types and values both give

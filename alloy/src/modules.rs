@@ -820,6 +820,102 @@ pub fn import_problems(
             continue;
         }
 
+        // `"game"` and `"game:Players"` name Roblox services, not
+        // modules. The path decides the form: `"game"` takes a list in
+        // braces, `"game:X"` takes one name.
+        if let Some(game) = crate::game_import::game_path(&spec) {
+            use crate::game_import::GamePath;
+
+            let quote = text(node.path).chars().next().unwrap_or('"');
+            let (a, b) = range(node.span);
+            // The service the name stands for, and the local it binds:
+            // an unknown service is reported on the name, a name bound
+            // twice on the local.
+            let service_name = |service_at: alloy_syntax::ast::TokSpan,
+                                service: &str,
+                                local_at: alloy_syntax::ast::TokSpan,
+                                out: &mut Vec<ImportProblem>,
+                                bound: &mut Vec<String>| {
+                if !crate::game_import::is_service(service) {
+                    let (sa, sb) = range(service_at);
+                    out.push(ImportProblem {
+                        start: sa,
+                        end: sb,
+                        kind: "ImportError",
+                        message: crate::game_import::unknown_message(service),
+                    });
+                }
+
+                let local = text(local_at).to_string();
+
+                if bound.contains(&local) {
+                    let (la, lb) = range(local_at);
+                    out.push(ImportProblem {
+                        start: la,
+                        end: lb,
+                        kind: "ImportError",
+                        message: format!("`{local}` is already imported in this file"),
+                    });
+                }
+
+                bound.push(local);
+            };
+            // The name a wrong form wrote, for the message that shows
+            // the two forms that work.
+            let first = match &node.kind {
+                ImportKind::Namespace(n) | ImportKind::Default(n) | ImportKind::Both(n, _) => {
+                    Some(text(*n))
+                }
+
+                ImportKind::Named(list) | ImportKind::TypeOnly(list) => {
+                    list.first().map(|s| text(s.name))
+                }
+            };
+
+            match (&game, &node.kind) {
+                (GamePath::Every, ImportKind::Named(list)) => {
+                    for item in list {
+                        let written = text(item.name).to_string();
+                        service_name(
+                            item.name,
+                            &written,
+                            item.alias.unwrap_or(item.name),
+                            &mut out,
+                            &mut bound_values,
+                        );
+                    }
+                }
+
+                (GamePath::Every, _) => {
+                    out.push(ImportProblem {
+                        start: a,
+                        end: b,
+                        kind: "ImportError",
+                        message: crate::game_import::braces_message(
+                            &spec,
+                            quote,
+                            first.unwrap_or("X"),
+                        ),
+                    });
+                }
+
+                (GamePath::One(service), ImportKind::Default(name)) => {
+                    service_name(node.path, service, *name, &mut out, &mut bound_values);
+                }
+
+                (GamePath::One(service), _) => {
+                    out.push(ImportProblem {
+                        start: a,
+                        end: b,
+                        kind: "ImportError",
+                        message: crate::game_import::single_message(&spec, quote, service),
+                    });
+                }
+            }
+
+            continue;
+        }
+
         let (path_start, path_end) = range(node.path);
         // A module that names no file is reported, and its names still
         // bind here, so a second import of one is a duplicate.

@@ -411,10 +411,18 @@ fn namespace_summaries(
         }
 
         // The declaration as written, with the path in front of its
-        // name, so the reader sees where the member lives.
+        // name, so the reader sees where the member lives. A function
+        // shows its header alone; a body says nothing a hover needs.
         let body = text(m.stmt.span());
         let at = start_of(member) - start_of(m.stmt.span());
         let shown = format!("{}{path}.{}", &body[..at], &body[at..]);
+        let shown = match m.stmt.under_default() {
+            Stmt::Function(_) | Stmt::LocalFunction(_) => {
+                shown.lines().next().unwrap_or(&shown).to_string()
+            }
+
+            _ => dedent(&shown),
+        };
         let mut lines = vec!["```alloy".to_string()];
         lines.extend(capped(&shown));
         lines.push("```".to_string());
@@ -618,6 +626,31 @@ fn namespace_pairs(
     }
 }
 
+/// A block read out of an indented body, with the indent of its last
+/// line taken off every line after the first. The head already sits at
+/// column zero; the rest came in with the namespace's own indent.
+fn dedent(text: &str) -> String {
+    let mut lines = text.lines();
+    let Some(head) = lines.next() else {
+        return text.to_string();
+    };
+    let rest: Vec<&str> = lines.collect();
+    let indent = rest
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out = String::from(head);
+
+    for line in rest {
+        out.push('\n');
+        out.push_str(line.get(indent..).unwrap_or(line.trim_start()));
+    }
+
+    out
+}
+
 /// The name one namespace member binds.
 fn member_name(stmt: &Stmt) -> Option<TokSpan> {
     match stmt.under_default() {
@@ -701,11 +734,20 @@ mod tests {
         let vec2 = d.iter().find(|x| x.name == "Math.Vec2").unwrap();
         assert_eq!(
             vec2.hover,
-            "```alloy\nstruct Math.Vec2 as\n        x: number\n    end\n```"
+            "```alloy\nstruct Math.Vec2 as\n    x: number\nend\n```"
         );
 
         let e = d.iter().find(|x| x.name == "Math.E").unwrap();
         assert!(e.hover.contains("`E` is private to `Math`."), "{}", e.hover);
+    }
+
+    #[test]
+    fn a_function_member_hovers_by_its_header() {
+        let src =
+            "namespace M as\n    function f(x: number): number\n        return x\n    end\nend\n";
+        let d = summaries(src, false);
+        let f = d.iter().find(|x| x.name == "M.f").unwrap();
+        assert_eq!(f.hover, "```alloy\nfunction M.f(x: number): number\n```");
     }
 
     #[test]

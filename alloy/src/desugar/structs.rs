@@ -136,15 +136,30 @@ impl<'s> Desugar<'s> {
             let name_span = m.path[0];
             let mname = self.text_of(name_span).to_string();
             // `function name(` becomes `function Target.name(`. The
-            // `private` or `public` word has no Luau form and goes.
-            match m.visibility {
-                Some(v) => {
-                    self.copy(ms, self.byte_start(v));
-                    self.copy(self.byte_end(v), fn_tok_end);
-                }
+            // `private` or `public` word has no Luau form and goes, and
+            // so does `async`: the body wrap is what it turns into, and
+            // a copy of it would sit in front of the Luau header.
+            let mut cut: Vec<(u32, u32)> = Vec::new();
 
-                None => self.copy(ms, fn_tok_end),
+            if let Some(v) = m.visibility {
+                cut.push((self.byte_start(v), self.byte_end(v)));
             }
+
+            if let Some(a) = m.body.is_async {
+                cut.push((self.byte_start(a), self.byte_end(a)));
+            }
+
+            cut.sort_unstable();
+            let mut head = ms;
+
+            for (from, to) in cut {
+                if from >= head {
+                    self.copy(head, from);
+                    head = to;
+                }
+            }
+
+            self.copy(head, fn_tok_end);
 
             let owner = if split && is_private {
                 format!("{target}__private")
@@ -1727,6 +1742,36 @@ mod tests {
                 .contains("function Box.__new<T>(f: { value: T, count: number? }): Box<T>"),
             "{}",
             out.check
+        );
+    }
+
+    /// `async function load(self)` in an impl wrote `async function
+    /// Loader.loadfunction load(self)`: the head copied the `async` the
+    /// body wrap replaces, and the rewrite then wrote the header again.
+    #[test]
+    fn an_async_method_writes_one_header() {
+        let src = "struct Loader as\n    n: number\nend\n\nimpl Loader as\n    async function load(self): number\n        return self.n\n    end\n\n    private async function hidden(self): number\n        return self.n\n    end\nend\nprint(Loader)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.ship.contains("async"), "{}", out.ship);
+        assert_eq!(
+            out.ship.matches("function Loader.load").count(),
+            1,
+            "{}",
+            out.ship
+        );
+        assert_eq!(
+            out.ship.matches("function load(").count(),
+            0,
+            "{}",
+            out.ship
+        );
+        assert_eq!(
+            out.ship.matches("function Loader.hidden").count(),
+            1,
+            "{}",
+            out.ship
         );
     }
 

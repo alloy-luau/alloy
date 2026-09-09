@@ -1328,8 +1328,12 @@ impl<'s> Desugar<'s> {
         let params_open = self.toks[self.params_open_tok(body) as usize];
         let mut cursor = start;
 
-        // 1. The header up to `(`, minus the `async` token.
-        if let Some(a) = body.is_async {
+        // 1. The header up to `(`, minus the `async` token. An impl
+        // method hands over the span past its name, and its `async`
+        // sits before that: the caller dropped it already.
+        if let Some(a) = body.is_async
+            && self.byte_start(a) >= start
+        {
             let as_ = self.byte_start(a);
             self.copy(cursor, as_);
             cursor = self.toks[a.end as usize].start;

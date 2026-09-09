@@ -124,14 +124,15 @@ impl<'s> Desugar<'s> {
                         .unwrap_or(name.clone());
 
                     let args = self.module_type_params(&path, &name);
+                    let type_args = type_arguments(&args);
 
                     if sp.is_type {
-                        types.push(format!("type {local}{args} = {temp}.{name}{args}"));
+                        types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
                     } else {
                         // A struct or an enum is a value and a type; the
                         // type comes along when the module exports one.
                         if self.module_exports_type(&path, &name) {
-                            types.push(format!("type {local}{args} = {temp}.{name}{args}"));
+                            types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
                         }
 
                         names.push(local);
@@ -169,12 +170,13 @@ impl<'s> Desugar<'s> {
                         .unwrap_or(name.clone());
 
                     let args = self.module_type_params(&path, &name);
+                    let type_args = type_arguments(&args);
 
                     if sp.is_type {
-                        types.push(format!("type {local}{args} = {temp}.{name}{args}"));
+                        types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
                     } else {
                         if self.module_exports_type(&path, &name) {
-                            types.push(format!("type {local}{args} = {temp}.{name}{args}"));
+                            types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
                         }
 
                         names.push(local);
@@ -222,8 +224,9 @@ impl<'s> Desugar<'s> {
                             .unwrap_or(name.clone());
 
                         let args = self.module_type_params(&path, &name);
+                        let type_args = type_arguments(&args);
 
-                        format!("type {local}{args} = {temp}.{name}{args}")
+                        format!("type {local}{args} = {temp}.{name}{type_args}")
                     })
                     .collect();
                 self.generate(anchor, &parts.join(" "));
@@ -421,4 +424,61 @@ impl<'s> Desugar<'s> {
     }
 
     // --- enums ---------------------------------------------------------------
+}
+
+/// The argument list a parameter list names: `<T = nil, U: Bound>`
+/// declares, `<T, U>` refers. A default or a bound belongs on the
+/// declaring side alone.
+fn type_arguments(params: &str) -> String {
+    let Some(inner) = params.strip_prefix('<').and_then(|p| p.strip_suffix('>')) else {
+        return params.to_string();
+    };
+    let mut names = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+
+    for c in inner.chars() {
+        match c {
+            '<' | '(' | '{' | '[' => {
+                depth += 1;
+                current.push(c);
+            }
+            '>' | ')' | '}' | ']' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                names.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+    }
+
+    if !current.trim().is_empty() {
+        names.push(current);
+    }
+
+    let names: Vec<String> = names
+        .iter()
+        .map(|p| {
+            let p = p.trim();
+            let end = p.find(['=', ':']).unwrap_or(p.len());
+
+            p[..end].trim().to_string()
+        })
+        .collect();
+
+    format!("<{}>", names.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_parameter_list_refers_by_name_alone() {
+        assert_eq!(super::type_arguments("<T = nil>"), "<T>");
+        assert_eq!(super::type_arguments("<T = nil, U: Bound>"), "<T, U>");
+        assert_eq!(super::type_arguments("<K, V = { a: number }>"), "<K, V>");
+        assert_eq!(super::type_arguments("<T...>"), "<T...>");
+        assert_eq!(super::type_arguments(""), "");
+    }
 }

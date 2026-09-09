@@ -491,6 +491,26 @@ pub(crate) fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<M
 
         match instance_name(&fname) {
             Some(n) => {
+                // A script cannot be required, so the build writes its
+                // globals into a module beside it. The tree holds that
+                // module, which has no source of its own.
+                if crate::modules::is_script(&fname)
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                    && !crate::globals::declared(
+                        &crate::globals::index_text(&path, &text),
+                        &path,
+                    )
+                    .is_empty()
+                {
+                    let stem = fname
+                        .strip_suffix(".aly")
+                        .or_else(|| fname.strip_suffix(".alx"))
+                        .unwrap_or(&fname);
+                    let mut g = node(&format!("{stem}.globals"), "ModuleScript", None);
+                    g.insert("children".into(), json!([]));
+                    children.push(Value::Object(g));
+                }
+
                 let mut m = node(&n, script_class(&fname), Some(rel));
                 m.insert("children".into(), json!([]));
                 children.push(Value::Object(m));

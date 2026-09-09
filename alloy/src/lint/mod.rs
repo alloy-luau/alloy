@@ -974,6 +974,38 @@ mod tests {
         assert_eq!(names("task.wait(1)\n"), Vec::<&str>::new());
     }
 
+    /// `export impl` on a foreign type still parses; the lint asks for
+    /// `global impl`, and its rewrite is the one word. It is off by
+    /// default while both spellings are accepted.
+    #[test]
+    fn export_impl_asks_for_global_impl() {
+        let src = "export impl Vector3 as\n    function flat(self): Vector3\n        return self\n    end\nend\n";
+        let out = crate::compile(src).unwrap();
+        let hit = out
+            .lints
+            .iter()
+            .find(|l| l.name == "export_impl")
+            .expect("the lint fires");
+        assert!(hit.message.contains("`global impl`"), "{}", hit.message);
+        let fix = hit.fix.as_ref().expect("a rewrite");
+        assert_eq!(fix.replacement, "global");
+        assert_eq!(&src[fix.start as usize..fix.end as usize], "export");
+        assert_eq!(
+            level_of(&LintConfig::default(), "export_impl"),
+            Level::Allow
+        );
+
+        // `global impl` says it already, and an `impl` on a struct of
+        // this file is an export of the struct, not a project-wide one.
+        let global = crate::compile(&src.replace("export impl", "global impl")).unwrap();
+        assert!(!global.lints.iter().any(|l| l.name == "export_impl"));
+        let own = crate::compile(
+            "struct Vec2 as\n    x: number\nend\nexport impl Vec2 as\n    function len(self): number\n        return self.x\n    end\nend\n",
+        )
+        .unwrap();
+        assert!(!own.lints.iter().any(|l| l.name == "export_impl"));
+    }
+
     #[test]
     fn an_unused_import_is_a_lint() {
         assert_eq!(

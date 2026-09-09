@@ -1171,6 +1171,50 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// `[contexts]` names the folders of each side. A folder name
+    /// matches any segment; a path with a `/` matches from the root;
+    /// the deepest match wins.
+    #[test]
+    fn the_contexts_table_reads_a_folder_name_and_a_path() {
+        use crate::directives::Side;
+
+        let c = Config::parse(
+            "[contexts]\nclient = [\"client\", \"ui\"]\nserver = [\"server\"]\nshared = [\"shared\"]\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        let side = |rel: &str| {
+            c.contexts
+                .side_of(Path::new(rel), &Path::new("src").join(rel))
+        };
+        assert_eq!(side("client/x.aly"), Some(Some(Side::Client)));
+        assert_eq!(side("features/ui/panel.aly"), Some(Some(Side::Client)));
+        assert_eq!(side("server/rules.aly"), Some(Some(Side::Server)));
+        assert_eq!(side("shared/types.aly"), Some(None));
+        assert_eq!(side("other/x.aly"), None);
+        // The deepest folder decides: a client folder inside a shared
+        // one is the client's.
+        assert_eq!(side("shared/ui/panel.aly"), Some(Some(Side::Client)));
+
+        let by_path = Config::parse(
+            "[contexts]\nserver = [\"src/back\"]\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            by_path
+                .contexts
+                .side_of(Path::new("back/x.aly"), Path::new("src/back/x.aly")),
+            Some(Some(Side::Server))
+        );
+        assert_eq!(
+            by_path
+                .contexts
+                .side_of(Path::new("front/x.aly"), Path::new("src/front/x.aly")),
+            None
+        );
+    }
+
     #[test]
     fn a_missing_key_takes_its_default() {
         let c = Config::parse("[build]\nout = \"dist\"\n", Path::new("alloy.toml")).unwrap();

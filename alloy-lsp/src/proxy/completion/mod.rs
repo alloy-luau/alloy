@@ -17,6 +17,7 @@ mod scope;
 mod std_completions;
 
 pub(crate) use context_items::MatchKind;
+pub(crate) use deprecated::says_deprecated;
 pub(crate) use members::{
     call_snippet, drop_receiver, hide_private, hide_record, lands_on_member, member_position,
     module_entries, payload_types, plain_snippet, private_fields, sep_of, set_call,

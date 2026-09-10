@@ -82,6 +82,9 @@ pub(crate) struct State {
     /// read at startup would cost every session that never opens a
     /// class body.
     pub(crate) roblox_docs: std::cell::RefCell<Option<Arc<HashMap<String, String>>>>,
+    /// The member names those entries mark deprecated, read off the
+    /// same index the first time a list has to hide one.
+    pub(crate) roblox_deprecated: std::cell::RefCell<Option<Arc<HashSet<String>>>>,
 }
 
 impl State {
@@ -273,6 +276,43 @@ impl State {
         }
 
         None
+    }
+
+    /// The member names the API docs mark deprecated: the engine opens
+    /// the text of a deprecated member with the note. `brickColor` and
+    /// `BasePart.brickColor` both stand in the set, so a row that names
+    /// the class and one that names the member alone both find it.
+    pub(crate) fn roblox_deprecated_names(&self) -> Arc<HashSet<String>> {
+        if let Some(held) = self.roblox_deprecated.borrow().as_ref() {
+            return Arc::clone(held);
+        }
+
+        let mut names = HashSet::new();
+
+        if let Some(docs) = self.roblox_docs() {
+            for (key, text) in docs.iter() {
+                let Some(entry) = key.strip_prefix("@roblox/globaltype/") else {
+                    continue;
+                };
+
+                // `Class.Method/param/0` documents an argument, not a
+                // member the list writes.
+                if entry.contains('/') || !crate::proxy::completion::says_deprecated(text) {
+                    continue;
+                }
+
+                if let Some((_, member)) = entry.rsplit_once('.') {
+                    names.insert(member.to_string());
+                }
+
+                names.insert(entry.to_string());
+            }
+        }
+
+        let held = Arc::new(names);
+        *self.roblox_deprecated.borrow_mut() = Some(Arc::clone(&held));
+
+        held
     }
 
     /// The docs file, read once. A file that will not parse reads as an

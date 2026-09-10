@@ -30,8 +30,9 @@ pub fn defaults() -> Value {
     })
 }
 
-/// The proxy's own editor options. Both features are on until the
-/// editor turns one off.
+/// The proxy's own editor options. The two helpers are on until the
+/// editor turns one off; the two deprecation filters are off until it
+/// turns one on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Editor {
     /// Name the element the editor closes after the `>` that ends an
@@ -39,6 +40,11 @@ pub struct Editor {
     pub auto_close_tags: bool,
     /// Write the `end` of an open block after Enter.
     pub auto_end: bool,
+    /// Leave a member the Roblox API marks deprecated out of every
+    /// completion list.
+    pub hide_roblox_deprecated: bool,
+    /// Leave out what the source marks `@deprecated` as well.
+    pub hide_all_deprecated: bool,
 }
 
 impl Default for Editor {
@@ -46,6 +52,8 @@ impl Default for Editor {
         Self {
             auto_close_tags: true,
             auto_end: true,
+            hide_roblox_deprecated: false,
+            hide_all_deprecated: false,
         }
     }
 }
@@ -59,6 +67,8 @@ pub fn editor(options: &Value, current: Editor) -> Editor {
     Editor {
         auto_close_tags: flag("autoCloseTags", current.auto_close_tags),
         auto_end: flag("autoEnd", current.auto_end),
+        hide_roblox_deprecated: flag("hideRobloxDeprecated", current.hide_roblox_deprecated),
+        hide_all_deprecated: flag("hideAllDeprecated", current.hide_all_deprecated),
     }
 }
 
@@ -125,9 +135,11 @@ pub fn from_editor(options: &Value) -> Value {
     if let Some(o) = out.as_object_mut() {
         o.remove("fflags");
 
-        // The proxy's own options; the child knows neither name.
+        // The proxy's own options; the child knows none of the names.
         o.remove("autoCloseTags");
         o.remove("autoEnd");
+        o.remove("hideRobloxDeprecated");
+        o.remove("hideAllDeprecated");
     }
 
     out
@@ -253,9 +265,29 @@ mod tests {
 
     #[test]
     fn the_proxys_own_options_stay_out_of_the_child_settings() {
-        let s = from_editor(&json!({ "luauLsp": {}, "autoCloseTags": false, "autoEnd": false }));
+        let s = from_editor(
+            &json!({ "luauLsp": {}, "autoCloseTags": false, "autoEnd": false,
+                                     "hideRobloxDeprecated": true, "hideAllDeprecated": true }),
+        );
         assert!(s.get("autoCloseTags").is_none());
         assert!(s.get("autoEnd").is_none());
+        assert!(s.get("hideRobloxDeprecated").is_none());
+        assert!(s.get("hideAllDeprecated").is_none());
+    }
+
+    /// Both filters start off, and a settings change that names one
+    /// leaves the other where it was.
+    #[test]
+    fn the_deprecation_filters_start_off() {
+        let start = Editor::default();
+        assert!(!start.hide_roblox_deprecated && !start.hide_all_deprecated);
+        let roblox = editor(&json!({ "hideRobloxDeprecated": true }), start);
+        assert!(roblox.hide_roblox_deprecated);
+        assert!(!roblox.hide_all_deprecated);
+        let both = editor(&json!({ "hideAllDeprecated": true }), roblox);
+        assert!(both.hide_roblox_deprecated && both.hide_all_deprecated);
+        assert_eq!(editor(&json!({ "inlayHints": {} }), both), both);
+        assert!(!editor(&json!({ "hideRobloxDeprecated": false }), both).hide_roblox_deprecated);
     }
 
     #[test]

@@ -1,9 +1,11 @@
-//! What a completion list marks deprecated.
+//! What a completion list marks deprecated, and what it leaves out.
 //!
 //! The child marks its own rows: luau-lsp reads `@deprecated` in the
 //! definitions and sends `deprecated: true`. The proxy assembles lists
 //! of its own, so those rows carry the mark too, as the `tags` the
-//! editor strikes the row through with.
+//! editor strikes through. Two editor settings then drop the marked
+//! rows: `hideRobloxDeprecated` for the engine's own members, and
+//! `hideAllDeprecated` for what the source marks as well.
 
 use super::*;
 
@@ -11,9 +13,9 @@ use super::*;
 const DEPRECATED: u64 = 1;
 
 impl State {
-    /// Marks every deprecated row of a completion answer. The list
-    /// holds the child's rows and the proxy's own by now, so both read
-    /// alike.
+    /// Marks every deprecated row of a completion answer, then drops
+    /// the rows the editor's settings hide. The list holds the child's
+    /// rows and the proxy's own by now, so both read alike.
     pub(crate) fn deprecated_pass(&self, uri: &str, result: &mut Value) {
         let own = match self.docs.get(uri) {
             Some(doc) => deprecated_names(&doc.source),
@@ -29,6 +31,60 @@ impl State {
                 mark(item);
             }
         }
+
+        let hide_all = self.editor.hide_all_deprecated;
+
+        if !hide_all && !self.editor.hide_roblox_deprecated {
+            return;
+        }
+
+        // A name the source declares is the author's own, whatever the
+        // engine calls it: `impl BasePart as function destroy(self)`
+        // stays in the list where `destroy` is a deprecated member.
+        let declared = self.declared_names(uri);
+        let engine = self.roblox_deprecated_names();
+
+        items.retain(|item| {
+            if !marked(item) {
+                return true;
+            }
+
+            let label = label_of(item);
+
+            if declared.contains(label) && !own.contains(label) {
+                return true;
+            }
+
+            match hide_all {
+                true => false,
+
+                false => !engine.contains(label) && !alloy::luaux::roblox::is_deprecated(label),
+            }
+        });
+    }
+
+    /// The names the workspace declares itself: the extension methods
+    /// on foreign types, and the declarations of the file.
+    fn declared_names(&self, uri: &str) -> HashSet<String> {
+        let mut out: HashSet<String> = self
+            .extensions
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<HashSet<String>>();
+
+        if let Some(doc) = self.docs.get(uri) {
+            for d in &doc.decls {
+                // A namespace member is indexed as `Old.f` and as
+                // `Old_f`; the list writes the member alone.
+                if let Some((_, member)) = d.name.rsplit_once('.') {
+                    out.insert(member.to_string());
+                }
+
+                out.insert(d.name.clone());
+            }
+        }
+
+        out
     }
 }
 
@@ -89,7 +145,7 @@ fn is_deprecated(item: &Value, own: &HashSet<String>) -> bool {
 /// Whether a documentation text opens with the deprecation note. The
 /// engine writes `<strong>Deprecated:</strong>`, which the proxy shows
 /// as `Deprecated:`; a namespace hover writes `**Deprecated.**`.
-fn says_deprecated(text: &str) -> bool {
+pub(crate) fn says_deprecated(text: &str) -> bool {
     text.lines().any(|line| {
         let line = line
             .trim_start()
@@ -103,7 +159,7 @@ fn says_deprecated(text: &str) -> bool {
 /// The names a source marks `@deprecated`. The attribute goes on a
 /// function or a namespace, so the declaration under it names the row
 /// the list has to mark.
-fn deprecated_names(src: &str) -> HashSet<String> {
+pub(crate) fn deprecated_names(src: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut pending = false;
 

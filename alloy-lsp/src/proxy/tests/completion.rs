@@ -1306,5 +1306,107 @@ fn a_deprecated_property_carries_the_tag() {
     // The current spelling is a row like any other.
     assert_eq!(row("BrickColor").get("tags"), None);
 
+    // The setting leaves the deprecated spelling out of the list.
+    st.editor.hide_roblox_deprecated = true;
+    let mut result = json!(st.context_items(uri, at, &ctx));
+    st.deprecated_pass(uri, &mut result);
+    let labels: Vec<&str> = result
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+
+    assert!(!labels.contains(&"brickColor"), "{labels:?}");
+    assert!(labels.contains(&"BrickColor"), "{labels:?}");
+
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The two settings: one hides what the Roblox API deprecates, the
+/// other hides what the source marks as well. A method the file
+/// declares on a foreign type is the author's own, so it stays.
+#[test]
+fn the_settings_hide_the_deprecated_rows() {
+    let src = concat!(
+        "@deprecated(\"use fresh\")\n",
+        "local function old() end\n",
+        "\n",
+        "local function fresh() end\n",
+        "\n",
+        "impl BasePart as\n",
+        "    public function destroy(self) end\n",
+        "end\n",
+    );
+    let child = || {
+        json!([
+            // The child marks its own rows with the older flag.
+            { "label": "old", "kind": 3, "deprecated": true },
+            { "label": "fresh", "kind": 3 },
+            { "label": "brickColor", "kind": 5,
+              "documentation": { "kind": "markdown", "value": "Deprecated: use `BrickColor`." } },
+            { "label": "Size", "kind": 5 },
+            { "label": "destroy", "kind": 3, "deprecated": true },
+        ])
+    };
+    let labels = |result: &Value| -> Vec<String> {
+        result
+            .as_array()
+            .expect("a list")
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect()
+    };
+    let (mut st, uri) = one_file(src);
+    st.extensions = vec![alloy::extensions::Extension {
+        target: "BasePart".to_string(),
+        name: "destroy".to_string(),
+        is_static: false,
+        params: String::new(),
+        ret: None,
+    }];
+
+    // Both settings off: every row stays, and each deprecated one
+    // carries the tag.
+    let mut result = child();
+    st.deprecated_pass(uri, &mut result);
+    assert_eq!(
+        labels(&result),
+        ["old", "fresh", "brickColor", "Size", "destroy"]
+    );
+    let tags = |result: &Value, label: &str| -> Value {
+        result
+            .as_array()
+            .expect("a list")
+            .iter()
+            .find(|i| i["label"] == label)
+            .and_then(|i| i.get("tags").cloned())
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(tags(&result, "old"), json!([1]));
+    assert_eq!(tags(&result, "brickColor"), json!([1]));
+    assert_eq!(tags(&result, "fresh"), Value::Null);
+
+    // The engine's own deprecated member goes; the author's `old` and
+    // the `destroy` this file declares stay.
+    st.editor.hide_roblox_deprecated = true;
+    let mut result = child();
+    st.deprecated_pass(uri, &mut result);
+    assert_eq!(labels(&result), ["old", "fresh", "Size", "destroy"]);
+
+    // With the second setting the author's own `@deprecated` goes too,
+    // and `destroy`, which the file declares without the attribute,
+    // still stands.
+    st.editor.hide_all_deprecated = true;
+    let mut result = child();
+    st.deprecated_pass(uri, &mut result);
+    assert_eq!(labels(&result), ["fresh", "Size", "destroy"]);
+
+    // A hidden name is still a name of the file: hover and go to
+    // definition read the declarations, which the filter never touches.
+    assert!(
+        st.docs
+            .get(uri)
+            .is_some_and(|d| d.source.contains("function old"))
+    );
 }

@@ -168,17 +168,9 @@ fn an_exported_namespace_hovers_at_the_import() {
         .flat_map(|d| d.decls.iter())
         .find(|d| d.name == "Geom")
         .expect("the namespace declaration");
-    assert!(
-        hover
-            .hover
-            .starts_with("```alloy\nexport namespace Geom as\nend\n```"),
-        "{}",
-        hover.hover
-    );
-    assert!(
-        hover.hover.ends_with("Members: `ORIGIN`, `Point`."),
-        "{}",
-        hover.hover
+    assert_eq!(
+        hover.hover,
+        "```alloy\nexport namespace Geom as\n    public const ORIGIN: number\n    public struct Point\nend\n```"
     );
 
     // The member reads under its path too.

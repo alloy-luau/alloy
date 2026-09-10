@@ -406,8 +406,8 @@ fn namespace_summaries(
         let word = text(member);
         let private = m.is_private(src, toks);
 
-        if !private {
-            members.push(format!("`{word}`"));
+        if let Some(line) = member_signature(src, toks, m) {
+            members.push(line);
         }
 
         // The declaration as written, with the path in front of its
@@ -475,21 +475,23 @@ fn namespace_summaries(
         })
     });
     let deprecated = deprecated.unwrap_or_default();
-    let mut hover = format!("```alloy\n{modifier}namespace {path} as\nend\n```{deprecated}");
+    // The block reads the way a struct hover reads: the header, one
+    // line per member, then `end`. A long namespace stops at the cap,
+    // since a hover the reader has to scroll says less than a short one.
+    let shown = members.len().min(MEMBER_CAP);
+    let mut lines = vec![format!("```alloy\n{modifier}namespace {path} as")];
+    lines.extend(members.iter().take(shown).cloned());
 
-    if !members.is_empty() {
-        hover.push_str(&format!("\n\nMembers: {}.", members.join(", ")));
+    if members.len() > shown {
+        lines.push(format!("    ... and {} more", members.len() - shown));
     }
 
-    if let Some(d) = doc_before(src, start_of(ns.span)) {
-        hover = format!(
-            "```alloy\n{modifier}namespace {path} as\nend\n```{deprecated}\n\n{d}{}",
-            match members.is_empty() {
-                true => String::new(),
+    lines.push("end\n```".to_string());
+    let mut hover = format!("{}{deprecated}", lines.join("\n"));
 
-                false => format!("\n\nMembers: {}.", members.join(", ")),
-            }
-        );
+    if let Some(d) = doc_before(src, start_of(ns.span)) {
+        hover.push_str("\n\n");
+        hover.push_str(&d);
     }
 
     out.push(Declaration {
@@ -649,6 +651,163 @@ fn namespace_pairs(
     }
 }
 
+/// How many members a namespace hover lists before it stops counting.
+const MEMBER_CAP: usize = 24;
+
+/// One member of a namespace, as the hover writes it: the visibility
+/// word, then the declaration's head. A body says nothing the list
+/// needs, so a struct reads as `public struct Vec2` and a function as
+/// its signature alone.
+fn member_signature(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    m: &alloy_syntax::ast::NamespaceMember,
+) -> Option<String> {
+    let text = |span: TokSpan| -> &str {
+        if span.end <= span.start {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+    let visibility = match m.is_private(src, toks) {
+        true => "private",
+
+        false => "public",
+    };
+    let params_of = |params: &[alloy_syntax::ast::Param]| -> String {
+        let list: Vec<String> = params.iter().map(|p| param_text(p, &text)).collect();
+
+        list.join(", ")
+    };
+    let function_head = |name: &str, body: &alloy_syntax::ast::FunctionBody| -> String {
+        let word = match body.is_async {
+            Some(_) => "async function",
+
+            None => "function",
+        };
+        let generics = body.generics.map(text).unwrap_or("");
+        let ret = match body.ret_type {
+            Some(t) => format!(": {}", text(t)),
+
+            None => String::new(),
+        };
+
+        format!("{word} {name}{generics}({}){ret}", params_of(&body.params))
+    };
+    let head = match m.stmt.under_default() {
+        Stmt::Local(l) => {
+            let word = match l.is_const {
+                true => "const",
+
+                false => "local",
+            };
+            let binding = l.names.first()?;
+            let name = text(binding.name);
+            // Without an annotation the value says the type, when the
+            // value is a literal. Anything else needs the checker, and
+            // a hover that guesses wrong reads worse than one that says
+            // the name alone.
+            let ty = binding
+                .ty
+                .map(|t| text(t).to_string())
+                .or_else(|| l.values.first().and_then(|v| literal_type(v, &text)));
+
+            match ty {
+                Some(t) => format!("{word} {name}: {t}"),
+
+                None => format!("{word} {name}"),
+            }
+        }
+
+        Stmt::Function(f) => function_head(text(*f.path.first()?), &f.body),
+
+        Stmt::LocalFunction(f) => function_head(text(f.name), &f.body),
+
+        Stmt::Struct(d) => format!(
+            "struct {}{}",
+            text(d.name),
+            d.generics.map(text).unwrap_or("")
+        ),
+
+        Stmt::Interface(d) => format!(
+            "interface {}{}",
+            text(d.name),
+            d.generics.map(text).unwrap_or("")
+        ),
+
+        Stmt::Enum(d) => format!("enum {}", text(d.name)),
+
+        Stmt::Trait(d) => format!("trait {}", text(d.name)),
+
+        Stmt::Class(d) => format!("class {}", text(d.name)),
+
+        Stmt::Namespace(d) => format!("namespace {}", text(d.name)),
+
+        Stmt::Macro(d) => format!("macro {}({})", text(d.name), params_of(&d.params)),
+
+        Stmt::Attribute(d) => format!("attribute {}({})", text(d.name), params_of(&d.params)),
+
+        Stmt::Remote(d) => {
+            let word = match d.is_function {
+                true => "remote function",
+
+                false => "remote",
+            };
+
+            format!("{word} {}({})", text(d.name), params_of(&d.params))
+        }
+
+        // `type Id = number` is short enough to read whole; a longer
+        // one stops at its first line.
+        Stmt::TypeAlias(d) => {
+            let whole = text(d.span);
+            let line = whole.lines().next().unwrap_or(whole).trim();
+            let line = line
+                .strip_prefix("export ")
+                .or_else(|| line.strip_prefix("global "))
+                .unwrap_or(line);
+
+            line.to_string()
+        }
+
+        _ => return None,
+    };
+
+    Some(format!("    {visibility} {head}"))
+}
+
+/// The type a literal value writes, for a `const` with no annotation.
+fn literal_type<'a>(
+    value: &alloy_syntax::ast::Expr,
+    text: &impl Fn(TokSpan) -> &'a str,
+) -> Option<String> {
+    use alloy_syntax::ast::Expr;
+
+    match value {
+        Expr::Number(_) => Some("number".to_string()),
+
+        Expr::String(_) | Expr::InterpString(_) | Expr::Interp { .. } => Some("string".to_string()),
+
+        Expr::True(_) | Expr::False(_) => Some("boolean".to_string()),
+
+        // `const size = Vector3.new(1, 2, 3)` names its own type.
+        Expr::Call { func, method, .. } if method.is_none() => match func.as_ref() {
+            Expr::Index { object, key, .. } => match (object.as_ref(), key) {
+                (Expr::Name(n), alloy_syntax::ast::IndexKey::Field(k)) if text(*k) == "new" => {
+                    Some(text(*n).to_string())
+                }
+
+                _ => None,
+            },
+
+            _ => None,
+        },
+
+        _ => None,
+    }
+}
+
 /// A block read out of an indented body, with the indent of its last
 /// line taken off every line after the first. The head already sits at
 /// column zero; the rest came in with the namespace's own indent.
@@ -744,15 +903,12 @@ mod tests {
         assert!(names.contains(&"Math_Vec2"), "{names:?}");
 
         let ns = d.iter().find(|x| x.name == "Math").unwrap();
-        assert!(
-            ns.hover
-                .starts_with("```alloy\nexport namespace Math as\nend\n```"),
-            "{}",
-            ns.hover
+        // The block reads the way a struct hover reads, and a private
+        // member says so on its own line.
+        assert_eq!(
+            ns.hover,
+            "```alloy\nexport namespace Math as\n    public const PI: number\n    private const E: number\n    public struct Vec2\nend\n```\n\nNumbers."
         );
-        assert!(ns.hover.contains("Numbers."), "{}", ns.hover);
-        // A private member stays out of the list.
-        assert!(ns.hover.ends_with("Members: `PI`, `Vec2`."), "{}", ns.hover);
 
         let vec2 = d.iter().find(|x| x.name == "Math.Vec2").unwrap();
         assert_eq!(
@@ -762,6 +918,33 @@ mod tests {
 
         let e = d.iter().find(|x| x.name == "Math.E").unwrap();
         assert!(e.hover.contains("`E` is private to `Math`."), "{}", e.hover);
+    }
+
+    #[test]
+    fn every_member_kind_reads_as_its_signature() {
+        let src = "global namespace Big as\n    public function helper(x: number): number\n        return x\n    end\n    public enum Kind as\n        A\n    end\n    public type Id = number\n    public interface Named as\n        name: string\n    end\n    public trait Show as\n        function show(self): string\n    end\n    public namespace Inner as\n        const B = 2\n    end\n    public const NAME = \"a\"\n    public const ON = true\nend\n";
+        let d = summaries(src, false);
+        let ns = d.iter().find(|x| x.name == "Big").unwrap();
+        assert_eq!(
+            ns.hover,
+            "```alloy\nglobal namespace Big as\n    public function helper(x: number): number\n    public enum Kind\n    public type Id = number\n    public interface Named\n    public trait Show\n    public namespace Inner\n    public const NAME: string\n    public const ON: boolean\nend\n```"
+        );
+    }
+
+    #[test]
+    fn a_long_namespace_stops_at_the_cap() {
+        let members: String = (0..30).map(|i| format!("    const C{i} = {i}\n")).collect();
+        let src = format!("namespace Many as\n{members}end\n");
+        let d = summaries(&src, false);
+        let ns = d.iter().find(|x| x.name == "Many").unwrap();
+        assert_eq!(
+            ns.hover
+                .lines()
+                .filter(|l| l.contains("public const"))
+                .count(),
+            24
+        );
+        assert!(ns.hover.contains("    ... and 6 more"), "{}", ns.hover);
     }
 
     #[test]

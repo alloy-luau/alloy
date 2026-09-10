@@ -1,4 +1,4 @@
-//! The Roblox services `import X from "game:X"` names, generated from
+//! The Roblox services `import X from "@game/X"` names, generated from
 //! luau-lsp's `globalTypes.d.luau` by `scripts/gen-roblox-classes.py`.
 //! The definitions carry no Service tag, so two rules build the list:
 //! every Instance class whose name ends in `Service`, and a seed in the

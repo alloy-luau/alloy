@@ -339,6 +339,54 @@ fn import_order(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
     out
 }
 
+/// `import Players from "game:Players"`: the service path of the
+/// release before this one. The fix writes the alias form, `"@game"`
+/// and `"@game/Players"`, and keeps the quote the line wrote.
+fn game_alias(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
+    let mut out = Vec::new();
+
+    for stmt in &chunk.block.stmts {
+        let Stmt::Import(i) = stmt else {
+            continue;
+        };
+        let Some(first) = toks.get(i.path.start as usize) else {
+            continue;
+        };
+        let end = toks[(i.path.end as usize)
+            .saturating_sub(1)
+            .max(i.path.start as usize)]
+        .end;
+        let written = &src[first.start as usize..end as usize];
+        let quote = written.chars().next().unwrap_or('"');
+        let spec = written.trim_matches(['"', '\'']);
+
+        if !crate::game_import::is_old_spelling(spec) {
+            continue;
+        }
+
+        let Some(alias) = crate::game_import::alias_form(spec) else {
+            continue;
+        };
+
+        out.push(Lint {
+            name: "game_alias",
+            start: first.start,
+            end,
+            message: format!(
+                "`{quote}{spec}{quote}` is the service path of the release before this one; \
+                 write `{quote}{alias}{quote}`"
+            ),
+            fix: Some(Fix {
+                start: first.start,
+                end,
+                replacement: format!("{quote}{alias}{quote}"),
+            }),
+        });
+    }
+
+    out
+}
+
 pub fn run(
     src: &str,
     toks: &[Tok],
@@ -357,6 +405,7 @@ pub fn run(
     lints.extend(directive_lints(src));
     lints.extend(export_impl(src, toks, chunk));
     lints.extend(deprecated_namespaces(src, toks, chunk));
+    lints.extend(game_alias(src, toks, chunk));
     if !ingot_rewrite {
         lints.extend(import_order(src, toks, chunk));
     }

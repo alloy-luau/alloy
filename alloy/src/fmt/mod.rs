@@ -717,11 +717,16 @@ mod tests {
     }
 
     /// A service import keeps the form the reader wrote, and the
-    /// import list keeps its order: the formatter sorts nothing.
+    /// import list keeps its order: the formatter sorts nothing. Both
+    /// spellings of the path stay as written; the `game_alias` lint is
+    /// what asks for the alias form.
     #[test]
     fn a_service_import_keeps_its_form_and_its_order() {
-        let src = "import { RunService, Players } from \"game\"\nimport TweenService from \"game:TweenService\"\nimport { ReplicatedStorage as RS } from \"game\"\n";
+        let src = "import { RunService, Players } from \"@game\"\nimport TweenService from \"@game/TweenService\"\nimport { ReplicatedStorage as RS } from \"@game\"\n";
         assert_eq!(fmt(src), src);
+
+        let old = "import { RunService, Players } from \"game\"\nimport TweenService from \"game:TweenService\"\n";
+        assert_eq!(fmt(old), old);
     }
 
     #[test]

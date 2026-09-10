@@ -1199,9 +1199,9 @@ pub fn import_problems(
             continue;
         }
 
-        // `"game"` and `"game:Players"` name Roblox services, not
-        // modules. The path decides the form: `"game"` takes a list in
-        // braces, `"game:X"` takes one name.
+        // `"@game"` and `"@game/Players"` name Roblox services, not
+        // modules. The path decides the form: `"@game"` takes a list in
+        // braces, `"@game/X"` takes one name.
         if let Some(game) = crate::game_import::game_path(&spec) {
             use crate::game_import::GamePath;
 
@@ -1251,6 +1251,23 @@ pub fn import_problems(
                 }
             };
 
+            // A first segment that names no service resolves nowhere,
+            // whatever form the import takes, so the name is the whole
+            // report and the form goes unsaid.
+            if let GamePath::One(service) = &game
+                && !crate::game_import::is_service(service)
+            {
+                let (pa, pb) = range(node.path);
+                out.push(ImportProblem {
+                    start: pa,
+                    end: pb,
+                    kind: "ImportError",
+                    message: crate::game_import::unknown_message(service),
+                });
+
+                continue;
+            }
+
             match (&game, &node.kind) {
                 (GamePath::Every, ImportKind::Named(list)) => {
                     for item in list {
@@ -1270,11 +1287,7 @@ pub fn import_problems(
                         start: a,
                         end: b,
                         kind: "ImportError",
-                        message: crate::game_import::braces_message(
-                            &spec,
-                            quote,
-                            first.unwrap_or("X"),
-                        ),
+                        message: crate::game_import::braces_message(quote, first.unwrap_or("X")),
                     });
                 }
 
@@ -1287,7 +1300,7 @@ pub fn import_problems(
                         start: a,
                         end: b,
                         kind: "ImportError",
-                        message: crate::game_import::single_message(&spec, quote, service),
+                        message: crate::game_import::single_message(quote, service),
                     });
                 }
             }

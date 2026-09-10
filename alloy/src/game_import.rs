@@ -1,30 +1,87 @@
-//! The Roblox services as imports: `import Players from "game:Players"`
-//! and `import { Players, ReplicatedStorage } from "game"`.
+//! The Roblox services as imports: `import Players from "@game/Players"`
+//! and `import { Players, ReplicatedStorage } from "@game"`.
 //!
 //! Both forms lower to `local Players = game:GetService("Players")` on
 //! the import's own line, so the analyzer types the binding as the
 //! service class the Roblox definitions declare.
+//!
+//! `@game` is one namespace with two readings, and the segment after
+//! the service decides which. `"@game/ReplicatedStorage"` is the
+//! service. `"@game/ReplicatedStorage/Shared/economy"` is an instance
+//! path, which resolves as a module does.
+//!
+//! `"game"` and `"game:Players"` are the spellings of the release
+//! before this one. They parse and lower the same way, and the
+//! `game_alias` lint asks for the alias form.
 
 use crate::roblox_services::SERVICES;
 
-/// What a `game` import path names.
+/// The alias every service import starts from.
+pub const ALIAS: &str = "@game";
+
+/// What a `@game` import path names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GamePath {
-    /// `"game"`: the names in braces are the services.
+    /// `"@game"`: the names in braces are the services.
     Every,
-    /// `"game:Players"`: one service, bound under the name written.
+    /// `"@game/Players"`: one service, bound under the name written.
     One(String),
 }
 
-/// The `game` path a spec names, without its quotes. `None` for any
+/// The `@game` path a spec names, without its quotes. `None` for any
 /// other spec, which is a module path.
+///
+/// A path with more than one segment after `@game` names an instance,
+/// not a service, so it is a module path. The one exception is a first
+/// segment that names no service: nothing under it can resolve either,
+/// so it comes back as `One` and the caller reports the name.
 pub fn game_path(spec: &str) -> Option<GamePath> {
+    if let Some(rest) = spec.strip_prefix(ALIAS) {
+        if rest.is_empty() {
+            return Some(GamePath::Every);
+        }
+
+        let rest = rest.strip_prefix('/')?;
+        let (first, tail) = rest.split_once('/').unwrap_or((rest, ""));
+
+        if first.is_empty() {
+            return None;
+        }
+
+        if !tail.is_empty() && is_service(first) {
+            return None;
+        }
+
+        return Some(GamePath::One(first.to_string()));
+    }
+
+    // The old spellings, kept for one release.
     match spec.split_once(':') {
         None => (spec == "game").then_some(GamePath::Every),
 
         Some(("game", service)) => Some(GamePath::One(service.to_string())),
 
         Some(_) => None,
+    }
+}
+
+/// Whether a spec is one of the spellings the release before this one
+/// used: `"game"` or `"game:Players"`. The `game_alias` lint reports
+/// these, and `alias_form` gives the spelling to write instead.
+pub fn is_old_spelling(spec: &str) -> bool {
+    spec == "game" || spec.starts_with("game:")
+}
+
+/// The alias spelling of an old spec: `"game"` becomes `"@game"` and
+/// `"game:Players"` becomes `"@game/Players"`. `None` for a spec that
+/// is already the alias form, or no service path at all.
+pub fn alias_form(spec: &str) -> Option<String> {
+    match spec {
+        "game" => Some(ALIAS.to_string()),
+
+        _ => spec
+            .strip_prefix("game:")
+            .map(|service| format!("{ALIAS}/{service}")),
     }
 }
 
@@ -48,21 +105,23 @@ pub fn nearest_service(name: &str) -> Option<&'static str> {
         .map(|(_, s)| s)
 }
 
-/// `import X from "game"` names no service, because `"game"` is every
-/// service. The message gives both forms that do name one.
-pub fn braces_message(spec: &str, quote: char, name: &str) -> String {
+/// `import X from "@game"` names no service, because `"@game"` is
+/// every service. The message gives both forms that do name one. It
+/// quotes the alias form whichever spelling the file wrote.
+pub fn braces_message(quote: char, name: &str) -> String {
     format!(
-        "`{quote}{spec}{quote}` names every service; \
-         write `import {{ {name} }} from {quote}{spec}{quote}` \
-         or `import {name} from {quote}game:{name}{quote}`"
+        "`{quote}{ALIAS}{quote}` names every service; \
+         write `import {{ {name} }} from {quote}{ALIAS}{quote}` \
+         or `import {name} from {quote}{ALIAS}/{name}{quote}`"
     )
 }
 
-/// `import { X } from "game:Players"` puts a list where one name goes.
-pub fn single_message(spec: &str, quote: char, service: &str) -> String {
+/// `import { X } from "@game/Players"` puts a list where one name goes.
+/// The message quotes the alias form whichever spelling the file wrote.
+pub fn single_message(quote: char, service: &str) -> String {
     format!(
-        "`{quote}{spec}{quote}` names one service; \
-         write `import {service} from {quote}{spec}{quote}`"
+        "`{quote}{ALIAS}/{service}{quote}` names one service; \
+         write `import {service} from {quote}{ALIAS}/{service}{quote}`"
     )
 }
 
@@ -122,15 +181,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_game_path_splits_on_the_colon() {
-        assert_eq!(game_path("game"), Some(GamePath::Every));
+    fn the_alias_names_every_service_and_one() {
+        assert_eq!(game_path("@game"), Some(GamePath::Every));
         assert_eq!(
-            game_path("game:Players"),
+            game_path("@game/Players"),
             Some(GamePath::One("Players".into()))
         );
         assert_eq!(game_path("./game"), None);
         assert_eq!(game_path("@pkg/game"), None);
         assert_eq!(game_path("gamer"), None);
+        assert_eq!(game_path("@gamer/x"), None);
+        assert_eq!(game_path("@game/"), None);
+    }
+
+    #[test]
+    fn a_path_past_a_service_is_an_instance_path() {
+        // The ship artifact writes this form, and it resolves the way
+        // a module path does, so it is no service import.
+        assert_eq!(game_path("@game/ReplicatedStorage/Shared/economy"), None);
+        assert_eq!(game_path("@game/ServerScriptService/Server"), None);
+        // A first segment that names no service resolves nowhere, so
+        // the caller reports it whatever follows.
+        assert_eq!(game_path("@game/Nope"), Some(GamePath::One("Nope".into())));
+        assert_eq!(
+            game_path("@game/Nope/x"),
+            Some(GamePath::One("Nope".into()))
+        );
+    }
+
+    #[test]
+    fn the_old_spellings_still_parse() {
+        assert_eq!(game_path("game"), Some(GamePath::Every));
+        assert_eq!(
+            game_path("game:Players"),
+            Some(GamePath::One("Players".into()))
+        );
+        assert!(is_old_spelling("game"));
+        assert!(is_old_spelling("game:Players"));
+        assert!(!is_old_spelling("@game"));
+        assert_eq!(alias_form("game").as_deref(), Some("@game"));
+        assert_eq!(alias_form("game:Players").as_deref(), Some("@game/Players"));
+        assert_eq!(alias_form("@game"), None);
     }
 
     #[test]
@@ -154,13 +245,13 @@ mod tests {
     #[test]
     fn each_message_reads_as_written() {
         assert_eq!(
-            braces_message("game", '\'', "X"),
-            "`'game'` names every service; write `import { X } from 'game'` \
-             or `import X from 'game:X'`"
+            braces_message('\'', "X"),
+            "`'@game'` names every service; write `import { X } from '@game'` \
+             or `import X from '@game/X'`"
         );
         assert_eq!(
-            single_message("game:Players", '\'', "Players"),
-            "`'game:Players'` names one service; write `import Players from 'game:Players'`"
+            single_message('\'', "Players"),
+            "`'@game/Players'` names one service; write `import Players from '@game/Players'`"
         );
         assert_eq!(
             unknown_message("Playerz"),

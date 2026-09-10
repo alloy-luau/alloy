@@ -1,4 +1,4 @@
--- A Roblox service is an import: `game:Players` names one, and `game`
+-- A Roblox service is an import: `@game/Players` names one, and `@game`
 -- names every one, so its names go in braces. Both lower to
 -- `game:GetService` on the import's own line.
 local Players = game:GetService("Players")

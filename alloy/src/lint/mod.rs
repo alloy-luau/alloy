@@ -471,6 +471,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "Flux. `import` resolves the path at build time, binds only the names the file uses, and carries the types; the checker follows it and `unused_import` watches it. `require` binds the whole module at runtime. `alloy flux --fix` rewrites `local X = require(\"./x\")` to `import X from \"./x\"`; an instance path stays for the author.",
     },
     LintInfo {
+        name: "game_alias",
+        group: Group::Style,
+        default: Level::Warn,
+        summary: "`\"game\"` or `\"game:X\"`, the service path before the alias",
+        detail: "The Roblox services sit under the `@game` alias: `import { Players } from \"@game\"` takes a list, and `import Players from \"@game/Players\"` takes one. `\"game\"` and `\"game:Players\"` were the spellings before, and they still compile; this release is the last that reads them. `alloy flux --fix` rewrites the path, and the formatter leaves both as written.",
+    },
+    LintInfo {
         name: "manual_class",
         group: Group::Style,
         default: Level::Warn,

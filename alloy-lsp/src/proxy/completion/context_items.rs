@@ -429,7 +429,9 @@ impl State {
                 for name in [
                     "HashMap", "Set", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array",
                 ] {
-                    items.push(word(name, 7, keywords::doc(name).map(str::to_string), from));
+                    let mut item = word(name, 7, keywords::doc(name).map(str::to_string), from);
+                    item["detail"] = json!("alloy:std");
+                    items.push(item);
                 }
 
                 for name in alloy::roblox_classes::INSTANCE_CLASSES

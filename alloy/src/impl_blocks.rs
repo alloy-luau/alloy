@@ -153,7 +153,9 @@ mod tests {
             blocks[0].hover
         );
         assert!(
-            blocks[0].hover.contains("    public function show(self): string"),
+            blocks[0]
+                .hover
+                .contains("    public function show(self): string"),
             "{}",
             blocks[0].hover
         );

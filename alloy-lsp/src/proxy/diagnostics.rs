@@ -1,5 +1,7 @@
 //! Diagnostics: the child's reports, reworded and filtered, and the ones alloy compiles and lints itself.
 
+use std::collections::BTreeMap;
+
 use super::completion::strip_std_prefix;
 use super::documents::project_aliases;
 use super::hover::{byte_column, impl_width, method_owner, utf16_column, without_self, word_width};
@@ -363,6 +365,91 @@ impl Server {
         });
         drop(st);
         self.to_client(&message);
+    }
+}
+
+/// The line and the width of the key that declares `alias` in a
+/// configuration file. The three files spell a key three ways, so the
+/// search takes the first line whose first word is the name, in quotes
+/// or bare, with a `=` or a `:` after it.
+pub(crate) fn alias_key_line(text: &str, alias: &str) -> Option<(u32, u32)> {
+    for (n, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let quoted = trimmed.starts_with(&format!("\"{alias}\""));
+        let bare = trimmed.starts_with(alias)
+            && trimmed[alias.len()..].trim_start().starts_with(['=', ':'])
+            && !quoted;
+
+        if !quoted && !bare {
+            continue;
+        }
+
+        let indent = (line.len() - trimmed.len()) as u32;
+        let width = if quoted {
+            alias.len() as u32 + 2
+        } else {
+            alias.len() as u32
+        };
+
+        return Some((n as u32, indent + width));
+    }
+
+    None
+}
+
+impl Server {
+    /// The reserved aliases of the project, as diagnostics on the file
+    /// that declares each one. The editor holds no document for
+    /// `alloy.toml` or a Luau configuration, so the report goes to the
+    /// file's own URI. Every pass republishes all three files, empty
+    /// where nothing is wrong, so a renamed alias clears its report.
+    pub(crate) fn publish_reserved_aliases(&self) {
+        let root = self.state.lock().expect("state").root.clone();
+        let Some(root) = root else {
+            return;
+        };
+        let Some((path, config)) =
+            Config::find_within(&root, &root).and_then(|p| Config::load(&p).ok().map(|c| (p, c)))
+        else {
+            return;
+        };
+        let base = path.parent().unwrap_or(&root).to_path_buf();
+        let mut by_file: BTreeMap<PathBuf, Vec<Value>> = BTreeMap::new();
+        by_file.insert(base.join(alloy::config::FILE_NAME), Vec::new());
+
+        for name in alloy::luau_config::FILE_NAMES {
+            let file = base.join(name);
+
+            if file.is_file() {
+                by_file.insert(file, Vec::new());
+            }
+        }
+
+        for problem in alloy::modules::reserved_alias_problems(&base, &config) {
+            let text = std::fs::read_to_string(&problem.file).unwrap_or_default();
+            let (line, end) = alias_key_line(&text, problem.alias).unwrap_or((0, 0));
+            by_file
+                .entry(problem.file.clone())
+                .or_default()
+                .push(json!({
+                    "range": {
+                        "start": { "line": line, "character": 0 },
+                        "end": { "line": line, "character": end },
+                    },
+                    "severity": 1,
+                    "source": "alloy",
+                    "code": "ReservedAlias",
+                    "message": problem.message,
+                }));
+        }
+
+        for (file, diagnostics) in by_file {
+            self.to_client(&json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": { "uri": path_to_uri(&file), "diagnostics": diagnostics },
+            }));
+        }
     }
 }
 

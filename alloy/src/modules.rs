@@ -350,6 +350,86 @@ pub fn import_trait_defaults_for_file(path: &Path, source: &str) -> Vec<(String,
     import_trait_defaults(source, &from, &aliases)
 }
 
+/// One alias the compiler owns. A project that declares it gets the
+/// compiler's meaning, never its own, so the declaration is an error.
+pub struct ReservedAlias {
+    /// The name, without the `@`.
+    pub name: &'static str,
+    /// What the compiler keeps the name for, for the message.
+    pub owns: &'static str,
+    /// Whether a Luau configuration may still declare it. `alloy init`
+    /// writes `@alloy` into `.luaurc` or `.config.luau`, so that one
+    /// belongs there; nothing writes `@game`, which the compiler
+    /// answers on its own.
+    pub in_luau_config: bool,
+}
+
+/// Every alias the compiler owns.
+pub const RESERVED_ALIASES: &[ReservedAlias] = &[
+    ReservedAlias {
+        name: "game",
+        owns: "the Roblox services",
+        in_luau_config: false,
+    },
+    ReservedAlias {
+        name: "alloy",
+        owns: "the runtime",
+        in_luau_config: true,
+    },
+];
+
+/// What a reserved alias reads when a project declares it.
+pub fn reserved_alias_message(alias: &ReservedAlias) -> String {
+    format!(
+        "`{}` is reserved for {}; rename this alias",
+        alias.name, alias.owns
+    )
+}
+
+/// One declaration of a reserved alias: the file it came from, the
+/// name, and what to say about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservedAliasProblem {
+    pub file: PathBuf,
+    pub alias: &'static str,
+    pub message: String,
+}
+
+/// Every reserved alias a project declares, each with the file that
+/// declares it. `alloy check` reports these, and so does the editor.
+///
+/// The `[mount]` table reserves both names, since a mount serves as an
+/// alias. A Luau configuration reserves `game` alone.
+pub fn reserved_alias_problems(root: &Path, config: &Config) -> Vec<ReservedAliasProblem> {
+    let mut out = Vec::new();
+    let mut push = |file: PathBuf, alias: &'static ReservedAlias| {
+        out.push(ReservedAliasProblem {
+            file,
+            alias: alias.name,
+            message: reserved_alias_message(alias),
+        });
+    };
+
+    if let Some((path, luau)) = crate::luau_config::read_dir(root) {
+        for (name, _) in &luau.aliases {
+            if let Some(alias) = RESERVED_ALIASES
+                .iter()
+                .find(|a| a.name == name && !a.in_luau_config)
+            {
+                push(path.clone(), alias);
+            }
+        }
+    }
+
+    for name in config.mount.keys() {
+        if let Some(alias) = RESERVED_ALIASES.iter().find(|a| a.name == name) {
+            push(root.join(crate::config::FILE_NAME), alias);
+        }
+    }
+
+    out
+}
+
 /// The alias table of a project, each alias to an absolute folder: the
 /// aliases the tree carries, which come from `.config.luau` or
 /// `.luaurc`, and from the `[mount]` table when that is the tree.

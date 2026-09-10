@@ -404,6 +404,14 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     let jsx_config = config.markup(root);
     let module_aliases = crate::modules::aliases(root, &tree);
 
+    // An alias the compiler owns never reaches the name the project
+    // gave it, so the declaration is a failure of the project, not of
+    // one file. The path is absolute, so the report names the file the
+    // alias came from.
+    for problem in crate::modules::reserved_alias_problems(root, config) {
+        report.failures.push((problem.file, problem.message));
+    }
+
     // The ingots start once per build and see every file.
     let ingots = crate::ingot::Ingots::load(root, config);
 

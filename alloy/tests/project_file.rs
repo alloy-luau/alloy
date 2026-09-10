@@ -427,3 +427,87 @@ fn a_luau_config_alias_wins_over_a_mount_of_the_same_name() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `@game` names the Roblox services and `@alloy` names the runtime,
+/// so a project that declares either alias never reaches its own
+/// folder under that name. The report names the file it came from.
+#[test]
+fn a_reserved_alias_is_an_error_that_names_its_file() {
+    let dir = std::env::temp_dir().join(format!("alloy-reserved-alias-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir,
+        "alloy.toml",
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[mount]\ngame = [\"src/shared\", \"@game/ReplicatedStorage/G\"]\nalloy = [\"src/shared\", \"@game/ReplicatedStorage/A\"]\n",
+    );
+    write(
+        &dir,
+        ".luaurc",
+        "{ \"languageMode\": \"strict\", \"aliases\": { \"game\": \"src/shared\", \"alloy\": \"./build/alloy\" } }\n",
+    );
+    write(
+        &dir,
+        "src/shared/util.aly",
+        "export const NAME = \"util\"\n",
+    );
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let found = alloy::modules::reserved_alias_problems(&dir, &config);
+    let said: Vec<(String, String)> = found
+        .iter()
+        .map(|p| {
+            (
+                p.file.file_name().unwrap().to_string_lossy().into_owned(),
+                p.message.clone(),
+            )
+        })
+        .collect();
+
+    // `alloy init` writes the `@alloy` alias into the Luau
+    // configuration itself, so only the mount table reserves that name.
+    assert_eq!(
+        said,
+        vec![
+            (
+                ".luaurc".to_string(),
+                "`game` is reserved for the Roblox services; rename this alias".to_string()
+            ),
+            (
+                "alloy.toml".to_string(),
+                "`alloy` is reserved for the runtime; rename this alias".to_string()
+            ),
+            (
+                "alloy.toml".to_string(),
+                "`game` is reserved for the Roblox services; rename this alias".to_string()
+            ),
+        ]
+    );
+
+    // The build reports them, so `alloy check` does.
+    let report = alloy::build::check_project(&dir, &config).unwrap();
+
+    assert!(
+        report
+            .failures
+            .iter()
+            .filter(|(_, m)| m.contains("is reserved for"))
+            .count()
+            == 3,
+        "{:?}",
+        report.failures
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A project that declares neither name is clean.
+#[test]
+fn the_reserved_names_leave_every_other_alias_alone() {
+    let dir = mounted_root("no-reserved", true, true);
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+
+    assert!(alloy::modules::reserved_alias_problems(&dir, &config).is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -647,6 +647,7 @@ impl Server {
         let started = std::time::Instant::now();
         self.state.lock().expect("state").forget_disk();
         self.load_ingots();
+        self.publish_reserved_aliases();
         let root = self.state.lock().expect("state").root.clone();
         let Some(root) = root else {
             return Vec::new();

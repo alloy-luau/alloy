@@ -930,6 +930,18 @@ pub fn exports_default(source: &str) -> bool {
         .any(|s| matches!(s, Stmt::ExportDefault { .. }))
 }
 
+/// A module's source as the Alloy parser reads it. A `.alx` file
+/// carries markup, which the parser has no reading for, so the markup
+/// blanks to text of the same width: every statement around it keeps
+/// its place, and a trailing `return` reads as the return it is.
+pub fn parsable(source: &str) -> std::borrow::Cow<'_, str> {
+    match crate::alx::blank_markup(source) {
+        Some((_, text)) => std::borrow::Cow::Owned(text),
+
+        None => std::borrow::Cow::Borrowed(source),
+    }
+}
+
 /// Whether a module ends its top-level statements in `return <expr>`.
 /// Luau reads that value as the module, and Alloy reads it the same
 /// way: the returned value is the module's default export.
@@ -940,7 +952,8 @@ pub fn returns_value(source: &str) -> bool {
         definitions: true,
         ..Default::default()
     };
-    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+    let source = parsable(source);
+    let Ok(parsed) = alloy_syntax::parse_lenient(&source, options) else {
         return false;
     };
 
@@ -1000,7 +1013,8 @@ pub fn returned_keys(source: &str) -> Option<Vec<String>> {
         definitions: true,
         ..Default::default()
     };
-    let parsed = alloy_syntax::parse_lenient(source, options).ok()?;
+    let source = parsable(source);
+    let parsed = alloy_syntax::parse_lenient(&source, options).ok()?;
     let toks = &parsed.lexed.toks;
     let stmts = &parsed.chunk.block.stmts;
     let text = |span: alloy_syntax::ast::TokSpan| -> String {
@@ -1022,7 +1036,7 @@ pub fn returned_keys(source: &str) -> Option<Vec<String>> {
     }
 
     match &r.values[0] {
-        Expr::Table { fields, .. } => table_keys(fields, toks, source),
+        Expr::Table { fields, .. } => table_keys(fields, toks, &source),
 
         // `local M = { }` with `M.f` filled in below it, the shape a
         // Luau module is written in.
@@ -1043,11 +1057,11 @@ pub fn returned_keys(source: &str) -> Option<Vec<String>> {
                     return None;
                 };
 
-                keys = Some(table_keys(fields, toks, source)?);
+                keys = Some(table_keys(fields, toks, &source)?);
             }
 
             let mut keys = keys?;
-            keys.extend(assigned_keys(source, &name));
+            keys.extend(assigned_keys(&source, &name));
             keys.dedup();
 
             Some(keys)
@@ -1062,7 +1076,7 @@ pub fn returned_keys(source: &str) -> Option<Vec<String>> {
                 _ => return None,
             };
 
-            crate::declarations::shapes(source)
+            crate::declarations::shapes(&source)
                 .into_iter()
                 .find_map(|s| match s {
                     crate::declarations::Shape::Struct { name, fields, .. } if name == head => {

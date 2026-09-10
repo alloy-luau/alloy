@@ -332,6 +332,28 @@ fn a_returning_module_is_its_own_default() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A markup module returns its component the same way. The parser has
+/// no reading for a tag, so the markup blanks before the read; without
+/// it the trailing `return` was lost and the import reported.
+#[test]
+fn a_markup_module_returns_its_component() {
+    let dir = scratch("returning_markup");
+    std::fs::write(
+        dir.join("panel.alx"),
+        "import * as React from \"@packages/react\" --@alloy-ignore\n\nlocal function Panel()\n    return (\n        <Frame>\n            <TextLabel Text=\"hi\" />\n        </Frame>\n    )\nend\n\nreturn Panel\n",
+    )
+    .unwrap();
+    let source = "import Panel from \"./panel\"\nprint(Panel)\n";
+    let main = dir.join("main.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+    assert!(problems.is_empty(), "{messages:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The keys of a returned table the compiler can read: a literal, a
 /// local the file fills in by name, and a struct the file constructs.
 #[test]

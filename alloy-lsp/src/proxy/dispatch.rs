@@ -1457,7 +1457,7 @@ impl Server {
                         && trigger.as_deref() != Some("\n")
                     {
                         st.mark_enum_members(uri, line, character, result);
-                        st.mark_declarations(result);
+                        st.mark_declarations(uri, result);
                         st.mark_namespaces(uri, line, character, result);
 
                         if let Some(doc) = st.docs.get(uri) {

@@ -31,6 +31,108 @@ use super::hover::{
 use super::navigation::module_file_of;
 use super::*;
 
+/// The kind words a declaration hover opens with. The list is the one
+/// `alloy::declarations::summaries` writes, so a new declaration kind
+/// adds its word here too.
+const DECLARATION_WORDS: [&str; 8] = [
+    "struct",
+    "enum",
+    "trait",
+    "interface",
+    "class",
+    "namespace",
+    "type",
+    "declare",
+];
+
+/// The detail a project global shows: `global const MAX`, the way a
+/// declaration of this file reads. The declaring file goes in the
+/// documentation, where a long path costs the list nothing.
+pub(crate) fn global_detail(g: &alloy::globals::Global) -> String {
+    use alloy::globals::Kind;
+
+    let word = match g.kind {
+        Kind::Function => "function",
+
+        Kind::Value if g.constant => "const",
+
+        Kind::Value => "local",
+
+        Kind::Struct => "struct",
+
+        Kind::Enum => "enum",
+
+        Kind::Trait => "trait",
+
+        Kind::Interface => "interface",
+
+        Kind::Class => "class",
+
+        Kind::Type => "type",
+
+        Kind::Remote => "remote",
+
+        Kind::Macro => "macro",
+
+        Kind::Attribute => "attribute",
+
+        Kind::Impl => "impl",
+
+        Kind::Namespace => "namespace",
+    };
+
+    format!("global {word} {}", g.name)
+}
+
+/// The detail a completion item shows for a declaration: the kind
+/// first, then the name. `Test` alone says nothing about what `Test`
+/// is, and the kind is what the reader is choosing between.
+///
+/// A function, a macro, an attribute, and a remote read as their whole
+/// head instead: the parameters are what the reader writes next.
+pub(crate) fn declaration_detail(hover: &str) -> Option<String> {
+    let head = hover.lines().nth(1)?.trim();
+
+    // An attribute hovers as its own use, `@icon(asset: string)`.
+    if head.starts_with('@') {
+        return Some(head.to_string());
+    }
+
+    let head = head.strip_suffix(" as").unwrap_or(head).trim();
+    // `export` says where the name goes, not what it is. `global` says
+    // both, so it stays in front of the kind.
+    let head = head.strip_prefix("export ").unwrap_or(head);
+    let (prefix, rest) = match head.strip_prefix("global ") {
+        Some(rest) => ("global ", rest),
+
+        None => ("", head),
+    };
+    let word = rest.split_whitespace().next()?;
+
+    if matches!(
+        word,
+        "function" | "async" | "macro" | "attribute" | "remote" | "const" | "local"
+    ) {
+        return Some(format!("{prefix}{rest}"));
+    }
+
+    if !DECLARATION_WORDS.contains(&word) {
+        return None;
+    }
+
+    let name: String = rest[word.len()..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    match name.is_empty() {
+        true => None,
+
+        false => Some(format!("{prefix}{word} {name}")),
+    }
+}
+
 impl State {
     /// After `Msg.`, the child lists a variant as the function or the
     /// string the emit made of it. Each one becomes an enum member with
@@ -146,7 +248,11 @@ impl State {
     /// A name the workspace declares completes as what it is: an
     /// attribute shows `@icon(asset: string)`, a struct `struct V`, in
     /// place of the table type the child sees.
-    pub(crate) fn mark_declarations(&self, result: &mut Value) {
+    ///
+    /// Only the declarations this file reaches: the child lists the
+    /// locals the emit wrote, and a name another file keeps to itself
+    /// says nothing about them.
+    pub(crate) fn mark_declarations(&self, uri: &str, result: &mut Value) {
         let items = match result {
             Value::Array(items) => items,
 
@@ -168,6 +274,12 @@ impl State {
                 .is_none_or(|label| !is_internal_name(label))
         });
 
+        let in_scope: HashMap<&str, &alloy::declarations::Declaration> = self
+            .decls_in_scope(uri)
+            .into_iter()
+            .map(|d| (d.name.as_str(), d))
+            .collect();
+
         for item in items.iter_mut() {
             let Some(label) = item["label"].as_str().map(str::to_string) else {
                 continue;
@@ -178,27 +290,28 @@ impl State {
             }
 
             let sigil = format!("@{label}");
-            let decl = self
-                .docs
-                .values()
-                .flat_map(|d| d.decls.iter())
-                .find(|d| d.name == sigil || d.name == label);
-            let Some(d) = decl else { continue };
-            let Some(head) = d.hover.lines().nth(1) else {
+            let Some(d) = in_scope
+                .get(sigil.as_str())
+                .or_else(|| in_scope.get(label.as_str()))
+            else {
+                continue;
+            };
+            let Some(detail) = declaration_detail(&d.hover) else {
                 continue;
             };
 
             if d.name == sigil {
                 item["kind"] = json!(21);
-                item["detail"] = json!(head);
-                item["documentation"] = json!({ "kind": "markdown", "value": d.hover });
-            } else if let Some(word) = ["struct", "enum", "trait", "interface"]
-                .iter()
-                .find(|w| head.contains(&format!("{w} ")))
-            {
-                item["detail"] = json!(format!("{word} {label}"));
-                item["documentation"] = json!({ "kind": "markdown", "value": d.hover });
             }
+
+            // A namespace is one table over a group, not a variable;
+            // the child sees the local the emit wrote for it.
+            if detail.starts_with("namespace ") || detail.starts_with("global namespace ") {
+                item["kind"] = json!(9);
+            }
+
+            item["detail"] = json!(detail);
+            item["documentation"] = json!({ "kind": "markdown", "value": d.hover });
         }
     }
 

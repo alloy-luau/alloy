@@ -40,12 +40,19 @@ fn a_global_completes_as_a_value() {
     assert!(labels.contains(&"MAX"), "{labels:?}");
     assert!(labels.contains(&"Vec2"), "{labels:?}");
 
-    let detail = items
+    let item = items
         .iter()
         .find(|i| i["label"] == "log")
-        .and_then(|i| i["detail"].as_str())
-        .unwrap_or_default();
-    assert!(detail.contains("shared/log.aly"), "{detail}");
+        .expect("the item");
+    // The detail says what the name is; the popup says where it lives.
+    assert_eq!(item["detail"], json!("global function log"));
+    assert!(
+        item["documentation"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("shared/log.aly"),
+        "{item}"
+    );
 }
 
 /// A global type completes in a type slot, and a global function does
@@ -196,20 +203,23 @@ fn the_other_side_answers_no_global() {
 }
 
 /// A global a script declares moves into a module the build writes
-/// beside it. The completion detail names the script, which is the file
-/// the reader can open.
+/// beside it. The popup names the script, which is the file the reader
+/// can open.
 #[test]
-fn the_detail_names_the_script_that_declares_the_global() {
+fn the_popup_names_the_script_that_declares_the_global() {
     let st = files(&[
         ("file:///main.server.aly", "global const LIMIT = 1\n"),
         ("file:///other.server.aly", "print(LIMIT)\n"),
     ]);
-    let detail = st
+    let item = st
         .global_completions("file:///other.server.aly", &[], false)
         .into_iter()
         .find(|i| i["label"] == "LIMIT")
-        .and_then(|i| i["detail"].as_str().map(str::to_string))
         .expect("the item");
 
-    assert_eq!(detail, "global in main.server.aly");
+    assert_eq!(item["detail"], json!("global const LIMIT"));
+    assert_eq!(
+        item["documentation"]["value"],
+        json!("Declared in `main.server.aly`.")
+    );
 }

@@ -1,5 +1,5 @@
 use super::super::*;
-use super::support::one_file;
+use super::support::{files, one_file};
 
 /// A word that begins a keyword drops the child's auto-imports.
 /// `end` in a guard clause and in a one-line `impl` drew
@@ -1125,4 +1125,69 @@ pub(crate) fn an_import_of_a_returning_module_completes_its_keys() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A declaration another file keeps to itself reaches no list. The
+/// server's `struct Test` is neither exported and imported nor
+/// `global`, so the client file, which declares a `namespace Test` of
+/// its own, reads its own name.
+#[test]
+fn a_name_another_file_keeps_reaches_no_list() {
+    let st = files(&[
+        (
+            "file:///src/client/main.client.aly",
+            "namespace Test as\n    public const test = 1\nend\n\nlocal x = Tes\n",
+        ),
+        (
+            "file:///src/server/main.server.aly",
+            "struct Test as\n    x: number\nend\n",
+        ),
+    ]);
+    // The child sees the local the emit wrote for the namespace.
+    let mut result = json!([{ "label": "Test", "kind": 6 }]);
+    st.mark_declarations("file:///src/client/main.client.aly", &mut result);
+    let item = &result[0];
+
+    assert_eq!(item["detail"], json!("namespace Test"));
+    assert_eq!(item["kind"], json!(9));
+
+    // The other file's struct never names it.
+    let mut theirs = json!([{ "label": "Test", "kind": 6 }]);
+    st.mark_declarations("file:///src/server/main.server.aly", &mut theirs);
+    assert_eq!(theirs[0]["detail"], json!("struct Test"));
+}
+
+/// The detail names the kind before the name, for every declaration
+/// the summaries carry.
+#[test]
+fn a_declaration_completes_as_its_kind() {
+    let src = "export struct Profile as\n    name: string\nend\nenum Msg as\n    Leave\nend\ntrait Show as\n    function show(self): string\nend\ninterface Named as\n    name: string\nend\ntype Id = number\nnamespace Util as\n    const K = 1\nend\n";
+    let (st, uri) = one_file(src);
+    let mut result = json!([
+        { "label": "Profile", "kind": 6 },
+        { "label": "Msg", "kind": 6 },
+        { "label": "Show", "kind": 6 },
+        { "label": "Named", "kind": 6 },
+        { "label": "Id", "kind": 6 },
+        { "label": "Util", "kind": 6 },
+    ]);
+    st.mark_declarations(uri, &mut result);
+    let details: Vec<&str> = result
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|i| i["detail"].as_str().unwrap_or(""))
+        .collect();
+
+    assert_eq!(
+        details,
+        [
+            "struct Profile",
+            "enum Msg",
+            "trait Show",
+            "interface Named",
+            "type Id",
+            "namespace Util",
+        ]
+    );
 }

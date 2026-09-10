@@ -126,9 +126,6 @@ impl State {
         uri: &str,
         path: &str,
     ) -> Vec<&alloy::declarations::Declaration> {
-        let Some(doc) = self.docs.get(uri) else {
-            return Vec::new();
-        };
         let inside = self.docs.get(uri).and_then(|d| {
             d.namespace_ranges
                 .iter()
@@ -145,12 +142,9 @@ impl State {
         let head = format!("{path}.");
         let mut out = Vec::new();
 
-        for d in doc.decls.iter().chain(
-            self.docs
-                .iter()
-                .filter(|(u, _)| u.as_str() != uri)
-                .flat_map(|(_, d)| d.decls.iter()),
-        ) {
+        // Only the namespaces this file reaches: its own, the ones it
+        // imports, and the globals of a side that reaches it.
+        for d in self.decls_in_scope(uri) {
             let Some(member) = d.name.strip_prefix(&head) else {
                 continue;
             };

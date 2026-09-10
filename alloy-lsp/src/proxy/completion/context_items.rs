@@ -96,7 +96,13 @@ impl State {
                         && fits(&declared_attribute_targets(&d.hover))
                         && seen.insert(d.name.clone())
                     {
-                        items.push(word(&d.name, 7, Some(d.hover.clone()), *sigil));
+                        let mut item = word(&d.name, 7, Some(d.hover.clone()), *sigil);
+
+                        if let Some(detail) = declaration_detail(&d.hover) {
+                            item["detail"] = json!(detail);
+                        }
+
+                        items.push(item);
                     }
                 }
             }
@@ -115,7 +121,13 @@ impl State {
 
                 for d in self.decls_in_scope(uri) {
                     if d.name.starts_with('$') && seen.insert(d.name.clone()) {
-                        items.push(word(&d.name, 3, Some(d.hover.clone()), *sigil));
+                        let mut item = word(&d.name, 3, Some(d.hover.clone()), *sigil);
+
+                        if let Some(detail) = declaration_detail(&d.hover) {
+                            item["detail"] = json!(detail);
+                        }
+
+                        items.push(item);
                     }
                 }
             }
@@ -325,7 +337,8 @@ impl State {
                         return items;
                     }
 
-                    let exports = self.exports_of_target(resolved);
+                    let exports = self.exports_of_target(resolved.clone());
+                    let decls = self.decls_of_target(resolved);
 
                     for e in &exports {
                         if *type_only && !e.is_type {
@@ -343,7 +356,16 @@ impl State {
                         } else {
                             e.name.clone()
                         };
-                        items.push(word(&label, e.kind, None, from));
+                        // The module's own declaration says what the
+                        // name is, so the list reads `struct Profile`.
+                        let found = decls.iter().find(|d| d.name == e.name);
+                        let mut item = word(&label, e.kind, found.map(|d| d.hover.clone()), from);
+
+                        if let Some(detail) = found.and_then(|d| declaration_detail(&d.hover)) {
+                            item["detail"] = json!(detail);
+                        }
+
+                        items.push(item);
                     }
                 }
             }
@@ -394,7 +416,13 @@ impl State {
                     let head = d.hover.lines().nth(1).unwrap_or("");
 
                     if head.contains("struct ") || head.contains("class ") {
-                        items.push(word(&d.name, 7, Some(d.hover.clone()), from));
+                        let mut item = word(&d.name, 7, Some(d.hover.clone()), from);
+
+                        if let Some(detail) = declaration_detail(&d.hover) {
+                            item["detail"] = json!(detail);
+                        }
+
+                        items.push(item);
                     }
                 }
 
@@ -918,6 +946,29 @@ impl State {
         exports
     }
 
+    /// The declarations of the module a path resolves to, for the
+    /// detail an import list shows beside each name.
+    pub(crate) fn decls_of_target(
+        &self,
+        resolved: Option<PathBuf>,
+    ) -> Vec<&alloy::declarations::Declaration> {
+        let Some(resolved) = resolved else {
+            return Vec::new();
+        };
+        let target = imports::module_path(&resolved);
+        let mut out = Vec::new();
+
+        for (u, d) in &self.docs {
+            let Some(p) = uri_to_path(u) else { continue };
+
+            if imports::module_path(&p) == target {
+                out.extend(d.decls.iter());
+            }
+        }
+
+        out
+    }
+
     /// The type a `match` scrutinee has, which decides the arms. A
     /// plain name resolves from its annotation, from the variant it
     /// starts at, or from the declaration index; nothing else does.
@@ -1071,7 +1122,10 @@ impl State {
                 doc.decls.iter().any(|d| {
                     d.name == name
                         && d.hover.lines().nth(1).is_some_and(|l| {
-                            l.contains("enum ") && (*u == uri || l.starts_with("export "))
+                            l.contains("enum ")
+                                && (*u == uri
+                                    || l.starts_with("export ")
+                                    || l.starts_with("global "))
                         })
                 })
             })
@@ -1279,16 +1333,28 @@ impl Server {
 /// `for` take a struct, an enum, or a class. The other names stay in
 /// the list: the author may be about to declare one.
 pub(crate) fn type_rank(prefers: context::Prefers, detail: &str) -> u8 {
+    // The detail names the kind first, `struct Profile`, so the rank
+    // reads the word alone. `alloy:std trait` is the std's own line.
+    let word = match detail {
+        "alloy:std trait" => "trait",
+
+        _ => {
+            let rest = detail.strip_prefix("global ").unwrap_or(detail);
+
+            rest.split_whitespace().next().unwrap_or(rest)
+        }
+    };
+
     match prefers {
         context::Prefers::Any => 1,
 
-        context::Prefers::Contract => match detail {
-            "interface" | "trait" | "alloy:std trait" => 0,
+        context::Prefers::Contract => match word {
+            "interface" | "trait" => 0,
 
             _ => 1,
         },
 
-        context::Prefers::Concrete => match detail {
+        context::Prefers::Concrete => match word {
             "struct" | "enum" => 0,
 
             _ => 1,

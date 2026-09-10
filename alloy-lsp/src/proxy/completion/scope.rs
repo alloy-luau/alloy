@@ -180,10 +180,32 @@ impl State {
                 })
                 .map(|d| bound_name(&d.name))
                 .collect();
+            // A `global` needs no import: it is in scope in every file
+            // of a side that reaches it. The compiler reads the same
+            // rule, so a name the list offers is a name that compiles.
+            let globals: HashSet<String> = doc
+                .decls
+                .iter()
+                .filter(|d| {
+                    d.hover
+                        .lines()
+                        .nth(1)
+                        .is_some_and(|l| l.starts_with("global "))
+                })
+                .map(|d| bound_name(&d.name))
+                .filter(|bound| {
+                    doc.globals
+                        .iter()
+                        .find(|g| g.name == *bound)
+                        .is_some_and(|g| self.global_reaches(uri, u, g))
+                })
+                .collect();
 
             for d in &doc.decls {
                 let bound = bound_name(&d.name);
-                let reachable = own || (exports.contains(&bound) && imported.contains(&bound));
+                let reachable = own
+                    || (exports.contains(&bound) && imported.contains(&bound))
+                    || globals.contains(&bound);
 
                 if reachable && seen.insert(d.name.clone()) {
                     out.push(d);

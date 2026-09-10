@@ -55,12 +55,17 @@ impl State {
             let mut item = json!({
                 "label": g.name,
                 "kind": kind,
-                "detail": format!("global in {file}"),
+                "detail": global_detail(&g),
             });
+            // The file is the one the reader opens, so it stays in the
+            // popup; the detail line says what the name is instead.
+            let where_from = format!("Declared in `{file}`.");
+            let text = match doc {
+                Some(hover) => format!("{hover}\n\n{where_from}"),
 
-            if let Some(d) = doc {
-                item["documentation"] = json!({ "kind": "markdown", "value": d });
-            }
+                None => where_from,
+            };
+            item["documentation"] = json!({ "kind": "markdown", "value": text });
 
             out.push(item);
         }
@@ -224,21 +229,23 @@ impl State {
 
             let head = d.hover.lines().nth(1).unwrap_or("");
             let kind = if head.contains("struct ") || head.contains("class ") {
-                Some(("struct", 7))
-            } else if head.contains("interface ") {
-                Some(("interface", 8))
+                Some(7)
+            } else if head.contains("interface ") || head.contains("trait ") {
+                Some(8)
             } else if head.contains("enum ") {
-                Some(("enum", 13))
-            } else if head.contains("trait ") {
-                Some(("trait", 8))
+                Some(13)
             } else if head.contains("type ") {
-                Some(("type", 7))
+                Some(7)
             } else {
                 None
             };
 
-            if let Some((detail, kind)) = kind {
-                push(&d.name, kind, detail, Some(d.hover.clone()));
+            // The kind first, then the name: `struct Profile` says what
+            // the slot takes, where `Profile` alone says nothing.
+            if let Some(kind) = kind
+                && let Some(detail) = declaration_detail(&d.hover)
+            {
+                push(&d.name, kind, &detail, Some(d.hover.clone()));
             }
         }
 

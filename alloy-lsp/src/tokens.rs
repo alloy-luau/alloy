@@ -33,6 +33,15 @@ pub fn remap(data: &[u64], doc: &Doc) -> Vec<u64> {
             continue;
         }
 
+        // The child reads `self` as a property of the table it stands
+        // for, and the editor paints a semantic token over the grammar.
+        // `self` is the receiver, and the grammar already scopes it
+        // `variable.language.self`; no token here lets that color show
+        // in every place the word appears.
+        if doc.shadow.get(first as usize..=last as usize) == Some("self") {
+            continue;
+        }
+
         let (sl, sc) = doc.to_source(l, s);
         tokens.push((sl, sc, len, kind, mods));
     }
@@ -75,6 +84,29 @@ mod tests {
         let data = [0, 0, 5, 1, 0, 0, 18, 3, 2, 0, 1, 0, 5, 3, 0];
         let out = remap(&data, &doc);
         assert_eq!(out, vec![0, 0, 5, 1, 0, 1, 0, 5, 3, 0]);
+    }
+
+    /// `self` carries no semantic token, so the grammar's own scope for
+    /// the word paints it wherever it stands.
+    #[test]
+    fn a_self_token_goes_and_the_rest_move() {
+        let src = "struct P as\n    x: number\nend\nimpl P as\n    function get(self): number\n        return self.x\n    end\nend\nprint(new P { x = 1 })\n";
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let line = doc.shadow.lines().nth(5).unwrap();
+        let col = line.find("self").unwrap() as u64;
+        // `self` on the return line, then `x` right after the dot.
+        let data = [5, col, 4, 9, 0, 0, 5, 1, 9, 0];
+        let out = remap(&data, &doc);
+        assert_eq!(out.len(), 5, "{out:?}");
+        let source_line = src.lines().nth(5).unwrap();
+        let x_col = source_line.find(".x").unwrap() as u64 + 1;
+        assert_eq!(out, vec![5, x_col, 1, 9, 0]);
     }
 
     /// The map crosses the markup lowering byte for byte, so a token of

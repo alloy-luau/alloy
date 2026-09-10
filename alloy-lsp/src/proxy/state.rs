@@ -295,10 +295,31 @@ impl State {
                             continue;
                         }
 
-                        if let Some(text) = entry.get("documentation").and_then(Value::as_str)
-                            && !text.is_empty()
-                        {
-                            index.insert(key, plain_docs(text));
+                        // The text the way luau-lsp writes it: the
+                        // description, the link to the reference page,
+                        // and the code sample, so the editor's side
+                        // panel reads the same for a property the proxy
+                        // lists and one the child lists.
+                        let text = entry
+                            .get("documentation")
+                            .and_then(Value::as_str)
+                            .filter(|t| !t.is_empty())
+                            .map(plain_docs);
+                        let link = entry
+                            .get("learn_more_link")
+                            .and_then(Value::as_str)
+                            .filter(|l| !l.is_empty())
+                            .map(|l| format!("[Learn More]({l})"));
+                        let sample = entry
+                            .get("code_sample")
+                            .and_then(Value::as_str)
+                            .filter(|c| !c.trim().is_empty())
+                            .map(|c| format!("```luau\n{}\n```", c.trim_end()));
+                        let parts: Vec<String> =
+                            [text, link, sample].into_iter().flatten().collect();
+
+                        if !parts.is_empty() {
+                            index.insert(key, parts.join("\n\n"));
                         }
                     }
                 }

@@ -655,8 +655,9 @@ impl State {
                 // after `part.`: the type the property writes, and the
                 // engine's own description of it.
                 for name in alloy::luaux::roblox::properties(class) {
+                    // The detail is the type alone, as after `part.`.
                     let detail = match alloy::roblox_props::property_type(class, name) {
-                        Some(ty) => format!("{name}: {}", readable_type(ty)),
+                        Some(ty) => readable_type(ty),
 
                         None => format!("property of {class}"),
                     };

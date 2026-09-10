@@ -1209,12 +1209,12 @@ fn an_object_initializer_names_the_type_of_each_property() {
             .unwrap_or_default()
     };
 
-    assert_eq!(detail("Size"), "Size: Vector3");
-    assert_eq!(detail("Name"), "Name: string");
-    assert_eq!(detail("Anchored"), "Anchored: boolean");
+    assert_eq!(detail("Size"), "Vector3");
+    assert_eq!(detail("Name"), "string");
+    assert_eq!(detail("Anchored"), "boolean");
     // The dump spells an enum `EnumMaterial`; the reader writes it with
     // the dot.
-    assert_eq!(detail("Material"), "Material: Enum.Material");
+    assert_eq!(detail("Material"), "Enum.Material");
     assert_eq!(detail("Touched"), "event of Part");
 }
 
@@ -1227,7 +1227,7 @@ fn an_object_initializer_carries_the_class_documentation() {
     let path = dir.join("api-docs.json");
     std::fs::write(
         &path,
-        "{\"@roblox/globaltype/BasePart.Size\": { \"documentation\": \"The dimensions of a <code>Part</code>.\" }}",
+        "{\"@roblox/globaltype/BasePart.Size\": { \"documentation\": \"The dimensions of a <code>Part</code>.\", \"learn_more_link\": \"https://example.test/Size\", \"code_sample\": \"part.Size = Vector3.new(1, 1, 1)\" }}",
     )
     .unwrap();
 
@@ -1239,9 +1239,14 @@ fn an_object_initializer_carries_the_class_documentation() {
     let items = st.context_items(uri, at, &ctx);
     let size = items.iter().find(|i| i["label"] == "Size").expect("Size");
 
+    // The text the way luau-lsp writes it: the description, the link,
+    // and the sample, so the editor's side panel reads the same for
+    // a property the proxy lists and one the child lists.
     assert_eq!(
         size["documentation"]["value"],
-        json!("The dimensions of a `Part`.")
+        json!(
+            "The dimensions of a `Part`.\n\n[Learn More](https://example.test/Size)\n\n```luau\npart.Size = Vector3.new(1, 1, 1)\n```"
+        )
     );
 
     let _ = std::fs::remove_dir_all(&dir);

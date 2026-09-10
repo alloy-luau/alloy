@@ -40,6 +40,7 @@ version = "0.1.0-rc.1"
 dependencies = [
  "alloy-luau",
  "alloy-syntax",
+ "globset",
  "serde_json",
 ]
 

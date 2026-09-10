@@ -37,7 +37,8 @@ impl State {
     /// `require`. Alloy writes `import name from "@pkg/name"`, so the
     /// item carries the module's name, the spec the project's aliases
     /// give it, and one edit that writes the import under the last one.
-    /// A module a dot folder holds, one no alias and no `[build] in`
+    /// A module a dot folder or an `_Index` folder holds, one the
+    /// editor's `ignoreGlobs` name, one no alias and no `[build] in`
     /// reaches, and one the file already imports are dropped.
     ///
     /// A service row inserts `local X = game:GetService("X")`. Alloy
@@ -58,6 +59,7 @@ impl State {
         let taken = imports::imported_specs(&doc.source);
         let services = imports::imported_services(&doc.source);
         let source = doc.source.clone();
+        let ignored = self.import_ignore_globs();
         let items = match result {
             Value::Array(v) => v,
 
@@ -71,27 +73,36 @@ impl State {
         };
 
         items.retain_mut(|item| {
-            if let Some(service) = service_auto_import(item) {
-                if services.contains(&service) {
-                    return false;
+            // A module under a service the file does not bind yet
+            // carries both edits, the `GetService` line and the
+            // `require` line. It is a module offer, so the module test
+            // reads the row before the service one.
+            if !is_module_auto_import(item) {
+                if let Some(service) = service_auto_import(item) {
+                    if services.contains(&service) {
+                        return false;
+                    }
+
+                    item["label"] = json!(service);
+                    item["detail"] = json!(format!("game:GetService(\"{service}\")"));
+                    item["insertText"] = json!(service);
+                    item["additionalTextEdits"] =
+                        json!([imports::service_import_edit(&source, &service)]);
+
+                    return true;
                 }
 
-                item["label"] = json!(service);
-                item["detail"] = json!(format!("game:GetService(\"{service}\")"));
-                item["insertText"] = json!(service);
-                item["additionalTextEdits"] =
-                    json!([imports::service_import_edit(&source, &service)]);
-
-                return true;
-            }
-
-            if !is_module_auto_import(item) {
                 return true;
             }
 
             let Some(instance) = item.get("detail").and_then(Value::as_str) else {
                 return false;
             };
+
+            if ignored.hides(item, instance) {
+                return false;
+            }
+
             let Some(file) = module_file_of(instance, &mounts) else {
                 return false;
             };
@@ -174,4 +185,67 @@ pub(crate) fn service_auto_import(item: &Value) -> Option<String> {
 
         alloy::game_import::is_service(name).then(|| name.to_string())
     })
+}
+
+/// The globs the luau-lsp extension ships in
+/// `luau-lsp.completion.imports.ignoreGlobs`.
+const DEFAULT_IGNORE_GLOBS: [&str; 1] = ["**/_Index/**"];
+
+/// What the auto-import lists leave out. A module under a dot folder or
+/// an `_Index` folder is a package's own store, not a module the author
+/// writes, and `luau-lsp.completion.imports.ignoreGlobs` names more.
+pub(crate) struct Ignored {
+    globs: globset::GlobSet,
+}
+
+impl Ignored {
+    /// Whether a row names a module no list offers. The child spells
+    /// the path twice: `detail` holds the Luau expression, and the last
+    /// line of the documentation holds the plain path the globs match.
+    pub(crate) fn hides(&self, item: &Value, instance: &str) -> bool {
+        let segments = instance_segments(instance);
+
+        if segments.iter().any(|s| s.starts_with('.') || s == "_Index") {
+            return true;
+        }
+
+        let path = documented_path(item).unwrap_or_else(|| segments.join("/"));
+
+        path.split('/').any(|s| s.starts_with('.') || s == "_Index") || self.globs.is_match(&path)
+    }
+}
+
+/// The plain path under the require snippet in an auto-import row:
+/// `game/ReplicatedStorage/Packages/.ember/x`.
+fn documented_path(item: &Value) -> Option<String> {
+    let text = item
+        .pointer("/documentation/value")
+        .or_else(|| item.get("documentation"))
+        .and_then(Value::as_str)?;
+    let last = text.trim_end().lines().next_back()?.trim();
+
+    (last.contains('/') && !last.contains(char::is_whitespace) && !last.contains('`'))
+        .then(|| last.to_string())
+}
+
+impl State {
+    /// The ignore globs the editor sends, else the luau-lsp default.
+    pub(crate) fn import_ignore_globs(&self) -> Ignored {
+        let patterns: Vec<String> = match self
+            .settings
+            .pointer("/completion/imports/ignoreGlobs")
+            .and_then(Value::as_array)
+        {
+            Some(list) => list
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+
+            None => DEFAULT_IGNORE_GLOBS.iter().map(|g| g.to_string()).collect(),
+        };
+
+        Ignored {
+            globs: alloy::build::globs(&patterns).unwrap_or_else(|_| globset::GlobSet::empty()),
+        }
+    }
 }

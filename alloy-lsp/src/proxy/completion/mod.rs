@@ -30,7 +30,7 @@ use super::hints::writable_type;
 use super::hover::{
     builtin_attribute_targets, declared_attribute_targets, remote_spec, std_receiver,
 };
-use super::navigation::module_file_of;
+use super::navigation::{instance_segments, module_file_of};
 use super::*;
 
 /// The kind words a declaration hover opens with. The list is the one

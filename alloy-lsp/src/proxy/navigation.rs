@@ -380,16 +380,18 @@ impl State {
 /// `pkg = ["packages/roblox", "@game/ReplicatedStorage/Packages"]` is
 /// `packages/roblox/fluid`.
 pub(crate) fn module_file_of(instance: &str, mounts: &[(String, PathBuf)]) -> Option<PathBuf> {
+    let segments = instance_segments(instance);
+
     for (prefix, dir) in mounts {
-        let Some(tail) = instance
-            .strip_prefix(prefix.as_str())
-            .and_then(|t| t.strip_prefix('.'))
-        else {
+        let head = instance_segments(prefix);
+
+        if segments.len() <= head.len() || !segments.starts_with(&head) {
             continue;
-        };
+        }
+
         let mut file = dir.clone();
 
-        for part in tail.split('.') {
+        for part in &segments[head.len()..] {
             file.push(part);
         }
 
@@ -397,6 +399,46 @@ pub(crate) fn module_file_of(instance: &str, mounts: &[(String, PathBuf)]) -> Op
     }
 
     None
+}
+
+/// The parts of an instance path. A part that is no identifier arrives
+/// in brackets, so `Packages[".ember"].jecs` is `Packages`, `.ember`,
+/// `jecs`. A package store folder reaches the path that way.
+pub(crate) fn instance_segments(path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = path;
+
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches('.');
+
+        let Some(after) = rest.strip_prefix('[') else {
+            let end = rest.find(['.', '[']).unwrap_or(rest.len());
+
+            if end == 0 {
+                break;
+            }
+
+            out.push(rest[..end].to_string());
+            rest = &rest[end..];
+
+            continue;
+        };
+
+        let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            break;
+        };
+        let body = &after[quote.len_utf8()..];
+        let Some(end) = body.find(quote) else {
+            break;
+        };
+
+        out.push(body[..end].to_string());
+        rest = body[end + quote.len_utf8()..]
+            .strip_prefix(']')
+            .unwrap_or("");
+    }
+
+    out
 }
 
 /// The definition a position in a data import names: on the path, the

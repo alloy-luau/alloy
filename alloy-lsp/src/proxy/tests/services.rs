@@ -223,3 +223,169 @@ pub(crate) fn a_service_binding_goes_to_its_import() {
     );
     assert_eq!(at("print"), None);
 }
+
+/// A child auto-import row that names a module under a dot folder or an
+/// `_Index` folder is dropped: the folder holds a package's own store,
+/// not a module the author writes. The editor's `ignoreGlobs` name more.
+#[test]
+pub(crate) fn a_package_store_is_no_auto_import() {
+    let row = |instance: &str, path: &str| {
+        json!({
+            "label": "y",
+            "kind": 9,
+            "detail": instance,
+            "documentation": { "kind": "markdown", "value": format!(
+                "```luau\nlocal y = require({instance})\n\n```\n\n{path}"
+            ) },
+        })
+    };
+    let (st, _) = one_file("print(1)\n");
+    let ignored = st.import_ignore_globs();
+
+    for (instance, path) in [
+        (
+            "ReplicatedStorage.Packages[\".ember\"].jecs.test.lol",
+            "game/ReplicatedStorage/Packages/.ember/jecs/test/lol",
+        ),
+        (
+            "ReplicatedStorage.Packages._Index.vide.src.mount",
+            "game/ReplicatedStorage/Packages/_Index/vide/src/mount",
+        ),
+    ] {
+        assert!(
+            ignored.hides(&row(instance, path), instance),
+            "{instance} must be hidden"
+        );
+    }
+
+    let plain = "ReplicatedStorage.Packages.vide";
+    assert!(!ignored.hides(&row(plain, "game/ReplicatedStorage/Packages/vide"), plain));
+
+    // A glob the editor sends replaces the default one.
+    let mut st = st;
+    st.settings = json!({ "completion": { "imports": { "ignoreGlobs": ["**/bench/**"] } } });
+    let ignored = st.import_ignore_globs();
+    let bench = "ReplicatedStorage.Packages.vide.bench.run";
+    assert!(ignored.hides(
+        &row(bench, "game/ReplicatedStorage/Packages/vide/bench/run"),
+        bench
+    ));
+    // The default is gone, so `_Index` now falls to the segment test,
+    // which stands on its own.
+    let index = "ReplicatedStorage.Packages._Index.vide";
+    assert!(ignored.hides(
+        &row(index, "game/ReplicatedStorage/Packages/_Index/vide"),
+        index
+    ));
+}
+
+/// An instance path spells a part that is no identifier in brackets.
+#[test]
+pub(crate) fn an_instance_path_reads_a_bracket_part() {
+    use super::super::navigation::instance_segments;
+
+    assert_eq!(
+        instance_segments("ReplicatedStorage.Packages[\".ember\"].jecs"),
+        ["ReplicatedStorage", "Packages", ".ember", "jecs"]
+    );
+    assert_eq!(
+        instance_segments("A.B[\"spawn.bench\"]"),
+        ["A", "B", "spawn.bench"]
+    );
+    assert_eq!(instance_segments("A.B"), ["A", "B"]);
+    assert_eq!(instance_segments(""), Vec::<String>::new());
+}
+
+/// The whole pass over a project: the child offers a module under
+/// `packages/.ember` and one beside it. Only the second reaches the
+/// reader, as an Alloy import through the mount alias.
+#[test]
+pub(crate) fn the_auto_import_pass_drops_a_store_module() {
+    let dir = std::env::temp_dir().join(format!("alloy-store-import-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("packages/.ember/x")).expect("temp dir");
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n\n\
+         [mount]\npkg = [\"packages\", \"@game/ReplicatedStorage/Packages\"]\n",
+    )
+    .expect("toml");
+    std::fs::write(dir.join("packages/.ember/x/y.luau"), "return {}\n").expect("store module");
+    std::fs::write(dir.join("packages/vide.luau"), "return {}\n").expect("package");
+
+    let src = "print(1)\n";
+    let main = dir.join("src/main.aly");
+    std::fs::write(&main, src).expect("main");
+
+    let uri = format!("file://{}", main.display());
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+    let options = EmitOptions {
+        file_name: main.to_string_lossy().into_owned(),
+        in_project: true,
+        ..EmitOptions::default()
+    };
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+
+    // The child binds the service the require reads, so each row
+    // carries two edits.
+    let row = |name: &str, instance: &str, path: &str| {
+        json!({
+            "label": name,
+            "kind": 9,
+            "detail": instance,
+            "documentation": { "kind": "markdown", "value": format!(
+                "```luau\nlocal ReplicatedStorage = game:GetService(\"ReplicatedStorage\")\n\
+                 local {name} = require({instance})\n\n```\n\n{path}"
+            ) },
+            "additionalTextEdits": [
+                {
+                    "newText": "local ReplicatedStorage = game:GetService(\"ReplicatedStorage\")\n",
+                    "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+                },
+                {
+                    "newText": format!("local {name} = require({instance})\n"),
+                    "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+                },
+            ],
+        })
+    };
+    let mut result = json!([
+        row(
+            "y",
+            "ReplicatedStorage.Packages[\".ember\"].x.y",
+            "game/ReplicatedStorage/Packages/.ember/x/y",
+        ),
+        row(
+            "vide",
+            "ReplicatedStorage.Packages.vide",
+            "game/ReplicatedStorage/Packages/vide",
+        ),
+    ]);
+    st.rewrite_child_auto_imports(&uri, &mut result);
+
+    let items = result.as_array().expect("the rows");
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["label"], "vide");
+    assert_eq!(items[0]["detail"], "@pkg/vide");
+    assert_eq!(
+        items[0]["additionalTextEdits"][0]["newText"],
+        "import vide from \"@pkg/vide\"\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

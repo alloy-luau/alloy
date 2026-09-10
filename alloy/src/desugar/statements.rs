@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 
 use alloy_syntax::ast::{
-    After, Assign, Block, CallArgs, Cond, Destructure, Expr, FunctionBody, GenericFor, ImportKind,
-    IndexKey, Local, Pattern, Stmt, TableField, TokSpan,
+    After, Assign, Block, CallArgs, Cond, Destructure, Expr, Function, FunctionBody, GenericFor,
+    ImportKind, IndexKey, Local, Pattern, Stmt, TableField, TokSpan,
 };
 
 use crate::render::Renderer;
@@ -403,6 +403,127 @@ impl<'s> Desugar<'s> {
         self.r.append(side);
     }
 
+    /// Finds the plain tables of the file that a colon method can take
+    /// a `self` type from: `local X = { }` at the top level, with no
+    /// later rebind and no metatable of its own.
+    ///
+    /// Luau gives `self` no type in `function X:m()` on such a table, so
+    /// the check artifact writes the parameter out as `typeof(X)`. A
+    /// struct, an enum, and a foreign `impl` carry their own `self`
+    /// already, and none of them reaches this scan.
+    pub(crate) fn scan_plain_tables(&mut self, block: &Block) {
+        let colon_method = |stmt: &Stmt| matches!(stmt.under_default(), Stmt::Function(f) if f.is_method && f.path.len() == 2);
+
+        if !self.options.check || !block.stmts.iter().any(colon_method) {
+            return;
+        }
+        // The hover folds read the same list, so both come from one
+        // scan of the source.
+        let mut out: HashSet<String> = crate::tables::plain_tables(self.src)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+
+        for stmt in &block.stmts {
+            self.drop_rebound_tables(stmt.under_default(), &mut out);
+        }
+
+        self.plain_tables = out;
+    }
+
+    /// Takes a name out of the plain tables when the file rebinds it,
+    /// gives it a metatable, or writes a metamethod on it. A class of
+    /// the `C.__index = C` shape holds instances, not the table, so
+    /// `typeof(C)` is the wrong type for its `self`.
+    fn drop_rebound_tables(&self, stmt: &Stmt, out: &mut HashSet<String>) {
+        if let Stmt::Assign(a) = stmt {
+            for target in &a.targets {
+                match target {
+                    Expr::Name(n) => {
+                        out.remove(self.text_of(*n));
+                    }
+
+                    Expr::Index {
+                        object,
+                        key: IndexKey::Field(k),
+                        ..
+                    } => {
+                        if let Expr::Name(n) = object.as_ref()
+                            && self.text_of(*k).starts_with("__")
+                        {
+                            out.remove(self.text_of(*n));
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+
+        // `setmetatable(X, M)` as a statement of its own.
+        if let Stmt::Call(Expr::Call { func, args, .. }, _) = stmt
+            && let Expr::Name(f) = func.as_ref()
+            && self.text_of(*f) == "setmetatable"
+            && let CallArgs::Paren(list) = args
+            && let Some(Expr::Name(n)) = list.first()
+        {
+            out.remove(self.text_of(*n));
+        }
+
+        for child in stmt_children(stmt) {
+            match child {
+                Child::Block(b) => {
+                    for inner in &b.stmts {
+                        self.drop_rebound_tables(inner.under_default(), out);
+                    }
+                }
+
+                Child::Function(f) => {
+                    for inner in &f.block.stmts {
+                        self.drop_rebound_tables(inner.under_default(), out);
+                    }
+                }
+
+                Child::Expr(_) => {}
+            }
+        }
+    }
+
+    /// The `self` type a colon method on a plain table takes, or nothing
+    /// when the statement is no such method.
+    pub(crate) fn table_self_type(&self, f: &Function) -> Option<String> {
+        if !self.options.check || !f.is_method || f.path.len() != 2 {
+            return None;
+        }
+        let owner = self.text_of(f.path[0]);
+
+        // The source may write `self` out already, and then it says
+        // more than the scan could.
+        if f.body.params.iter().any(|p| self.text_of(p.name) == "self") {
+            return None;
+        }
+
+        self.plain_tables
+            .contains(owner)
+            .then(|| format!("typeof({owner})"))
+    }
+
+    /// `function X:m(...)` on a plain table, written out as
+    /// `function X.m(self: typeof(X), ...)` for the check artifact.
+    pub(crate) fn table_method(&mut self, f: &Function, target: &str) {
+        let start = self.byte_start(f.span);
+        let name = f.path[1];
+        // The `:` sits between the two names, so the copy stops at the
+        // owner and the emit writes the dot.
+        let owner_end = self.byte_end(f.path[0]);
+        self.copy(start, owner_end);
+        self.generate(owner_end, ".");
+        self.self_inject = Some(target.to_string());
+        let rest = TokSpan::new(name.start as usize, f.span.end as usize);
+        self.function_with_header(rest, &f.body);
+        self.self_inject = None;
+    }
+
     /// Reports if a statement needs rewriting. The tree check is exact for
     /// nodes; ambient names and word operators need the source text.
     pub(crate) fn stmt_needs_desugar(&self, s: &Stmt) -> bool {
@@ -430,6 +551,8 @@ impl<'s> Desugar<'s> {
             Stmt::Local(l) if !l.attrs.is_empty() => return true,
 
             Stmt::Function(f) if self.params_have_attrs(&f.body) => return true,
+
+            Stmt::Function(f) if self.table_self_type(f).is_some() => return true,
 
             Stmt::LocalFunction(f) if self.params_have_attrs(&f.body) => return true,
 
@@ -837,6 +960,11 @@ impl<'s> Desugar<'s> {
                 let after = self.toks[t.span.start as usize].end;
                 self.generate(start, "export");
                 self.copy(after, self.byte_end(t.span));
+            }
+
+            Stmt::Function(f) if self.table_self_type(f).is_some() => {
+                let target = self.table_self_type(f).unwrap_or_default();
+                self.table_method(f, &target);
             }
 
             Stmt::Function(f) if function_needs_rewrite(&f.body) => {
@@ -1451,6 +1579,13 @@ impl<'s> Desugar<'s> {
 
         self.copy(cursor, params_open.end);
         cursor = params_open.end;
+
+        // A colon method on a plain table: the source names no `self`,
+        // so the header writes the parameter out.
+        if let Some(target) = self.self_inject.take() {
+            let sep = if body.params.is_empty() { "" } else { ", " };
+            self.generate(params_open.end, &format!("self: {target}{sep}"));
+        }
 
         // 2. Parameters: a destructure becomes a temp, a default makes the
         //    type optional, and both add a prologue line.

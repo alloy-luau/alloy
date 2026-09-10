@@ -35,6 +35,9 @@ pub struct Doc {
     /// Every namespace member: the name the emit writes and the path
     /// the source wrote, for the folds.
     pub namespaces: Vec<(String, String)>,
+    /// The plain `local X = { }` tables with their members, for the
+    /// folds: a print of the whole shape reads back as `typeof(X)`.
+    pub tables: Vec<(String, Vec<String>)>,
     /// Every namespace the file declares, with the byte range of its
     /// body and the members it holds.
     pub namespace_ranges: Vec<alloy::declarations::NamespaceSpan>,
@@ -243,6 +246,7 @@ impl Doc {
             exports: Vec::new(),
             decls: Vec::new(),
             namespaces: Vec::new(),
+            tables: Vec::new(),
             namespace_ranges: Vec::new(),
             bindings: Vec::new(),
             shapes: Vec::new(),
@@ -294,6 +298,7 @@ impl Doc {
             false => Vec::new(),
         };
         self.namespaces = alloy::declarations::namespace_names(text);
+        self.tables = alloy::tables::plain_tables(text);
         self.namespace_ranges = alloy::declarations::namespace_ranges(text);
         self.bindings = alloy::declarations::bindings(text);
         self.shapes = alloy::declarations::shapes(text);

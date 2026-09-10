@@ -326,6 +326,30 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
         return Some(iface.name.clone());
     }
 
+    // A plain `local X = { }` table. No type names it, so the analyzer
+    // prints the whole shape; the source named the value, and the type
+    // of it is `typeof(X)`.
+    if !known.tables.is_empty() && !m.is_empty() && trimmed.starts_with('{') {
+        let mut keys: Vec<String> = m
+            .iter()
+            .map(|(k, _)| {
+                k.trim_start_matches("read ")
+                    .trim_start_matches("write ")
+                    .to_string()
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+
+        for (name, fields) in &known.tables {
+            let all: Vec<&String> = fields.iter().collect();
+
+            if same_set(&keys, &all) {
+                return Some(format!("typeof({name})"));
+            }
+        }
+    }
+
     // The std containers, by the methods that name their arguments. Two
     // arrays of one element type are two types to the checker, so the
     // element may be a union: it keeps its parentheses under the `[]`

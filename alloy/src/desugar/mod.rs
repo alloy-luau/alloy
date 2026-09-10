@@ -2508,19 +2508,6 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// `new Name()` where the constructor itself writes it: the raw
-    /// construct with no fields, the same text `new Name { }` gives.
-    fn empty_construct(&self, name: &str) -> String {
-        let ctor = self.raw_ctor(name);
-        // Inside the struct's own impl the instance carries the full
-        // view, so `self.count` in `new` type checks.
-        if self.impl_target.as_deref() == Some(name) && self.has_private_view(name) {
-            format!("(({ctor}({{}}) :: any) :: {name}__all)")
-        } else {
-            format!("{ctor}({{}})")
-        }
-    }
-
     /// `(x :: any)` in the check artifact, `x` in the ship artifact: for
     /// a spot where the checker cannot follow what the emit knows.
     fn any_cast(&self, x: &str) -> String {

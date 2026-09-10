@@ -40,6 +40,7 @@ pub mod schema;
 #[allow(dead_code)]
 #[path = "../../alloy-lsp/src/shapes/mod.rs"]
 pub mod shapes;
+pub mod tables;
 pub mod testbuild;
 pub mod typecheck;
 

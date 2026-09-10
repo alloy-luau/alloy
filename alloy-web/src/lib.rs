@@ -806,6 +806,7 @@ pub fn fold(text: &str) -> String {
             shapes: s.shapes.clone(),
             interfaces: s.interfaces.clone(),
             namespaces: alloy::declarations::namespace_names(&s.source),
+            tables: alloy::tables::plain_tables(&s.source),
         };
         let mut out = text.to_string();
 

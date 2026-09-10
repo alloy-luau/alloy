@@ -159,8 +159,13 @@ impl State {
                 .collect(),
             namespaces: here
                 .into_iter()
-                .chain(rest.map(|(_, d)| d))
+                .chain(rest.clone().map(|(_, d)| d))
                 .flat_map(|d| d.namespaces.iter().cloned())
+                .collect(),
+            tables: here
+                .into_iter()
+                .chain(rest.map(|(_, d)| d))
+                .flat_map(|d| d.tables.iter().cloned())
                 .collect(),
         }
     }

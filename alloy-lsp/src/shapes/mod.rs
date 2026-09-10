@@ -50,6 +50,10 @@ pub struct Known {
     /// Every namespace member: the name the emit writes and the path
     /// the source wrote. `Math_Vec2` reads as `Math.Vec2`.
     pub namespaces: Vec<(String, String)>,
+    /// The plain `local X = { }` tables with their members. The
+    /// analyzer has no name for one, so a print of the whole shape
+    /// reads back as `typeof(X)`.
+    pub tables: Vec<(String, Vec<String>)>,
 }
 
 /// An interface a source declares: the interfaces it extends and the
@@ -340,6 +344,22 @@ struct Binding {
     body: String,
 }
 
+/// The name a hover declares, in `local X: T` or `X: T`. A type that
+/// reads back as the name of what it declares tells the reader
+/// nothing, so the fold leaves that one print alone.
+fn subject_of(text: &str) -> Option<String> {
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("local "))?
+        .trim_start()
+        .strip_prefix("local ")?;
+    let (name, _) = line.split_once(": ")?;
+    let name = name.trim();
+
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then(|| name.to_string())
+}
+
 /// Folds one text: every `where` clause whose bindings all name known
 /// shapes goes, and the head reads by name; then the enum unions and
 /// the Result unions.
@@ -352,6 +372,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     let known = match text.contains("not compatible with type") {
         true => {
             narrowed = Known {
+                tables: known.tables.clone(),
                 shapes: known.shapes.clone(),
                 interfaces: known
                     .interfaces
@@ -366,6 +387,29 @@ pub fn fold(text: &str, known: &Known) -> String {
         }
 
         false => known,
+    };
+    // `local Provider: typeof(Provider)` says nothing. A hover on the
+    // table itself keeps the shape; every other reader of the type
+    // gets the name.
+    let without_subject;
+    let known = match subject_of(text) {
+        Some(name) if known.tables.iter().any(|(n, _)| *n == name) => {
+            without_subject = Known {
+                tables: known
+                    .tables
+                    .iter()
+                    .filter(|(n, _)| *n != name)
+                    .cloned()
+                    .collect(),
+                shapes: known.shapes.clone(),
+                interfaces: known.interfaces.clone(),
+                namespaces: known.namespaces.clone(),
+            };
+
+            &without_subject
+        }
+
+        _ => known,
     };
     // The std spells the operand of `await` `Awaitable<T>`; the source
     // writes `Future<T>`, and the two are one type.
@@ -1627,6 +1671,7 @@ mod tests {
             shapes: Vec::new(),
             interfaces: interfaces(source),
             namespaces: Vec::new(),
+            tables: Vec::new(),
         };
 
         assert_eq!(
@@ -1711,6 +1756,7 @@ mod tests {
             interfaces: interfaces("type Ent = { id: number, name: string }\n"),
             shapes: Vec::new(),
             namespaces: Vec::new(),
+            tables: Vec::new(),
         };
 
         // The alias marks no field, so the `Readonly` print is not it,
@@ -1756,6 +1802,7 @@ mod tests {
             interfaces: interfaces("type Profile = { name: string, level: number }\n"),
             shapes: Vec::new(),
             namespaces: Vec::new(),
+            tables: Vec::new(),
         };
         let printed = "local all: {\n        level: number,\n        name: string\n    }[]";
 
@@ -1835,6 +1882,7 @@ mod tests {
                 },
             ],
             namespaces: Vec::new(),
+            tables: Vec::new(),
         }
     }
 
@@ -1855,6 +1903,7 @@ mod tests {
                 types: vec!["T".into(), "number".into()],
             }],
             namespaces: Vec::new(),
+            tables: Vec::new(),
         };
         let text = "local held: t1 where t1 = {\n    read bump: (self: t1, n: number) -> number,\n    count: number,\n    read get: (self: t1) -> number,\n    value: number\n}";
         assert_eq!(fold(text, &known), "local held: Slotted<number>");
@@ -1880,6 +1929,7 @@ mod tests {
                 "export struct Swinger as\n    read requested: Signal<> = Signal.new()\n    private last: number = 0\n    private scope: Scope = Scope.new()\nend\n",
             ),
             namespaces: Vec::new(),
+            tables: Vec::new(),
         };
         assert_eq!(fold(text, &known), ": Swinger");
     }
@@ -2015,6 +2065,7 @@ mod tests {
                 },
             ],
             namespaces: Vec::new(),
+            tables: Vec::new(),
         };
         let text = "local function describe(event: { _1: Player, _2: Vector3, tag: \"Spawn\" } | { _1: Player, _2: { _1: number, _2: number, tag: \"Rect\" } | { _1: number, tag: \"Circle\" }, tag: \"Hit\" } | { _1: Player, tag: \"Leave\" }): string";
         assert_eq!(
@@ -2038,6 +2089,7 @@ mod tests {
                 ],
             }],
             namespaces: Vec::new(),
+            tables: Vec::new(),
         };
         let inside = "function buy(id: string): Result<\"None\" | { _1: number, tag: \"Coins\" } | { _1: number, tag: \"Strength\" }, string>";
         assert_eq!(
@@ -2161,6 +2213,7 @@ mod dbg2 {
             ],
             interfaces: Vec::new(),
             namespaces: Vec::new(),
+            tables: Vec::new(),
         };
         let text = "Key 'area' is missing from 'string' in the type '\"Empty\" | { _1: number, tag: \"Circle\" } | { _1: number, _2: number, tag: \"Rect\" }'";
         println!("OUT: {:?}", fold(text, &known));

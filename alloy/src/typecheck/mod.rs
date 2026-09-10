@@ -882,6 +882,10 @@ pub fn known_shapes(files: &[CheckSource]) -> crate::shapes::Known {
             .iter()
             .flat_map(|f| crate::declarations::namespace_names(&f.source))
             .collect(),
+        tables: files
+            .iter()
+            .flat_map(|f| crate::tables::plain_tables(&f.source))
+            .collect(),
     }
 }
 

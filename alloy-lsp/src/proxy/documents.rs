@@ -784,6 +784,10 @@ impl Server {
         let mut opened = false;
 
         for path in files {
+            if self.stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+
             self.wait_for_requests();
             let uri = path_to_uri(&path);
             let already = self.state.lock().expect("state").docs.contains_key(&uri);
@@ -832,6 +836,11 @@ impl Server {
 
         loop {
             std::thread::sleep(std::time::Duration::from_secs(secs));
+
+            if self.stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+
             let roots = self.poll_roots();
 
             if roots.is_empty() {

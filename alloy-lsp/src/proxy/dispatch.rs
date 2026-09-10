@@ -1,5 +1,9 @@
 use super::*;
 
+/// The id the proxy's own `shutdown` to the child carries. The reader
+/// drops the answer: the editor already has its own.
+pub(crate) const CHILD_SHUTDOWN_ID: i64 = -900_001;
+
 pub struct Server {
     pub(crate) state: Mutex<State>,
     pub(crate) child_in: Mutex<Box<dyn Write + Send>>,
@@ -12,6 +16,9 @@ pub struct Server {
     /// over the workspace waits while one is: the pass takes the state
     /// lock for every file, and a hover wants the same lock.
     pub(crate) busy: std::sync::atomic::AtomicUsize,
+    /// Set by `shutdown` and `exit`: a pass over the workspace stops
+    /// at its next file, and the poll thread stops ticking.
+    pub(crate) stopping: std::sync::atomic::AtomicBool,
 }
 
 impl Server {
@@ -32,6 +39,7 @@ impl Server {
             client_out: Mutex::new(client_out),
             scan: Mutex::new(()),
             busy: std::sync::atomic::AtomicUsize::new(0),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -100,6 +108,8 @@ impl Server {
     }
 
     fn dispatch_client(self: &Arc<Self>, mut message: Value) -> bool {
+        use std::sync::atomic::Ordering;
+
         let method = message
             .get("method")
             .and_then(Value::as_str)
@@ -219,7 +229,28 @@ impl Server {
                 std::thread::spawn(move || scanner.open_shadows(files));
             }
 
+            Some("shutdown") => {
+                // The editor gives a server two seconds to answer and
+                // kills it after. The child answers only once it has
+                // read its definitions, which a restart mid-index does
+                // not wait for, so the proxy answers now and stops its
+                // own passes; the child hears the request through its
+                // own id, which the reader drops.
+                self.stopping.store(true, Ordering::Relaxed);
+
+                if let Some(id) = message.get("id") {
+                    self.respond(id, Value::Null);
+                }
+
+                self.to_child(&json!({
+                    "jsonrpc": "2.0",
+                    "id": CHILD_SHUTDOWN_ID,
+                    "method": "shutdown",
+                }));
+            }
+
             Some("exit") => {
+                self.stopping.store(true, Ordering::Relaxed);
                 self.to_child(&message);
 
                 return false;
@@ -839,6 +870,13 @@ impl Server {
             .get("method")
             .and_then(Value::as_str)
             .map(str::to_string);
+
+        // The answer to the proxy's own shutdown: the editor has its
+        // answer already.
+        if method.is_none() && message.get("id").and_then(Value::as_i64) == Some(CHILD_SHUTDOWN_ID)
+        {
+            return;
+        }
         log::trace(&format!(
             "child -> {} id={}",
             method.as_deref().unwrap_or("(response)"),

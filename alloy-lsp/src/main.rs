@@ -240,7 +240,7 @@ fn main() -> ExitCode {
 
     // Child -> editor on its own thread.
     let reader_server = Arc::clone(&server);
-    let reader = std::thread::spawn(move || {
+    let _reader = std::thread::spawn(move || {
         let mut reader = BufReader::new(child_out);
 
         loop {
@@ -286,8 +286,26 @@ fn main() -> ExitCode {
         }
     }
 
-    let _ = child.wait();
-    let _ = reader.join();
+    // The child gets a second to leave on its own; a child still
+    // loading its definitions never answered the shutdown, and the
+    // editor kills a server that lingers.
+    let gone = std::time::Instant::now() + std::time::Duration::from_secs(1);
+
+    while std::time::Instant::now() < gone {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+
+            Err(_) => break,
+        }
+    }
+
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     let _ = std::io::stdout().flush();
 
     ExitCode::SUCCESS

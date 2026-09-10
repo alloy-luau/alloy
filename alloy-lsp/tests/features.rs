@@ -2602,3 +2602,52 @@ fn a_hover_answers_while_a_large_workspace_opens() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A restart during the workspace pass: the editor gives a server two
+/// seconds to answer `shutdown` and kills it after. The proxy answers
+/// at once, whatever the child is doing, and leaves on `exit`.
+#[test]
+fn a_shutdown_answers_at_once_during_the_workspace_pass() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-shutdown-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n",
+    )
+    .unwrap();
+
+    for i in 0..300 {
+        std::fs::write(
+            dir.join(format!("src/part{i}.aly")),
+            format!("struct Part{i} as\n    value: number\nend\n"),
+        )
+        .unwrap();
+    }
+
+    let mut s = start(&child, &dir);
+    // The pass over the 300 files has just started.
+    let asked = Instant::now();
+    let answer = s.request("shutdown", json!(null));
+    let took = asked.elapsed();
+    assert!(answer.is_null(), "{answer}");
+    assert!(took < Duration::from_secs(2), "shutdown took {took:?}");
+
+    write(&mut s.stdin, &json!({ "jsonrpc": "2.0", "method": "exit" }));
+    let left = Instant::now();
+
+    while s._server.0.try_wait().ok().flatten().is_none() {
+        assert!(
+            left.elapsed() < Duration::from_secs(3),
+            "the server did not leave after exit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

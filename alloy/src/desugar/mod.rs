@@ -408,6 +408,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         struct_generics: HashMap::new(),
         structs_with_new: HashMap::new(),
         impl_target: None,
+        impl_method: None,
+        plain_tables: HashSet::new(),
+        self_inject: None,
         declared_types: HashSet::new(),
         traits: HashMap::new(),
         trait_required: HashMap::new(),
@@ -495,6 +498,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
+    d.scan_plain_tables(&chunk.block);
     d.scan_reduce_inserts(&chunk.block);
     d.scan_static_checks(&chunk.block);
 
@@ -893,6 +897,17 @@ struct Desugar<'s> {
     /// The struct whose `impl` renders now, whose own raw constructor is
     /// the constructor's business.
     impl_target: Option<String>,
+    /// The name of the method that renders now inside that `impl`. A
+    /// `new Self()` in the constructor itself would call the
+    /// constructor again, so the emit builds the value instead.
+    impl_method: Option<String>,
+    /// Top-level `local X = { }` tables the file never rebinds and
+    /// never gives a metatable. A colon method on one of them takes
+    /// `typeof(X)` for its `self`.
+    plain_tables: HashSet<String>,
+    /// The type of the `self` parameter the next function header has to
+    /// write out, for a method the source spells with a colon.
+    self_inject: Option<String>,
     /// Type names the file declares at the top level, so an ambient type
     /// of the same name yields to them anywhere in the file.
     declared_types: HashSet<String>,
@@ -2180,6 +2195,16 @@ impl<'s> Desugar<'s> {
             // A script's globals live in the module the build hoists
             // them into, so that module is this file, not another.
             let own = crate::globals::hoist_name(&file);
+            // The index names a file relative to `[build] in`; the
+            // compiler names the one it renders however the caller
+            // wrote it, absolute from the CLI. A path that ends in the
+            // other is the same file, so a global never reports
+            // against itself.
+            let same_file = |other: &str| {
+                let (a, b) = (other.replace('\\', "/"), file.replace('\\', "/"));
+
+                a == b || a.ends_with(&format!("/{b}")) || b.ends_with(&format!("/{a}"))
+            };
             // The side this declaration reaches: its own directive, or
             // the side of the file it sits in. A server name and a
             // client name never meet, so both may stand.
@@ -2188,6 +2213,7 @@ impl<'s> Desugar<'s> {
             if let Some(other) = self.options.globals.iter().find(|o| {
                 o.name == g.name
                     && !(self.options.hoist_globals && o.file == own)
+                    && !same_file(&o.declared_in)
                     && crate::globals::sides_collide(o.side, side)
             }) {
                 say(format!(
@@ -2479,6 +2505,19 @@ impl<'s> Desugar<'s> {
             format!("{name}.__new")
         } else {
             name.to_string()
+        }
+    }
+
+    /// `new Name()` where the constructor itself writes it: the raw
+    /// construct with no fields, the same text `new Name { }` gives.
+    fn empty_construct(&self, name: &str) -> String {
+        let ctor = self.raw_ctor(name);
+        // Inside the struct's own impl the instance carries the full
+        // view, so `self.count` in `new` type checks.
+        if self.impl_target.as_deref() == Some(name) && self.has_private_view(name) {
+            format!("(({ctor}({{}}) :: any) :: {name}__all)")
+        } else {
+            format!("{ctor}({{}})")
         }
     }
 

@@ -202,6 +202,30 @@ fn one_name_in_two_files_reports() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The compiler names the file it renders as the caller wrote it, and
+/// the index names it relative to `[build] in`. One file wrote the
+/// global, so nothing reports.
+#[test]
+fn one_file_never_reports_against_itself() {
+    let dir = temp_project("self_duplicate");
+    fs::write(
+        dir.join("src/main.server.aly"),
+        "global local testing12 = 1
+print(testing12)
+",
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    let messages = messages(&report);
+    assert!(
+        !messages.iter().any(|m| m.contains("is global in both")),
+        "{messages:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// The declaring module leads back to a file that names the global, so
 /// the injected require would close a loop.
 #[test]

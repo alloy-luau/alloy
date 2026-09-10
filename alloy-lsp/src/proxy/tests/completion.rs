@@ -1000,3 +1000,80 @@ pub(crate) fn an_open_index_offers_the_keys_of_its_receiver() {
         json!("local v = profile[".len())
     );
 }
+
+/// A module that ends in `return <expr>` has no export table: its value
+/// is the module. A name in braces completes to a key of that value,
+/// and the head of the import offers the name the module returns.
+#[test]
+pub(crate) fn an_import_of_a_returning_module_completes_its_keys() {
+    let dir = std::env::temp_dir().join(format!("alloy-returning-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+    std::fs::write(
+        dir.join("src/palette.aly"),
+        "--- The colours the UI paints with.\nlocal Palette = { dark = \"#111111\" }\n\n--- Lightens a hex colour.\nfunction Palette.tint(hex: string): string\n    return hex\nend\n\nreturn Palette\n",
+    )
+    .expect("module");
+
+    let src = "import { } from \"./palette\"\nimport  from \"./palette\"\n";
+    let main = dir.join("src/main.aly");
+    std::fs::write(&main, src).expect("main");
+
+    let uri = format!("file://{}", main.display());
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+    let options = EmitOptions {
+        file_name: main.to_string_lossy().into_owned(),
+        in_project: true,
+        ..EmitOptions::default()
+    };
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    let labels = |at: usize| -> Vec<String> {
+        let ctx = context::detect(src, at).expect("a context");
+
+        st.context_items(&uri, at, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // In braces: the keys of the value the module returns.
+    let keys = labels(src.find("} from").expect("the braces"));
+    assert!(keys.contains(&"dark".to_string()), "{keys:?}");
+    assert!(keys.contains(&"tint".to_string()), "{keys:?}");
+
+    // At the head: the name the module returns is what a bare import
+    // binds, so it reads best there.
+    let head = labels(src.find("import  from").expect("the head") + "import ".len());
+    assert!(head.contains(&"Palette".to_string()), "{head:?}");
+
+    // The module's own text reaches the importer, so a hover on a name
+    // it took reads the declaration and the comment above it.
+    let sources = &st.docs[&uri].import_sources;
+    assert!(
+        sources
+            .iter()
+            .any(|t| t.contains("function Palette.tint") && t.contains("Lightens a hex colour")),
+        "{sources:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

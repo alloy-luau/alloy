@@ -154,6 +154,33 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
                 let module = name_of(*span);
                 let text_at = |i: usize| toks.get(i).map(|t| t.text(text)).unwrap_or("");
 
+                // The name binds the module, so a bare import reads it.
+                push(module.clone(), false, true, 6);
+
+                // `local M = { a = 1 }`: the keys the literal opens with.
+                for stmt in &parsed.chunk.block.stmts {
+                    let Stmt::Local(l) = stmt else {
+                        continue;
+                    };
+
+                    if l.names.len() != 1 || name_of(l.names[0].name) != module {
+                        continue;
+                    }
+
+                    if let Some(Expr::Table { fields, .. }) = l.values.first() {
+                        for f in fields {
+                            if let alloy_syntax::ast::TableField::Named { name, value } = f {
+                                let kind = match value {
+                                    Expr::Function { .. } => 3,
+
+                                    _ => 6,
+                                };
+                                push(name_of(*name), false, false, kind);
+                            }
+                        }
+                    }
+                }
+
                 for i in 0..toks.len() {
                     // `M.key = ...` at the start of a line.
                     if text_at(i) == module
@@ -877,6 +904,25 @@ mod tests {
             .collect();
         assert!(exports.contains(&("keep".into(), false, 3)), "{exports:?}");
         assert!(exports.contains(&("Theme".into(), true, 7)), "{exports:?}");
+    }
+
+    /// A module that ends in `return <expr>` sends the value out. Its
+    /// keys read in braces, and the name it returns is the default a
+    /// bare import binds.
+    #[test]
+    fn a_returning_module_sends_out_its_value() {
+        let src = "local Palette = { dark = \"#111111\" }\n\nfunction Palette.tint(hex: string): string\n    return hex\nend\n\nPalette.light = \"#eeeeee\"\n\nreturn Palette\n";
+        let exports: Vec<(String, bool, u64)> = exports_of(src, false)
+            .into_iter()
+            .map(|e| (e.name, e.is_default, e.kind))
+            .collect();
+        assert!(
+            exports.contains(&("Palette".into(), true, 6)),
+            "{exports:?}"
+        );
+        assert!(exports.contains(&("dark".into(), false, 6)), "{exports:?}");
+        assert!(exports.contains(&("light".into(), false, 6)), "{exports:?}");
+        assert!(exports.contains(&("tint".into(), false, 3)), "{exports:?}");
     }
 
     #[test]

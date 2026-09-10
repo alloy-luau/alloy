@@ -42,9 +42,10 @@ impl State {
     /// reaches, and one the file already imports are dropped.
     ///
     /// A service row inserts `local X = game:GetService("X")`. Alloy
-    /// writes `import X from "game:X"` instead, or the name inside an
-    /// `import { ... } from "game"` line the file already has. A service
-    /// the file imports is no offer, so neither form joins the other.
+    /// writes `import X from "@game/X"` instead, or the name inside an
+    /// `import { ... } from "@game"` line the file already has. A
+    /// service the file imports is no offer, so neither form joins the
+    /// other.
     pub(crate) fn rewrite_child_auto_imports(&self, uri: &str, result: &mut Value) {
         let Some(doc) = self.docs.get(uri) else {
             return;

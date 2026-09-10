@@ -753,8 +753,8 @@ pub fn rename_edits(
 // --- the Roblox services -------------------------------------------------
 
 /// The `(local, service)` pairs one import line binds, when its path
-/// names services. `import { RunService as Run } from "game"` binds
-/// `Run` to `RunService`; `import P from "game:Players"` binds `P` to
+/// names services. `import { RunService as Run } from "@game"` binds
+/// `Run` to `RunService`; `import P from "@game/Players"` binds `P` to
 /// `Players`.
 pub fn service_bindings(line: &str) -> Vec<(String, String)> {
     use alloy::game_import::GamePath;
@@ -799,7 +799,7 @@ pub fn service_bindings(line: &str) -> Vec<(String, String)> {
             }
         }
 
-        // `import Players from "game:Players"`, and `import * as P`,
+        // `import Players from "@game/Players"`, and `import * as P`,
         // which is no form the path takes but still binds a name.
         None => {
             let name = head
@@ -827,19 +827,27 @@ pub fn imported_services(src: &str) -> HashSet<String> {
 }
 
 /// The edit that imports a Roblox service. A file that already reads
-/// `import { ... } from "game"` takes the name into those braces; any
-/// other file takes a line of its own.
+/// `import { ... } from "@game"` takes the name into those braces; any
+/// other file takes a line of its own. A file still on the old
+/// spelling keeps it, so the edit adds no second list beside the one
+/// the file has.
 pub fn service_import_edit(src: &str, service: &str) -> Value {
-    let has_list = src.lines().any(|line| {
+    let list_spec = src.lines().find_map(|line| {
         let t = line.trim();
 
-        t.starts_with("import {") && (t.ends_with("from \"game\"") || t.ends_with("from 'game'"))
+        if !t.starts_with("import {") {
+            return None;
+        }
+
+        ["@game", "game"].into_iter().find(|spec| {
+            t.ends_with(&format!("from \"{spec}\"")) || t.ends_with(&format!("from '{spec}'"))
+        })
     });
 
-    if has_list {
+    if let Some(spec) = list_spec {
         return import_edit(
             src,
-            "game",
+            spec,
             &Export {
                 name: service.to_string(),
                 is_type: false,
@@ -853,7 +861,7 @@ pub fn service_import_edit(src: &str, service: &str) -> Value {
 
     json!({
         "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 0 } },
-        "newText": format!("import {service} from \"game:{service}\"\n"),
+        "newText": format!("import {service} from \"{}/{service}\"\n", alloy::game_import::ALIAS),
     })
 }
 

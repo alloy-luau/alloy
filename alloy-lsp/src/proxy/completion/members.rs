@@ -446,25 +446,33 @@ pub(crate) fn module_entries(
             ));
         }
 
-        if root.is_some_and(|r| r.join(sourcemap).is_file()) {
-            out.push((
-                "@game/".to_string(),
-                19,
-                format!("the DataModel, from {sourcemap}"),
-            ));
-        }
-
-        // The Roblox services: `game` takes a list in braces, `game:X`
-        // names one service.
+        // The Roblox services: `@game` takes a list in braces, and
+        // `@game/X` names one. A path past a service is an instance
+        // path, which the sourcemap answers for.
         out.push((
-            "game".to_string(),
+            "@game".to_string(),
             9,
             "the Roblox services, in braces".to_string(),
         ));
-        out.push(("game:".to_string(), 19, "one Roblox service".to_string()));
+        out.push((
+            "@game/".to_string(),
+            19,
+            match root.is_some_and(|r| r.join(sourcemap).is_file()) {
+                true => format!("one Roblox service, or the DataModel from {sourcemap}"),
+
+                false => "one Roblox service".to_string(),
+            },
+        ));
     }
 
     if let Some(rest) = head.strip_prefix("@game/") {
+        // The first segment is a service, and `context_items` lists
+        // those with their class summaries. From the second segment on
+        // the path names an instance, so the sourcemap answers.
+        if rest.is_empty() {
+            return out;
+        }
+
         if let Some(root) = root
             && let Ok(text) = std::fs::read_to_string(root.join(sourcemap))
             && let Ok(tree) = serde_json::from_str::<Value>(&text)

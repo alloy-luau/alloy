@@ -272,9 +272,15 @@ impl State {
                     return items;
                 }
 
-                // `import { X } from "game"`: the names in braces are
-                // the Roblox services.
-                if spec.as_deref() == Some("game") && !*type_only {
+                // `import { X } from "@game"`: the names in braces are
+                // the Roblox services. The old spelling still opens the
+                // same list.
+                let every_service = matches!(
+                    spec.as_deref().and_then(alloy::game_import::game_path),
+                    Some(alloy::game_import::GamePath::Every)
+                );
+
+                if every_service && !*type_only {
                     for name in alloy::roblox_services::SERVICES {
                         let mut item = word(
                             name,
@@ -851,10 +857,19 @@ impl State {
             }
 
             Context::ImportSpec { text, start } => {
-                // `"game:X"` names one service, so the segment after the
-                // colon is the service list.
-                if text.starts_with("game:") {
-                    let from = start + "game:".len();
+                // `"@game/X"` names one service, so the segment right
+                // after the alias is the service list. A second segment
+                // makes the path an instance path, which the module
+                // entries walk the sourcemap for. `"game:X"` is the old
+                // spelling of the same list.
+                let service_head = text
+                    .strip_prefix("@game/")
+                    .filter(|rest| !rest.contains('/'))
+                    .map(|_| "@game/")
+                    .or_else(|| text.starts_with("game:").then_some("game:"));
+
+                if let Some(head) = service_head {
+                    let from = start + head.len();
 
                     for name in alloy::roblox_services::SERVICES {
                         let mut item = word(
@@ -893,12 +908,8 @@ impl State {
                     item["detail"] = json!(detail);
 
                     // A sibling module resolves as `./name`; a bare name
-                    // is an alias the project has to declare. `game` is
-                    // neither: it names the services.
-                    if head.is_empty()
-                        && !label.starts_with(['@', '.'])
-                        && !label.starts_with("game")
-                    {
+                    // is an alias the project has to declare.
+                    if head.is_empty() && !label.starts_with(['@', '.']) {
                         item["textEdit"]["newText"] = json!(format!("./{label}"));
                     }
 

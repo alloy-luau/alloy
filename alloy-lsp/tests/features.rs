@@ -2759,3 +2759,52 @@ fn an_object_initializer_opens_on_its_brace() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A service binding hovers as the import line that binds it and the
+/// class the definitions declare, and the same import types the binding
+/// so a member of the service resolves.
+#[test]
+fn a_service_binding_hovers_and_types() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-service-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "import Players from \"@game/Players\"\nimport { RunService as Run } from \"@game\"\n\nprint(Players.MaxPlayers, Run.Heartbeat)\n";
+    let file = dir.join("t.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // Line 3, the `Players` of `Players.MaxPlayers`.
+    let h = s.hover(&uri, 3, 8);
+    assert!(h.contains("import Players from \"@game/Players\""), "{h}");
+    assert!(h.contains("a Roblox service"), "{h}");
+
+    // Line 1, the alias the braces rename to.
+    let h = s.hover(&uri, 1, 24);
+    assert!(h.contains("RunService"), "{h}");
+
+    // The binding carries the service class, so no member of it
+    // reports.
+    let diags = s.diagnostics(&uri, |ds| {
+        ds.iter().all(|d| !d.contains("MaxPlayers")) && ds.iter().all(|d| !d.contains("Heartbeat"))
+    });
+    assert!(
+        diags
+            .iter()
+            .all(|d| !d.contains("MaxPlayers") && !d.contains("Heartbeat")),
+        "{diags:#?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

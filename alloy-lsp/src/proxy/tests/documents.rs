@@ -290,7 +290,7 @@ pub(crate) fn alias_labels(dir: &Path, root: &Path) -> Vec<String> {
     module_entries(dir, Some(root), "", "sourcemap.json", None)
         .into_iter()
         .map(|(label, _, _)| label)
-        .filter(|l| l.starts_with('@') && l != "@self/" && l != "@game/")
+        .filter(|l| l.starts_with('@') && l != "@self/" && l != "@game" && l != "@game/")
         .collect()
 }
 /// The list of a directory leaves out the file being edited and
@@ -320,13 +320,12 @@ pub(crate) fn an_import_path_lists_neither_the_file_itself_nor_a_script() {
             .collect()
     };
 
-    // `game` and `game:` name the Roblox services, which no file holds.
+    // `@game` and `@game/` name the Roblox services, which no file
+    // holds, and the filter above drops both with the aliases.
     assert_eq!(
         labels(""),
         vec![
             "../".to_string(),
-            "game".to_string(),
-            "game:".to_string(),
             "helper".to_string(),
             "plain".to_string(),
             "sub/".to_string()

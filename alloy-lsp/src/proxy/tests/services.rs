@@ -22,10 +22,10 @@ fn items_at(src: &str, offset: usize) -> Vec<Value> {
     st.context_items(uri, offset, &ctx)
 }
 
-/// `import { | } from "game"`: the names in braces are the services.
+/// `import { | } from "@game"`: the names in braces are the services.
 #[test]
 pub(crate) fn the_braces_of_a_game_import_list_the_services() {
-    let src = "import {  } from \"game\"\n";
+    let src = "import {  } from \"@game\"\n";
     let offset = src.find('{').unwrap() + 2;
     let items = items_at(src, offset);
     let labels: Vec<&str> = items
@@ -37,7 +37,7 @@ pub(crate) fn the_braces_of_a_game_import_list_the_services() {
         assert!(labels.contains(&name), "{name} missing");
     }
 
-    // No module name and no `type` keyword: `"game"` exports neither.
+    // No module name and no `type` keyword: `"@game"` exports neither.
     assert!(!labels.contains(&"type"), "{labels:?}");
 
     let players = items
@@ -54,60 +54,86 @@ pub(crate) fn the_braces_of_a_game_import_list_the_services() {
     );
 }
 
-/// `import P from "game:|"`: the path after the colon is one service.
+/// `import P from "@game/|"`: the segment after the alias is one
+/// service. The old `"game:|"` opens the same list.
 #[test]
-pub(crate) fn a_game_colon_path_lists_the_services() {
-    let src = "import P from \"game:\"\n";
-    let offset = src.find("game:").unwrap() + "game:".len();
-    let items = items_at(src, offset);
-    let labels: Vec<&str> = items
-        .iter()
-        .map(|i| i["label"].as_str().unwrap_or(""))
-        .collect();
+pub(crate) fn the_segment_after_the_alias_lists_the_services() {
+    for (src, head, character) in [
+        ("import P from \"@game/\"\n", "@game/", 21),
+        ("import P from \"game:\"\n", "game:", 20),
+    ] {
+        let offset = src.find(head).unwrap() + head.len();
+        let items = items_at(src, offset);
+        let labels: Vec<&str> = items
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or(""))
+            .collect();
 
-    for name in ["Players", "RunService"] {
-        assert!(labels.contains(&name), "{name} missing: {labels:?}");
+        for name in ["Players", "RunService"] {
+            assert!(labels.contains(&name), "{name} missing: {labels:?}");
+        }
+
+        // The edit replaces the segment after the alias, not the whole
+        // path, and the item carries the class summary.
+        let players = items
+            .iter()
+            .find(|i| i["label"] == "Players")
+            .expect("Players");
+        assert_eq!(players["textEdit"]["newText"], "Players");
+        assert_eq!(
+            players["textEdit"]["range"]["start"]["character"],
+            character
+        );
+        assert_eq!(players["detail"], "game:GetService(\"Players\")");
+        assert!(
+            players["documentation"]["value"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("`Players`: a Roblox service."),
+            "{players}"
+        );
     }
 
-    // The edit replaces the segment after the colon, not the whole path.
-    let players = items
-        .iter()
-        .find(|i| i["label"] == "Players")
-        .expect("Players");
-    assert_eq!(players["textEdit"]["newText"], "Players");
-    assert_eq!(players["textEdit"]["range"]["start"]["character"], 20);
+    // A second segment names an instance, not a service, so the list
+    // is the sourcemap's, which an empty project has none of.
+    let src = "import P from \"@game/ReplicatedStorage/\"\n";
+    let offset = src.rfind('"').unwrap();
+
+    assert!(labels_at(src, offset).is_empty());
 }
 
-/// `import P from "|"`: the path list offers the services beside the
-/// aliases and the directories.
+/// `import P from "|"`: the path list offers the alias beside the
+/// project's own and the directories, and the old spellings are gone.
 #[test]
-pub(crate) fn the_import_path_list_offers_game() {
+pub(crate) fn the_import_path_list_offers_the_game_alias() {
     let src = "import P from \"\"\n";
     let offset = src.rfind('"').unwrap();
     let labels = labels_at(src, offset);
 
-    assert!(labels.contains(&"game".to_string()), "{labels:?}");
-    assert!(labels.contains(&"game:".to_string()), "{labels:?}");
+    assert!(labels.contains(&"@game".to_string()), "{labels:?}");
+    assert!(labels.contains(&"@game/".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"game".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"game:".to_string()), "{labels:?}");
 
-    // A sibling module takes a `./`; `game` names no file, so it does
-    // not.
+    // A sibling module takes a `./`; the alias names no file, so it
+    // keeps the text it shows.
     let items = items_at(src, offset);
-    let game = items.iter().find(|i| i["label"] == "game").expect("game");
-    assert_eq!(game["textEdit"]["newText"], "game");
+    let game = items.iter().find(|i| i["label"] == "@game").expect("@game");
+    assert_eq!(game["textEdit"]["newText"], "@game");
 }
 
 /// The hover on the binding and on the path reads the import line and
 /// what the service is.
 #[test]
 pub(crate) fn a_service_hover_reads_the_import_line() {
-    let src = "import Players from 'game:Players'\nimport { RunService as Run } from 'game'\n\nprint(Players, Run)\n";
+    let src = "import Players from '@game/Players'\nimport { RunService as Run } from '@game'\n\nprint(Players, Run)\n";
     let first = src.lines().next().unwrap();
     let second = src.lines().nth(1).unwrap();
     let on_binding = service_hover(src, "Players", None).expect("the binding");
 
     assert_eq!(
         on_binding,
-        "```alloy\nimport Players from 'game:Players'\n```\n\
+        "```alloy\nimport Players from '@game/Players'\n```\n\
          `Players`: a Roblox service. The class extends `Instance`."
     );
 
@@ -117,22 +143,33 @@ pub(crate) fn a_service_hover_reads_the_import_line() {
     assert_eq!(
         service_hover(src, "game", Some(second)),
         Some(
-            "```alloy\nimport { RunService as Run } from 'game'\n```\n\
+            "```alloy\nimport { RunService as Run } from '@game'\n```\n\
              `RunService`: a Roblox service. The class extends `Instance`."
                 .to_string()
         )
     );
 
     let alias = service_hover(src, "Run", None).expect("the alias");
-    assert!(alias.starts_with("```alloy\nimport { RunService as Run } from 'game'"));
+    assert!(alias.starts_with("```alloy\nimport { RunService as Run } from '@game'"));
     assert!(alias.ends_with("`RunService`: a Roblox service. The class extends `Instance`."));
 
     assert_eq!(service_hover(src, "print", None), None);
+
+    // The old spelling still hovers the same way.
+    let old = "import Players from 'game:Players'\n\nprint(Players)\n";
+    assert_eq!(
+        service_hover(old, "Players", None),
+        Some(
+            "```alloy\nimport Players from 'game:Players'\n```\n\
+             `Players`: a Roblox service. The class extends `Instance`."
+                .to_string()
+        )
+    );
 }
 
 /// The child offers a service as `local X = game:GetService("X")`.
 /// Alloy writes the import instead: a line of its own, or the name in
-/// the braces of an `import { ... } from "game"` the file already has.
+/// the braces of an `import { ... } from "@game"` the file already has.
 #[test]
 pub(crate) fn a_service_auto_import_writes_an_import_line() {
     let child = |service: &str| {
@@ -155,7 +192,7 @@ pub(crate) fn a_service_auto_import_writes_an_import_line() {
     assert_eq!(result[0]["detail"], "game:GetService(\"Players\")");
     assert_eq!(
         result[0]["additionalTextEdits"][0]["newText"],
-        "import Players from \"game:Players\"\n"
+        "import Players from \"@game/Players\"\n"
     );
     assert_eq!(
         result[0]["additionalTextEdits"][0]["range"]["start"]["line"],
@@ -168,29 +205,43 @@ pub(crate) fn a_service_auto_import_writes_an_import_line() {
     st.rewrite_child_auto_imports(uri, &mut result);
     assert_eq!(
         result[0]["additionalTextEdits"][0]["newText"],
-        "import Players from \"game:Players\"\n"
+        "import Players from \"@game/Players\"\n"
     );
     assert_eq!(
         result[0]["additionalTextEdits"][0]["range"]["start"]["line"],
         1
     );
 
-    // A `from "game"` line already there takes the name into its braces.
-    let src = "import { RunService } from \"game\"\n\nprint(RunService)\n";
-    let (st, uri) = one_file(src);
-    let mut result = child("Players");
-    st.rewrite_child_auto_imports(uri, &mut result);
-    assert_eq!(
-        result[0]["additionalTextEdits"][0]["newText"],
-        "import { RunService, Players } from \"game\""
-    );
-    assert_eq!(
-        result[0]["additionalTextEdits"][0]["range"]["start"]["line"],
-        0
-    );
+    // A `from "@game"` line already there takes the name into its
+    // braces. A file still on the old spelling keeps its own line, so
+    // the edit never opens a second list beside the one it has.
+    for (src, want) in [
+        (
+            "import { RunService } from \"@game\"\n\nprint(RunService)\n",
+            "import { RunService, Players } from \"@game\"",
+        ),
+        (
+            "import { RunService } from \"game\"\n\nprint(RunService)\n",
+            "import { RunService, Players } from \"game\"",
+        ),
+    ] {
+        let (st, uri) = one_file(src);
+        let mut result = child("Players");
+        st.rewrite_child_auto_imports(uri, &mut result);
+        assert_eq!(
+            result[0]["additionalTextEdits"][0]["newText"], want,
+            "{src}"
+        );
+        assert_eq!(
+            result[0]["additionalTextEdits"][0]["range"]["start"]["line"],
+            0
+        );
+    }
 
-    // A service the file imports is no offer, in either form.
+    // A service the file imports is no offer, in any form.
     for src in [
+        "import { Players } from \"@game\"\n\nprint(Players)\n",
+        "import Players from \"@game/Players\"\n\nprint(Players)\n",
         "import { Players } from \"game\"\n\nprint(Players)\n",
         "import Players from \"game:Players\"\n\nprint(Players)\n",
     ] {
@@ -205,7 +256,7 @@ pub(crate) fn a_service_auto_import_writes_an_import_line() {
 /// line binds, alias included.
 #[test]
 pub(crate) fn a_service_binding_goes_to_its_import() {
-    let src = "import Players from 'game:Players'\nimport { RunService as Run } from 'game'\n\nprint(Players, Run)\n";
+    let src = "import Players from '@game/Players'\nimport { RunService as Run } from '@game'\n\nprint(Players, Run)\n";
     let at = |word: &str| service_definition(src, "file:///t.aly", word);
 
     assert_eq!(

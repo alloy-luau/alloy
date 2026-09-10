@@ -413,9 +413,29 @@ pub fn complete(offset: u32) -> String {
                 items.push(word("{", "keyword", Some("Named exports, one or more, `as` to rename.".to_string()), from));
             }
 
-            Context::ImportNames { prefix, after_name, .. } => {
+            // `import { | } from "@game"`: the names in braces are the
+            // Roblox services. The playground has one file, so no
+            // module answers any other spec.
+            Context::ImportNames { prefix, after_name, spec, type_only } => {
+                let from = offset - prefix.len();
+
                 if *after_name {
-                    items.push(word("as", "keyword", Some("Renames the import.".to_string()), offset - prefix.len()));
+                    items.push(word("as", "keyword", Some("Renames the import.".to_string()), from));
+
+                    return json!({ "items": items, "luau": false }).to_string();
+                }
+
+                let every_service = matches!(
+                    spec.as_deref().and_then(alloy::game_import::game_path),
+                    Some(alloy::game_import::GamePath::Every)
+                );
+
+                if every_service && !*type_only {
+                    for name in alloy::roblox_services::SERVICES {
+                        let mut item = word(name, "class", Some(alloy::game_import::service_summary(name)), from);
+                        item["detail"] = json!(format!("game:GetService(\"{name}\")"));
+                        items.push(item);
+                    }
                 }
             }
 
@@ -691,7 +711,35 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
-            Context::ImportSpec { .. } | Context::Nothing => {}
+            // The path list of a one-file playground: the `@game` alias
+            // alone, and the services under it.
+            Context::ImportSpec { text, start } => {
+                let head = text
+                    .strip_prefix("@game/")
+                    .filter(|rest| !rest.contains('/'))
+                    .map(|_| "@game/");
+
+                match head {
+                    Some(head) => {
+                        let from = start + head.len();
+
+                        for name in alloy::roblox_services::SERVICES {
+                            let mut item = word(name, "class", Some(alloy::game_import::service_summary(name)), from);
+                            item["detail"] = json!(format!("game:GetService(\"{name}\")"));
+                            items.push(item);
+                        }
+                    }
+
+                    None => {
+                        if text.is_empty() {
+                            items.push(word("@game", "class", Some("The Roblox services, in braces: `import { Players } from \"@game\"`.".to_string()), *start));
+                            items.push(word("@game/", "module", Some("One Roblox service: `import Players from \"@game/Players\"`.".to_string()), *start));
+                        }
+                    }
+                }
+            }
+
+            Context::Nothing => {}
         }
 
         json!({ "items": items, "luau": false }).to_string()
@@ -1167,6 +1215,45 @@ mod tests {
         for name in alloy::directives::NAMES {
             assert!(items.contains(name), "`{name}` is not offered: {items}");
         }
+    }
+
+    /// The playground offers the same three service positions the
+    /// editor does: the path list, the segment after `@game/`, and the
+    /// names in the braces of `from "@game"`.
+    #[test]
+    fn the_service_positions_reach_the_playground() {
+        let labels = |source: &str, at: usize| -> Vec<String> {
+            super::set_source(source);
+            let items: serde_json::Value =
+                serde_json::from_str(&super::complete(at as u32)).expect("items");
+
+            items["items"]
+                .as_array()
+                .expect("a list")
+                .iter()
+                .filter_map(|i| i["label"].as_str().map(str::to_string))
+                .collect()
+        };
+
+        let path = "import P from \"\"\n";
+        let at = path.rfind('"').expect("the quote");
+        let list = labels(path, at);
+        assert!(list.contains(&"@game".to_string()), "{list:?}");
+        assert!(list.contains(&"@game/".to_string()), "{list:?}");
+        assert!(!list.contains(&"game:".to_string()), "{list:?}");
+
+        let one = "import P from \"@game/\"\n";
+        let at = one.rfind('"').expect("the quote");
+        assert!(labels(one, at).contains(&"Players".to_string()));
+
+        let braces = "import {  } from \"@game\"\n";
+        let at = braces.find('{').expect("the brace") + 2;
+        let names = labels(braces, at);
+        assert!(
+            names.contains(&"ReplicatedStorage".to_string()),
+            "{names:?}"
+        );
+        assert!(!names.contains(&"type".to_string()), "{names:?}");
     }
 
     /// A hover on a std member answers with the member's own section,

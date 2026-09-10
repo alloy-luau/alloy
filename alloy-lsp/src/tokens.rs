@@ -38,7 +38,7 @@ pub fn remap(data: &[u64], doc: &Doc) -> Vec<u64> {
         // `self` is the receiver, and the grammar already scopes it
         // `variable.language.self`; no token here lets that color show
         // in every place the word appears.
-        if doc.shadow.get(first as usize..=last as usize) == Some("self") {
+        if doc.shadow.get(first..=last) == Some("self") {
             continue;
         }
 

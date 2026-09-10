@@ -2901,3 +2901,87 @@ fn a_table_method_types_self_and_a_constructor_returns_its_struct() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A struct with two impl blocks: one of its own with a private method,
+/// and one for a trait.
+const IMPLS: &str = "\
+struct Test as
+    x: number
+end
+
+--- What the block adds.
+impl Test as
+    function test()
+    end
+
+    private function hidden()
+    end
+end
+
+trait Display as
+    function show(self): string
+end
+
+impl Display for Test as
+    function show(self): string
+        return \"t\"
+    end
+end
+
+local t = new Test { x = 1 }
+local a: Test = t
+print(t, a, t:test(), t:show())
+";
+
+/// The header of an `impl` hovers as the block: its own line, the
+/// public methods inside it, and the doc comment above it. The same
+/// name anywhere else still hovers as the struct.
+#[test]
+fn an_impl_header_hovers_as_its_block() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-impl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("impls.aly");
+    std::fs::write(&file, IMPLS).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": IMPLS } } }),
+    );
+    s.drain(Duration::from_secs(2));
+
+    // The `impl` keyword and the target name both answer with the block.
+    for character in [0, 6] {
+        let h = s.hover(&uri, 5, character);
+        assert!(h.contains("impl Test as"), "impl header: {h}");
+        assert!(h.contains("public function test()"), "impl header: {h}");
+        assert!(!h.contains("hidden"), "a private method: {h}");
+        assert!(!h.contains("struct Test"), "impl header: {h}");
+        assert!(h.contains("What the block adds."), "the doc comment: {h}");
+    }
+
+    // A block for a trait names the trait first.
+    let h = s.hover(&uri, 17, 18);
+    assert!(h.contains("impl Display for Test as"), "trait impl: {h}");
+    assert!(
+        h.contains("public function show(self): string"),
+        "trait impl: {h}"
+    );
+
+    // The same name in an annotation and in a `new` keeps the struct.
+    let h = s.hover(&uri, 24, 10);
+    assert!(h.contains("struct Test as"), "annotation: {h}");
+    let h = s.hover(&uri, 23, 15);
+    assert!(h.contains("struct Test as"), "new: {h}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

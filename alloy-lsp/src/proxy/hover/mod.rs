@@ -2,6 +2,7 @@
 
 mod declarations;
 mod fields;
+mod impls;
 mod members;
 mod modules;
 mod restyle;

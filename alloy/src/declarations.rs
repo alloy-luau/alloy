@@ -668,7 +668,7 @@ const MEMBER_CAP: usize = 24;
 /// One method of an `impl`, as the line an author writes for it:
 /// `public function len(self): number`. The hover of the type the
 /// `impl` targets reads these inside its block.
-fn method_signature(
+pub fn method_signature(
     src: &str,
     toks: &[alloy_syntax::lexer::Tok],
     m: &alloy_syntax::ast::Function,

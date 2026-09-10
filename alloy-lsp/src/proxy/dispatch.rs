@@ -619,7 +619,8 @@ impl Server {
 
                 if m == "textDocument/hover"
                     && let Some(id) = message.get("id").cloned()
-                    && (self.case_binding_hover(&uri, &message, &id)
+                    && (self.impl_header_hover(&uri, &message, &id)
+                        || self.case_binding_hover(&uri, &message, &id)
                         || self.field_hover(&uri, &message, &id)
                         || self.source_binding_hover(&uri, &message, &id)
                         || self.declaration_hover(&uri, &message, &id)

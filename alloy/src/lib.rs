@@ -22,6 +22,7 @@ pub mod flux;
 pub mod fmt;
 pub mod game_import;
 pub mod globals;
+pub mod impl_blocks;
 pub mod ingot;
 pub mod jsonc;
 pub mod lint;

@@ -35,6 +35,9 @@ pub struct Doc {
     /// Every namespace member: the name the emit writes and the path
     /// the source wrote, for the folds.
     pub namespaces: Vec<(String, String)>,
+    /// Every `impl` block of the file, so its header hovers as the
+    /// block instead of as the name it targets.
+    pub impl_blocks: Vec<alloy::impl_blocks::ImplBlock>,
     /// The plain `local X = { }` tables with their members, for the
     /// folds: a print of the whole shape reads back as `typeof(X)`.
     pub tables: Vec<(String, Vec<String>)>,
@@ -246,6 +249,7 @@ impl Doc {
             exports: Vec::new(),
             decls: Vec::new(),
             namespaces: Vec::new(),
+            impl_blocks: Vec::new(),
             tables: Vec::new(),
             namespace_ranges: Vec::new(),
             bindings: Vec::new(),
@@ -299,6 +303,7 @@ impl Doc {
         };
         self.namespaces = alloy::declarations::namespace_names(text);
         self.tables = alloy::tables::plain_tables(text);
+        self.impl_blocks = alloy::impl_blocks::impl_blocks(text);
         self.namespace_ranges = alloy::declarations::namespace_ranges(text);
         self.bindings = alloy::declarations::bindings(text);
         self.shapes = alloy::declarations::shapes(text);

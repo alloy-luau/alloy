@@ -80,8 +80,10 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
     };
     let stmts = &parsed.chunk.block.stmts;
 
-    // Target -> (traits, methods), from every impl in the file.
-    let mut impls: HashMap<&str, (Vec<&str>, Vec<&str>)> = HashMap::new();
+    // Target -> (traits, methods), from every impl in the file. A
+    // method reads as the line an author would write for it, so a
+    // struct hovers the way a namespace does.
+    let mut impls: HashMap<&str, (Vec<&str>, Vec<String>)> = HashMap::new();
 
     for stmt in stmts {
         if let Stmt::Impl(i) = stmt {
@@ -98,8 +100,8 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                     continue;
                 }
 
-                if let Some(first) = m.path.first() {
-                    entry.1.push(text(*first));
+                if let Some(line) = method_signature(src, toks, m) {
+                    entry.1.push(line);
                 }
             }
         }
@@ -307,6 +309,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
         // Interfaces and traits have no impl blocks of their own.
         let mut notes = std::mem::take(&mut notes_first);
+        let mut lines = lines;
 
         if let Some((traits, methods)) = impls.get(name) {
             if !traits.is_empty() {
@@ -314,9 +317,14 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                 notes.push(format!("Implements {}.", list.join(", ")));
             }
 
-            if !methods.is_empty() {
-                let list: Vec<String> = methods.iter().map(|m| format!("`{m}`")).collect();
-                notes.push(format!("Methods: {}.", list.join(", ")));
+            // The methods read inside the block, one per line, the way
+            // a namespace reads its members.
+            if !methods.is_empty()
+                && let Some(end) = lines.iter().rposition(|l| l == "end")
+            {
+                for (k, line) in methods.iter().enumerate() {
+                    lines.insert(end + k, format!("    {line}"));
+                }
             }
         }
 
@@ -658,6 +666,51 @@ const MEMBER_CAP: usize = 24;
 /// word, then the declaration's head. A body says nothing the list
 /// needs, so a struct reads as `public struct Vec2` and a function as
 /// its signature alone.
+/// One method of an `impl`, as the line an author writes for it:
+/// `public function len(self): number`. The hover of the type the
+/// `impl` targets reads these inside its block.
+fn method_signature(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    m: &alloy_syntax::ast::Function,
+) -> Option<String> {
+    let text = |span: TokSpan| -> &str {
+        if span.end <= span.start {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+    let visibility = match m.visibility.map(text) {
+        Some("private") => "private",
+
+        _ => "public",
+    };
+    let name = text(*m.path.first()?);
+    let word = match m.body.is_async {
+        Some(_) => "async function",
+
+        None => "function",
+    };
+    let generics = m.body.generics.map(text).unwrap_or("");
+    let params: Vec<String> = m
+        .body
+        .params
+        .iter()
+        .map(|p| param_text(p, &text))
+        .collect();
+    let ret = match m.body.ret_type {
+        Some(t) => format!(": {}", text(t)),
+
+        None => String::new(),
+    };
+
+    Some(format!(
+        "{visibility} {word} {name}{generics}({}){ret}",
+        params.join(", ")
+    ))
+}
+
 fn member_signature(
     src: &str,
     toks: &[alloy_syntax::lexer::Tok],

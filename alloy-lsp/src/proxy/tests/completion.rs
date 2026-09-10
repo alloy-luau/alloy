@@ -1191,3 +1191,58 @@ fn a_declaration_completes_as_its_kind() {
         ]
     );
 }
+
+/// The `{ }` of `new Instance("Part")` lists each property with the
+/// type it writes, the way a member list after `part.` reads.
+#[test]
+fn an_object_initializer_names_the_type_of_each_property() {
+    let src = "local part = new Instance(\"Part\") {\n    \n}\n";
+    let (st, uri) = one_file(src);
+    let at = src.find("\n    \n").expect("the body") + "\n    ".len();
+    let ctx = context::detect(src, at).expect("a context");
+    let items = st.context_items(uri, at, &ctx);
+    let detail = |label: &str| -> String {
+        items
+            .iter()
+            .find(|i| i["label"] == label)
+            .and_then(|i| i["detail"].as_str().map(str::to_string))
+            .unwrap_or_default()
+    };
+
+    assert_eq!(detail("Size"), "Size: Vector3");
+    assert_eq!(detail("Name"), "Name: string");
+    assert_eq!(detail("Anchored"), "Anchored: boolean");
+    // The dump spells an enum `EnumMaterial`; the reader writes it with
+    // the dot.
+    assert_eq!(detail("Material"), "Material: Enum.Material");
+    assert_eq!(detail("Touched"), "event of Part");
+}
+
+/// With a `--docs` file the initializer carries the engine's own text,
+/// the way the child's member list does.
+#[test]
+fn an_object_initializer_carries_the_class_documentation() {
+    let dir = std::env::temp_dir().join(format!("alloy-api-docs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("api-docs.json");
+    std::fs::write(
+        &path,
+        "{\"@roblox/globaltype/BasePart.Size\": { \"documentation\": \"The dimensions of a <code>Part</code>.\" }}",
+    )
+    .unwrap();
+
+    let src = "local part = new Instance(\"Part\") {\n    \n}\n";
+    let (mut st, uri) = one_file(src);
+    st.api_docs = Some(path);
+    let at = src.find("\n    \n").expect("the body") + "\n    ".len();
+    let ctx = context::detect(src, at).expect("a context");
+    let items = st.context_items(uri, at, &ctx);
+    let size = items.iter().find(|i| i["label"] == "Size").expect("Size");
+
+    assert_eq!(
+        size["documentation"]["value"],
+        json!("The dimensions of a `Part`.")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

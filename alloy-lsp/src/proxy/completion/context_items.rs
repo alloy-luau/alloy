@@ -649,13 +649,21 @@ impl State {
             Context::InstanceField { prefix, class } => {
                 let from = offset - prefix.len();
 
+                // The same detail and the same text a member list gives
+                // after `part.`: the type the property writes, and the
+                // engine's own description of it.
                 for name in alloy::luaux::roblox::properties(class) {
+                    let detail = match alloy::roblox_props::property_type(class, name) {
+                        Some(ty) => format!("{name}: {}", readable_type(ty)),
+
+                        None => format!("property of {class}"),
+                    };
                     let mut item = snippet(
                         name,
                         &format!("{name} = ${{1:{name}}}"),
                         5,
-                        &format!("property of {class}"),
-                        None,
+                        &detail,
+                        self.roblox_doc(class, name),
                         from,
                     );
                     item["sortText"] = json!(format!("0{name}"));
@@ -668,7 +676,7 @@ impl State {
                         &format!("{name} = ${{1:handler}}"),
                         23,
                         &format!("event of {class}"),
-                        None,
+                        self.roblox_doc(class, name),
                         from,
                     );
                     item["sortText"] = json!(format!("1{name}"));
@@ -1377,4 +1385,14 @@ pub(crate) enum MatchKind {
     Literal,
     /// Nothing the proxy reads.
     Unknown,
+}
+
+/// A Roblox type as the source writes it: the dump spells an enum
+/// `EnumFont`, and the reader writes `Enum.Font`.
+pub(crate) fn readable_type(name: &str) -> String {
+    match name.strip_prefix("Enum") {
+        Some(rest) if rest.starts_with(char::is_uppercase) => format!("Enum.{rest}"),
+
+        _ => name.to_string(),
+    }
 }

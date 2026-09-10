@@ -73,6 +73,15 @@ pub(crate) struct State {
     pub(crate) trees: std::cell::RefCell<HashMap<PathBuf, Arc<alloy::project::Tree>>>,
     /// The roots whose `.luaurc` the mirror already holds.
     pub(crate) luau_configs: std::cell::RefCell<HashSet<PathBuf>>,
+    /// The Roblox API docs the child was started with, `--docs`. The
+    /// proxy answers the object initializer itself, so it reads the
+    /// same text the child shows after a `.`.
+    pub(crate) api_docs: Option<PathBuf>,
+    /// The `@roblox/globaltype/Class.Member` entries of that file, read
+    /// once on the first list that needs one. The file is 7 MB, so a
+    /// read at startup would cost every session that never opens a
+    /// class body.
+    pub(crate) roblox_docs: std::cell::RefCell<Option<Arc<HashMap<String, String>>>>,
 }
 
 impl State {
@@ -247,6 +256,63 @@ impl State {
         self.luau_configs.borrow_mut().insert(root.to_path_buf());
     }
 
+    /// The text the Roblox API docs hold for a member of a class,
+    /// walking what the class extends the way a property lookup does.
+    /// `None` without a `--docs` file, which is how the child runs
+    /// when the editor found none.
+    pub(crate) fn roblox_doc(&self, class: &str, member: &str) -> Option<String> {
+        let docs = self.roblox_docs()?;
+        let mut name = Some(class);
+
+        while let Some(c) = name {
+            if let Some(text) = docs.get(&format!("@roblox/globaltype/{c}.{member}")) {
+                return Some(text.clone());
+            }
+
+            name = alloy::luaux::roblox::superclass(c);
+        }
+
+        None
+    }
+
+    /// The docs file, read once. A file that will not parse reads as an
+    /// empty index, so the read runs once and not on every list.
+    fn roblox_docs(&self) -> Option<Arc<HashMap<String, String>>> {
+        if let Some(held) = self.roblox_docs.borrow().as_ref() {
+            return Some(Arc::clone(held));
+        }
+
+        let mut index = HashMap::new();
+
+        if let Some(path) = &self.api_docs {
+            match std::fs::read_to_string(path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<HashMap<String, Value>>(&t).ok())
+            {
+                Some(entries) => {
+                    for (key, entry) in entries {
+                        if !key.starts_with("@roblox/globaltype/") {
+                            continue;
+                        }
+
+                        if let Some(text) = entry.get("documentation").and_then(Value::as_str)
+                            && !text.is_empty()
+                        {
+                            index.insert(key, plain_docs(text));
+                        }
+                    }
+                }
+
+                None => log::warn(&format!("cannot read the API docs at {}", path.display())),
+            }
+        }
+
+        let held = Arc::new(index);
+        *self.roblox_docs.borrow_mut() = Some(Arc::clone(&held));
+
+        Some(held)
+    }
+
     /// The side a document sees: its name, then `--@alloy-side`, then
     /// the place the project's tree gives it.
     pub(crate) fn side_of(&self, uri: &str, source: &str) -> Option<alloy::directives::Side> {
@@ -406,4 +472,31 @@ impl State {
 
         (options, jsx)
     }
+}
+
+/// The API docs write HTML: `<code>Instance</code>` for a name, and a
+/// `<br/>` for a break. Markdown carries the same two.
+fn plain_docs(text: &str) -> String {
+    let text = text
+        .replace("<code>", "`")
+        .replace("</code>", "`")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("<br>", "\n");
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+
+            '>' => in_tag = false,
+
+            _ if !in_tag => out.push(c),
+
+            _ => {}
+        }
+    }
+
+    out.trim().to_string()
 }

@@ -26,10 +26,12 @@ impl Server {
         child_in: Box<dyn Write + Send>,
         client_out: Box<dyn Write + Send>,
         extensions: Vec<alloy::extensions::Extension>,
+        api_docs: Option<PathBuf>,
     ) -> Self {
         let state = State {
             settings: settings::defaults(),
             extensions,
+            api_docs,
             ..State::default()
         };
 

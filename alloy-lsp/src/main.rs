@@ -207,7 +207,7 @@ fn main() -> ExitCode {
         }
     }
 
-    if let Some(docs) = docs {
+    if let Some(docs) = &docs {
         child_args.push(format!("--docs={docs}"));
     }
 
@@ -236,6 +236,7 @@ fn main() -> ExitCode {
         Box::new(child_in),
         Box::new(std::io::stdout()),
         exts,
+        docs.map(PathBuf::from),
     ));
 
     // Child -> editor on its own thread.

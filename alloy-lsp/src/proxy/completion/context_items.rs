@@ -1324,12 +1324,15 @@ impl Server {
 
         let (extra, incomplete) = st.ingot_items(uri, line, character, trigger);
         items.extend(extra);
-        drop(st);
-        let result = match incomplete {
+        let mut result = match incomplete {
             true => json!({ "isIncomplete": true, "items": items }),
 
             false => json!(items),
         };
+        // The list never reaches the merge path, so it marks and hides
+        // its own deprecated rows.
+        st.deprecated_pass(uri, &mut result);
+        drop(st);
         self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
 
         true

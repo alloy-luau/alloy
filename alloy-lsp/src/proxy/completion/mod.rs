@@ -9,6 +9,7 @@
 
 mod auto_imports;
 mod context_items;
+mod deprecated;
 mod keyword_first;
 mod members;
 mod namespaces;

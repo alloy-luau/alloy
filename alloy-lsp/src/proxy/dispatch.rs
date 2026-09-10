@@ -1549,6 +1549,11 @@ impl Server {
                         }
 
                         st.filter_remote_members(uri, line, character, result);
+                        // After the merge: the child's rows and the
+                        // proxy's own read alike, so one pass marks
+                        // every deprecated row and hides what the
+                        // editor's settings hide.
+                        st.deprecated_pass(uri, result);
                         // After the clean: the spec `@pkg/react` is the
                         // detail, and the clean drops a detail that
                         // spells no type.

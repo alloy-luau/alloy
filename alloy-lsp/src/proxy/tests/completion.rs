@@ -1251,3 +1251,60 @@ fn an_object_initializer_carries_the_class_documentation() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A property the engine deprecates carries the tag the editor strikes
+/// the row through with, and keeps the note in its documentation. The
+/// child marks its own rows; the object initializer is the proxy's.
+#[test]
+fn a_deprecated_property_carries_the_tag() {
+    let dir = std::env::temp_dir().join(format!("alloy-deprecated-docs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("api-docs.json");
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"@roblox/globaltype/BasePart.brickColor\": { \"documentation\": ",
+            "\"<strong>Deprecated:</strong> use <code>BrickColor</code>.\", ",
+            "\"learn_more_link\": \"\", \"code_sample\": \"\" },",
+            "\"@roblox/globaltype/BasePart.BrickColor\": { \"documentation\": ",
+            "\"Determines the color of a part.\", \"learn_more_link\": \"\", \"code_sample\": \"\" }}",
+        ),
+    )
+    .unwrap();
+
+    let src = "local part = new Instance(\"Part\") {\n    \n}\n";
+    let (mut st, uri) = one_file(src);
+    st.api_docs = Some(path);
+    let at = src.find("\n    \n").expect("the body") + "\n    ".len();
+    let ctx = context::detect(src, at).expect("a context");
+    let mut result = json!(st.context_items(uri, at, &ctx));
+    st.deprecated_pass(uri, &mut result);
+    let row = |label: &str| -> Value {
+        result
+            .as_array()
+            .expect("a list")
+            .iter()
+            .find(|i| i["label"] == label)
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    assert_eq!(
+        row("brickColor")["tags"],
+        json!([1]),
+        "{}",
+        row("brickColor")
+    );
+    assert!(
+        row("brickColor")["documentation"]["value"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("Deprecated:")),
+        "{}",
+        row("brickColor")
+    );
+    // The current spelling is a row like any other.
+    assert_eq!(row("BrickColor").get("tags"), None);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

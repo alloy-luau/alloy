@@ -86,15 +86,16 @@ pub(crate) fn edit_capabilities(message: &mut Value) {
     }
 
     // `@` and `$` open an attribute and a macro or intrinsic, `(` an
-    // attribute's arguments, and a space the side of a directive: the
-    // editor asks on them only when the server lists them.
+    // attribute's arguments, `{` the field list of an object
+    // initializer, and a space the side of a directive: the editor asks
+    // on them only when the server lists them.
     if let Some(Value::Object(completion)) = caps.get_mut("completionProvider") {
         let list = completion
             .entry("triggerCharacters")
             .or_insert_with(|| json!([]));
 
         if let Some(chars) = list.as_array_mut() {
-            for c in ["@", "$", "(", " "] {
+            for c in ["@", "$", "(", " ", "{"] {
                 if !chars.iter().any(|v| v == c) {
                     chars.push(json!(c));
                 }

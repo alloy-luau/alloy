@@ -2692,3 +2692,70 @@ fn a_shutdown_answers_at_once_during_the_workspace_pass() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The `{` of an object initializer opens its property list, so the
+/// reader never presses Ctrl+Space there. Every other `{` opens
+/// nothing, and the blank line inside the braces opens the list again.
+#[test]
+fn an_object_initializer_opens_on_its_brace() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-initbrace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "local part = new Instance(\"Part\") {}\nlocal plain = {}\nlocal p2 = new Instance(\"Part\") {\n    \n}\nlocal p3 = new Instance(\"Part\") { Name = \"a\", }\nprint(part, plain, p2, p3)\n";
+    let file = dir.join("t.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    let triggered = |s: &mut Session, line: u32, character: u32, trigger: &str| -> Vec<String> {
+        let r = s.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "context": { "triggerKind": 2, "triggerCharacter": trigger }
+            }),
+        );
+
+        r.get("items")
+            .and_then(Value::as_array)
+            .or_else(|| r.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // Line 0, right after the `{` of `new Instance("Part") {`.
+    let props = triggered(&mut s, 0, 35, "{");
+    assert!(props.contains(&"Anchored".to_string()), "{props:?}");
+    assert!(props.contains(&"Size".to_string()), "{props:?}");
+
+    // Line 1, the `{` of a plain table: nothing.
+    assert_eq!(triggered(&mut s, 1, 15, "{"), Vec::<String>::new());
+
+    // Line 3, the blank line inside the braces.
+    let inside = triggered(&mut s, 3, 4, "\n");
+    assert!(inside.contains(&"Anchored".to_string()), "{inside:?}");
+
+    // Line 5, the space after the comma of the field list.
+    let after_comma = triggered(&mut s, 5, 46, " ");
+    assert!(
+        after_comma.contains(&"Anchored".to_string()),
+        "{after_comma:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

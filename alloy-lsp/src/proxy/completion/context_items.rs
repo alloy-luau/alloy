@@ -1255,6 +1255,31 @@ impl State {
 
 impl Server {
     /// side, or an import, where the child would list globals.
+    /// Whether the caret takes a field name of an object initializer.
+    /// The space after a comma continues the field list, so the trigger
+    /// answers there and nowhere else a space lands.
+    pub(crate) fn opens_a_field_list(&self, uri: &str, message: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+        let st = self.state.lock().expect("state");
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        context::detect(&doc.source, offset).is_some_and(|c| fills_an_initializer(&c))
+    }
+
     pub(crate) fn context_completion(&self, uri: &str, message: &Value, id: &Value) -> bool {
         if !is_alloy_uri(uri) {
             return false;
@@ -1292,19 +1317,12 @@ impl Server {
             .pointer("/params/context/triggerCharacter")
             .and_then(Value::as_str);
 
-        // The child lists a newline as a trigger for its `end`
-        // completion. That request is the child's alone: a context list
-        // answered here would open on every Enter, and the next Enter
-        // would accept its first item.
-        if trigger == Some("\n") {
-            return false;
-        }
-
         let Some(ctx) = context::detect(&doc.source, offset) else {
-            // `(` opens an attribute's argument list; anywhere else the
-            // editor asked on it for nothing, and the child would list
+            // `(` opens an attribute's argument list and `{` the field
+            // list of an object initializer; anywhere else the editor
+            // asked on one for nothing, and the child would list
             // globals.
-            if trigger == Some("(") {
+            if matches!(trigger, Some("(" | "{")) {
                 drop(st);
                 self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": [] }));
 
@@ -1313,6 +1331,26 @@ impl Server {
 
             return false;
         };
+
+        // The child lists a newline as a trigger for its `end`
+        // completion. That request is the child's alone: a context list
+        // answered here would open on every Enter, and the next Enter
+        // would accept its first item. The blank line an object
+        // initializer holds is the exception: the field list is what
+        // Enter asks for there.
+        if trigger == Some("\n") && !fills_an_initializer(&ctx) {
+            return false;
+        }
+
+        // `{` opens the field list of an object initializer. Every
+        // other `{`, a table literal, a type, or a markup hole, takes
+        // no list, so nothing pops up where the author writes a value.
+        if trigger == Some("{") && !fills_an_initializer(&ctx) {
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": [] }));
+
+            return true;
+        }
 
         let mut items = st.context_items(uri, offset, &ctx);
 
@@ -1337,6 +1375,16 @@ impl Server {
 
         true
     }
+}
+
+/// Whether a context takes a field name of an object initializer:
+/// `new Instance("Part") { |`, `new Stats { |`, and the slot after each
+/// comma or newline inside the braces.
+pub(crate) fn fills_an_initializer(ctx: &context::Context) -> bool {
+    matches!(
+        ctx,
+        context::Context::StructField { .. } | context::Context::InstanceField { .. }
+    )
 }
 
 /// Removes the runtime's table from a type text, in every string of the

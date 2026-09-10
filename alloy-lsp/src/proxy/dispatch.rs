@@ -534,9 +534,11 @@ impl Server {
                     return true;
                 }
 
-                // A space triggers a completion only for the side of a
-                // directive; every other space answers nothing, so no
-                // list opens where the author is typing words.
+                // A space triggers a completion for the side of a
+                // directive and for the field after the comma of an
+                // object initializer; every other space answers
+                // nothing, so no list opens where the author is typing
+                // words.
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
                     && message.pointer("/params/context/triggerCharacter") == Some(&json!(" "))
@@ -550,9 +552,12 @@ impl Server {
 
                         st.side_word_completions(&uri, line, character)
                     };
-                    self.respond(&id, json!(items));
 
-                    return true;
+                    if !items.is_empty() || !self.opens_a_field_list(&uri, &message) {
+                        self.respond(&id, json!(items));
+
+                        return true;
+                    }
                 }
 
                 // A closing quote asks for nothing: the editor sends the

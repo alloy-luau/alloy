@@ -609,6 +609,13 @@ pub(crate) fn declares_a_name_at(source: &str, offset: usize) -> bool {
 /// What a built-in attribute goes on. The list mirrors
 /// `builtin_attr_targets` in the compiler, which is what reports an
 /// attribute on the wrong declaration.
+/// The built-in attributes that read with nothing under the caret.
+/// Luau takes these before the reader writes the function, and each
+/// one says something on its own. Every other built-in names a target:
+/// a wire width, a remote attribute, `@derive`, `@sealed`, `@test`, and
+/// `@cfg` all need the declaration in front of them to mean anything.
+pub(crate) const OPEN_ATTRIBUTES: &[&str] = &["@native", "@checked", "@deprecated"];
+
 pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
     match key {
         "@derive" | "@sealed" => &["struct", "enum"],

@@ -499,6 +499,55 @@ pub(crate) fn an_attribute_list_follows_the_declaration_under_it() {
     assert!(field.contains(&"@rename".to_string()), "{field:?}");
     assert!(!field.contains(&"@derive".to_string()), "{field:?}");
 }
+
+/// Nothing under the caret to carry the attribute: the file ends, or
+/// blank lines run to the end of it, or the line below starts no
+/// declaration. Only the attributes that go anywhere read there; every
+/// other one names a target the reader has not written yet.
+#[test]
+pub(crate) fn an_attribute_over_nothing_offers_the_ones_that_go_anywhere() {
+    let open = ["@native", "@checked", "@deprecated"];
+    let held_back = [
+        "@derive",
+        "@sealed",
+        "@test",
+        "@cfg",
+        "@u8",
+        "@f32",
+        "@rename",
+        "@skip",
+        "@ratelimit",
+        "@unreliable",
+    ];
+
+    for src in [
+        // The end of the file.
+        "@",
+        "@\n",
+        // Blank lines to the end of the file.
+        "@\n\n\n",
+        // A comment, and then nothing.
+        "@\n-- later\n\n",
+        // A line below that starts no declaration.
+        "@\n\nprint(1)\n",
+    ] {
+        let labels = attribute_labels(src);
+        assert_eq!(labels, open, "{src:?} gave {labels:?}");
+
+        for name in held_back {
+            assert!(!labels.contains(&name.to_string()), "{src:?}: {name}");
+        }
+    }
+
+    // A declaration below still names the target, blank lines and all.
+    let structure = attribute_labels("@\n\n\nstruct V as\n    x: number\nend\n");
+    assert!(structure.contains(&"@derive".to_string()), "{structure:?}");
+    assert!(!structure.contains(&"@u8".to_string()), "{structure:?}");
+
+    // A declared attribute names its targets, so it waits for one too.
+    let declared = attribute_labels("attribute audited(why: string) on remote\n\n@\n\n");
+    assert_eq!(declared, open, "{declared:?}");
+}
 /// A declared attribute reaches the targets it names, and nothing
 /// else.
 #[test]

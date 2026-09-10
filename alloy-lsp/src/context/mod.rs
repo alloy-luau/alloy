@@ -39,10 +39,14 @@ pub use scope::{Local, LocalKind, locals_in_scope};
 pub enum Context {
     /// `@der|`: an attribute name. `sigil` is the byte offset of `@`, and
     /// `target` what the attribute would go on, when the position says.
+    /// `bare` marks an attribute with nothing under it to carry it: the
+    /// lines below are blank to the end of the file, or the first one
+    /// with text starts no declaration.
     Attribute {
         prefix: String,
         sigil: usize,
         target: Option<&'static str>,
+        bare: bool,
     },
     /// `@derive(Eq, De|`: a derive name.
     DeriveArg { prefix: String },
@@ -411,10 +415,13 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
 
     // A sigil right before the word.
     if head.ends_with('@') {
+        let (target, bare) = bodies::attribute_target(src, line_start, line_end, head);
+
         return Some(Context::Attribute {
             prefix: prefix.to_string(),
             sigil: line_start + head.len() - 1,
-            target: bodies::attribute_target(src, line_start, line_end, head),
+            target,
+            bare,
         });
     }
 
@@ -1496,7 +1503,8 @@ mod tests {
             Some(Context::Attribute {
                 prefix: "der".to_string(),
                 sigil: 0,
-                target: None
+                target: None,
+                bare: true
             })
         );
         assert_eq!(

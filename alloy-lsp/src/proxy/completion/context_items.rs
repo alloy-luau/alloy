@@ -54,13 +54,32 @@ impl State {
         let mut items = Vec::new();
 
         match ctx {
-            Context::Attribute { sigil, target, .. } => {
-                // Only the attributes that go on what the position names;
-                // every one when the position says nothing.
-                let fits = |targets: &[&str]| target.is_none_or(|t| targets.contains(&t));
+            Context::Attribute {
+                sigil,
+                target,
+                bare,
+                ..
+            } => {
+                // Only the attributes that go on what the position
+                // names. With nothing under the caret to carry one, the
+                // list holds the attributes that go anywhere: every
+                // other one names a target the reader has not written.
+                let fits = |targets: &[&str]| match target {
+                    Some(t) => targets.contains(t),
+
+                    None if *bare => targets.is_empty(),
+
+                    None => true,
+                };
 
                 for key in keywords::keys_with_prefix("@") {
-                    if fits(builtin_attribute_targets(key)) {
+                    let ok = match (target, *bare) {
+                        (None, true) => OPEN_ATTRIBUTES.contains(&key),
+
+                        _ => fits(builtin_attribute_targets(key)),
+                    };
+
+                    if ok {
                         items.push(word(
                             key,
                             14,

@@ -294,7 +294,7 @@ pub(crate) fn attribute_target(
     line_start: usize,
     line_end: usize,
     head: &str,
-) -> Option<&'static str> {
+) -> (Option<&'static str>, bool) {
     let opens = head.matches('(').count();
     let closes = head.matches(')').count();
 
@@ -302,9 +302,9 @@ pub(crate) fn attribute_target(
         return if head.trim_start().starts_with("remote ")
             || head.trim_start().starts_with("export remote ")
         {
-            Some("param")
+            (Some("param"), false)
         } else {
-            None
+            (None, false)
         };
     }
 
@@ -319,18 +319,24 @@ pub(crate) fn attribute_target(
             }
 
             return match declaration_word(line) {
-                Some("struct") | Some("interface") => Some("field"),
-                Some("enum") => Some("variant"),
-                _ => None,
+                Some("struct") | Some("interface") => (Some("field"), false),
+                Some("enum") => (Some("variant"), false),
+                _ => (None, false),
             };
         }
 
-        return None;
+        return (None, false);
     }
 
     // At column zero the attribute precedes a declaration: past the
-    // other attribute lines, the blanks, and the comments.
-    declaration_below(&src[line_end.min(src.len())..])
+    // other attribute lines, the blanks, and the comments. Nothing
+    // there is no declaration yet, which is a state of its own: only
+    // an attribute that goes anywhere reads over blank lines.
+    match declaration_below(&src[line_end.min(src.len())..]) {
+        Some(word) => (Some(word), false),
+
+        None => (None, true),
+    }
 }
 
 /// The type the `impl` block around the caret is for: the `X` of

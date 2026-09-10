@@ -309,7 +309,6 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
         // Interfaces and traits have no impl blocks of their own.
         let mut notes = std::mem::take(&mut notes_first);
-        let mut lines = lines;
 
         if let Some((traits, methods)) = impls.get(name) {
             if !traits.is_empty() {
@@ -693,12 +692,7 @@ fn method_signature(
         None => "function",
     };
     let generics = m.body.generics.map(text).unwrap_or("");
-    let params: Vec<String> = m
-        .body
-        .params
-        .iter()
-        .map(|p| param_text(p, &text))
-        .collect();
+    let params: Vec<String> = m.body.params.iter().map(|p| param_text(p, &text)).collect();
     let ret = match m.body.ret_type {
         Some(t) => format!(": {}", text(t)),
 
@@ -918,7 +912,7 @@ mod tests {
         assert_eq!(d[0].name, "Vec2");
         assert_eq!(
             d[0].hover,
-            "```alloy\nexport struct Vec2 as\n    x: number\n    y: number = 0\nend\n```\n\nImplements `Display`. Methods: `len`, `to_string`."
+            "```alloy\nexport struct Vec2 as\n    x: number\n    y: number = 0\n    public function len(self)\n    public function to_string(self)\nend\n```\n\nImplements `Display`."
         );
     }
 

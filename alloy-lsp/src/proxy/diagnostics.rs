@@ -368,11 +368,11 @@ impl Server {
     }
 }
 
-/// The line and the width of the key that declares `alias` in a
-/// configuration file. The three files spell a key three ways, so the
-/// search takes the first line whose first word is the name, in quotes
-/// or bare, with a `=` or a `:` after it.
-pub(crate) fn alias_key_line(text: &str, alias: &str) -> Option<(u32, u32)> {
+/// The line and the span of the key that declares `alias` in a
+/// configuration file: `(line, start, end)`. The three files spell a
+/// key three ways, so the search takes the first line whose first word
+/// is the name, in quotes or bare, with a `=` or a `:` after it.
+pub(crate) fn alias_key_line(text: &str, alias: &str) -> Option<(u32, u32, u32)> {
     for (n, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
         let quoted = trimmed.starts_with(&format!("\"{alias}\""));
@@ -384,14 +384,14 @@ pub(crate) fn alias_key_line(text: &str, alias: &str) -> Option<(u32, u32)> {
             continue;
         }
 
-        let indent = (line.len() - trimmed.len()) as u32;
+        let start = (line.len() - trimmed.len()) as u32;
         let width = if quoted {
             alias.len() as u32 + 2
         } else {
             alias.len() as u32
         };
 
-        return Some((n as u32, indent + width));
+        return Some((n as u32, start, start + width));
     }
 
     None
@@ -427,13 +427,13 @@ impl Server {
 
         for problem in alloy::modules::reserved_alias_problems(&base, &config) {
             let text = std::fs::read_to_string(&problem.file).unwrap_or_default();
-            let (line, end) = alias_key_line(&text, problem.alias).unwrap_or((0, 0));
+            let (line, start, end) = alias_key_line(&text, problem.alias).unwrap_or((0, 0, 0));
             by_file
                 .entry(problem.file.clone())
                 .or_default()
                 .push(json!({
                     "range": {
-                        "start": { "line": line, "character": 0 },
+                        "start": { "line": line, "character": start },
                         "end": { "line": line, "character": end },
                     },
                     "severity": 1,

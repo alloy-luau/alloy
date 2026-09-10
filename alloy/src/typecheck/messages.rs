@@ -647,6 +647,16 @@ pub fn unknown_module_message(
     if let Some(rest) = spec.strip_prefix('@') {
         let alias = rest.split('/').next().unwrap_or(rest);
 
+        // `@game` is reserved, so "declare the alias" is the wrong
+        // advice here: the path is a service or a place in the tree.
+        if alias == "game" {
+            return format!(
+                "\"{spec}\" names no module; `{alias_name}` names a service, `{alias_name}/Players`, \
+                 or a place in the tree, `{alias_name}/ReplicatedStorage/Shared/economy`",
+                alias_name = crate::game_import::ALIAS
+            );
+        }
+
         // The project declares the alias, so the folder is the answer;
         // without it the alias itself is what to add.
         return match alias_target {

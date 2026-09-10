@@ -373,8 +373,7 @@ fn game_alias(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
             start: first.start,
             end,
             message: format!(
-                "`{quote}{spec}{quote}` is the service path of the release before this one; \
-                 write `{quote}{alias}{quote}`"
+                "`{quote}{spec}{quote}` is the old service path; write `{quote}{alias}{quote}`"
             ),
             fix: Some(Fix {
                 start: first.start,

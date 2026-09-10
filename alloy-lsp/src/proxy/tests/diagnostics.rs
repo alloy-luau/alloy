@@ -332,13 +332,13 @@ pub(crate) fn a_module_that_gains_a_default_clears_its_importer() {
 pub(crate) fn the_key_of_a_reserved_alias_is_found_in_every_file() {
     let luaurc =
         "{\n  \"aliases\": {\n    \"pkg\": \"Packages\",\n    \"game\": \"src/shared\"\n  }\n}\n";
-    assert_eq!(alias_key_line(luaurc, "game"), Some((3, 10)));
+    assert_eq!(alias_key_line(luaurc, "game"), Some((3, 4, 10)));
 
     let toml = "[build]\nin = \"src\"\n\n[mount]\nshared = [\"src/shared\", \"@game/x\"]\ngame = [\"src/g\", \"@game/y\"]\n";
-    assert_eq!(alias_key_line(toml, "game"), Some((5, 4)));
+    assert_eq!(alias_key_line(toml, "game"), Some((5, 0, 4)));
 
     let config_luau = "return {\n    luau = {\n        aliases = {\n            game = \"src/shared\",\n        },\n    },\n}\n";
-    assert_eq!(alias_key_line(config_luau, "game"), Some((3, 16)));
+    assert_eq!(alias_key_line(config_luau, "game"), Some((3, 12, 16)));
 
     // A name that is only part of another key is no declaration.
     assert_eq!(alias_key_line("gamer = \"x\"\n", "game"), None);

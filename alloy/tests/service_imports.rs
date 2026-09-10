@@ -117,6 +117,7 @@ fn a_first_segment_that_is_no_service_reports_whatever_follows() {
 fn a_path_past_a_service_is_a_module_path() {
     // The ship artifact writes `@game/ReplicatedStorage/Shared/x`, so
     // the form stays a module path and the resolver answers for it.
+    // `@game` is reserved, so the message never asks for the alias.
     let source = "import { a } from '@game/ReplicatedStorage/Shared/economy'\n";
     let found = problems(source);
 
@@ -124,6 +125,16 @@ fn a_path_past_a_service_is_a_module_path() {
     assert_eq!(found[0].kind, "UnknownModule");
     assert!(
         !found[0].message.contains("Roblox service"),
+        "{}",
+        found[0].message
+    );
+    assert!(
+        !found[0].message.contains("no alias game"),
+        "{}",
+        found[0].message
+    );
+    assert!(
+        found[0].message.contains("a place in the tree"),
         "{}",
         found[0].message
     );
@@ -164,12 +175,11 @@ fn the_old_spelling_draws_the_deprecation_lint_and_its_fix() {
     assert_eq!(hits.len(), 2, "{:?}", out.lints);
     assert_eq!(
         hits[0].message,
-        "`'game:Players'` is the service path of the release before this one; \
-         write `'@game/Players'`"
+        "`'game:Players'` is the old service path; write `'@game/Players'`"
     );
     assert_eq!(
         hits[1].message,
-        "`\"game\"` is the service path of the release before this one; write `\"@game\"`"
+        "`\"game\"` is the old service path; write `\"@game\"`"
     );
 
     let owned: Vec<alloy::Lint> = hits.into_iter().cloned().collect();

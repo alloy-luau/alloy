@@ -453,7 +453,7 @@ pub(crate) fn narrowed_between(text: &str, name: &str) -> bool {
             continue;
         }
 
-        let from = text[..i].rfind(['\n', ' ', '(']).map_or(0, |k| k);
+        let from = text[..i].rfind(['\n', ' ', '(']).unwrap_or(0);
 
         if tests
             .iter()

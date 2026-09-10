@@ -252,3 +252,76 @@ pub(crate) fn one_report_per_problem() {
     collapse_diagnostics(&mut items);
     assert_eq!(items, vec![one]);
 }
+
+/// Two open files: a module and the file that imports it. The import
+/// checks read the module from disk, so a module that gains an
+/// `export default` clears the report of the importer, and the export
+/// surface of the document is the signal that the importers must hear
+/// the change again.
+#[test]
+pub(crate) fn a_module_that_gains_a_default_clears_its_importer() {
+    let dir = std::env::temp_dir().join(format!("alloy-stale-import-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let module = dir.join("src/m.aly");
+    let main = dir.join("src/main.aly");
+    let before = "export function helper(): number\n    return 2\nend\n";
+    let after = "export function helper(): number\n    return 2\nend\n\nexport default function make(): number\n    return 1\nend\n";
+    std::fs::write(&module, before).expect("module");
+    std::fs::write(&main, "import X from \"./m\"\n\nlocal n = X\n").expect("main");
+
+    let doc_of = |text: &str| {
+        Doc::new(
+            text.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let module_uri = format!("file://{}", module.display());
+    let main_uri = format!("file://{}", main.display());
+    st.docs.insert(module_uri.clone(), doc_of(before));
+    st.docs.insert(
+        main_uri.clone(),
+        doc_of("import X from \"./m\"\n\nlocal n = X\n"),
+    );
+
+    let says_no_default = |st: &State| {
+        st.alloy_diagnostics(&main_uri).iter().any(|d| {
+            d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("has no default export"))
+        })
+    };
+    assert!(says_no_default(&st));
+
+    // The editor types the fix. The buffer holds it and the disk does
+    // not, so the importer's report stands.
+    let typed = doc_of(after);
+    assert_ne!(
+        export_surface(&st.docs[&module_uri]),
+        export_surface(&typed),
+        "the export surface says the importers must hear this"
+    );
+    st.docs.insert(module_uri.clone(), typed);
+    assert!(says_no_default(&st));
+
+    // The editor saves. Nothing is cached: the next read of the
+    // importer's diagnostics is clean.
+    std::fs::write(&module, after).expect("module");
+    assert!(!says_no_default(&st));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

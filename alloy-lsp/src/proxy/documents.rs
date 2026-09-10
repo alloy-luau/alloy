@@ -351,18 +351,20 @@ impl Server {
 
     /// Opens or replaces a document and its shadow.
     pub(crate) fn open_doc(&self, uri: &str, text: String, version: i64, by_editor: bool) {
-        let had_globals = {
+        let (had_globals, had_exports) = {
             let st = self.state.lock().expect("state");
 
-            st.docs
-                .get(uri)
-                .map(|d| global_names(&d.globals))
-                .unwrap_or_default()
+            match st.docs.get(uri) {
+                Some(d) => (workspace_surface(d), export_surface(d)),
+
+                None => Default::default(),
+            }
         };
         let (options, jsx, ingots) = self.compile_options(uri, &text);
         let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
         let source = doc.source.clone();
-        let fresh_globals = global_names(&doc.globals);
+        let fresh_globals = workspace_surface(&doc);
+        let fresh_exports = export_surface(&doc);
         let (shadow, existed) = {
             let mut st = self.state.lock().expect("state");
             let shadow = st.child_uri(uri);
@@ -428,8 +430,16 @@ impl Server {
 
         // A pass over the workspace opens every file; one refresh at
         // the end of it costs one recompile each, not one per file.
-        if had_globals != fresh_globals && self.scan.try_lock().is_ok() {
-            self.refresh_globals(uri);
+        if self.scan.try_lock().is_ok() {
+            if had_globals != fresh_globals {
+                self.refresh_globals(uri);
+            }
+
+            if had_exports != fresh_exports
+                && let Some(path) = uri_to_path(uri)
+            {
+                self.refresh_importers(&[path]);
+            }
         }
 
         self.publish(uri);
@@ -448,6 +458,9 @@ impl Server {
         for uri in uris {
             self.wait_for_requests();
             self.resend_doc(&uri);
+            // The Alloy diagnostics of the other file move with the
+            // set: a name it reaches, or a name it no longer reaches.
+            self.publish(&uri);
         }
     }
 
@@ -545,9 +558,11 @@ impl Server {
             options.plain_modules = alloy::modules::plain_modules_for_file(&path, &doc.source);
         }
 
-        let had_globals = global_names(&doc.globals);
+        let had_globals = workspace_surface(doc);
+        let had_exports = export_surface(doc);
         doc.compile(&options, &jsx, ingots.as_deref());
-        let fresh_globals = global_names(&doc.globals);
+        let fresh_globals = workspace_surface(doc);
+        let fresh_exports = export_surface(doc);
         let source = doc.source.clone();
         let shadow_text = doc.shadow.clone();
         let shadow = st.child_uri(uri);
@@ -574,6 +589,12 @@ impl Server {
 
         if had_globals != fresh_globals {
             self.refresh_globals(uri);
+        }
+
+        if had_exports != fresh_exports
+            && let Some(path) = uri_to_path(uri)
+        {
+            self.refresh_importers(&[path]);
         }
 
         self.publish(uri);
@@ -1582,6 +1603,25 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// that says whether the workspace's set changed.
 fn global_names(globals: &[alloy::globals::Global]) -> Vec<String> {
     globals.iter().map(|g| g.name.clone()).collect()
+}
+
+/// What one document lends the workspace: the names it declares as
+/// `global` and the names a `.d.aly` declares. A change to either
+/// changes what every other file binds, so every other shadow is stale.
+fn workspace_surface(doc: &Doc) -> (Vec<String>, Vec<String>) {
+    (global_names(&doc.globals), doc.ambient.clone())
+}
+
+/// What one document lends the files that import it: each name it
+/// sends out and whether that name is the default. A change here moves
+/// the reports of every importer, and the import checks read the module
+/// from disk, so an importer's report stands until something asks for
+/// it again.
+pub(crate) fn export_surface(doc: &Doc) -> Vec<(String, bool)> {
+    doc.exports
+        .iter()
+        .map(|e| (e.name.clone(), e.is_default))
+        .collect()
 }
 
 pub(crate) const RUNTIME_ALIAS: &str = "@alloy";

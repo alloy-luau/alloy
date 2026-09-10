@@ -334,6 +334,14 @@ impl Server {
                 }
 
                 self.forward_plain(message);
+
+                // The import checks read a module from disk, so the
+                // save is the moment an importer's report can change.
+                if is_alloy_uri(&uri)
+                    && let Some(path) = uri_to_path(&uri)
+                {
+                    self.refresh_importers(&[path]);
+                }
             }
 
             Some("workspace/didChangeWatchedFiles") => {
@@ -407,7 +415,15 @@ impl Server {
                             }
                         }
 
-                        _ => {}
+                        // The editor holds the file, so its own
+                        // notifications carry the text. The importers
+                        // still read the module from disk, which this
+                        // change is what moved.
+                        _ => {
+                            if let Some(path) = uri_to_path(&uri) {
+                                self.refresh_importers(&[path]);
+                            }
+                        }
                     }
                 }
 

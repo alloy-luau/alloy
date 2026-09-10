@@ -44,9 +44,9 @@ use diagnostics::{
 };
 #[allow(unused_imports)]
 use documents::{
-    RUNTIME_ALIAS, UPDATE_IMPORTS, config_dir_from, map_from_shadow, map_into_shadow,
-    map_uris_into_mirror, mirror_dir, mirror_luau_text, mirrored_sourcemap, mount_alias_settings,
-    normalize, project_aliases,
+    RUNTIME_ALIAS, UPDATE_IMPORTS, config_dir_from, export_surface, map_from_shadow,
+    map_into_shadow, map_uris_into_mirror, mirror_dir, mirror_luau_text, mirrored_sourcemap,
+    mount_alias_settings, normalize, project_aliases,
 };
 #[allow(unused_imports)]
 use hints::{clean_hints, emit_slot_hint, hint_label, unwrap_future_hint, writable_type};

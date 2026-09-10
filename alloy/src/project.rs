@@ -496,11 +496,8 @@ pub(crate) fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<M
                 // module, which has no source of its own.
                 if crate::modules::is_script(&fname)
                     && let Ok(text) = std::fs::read_to_string(&path)
-                    && !crate::globals::declared(
-                        &crate::globals::index_text(&path, &text),
-                        &path,
-                    )
-                    .is_empty()
+                    && !crate::globals::declared(&crate::globals::index_text(&path, &text), &path)
+                        .is_empty()
                 {
                     let stem = fname
                         .strip_suffix(".aly")

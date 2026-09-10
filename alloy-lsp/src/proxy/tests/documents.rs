@@ -60,6 +60,66 @@ pub(crate) fn the_newline_edit_writes_the_end_below_the_caret() {
     assert!(!end_follows("f()\n\nendless()\n", 4, ""));
     assert!(!end_follows("f()\n", 4, ""));
 }
+
+/// An opener inside a namespace, an impl, a trait, or a struct's impl
+/// writes its `end` at its own column. The body of the enclosing block
+/// already ends below, which is where the count alone lost the opener.
+#[test]
+pub(crate) fn the_end_edit_follows_the_opener_inside_a_body() {
+    for (src, line, character, want) in [
+        (
+            "namespace N as\n    function f()\n        \nend\n",
+            2,
+            8,
+            "\n    end",
+        ),
+        (
+            "impl V as\n    function V.new()\n        \nend\n",
+            2,
+            8,
+            "\n    end",
+        ),
+        (
+            "trait Show as\n    function show(self)\n        \nend\n",
+            2,
+            8,
+            "\n    end",
+        ),
+        (
+            "namespace A as\n    namespace B as\n        function f()\n            \n    end\nend\n",
+            3,
+            12,
+            "\n        end",
+        ),
+        (
+            "struct V as\n    n: number\nend\n\nimpl V as\n    function V.scale(self)\n        \nend\n",
+            6,
+            8,
+            "\n    end",
+        ),
+        // A file that indents with tabs writes the tab back.
+        (
+            "namespace N as\n\tfunction f()\n\t\t\nend\n",
+            2,
+            2,
+            "\n\tend",
+        ),
+    ] {
+        let (st, uri) = one_file(src);
+        let edit = st.end_edit(uri, line, character).expect("an edit");
+        assert_eq!(edit[0]["newText"], json!(want), "{src:?}");
+        assert_eq!(
+            edit[0]["range"],
+            json!({ "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": character } }),
+            "{src:?}"
+        );
+    }
+
+    // The method already closes, so the caret line takes nothing.
+    let (st, uri) = one_file("impl V as\n    function V.new()\n        \n    end\nend\n");
+    assert_eq!(st.end_edit(uri, 2, 8), None);
+}
 #[test]
 pub(crate) fn a_hint_in_parts_folds_as_one_label() {
     let mut result = json!([{

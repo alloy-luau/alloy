@@ -4,8 +4,28 @@
 /// The indentation of the block opener on `line` when the file lacks its
 /// `end`, from a walk over the lexer's tokens: strings and comments never
 /// count. None when the line opens nothing or the file is balanced.
+///
+/// The walk stops at the end of the opener line, so a body that sits
+/// inside a `namespace`, an `impl`, or any other block answers too. Over
+/// the whole file the count alone cannot say which opener the last `end`
+/// belongs to: in
+///
+/// ```text
+/// namespace N as
+///     function f()
+/// end
+/// ```
+///
+/// the `end` closes the namespace, and a count gives it to `f`. The
+/// indentation is what tells the two apart, so `closed_below` reads it.
 pub fn needs_end(src: &str, line: u32) -> Option<String> {
-    let stack = open_blocks(src, src.len());
+    // A file with every `end` in place wants none: the reader pressed
+    // Enter inside a block that is already whole.
+    if open_blocks(src, src.len()).is_empty() {
+        return None;
+    }
+
+    let stack = open_blocks(src, end_of_line(src, line)?);
     let (opener_line, offset) = *stack.last()?;
 
     if opener_line != line {
@@ -18,7 +38,71 @@ pub fn needs_end(src: &str, line: u32) -> Option<String> {
         .take_while(|c| *c == ' ' || *c == '\t')
         .collect();
 
-    Some(indent)
+    match closed_below(src, offset, &indent) {
+        true => None,
+
+        false => Some(indent),
+    }
+}
+
+/// The byte offset of the line break that ends `line`, or the end of
+/// the source for the last line. None when the file has no such line.
+fn end_of_line(src: &str, line: u32) -> Option<usize> {
+    let mut at = 0;
+
+    for _ in 0..line {
+        at += src[at..].find('\n')? + 1;
+    }
+
+    if at > src.len() {
+        return None;
+    }
+
+    Some(src[at..].find('\n').map_or(src.len(), |i| at + i))
+}
+
+/// How far an indentation reaches, with a tab as four columns. A file
+/// writes one of the two, so the width compares the lines of a body
+/// whichever it is.
+fn width(indent: &str) -> usize {
+    indent.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
+}
+
+/// Whether the block that opens at `offset` already has its closing
+/// word. The scan takes the first line under the opener that is back at
+/// the opener's own column or further left: the body sits deeper, so
+/// that line either closes the block or belongs to what holds it.
+fn closed_below(src: &str, offset: usize, indent: &str) -> bool {
+    let own = width(indent);
+    let after = match src[offset..].find('\n') {
+        Some(i) => &src[offset + i + 1..],
+
+        None => return false,
+    };
+
+    for line in after.lines() {
+        let text = line.trim_start();
+
+        if text.is_empty() {
+            continue;
+        }
+
+        if width(&line[..line.len() - text.len()]) > own {
+            continue;
+        }
+
+        let word = text
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .next()
+            .unwrap_or_default();
+
+        // `else` and `elseif` carry an `if` on to its own `end`, and
+        // `until` closes a `repeat`.
+        return width(&line[..line.len() - text.len()]) == own
+            && matches!(word, "end" | "else" | "elseif" | "until");
+    }
+
+    false
 }
 
 /// Whether a block is still open at a byte offset, so `end` is a word
@@ -260,5 +344,53 @@ mod tests {
             needs_end("function f()\n    local x = 1\n", 0).as_deref(),
             Some("")
         );
+    }
+
+    /// A body inside a block that already has its own `end` answers
+    /// too. The count gives the last `end` to the inner opener; the
+    /// column says it belongs to the namespace, the impl, or the trait.
+    #[test]
+    fn an_opener_inside_a_closed_block_wants_its_own_end() {
+        for (src, line, want) in [
+            ("namespace N as\n    function f()\nend\n", 1, "    "),
+            ("impl V as\n    function V.new()\nend\n", 1, "    "),
+            ("trait Show as\n    function show(self)\nend\n", 1, "    "),
+            (
+                "namespace A as\n    namespace B as\n        function f()\n    end\nend\n",
+                2,
+                "        ",
+            ),
+            (
+                "struct V as\n    n: number\nend\n\nimpl V as\n    function V.scale(self)\nend\n",
+                5,
+                "    ",
+            ),
+            ("namespace N as\n\tfunction f()\nend\n", 1, "\t"),
+            (
+                "namespace N as\n    function f()\n        if x then\n    end\nend\n",
+                2,
+                "        ",
+            ),
+        ] {
+            assert_eq!(needs_end(src, line).as_deref(), Some(want), "{src:?}");
+        }
+    }
+
+    /// The `end` of the opener is there already: the next line back at
+    /// the opener's column closes it, whatever stands between.
+    #[test]
+    fn an_opener_that_already_closes_wants_nothing() {
+        for (src, line) in [
+            ("namespace N as\n    function f()\n    end\nend\n", 1),
+            (
+                "namespace N as\n    function f()\n        local x = 1\n    end\n",
+                1,
+            ),
+            // The `if` carries on to its own `end` through the `else`.
+            ("namespace N as\n    if x then\n    else\n    end\n", 1),
+            ("namespace N as\n    repeat\n    until x\n", 1),
+        ] {
+            assert_eq!(needs_end(src, line), None, "{src:?}");
+        }
     }
 }

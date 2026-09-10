@@ -2203,6 +2203,46 @@ fn a_newline_writes_the_end_of_an_open_block() {
         ("local t = {}\nfunction t.f()\n", 2, 0, "\nend"),
         ("function test()\n    ", 1, 4, "\nend"),
         ("if x then\n    while y do\n        ", 2, 8, "\n    end"),
+        // A body inside a block that already ends: the `end` goes at
+        // the opener's own column, never at the column of the block
+        // that holds it.
+        (
+            "namespace N as\n    function f()\n        \nend\n",
+            2,
+            8,
+            "\n    end",
+        ),
+        (
+            "impl Point as\n    function Point.zero()\n        \nend\n",
+            2,
+            8,
+            "\n    end",
+        ),
+        (
+            "trait Show as\n    function show(self)\n        \nend\n",
+            2,
+            8,
+            "\n    end",
+        ),
+        (
+            "namespace A as\n    namespace B as\n        function f()\n            \n    end\nend\n",
+            3,
+            12,
+            "\n        end",
+        ),
+        (
+            "struct V as\n    n: number\nend\n\nimpl V as\n    function V.scale(self)\n        \nend\n",
+            6,
+            8,
+            "\n    end",
+        ),
+        // A file that indents with tabs takes the tab back.
+        (
+            "namespace N as\n\tfunction f()\n\t\t\nend\n",
+            2,
+            2,
+            "\n\tend",
+        ),
     ] {
         write(
             &mut s.stdin,

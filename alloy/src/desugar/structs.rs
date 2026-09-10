@@ -200,6 +200,7 @@ impl<'s> Desugar<'s> {
             let fn_tok_end = self.toks[fn_tok].end;
             let name_span = m.path[0];
             let mname = self.text_of(name_span).to_string();
+            self.impl_method = Some(mname.clone());
             // `function name(` becomes `function Target.name(`. The
             // `private` or `public` word has no Luau form and goes, and
             // so does `async`: the body wrap is what it turns into, and
@@ -264,6 +265,7 @@ impl<'s> Desugar<'s> {
 
             cursor = self.byte_end(m.span);
             self.self_prologue = None;
+            self.impl_method = None;
         }
 
         self.self_type = None;
@@ -1190,6 +1192,52 @@ impl<'s> Desugar<'s> {
         args.is_none() && init.is_some() && self.structs.contains(self.text_of(*n))
     }
 
+    /// `new Name()` where the constructor itself writes it: the raw
+    /// construct with no fields, the same text `new Name { }` gives.
+    pub(crate) fn empty_construct(&self, name: &str) -> String {
+        let ctor = self.raw_ctor(name);
+        // Inside the struct's own impl the instance carries the full
+        // view, so `self.count` in `new` type checks.
+        if self.impl_target.as_deref() == Some(name) && self.has_private_view(name) {
+            format!("(({ctor}({{}}) :: any) :: {name}__all)")
+        } else {
+            format!("{ctor}({{}})")
+        }
+    }
+
+    /// `new Self()` inside the constructor that `new Self(...)` calls.
+    /// The call would be the constructor calling itself, which never
+    /// returns, so the emit builds the value the way `new Self { }`
+    /// does. Only the empty argument list counts: `new Self(a)` in the
+    /// same body may be a recursion the source means.
+    pub(crate) fn self_construct(
+        &self,
+        name: &Expr,
+        args: Option<&CallArgs>,
+        init: Option<&Expr>,
+    ) -> bool {
+        let Expr::Name(n) = name else {
+            return false;
+        };
+        let text = self.text_of(*n);
+
+        if init.is_some() || self.impl_target.as_deref() != Some(text) {
+            return false;
+        }
+
+        if self.structs_with_new.get(text) != self.impl_method.as_ref() {
+            return false;
+        }
+
+        match args {
+            None => true,
+
+            Some(CallArgs::Paren(list)) => list.is_empty(),
+
+            Some(_) => false,
+        }
+    }
+
     /// The constructor `new Name(...)` calls: the `new` or `New` the impl
     /// wrote, else `new`, which a foreign class or an imported struct has.
     pub(crate) fn constructor_of(&self, name: &Expr) -> String {
@@ -1658,21 +1706,36 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        self.check_missing_fields(*n, &sname, &given, "fields");
+    }
+
+    /// Reports the fields a construction leaves unset. `form` says what
+    /// the source wrote, so the message quotes it back.
+    fn check_missing_fields(&mut self, n: TokSpan, sname: &str, given: &[String], form: &str) {
+        let Some(declared) = self.struct_fields.get(sname).cloned() else {
+            return;
+        };
         let missing: Vec<&str> = declared
             .iter()
             .filter(|(d, has_default)| !has_default && !given.contains(d))
             .map(|(d, _)| d.as_str())
             .collect();
 
-        if !missing.is_empty() {
-            self.diagnose(
-                *n,
-                &format!(
-                    "`new {sname} {{ ... }}` leaves {} unset; a field without a default needs a value",
-                    list_names(&missing)
-                ),
-            );
+        if missing.is_empty() {
+            return;
         }
+        let written = match form {
+            "paren" => format!("new {sname}()"),
+
+            _ => format!("new {sname} {{ ... }}"),
+        };
+        self.diagnose(
+            n,
+            &format!(
+                "`{written}` leaves {} unset; a field without a default needs a value",
+                list_names(&missing)
+            ),
+        );
     }
 
     /// The two mistakes with `new` on a struct: the fields form on one that
@@ -1741,7 +1804,15 @@ impl<'s> Desugar<'s> {
             }
         } else {
             match ctor {
-                Some(_) => return,
+                Some(_) => {
+                    // The constructor building its own value names no
+                    // field, so every field without a default is unset.
+                    if self.self_construct(name, args, init) {
+                        self.check_missing_fields(*n, &text, &[], "paren");
+                    }
+
+                    return;
+                }
 
                 None => format!(
                     "`{text}` writes no `new` or `New`: construct it with `new {text} {{ ... }}`, or write `function new` in `impl {text}`"

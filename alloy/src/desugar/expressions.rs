@@ -242,6 +242,11 @@ impl<'s> Desugar<'s> {
                         ")".to_string()
                     };
                     self.generate(self.byte_end(table.span()), &close);
+                } else if self.self_construct(name, args.as_ref(), init.as_deref()) {
+                    self.check_new(name, args.as_ref(), init.as_deref(), *span);
+                    let n = self.render_to_string(name);
+                    let text = self.empty_construct(&n);
+                    self.generate(anchor, &text);
                 } else {
                     let head =
                         self.new_head(name, *type_args, args.as_ref(), init.as_deref(), *span);

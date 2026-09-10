@@ -1,0 +1,41 @@
+struct Plain as end
+
+impl Plain as
+	function new(): Plain
+		return new Plain()
+	end
+end
+
+struct Marked as
+	field: number = 0
+end
+
+impl Marked as
+	function new(): Marked
+		return new Marked { }
+	end
+
+	function one(): Marked
+		return new Marked { field = 1 }
+	end
+
+	function copy(): Marked
+		return new Marked()
+	end
+end
+
+struct Held<T> as
+	items: T[] = []
+end
+
+impl Held<T> as
+	function new(): Held<T>
+		return new Held()
+	end
+end
+
+local a = Plain.new()
+local b = Marked.new()
+local c = Marked.one()
+local d: Held<number> = Held.new()
+print(a, b, c, d)

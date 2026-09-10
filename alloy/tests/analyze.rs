@@ -190,6 +190,66 @@ end
 print(pick, hand_written)
 "#;
 
+/// `new Self()` inside a struct's own constructor. The value the
+/// constructor gives back must be the struct, so the annotated locals
+/// take it with no cast.
+const CONSTRUCTED: &str = r#"struct Test as end
+
+impl Test as
+    function new()
+        return new Test()
+    end
+end
+
+struct Marked as
+    field: number = 0
+end
+
+impl Marked as
+    function new()
+        return new Marked { }
+    end
+
+    function one(): Marked
+        return new Marked { field = 1 }
+    end
+end
+
+local made: Test = Test.new()
+local blank: Marked = Marked.new()
+local one: Marked = Marked.one()
+
+print(made, blank, one)
+"#;
+
+/// A colon method on a plain table. The check artifact writes the
+/// `self` parameter out as `typeof(Provider)`, which names the table
+/// while the table still holds the method: the alias must not recurse
+/// past the solver.
+const TABLE_SELF: &str = r#"local Provider = { }
+
+Provider.count = 0
+
+function Provider:Bump(n: number): number
+    self.count += n
+    return self:Peek()
+end
+
+function Provider:Peek(): number
+    return self.count
+end
+
+function Provider:Reset()
+    self.count = 0
+    self:Bump(1)
+end
+
+type Self = typeof(Provider)
+local held: Self = Provider
+held:Reset()
+print(held:Bump(2), held:Peek())
+"#;
+
 fn analyze(src: &str, name: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("tools/types/globalTypes.d.luau");
@@ -510,4 +570,20 @@ fn a_project_with_globals_analyzes() {
 #[test]
 fn a_namespace_analyzes_clean() {
     analyze(NAMESPACED, "namespaced");
+}
+
+/// A constructor that writes `new Self()` gives back the struct, the
+/// same as `new Self { }`. The paren form used to call the constructor
+/// again, which left the return type unknown.
+#[test]
+fn a_self_construct_returns_the_struct() {
+    analyze(CONSTRUCTED, "constructed");
+}
+
+/// `typeof(Provider)` on the `self` of a colon method reads back as the
+/// table, and the analyzer settles it: the table names the methods and
+/// each method names the table.
+#[test]
+fn a_table_method_self_type_settles() {
+    analyze(TABLE_SELF, "table-self");
 }

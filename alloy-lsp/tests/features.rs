@@ -2808,3 +2808,96 @@ fn a_service_binding_hovers_and_types() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A colon method on a plain table, and a constructor that writes
+/// `new Self()`. Both used to leave the editor with no type: `self`
+/// answered nothing and listed nothing, and the constructor's inferred
+/// return read `unknown`.
+const SELF_AND_NEW: &str = "\
+local Provider = { }
+
+Provider.count = 0
+
+function Provider:Bump(n: number): number
+    self.count += n
+    return self.count
+end
+
+function Provider:Reset()
+    self.count = 0
+    print(self.)
+end
+
+struct Test as end
+
+impl Test as
+    function new()
+        return new Test()
+    end
+end
+
+print(Provider, Test.new())
+";
+
+/// The check artifact writes `self: typeof(Provider)` on a colon method
+/// of a plain table, so hover on `self` reads the table and `self.`
+/// lists its members. `new Test()` inside `Test`'s own `new` builds the
+/// value instead of calling the constructor again, so the hint on the
+/// return reads the struct.
+#[test]
+fn a_table_method_types_self_and_a_constructor_returns_its_struct() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-self-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("provider.aly");
+    std::fs::write(&file, SELF_AND_NEW).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": SELF_AND_NEW } } }),
+    );
+    s.drain(Duration::from_secs(3));
+
+    // `self` reads the table it stands for, by the name the source
+    // gave the value.
+    let h = s.hover(&uri, 5, 5);
+    assert!(h.contains("typeof(Provider)"), "self in a method: {h}");
+    assert!(!h.contains("where"), "self in a method: {h}");
+
+    // `self.` lists every member, the fields and the methods.
+    let labels = s.completion_labels(&uri, 11, 15);
+    assert!(
+        ["count", "Bump", "Reset"]
+            .iter()
+            .all(|m| labels.iter().any(|l| l == m)),
+        "{labels:?}"
+    );
+
+    // The constructor's return: the struct, not `unknown`.
+    let hints = s.request(
+        "textDocument/inlayHint",
+        json!({ "textDocument": { "uri": uri },
+            "range": { "start": { "line": 16, "character": 0 },
+                       "end": { "line": 21, "character": 0 } } }),
+    );
+    let on_new: Vec<String> = hints
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|h| h["position"]["line"] == 17)
+        .map(hint_text)
+        .collect();
+    assert!(on_new.iter().any(|l| l == ": Test"), "{hints}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

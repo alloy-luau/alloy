@@ -30,7 +30,7 @@ local function g(): __alloy.Future<__alloy.Result<number, string>> return __allo
 	return __alloy.Ok(n + m)
 end) end
 local fut = __alloy.future(function() return 1 end)
-local res = __alloy.try_block(function() return 2 end)
+local res = __alloy.try_block(function(__fail) return 2 end)
 local merged = __alloy.spread( base, { x = 1 }, other )
 local _1 = t local a, first = _1.a, _1.b
 _1 = xs local head, rest = _1[1], __alloy.Array.slice(_1, 2)

@@ -271,19 +271,30 @@ impl<'s> Desugar<'s> {
             }
 
             Expr::AsyncBlock { block, span } | Expr::TryBlock { block, span } => {
-                let helper = if matches!(e, Expr::AsyncBlock { .. }) {
-                    "future"
-                } else {
-                    "try_block"
-                };
+                let is_try = matches!(e, Expr::TryBlock { .. });
+                let helper = if is_try { "try_block" } else { "future" };
                 let std = self.std();
-                self.generate(anchor, &format!("{std}.{helper}(function()"));
+                // A `try do` block hands its closure the `fail` a `try`
+                // inside it calls. The name carries the nesting, so an
+                // inner block shadows no outer one.
+                let target = is_try.then(|| TryTarget {
+                    fail: self.fail_name(),
+                    exact: self.block_fail_exact(block),
+                });
+                let params = match &target {
+                    Some(t) => t.fail.clone(),
+
+                    None => String::new(),
+                };
+                self.generate(anchor, &format!("{std}.{helper}(function({params})"));
                 // The two keywords are replaced; the block and `end` copy.
                 let after_keywords = self.toks[span.start as usize + 1].end;
                 let end_tok = self.toks[span.end as usize - 1];
                 let body_start = self.block_start_or(block, end_tok.start);
                 self.copy(after_keywords, body_start);
+                self.try_targets.push(target);
                 self.block(block);
+                self.try_targets.pop();
                 let after_block = self.block_end_or(block, body_start);
                 self.copy(after_block, end_tok.start);
                 self.copy(end_tok.start, end_tok.end);
@@ -492,7 +503,7 @@ impl<'s> Desugar<'s> {
 
     /// The dotted name of a callee, `Future.resolve` for an `Index`
     /// chain of plain fields. Anything else gives `None`.
-    fn dotted_name(&self, expr: &Expr) -> Option<String> {
+    pub(crate) fn dotted_name(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::Name(n) => Some(self.text_of(*n).to_string()),
 
@@ -589,14 +600,148 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The name of the `fail` a `try do` block hands its closure. The
+    /// count of the blocks already open numbers it, so a block inside a
+    /// block shadows no name.
+    fn fail_name(&self) -> String {
+        let open = self.try_targets.iter().flatten().count();
+
+        if open == 0 {
+            "__fail".to_string()
+        } else {
+            format!("__fail{}", open + 1)
+        }
+    }
+
+    /// The error type a `try` operand carries, where this file can name
+    /// it: `Result<T, E>` gives `E`. A call this file cannot see the
+    /// return type of gives `None`.
+    fn try_error_type(&self, operand: &Expr) -> Option<String> {
+        let Expr::Call {
+            func, method: None, ..
+        } = operand
+        else {
+            return None;
+        };
+        let name = self.dotted_name(func)?;
+
+        if name == "Result.pcall" {
+            return Some("string".to_string());
+        }
+
+        let ty = self.fn_ret_types.get(&name)?.trim();
+        let inner = ty.strip_prefix("Result<")?.strip_suffix('>')?;
+        let args = super::types::split_generics(inner);
+
+        (args.len() == 2).then(|| args[1].clone())
+    }
+
+    /// Whether a `fail` call of this block may pass its payload with the
+    /// payload's own type. One error source solves `E` on its own. Luau
+    /// reads the type of an unannotated parameter off the first call, so
+    /// two sources this file cannot prove equal would pin `E` to the
+    /// first and report the second; those pass `any` instead.
+    fn block_fail_exact(&self, block: &Block) -> bool {
+        let mut found = Vec::new();
+        self.block_sources(block, &mut found);
+
+        if found.len() <= 1 {
+            return true;
+        }
+
+        let mut seen: Option<String> = None;
+
+        for operand in found {
+            let Some(ty) = operand.and_then(|e| self.try_error_type(e)) else {
+                return false;
+            };
+
+            match &seen {
+                None => seen = Some(ty),
+
+                Some(first) if *first == ty => {}
+
+                Some(_) => return false,
+            }
+        }
+
+        true
+    }
+
+    /// Every error this block's `fail` can carry: the operand of a `try`
+    /// the block owns, and `None` for a `return Err(e)` it owns, whose
+    /// payload type this file does not name. A nested function and a
+    /// nested `try do` or `async do` block own theirs, so the walk stops
+    /// there.
+    fn block_sources<'a>(&self, block: &'a Block, out: &mut Vec<Option<&'a Expr>>) {
+        for stmt in &block.stmts {
+            if let Stmt::Return(r) = stmt
+                && self.err_call_args(&r.values).is_some()
+            {
+                out.push(None);
+            }
+
+            for child in stmt_children(stmt) {
+                self.child_sources(child, out);
+            }
+        }
+    }
+
+    fn child_sources<'a>(&self, child: Child<'a>, out: &mut Vec<Option<&'a Expr>>) {
+        match child {
+            Child::Expr(Expr::TryBlock { .. } | Expr::AsyncBlock { .. }) => {}
+
+            Child::Expr(e) => {
+                if let Expr::Try { operand, .. } = e {
+                    out.push(Some(operand));
+                }
+
+                for inner in expr_children(e) {
+                    self.child_sources(inner, out);
+                }
+            }
+
+            Child::Block(b) => self.block_sources(b, out),
+
+            Child::Function(_) => {}
+        }
+    }
+
+    /// The arguments of `Err(e)` or `Err(e, trace)`, where the name is
+    /// the std's and not a local of this file.
+    pub(crate) fn err_call_args<'a>(&self, values: &'a [Expr]) -> Option<&'a [Expr]> {
+        if values.len() != 1 {
+            return None;
+        }
+
+        let Expr::Call {
+            func,
+            method: None,
+            args: CallArgs::Paren(list),
+            ..
+        } = &values[0]
+        else {
+            return None;
+        };
+
+        (self.dotted_name(func).as_deref() == Some("Err")
+            && !list.is_empty()
+            && list.len() <= 2
+            && !self.is_local("Err"))
+        .then_some(list.as_slice())
+    }
+
     /// `try expr`: hoist the Result, return it on Err, yield the payload.
     pub(crate) fn try_expr(&mut self, operand: &Expr, span: TokSpan) -> String {
         let anchor = self.byte_start(span);
 
+        let target = self.try_targets.last().cloned().flatten();
+
         // At the top level `return` leaves the module, which the emit
         // still writes; inside a function the return type must take an
-        // Err.
-        if !self.ret_types.is_empty() && !self.in_result_function() {
+        // Err. Inside a `try do` block the Err leaves that block, so the
+        // function around it is free to return anything.
+        if target.is_none() && !self.ret_types.is_empty() && !self.in_result_function() {
             self.diagnose(
                 span,
                 "`try` works only inside a function that returns Result; it returns the Err from that function",
@@ -630,11 +775,33 @@ impl<'s> Desugar<'s> {
             other => self.render_to_string(other),
         };
         let temp = self.hoist_text(value, anchor);
-        let returned = self.any_cast(&temp);
-        self.hoist_stmt(
-            format!("if {temp}.tag == \"Err\" then return {returned} end"),
-            anchor,
-        );
+
+        match target {
+            // Inside a `try do` block the Err leaves through the block's
+            // `fail`. A `return` there would decide the closure's value
+            // type instead: Luau reads that off the first `return` and
+            // checks the rest against it.
+            Some(t) => {
+                let payload = if t.exact {
+                    format!("{temp}._1")
+                } else {
+                    self.any_cast(&format!("{temp}._1"))
+                };
+                let fail = &t.fail;
+                self.hoist_stmt(
+                    format!("if {temp}.tag == \"Err\" then {fail}({payload}, {temp}.trace) end"),
+                    anchor,
+                );
+            }
+
+            None => {
+                let returned = self.any_cast(&temp);
+                self.hoist_stmt(
+                    format!("if {temp}.tag == \"Err\" then return {returned} end"),
+                    anchor,
+                );
+            }
+        }
 
         // `_1` is `T | E` to the checker; `unwrap` is `T`. The ship
         // artifact reads the field, since the tag was just checked.

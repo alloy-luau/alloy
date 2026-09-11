@@ -76,6 +76,41 @@ describe("Result", function()
 		expect(tostring(caught._1)).toContain("kaboom")
 		expect(type(caught.trace)).toBe("string")
 	end)
+
+	it("try_block answers with the Err its fail raises", function()
+		local raised = alloy.try_block(function(fail)
+			fail("left early", "a trace")
+
+			return 1
+		end)
+		expect(raised:is_err()).toBe(true)
+		expect(raised._1).toBe("left early")
+		expect(raised.trace).toBe("a trace")
+	end)
+
+	it("a fail leaves its own block, not the block around it", function()
+		local outer = alloy.try_block(function(_fail)
+			local inner = alloy.try_block(function(fail2)
+				fail2("inner", nil)
+
+				return 1
+			end)
+
+			return inner:is_err()
+		end)
+		expect(outer:is_ok()).toBe(true)
+		expect(outer._1).toBe(true)
+	end)
+
+	it("a throw a fail did not raise still reads as a throw", function()
+		local caught = alloy.try_block(function(_fail)
+			error({ err = "a plain table", trace = "not the escape" })
+		end)
+		expect(caught:is_err()).toBe(true)
+		expect(type(caught._1)).toBe("table")
+		expect(caught._1.err).toBe("a plain table")
+		expect(tostring(caught.trace)).toContain("table")
+	end)
 end)
 
 return nil

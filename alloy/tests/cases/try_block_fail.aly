@@ -1,0 +1,65 @@
+-- A `try` inside a `try do` block leaves the block through the block's
+-- `fail`, so the block's own `return` decides the value type.
+local function parse(s: string): Result<number, string>
+    return Ok(1)
+end
+
+local function code(s: string): Result<string, number>
+    return Ok("x")
+end
+
+local plain = try do return 1 end
+
+local through = try do return parse("7") end
+
+local one = try do
+    local v = try parse("1")
+    return v + 1
+end
+
+-- Two `try`s of one error type keep it; the payload passes as written.
+local same = try do
+    local a = try parse("1")
+    local b = try parse("2")
+    return a + b
+end
+
+-- Two error types this file can name as different pass `any`, so the
+-- error type stays open instead of reporting the second one.
+local mixed = try do
+    local a = try parse("1")
+    local b = try code("2")
+    return a + #b
+end
+
+-- A block inside a block gets a `fail` of its own.
+local nested = try do
+    local inner = try do
+        local v = try parse("3")
+        return v * 2
+    end
+    return inner:unwrap_or(0)
+end
+
+-- `return Err(e)` is the block failing with `e`, which is what `fail`
+-- says. A `return` of it would decide the closure's value type.
+local guarded = try do
+    local v = try parse("1")
+    if v > 10 then
+        return Err("too big")
+    end
+    return v
+end
+
+-- A `try` inside a function inside a block still returns from the
+-- function.
+local function reader(): Result<number, string>
+    local v = try parse("4")
+    return Ok(v)
+end
+
+local outer = try do
+    return reader()
+end
+
+print(plain, through, one, same, mixed, nested, guarded, outer)

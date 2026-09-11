@@ -92,8 +92,8 @@ export type ResultMethods<T, E> = {
 	read unwrap: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T,
 	read expect: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, message: string) -> T,
 	read unwrap_or: <D>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, default: D) -> T | D,
-	read map: <U>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (T) -> U) -> Result2<U, E>,
-	read map_err: <F>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> F) -> Result2<T, F>,
+	read map: <U>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (T) -> U) -> Result2<U, any>,
+	read map_err: <F>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> F) -> Result2<any, F>,
 	read is_ok: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> boolean,
 	read is_err: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> boolean,
 	read ok: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T?,
@@ -105,14 +105,29 @@ export type ResultMethods<T, E> = {
 export type ResultOk<T, E> = { tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } & ResultMethods<T, E>
 export type ResultErr<T, E> = { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E } & ResultMethods<T, E>
 export type Result<T, E> = ResultOk<T, E> | ResultErr<T, E>
--- `Result2` is one table, not a union of two. A member read off a union
--- is a union of two identical functions, and a callback's parameter
--- never solves through one. A mapped Result narrows no further, so the
--- tag carries both cases and the data half reads back as `Result<T, E>`.
+-- `Result2` puts the two tags in a union and intersects the methods
+-- over the pair. The union is what lets a mapped Result fit a declared
+-- `Result<T, E>`, which `return r:map(f)` asks for: a single table is
+-- the subtype of neither tag. The methods sit outside the union, so a
+-- member read is one function and a callback's parameter still solves;
+-- a union of two identical functions leaves it free.
+--
+-- `map` answers `Result2<U, any>` and `map_err` answers `Result2<any,
+-- F>`, so the shape a method returns names no argument of the shape it
+-- is read from. Luau compares `ResultMethods<T, E>` against another
+-- copy member by member, and a return that carried `E` would make that
+-- walk open `Result2` again and fail on a `T` or an `E` the two copies
+-- reached by different routes. The side a map leaves alone reads `any`
+-- from there on.
+--
+-- `unwrap_or` answers `any`. Luau matches no generic function against
+-- another, however the two are written, unless the one being checked
+-- answers `any`; a `T | D` there is what stops the whole shape from
+-- fitting `Result<T, E>`.
 export type ResultMethods2<T, E> = {
 	read unwrap: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
 	read expect: (self: { read tag: "Ok" | "Err", read _1: T | E }, message: string) -> T,
-	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> T | D,
+	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> any,
 	read map: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> U) -> any,
 	read map_err: <F>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> F) -> any,
 	read is_ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
@@ -120,7 +135,7 @@ export type ResultMethods2<T, E> = {
 	read ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T?,
 }
 
-export type Result2<T, E> = { tag: "Ok" | "Err", read _1: T | E, read trace: string?, read __ok: T, read __err: E } & ResultMethods2<T, E>
+export type Result2<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods2<T, E>
 
 local Result = {}
 Result.__index = Result
@@ -206,30 +221,142 @@ alloy.Result = Result
 alloy.Ok = Ok
 alloy.Err = Err
 
+-- `__ok` or `__err` off a Result shape. Result is a union of the two
+-- tags, and each tag is a table intersected with the methods, so the
+-- walk goes through both; the two tags carry the same pair, so the
+-- first branch that holds the member answers. A type that is no Result
+-- holds neither and gives nil.
+type function __try_member(T, name)
+	local want = name:value()
+	local shape: any = T
+
+	if shape:is("union") or shape:is("intersection") then
+		for _, part in shape:components() do
+			local found = __try_member(part, name)
+
+			if found ~= nil then
+				return found
+			end
+		end
+
+		return nil
+	end
+
+	if shape:is("table") then
+		for key, prop in shape:properties() do
+			local k: any = key
+			local p: any = prop
+
+			if k:is("singleton") and k:value() == want then
+				return p.read or p.write
+			end
+		end
+	end
+
+	return nil
+end
+
+-- The value type of a `try do` block, from the type its closure gives
+-- back: a Result passes its payload through, and a plain value is the
+-- value. A block that returns nothing leaves the type free, and `any`
+-- is what fits then, since Result is invariant in both arguments.
+type function __try_ok(T)
+	local found = __try_member(T, types.singleton("__ok"))
+
+	if found ~= nil then
+		return found
+	end
+
+	local value: any = T
+
+	if value:is("unknown") or value:is("never") then
+		return types.any
+	end
+
+	return T
+end
+
+-- The error type of a `try do` block: the error of the Result the block
+-- gives back, the type of every `fail` the block raises, or both.
+-- A block that names neither can still fail, by a throw the `xpcall`
+-- catches, and a throw carries any value: `any` is the answer there,
+-- and it is also the one type that fits an annotation of any error,
+-- since Result is invariant.
+type function __try_err(T, E)
+	local found = __try_member(T, types.singleton("__err"))
+	local raised: any = E
+
+	if raised:is("unknown") or raised:is("never") then
+		raised = nil
+	end
+
+	if found ~= nil and raised ~= nil then
+		local a: any = found
+		local b: any = raised
+
+		if a:is("any") or b:is("any") then
+			return types.any
+		end
+
+		return types.unionof(found, raised)
+	end
+
+	if found ~= nil then
+		return found
+	end
+
+	if raised ~= nil then
+		return raised
+	end
+
+	return types.any
+end
+
+-- The escape a `try` inside a `try do` block raises. `try_block` knows
+-- this table and answers with that Err; nothing else can build one, so
+-- no other throw is read as one.
+local TryFail = {}
+
+local function raise(err: any, trace: string?)
+	error(setmetatable({ err = err, trace = trace }, TryFail), 0)
+end
+
 --- `try do ... end`: the block's value as a Result. A plain value becomes
 --- Ok, a Result passes through as is, and a throw becomes Err with the
 --- traceback from the throw site.
 ---
---- The parameter reads `() -> (T | Result<T, E>)` because a `try` inside
---- the block returns the Err from the closure: the block gives back
---- either the value or a Result of it.
+--- The closure takes the block's `fail`, which a `try` inside the block
+--- calls on Err. The call carries the error type, so `E` solves from
+--- what the block can fail with; the call leaves the block, so the
+--- block's own `return` alone decides `T`. Luau reads a closure's
+--- return type off its first `return` and checks the rest against it,
+--- so an Err returned there would take the place of the value.
 ---
---- The answer reads `Result<T, any>`, not `Result<T, E>`. A block that
---- never builds an Err leaves `E` free, and Luau then solves it as
---- `never` or `unknown` and reports correct code. The value type `T` is
---- the one that catches a mistake here, so `E` stays open.
-function alloy.try_block<T, E>(f: () -> (T | Result<T, E>)): Result<T, any>
-	local packed = table.pack(xpcall(f, function(e)
+--- The return type reads `...T` so a block that returns nothing still
+--- solves; `T` is free then, and `__try_ok` answers `any`.
+function alloy.try_block<T, E>(
+	f: (fail: (E, string?) -> never) -> ...T
+): Result<__try_ok<T>, __try_err<T, E>>
+	local packed = table.pack(xpcall(f :: any, function(e)
+		if type(e) == "table" and getmetatable(e) == TryFail then
+			return e
+		end
+
 		return { err = e, trace = debug.traceback(tostring(e), 2) }
-	end))
+	end, raise))
+
 	if not packed[1] then
 		local failure = packed[2] :: any
+
 		return Err(failure.err, failure.trace)
 	end
+
 	local value = packed[2]
+
 	if type(value) == "table" and getmetatable(value) == Result then
 		return value :: any
 	end
+
 	return Ok(value :: any)
 end
 

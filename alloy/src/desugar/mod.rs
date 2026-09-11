@@ -399,6 +399,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         attr_decls: HashMap::new(),
         imported_names: HashSet::new(),
         ret_types: Vec::new(),
+        try_targets: Vec::new(),
         result_aliases: HashSet::new(),
         fn_ret_types: HashMap::new(),
         binding_types: HashMap::new(),
@@ -869,6 +870,11 @@ struct Desugar<'s> {
     /// innermost last. `try` reads it: it compiles only inside a function
     /// that returns a Result.
     ret_types: Vec<Option<String>>,
+    /// The return target of each nesting under render, innermost last:
+    /// the `try do` block that owns it, or `None` for a function. `try`
+    /// reads the last one to pick between the block's `fail` and a
+    /// `return` from the function.
+    try_targets: Vec<Option<TryTarget>>,
     /// Type aliases the file declares whose value is a `Result`, so a
     /// function that returns one still takes `try`.
     result_aliases: HashSet<String>,
@@ -1185,6 +1191,19 @@ fn luau_string(text: &str) -> String {
 }
 
 /// A child of a node, in source order.
+/// One `try do` block under render.
+#[derive(Clone)]
+pub(crate) struct TryTarget {
+    /// The name the emit gives the block's `fail`.
+    fail: String,
+    /// Whether a `fail` call may pass its payload with the payload's own
+    /// type. Luau reads the type of an unannotated parameter off the
+    /// first call, so two error sources it cannot prove equal would pin
+    /// `E` to the first and report the second. Those pass `any`, which
+    /// leaves `E` open the way it was before.
+    exact: bool,
+}
+
 pub(crate) enum Child<'a> {
     Expr(&'a Expr),
     Block(&'a Block),
@@ -2575,5 +2594,68 @@ mod tests {
         for i in 0..u32::try_from("Alias.area".len()).unwrap() {
             assert_eq!(out.map.to_source(at + i), want, "offset {i}");
         }
+    }
+
+    #[test]
+    fn a_try_inside_a_try_block_calls_the_block_fail() {
+        let src = "local function parse(s: string): Result<number, string>\n    return Ok(1)\nend\nlocal r = try do\n    local v = try parse(\"1\")\n    return v + 1\nend\nprint(r)\n";
+        let out = crate::compile_with(src, &EmitOptions::default()).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("try_block(function(__fail)"),
+            "{}",
+            out.ship
+        );
+        assert!(out.ship.contains("__fail(_1._1, _1.trace)"), "{}", out.ship);
+        // The Err leaves through `fail`, never through a `return`, which
+        // would decide the closure's value type instead.
+        assert!(!out.ship.contains("then return _1 end"), "{}", out.ship);
+    }
+
+    #[test]
+    fn a_try_block_inside_a_plain_function_needs_no_result_return_type() {
+        let src = "local function parse(s: string): Result<number, string>\n    return Ok(1)\nend\nlocal function count(): number\n    local r = try do\n        local v = try parse(\"1\")\n        return v\n    end\n    return r:unwrap_or(0)\nend\nprint(count)\n";
+        let out = crate::compile_with(src, &EmitOptions::default()).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    }
+
+    #[test]
+    fn two_error_types_a_file_can_name_as_different_pass_any() {
+        let same = "local function parse(s: string): Result<number, string>\n    return Ok(1)\nend\nlocal r = try do\n    local a = try parse(\"1\")\n    local b = try parse(\"2\")\n    return a + b\nend\nprint(r)\n";
+        let out = crate::compile_with(same, &EmitOptions::default()).unwrap();
+
+        assert!(!out.ship.contains(":: any"), "{}", out.ship);
+
+        let mixed = "local function parse(s: string): Result<number, string>\n    return Ok(1)\nend\nlocal function code(s: string): Result<string, number>\n    return Ok(\"x\")\nend\nlocal r = try do\n    local a = try parse(\"1\")\n    local b = try code(\"2\")\n    return a + #b\nend\nprint(r)\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(mixed, &options).unwrap();
+
+        // Luau reads an unannotated parameter's type off the first call,
+        // so a second error type would report; `any` leaves `E` open.
+        assert_eq!(
+            out.check.matches("(_1._1 :: any)").count(),
+            2,
+            "{}",
+            out.check
+        );
+    }
+
+    #[test]
+    fn a_block_inside_a_block_names_its_own_fail() {
+        let src = "local function parse(s: string): Result<number, string>\n    return Ok(1)\nend\nlocal r = try do\n    local inner = try do\n        local v = try parse(\"1\")\n        return v\n    end\n    return inner:unwrap_or(0)\nend\nprint(r)\n";
+        let out = crate::compile_with(src, &EmitOptions::default()).unwrap();
+
+        assert!(out.ship.contains("function(__fail)"), "{}", out.ship);
+        assert!(out.ship.contains("function(__fail2)"), "{}", out.ship);
+        assert!(
+            out.ship.contains("__fail2(_1._1, _1.trace)"),
+            "{}",
+            out.ship
+        );
     }
 }

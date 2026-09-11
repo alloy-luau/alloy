@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use alloy_syntax::ast::{
     After, Assign, Block, CallArgs, Cond, Destructure, Expr, Function, FunctionBody, GenericFor,
-    ImportKind, IndexKey, Local, Pattern, Stmt, TableField, TokSpan,
+    ImportKind, IndexKey, Local, Pattern, Return, Stmt, TableField, TokSpan,
 };
 
 use crate::render::Renderer;
@@ -222,7 +222,9 @@ impl<'s> Desugar<'s> {
         self.declare_params(body);
         self.ret_types
             .push(body.ret_type.map(|t| self.text_of(t).trim().to_string()));
+        self.try_targets.push(None);
         self.block(&body.block);
+        self.try_targets.pop();
         self.ret_types.pop();
         self.scopes.pop();
         self.barrier = saved;
@@ -237,6 +239,68 @@ impl<'s> Desugar<'s> {
         let head = ty.split(['<', '?']).next().unwrap_or(ty).trim();
 
         head == "Result" || self.result_aliases.contains(head)
+    }
+
+    /// The arguments of a `return Err(...)` that a `try do` block owns,
+    /// where the call sits on one line with its first argument. A head
+    /// that wraps keeps the plain `return`: the rewrite replaces that
+    /// head, and the line count has to hold.
+    fn block_err_return<'a>(&self, r: &'a Return) -> Option<&'a [Expr]> {
+        self.try_targets.last()?.as_ref()?;
+
+        let list = self.err_call_args(&r.values)?;
+        let head = self.byte_start(r.span) as usize;
+        let first = self.byte_start(list[0].span()) as usize;
+
+        (!self.src[head..first].contains('\n')).then_some(list)
+    }
+
+    /// Writes `fail(e, nil)` where the source wrote `return Err(e)`.
+    /// Everything from the first argument on copies, so the lines and
+    /// the map hold.
+    fn block_err_return_stmt(&mut self, r: &Return) {
+        let Some(list) = self.block_err_return(r) else {
+            return;
+        };
+        let Some(target) = self.try_targets.last().cloned().flatten() else {
+            return;
+        };
+        let (open, close) = if target.exact || !self.options.check {
+            ("", "")
+        } else {
+            ("(", " :: any)")
+        };
+        let fail = target.fail;
+        let anchor = self.byte_start(r.span);
+        let first = &list[0];
+        let second = list.get(1);
+        let after_first = self.byte_end(first.span());
+        let end = self.byte_end(r.span);
+        self.generate(anchor, &format!("{fail}({open}"));
+        self.expr(first);
+
+        match second {
+            Some(e) => {
+                let start = self.byte_start(e.span());
+                self.generate(after_first, close);
+                self.copy(after_first, start);
+                self.expr(e);
+                self.copy(self.byte_end(e.span()), end);
+            }
+
+            None => {
+                // The trace slot carries a type, since Luau reads the
+                // whole parameter list off one call: a bare `nil` here
+                // would pin it and report the `try` that passes a trace.
+                let trace = if self.options.check {
+                    "(nil :: string?)"
+                } else {
+                    "nil"
+                };
+                self.generate(after_first, &format!("{close}, {trace}"));
+                self.copy(after_first, end);
+            }
+        }
     }
 
     pub(crate) fn stmt(&mut self, stmt: &Stmt) {
@@ -875,6 +939,14 @@ impl<'s> Desugar<'s> {
             }
 
             Stmt::Local(l) if local_needs_rewrite(l) => self.local_stmt(l),
+
+            // `return Err(e)` inside a `try do` block: the block fails
+            // with `e`, which is what the block's `fail` says. A
+            // `return` of it would decide the closure's value type
+            // instead, and Luau then reports every other `return`.
+            Stmt::Return(r) if self.block_err_return(r).is_some() => {
+                self.block_err_return_stmt(r);
+            }
 
             // `return HashMap.new()` under a declared `HashMap<K, V>`
             // return type: the same rule as the annotated local below.

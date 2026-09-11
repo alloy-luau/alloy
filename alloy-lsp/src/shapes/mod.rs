@@ -282,6 +282,102 @@ fn marks_a_member(text: &str) -> bool {
         })
 }
 
+/// Every backquoted type with an intersection of one repeated member
+/// collapsed to that member.
+///
+/// `Result2` reads as its two tag tables in a union, intersected with
+/// the methods outside it. When both sides of a comparison fold to the
+/// same text, the checker prints `(Result<T, E>) & Result<T, E>`, which
+/// says the same thing twice and reads as if the two differ.
+fn fold_intersection_dupes(text: &mut String) {
+    if !text.contains(" & ") {
+        return;
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+
+        out.push_str(&rest[..=open]);
+        out.push_str(&collapse_intersection(&after[..close]));
+        out.push('`');
+        rest = &after[close + 1..];
+    }
+
+    out.push_str(rest);
+    *text = out;
+}
+
+/// One member when every member of an intersection is the same type,
+/// whatever parentheses the checker wrapped them in. The text itself
+/// otherwise.
+fn collapse_intersection(text: &str) -> String {
+    let parts = split_intersection(text);
+
+    if parts.len() < 2 {
+        return text.to_string();
+    }
+
+    let bare = |p: &str| {
+        let p = p.trim();
+
+        match p.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+            // Only a whole group, never `(a) & (b)` read as one.
+            Some(inner) if split_intersection(inner).len() == 1 => inner.trim().to_string(),
+            _ => p.to_string(),
+        }
+    };
+
+    let first = bare(parts[0]);
+
+    match parts.iter().all(|p| bare(p) == first) {
+        true => first,
+        false => text.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod intersection_tests {
+    use super::collapse_intersection;
+
+    #[test]
+    fn one_repeated_member_collapses() {
+        assert_eq!(
+            collapse_intersection("(Result<string, any>) & Result<string, any>"),
+            "Result<string, any>"
+        );
+        assert_eq!(collapse_intersection("A & A"), "A");
+    }
+
+    #[test]
+    fn members_that_differ_stay() {
+        assert_eq!(collapse_intersection("A & B"), "A & B");
+        assert_eq!(
+            collapse_intersection("Saber & { hp: number }"),
+            "Saber & { hp: number }"
+        );
+    }
+
+    #[test]
+    fn a_lone_type_is_itself() {
+        assert_eq!(collapse_intersection("number"), "number");
+    }
+
+    #[test]
+    fn an_inner_ampersand_is_no_split() {
+        // The `&` sits inside the braces, so this is one member.
+        assert_eq!(
+            collapse_intersection("{ f: (A & B) -> () }"),
+            "{ f: (A & B) -> () }"
+        );
+    }
+}
+
 /// The members of an intersection at depth zero.
 fn split_intersection(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
@@ -528,6 +624,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     // `()` is no type argument; it reads as `Future<()>`.
     out = out.replace("Future<nil>", "Future<()>");
     fold_union_dupes(&mut out);
+    fold_intersection_dupes(&mut out);
     fold_array_parens(&mut out);
     // `Array<number[] | number[]>` is one array once the union folds.
     fold_array_alias(&mut out);

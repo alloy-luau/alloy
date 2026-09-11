@@ -38,8 +38,10 @@ pub const SELF_TEXT: &str = "\
 Usage: alloy self <command> [--dir <path>]
 
 Commands:
-  install         Copy alloy and alloy-lsp to ~/.alloy/bin
-  update          Fetch the latest release and install its binaries
+  install         Copy alloy and alloy-lsp to ~/.alloy/bin; what is not
+                  beside this binary comes from the GitHub release
+  update          Fetch a release and install its binaries: the latest,
+                  or the one --version names
   uninstall       Remove the binaries from ~/.alloy/bin
   code            Write ~/.alloy/alloy.schema.json and point VS Code and Zed at it
   schema          Print the JSON Schema of alloy.toml

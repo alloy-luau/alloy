@@ -28,6 +28,7 @@ pub mod jsonc;
 pub mod lint;
 pub mod luau_config;
 pub mod modules;
+pub mod net;
 pub mod project;
 pub mod render;
 pub mod roblox_classes;

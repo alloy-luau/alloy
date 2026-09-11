@@ -1,0 +1,10 @@
+# GitHub highlights with the grammars Linguist carries, and Alloy is not
+# one of them yet. Luau is, and the two share their shape, so a file
+# reads well there: the words Alloy adds stay plain. The editor uses the
+# real grammar, in alloy-luau/extensions.
+*.aly linguist-language=Luau
+*.alx linguist-language=Luau
+
+# The golden cases are fixtures of the compiler's own tests. They read
+# as code, and they say nothing about what this crate is written in.
+alloy/tests/cases/** linguist-detectable=false

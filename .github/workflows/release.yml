@@ -1,6 +1,9 @@
-# Releases Alloy on a tag like v1.2.3: one zip per platform with both
-# binaries, a GitHub release that carries them, and the crates on
+# Releases Alloy on a tag like v1.2.3: two zips per platform, one per
+# binary, a GitHub release that carries them, and the crates on
 # crates.io. The job fails when the tag and the crate versions differ.
+#
+# Each zip holds its binary at the root, so `alloy self update` unpacks
+# it and finds the executable with no folder to strip.
 #
 # The crates.io publish needs the repository secret CARGO_REGISTRY_TOKEN,
 # an API token from https://crates.io/settings/tokens with publish scope.
@@ -69,20 +72,28 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          name="alloy-${{ needs.meta.outputs.version }}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/alloy" "target/${{ matrix.target }}/release/alloy-lsp" README.md "dist/$name/"
-          (cd dist && zip -qr "$name.zip" "$name")
-          rm -r "dist/$name"
+          version="${{ needs.meta.outputs.version }}"
+          target="${{ matrix.target }}"
+          bin="target/$target/release"
+          mkdir -p dist
+          # -j drops the paths, so each entry sits at the zip's root.
+          docs=(README.md)
+          if [ -f LICENSE ]; then docs+=(LICENSE); fi
+          zip -qj "dist/alloy-$version-$target.zip" "$bin/alloy" "${docs[@]}"
+          zip -qj "dist/alloy-lsp-$version-$target.zip" "$bin/alloy-lsp"
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "alloy-${{ needs.meta.outputs.version }}-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/alloy.exe", "target/${{ matrix.target }}/release/alloy-lsp.exe", "README.md" "dist/$name/"
-          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
-          Remove-Item -Recurse "dist/$name"
+          $version = "${{ needs.meta.outputs.version }}"
+          $target = "${{ matrix.target }}"
+          $bin = "target/$target/release"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          # Named files, not a folder, so each entry sits at the root.
+          $docs = @("README.md")
+          if (Test-Path LICENSE) { $docs += "LICENSE" }
+          Compress-Archive -Path (@("$bin/alloy.exe") + $docs) -DestinationPath "dist/alloy-$version-$target.zip"
+          Compress-Archive -Path "$bin/alloy-lsp.exe" -DestinationPath "dist/alloy-lsp-$version-$target.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -98,7 +109,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create the release
+      - name: Create the release, with every zip
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

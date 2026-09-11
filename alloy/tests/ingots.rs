@@ -219,3 +219,39 @@ fn a_missing_ingot_is_a_problem_not_a_panic() {
     assert_eq!(report.written.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A build fetches nothing: an ingot from a release that is not in the
+/// store is a report that names the command which installs it.
+#[test]
+fn a_missing_release_ingot_names_the_install_command() {
+    let root = std::env::temp_dir().join(format!("alloy-ingot-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    for (text, says) in [
+        (
+            "logger = { repo = \"someone/logger-ingot\" }",
+            "latest release",
+        ),
+        (
+            "logger = { repo = \"someone/logger-ingot\", version = \"1.2.0\" }",
+            "1.2.0",
+        ),
+    ] {
+        let config =
+            Config::parse(&format!("[ingots]\n{text}\n"), Path::new("alloy.toml")).unwrap();
+        let ingots = Ingots::load(&root, &config);
+        assert!(ingots.is_empty(), "nothing loads and nothing is fetched");
+
+        let problem = ingots.problems[0].to_string();
+        assert!(problem.contains("ingot `logger`"), "{problem}");
+        assert!(problem.contains("alloy ingot install logger"), "{problem}");
+        assert!(problem.contains(says), "{problem}");
+        assert!(
+            !alloy::ingot::fetch::store_root(&root).exists(),
+            "a build writes nothing to the store"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

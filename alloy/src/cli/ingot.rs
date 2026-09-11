@@ -1,10 +1,12 @@
-//! `alloy ingot <command>`: scaffold, inspect, and run one ingot without
-//! a project, so an author sees what the host sees.
+//! `alloy ingot <command>`: install the ingots a project declares, and
+//! scaffold, inspect, and run one without a project, so an author sees
+//! what the host sees.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use alloy::config::{Config, IngotSource};
+use alloy::ingot::fetch::{self, Outcome};
 use alloy::ingot::manifest::{self, Manifest};
 use alloy::ingot::{Hook, Ingots};
 
@@ -35,6 +37,10 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
             }
         },
 
+        Some("install") => install(args.get(1).map(String::as_str), false),
+
+        Some("update") => install(args.get(1).map(String::as_str), true),
+
         Some("run") => match (args.get(1), args.get(2)) {
             (Some(dir), Some(file)) => run_one(&dir_of(dir), Path::new(file), &args[3..]),
 
@@ -55,6 +61,115 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `alloy ingot install [name]` and `alloy ingot update [name]`.
+///
+/// The install fetches what the project declares and does not have.
+/// The update, `refresh`, asks each repository for its latest release
+/// again; a pinned version stays where it is and says so.
+fn install(only: Option<&str>, refresh: bool) -> ExitCode {
+    let p = Painter::for_stdout();
+    let word = if refresh { "update" } else { "install" };
+    let Some(config_path) = Config::find(Path::new(".")) else {
+        fail(&format!(
+            "`alloy ingot {word}` needs an alloy.toml; none is here or above"
+        ));
+
+        return ExitCode::FAILURE;
+    };
+    let config = match Config::load(&config_path) {
+        Ok(c) => c,
+
+        Err(e) => {
+            fail(&format!("{}: {e}", config_path.display()));
+
+            return ExitCode::FAILURE;
+        }
+    };
+    let root = config_path.parent().unwrap_or(Path::new("."));
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+
+    if let Some(name) = only
+        && !config.ingots.contains_key(name)
+    {
+        fail(&format!(
+            "{} declares no ingot `{name}`",
+            config_path.display()
+        ));
+
+        return ExitCode::FAILURE;
+    }
+
+    if config.ingots.is_empty() {
+        println!(
+            "{}",
+            p.note(&format!("{} declares no ingots", config_path.display()))
+        );
+
+        return ExitCode::SUCCESS;
+    }
+
+    let mut failed = false;
+
+    for (name, source) in &config.ingots {
+        if only.is_some_and(|want| want != name) {
+            continue;
+        }
+
+        let table = source.table();
+
+        match fetch::install(&root, name, &table, &fetch::GitHub, refresh) {
+            Ok(Outcome::Local) => println!(
+                "{}",
+                p.note(&format!(
+                    "{name} is a path in this project; nothing to fetch"
+                ))
+            ),
+
+            Ok(Outcome::Present(version)) => println!(
+                "{}",
+                p.note(&format!(
+                    "{name} {version} is installed{}",
+                    if refresh { " and is the latest" } else { "" }
+                ))
+            ),
+
+            Ok(Outcome::Pinned(version)) => println!(
+                "{}",
+                p.note(&format!(
+                    "{name} is pinned at {version}; the update leaves it. Set `version = \"^\"` to follow the latest release"
+                ))
+            ),
+
+            Ok(Outcome::Fetched(version)) => println!(
+                "{}",
+                p.ok(&format!(
+                    "{name} {version} → {}",
+                    fetch::store(&root, name, &version).display()
+                ))
+            ),
+
+            Err(e) => {
+                fail(&format!("ingot `{name}`: {e}"));
+                failed = true;
+            }
+        }
+    }
+
+    if failed {
+        return ExitCode::FAILURE;
+    }
+
+    println!(
+        "{}",
+        p.note(&format!(
+            "{} records what is installed",
+            fetch::lock_path(&root).display()
+        ))
+    );
+
+    ExitCode::SUCCESS
 }
 
 /// A Rust project that depends on `alloy-ingot`, with a manifest and a
@@ -199,15 +314,17 @@ fn dir_of(arg: &str) -> PathBuf {
     let root = config_path.parent().unwrap_or(Path::new("."));
 
     match config.ingots.get(arg) {
-        Some(alloy::config::IngotSource::Path(p)) => root.join(p),
+        Some(source) => {
+            let table = source.table();
 
-        Some(alloy::config::IngotSource::Table(t)) => match (&t.path, &t.repo, &t.version) {
-            (Some(p), _, _) => root.join(p),
+            match &table.path {
+                Some(p) => root.join(p),
 
-            (None, Some(_), Some(v)) => root.join(".alloy").join("ingots").join(arg).join(v),
-
-            _ => path,
-        },
+                // An installed ingot sits in the store, at the version
+                // the lock file names.
+                None => fetch::resolve(root, arg, &table).unwrap_or(path),
+            }
+        }
 
         None => path,
     }

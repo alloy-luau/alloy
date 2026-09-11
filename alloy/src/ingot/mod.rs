@@ -488,7 +488,9 @@ impl Ingot {
         let dir = match (&table.path, &table.repo) {
             (Some(p), _) => root.join(p),
 
-            (None, Some(_)) => fetch::ensure(root, name, &table)?,
+            // A build fetches nothing. `alloy ingot install` puts the
+            // release in the store and the lock file names it.
+            (None, Some(_)) => fetch::resolve(root, name, &table)?,
 
             (None, None) => return Err("names neither a path nor a repo".to_string()),
         };

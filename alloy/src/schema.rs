@@ -150,7 +150,7 @@ fn mount_value() -> Value {
 
 fn ingot_value() -> Value {
     json!({
-        "description": "Where the ingot comes from: a path relative to this file that holds `ingot.toml` and the binary, or a GitHub release pinned by version.",
+        "description": "Where the ingot comes from: a path relative to this file that holds `ingot.toml` and the binary, or a GitHub release. `alloy ingot install` fetches it; a build never does.",
         "oneOf": [
             { "type": "string", "description": "A directory relative to this file." },
             {
@@ -159,7 +159,7 @@ fn ingot_value() -> Value {
                 "properties": {
                     "path": { "type": "string", "description": "A directory relative to this file." },
                     "repo": { "type": "string", "description": "`owner/repo` on GitHub; the release `v<version>` holds the zip." },
-                    "version": { "type": "string", "description": "The release version to pin." },
+                    "version": { "type": "string", "description": "The release to install. `^`, the default, is the latest release at install time, and `.alloy/ingots.lock` records what it resolved to. A version, `1.2.3` or `v1.2.3`, pins that release, and `alloy ingot update` leaves it alone.", "default": "^" },
                     "asset": { "type": "string", "description": "The asset name in the release. Unset means `<name>-ingot-<target>.zip`, then `<name>-ingot.zip`." },
                     "order": { "type": "integer", "description": "The pass the ingot's transform runs in, over the manifest's word. A lower number runs first." },
                     "lints": {
@@ -170,7 +170,7 @@ fn ingot_value() -> Value {
                 }
             }
         ],
-        "examples": ["ingots/tailwind", { "repo": "alloy-luau/tailwind-ingot", "version": "0.1.0" }]
+        "examples": ["ingots/tailwind", { "repo": "alloy-luau/tailwind-ingot" }, { "repo": "alloy-luau/tailwind-ingot", "version": "0.1.0" }]
     })
 }
 
@@ -655,7 +655,7 @@ pub const TABLES: &[Table] = &[
     },
     Table {
         name: "ingots",
-        doc: "The extensions of the project, name to source. An ingot is an executable beside an `ingot.toml`; it edits source before the desugar, lints, formats, and answers the editor. `alloy doc ingots` explains them.",
+        doc: "The extensions of the project, name to source. An ingot is an executable beside an `ingot.toml`; it edits source before the desugar, lints, formats, and answers the editor. A path is read where it is; a repo is fetched by `alloy ingot install` into `.alloy/ingots` and recorded in `.alloy/ingots.lock`. `alloy doc ingots` explains them.",
         keys: &[],
         open: Some(ingot_value),
     },

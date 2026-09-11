@@ -63,6 +63,10 @@ is the guest side.
 
 Commands:
   new <name>      Write a Rust project for an ingot in ./<name>
+  install [name]  Fetch the ingots the project declares and does not
+                  have; with a name, that one
+  update [name]   Fetch the latest release of every ingot whose version
+                  is \"^\"; a pinned version stays where it is
   info <dir>      Print what the ingot in <dir> declares
   run <dir> <file> [options]
                   Push one file through the ingot and print the result

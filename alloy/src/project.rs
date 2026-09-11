@@ -23,6 +23,11 @@ use serde_json::{Map, Value, json};
 use crate::config::Config;
 use crate::rojo::{Mounted, ProjectFile};
 
+/// What `.alloy/.gitignore` holds: the files under `.alloy` that no
+/// repository wants. The ingot store is build output; the lock file
+/// beside it is not, so it stays in version control.
+pub const ALLOY_DIR_IGNORE: &str = "sourcemap.json\ningots/\n";
+
 /// The DataModel path of a mount, split: `@game/A/B` is `["A", "B"]`.
 /// `None` when the string does not start with `@game/`.
 pub fn segments(mount: &str) -> Option<Vec<String>> {
@@ -663,7 +668,7 @@ pub fn files(tree: &Tree, config: &Config, root: &Path) -> std::io::Result<Vec<(
 
     out.push((
         PathBuf::from(".alloy/.gitignore"),
-        "sourcemap.json\n".to_string(),
+        ALLOY_DIR_IGNORE.to_string(),
     ));
 
     // The sourcemap sits at the root under the name Rojo writes and

@@ -194,6 +194,10 @@ pub struct IngotTable {
     pub path: Option<String>,
     /// `owner/repo` on GitHub; the release `v<version>` holds the zip.
     pub repo: Option<String>,
+    /// The release to install. `^`, the default, is the latest release
+    /// at install time, and `.alloy/ingots.lock` records what it
+    /// resolved to. A version, `1.2.3` or `v1.2.3`, pins that release:
+    /// `alloy ingot update` leaves it where it is.
     pub version: Option<String>,
     /// The asset name in the release. Unset means
     /// `<name>-ingot-<target>.zip`, then `<name>-ingot.zip`.

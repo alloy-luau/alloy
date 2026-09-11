@@ -61,14 +61,16 @@ print(to_data(new Point { x = 1, y = 2 }))
 /// type keeps that type.
 const RACED: &str = r#"local ready = Future.resolve(42)
 local timer = Future.delay(1)
-local first: number? = await Future.race([ ready, timer ])
-
 local a = Future.resolve("a")
 local b = Future.resolve("b")
-local same: string = await Future.race([ a, b ])
-local both: string[] = await Future.all([ a, b ])
 
-print(first, same, both)
+async do
+    local first: number? = await Future.race([ ready, timer ])
+    local same: string = await Future.race([ a, b ])
+    local both: string[] = await Future.all([ a, b ])
+
+    print(first, same, both)
+end
 "#;
 
 /// A Roblox service as an import lowers to `game:GetService`, so the

@@ -24,11 +24,11 @@ local function load(id: number): __alloy.Future<Profile> return __alloy.future(f
 	local raw = __alloy.await(fetch(id))
 	return raw
 end) end
-local function g(): __alloy.Result<number, string>
+local function g(): __alloy.Future<__alloy.Result<number, string>> return __alloy.future(function(): __alloy.Result<number, string>
 	local _1 = parse("1") if _1.tag == "Err" then return _1 end local n = _1._1
 	_1 = __alloy.try_await(load(2)) if _1.tag == "Err" then return _1 end local m = _1._1
 	return __alloy.Ok(n + m)
-end
+end) end
 local fut = __alloy.future(function() return 1 end)
 local res = __alloy.try_block(function() return 2 end)
 local merged = __alloy.spread( base, { x = 1 }, other )

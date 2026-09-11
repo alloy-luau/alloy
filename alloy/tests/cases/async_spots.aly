@@ -1,0 +1,37 @@
+-- Where an `await` may stand: the forms that own their thread.
+local async function rank(n: number): number
+    return n
+end
+
+local async function best(xs: number[]): number
+    local top = await rank(xs[1])
+
+    local pick = async function(n: number): number
+        return await rank(n)
+    end
+
+    return await pick(top)
+end
+
+-- An `async do` block stands alone as a statement.
+async do
+    print(await rank(1))
+end
+
+-- And inside a plain function, where it is the fix for a bare `await`.
+local function warm()
+    async do
+        print(await rank(2))
+    end
+end
+
+-- `after` runs its block on the timer's own thread.
+after 1 do
+    print(await rank(3))
+end
+
+local held = async do
+    return await rank(4)
+end
+
+print(best, warm, held)

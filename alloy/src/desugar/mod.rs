@@ -27,6 +27,7 @@ use alloy_syntax::lexer::Tok;
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 
 mod attributes;
+mod awaits;
 mod enums;
 mod expressions;
 mod macros;
@@ -502,6 +503,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.scan_plain_tables(&chunk.block);
     d.scan_reduce_inserts(&chunk.block);
     d.scan_static_checks(&chunk.block);
+    d.check_await_spots(&chunk.block);
 
     // Leading trivia, the block, trailing trivia: the printer's shape. The
     // std require, when the file needs one, goes on the first line after

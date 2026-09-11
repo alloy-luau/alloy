@@ -24,7 +24,7 @@ local async function load(id: number) -> Profile
 	local raw = await fetch(id)
 	return raw
 end
-local function g(): Result<number, string>
+local async function g(): Result<number, string>
 	local n = try parse("1")
 	local m = try await load(2)
 	return Ok(n + m)

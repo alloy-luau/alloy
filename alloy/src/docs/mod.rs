@@ -40,6 +40,8 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["remote"], "WireType"),
         (&["directive"], "DirectiveError"),
         (&["result"], "ResultError"),
+        // After `result`, so `try await` on a Result keeps that kind.
+        (&["await", "async"], "AsyncError"),
         (&["a `const`"], "ConstError"),
         (&["@test", "test "], "TestError"),
         (&["@cfg"], "AttributeError"),

@@ -948,8 +948,9 @@ pub fn bound_names(src: &str) -> HashSet<String> {
                 }
             }
 
+            // A namespace holds components: `<Scope.card/>` names one.
             "struct" | "enum" | "trait" | "interface" | "remote" | "attribute" | "macro"
-            | "class" => {
+            | "class" | "namespace" => {
                 if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
                     names.insert(text(t).to_string());
                 }
@@ -993,10 +994,10 @@ mod tests {
     #[test]
     fn the_scan_sees_alloy_bindings() {
         let names = bound_names(
-            "import * as React from \"x\"\nimport { a as b, type T } from \"y\"\nconst Row = 1\nlocal { w = h } = t\nstruct Card as end\nlocal function f() end\n",
+            "import * as React from \"x\"\nimport { a as b, type T } from \"y\"\nconst Row = 1\nlocal { w = h } = t\nstruct Card as end\nlocal function f() end\nnamespace Scope as end\n",
         );
 
-        for n in ["React", "b", "Row", "h", "Card", "f"] {
+        for n in ["React", "b", "Row", "h", "Card", "f", "Scope"] {
             assert!(names.contains(n), "{n} missing from {names:?}");
         }
 

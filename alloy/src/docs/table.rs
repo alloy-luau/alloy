@@ -99,7 +99,7 @@ pub const TABLE: &[(&str, &str)] = &[
     // Declarations
     (
         "struct",
-        "```alloy\nstruct Name as\n    field: T\nend\n```\nA record with fields. `impl Name` adds methods. `Name { x = 1 }` is the raw constructor and `new Name(...)` calls `Name.new`. `@derive(Eq, Debug, Clone)` on the line before generates methods. A field or a method marked `private` belongs to the impl alone.\n\nEmits a table type plus a metatable with `__index` and a `__tostring`, so `print(v)` and `` `{v}` `` show `Name { x = 1, y = 2 }`. A `to_string` in the impl, an `impl Display`, replaces the default printer.",
+        "```alloy\nstruct Name as\n    field: T\nend\n```\nA record with fields. `impl Name` adds methods. `new Name { x = 1 }` fills the fields and `new Name(...)` calls `Name.new`; a construction always takes `new`. `@derive(Eq, Debug, Clone)` on the line before generates methods. A field or a method marked `private` belongs to the impl alone.\n\nEmits a table type plus a metatable with `__index` and a `__tostring`, so `print(v)` and `` `{v}` `` show `Name { x = 1, y = 2 }`. A `to_string` in the impl, an `impl Display`, replaces the default printer.",
     ),
     (
         "impl",
@@ -168,11 +168,11 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "async",
-        "```alloy\nasync function f() ... end\nlocal job = async do ... end\nasync do ... end\n```\nReturns a Future. The body runs on `task.spawn` under `xpcall`, and the Future memoizes the result. `async function f(): T` is `Future<T>`; without a return type, a body that returns a value infers `T`, and one that returns nothing is `Future<()>`.\n\n`async do ... end` is an expression whose value is that Future, so a binding can `await` it later. It also stands alone as a statement, wherever a `do` block stands: the block runs for its effects and the Future is dropped.",
+        "```alloy\nasync function f() ... end\nlocal job = async do ... end\nasync do ... end\n```\nReturns a Future. The body runs on `task.spawn` under `xpcall`, and the Future memoizes the result. `async function f(): T` is `Future<T>`; without a return type, a body that returns a value infers `T`, and one that returns nothing is `Future<()>`.\n\n`async do ... end` is an expression whose value is that Future, so a binding can `await` it later. It also stands alone as a statement, wherever a `do` block stands: the block runs for its effects and the Future is dropped.\n\nAn `async function` body and an `async do` block are the two async contexts an `await` needs; `alloy doc await` carries the rule.",
     ),
     (
         "await",
-        "```alloy\nawait expr\n```\nYields until the Future settles, then returns its value or rethrows its error. Accepts a Future or any value with `andThen`; the std spells the operand's type `Awaitable<T>`, which is `Future<T>`.\n\n`try await f()` turns a rejection into an Err. When `f` is an async function declared to return a `Result`, the Result it settles with is the value, not an Ok around it.",
+        "```alloy\nawait expr\n```\nYields until the Future settles, then returns its value or rethrows its error. Accepts a Future or any value with `andThen`; the std spells the operand's type `Awaitable<T>`, which is `Future<T>`.\n\n`await` yields the running thread, so it needs a thread the runtime owns: the body of an `async function`, an `async do ... end` block, an `after` block, or the top level of a `*.server.aly` or `*.client.aly` script, which Roblox runs on a thread of its own. Anywhere else it reports. A module's top level yields inside `require`; a plain function yields into whatever called it, and a caller that is C code, such as a `table.sort` comparator, kills the thread on Roblox. A function boundary resets this: an ordinary `function` inside an `async function` is not an async context, though an `async function` expression is.\n\n`try await f()` turns a rejection into an Err and follows the same rule. When `f` is an async function declared to return a `Result`, the Result it settles with is the value, not an Ok around it.",
     ),
     (
         "try",
@@ -425,7 +425,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Future",
-        "```alloy\nasync function load(id: number): Profile\n    return await fetch(id)\nend\nlocal profiles = await Future.all([load(1), load(2)])\nlocal first = await Future.race([load(1), Future.delay(5)])\n```\nA memoized task, from the std: it runs once, settles once, and every `await` after that reads the same value. An `async function` returns one and its body runs on `task.spawn` under `xpcall`; `await` yields until it settles, then returns the value or rethrows; `try await` returns the `Err` from the enclosing function instead of rethrowing.\n\n`race` and `any` read the value type off each Future in the list, so a mixed list gives the union: `Future<number>` beside `Future<nil>` yields `Future<number?>`. An `async function` without a return type and without a `return` value is `Future<()>`.",
+        "```alloy\nasync function load(id: number): Profile\n    return await fetch(id)\nend\nasync do\n    local profiles = await Future.all([load(1), load(2)])\n    local first = await Future.race([load(1), Future.delay(5)])\n    print(profiles, first)\nend\n```\nA memoized task, from the std: it runs once, settles once, and every `await` after that reads the same value. An `async function` returns one and its body runs on `task.spawn` under `xpcall`; `await` yields until it settles, then returns the value or rethrows; `try await` returns the `Err` from the enclosing function instead of rethrowing. Both need an async context: see `alloy doc await`.\n\n`race` and `any` read the value type off each Future in the list, so a mixed list gives the union: `Future<number>` beside `Future<nil>` yields `Future<number?>`. An `async function` without a return type and without a `return` value is `Future<()>`.",
     ),
     (
         "Result",

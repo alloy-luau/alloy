@@ -151,6 +151,9 @@ fn page(topic: &str, color: bool) -> Option<String> {
 
     if let Some(l) = LINTS.iter().find(|l| l.name == topic) {
         let level = match (l.default, l.group) {
+            // `print` is ordinary in Luau, so this one sits out of what
+            // `strict` raises.
+            _ if l.name == "print_debug" => "off until `[lint.rules]` names it",
             (Level::Allow, Group::Pedantic) => {
                 "warn, from `[lint] strict = true`; off when the project turns strict off"
             }

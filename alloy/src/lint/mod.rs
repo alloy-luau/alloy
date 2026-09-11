@@ -661,7 +661,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Pedantic,
         default: Level::Allow,
         summary: "a `print` call",
-        detail: "Pedantic. A `print` left over from debugging writes to the output of every player. Remove it, or route it through a logger the project can turn off.",
+        detail: "Pedantic, and `strict` leaves it alone: `print` is ordinary in Luau, so a project that wants it gone writes `[lint.rules] print_debug = \"warn\"`. A `print` left over from debugging writes to the output of every player. Remove it, or route it through a logger the project can turn off.",
     },
     LintInfo {
         name: "const_mutation",
@@ -811,6 +811,9 @@ pub fn level_of(config: &LintConfig, name: &str) -> Level {
     }
 
     match info {
+        // `print` is ordinary in Luau, and a project that wants it gone
+        // says so by name. Strict carries the rest of the group.
+        Some(l) if l.name == "print_debug" && listed(config, name).is_none() => l.default,
         Some(l) if l.group == Group::Pedantic && config.strict => Level::Warn,
         _ if !config.recommended => Level::Allow,
         Some(l) => l.default,
@@ -1073,6 +1076,26 @@ mod tests {
         let lax = strict.without_strict();
         assert_eq!(level_of(&lax, "implicit_any"), Level::Allow);
         assert_eq!(level_of(&lax, "optional_access"), Level::Warn);
+
+        // `print` is ordinary in Luau, so strict leaves it alone and a
+        // project that wants it gone names it.
+        assert_eq!(level_of(&strict, "print_debug"), Level::Allow);
+
+        let asked = LintConfig {
+            rules: [("print_debug".to_string(), Level::Warn)]
+                .into_iter()
+                .collect(),
+            ..LintConfig::default()
+        };
+        assert_eq!(level_of(&asked, "print_debug"), Level::Warn);
+
+        let by_group = LintConfig {
+            rules: [("pedantic".to_string(), Level::Warn)]
+                .into_iter()
+                .collect(),
+            ..LintConfig::default()
+        };
+        assert_eq!(level_of(&by_group, "print_debug"), Level::Warn);
 
         let denied = LintConfig {
             rules: [("optional_access".to_string(), Level::Deny)]

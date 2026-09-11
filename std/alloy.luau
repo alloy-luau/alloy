@@ -206,14 +206,26 @@ alloy.Result = Result
 alloy.Ok = Ok
 alloy.Err = Err
 
---- `try do ... end`: a block that returns Ok on a plain return and passes a
---- Result through as is.
-function alloy.try_block(f: () -> any): Result<any, any>
-	local value = f()
-	if type(value) == "table" and getmetatable(value) == Result then
-		return value
+--- `try do ... end`: the block's value as a Result. A plain value becomes
+--- Ok, a Result passes through as is, and a throw becomes Err with the
+--- traceback from the throw site.
+---
+--- The parameter reads `() -> (T | Result<T, E>)` because a `try` inside
+--- the block returns the Err from the closure: the block gives back
+--- either the value or a Result of it, and both land in `Result<T, E>`.
+function alloy.try_block<T, E>(f: () -> (T | Result<T, E>)): Result<T, E>
+	local packed = table.pack(xpcall(f, function(e)
+		return { err = e, trace = debug.traceback(tostring(e), 2) }
+	end))
+	if not packed[1] then
+		local failure = packed[2] :: any
+		return Err(failure.err, failure.trace)
 	end
-	return Ok(value)
+	local value = packed[2]
+	if type(value) == "table" and getmetatable(value) == Result then
+		return value :: any
+	end
+	return Ok(value :: any)
 end
 
 -- ---------------------------------------------------------------------------

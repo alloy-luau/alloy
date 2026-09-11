@@ -176,7 +176,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "try",
-        "```alloy\ntry expr\ntry do ... end\n```\nReturns early with the `Err`, inside a function that returns `Result`. At the module top level it returns the `Err` from the chunk, so the module yields that `Err`. `try do` is a block whose value is a Result.",
+        "```alloy\ntry expr\ntry do ... end\n```\nReturns early with the `Err`, inside a function that returns `Result`. At the module top level it returns the `Err` from the chunk, so the module yields that `Err`.\n\n`try do ... end` is a block whose value is a Result: a plain value becomes `Ok`, a Result passes through as is, and a throw becomes `Err` carrying the traceback from the throw site. A `try` inside the block returns its `Err` from the block, not from the function around it. The value type flows, so `try do return 1 end` is a `Result<number, ...>`.",
     ),
     (
         "macro",

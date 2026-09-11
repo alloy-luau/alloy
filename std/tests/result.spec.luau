@@ -67,6 +67,15 @@ describe("Result", function()
 		expect(passed:is_err()).toBe(true)
 		expect(passed._1).toBe("kept")
 	end)
+
+	it("try_block turns a throw into an Err with a traceback", function()
+		local caught = alloy.try_block(function(): number
+			error("kaboom")
+		end)
+		expect(caught:is_err()).toBe(true)
+		expect(tostring(caught._1)).toContain("kaboom")
+		expect(type(caught.trace)).toBe("string")
+	end)
 end)
 
 return nil

@@ -212,8 +212,13 @@ alloy.Err = Err
 ---
 --- The parameter reads `() -> (T | Result<T, E>)` because a `try` inside
 --- the block returns the Err from the closure: the block gives back
---- either the value or a Result of it, and both land in `Result<T, E>`.
-function alloy.try_block<T, E>(f: () -> (T | Result<T, E>)): Result<T, E>
+--- either the value or a Result of it.
+---
+--- The answer reads `Result<T, any>`, not `Result<T, E>`. A block that
+--- never builds an Err leaves `E` free, and Luau then solves it as
+--- `never` or `unknown` and reports correct code. The value type `T` is
+--- the one that catches a mistake here, so `E` stays open.
+function alloy.try_block<T, E>(f: () -> (T | Result<T, E>)): Result<T, any>
 	local packed = table.pack(xpcall(f, function(e)
 		return { err = e, trace = debug.traceback(tostring(e), 2) }
 	end))

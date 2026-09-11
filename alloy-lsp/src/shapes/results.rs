@@ -428,6 +428,20 @@ fn group_brace(text: &str, after_paren: usize) -> Option<usize> {
 
     let amp = rest.find(" & {")?;
 
+    // A Result inside the alias arguments carries a ` & {` of its own,
+    // and it stands before this group's. Step over the arguments so the
+    // brace is the one this group meets its methods with.
+    let past = rest
+        .find('<')
+        .filter(|open| *open < amp)
+        .and_then(|open| group_len(&rest[open..], '<', '>').map(|len| open + len));
+
+    let amp = match past {
+        Some(skip) => skip + rest[skip..].find(" & {")?,
+
+        None => amp,
+    };
+
     Some(after_paren + amp + 3)
 }
 
@@ -464,7 +478,7 @@ fn result_group(text: &str, brace: usize) -> Option<(usize, usize, String, Strin
     if before.ends_with('&') {
         let head_end = before.len() - 1;
         let head = text[..head_end].trim_end();
-        let mut name_at = head.rfind("ResultMethods")?;
+        let mut name_at = alias_head(head, "ResultMethods")?;
 
         if head[name_at..].contains(' ') && !head[name_at..].contains(", ") {
             return None;
@@ -505,6 +519,33 @@ fn result_group(text: &str, brace: usize) -> Option<(usize, usize, String, Strin
     Some((brace, close, ok, err, tag))
 }
 
+/// The offset of `name` when a text ends with `name<...>`. The walk
+/// starts at the closing `>`, so a `ResultMethods` inside the arguments
+/// of another is no candidate.
+fn alias_head(text: &str, name: &str) -> Option<usize> {
+    if !text.ends_with('>') {
+        return None;
+    }
+
+    let mut depth = 0i32;
+
+    for (k, c) in text.char_indices().rev() {
+        match c {
+            '>' => depth += 1,
+            '<' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return text[..k].ends_with(name).then(|| k - name.len());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 /// The length of the methods part: a table, or an alias with arguments.
 fn other_len(text: &str) -> Option<usize> {
     if text.starts_with('{') {
@@ -541,6 +582,23 @@ mod tests {
         assert_eq!(
             fold(text, &Known::default()),
             "```luau\nfunction Result.pcall(f: (...any) -> (...any), ...: any): Result<any, string>\n```"
+        );
+    }
+
+    // A Result whose value side is another Result, which is what
+    // `Result<Result<number, any>, any>` prints as. The inner pair
+    // carries a `ResultMethods` and a ` & {` of its own, and the outer
+    // group read both of those as its own.
+    #[test]
+    fn a_result_inside_a_result_folds() {
+        let inner = "(ResultMethods<number, any> & { read _1: any, read __err: any, read __ok: number, tag: \"Err\", read trace: string? }) | (ResultMethods<number, any> & { read _1: number, read __err: any, read __ok: number, tag: \"Ok\", read trace: string? })";
+        let outer = format!(
+            "(ResultMethods<{inner}, any> & {{ read _1: {inner}, read __err: any, read __ok: {inner}, tag: \"Ok\", read trace: string? }}) | (ResultMethods<{inner}, any> & {{ read _1: any, read __err: any, read __ok: {inner}, tag: \"Err\", read trace: string? }})"
+        );
+
+        assert_eq!(
+            fold(&outer, &Known::default()),
+            "Result<Result<number, any>, any>"
         );
     }
 }

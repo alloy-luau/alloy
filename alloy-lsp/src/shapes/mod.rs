@@ -297,16 +297,19 @@ fn fold_intersection_dupes(text: &mut String) {
     let mut out = String::with_capacity(text.len());
     let mut rest = text.as_str();
 
-    while let Some(open) = rest.find('`') {
-        let after = &rest[open + 1..];
-        let Some(close) = after.find('`') else {
+    // The checker quotes a type with a backtick in one sentence and an
+    // apostrophe in another, so both carry a type to collapse.
+    while let Some(open) = rest.find(['`', '\'']) {
+        let quote = rest[open..].chars().next().unwrap_or('`');
+        let after = &rest[open + quote.len_utf8()..];
+        let Some(close) = after.find(quote) else {
             break;
         };
 
         out.push_str(&rest[..=open]);
         out.push_str(&collapse_intersection(&after[..close]));
-        out.push('`');
-        rest = &after[close + 1..];
+        out.push(quote);
+        rest = &after[close + quote.len_utf8()..];
     }
 
     out.push_str(rest);

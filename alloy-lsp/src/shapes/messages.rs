@@ -268,6 +268,15 @@ fn bound_failure(message: &str) -> Option<String> {
     let bound = quoted_from(&message[at..])?;
     let got_at = message.find("but got ")? + "but got ".len();
     let got = quoted_from(&message[got_at..])?;
+
+    // A bound the argument misses sits in the type the checker WANTED.
+    // A `Result` is itself an intersection, so the same clause also
+    // walks the type it GOT, and rewriting that reads as a type that
+    // does not satisfy itself. The top line already names both sides,
+    // so it stands instead.
+    if got.contains(bound) {
+        return None;
+    }
     // The message keeps the kind it came with; a caller that adds one
     // would print it twice.
     let head = match message.split_once(": ") {
@@ -432,5 +441,38 @@ mod import_temp_tests {
             friendly_text("TypeError: Unknown type '_market'"),
             "TypeError: Unknown type '_market'"
         );
+    }
+
+    /// A `where T: Shape` the argument misses: the bound sits in the
+    /// type the checker wanted, so the sentence names both sides.
+    #[test]
+    fn a_missed_bound_reads_as_a_bound() {
+        let raw = "TypeError: Expected this to be 'Plain & Named', but got 'Plain'; \
+                   this is because the 2nd component of the intersection is `Named`, \
+                   which is not a subtype of `Plain`";
+
+        assert_eq!(
+            friendly_text(raw),
+            "TypeError: `Plain` does not satisfy the bound `Named`"
+        );
+    }
+
+    /// A `Result` is itself an intersection, so the same clause walks
+    /// the type the checker GOT. Rewriting that read as a type that
+    /// does not satisfy itself, and threw away a top line that already
+    /// named both sides.
+    #[test]
+    fn an_intersection_inside_the_got_type_is_no_bound() {
+        let raw = "TypeError: Expected this to be 'number', but got '(A | B) & ResultMethods2<string, any>'; \
+                   this is because * the 2nd component of the intersection is `ResultMethods2<string, any>`, \
+                   which is not a subtype of `number`";
+
+        let out = friendly_text(raw);
+
+        assert!(
+            out.starts_with("TypeError: Expected this to be 'number', but got "),
+            "the top line stands: {out}"
+        );
+        assert!(!out.contains("does not satisfy the bound"), "{out}");
     }
 }

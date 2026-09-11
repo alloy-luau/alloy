@@ -635,6 +635,7 @@ impl<'a> Parser<'a> {
                 exported,
                 global,
                 name,
+                attributes: Vec::new(),
                 span: TokSpan::new(start, self.pos),
             }));
         }
@@ -651,6 +652,7 @@ impl<'a> Parser<'a> {
             exported,
             global,
             name,
+            attributes: Vec::new(),
             span: TokSpan::new(start, self.pos),
         }))
     }

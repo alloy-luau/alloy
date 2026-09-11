@@ -868,6 +868,9 @@ pub struct TypeAlias {
     /// the project. A global exports too, so an import still resolves.
     pub global: bool,
     pub name: TokSpan,
+    /// `@name` lines above the alias. `attribute X on type` declares
+    /// one, so the alias carries them and the check reads the target.
+    pub attributes: Vec<Attr>,
     pub span: TokSpan,
 }
 

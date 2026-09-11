@@ -550,6 +550,8 @@ impl<'s> Desugar<'s> {
         match s {
             Stmt::Local(l) if !l.attrs.is_empty() => return true,
 
+            Stmt::TypeAlias(t) if !t.attributes.is_empty() => return true,
+
             Stmt::Function(f) if self.params_have_attrs(&f.body) => return true,
 
             Stmt::Function(f) if self.table_self_type(f).is_some() => return true,
@@ -940,6 +942,48 @@ impl<'s> Desugar<'s> {
             Stmt::Destroy { expr, delay, span } => self.destroy(*span, expr, delay.as_ref()),
 
             Stmt::After(a) => self.after_block(a),
+
+            // An attribute on a type alias has no Luau form. The target
+            // check runs in `check_attrs`; the lines go blank, so the
+            // output stays Luau and keeps its line count.
+            Stmt::TypeAlias(t) if !t.attributes.is_empty() => {
+                for a in &t.attributes {
+                    self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
+                }
+
+                let first = t.span.start;
+                let rest = TokSpan::new(
+                    t.attributes
+                        .iter()
+                        .map(|a| a.span.end)
+                        .max()
+                        .unwrap_or(first) as usize,
+                    t.span.end as usize,
+                );
+                let start = self.byte_start(rest);
+                let end = self.byte_end(rest);
+                // The copy starts where the last attribute ends, so the
+                // newline between it and the keyword survives.
+                let after_attrs = t
+                    .attributes
+                    .iter()
+                    .map(|a| self.byte_end(a.span))
+                    .max()
+                    .unwrap_or(start);
+
+                if t.global {
+                    let after_kw = self.toks[rest.start as usize].end;
+                    self.copy(after_attrs, start);
+                    self.generate(start, "export");
+                    self.copy(after_kw, end);
+                } else if !t.exported && self.export_listed_types.contains(self.text_of(t.name)) {
+                    self.copy(after_attrs, start);
+                    self.generate(start, "export ");
+                    self.copy(start, end);
+                } else {
+                    self.copy(after_attrs, end);
+                }
+            }
 
             // The modifier is Alloy's; Luau reads the rest. `export`
             // takes its place, and the alias keeps every other byte.

@@ -137,6 +137,8 @@ impl<'s> Desugar<'s> {
 
             Stmt::Remote(r) => self.check_attrs(&r.attributes, "remote"),
 
+            Stmt::TypeAlias(t) => self.check_attrs(&t.attributes, "type"),
+
             Stmt::Struct(st) => {
                 self.check_attrs(&st.attributes, "struct");
                 let name = self.text_of(st.name).to_string();
@@ -1322,6 +1324,49 @@ mod tests {
         assert!(
             messages("@deprecated(\"use `new`\")\nlocal function old(): number\n    return 1\nend\nprint(old())\n")
                 .is_empty()
+        );
+    }
+
+    /// `@deprecated` over a type alias read `expected `function`,
+    /// found `type``, a parse error. A type alias is an attribute
+    /// target, so the refusal reads the way it does on a local.
+    #[test]
+    fn an_attribute_on_a_type_alias_reports_its_target() {
+        let got = messages(
+            "@deprecated
+export type Old = { a: number }
+",
+        );
+        assert_eq!(
+            got,
+            vec![
+                "the attribute `deprecated` has no meaning on a type; it goes on `function` and `namespace`"
+            ]
+        );
+    }
+
+    /// A declared attribute reaches a type alias, and the emit drops
+    /// the line: `@tag` is no Luau.
+    #[test]
+    fn a_declared_attribute_reaches_a_type_alias() {
+        let src = "attribute tag on type
+
+@tag
+export type Id = number
+
+local a: Id = 1
+print(a)
+";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        let out = crate::compile(src).unwrap();
+        assert!(!out.ship.contains("@tag"), "{}", out.ship);
+        assert!(!out.ship.contains("\ntag"), "{}", out.ship);
+        assert!(out.ship.contains("export type Id = number"), "{}", out.ship);
+        assert_eq!(
+            out.ship.lines().count(),
+            src.lines().count(),
+            "{}",
+            out.ship
         );
     }
 

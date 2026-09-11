@@ -577,6 +577,21 @@ impl<'a> Parser<'a> {
                 return self.namespace_decl(start, attrs, exported).map(marked);
             }
 
+            // `attribute X on type` declares one, so a type alias takes
+            // attributes the way every other declaration does. The
+            // modifier is already read, so the flags go on by hand.
+            "type" if self.name_at(1) || self.text_at(1) == "function" => {
+                let mut stmt = self.type_alias(start)?;
+
+                if let Stmt::TypeAlias(t) = &mut stmt {
+                    t.attributes = attrs;
+                    t.exported = exported;
+                    t.global = is_global;
+                }
+
+                return Ok(stmt);
+            }
+
             _ => {}
         }
 

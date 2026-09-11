@@ -773,10 +773,17 @@ impl<'s> Desugar<'s> {
                 );
             }
 
-            // `new X(...)`, `await f()`: a call once rendered. `try f()`
-            // drops its value into a throwaway local, since the unwrapped
-            // value is a name and a name is no statement.
-            Stmt::Call(e @ (Expr::New { .. } | Expr::Await { .. } | Expr::Try { .. }), span) => {
+            // `new X(...)`, `await f()`, `async do ... end`: a call once
+            // rendered. `try f()` drops its value into a throwaway local,
+            // since the unwrapped value is a name and a name is no
+            // statement.
+            Stmt::Call(
+                e @ (Expr::New { .. }
+                | Expr::Await { .. }
+                | Expr::Try { .. }
+                | Expr::AsyncBlock { .. }),
+                span,
+            ) => {
                 let anchor = self.byte_start(*span);
 
                 if matches!(e, Expr::Try { .. }) {
@@ -2484,6 +2491,48 @@ mod tests {
             out.check.contains("x = if x == nil then 1 else x"),
             "{}",
             out.check
+        );
+    }
+
+    /// `async do ... end` stands alone as a statement: the block starts
+    /// on a thread of its own and the Future is dropped. It lowers the
+    /// same way in every position, and `end)` keeps the line count.
+    #[test]
+    fn an_async_block_stands_alone_as_a_statement() {
+        let src = "async do\n    print(1)\nend\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("__alloy.future(function()"),
+            "{}",
+            out.ship
+        );
+        assert!(out.ship.trim_end().ends_with("end)"), "{}", out.ship);
+        assert_eq!(out.ship.lines().count(), src.lines().count());
+
+        // Inside a plain function body, which is where the placement
+        // rule sends an author who wrote a bare `await`.
+        let src = "local function f()\n    async do\n        print(1)\n    end\nend\nprint(f)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("__alloy.future(function()"),
+            "{}",
+            out.ship
+        );
+        assert_eq!(out.ship.lines().count(), src.lines().count());
+    }
+
+    /// The expression form still binds: the value is a Future.
+    #[test]
+    fn an_async_block_still_reads_as_an_expression() {
+        let out =
+            crate::compile("local held = async do\n    return 1\nend\nprint(held)\n").unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("local held = __alloy.future(function()"),
+            "{}",
+            out.ship
         );
     }
 

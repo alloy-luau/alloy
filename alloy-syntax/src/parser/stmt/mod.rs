@@ -130,7 +130,7 @@ impl<'a> Parser<'a> {
             "local" | "if" | "while" | "for" | "repeat" | "do" | "function" | "return" | "break"
         ) || (self.at("continue") && self.continue_is_keyword())
             || (self.at("const") && self.name_at(1))
-            || (self.at("async") && self.text_at(1) == "function")
+            || (self.at("async") && matches!(self.text_at(1), "function" | "do"))
             || (self.at("delete") && self.name_at(1))
             || (self.at("destroy") && self.name_at(1))
             || self.at("after")
@@ -217,6 +217,15 @@ impl<'a> Parser<'a> {
                 }
 
                 Ok(stmt)
+            }
+
+            // `async do ... end` alone: the block starts on a thread of
+            // its own and the Future it gives back is dropped, the way a
+            // call's value is. `local f = async do ... end` keeps it.
+            "async" if self.text_at(1) == "do" && !self.newline_after(0) => {
+                let e = self.expr()?;
+
+                Ok(Stmt::Call(e, TokSpan::new(start, self.pos)))
             }
 
             // `$name(args)` as a statement: an intrinsic or macro call.

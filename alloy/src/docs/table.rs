@@ -168,7 +168,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "async",
-        "```alloy\nasync function f() ... end\nasync do ... end\n```\nReturns a Future. The body runs on `task.spawn` under `xpcall`, and the Future memoizes the result. `async function f(): T` is `Future<T>`; without a return type, a body that returns a value infers `T`, and one that returns nothing is `Future<()>`.",
+        "```alloy\nasync function f() ... end\nlocal job = async do ... end\nasync do ... end\n```\nReturns a Future. The body runs on `task.spawn` under `xpcall`, and the Future memoizes the result. `async function f(): T` is `Future<T>`; without a return type, a body that returns a value infers `T`, and one that returns nothing is `Future<()>`.\n\n`async do ... end` is an expression whose value is that Future, so a binding can `await` it later. It also stands alone as a statement, wherever a `do` block stands: the block runs for its effects and the Future is dropped.",
     ),
     (
         "await",

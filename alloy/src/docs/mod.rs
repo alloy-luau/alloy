@@ -43,10 +43,14 @@ pub fn kind_for(message: &str) -> &'static str {
         // After `result`, so `try await` on a Result keeps that kind.
         (&["await", "async"], "AsyncError"),
         (&["a `const`"], "ConstError"),
+        // Before the test rule: `test ` also matches a struct the user
+        // named `Test`, and a message about constructing one says
+        // `new Test { ... }`. The `new ` marker is the narrower of the
+        // two, so it answers first.
+        (&["`new ", "constructor", "construct"], "ConstructorError"),
         (&["@test", "test "], "TestError"),
         (&["@cfg"], "AttributeError"),
         (&["macro"], "MacroError"),
-        (&["`new ", "constructor", "construct"], "ConstructorError"),
         (&["attribute", "derive"], "AttributeError"),
         (&["data file"], "DataError"),
         (&["import", "export", "require", "module"], "ImportError"),

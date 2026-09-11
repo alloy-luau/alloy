@@ -732,7 +732,12 @@ mod tests {
         let out = compile(src).unwrap();
         let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(messages.len(), 3, "{messages:?}");
-        assert!(messages[0].contains("writes `New`"), "{messages:?}");
+        assert!(
+            messages[0].contains("skips `Menu.New`")
+                && messages[0].contains("new Menu()")
+                && messages[0].contains("new Menu({ ... })"),
+            "{messages:?}"
+        );
         assert!(messages[1].contains("is not a call"), "{messages:?}");
         assert!(messages[2].contains("writes a constructor"), "{messages:?}");
         assert!(out.ship.contains("local a = Menu.New(1)"), "{}", out.ship);
@@ -1021,6 +1026,19 @@ mod tests {
         assert_eq!(
             docs::labeled("internal: generated text holds a newline"),
             "InternalError: internal: generated text holds a newline"
+        );
+    }
+
+    /// A struct the reader named `Test` still reports as a constructor
+    /// problem. `test ` matches its name, so the narrower `new ` marker
+    /// has to answer first.
+    #[test]
+    fn a_struct_named_test_keeps_the_constructor_kind() {
+        assert_eq!(
+            docs::kind_for(
+                "`new Test { ... }` skips `Test.new`; write `new Test()` to call it, or `new Test({ ... })` to give it the fields"
+            ),
+            "ConstructorError"
         );
     }
 

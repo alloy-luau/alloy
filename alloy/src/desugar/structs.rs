@@ -1790,8 +1790,13 @@ impl<'s> Desugar<'s> {
 
         let message = if self.fields_form(name, args, init) {
             match ctor {
+                // The fields form builds the value outright, so it is
+                // the one way past a constructor. Naming what the call
+                // skips reads better than naming the rule, and the two
+                // ways out cover both reasons to write fields here: to
+                // call `new`, and to hand it the fields to work on.
                 Some(ctor) if self.impl_target.as_deref() != Some(text.as_str()) => format!(
-                    "`{text}` writes `{ctor}`: construct it with `new {text}(...)`; the fields form is the constructor's own"
+                    "`new {text} {{ ... }}` skips `{text}.{ctor}`; write `new {text}()` to call it, or `new {text}({{ ... }})` to give it the fields"
                 ),
 
                 _ => {

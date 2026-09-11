@@ -410,9 +410,10 @@ fn install(dir: &Path) -> ExitCode {
 
     // What is not beside the running binary comes from the release of
     // this version, so an install from a single downloaded `alloy`
-    // still puts the server on PATH.
-    if !absent.is_empty() && !from_release(dir, &absent) {
-        failed = true;
+    // still puts the server on PATH. A release that cannot be reached
+    // is a warning: what was beside the binary is installed already.
+    if !absent.is_empty() {
+        from_release(dir, &absent);
     }
 
     if failed {
@@ -466,9 +467,9 @@ fn uninstall(dir: &Path) -> ExitCode {
 }
 
 /// Fetches the named binaries of this version's release into `dir`.
-/// True when they all landed; a failure is a warning, because the
-/// binaries that were beside the running one are installed already.
-fn from_release(dir: &Path, which: &[&str]) -> bool {
+/// Every failure is a warning: the binaries that sat beside the
+/// running one are installed already.
+fn from_release(dir: &Path, which: &[&str]) {
     let version = crate::alloy_version();
     let p = Painter::for_stdout();
     let warn = Painter::for_stderr();
@@ -483,7 +484,7 @@ fn from_release(dir: &Path, which: &[&str]) -> bool {
             ))
         );
 
-        return false;
+        return;
     };
 
     println!(
@@ -500,29 +501,21 @@ fn from_release(dir: &Path, which: &[&str]) -> bool {
         Err(e) => {
             eprintln!("{}", warn.warn(&format!("{e}; the editor has no server")));
 
-            return false;
+            return;
         }
     };
 
     match fetch_into(dir, &release, version, triple, which) {
-        Ok(names) => {
-            println!(
-                "{}",
-                p.ok(&format!(
-                    "installed {} {version} → {}",
-                    names.join(" and "),
-                    dir.display()
-                ))
-            );
+        Ok(names) => println!(
+            "{}",
+            p.ok(&format!(
+                "installed {} {version} → {}",
+                names.join(" and "),
+                dir.display()
+            ))
+        ),
 
-            true
-        }
-
-        Err(e) => {
-            eprintln!("{}", warn.warn(&format!("{e}; the editor has no server")));
-
-            false
-        }
+        Err(e) => eprintln!("{}", warn.warn(&format!("{e}; the editor has no server"))),
     }
 }
 

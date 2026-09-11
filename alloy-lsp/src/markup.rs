@@ -44,6 +44,13 @@ fn opens_markup(src: &str, lt: usize) -> bool {
         return true;
     }
 
+    // A `<` the reader has not finished still opens markup, so the tag
+    // under the caret is a tag. Whitespace has to sit between the two:
+    // `a << b` is a shift, and its second `<` opens nothing.
+    if last == '<' && before.len() < lt {
+        return true;
+    }
+
     let word = crate::imports::word_before(before, before.len());
 
     matches!(
@@ -1347,5 +1354,27 @@ mod tests {
         );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["detail"], "prop of the enamel ingot");
+    }
+
+    /// A `<` the reader started and left opens markup, so a tag under
+    /// it is still a tag. Without this the slot is not a tag slot, and
+    /// the request falls through to the child, which answers with every
+    /// global in scope.
+    #[test]
+    fn an_unfinished_angle_still_opens_markup() {
+        let src = "return <ScreenGui>\n    <\n    <NS.\n";
+        let at = src.rfind("<NS.").unwrap();
+
+        assert!(opens_markup(src, at), "the tag after a bare `<` is a tag");
+    }
+
+    /// `a << b` is a shift. Its second `<` sits against the first, and
+    /// opens nothing.
+    #[test]
+    fn a_shift_operator_opens_no_markup() {
+        let src = "local x = a << b";
+        let at = src.rfind('<').unwrap();
+
+        assert!(!opens_markup(src, at), "`<<` is a shift, not a tag");
     }
 }

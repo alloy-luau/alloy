@@ -1136,6 +1136,7 @@ impl Server {
                             // emit wrote, not the name the source has.
                             let says_nothing = restates_itself(&text)
                                 || invents_a_type(&text, doc)
+                                || lowers_a_block(&text, doc, line, character)
                                 || (is_byte_count(&text) && names_a_key(doc, line, character));
 
                             // A std member: the type above, then what

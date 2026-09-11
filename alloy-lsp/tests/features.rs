@@ -836,6 +836,66 @@ fn a_binding_hovers_where_it_was_written() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const LOWERED_BLOCKS: &str = "local function parse(s: string): Result<number, string>\n    return Ok(1)\nend\n\nlocal c = try do\n    local v = try parse(\"1\")\n    return v + 1\nend\n\nlocal j = async do\n    return 1\nend\n\nprint(c, j)\n";
+
+/// `async do` and `try do` lower to a closure the source never wrote.
+/// The child answers about that closure on the block's own furniture:
+/// the `do`, the `end`, and the blank columns between. That answer
+/// names the emit's parameters, so `try do` read
+/// `function(__fail: (string, string?) -> (...unknown)): number`. The
+/// furniture says nothing now, and every real name still answers.
+#[test]
+fn a_lowered_block_never_hovers_its_closure() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-blocks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("blocks.aly");
+    std::fs::write(&file, LOWERED_BLOCKS).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": LOWERED_BLOCKS } } }),
+    );
+
+    // The first request warms the child's index; a cold one answers
+    // nothing whatever the code says.
+    let _ = s.hover(&uri, 4, 6);
+
+    // The block's furniture: the `do` of `try do`, the blank column
+    // inside it, its `end`, and the same inside `async do`.
+    for (line, character, what) in [
+        (4, 13, "try do's do"),
+        (5, 0, "inside try do"),
+        (7, 0, "try do's end"),
+        (10, 0, "inside async do"),
+    ] {
+        let h = s.hover(&uri, line, character);
+        assert!(
+            !h.contains("__fail") && !h.contains("...unknown"),
+            "{what} leaks the emit: {h}"
+        );
+    }
+
+    // The bindings still carry their own types.
+    let h = s.hover(&uri, 4, 6);
+    assert!(h.contains("Result<number, string>"), "try do binding: {h}");
+    let h = s.hover(&uri, 9, 6);
+    assert!(h.contains("Future<number>"), "async do binding: {h}");
+    // A name written inside the block answers for itself.
+    let h = s.hover(&uri, 5, 10);
+    assert!(h.contains("number"), "name inside the block: {h}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const SERVICES: &str = "import Players from \"game:Players\"\nimport { ReplicatedStorage, RunService as Run } from \"game\"\n\nlocal remotes = ReplicatedStorage:WaitForChild(\"Remotes\")\n\nPlayers.PlayerAdded:Connect(function(player)\n    print(player.Name, remotes, Run.Heartbeat)\nend)\n";
 
 /// A service import binds `game:GetService`, so the hover names the

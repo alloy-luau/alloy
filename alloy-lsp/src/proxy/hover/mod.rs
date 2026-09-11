@@ -19,9 +19,10 @@ pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 pub(crate) use modules::const_hover as const_hover_of;
 pub(crate) use restyle::{
     declared_annotation, declared_signature, drop_bound_intersections, fold_std_shapes,
-    invents_a_type, is_byte_count, keep_annotation, name_by_declaration, name_method_receiver,
-    name_solver_variable, name_trait_method, names_a_key, prefer_constructed_struct,
-    restates_itself, restore_struct_arguments, restyle_hover, source_type, unlocal_parameter,
+    invents_a_type, is_byte_count, keep_annotation, lowers_a_block, name_by_declaration,
+    name_method_receiver, name_solver_variable, name_trait_method, names_a_key,
+    prefer_constructed_struct, restates_itself, restore_struct_arguments, restyle_hover,
+    source_type, unlocal_parameter,
 };
 
 use super::completion::{lands_on_member, member_position, sep_of};

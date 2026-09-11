@@ -55,7 +55,7 @@ use hover::{
     OPEN_ATTRIBUTES, attach_std_member_docs, case_binding_text, declared_annotation,
     declared_attribute_targets, declared_field_hover, declared_parameter_hover, declared_signature,
     declares_a_name_at, drop_bound_intersections, field_key, fold_std_shapes, foreign_method_hover,
-    invents_a_type, is_byte_count, keep_annotation, method_owner, module_hover,
+    invents_a_type, is_byte_count, keep_annotation, lowers_a_block, method_owner, module_hover,
     name_by_declaration, name_method_receiver, name_solver_variable, name_trait_method,
     names_a_key, optional_index_hover, prefer_constructed_struct, remote_parameter_hover,
     remote_spec, restates_itself, restore_struct_arguments, restyle_hover, service_hover,

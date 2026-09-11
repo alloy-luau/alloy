@@ -543,6 +543,49 @@ pub(crate) fn is_byte_count(text: &str) -> bool {
     }
 }
 
+/// Whether the hover is the closure a lowered block emits, asked for
+/// somewhere that is not a name.
+///
+/// `async do ... end` and `try do ... end` both lower to a closure the
+/// source never wrote. The child then answers about that closure at
+/// every position the block covers that carries no binding: the `do`,
+/// the `end`, and the blank columns between them. The answer names the
+/// emit's own parameters, so `try do` reads
+/// `function(__fail: (string, string?) -> (...unknown)): number`.
+///
+/// A name inside the block still answers for itself, and so does a
+/// binding that really holds a function. Only the block's own furniture
+/// goes quiet.
+pub(crate) fn lowers_a_block(text: &str, doc: &Doc, line: u32, character: u32) -> bool {
+    let Some((_, body)) = text.split_once('\n') else {
+        return false;
+    };
+    let Some(inner) = body.trim().strip_suffix("```") else {
+        return false;
+    };
+
+    let inner = inner.trim();
+
+    // The whole answer is one anonymous closure type. A named one, a
+    // `type function`, or anything with prose is somebody's real hover.
+    if !inner.starts_with("function(") || inner.contains('\n') {
+        return false;
+    }
+
+    let Some(offset) = offset_of(&doc.source, line, character) else {
+        return false;
+    };
+
+    if !keywords::is_word_at(&doc.source, offset) {
+        return true;
+    }
+
+    let (start, end) = keywords::word_range(&doc.source, offset);
+    let word = &doc.source[start..end];
+
+    !doc.bindings.iter().any(|b| b.name == word)
+}
+
 /// Whether the position sits on a name outside every string literal of
 /// its line. The emit turns such a name into a key, and the child then
 /// answers about the key's own text.

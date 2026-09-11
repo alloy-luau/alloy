@@ -104,6 +104,10 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
 
             Stmt::Macro(m) if m.exported => push(name_of(m.name), false, false, 3),
 
+            // A namespace is a table of members, and markup names one:
+            // `import { Widgets }` then `<Widgets.button/>`.
+            Stmt::Namespace(n) if n.exported => push(name_of(n.name), false, false, 9),
+
             Stmt::ExportList(e) if e.from.is_none() => {
                 for spec in &e.specs {
                     let name = spec
@@ -901,6 +905,20 @@ mod tests {
         assert!(names.contains(&("T".into(), true, false)));
         assert!(names.contains(&("c".into(), false, false)));
         assert!(names.contains(&("f".into(), false, true)), "{names:?}");
+    }
+
+    /// A namespace holds components, so markup in another file names
+    /// it: `import { Widgets }` then `<Widgets.button/>`.
+    #[test]
+    fn an_exported_namespace_is_an_export() {
+        let src = "export namespace Widgets as
+    function button() end
+end
+namespace Inner as end
+";
+        let names: Vec<String> = exports_of(src, false).into_iter().map(|e| e.name).collect();
+
+        assert_eq!(names, ["Widgets"]);
     }
 
     #[test]

@@ -7,6 +7,8 @@ use alloy::luaux::markup::{Attribute, Child, Element, Node};
 use alloy::luaux::roblox;
 use serde_json::{Value, json};
 
+use crate::components::Member;
+
 /// What sits under the cursor inside markup.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Spot {
@@ -616,11 +618,25 @@ fn chain(class: &str) -> Vec<&'static str> {
     out
 }
 
-/// Hover text for a spot, when there is something to say.
-pub fn hover(spot: &Spot, bound: &HashSet<String>) -> Option<Value> {
+/// Hover text for a spot, when there is something to say. `member` is
+/// what a dotted tag name resolves to, when it resolves.
+pub fn hover(spot: &Spot, bound: &HashSet<String>, member: Option<&Member>) -> Option<Value> {
     let text = match spot {
         Spot::Tag { name } => {
-            if roblox::is_class(name) {
+            if let Some(m) = member.filter(|_| name.contains('.')) {
+                let holder = name.rsplit_once('.').map(|(h, _)| h).unwrap_or(name);
+                let code = m
+                    .signature
+                    .clone()
+                    .unwrap_or_else(|| format!("{holder}.{}", m.name));
+                let stands = match m.detail.as_str() {
+                    "function" => "a function. The tag calls it as a component.".to_string(),
+
+                    other => format!("a {other}. A tag stands on a function."),
+                };
+
+                format!("```alloy\n{code}\n```\n`{holder}.{}`: {stands}", m.name)
+            } else if roblox::is_class(name) {
                 let props = roblox::properties(name).count();
                 let events = roblox::events(name).count();
                 let parents = chain(name);
@@ -691,16 +707,39 @@ pub struct IngotProp {
 }
 
 /// Completion items for a slot.
+///
+/// `reach` holds what the tag slot can name: the members of the path in
+/// front of the last `.` for a dotted tag, and otherwise every name of
+/// the file that holds a component.
 pub fn completions(
     spot: &Spot,
     bound: &HashSet<String>,
     src: &str,
     props: &[IngotProp],
+    reach: &[Member],
 ) -> Vec<Value> {
     let mut items = Vec::new();
 
     match spot {
         Spot::TagSlot { prefix } => {
+            // `<Lib.Widgets.`: the path in front of the last `.` says
+            // what the slot can name. A class and a global belong to no
+            // path, so the list ends here whatever it found.
+            if let Some((_, typed)) = prefix.rsplit_once('.') {
+                for m in reach {
+                    if m.name.starts_with(typed) {
+                        items.push(json!({
+                            "label": m.name,
+                            "kind": m.kind,
+                            "detail": m.detail,
+                            "sortText": m.sort_key(),
+                        }));
+                    }
+                }
+
+                return items;
+            }
+
             for class in roblox::creatable_classes() {
                 if class.starts_with(prefix.as_str()) {
                     items.push(json!({
@@ -712,9 +751,23 @@ pub fn completions(
                 }
             }
 
+            // A namespace, a table, a struct, and an import hold
+            // components, so the slot offers them under any case.
+            for m in reach {
+                if m.name.starts_with(prefix.as_str()) {
+                    items.push(json!({
+                        "label": m.name,
+                        "kind": m.kind,
+                        "detail": m.detail,
+                        "sortText": format!("0{}", m.name),
+                    }));
+                }
+            }
+
             let mut names: Vec<&String> = bound
                 .iter()
                 .filter(|n| n.starts_with(prefix.as_str()))
+                .filter(|n| !reach.iter().any(|m| m.name == **n))
                 .collect();
             names.sort();
 
@@ -965,6 +1018,7 @@ mod tests {
                 name: "Frame".into(),
             },
             &HashSet::new(),
+            None,
         )
         .unwrap();
         assert!(
@@ -1003,6 +1057,7 @@ mod tests {
             &HashSet::new(),
             "",
             &[],
+            &[],
         );
         assert!(items.iter().any(|i| i["label"] == "TextLabel"));
         let items = completions(
@@ -1014,12 +1069,143 @@ mod tests {
             &HashSet::new(),
             "",
             &[],
+            &[],
         );
         assert!(
             items
                 .iter()
                 .any(|i| i["label"] == "Activated" && i["kind"] == 23)
         );
+    }
+
+    fn member(name: &str, kind: u64, detail: &str) -> Member {
+        Member {
+            name: name.to_string(),
+            kind,
+            detail: detail.to_string(),
+            signature: None,
+        }
+    }
+
+    /// `<Scope.` names one path, so the list holds that path's members
+    /// and nothing the file or the engine offers elsewhere.
+    #[test]
+    fn a_dotted_tag_slot_offers_the_members_alone() {
+        let reach = vec![
+            member("component", 3, "function"),
+            member("other", 3, "function"),
+        ];
+        let mut bound = HashSet::new();
+        bound.insert("Scope".to_string());
+
+        let items = completions(
+            &Spot::TagSlot {
+                prefix: "Scope.".into(),
+            },
+            &bound,
+            "",
+            &[],
+            &reach,
+        );
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        assert_eq!(labels, ["component", "other"]);
+
+        // The part after the `.` narrows the same list.
+        let items = completions(
+            &Spot::TagSlot {
+                prefix: "Scope.com".into(),
+            },
+            &bound,
+            "",
+            &[],
+            &reach,
+        );
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+        assert_eq!(labels, ["component"]);
+    }
+
+    /// A path that reaches nothing offers nothing. The class list and
+    /// the file's own names belong to a bare tag, not to this one.
+    #[test]
+    fn a_dotted_tag_slot_that_reaches_nothing_offers_nothing() {
+        let mut bound = HashSet::new();
+        bound.insert("Frame".to_string());
+
+        let items = completions(
+            &Spot::TagSlot {
+                prefix: "plain.".into(),
+            },
+            &bound,
+            "",
+            &[],
+            &[],
+        );
+
+        assert!(items.is_empty());
+    }
+
+    /// A table that holds a component is offered under its own name,
+    /// which the author may write in lowercase.
+    #[test]
+    fn a_holder_reaches_the_tag_slot_under_any_case() {
+        let reach = vec![member("tbl", 9, "table"), member("Scope", 9, "namespace")];
+        let items = completions(
+            &Spot::TagSlot {
+                prefix: String::new(),
+            },
+            &HashSet::new(),
+            "",
+            &[],
+            &reach,
+        );
+        let holder = |name: &str| {
+            items
+                .iter()
+                .find(|i| i["label"] == name)
+                .map(|i| i["detail"].as_str().unwrap_or("").to_string())
+        };
+
+        assert_eq!(holder("tbl").as_deref(), Some("table"));
+        assert_eq!(holder("Scope").as_deref(), Some("namespace"));
+        // The classes still stand beside them.
+        assert!(items.iter().any(|i| i["label"] == "Frame"));
+    }
+
+    /// A dotted tag hovers as the member it names, with the line the
+    /// source writes for it.
+    #[test]
+    fn a_dotted_tag_hovers_as_its_member() {
+        let mut found = member("component", 3, "function");
+        found.signature = Some("function component()".to_string());
+
+        let value = hover(
+            &Spot::Tag {
+                name: "Scope.component".into(),
+            },
+            &HashSet::new(),
+            Some(&found),
+        )
+        .expect("hover");
+        let text = value["contents"]["value"].as_str().unwrap_or("");
+
+        assert!(text.contains("function component()"), "{text}");
+        assert!(text.contains("`Scope.component`"), "{text}");
+        assert!(!text.contains("__alloy"), "{text}");
+
+        // A member that is not a function says so, since a tag calls it.
+        let value = hover(
+            &Spot::Tag {
+                name: "Lib.Widgets".into(),
+            },
+            &HashSet::new(),
+            Some(&member("Widgets", 9, "namespace")),
+        )
+        .expect("hover");
+        let text = value["contents"]["value"].as_str().unwrap_or("");
+
+        assert!(text.contains("a namespace"), "{text}");
     }
 
     /// A tag inside a `{ }` hole has no element in the tree, so its
@@ -1042,6 +1228,7 @@ mod tests {
                 name: "key".into(),
             },
             &HashSet::new(),
+            None,
         )
         .expect("hover");
 
@@ -1059,7 +1246,7 @@ mod tests {
         let at = src.find("there").expect("text");
 
         assert_eq!(completion_spot(src, at), Some(Spot::Text));
-        assert!(completions(&Spot::Text, &HashSet::new(), src, &[]).is_empty());
+        assert!(completions(&Spot::Text, &HashSet::new(), src, &[], &[]).is_empty());
         // A hole is code, and the child answers it.
         let hole = "local function V()\n    return <TextLabel>{x}</TextLabel>\nend\n";
         let inside = hole.find("x}").expect("hole");
@@ -1100,6 +1287,7 @@ mod tests {
             &HashSet::new(),
             src,
             &[],
+            &[],
         );
         // The declared prop, then the two the markup reads itself.
         assert_eq!(items.len(), 3);
@@ -1123,7 +1311,7 @@ mod tests {
             prefix: prefix.to_string(),
             existing,
         };
-        let items = completions(&slot("Cla", vec![]), &HashSet::new(), "", &props);
+        let items = completions(&slot("Cla", vec![]), &HashSet::new(), "", &props, &[]);
         let first = &items[0];
 
         assert_eq!(first["label"], "ClassName");
@@ -1132,7 +1320,7 @@ mod tests {
         assert_eq!(first["documentation"]["value"], "Utility classes.");
 
         // At the attribute column, and never twice on the same tag.
-        let items = completions(&slot("", vec![]), &HashSet::new(), "", &props);
+        let items = completions(&slot("", vec![]), &HashSet::new(), "", &props, &[]);
         assert_eq!(items[0]["label"], "ClassName");
 
         let items = completions(
@@ -1140,6 +1328,7 @@ mod tests {
             &HashSet::new(),
             "",
             &props,
+            &[],
         );
         assert!(items.iter().all(|i| i["label"] != "ClassName"));
 
@@ -1154,6 +1343,7 @@ mod tests {
             &HashSet::new(),
             src,
             &props,
+            &[],
         );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["detail"], "prop of the enamel ingot");

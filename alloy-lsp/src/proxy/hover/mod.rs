@@ -360,10 +360,23 @@ impl Server {
             return false;
         };
         let bound = markup_bound(&doc.source);
+        let load = |spec: &str| st.module_source(uri, spec);
 
         let result = match method {
             "textDocument/hover" => match markup::hover_spot(&doc.source, offset) {
-                Some(spot) => markup::hover(&spot, &bound).unwrap_or(Value::Null),
+                Some(spot) => {
+                    let member = match &spot {
+                        markup::Spot::Tag { name } if name.contains('.') => {
+                            let path: Vec<&str> = name.split('.').collect();
+
+                            components::member_at(&doc.source, &path, &load)
+                        }
+
+                        _ => None,
+                    };
+
+                    markup::hover(&spot, &bound, member.as_ref()).unwrap_or(Value::Null)
+                }
 
                 None => return false,
             },
@@ -371,8 +384,30 @@ impl Server {
             _ => match markup::completion_spot(&doc.source, offset) {
                 Some(spot) => {
                     let props = st.ingot_props(uri);
+                    // A dotted tag reaches the members of the path in
+                    // front of its last `.`; a bare one reaches every
+                    // name of the file that holds a component.
+                    let reach = match &spot {
+                        markup::Spot::TagSlot { prefix } => match prefix.rsplit_once('.') {
+                            Some((holder, _)) => {
+                                let path: Vec<&str> = holder.split('.').collect();
 
-                    Value::Array(markup::completions(&spot, &bound, &doc.source, &props))
+                                components::members(&doc.source, &path, &load)
+                            }
+
+                            None => components::containers(&doc.source),
+                        },
+
+                        _ => Vec::new(),
+                    };
+
+                    Value::Array(markup::completions(
+                        &spot,
+                        &bound,
+                        &doc.source,
+                        &props,
+                        &reach,
+                    ))
                 }
 
                 None => return false,
@@ -383,6 +418,24 @@ impl Server {
         self.respond(id, result);
 
         true
+    }
+}
+
+impl State {
+    /// The source of the module a spec names: an open document first,
+    /// then the file on disk. A `.alx` in another folder is open only
+    /// when the author has it in a tab, so the disk answers for the
+    /// rest.
+    pub(crate) fn module_source(&self, uri: &str, spec: &str) -> Option<String> {
+        let target = imports::module_path(&self.resolve_spec(uri, spec)?);
+
+        for (u, d) in &self.docs {
+            if uri_to_path(u).is_some_and(|p| imports::module_path(&p) == target) {
+                return Some(d.source.clone());
+            }
+        }
+
+        std::fs::read_to_string(imports::module_file(&target)?).ok()
     }
 }
 

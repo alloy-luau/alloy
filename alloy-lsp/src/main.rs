@@ -22,6 +22,7 @@
 //! - Everything after `--` goes to the child as is.
 
 mod block_end;
+mod components;
 mod context;
 mod doc;
 mod extensions;

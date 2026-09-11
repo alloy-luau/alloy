@@ -77,7 +77,7 @@ use serde_json::{Map, Value, json};
 
 use crate::doc::{Doc, offset_of, position_of};
 use crate::imports::{self, Rename};
-use crate::{block_end, context, keywords, log, markup, settings, tokens};
+use crate::{block_end, components, context, keywords, log, markup, settings, tokens};
 
 /// The names bound in a file, with markup blanked for `.alx`.
 pub(crate) fn markup_bound(src: &str) -> HashSet<String> {

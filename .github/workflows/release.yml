@@ -172,7 +172,11 @@ jobs:
           # toolchain reaches users either way.
           version="${{ needs.meta.outputs.version }}"
           for package in alloy-syntax alloy-ingot; do
-            if curl -sf "https://crates.io/api/v1/crates/$package/$version" >/dev/null 2>&1; then
+            # crates.io refuses a request with no User-Agent, so the
+            # check needs one or it never finds anything and the
+            # publish below fails on a version that is already up.
+            if curl -sf -A "alloy-release" \
+              "https://crates.io/api/v1/crates/$package/$version" >/dev/null 2>&1; then
               echo "$package $version is already on crates.io; skipping"
               continue
             fi

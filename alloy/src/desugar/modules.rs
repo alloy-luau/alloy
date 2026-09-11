@@ -718,8 +718,26 @@ impl<'s> Desugar<'s> {
             self.exports.push((name.clone(), name));
         }
 
-        // Skip the `export` token; render the rest as a plain local.
-        let rest = TokSpan::new(span.start as usize + 1, span.end as usize);
+        // The attributes stand above the word, and the span opens on
+        // the first of them. Their lines go blank; the `export` or
+        // `global` word after them goes, and the rest renders as a
+        // plain local.
+        for a in &l.attrs {
+            self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
+        }
+
+        let word = l
+            .attrs
+            .iter()
+            .map(|a| a.span.end)
+            .max()
+            .unwrap_or(span.start) as usize;
+        let rest = TokSpan::new(word + 1, span.end as usize);
+
+        // The newline between the last attribute and the word.
+        if let Some(after) = l.attrs.iter().map(|a| self.byte_end(a.span)).max() {
+            self.copy(after, self.toks[word].start);
+        }
 
         if local_needs_rewrite(l) {
             self.local_stmt(l);
@@ -855,6 +873,30 @@ fn block_imports(block: &Block, out: &mut Vec<TokSpan>) {
 
 #[cfg(test)]
 mod tests {
+    /// An attribute over `export local` left its own name and the
+    /// `export` word in the emit, which no Luau reads: the span opens
+    /// on the attribute, and only one token was skipped.
+    #[test]
+    fn an_attribute_over_an_export_local_drops_both_words() {
+        let src = "attribute mark on local
+
+@mark
+export local ex = 1
+print(ex)
+";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.ship.contains("local ex = 1"), "{}", out.ship);
+        assert!(!out.ship.contains("export local"), "{}", out.ship);
+        assert!(!out.ship.contains("\nmark"), "{}", out.ship);
+        assert_eq!(
+            out.ship.lines().count(),
+            src.lines().count(),
+            "{}",
+            out.ship
+        );
+    }
+
     #[test]
     fn a_parameter_list_refers_by_name_alone() {
         assert_eq!(super::type_arguments("<T = nil>"), "<T>");

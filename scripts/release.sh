@@ -2,7 +2,8 @@
 # Bumps every crate to one version, commits, tags, and pushes. CI builds
 # the zips, the GitHub release, and the crates.io publish.
 #
-#   scripts/release.sh 0.2.0    -> tag v0.2.0
+#   scripts/release.sh 0.2.0       -> tag v0.2.0
+#   scripts/release.sh 0.1.0-rc    -> tag v0.1.0-rc
 set -euo pipefail
 
 version="${1:-}"
@@ -11,7 +12,7 @@ if [ -z "$version" ]; then
   exit 1
 fi
 if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-  echo "version must look like 1.2.3 or 1.2.3-beta.1" >&2
+  echo "version must look like 1.2.3, 1.2.3-rc, or 1.2.3-beta.1" >&2
   exit 1
 fi
 
@@ -23,15 +24,19 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-for crate in alloy-syntax luaux alloy alloy-lsp; do
+# The root carries the workspace version; each crate carries its own.
+sed -i "0,/^version = \".*\"/s//version = \"$version\"/" Cargo.toml
+
+for crate in alloy-syntax luaux alloy-ingot alloy alloy-lsp alloy-web; do
   # Only the first version line is the package version.
   sed -i "0,/^version = \".*\"/s//version = \"$version\"/" "$crate/Cargo.toml"
 done
 # The path dependencies name a version too.
 sed -i "s/\(alloy-syntax = { version = \)\"[^\"]*\"/\1\"$version\"/" alloy/Cargo.toml alloy-lsp/Cargo.toml
+sed -i "s/\(alloy-ingot = { version = \)\"[^\"]*\"/\1\"$version\"/" alloy/Cargo.toml
 sed -i "s/\(package = \"alloy-luau\", version = \)\"[^\"]*\"/\1\"$version\"/" alloy-lsp/Cargo.toml
 cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace
-git add ./*/Cargo.toml Cargo.lock
+git add Cargo.toml ./*/Cargo.toml Cargo.lock
 
 tag="v$version"
 git commit -m "chore(release): $version"

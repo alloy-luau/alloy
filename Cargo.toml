@@ -5,7 +5,7 @@ members = ["alloy", "alloy-syntax", "alloy-lsp", "alloy-ingot", "alloy-web", "lu
 default-members = ["alloy"]
 
 [workspace.package]
-version = "0.1.0-rc"
+version = "0.1.0-rc.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"

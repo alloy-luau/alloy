@@ -13,6 +13,10 @@ on:
   push:
     tags:
       - "v*"
+  # A dry run builds and zips every target and stops there. It makes no
+  # release and publishes nothing, so the matrix is provable before a tag
+  # starts the one-way half of this workflow.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -31,12 +35,19 @@ jobs:
       - id: parse
         run: |
           # The tag carries the version, `v0.1.0-rc` or `v1.2.3`, and
-          # every crate of the workspace must already say the same.
-          version="${GITHUB_REF_NAME#v}"
+          # every crate of the workspace must already say the same. A dry
+          # run has no tag, so it takes the version from the workspace and
+          # still checks that every crate agrees.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+            echo "dry run at workspace version $version"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
           for crate in alloy-syntax luaux alloy-ingot alloy alloy-lsp alloy-web; do
             found=$(grep -m1 '^version' "$crate/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
             if [ "$found" != "$version" ]; then
-              echo "tag says $version but $crate/Cargo.toml says $found"
+              echo "the release is $version but $crate/Cargo.toml says $found"
               exit 1
             fi
           done
@@ -102,6 +113,7 @@ jobs:
   release:
     name: GitHub release
     needs: [meta, build]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -121,6 +133,7 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: [meta, release]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -43,6 +43,7 @@ pub mod schema;
 #[path = "../../alloy-lsp/src/shapes/mod.rs"]
 pub mod shapes;
 pub mod tables;
+pub mod target;
 pub mod testbuild;
 pub mod typecheck;
 

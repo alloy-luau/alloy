@@ -54,26 +54,36 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.label }}
     needs: meta
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # `target` is what cargo builds. `label` is what the zip is
+        # called: a reader on the downloads page has no use for the
+        # vendor field of a triple, which Linux leaves as `unknown`.
+        # `alloy::target::label_for` maps a machine to the same name, so
+        # `alloy self update` looks for the file this builds.
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            label: linux-x64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            label: linux-arm64
           - os: macos-latest
             target: aarch64-apple-darwin
+            label: macos-arm64
           # macos-13, the Intel runner, is retired, and a job that asks
           # for it queues forever. The Apple Silicon runner cross-compiles
           # the Intel target; both SDKs ship with Xcode.
           - os: macos-latest
             target: x86_64-apple-darwin
+            label: macos-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            label: windows-x64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -88,29 +98,31 @@ jobs:
         run: |
           version="${{ needs.meta.outputs.version }}"
           target="${{ matrix.target }}"
+          label="${{ matrix.label }}"
           bin="target/$target/release"
           mkdir -p dist
           # -j drops the paths, so each entry sits at the zip's root.
           docs=(README.md)
           if [ -f LICENSE ]; then docs+=(LICENSE); fi
-          zip -qj "dist/alloy-$version-$target.zip" "$bin/alloy" "${docs[@]}"
-          zip -qj "dist/alloy-lsp-$version-$target.zip" "$bin/alloy-lsp"
+          zip -qj "dist/alloy-$version-$label.zip" "$bin/alloy" "${docs[@]}"
+          zip -qj "dist/alloy-lsp-$version-$label.zip" "$bin/alloy-lsp"
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $version = "${{ needs.meta.outputs.version }}"
           $target = "${{ matrix.target }}"
+          $label = "${{ matrix.label }}"
           $bin = "target/$target/release"
           New-Item -ItemType Directory -Force dist | Out-Null
           # Named files, not a folder, so each entry sits at the root.
           $docs = @("README.md")
           if (Test-Path LICENSE) { $docs += "LICENSE" }
-          Compress-Archive -Path (@("$bin/alloy.exe") + $docs) -DestinationPath "dist/alloy-$version-$target.zip"
-          Compress-Archive -Path "$bin/alloy-lsp.exe" -DestinationPath "dist/alloy-lsp-$version-$target.zip"
+          Compress-Archive -Path (@("$bin/alloy.exe") + $docs) -DestinationPath "dist/alloy-$version-$label.zip"
+          Compress-Archive -Path "$bin/alloy-lsp.exe" -DestinationPath "dist/alloy-lsp-$version-$label.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: ${{ matrix.label }}
           path: dist/*.zip
 
   release:

@@ -86,28 +86,10 @@ fn option<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 
 const REPO: &str = "alloy-luau/alloy";
 
-/// The release target this binary was built for, as the release names
-/// its zips. The pair is an argument so a test can ask for a target
-/// this machine is not.
-fn triple_for(arch: &str, os: &str) -> Option<&'static str> {
-    Some(match (arch, os) {
-        ("x86_64", "linux") => "x86_64-unknown-linux-gnu",
-        ("aarch64", "linux") => "aarch64-unknown-linux-gnu",
-        ("x86_64", "macos") => "x86_64-apple-darwin",
-        ("aarch64", "macos") => "aarch64-apple-darwin",
-        ("x86_64", "windows") => "x86_64-pc-windows-msvc",
-        _ => return None,
-    })
-}
-
-fn target_triple() -> Option<&'static str> {
-    triple_for(std::env::consts::ARCH, std::env::consts::OS)
-}
-
-/// The zip that carries one binary: `alloy-lsp-0.1.0-rc-<triple>.zip`.
+/// The zip that carries one binary: `alloy-lsp-0.1.0-rc-linux-x64.zip`.
 /// The release builds one per binary, each with the binary at its root.
-fn asset_name(binary: &str, version: &str, triple: &str) -> String {
-    format!("{binary}-{}-{triple}.zip", version.trim_start_matches('v'))
+fn asset_name(binary: &str, version: &str, target: &str) -> String {
+    format!("{binary}-{}-{target}.zip", version.trim_start_matches('v'))
 }
 
 /// The asset of a release that carries one binary. The name matches
@@ -116,9 +98,9 @@ fn pick_asset<'a>(
     assets: &'a [serde_json::Value],
     binary: &str,
     version: &str,
-    triple: &str,
+    target: &str,
 ) -> Option<&'a serde_json::Value> {
-    let wanted = asset_name(binary, version, triple);
+    let wanted = asset_name(binary, version, target);
 
     assets
         .iter()
@@ -146,7 +128,7 @@ fn release_json(version: Option<&str>) -> Result<serde_json::Value, String> {
 fn stage(
     release: &serde_json::Value,
     version: &str,
-    triple: &str,
+    target: &str,
     which: &[&str],
     work: &Path,
 ) -> Result<Vec<(String, PathBuf)>, String> {
@@ -154,8 +136,8 @@ fn stage(
     let mut staged = Vec::new();
 
     for binary in which.iter().copied() {
-        let name = asset_name(binary, version, triple);
-        let asset = pick_asset(&assets, binary, version, triple)
+        let name = asset_name(binary, version, target);
+        let asset = pick_asset(&assets, binary, version, target)
             .ok_or_else(|| format!("the release has no {name}"))?;
         let url = asset["browser_download_url"]
             .as_str()
@@ -206,7 +188,7 @@ fn unpack(zip: &Path, into: &Path) -> Result<(), String> {
 /// unpacked before anything is replaced.
 fn update(dir: &Path, version: Option<&str>) -> ExitCode {
     let p = Painter::for_stdout();
-    let Some(triple) = target_triple() else {
+    let Some(target) = alloy::target::label() else {
         fail(&format!(
             "no release is built for {} {}; build from source",
             std::env::consts::ARCH,
@@ -235,10 +217,10 @@ fn update(dir: &Path, version: Option<&str>) -> ExitCode {
 
     println!(
         "{}",
-        p.note(&format!("fetching alloy {wanted} for {triple}"))
+        p.note(&format!("fetching alloy {wanted} for {target}"))
     );
 
-    match fetch_into(dir, &release, &wanted, triple, &BINARIES) {
+    match fetch_into(dir, &release, &wanted, target, &BINARIES) {
         Ok(names) => {
             println!(
                 "{}",
@@ -267,14 +249,14 @@ fn fetch_into(
     dir: &Path,
     release: &serde_json::Value,
     version: &str,
-    triple: &str,
+    target: &str,
     which: &[&str],
 ) -> Result<Vec<String>, String> {
     let work = std::env::temp_dir().join(format!("alloy-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| format!("cannot create {}: {e}", work.display()))?;
 
-    let staged = stage(release, version, triple, which, &work).inspect_err(|_| {
+    let staged = stage(release, version, target, which, &work).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&work);
     })?;
 
@@ -473,7 +455,7 @@ fn from_release(dir: &Path, which: &[&str]) {
     let version = crate::alloy_version();
     let p = Painter::for_stdout();
     let warn = Painter::for_stderr();
-    let Some(triple) = target_triple() else {
+    let Some(target) = alloy::target::label() else {
         eprintln!(
             "{}",
             warn.warn(&format!(
@@ -505,7 +487,7 @@ fn from_release(dir: &Path, which: &[&str]) {
         }
     };
 
-    match fetch_into(dir, &release, version, triple, which) {
+    match fetch_into(dir, &release, version, target, which) {
         Ok(names) => println!(
             "{}",
             p.ok(&format!(
@@ -612,23 +594,23 @@ mod tests {
 
     /// Every target the release builds for.
     const TARGETS: [(&str, &str, &str); 5] = [
-        ("x86_64", "linux", "x86_64-unknown-linux-gnu"),
-        ("aarch64", "linux", "aarch64-unknown-linux-gnu"),
-        ("x86_64", "macos", "x86_64-apple-darwin"),
-        ("aarch64", "macos", "aarch64-apple-darwin"),
-        ("x86_64", "windows", "x86_64-pc-windows-msvc"),
+        ("x86_64", "linux", "linux-x64"),
+        ("aarch64", "linux", "linux-arm64"),
+        ("x86_64", "macos", "macos-x64"),
+        ("aarch64", "macos", "macos-arm64"),
+        ("x86_64", "windows", "windows-x64"),
     ];
 
     /// The assets of one release, as the workflow names them.
     fn assets(version: &str) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
 
-        for (_, _, triple) in TARGETS {
+        for (_, _, target) in TARGETS {
             for binary in BINARIES {
                 out.push(json!({
-                    "name": format!("{binary}-{version}-{triple}.zip"),
+                    "name": format!("{binary}-{version}-{target}.zip"),
                     "size": 1234,
-                    "browser_download_url": format!("https://example/{binary}-{triple}"),
+                    "browser_download_url": format!("https://example/{binary}-{target}"),
                 }));
             }
         }
@@ -637,15 +619,18 @@ mod tests {
     }
 
     #[test]
-    fn every_target_resolves_to_its_triple() {
-        for (arch, os, triple) in TARGETS {
-            assert_eq!(triple_for(arch, os), Some(triple));
+    fn every_target_resolves_to_its_label() {
+        for (arch, os, target) in TARGETS {
+            assert_eq!(alloy::target::label_for(arch, os), Some(target));
         }
 
-        assert_eq!(triple_for("riscv64", "linux"), None);
-        assert_eq!(triple_for("x86_64", "freebsd"), None);
+        assert_eq!(alloy::target::label_for("riscv64", "linux"), None);
+        assert_eq!(alloy::target::label_for("x86_64", "freebsd"), None);
         // This machine is one of them, or the update says so.
-        assert!(target_triple().is_some() || triple_for("x86_64", "linux").is_some());
+        assert!(
+            alloy::target::label().is_some()
+                || alloy::target::label_for("x86_64", "linux").is_some()
+        );
     }
 
     #[test]
@@ -665,12 +650,12 @@ mod tests {
     fn each_target_picks_its_own_zip() {
         let assets = assets("0.1.0-rc");
 
-        for (_, _, triple) in TARGETS {
+        for (_, _, target) in TARGETS {
             for binary in BINARIES {
-                let picked = pick_asset(&assets, binary, "0.1.0-rc", triple)
+                let picked = pick_asset(&assets, binary, "0.1.0-rc", target)
                     .and_then(|a| a["name"].as_str())
                     .unwrap_or("");
-                assert_eq!(picked, format!("{binary}-0.1.0-rc-{triple}.zip"));
+                assert_eq!(picked, format!("{binary}-0.1.0-rc-{target}.zip"));
             }
         }
     }
@@ -754,7 +739,7 @@ mod tests {
             return;
         }
 
-        let triple = "x86_64-unknown-linux-gnu";
+        let target = "linux-x64";
         let version = "0.1.0-rc";
         let root = std::env::temp_dir().join(format!("alloy-update-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -772,23 +757,23 @@ mod tests {
                 (binary, format!("the {binary} binary").as_bytes()),
                 ("README.md", b"docs"),
             ]);
-            let at = serve.join(asset_name(binary, version, triple));
+            let at = serve.join(asset_name(binary, version, target));
             std::fs::write(&at, &zip).unwrap();
             assets.push(json!({
-                "name": asset_name(binary, version, triple),
+                "name": asset_name(binary, version, target),
                 "size": zip.len(),
                 "browser_download_url": format!("file://{}", at.display()),
             }));
         }
 
         let release = json!({ "tag_name": "v0.1.0-rc", "assets": assets });
-        let staged = stage(&release, version, triple, &BINARIES, &work).expect("the zips unpack");
+        let staged = stage(&release, version, target, &BINARIES, &work).expect("the zips unpack");
         assert_eq!(staged.len(), 2);
 
         // An install that is already there is replaced, and the old one
         // does not survive as a stray file.
-        let target = bin.join("alloy");
-        std::fs::write(&target, "the old binary").unwrap();
+        let existing = bin.join("alloy");
+        std::fs::write(&existing, "the old binary").unwrap();
 
         for (name, file) in &staged {
             replace_exe(file, &bin.join(exe_name(name))).expect("the replace lands");
@@ -815,7 +800,7 @@ mod tests {
         // short download, and nothing is staged.
         let mut lying = release.clone();
         lying["assets"][0]["size"] = json!(1_000_000);
-        let err = stage(&lying, version, triple, &BINARIES, &root.join("again")).unwrap_err();
+        let err = stage(&lying, version, target, &BINARIES, &root.join("again")).unwrap_err();
         assert!(err.contains("cut short"), "{err}");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -826,14 +811,14 @@ mod tests {
         // Both names start with `alloy-`, so a contains match would
         // install the server as the compiler.
         let assets = assets("0.1.0-rc");
-        let triple = "x86_64-unknown-linux-gnu";
-        let picked = pick_asset(&assets, "alloy", "0.1.0-rc", triple).unwrap();
+        let target = "linux-x64";
+        let picked = pick_asset(&assets, "alloy", "0.1.0-rc", target).unwrap();
         assert_eq!(
             picked["name"].as_str(),
-            Some("alloy-0.1.0-rc-x86_64-unknown-linux-gnu.zip")
+            Some("alloy-0.1.0-rc-linux-x64.zip")
         );
         // A release of another version carries nothing for this one.
-        assert!(pick_asset(&assets, "alloy", "0.2.0", triple).is_none());
-        assert!(pick_asset(&assets, "alloy", "0.1.0-rc", "sparc-sun-solaris").is_none());
+        assert!(pick_asset(&assets, "alloy", "0.2.0", target).is_none());
+        assert!(pick_asset(&assets, "alloy", "0.1.0-rc", "solaris-sparc").is_none());
     }
 }

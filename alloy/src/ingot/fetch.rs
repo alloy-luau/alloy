@@ -27,19 +27,6 @@ pub const LATEST: &str = "^";
 /// The lock file's name, beside the store under `.alloy`.
 pub const LOCK_NAME: &str = "ingots.lock";
 
-/// The release target this binary was built for, as a release names
-/// its zips: `x86_64-unknown-linux-gnu`.
-pub fn target_triple() -> Option<&'static str> {
-    Some(match (std::env::consts::ARCH, std::env::consts::OS) {
-        ("x86_64", "linux") => "x86_64-unknown-linux-gnu",
-        ("aarch64", "linux") => "aarch64-unknown-linux-gnu",
-        ("x86_64", "macos") => "x86_64-apple-darwin",
-        ("aarch64", "macos") => "aarch64-apple-darwin",
-        ("x86_64", "windows") => "x86_64-pc-windows-msvc",
-        _ => return None,
-    })
-}
-
 /// The version a project asks for: the `version` key, `^` without one.
 pub fn requested(table: &IngotTable) -> &str {
     table.version.as_deref().unwrap_or(LATEST)
@@ -174,12 +161,12 @@ pub fn resolve(root: &Path, name: &str, table: &IngotTable) -> Result<PathBuf, S
 
 /// The asset names an ingot's release may use, best first. An `asset`
 /// key in alloy.toml names one outright.
-pub fn asset_names(name: &str, table: &IngotTable, triple: &str) -> Vec<String> {
+pub fn asset_names(name: &str, table: &IngotTable, target: &str) -> Vec<String> {
     match &table.asset {
         Some(a) => vec![a.clone()],
 
         None => vec![
-            format!("{name}-ingot-{triple}.zip"),
+            format!("{name}-ingot-{target}.zip"),
             format!("{name}-ingot.zip"),
         ],
     }
@@ -346,8 +333,8 @@ fn fetch(
         .as_str()
         .ok_or_else(|| format!("the release of {repo} carries no tag"))?;
     let version = plain(tag).to_string();
-    let triple = target_triple().unwrap_or("unknown");
-    let wanted = asset_names(name, table, triple);
+    let target = crate::target::label().unwrap_or("unknown");
+    let wanted = asset_names(name, table, target);
     let assets = release["assets"].as_array().cloned().unwrap_or_default();
     let asset = wanted
         .iter()
@@ -490,7 +477,7 @@ mod tests {
             json!({
                 "tag_name": tag,
                 "assets": [{
-                    "name": format!("{}-ingot-{}.zip", self.name, target_triple().unwrap_or("unknown")),
+                    "name": format!("{}-ingot-{}.zip", self.name, crate::target::label().unwrap_or("unknown")),
                     "size": 10,
                     "browser_download_url": format!("https://example/{tag}"),
                 }],
@@ -759,7 +746,7 @@ mod tests {
             Ok(json!({
                 "tag_name": "v1.0.0",
                 "assets": [{
-                    "name": format!("shout-ingot-{}.zip", target_triple().unwrap_or("unknown")),
+                    "name": format!("shout-ingot-{}.zip", crate::target::label().unwrap_or("unknown")),
                     "size": 1,
                     "browser_download_url": "https://example/v1.0.0",
                 }],

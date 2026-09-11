@@ -190,6 +190,42 @@ end
 print(pick, hand_written)
 "#;
 
+/// `try await` over every shape of Future the compiler can read: one
+/// that settles with a Result, one annotated as such, one from an async
+/// function declared to return a Result, and one that settles with a
+/// plain value.
+const TRIED: &str = r#"local async function loaded(): Result<number, string>
+    return Ok(1)
+end
+
+local async function from_resolve(): Result<number, string>
+    local v = try await Future.resolve(Ok(1))
+
+    return Ok(v)
+end
+
+local async function from_annotation(): Result<number, string>
+    local f: Future<Result<number, string>> = Future.resolve(Ok(1))
+    local v = try await f
+
+    return Ok(v)
+end
+
+local async function from_async(): Result<number, string>
+    local v = try await loaded()
+
+    return Ok(v)
+end
+
+local async function from_plain(): Result<number, string>
+    local v = try await Future.resolve(1)
+
+    return Ok(v)
+end
+
+print(from_resolve, from_annotation, from_async, from_plain)
+"#;
+
 /// `new Self()` inside a struct's own constructor. The value the
 /// constructor gives back must be the struct, so the annotated locals
 /// take it with no cast.
@@ -350,6 +386,14 @@ fn a_mixed_race_lands_on_the_union() {
 #[test]
 fn a_reject_and_a_hand_written_awaitable_analyze() {
     analyze(REJECTED, "rejected");
+}
+
+/// A `try await` of a Future that settles with a Result yields that
+/// Result, not an Ok around it. The typed form said otherwise, and the
+/// nested print named the emit's own keys: `_1`, `__ok`, `__err`.
+#[test]
+fn a_tried_await_yields_the_result_the_future_settles_with() {
+    analyze(TRIED, "tried-await");
 }
 
 /// `import Players from "game:Players"` binds the service class, so a

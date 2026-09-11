@@ -400,6 +400,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ret_types: Vec::new(),
         result_aliases: HashSet::new(),
         fn_ret_types: HashMap::new(),
+        binding_types: HashMap::new(),
         enum_decls: HashMap::new(),
         impl_methods: HashMap::new(),
         renames: Vec::new(),
@@ -873,6 +874,11 @@ struct Desugar<'s> {
     /// `try` reads it: an operand whose type is no Result is an error
     /// at the `try`, not at the `return` under it.
     fn_ret_types: HashMap<String, String>,
+    /// The type each annotated binding of this file declares, by name.
+    /// `try await` reads it: a `Future<Result<...>>` settles with the
+    /// Result itself. The map is flat, the way `fn_ret_types` is; a
+    /// name reused with another type gives up its entry.
+    binding_types: HashMap<String, String>,
     /// The enums this file declares, from the prescan, so a use before
     /// the declaration still checks. `enums` also holds `Result`, which
     /// the std owns and whose table carries more than its variants.
@@ -2065,16 +2071,44 @@ impl<'s> Desugar<'s> {
 
     fn declare_binding(&mut self, b: &Binding) {
         match &b.destructure {
-            None => self.declare_name(b.name),
+            None => {
+                self.record_binding_type(b.name, b.ty);
+                self.declare_name(b.name);
+            }
 
             Some(d) => self.declare_destructure(d),
+        }
+    }
+
+    /// The annotation a binding carries, under its name. A name the
+    /// file binds twice with two types keeps neither.
+    fn record_binding_type(&mut self, name: TokSpan, ty: Option<TokSpan>) {
+        let Some(ty) = ty else {
+            return;
+        };
+        let key = self.text_of(name).to_string();
+        let text = self.text_of(ty).trim().trim_start_matches(':').trim();
+
+        match self.binding_types.get(&key) {
+            Some(old) if old != text => {
+                self.binding_types.insert(key, String::new());
+            }
+
+            Some(_) => {}
+
+            None => {
+                self.binding_types.insert(key, text.to_string());
+            }
         }
     }
 
     fn declare_params(&mut self, body: &FunctionBody) {
         for p in &body.params {
             match &p.destructure {
-                None => self.declare_name(p.name),
+                None => {
+                    self.record_binding_type(p.name, p.ty);
+                    self.declare_name(p.name);
+                }
 
                 Some(d) => self.declare_destructure(d),
             }

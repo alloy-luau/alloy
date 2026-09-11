@@ -490,6 +490,105 @@ impl<'s> Desugar<'s> {
         known.then(|| ty.to_string())
     }
 
+    /// The dotted name of a callee, `Future.resolve` for an `Index`
+    /// chain of plain fields. Anything else gives `None`.
+    fn dotted_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Name(n) => Some(self.text_of(*n).to_string()),
+
+            Expr::Index {
+                object,
+                key: IndexKey::Field(f),
+                optional: false,
+                ..
+            } => Some(format!(
+                "{}.{}",
+                self.dotted_name(object)?,
+                self.text_of(*f)
+            )),
+
+            _ => None,
+        }
+    }
+
+    /// Whether an expression is a Result the file can name as one:
+    /// `Ok(v)`, `Err(e)`, a `try`, or a call to a function whose
+    /// declared return type is a Result.
+    fn is_result_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren { inner, .. } => self.is_result_expr(inner),
+
+            Expr::Try { .. } | Expr::TryBlock { .. } => true,
+
+            Expr::Call {
+                func, method: None, ..
+            } => match self.dotted_name(func).as_deref() {
+                Some("Ok" | "Err") => true,
+
+                Some(name) => {
+                    let ty = self.fn_ret_types.get(name).map(|t| t.trim().to_string());
+
+                    ty.is_some_and(|t| t.starts_with("Result") || self.result_aliases.contains(&t))
+                }
+
+                None => false,
+            },
+
+            _ => false,
+        }
+    }
+
+    /// Whether a written type is a Future of a Result. The std spells
+    /// the operand of `await` `Awaitable<T>`; a source writes `Future`.
+    fn future_of_result(&self, ty: &str) -> bool {
+        let inner = ty
+            .strip_prefix("Future<")
+            .or_else(|| ty.strip_prefix("Awaitable<"))
+            .and_then(|rest| rest.strip_suffix('>'));
+        let Some(inner) = inner.map(str::trim) else {
+            return false;
+        };
+        let head = inner.split_once('<').map_or(inner, |(head, _)| head).trim();
+
+        head == "Result" || self.result_aliases.contains(head)
+    }
+
+    /// Whether the Future an `await` takes settles with a Result. A
+    /// call to an async function declared to return one does,
+    /// `Future.resolve(r)` settles with exactly `r`, and a binding
+    /// annotated `Future<Result<T, E>>` says so outright.
+    fn settles_with_result(&self, awaited: &Expr) -> bool {
+        match awaited {
+            Expr::Paren { inner, .. } => self.settles_with_result(inner),
+
+            // A binding annotated `Future<Result<T, E>>` settles with
+            // that Result.
+            Expr::Name(n) => self
+                .binding_types
+                .get(self.text_of(*n))
+                .is_some_and(|t| self.future_of_result(t)),
+
+            Expr::Call {
+                func,
+                method: None,
+                args,
+                ..
+            } => match self.dotted_name(func).as_deref() {
+                Some("Future.resolve") => match args {
+                    CallArgs::Paren(list) => list.len() == 1 && self.is_result_expr(&list[0]),
+
+                    _ => false,
+                },
+
+                Some(name) => self.result_asyncs.contains(name),
+
+                None => false,
+            },
+
+            _ => false,
+        }
+    }
+
     /// `try expr`: hoist the Result, return it on Err, yield the payload.
     pub(crate) fn try_expr(&mut self, operand: &Expr, span: TokSpan) -> String {
         let anchor = self.byte_start(span);
@@ -515,11 +614,11 @@ impl<'s> Desugar<'s> {
             Expr::Await { operand: inner, .. } => {
                 let x = self.render_to_string(inner);
                 let std = self.std();
-                // A call to an async function declared to return a Result
-                // settles with the Result: the typed form says so.
-                let known = matches!(&**inner, Expr::Call { func, method: None, .. }
-                    if matches!(&**func, Expr::Name(n) if self.result_asyncs.contains(self.text_of(*n))));
-                let helper = if known {
+                // A Future that settles with a Result yields that
+                // Result, not an Ok around it: the typed form says so.
+                // Without it the checker prints a Result of a Result,
+                // and the nested print names the emit's own keys.
+                let helper = if self.settles_with_result(inner) {
                     "try_await_result"
                 } else {
                     "try_await"

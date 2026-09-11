@@ -440,12 +440,8 @@ end
 --- `try await`: a failed Future becomes an Err instead of a throw, and
 --- a Result the Future settles with is the Result, not an Ok around it,
 --- so `try await f()` on an async function that returns a Result yields
---- the value.
---- `try await`: a failed Future becomes an Err instead of a throw, and
---- a Result the Future settles with is the Result, not an Ok around it,
---- so `try await f()` on an async function that returns a Result yields
 --- the value. The compiler calls `try_await_result` where it knows the
---- function returns a Result, for the type; both run the same code.
+--- Future settles with a Result, for the type; both run the same code.
 function alloy.try_await<A>(target: A & Settled<any>): Result<index<A, "__value">, any>
 	local ok, value = pcall(alloy.await, target)
 	if not ok then
@@ -457,7 +453,14 @@ function alloy.try_await<A>(target: A & Settled<any>): Result<index<A, "__value"
 	return Ok(value) :: any
 end
 
-function alloy.try_await_result<T, E>(target: { read __value: { read __ok: T, read __err: E } }): Result<T, E>
+--- The same call, typed for a Future that settles with a Result: the
+--- Result the Future carries is the answer, not an Ok around it. The
+--- arguments come off the settled value, since a generic bound to the
+--- shape `{ __ok: T, __err: E }` reads `unknown` off an annotated
+--- `Future<Result<T, E>>`.
+function alloy.try_await_result<A>(
+	target: A & Settled<any>
+): Result<index<index<A, "__value">, "__ok">, index<index<A, "__value">, "__err">>
 	return alloy.try_await(target) :: any
 end
 

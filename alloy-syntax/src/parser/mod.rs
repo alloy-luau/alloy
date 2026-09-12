@@ -526,30 +526,24 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// The words that start an Alloy statement or expression. A name cannot
-/// be one of them: not a local, a parameter, a plain function, or a bare
-/// expression. After `.` or `:` each is a field, so `Instance.new` and
-/// an `impl`'s `function new` stay valid. Words with a meaning only
-/// inside a construct, `client`, `from`, `as`, `case`, and so on, are
-/// free names, and so are the words [`is_contextual`] lists.
+/*
+The words that start an Alloy declaration and nothing else. A name cannot
+be one of them: not a local, a parameter, a plain function, or a bare
+expression. After `.` or `:` each is a field, so `t.impl` stays valid.
+
+Six words are left. Each one opens a declaration that no expression
+resembles, and no Roblox file names a local after one, so the reservation
+costs a user nothing. `attribute`, `trait`, and `namespace` also name the
+target of an `attribute ... on` list, where the word must read as itself.
+
+Words with a meaning only inside a construct, `client`, `from`, `as`,
+`case`, and so on, are free names, and so are the words
+[`is_contextual`] lists.
+*/
 pub fn is_alloy_reserved(word: &str) -> bool {
     matches!(
         word,
-        "struct"
-            | "enum"
-            | "trait"
-            | "impl"
-            | "interface"
-            | "remote"
-            | "macro"
-            | "attribute"
-            | "namespace"
-            | "async"
-            | "await"
-            | "delete"
-            | "destroy"
-            | "after"
-            | "import"
+        "trait" | "impl" | "remote" | "macro" | "attribute" | "namespace"
     )
 }
 
@@ -578,6 +572,18 @@ differs per word:
   without a `with` are the name.
 - `const` declares when a name, `function`, `@`, `[`, or `{` follows.
   `const = 1`, `const(x)`, `const.x` are the name.
+- `async` is the modifier before `function` or `do` on the same line.
+- `await` is the operator before an operand on the same line.
+- `delete` and `destroy` take a name, a string, or a number, so
+  `local function destroy(self)` and `self:destroy()` are the name.
+- `after` takes a delay and then `do`, `Parser::after_delay_follows`.
+  `after(x)`, `after = 1`, and `after[1] = 2` are the name.
+- `enum`, `struct`, and `interface` declare before a name on the same
+  line. `local enum = t` and `enum.Idle` are the name.
+- `import` opens the statement before `*`, `{`, `type {`, or `Name from`.
+  The call `import("m")` is the expression form and stays the keyword,
+  because the emit turns it into a `require`; a file that binds a local
+  named `import` must call it some other way.
 */
 pub use crate::contextual::is_contextual;
 

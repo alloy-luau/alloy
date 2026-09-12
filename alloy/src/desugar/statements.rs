@@ -2577,15 +2577,31 @@ mod tests {
         );
     }
 
-    /// `after` is reserved, so a local of that name reports.
+    /// `after` is contextual: the keyword takes a delay and a `do`, and
+    /// every other shape is the local a file may name after.
     #[test]
-    fn after_is_a_reserved_word() {
-        let got = messages("local after = 1\nprint(after)\n");
-        assert!(
-            got.iter()
-                .any(|m| m == "`after` is a reserved word and cannot be a name"),
-            "{got:?}"
-        );
+    fn after_is_contextual() {
+        for src in [
+            "local after = 1\nprint(after)\n",
+            "local t = {}\nt.after = 1\nprint(t.after)\n",
+            "local after = {}\nafter[1] = 2\nprint(after)\n",
+            "local after = function(n) return n end\nprint(after(1))\n",
+            "local after = 1\nafter += 1\nprint(after)\n",
+        ] {
+            assert!(messages(src).is_empty(), "{src:?}: {:?}", messages(src));
+        }
+
+        // The statement still lowers, with and without the filter.
+        let out = crate::compile("after 2 do\n    print(1)\nend\n").unwrap();
+        assert!(out.ship.contains("task.delay(2"), "{}", out.ship);
+
+        let out = crate::compile("local ready = true\nafter 3 where ready do\n    print(1)\nend\n")
+            .unwrap();
+        assert!(out.ship.contains("task.delay(3"), "{}", out.ship);
+
+        // A parenthesized delay keeps the keyword, because the `do` closes it.
+        let out = crate::compile("local n = 1\nafter (n + 1) do\n    print(1)\nend\n").unwrap();
+        assert!(out.ship.contains("task.delay("), "{}", out.ship);
     }
 
     #[test]

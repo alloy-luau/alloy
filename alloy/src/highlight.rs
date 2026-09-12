@@ -219,10 +219,7 @@ fn paint_line(line: &str, mode: Mode) -> String {
             // A contextual word before a call or an assignment is the
             // name it is. This highlighter reads one line at a time, so
             // it decides from the character after the word.
-            let name_here = alloy_syntax::contextual::is_contextual(&w)
-                && after
-                    .trim_start()
-                    .starts_with(['(', '=', '.', ':', '[', ',', ')', '}', ';']);
+            let name_here = alloy_syntax::contextual::name_before(&w, &after);
             let keyword = matches!(mode, Mode::Alloy | Mode::Luau)
                 && KEYWORDS.contains(&w.as_str())
                 && !name_here

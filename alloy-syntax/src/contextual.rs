@@ -5,10 +5,18 @@ reads as a keyword.
 Luau reserves none of these words, and every one of them appears in
 ordinary Roblox code: `Instance.new` lands in a local named `new`, a
 module table is named `export`, `try` holds `pcall`, `match` holds a
-string helper, and `const` is a Luau declaration Alloy passes through.
+string helper, `const` is a Luau declaration Alloy passes through, and
+`local function destroy(self)` is the cleanup method half of Roblox
+writes. A package a project imports brings its own names, and `async`,
+`await`, `after`, and `enum` are among them.
 Luau itself treats `export` this way. `export type T = number` and
 `local export = 1` live in one file, because `type` is what makes the
 word a keyword.
+
+One shape stays reserved inside a contextual word: a call spelled
+`import(...)` or `import<<T>>(...)` is always the module import, because
+that call is the expression form of the statement and the emit turns it
+into a `require`. Every other reading of `import` is the name.
 
 The parser decides this per dispatch, and every other reader of the file
 needs the same answer: the formatter spaces `new(x)` as a call, the
@@ -21,7 +29,23 @@ use crate::lexer::{Tok, TokKind};
 
 /// The words that read as a keyword in some places and a name in others.
 pub fn is_contextual(word: &str) -> bool {
-    matches!(word, "new" | "export" | "try" | "match" | "const")
+    matches!(
+        word,
+        "new"
+            | "export"
+            | "try"
+            | "match"
+            | "const"
+            | "async"
+            | "await"
+            | "delete"
+            | "destroy"
+            | "after"
+            | "enum"
+            | "struct"
+            | "interface"
+            | "import"
+    )
 }
 
 /// The words that make `export` a declaration instead of a name.
@@ -88,6 +112,29 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
         "match" => match_follows(src, toks, i),
 
         "const" => const_decl_follows(src, toks, i),
+
+        // `async function f()` and `async do ... end`. Nothing else takes
+        // the word, so `local async = true` keeps its name.
+        "async" => {
+            matches!(text(src, toks, i + 1), "function" | "do") && !newline_after(src, toks, i)
+        }
+
+        // `await f()`. `await(p)` and `await = 1` are the name.
+        "await" => prefix_operand_follows(src, toks, i),
+
+        // `delete t[k]` and `destroy part`. `local function destroy(self)`
+        // and `self:destroy()` are the name.
+        "delete" | "destroy" => delete_operand_follows(src, toks, i),
+
+        "after" => after_delay_follows(src, toks, i),
+
+        // A declaration opens with its own name: `enum State as`,
+        // `struct Vec2 as`, `interface Named as`.
+        "enum" | "struct" | "interface" => {
+            !newline_after(src, toks, i) && name_at(src, toks, i + 1)
+        }
+
+        "import" => import_follows(src, toks, i),
 
         _ => true,
     }
@@ -254,6 +301,117 @@ fn with_closes_scrutinees(src: &str, toks: &[Tok], i: usize) -> bool {
 }
 
 /*
+Reports if an operand for `delete` or `destroy` follows token `i`.
+
+The operand is a name, a string, or a number. A string and a number are
+not things a file can delete, and they are here on purpose: the statement
+takes them and the analyzer names what the user wrote, instead of the
+parser reporting a call it never saw. `delete(x)` and `destroy = f` keep
+their Luau reading, and so does `local function destroy(self)`.
+*/
+pub fn delete_operand_follows(src: &str, toks: &[Tok], i: usize) -> bool {
+    if newline_after(src, toks, i) {
+        return false;
+    }
+
+    name_at(src, toks, i + 1)
+        || matches!(
+            toks.get(i + 1).map(|t| t.kind),
+            Some(TokKind::Str { .. } | TokKind::Number | TokKind::InterpStr)
+        )
+}
+
+/*
+Reports if a delay follows the `after` at token `i`.
+
+`after 2 do ... end` takes a delay and then a block, so a number or a
+name after the word makes it the keyword. `after(x)`, `after = 1`,
+`after[1] = 2`, `after.f = 2`, and `after += 1` are the Luau readings of
+a local named after.
+
+A parenthesized delay, `after (a + b) do`, carries the tokens of a call.
+The `do` that closes the delay decides, and the scan stops at the end of
+the line, so `after(x)` on one line and `do ... end` on the next stay a
+call and a block.
+*/
+pub fn after_delay_follows(src: &str, toks: &[Tok], i: usize) -> bool {
+    prefix_operand_follows(src, toks, i)
+        || (text(src, toks, i + 1) == "(" && do_closes_delay(src, toks, i))
+}
+
+/*
+Reports if a `do` or a `where` closes the delay that opens after token
+`i`, with no newline before it.
+
+The scan balances brackets, so the `do` of a nested `for` inside the
+delay does not count. At depth zero it gives up at a token no delay
+holds, ex: the `=` of `after(x) = 1`, an assignment a file could write
+to the field of a table named after.
+*/
+fn do_closes_delay(src: &str, toks: &[Tok], i: usize) -> bool {
+    let mut depth = 0usize;
+
+    for n in 1..=SCRUTINEE_SCAN {
+        if newline_after(src, toks, i + n - 1) {
+            return false;
+        }
+
+        let Some(t) = toks.get(i + n) else {
+            return false;
+        };
+
+        match t.text(src) {
+            "(" | "[" | "{" => depth += 1,
+
+            ")" | "]" | "}" => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+
+                None => return false,
+            },
+
+            _ if depth > 0 => {}
+
+            "do" | "where" => return true,
+
+            "=" | ";" | "end" | "then" | "else" | "elseif" | "until" | "return" | "local"
+            | "while" | "for" | "function" => return false,
+
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/*
+Reports if an import list follows the `import` at token `i`.
+
+`import { a } from "m"`, `import * as m from "m"`, `import type { T }
+from "m"`, and `import M from "m"` are the statement. Everything else is
+the name, so `local import = 1` and `import.cache` keep their Luau
+reading.
+
+The call `import("m")` is absent from this rule on purpose. It is the
+expression form of the same statement, and the emit turns it into a
+`require`, so the parser holds that one shape for the keyword. The word
+is still spelled like a name there, which is what lets the call parse at
+all.
+*/
+pub fn import_follows(src: &str, toks: &[Tok], i: usize) -> bool {
+    match text(src, toks, i + 1) {
+        "*" | "{" => true,
+
+        "type" => text(src, toks, i + 2) == "{",
+
+        _ => {
+            name_at(src, toks, i + 1)
+                && (text(src, toks, i + 2) == "from"
+                    || (text(src, toks, i + 2) == "," && text(src, toks, i + 3) == "{"))
+        }
+    }
+}
+
+/*
 Reports if a declaration follows the `const` at token `i`.
 
 A name, `function`, `async function`, an `@attr` line, or a destructuring
@@ -303,6 +461,32 @@ fn destructure_follows(src: &str, toks: &[Tok], i: usize) -> bool {
     }
 
     false
+}
+
+/*
+Reports if the contextual `word` reads as a name, judged from `after`:
+the rest of the line behind it.
+
+This is [`keyword_at`] for the terminal highlighter, which paints one
+line at a time and holds no tokens. A punctuation mark that cannot
+follow a keyword makes the word a name, so `new(x)`, `try = pcall`, and
+`t.destroy` paint as the names they are.
+
+`import(` and `import<<T>>(` are the exception the tokens make too: that
+call is the module import, so the word keeps its color there.
+*/
+pub fn name_before(word: &str, after: &str) -> bool {
+    if !is_contextual(word) {
+        return false;
+    }
+
+    let rest = after.trim_start();
+
+    if word == "import" && rest.starts_with(['(', '<']) {
+        return false;
+    }
+
+    rest.starts_with(['(', '=', '.', ':', '[', ',', ')', '}', ';'])
 }
 
 /// The words Luau itself reserves, plus the two Alloy adds to a body.
@@ -478,6 +662,97 @@ mod tests {
     fn a_plain_keyword_answers_true() {
         assert!(is_kw("struct V as\nend\n", "struct"));
         assert!(is_kw("local x = 1\n", "local"));
+    }
+
+    /// `after` reads both ways on the tokens a call and an index share.
+    #[test]
+    fn after_takes_a_delay_and_nothing_else() {
+        assert!(is_kw("after 2 do\nend\n", "after"));
+        assert!(is_kw("after n do\nend\n", "after"));
+        assert!(is_kw("after delay() do\nend\n", "after"));
+        assert!(is_kw("after 3 where ready do\nend\n", "after"));
+        assert!(is_kw("after (n + 1) do\nend\n", "after"));
+        assert!(is_kw("destroy part after 2\n", "after"));
+
+        assert!(!is_kw("after = 1\n", "after"));
+        assert!(!is_kw("after(x)\n", "after"));
+        assert!(!is_kw("after[1] = 2\n", "after"));
+        assert!(!is_kw("after.f = 2\n", "after"));
+        assert!(!is_kw("after:m()\n", "after"));
+        assert!(!is_kw("after += 1\n", "after"));
+        assert!(!is_kw("print(after)\n", "after"));
+
+        // A call on one line and a block on the next stay two statements.
+        assert!(!is_kw("after(x)\ndo print(1) end\n", "after"));
+    }
+
+    /// The modifier, the operator, and the two cleanup words.
+    #[test]
+    fn the_prefix_words_need_what_follows_them() {
+        assert!(is_kw("async function f()\nend\n", "async"));
+        assert!(is_kw("async do print(1) end\n", "async"));
+        assert!(!is_kw("local async = false\n", "async"));
+        assert!(!is_kw("async(1)\n", "async"));
+        assert!(!is_kw("if async then print(1) end\n", "async"));
+
+        assert!(is_kw("local v = await f()\n", "await"));
+        assert!(!is_kw("local await = pcall\n", "await"));
+        assert!(!is_kw("await(1)\n", "await"));
+
+        assert!(is_kw("delete t\n", "delete"));
+        assert!(is_kw("destroy part\n", "destroy"));
+        assert!(!is_kw("delete(1)\n", "delete"));
+        assert!(!is_kw("local function destroy(self)\nend\n", "destroy"));
+        assert!(!is_kw("self:destroy()\n", "destroy"));
+        assert!(!is_kw("t.destroy = print\n", "destroy"));
+    }
+
+    /// A declaration opens with its own name; a table named for the word
+    /// does not.
+    #[test]
+    fn a_declaration_word_needs_a_name_after_it() {
+        assert!(is_kw("enum State as\nend\n", "enum"));
+        assert!(is_kw("struct Vec2 as\nend\n", "struct"));
+        assert!(is_kw("interface Named as\nend\n", "interface"));
+
+        assert!(!is_kw("local enum = { Idle = 1 }\n", "enum"));
+        assert!(!is_kw("print(enum.Idle)\n", "enum"));
+        assert!(!is_kw("struct.x = 1\n", "struct"));
+        assert!(!is_kw("print(interface)\n", "interface"));
+        assert!(!is_kw("local x = enum\nState = 1\n", "enum"));
+    }
+
+    /// `import` opens the statement, and the call form keeps the keyword
+    /// because the emit turns it into a `require`.
+    #[test]
+    fn import_is_a_name_outside_its_statement() {
+        assert!(is_kw("import { a } from \"m\"\n", "import"));
+        assert!(is_kw("import * as m from \"m\"\n", "import"));
+        assert!(is_kw("import M from \"m\"\n", "import"));
+        assert!(is_kw("import M, { a } from \"m\"\n", "import"));
+        assert!(is_kw("import type { T } from \"m\"\n", "import"));
+
+        assert!(!is_kw("local import = {}\n", "import"));
+        assert!(!is_kw("import.cache = 1\n", "import"));
+        assert!(!is_kw("print(import)\n", "import"));
+    }
+
+    /// The one-line reading the terminal highlighter uses.
+    #[test]
+    fn the_line_reading_matches_the_token_reading() {
+        assert!(name_before("new", "(\"Part\")"));
+        assert!(name_before("destroy", ".x = 1"));
+        assert!(name_before("after", " = 1"));
+        assert!(!name_before("after", " 2 do"));
+        assert!(!name_before("struct", " Vec2 as"));
+
+        // The import call keeps its color: the emit reads it as a require.
+        assert!(!name_before("import", "(\"m\")"));
+        assert!(!name_before("import", "<<Config>>(name)"));
+        assert!(name_before("import", ".cache = 1"));
+
+        // A word with no name reading is never a name.
+        assert!(!name_before("impl", " = 1"));
     }
 
     /// The operand of a prefix word starts on the same line.

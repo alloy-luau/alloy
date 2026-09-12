@@ -722,9 +722,13 @@ mod tests {
 
     #[test]
     fn reserved_words_cannot_be_names() {
-        let bad = compile("local struct = 1\nlocal function await() end\nlocal function f(delete) end\nprint(namespace)\nlocal private = 1\n").unwrap();
+        let bad = compile("local trait = 1\nlocal function macro() end\nlocal function f(impl) end\nprint(namespace)\nlocal private = 1\n").unwrap();
         assert_eq!(bad.diagnostics.len(), 5, "{:?}", bad.diagnostics);
         assert!(bad.diagnostics[0].message.contains("reserved"));
+
+        // The contextual words are names wherever a name can stand.
+        let names = compile("local struct = 1\nlocal function await() end\nlocal function f(delete) end\nlocal function destroy(self) return self end\nlocal enum = { Idle = 1 }\nlocal interface = enum.Idle\nlocal async = false\nlocal after = 2\nprint(struct, await, f, destroy, interface, async, after)\n").unwrap();
+        assert!(names.diagnostics.is_empty(), "{:?}", names.diagnostics);
 
         let fine = compile("struct V as\n    x: number\nend\nimpl V as\n    function new(): V\n        return new V { x = 1 }\n    end\nend\nlocal make = Instance.new\nfunction V.await() end\nlocal v = new V()\nprint(make, v, V.new)\n").unwrap();
         assert!(fine.diagnostics.is_empty(), "{:?}", fine.diagnostics);

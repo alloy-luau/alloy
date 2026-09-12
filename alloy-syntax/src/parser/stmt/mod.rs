@@ -130,6 +130,13 @@ impl<'a> Parser<'a> {
         crate::contextual::const_decl_follows(self.src, self.toks, self.pos)
     }
 
+    /// Reports if a delay follows the `after` at the cursor, so the word
+    /// opens the statement instead of naming a local. The rule lives in
+    /// [`crate::contextual`], so the formatter and the server read it too.
+    pub(in super::super) fn after_delay_follows(&self) -> bool {
+        crate::contextual::after_delay_follows(self.src, self.toks, self.pos)
+    }
+
     /// Reports if the token at the cursor is a keyword that begins a statement.
     fn opens_statement(&self) -> bool {
         matches!(
@@ -140,7 +147,7 @@ impl<'a> Parser<'a> {
             || (self.at("async") && matches!(self.text_at(1), "function" | "do"))
             || (self.at("delete") && self.name_at(1))
             || (self.at("destroy") && self.name_at(1))
-            || self.at("after")
+            || (self.at("after") && self.after_delay_follows())
             || (self.at("import") && self.import_follows())
             || (self.at("enum") && self.name_at(1) && self.text_at(2) == "as")
             || (self.at("impl") && self.name_at(1))
@@ -277,8 +284,10 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // `after n do ... end`, with `where` between the two.
-            "after" => {
+            // `after n do ... end`, with `where` between the two. The
+            // delay guard keeps `after = 1` and `after(x)` as the local
+            // a file may name after.
+            "after" if self.after_delay_follows() => {
                 self.bump();
                 let delay = self.expr()?;
                 let filter = match self.at("where") && self.infix_word_here() {

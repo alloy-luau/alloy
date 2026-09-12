@@ -650,11 +650,26 @@ fn name_case(src: &str) {
     assert!(reports.is_empty(), "{src:?} reported {reports:?}");
 }
 
-/// `new`, `export`, `try`, `match`, and `const` are names wherever the
-/// token after them cannot follow the keyword.
+/// Every contextual word is a name wherever the token after it cannot
+/// follow the keyword.
 #[test]
 fn a_contextual_word_is_a_name() {
-    for word in ["new", "export", "try", "match", "const"] {
+    for word in [
+        "new",
+        "export",
+        "try",
+        "match",
+        "const",
+        "async",
+        "await",
+        "delete",
+        "destroy",
+        "after",
+        "enum",
+        "struct",
+        "interface",
+        "import",
+    ] {
         name_case(&format!("local {word} = 1\nprint({word})\n"));
         name_case(&format!("{word} = 1\n"));
         name_case(&format!("local t = {{}}\nprint(t.{word})\n"));
@@ -687,6 +702,31 @@ fn a_contextual_word_is_a_name() {
     name_case("local try = \"a\"\nprint(try .. \"b\")\n");
     name_case("local new = 1\nprint(new + 1)\n");
     name_case("local const = 1\nconst += 1\n");
+
+    // `destroy` is the Roblox cleanup method, by name and by call.
+    name_case("local function destroy(self) return self end\nprint(destroy)\n");
+    name_case("local t = {}\nfunction t.destroy(self) return self end\nt:destroy()\n");
+    name_case("local t = { destroy = print }\nt.destroy(1)\n");
+
+    // `after` takes every shape a number-valued local takes.
+    name_case("local after = 2\nafter += 1\nprint(after)\n");
+    name_case("local after = print\nafter(1)\n");
+    name_case("local after = {}\nafter.f = 2\nprint(after)\n");
+    name_case("local after = {}\nafter:f()\n");
+
+    // `async`, `await`, and `delete` are plain values here.
+    name_case("local async = false\nif async then print(1) end\n");
+    name_case("local await = print\nawait(1)\n");
+    name_case("local delete = print\ndelete(1)\n");
+
+    // `enum`, `struct`, and `interface` name a table.
+    name_case("local enum = { Idle = 1 }\nprint(enum.Idle)\n");
+    name_case("local struct = {}\nstruct.x = 1\nprint(struct)\n");
+    name_case("local interface = {}\nprint(interface)\n");
+
+    // `import` is a name in every shape but the call the emit requires.
+    name_case("local import = {}\nimport.cache = 1\nprint(import)\n");
+    name_case("local t = { import = 1 }\nprint(t.import)\n");
 }
 
 /// Each word still opens its own syntax.
@@ -764,6 +804,73 @@ fn a_contextual_word_is_the_keyword() {
     ));
 }
 
+/// The eight words that joined the contextual set keep their own syntax.
+#[test]
+fn the_new_contextual_words_keep_their_syntax() {
+    use alloy_syntax::ast::Stmt;
+
+    let head = |src: &str| {
+        let lexed = lexer::lex(src).expect("lex");
+
+        parser::parse(src, &lexed.toks)
+            .unwrap_or_else(|e| panic!("{src:?}: {}", e.message))
+            .block
+            .stmts
+            .into_iter()
+            .next()
+            .expect("a statement")
+    };
+
+    assert!(matches!(
+        head("after 2 do\n    print(1)\nend\n"),
+        Stmt::After(_)
+    ));
+    assert!(matches!(
+        head("after 3 where ready do\n    print(1)\nend\n"),
+        Stmt::After(_)
+    ));
+    assert!(matches!(
+        head("after (n + 1) do\n    print(1)\nend\n"),
+        Stmt::After(_)
+    ));
+    assert!(matches!(head("destroy part\n"), Stmt::Destroy { .. }));
+    assert!(matches!(
+        head("destroy part after 2\n"),
+        Stmt::Destroy { delay: Some(_), .. }
+    ));
+    assert!(matches!(head("delete t.x\n"), Stmt::Delete { .. }));
+    assert!(matches!(
+        head("async function f()\nend\n"),
+        Stmt::Function(_)
+    ));
+    assert!(matches!(
+        head("enum State as\n    Idle\nend\n"),
+        Stmt::Enum(_)
+    ));
+    assert!(matches!(
+        head("struct Vec2 as\n    x: number\nend\n"),
+        Stmt::Struct(_)
+    ));
+    assert!(matches!(
+        head("interface Named as\n    name: string\nend\n"),
+        Stmt::Interface(_)
+    ));
+    assert!(matches!(head("import { a } from \"m\"\n"), Stmt::Import(_)));
+    assert!(matches!(
+        head("import * as m from \"m\"\n"),
+        Stmt::Import(_)
+    ));
+    assert!(matches!(head("import M from \"m\"\n"), Stmt::Import(_)));
+    assert!(matches!(
+        head("import type { T } from \"m\"\n"),
+        Stmt::Import(_)
+    ));
+
+    // `await` stays the prefix operator in expression position.
+    round_trip("local v = await f()\nprint(v)\n");
+    round_trip("local v = async do return 1 end\nprint(v)\n");
+}
+
 /// One file writes the word both ways. Luau does this with `export`, and
 /// the five words follow it.
 #[test]
@@ -773,21 +880,21 @@ fn both_readings_live_in_one_file() {
     round_trip("const LIMIT = 5\nlocal const = 1\nconst = const + LIMIT\n");
     round_trip("local new = Instance.new\nlocal v = new Thing()\nprint(new(\"Part\"), v)\n");
     round_trip("local try = pcall\nlocal v = try f()\nprint(try(print), v)\n");
+
+    // The word a file writes both ways in the same block.
+    round_trip("local after = 2\nafter after do\n    print(after)\nend\n");
+    round_trip("local function destroy(self)\n    destroy self\nend\n");
+    round_trip("local enum = { Idle = 1 }\nenum State as\n    Idle\nend\nprint(enum.Idle)\n");
+    round_trip("local async = false\nasync function f()\nend\nprint(async, f)\n");
+    round_trip("local await = pcall\nlocal v = await f()\nprint(await(print), v)\n");
+    round_trip("local import = {}\nimport { a } from \"m\"\nprint(import, a)\n");
 }
 
-/// A word still reserved reports when a name takes it.
+/// A word still reserved reports when a name takes it. Six are left, and
+/// each opens a declaration no expression resembles.
 #[test]
 fn a_reserved_word_still_reports() {
-    for word in [
-        "struct",
-        "enum",
-        "trait",
-        "impl",
-        "namespace",
-        "await",
-        "delete",
-        "import",
-    ] {
+    for word in ["trait", "impl", "remote", "macro", "attribute", "namespace"] {
         let src = format!("local {word} = 1\n");
         assert!(
             !reserved_reports(&src).is_empty(),

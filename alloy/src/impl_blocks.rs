@@ -113,12 +113,23 @@ fn block_of(
         .filter(|g| g.start >= i.target.end)
         .unwrap_or(i.target);
     let end = toks[last.end as usize - 1].end as usize;
+    // The header opens at the `impl`, not at the statement. An `@attr`
+    // above the block is part of the statement's span, and a caret on it
+    // asks about the attribute.
+    let header = (i.span.start as usize..i.target.start as usize)
+        .find(|n| {
+            let t = toks[*n];
+
+            &src[t.start as usize..t.end as usize] == "impl"
+        })
+        .map(|n| toks[n].start as usize)
+        .unwrap_or(start);
 
     ImplBlock {
         target,
         trait_name,
         hover,
-        start,
+        start: header,
         end,
     }
 }

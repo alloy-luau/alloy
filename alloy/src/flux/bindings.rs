@@ -185,6 +185,19 @@ impl<'s> Scan<'s> {
                 continue;
             };
 
+            // `Lifecycle.Start` reads a variant of the enum; it is not
+            // the private `Start` of a struct elsewhere in the file. A
+            // receiver the file gives no type and spells with a capital
+            // is a type, a namespace, or a module, so the member is
+            // that one's, unless the receiver is the owner itself.
+            if base.is_some_and(|n| {
+                n != *owner
+                    && self.declared_type(n).is_none()
+                    && n.starts_with(|c: char| c.is_ascii_uppercase())
+            }) {
+                continue;
+            }
+
             if self.enclosing_owner(i) == Some(*owner) {
                 continue;
             }

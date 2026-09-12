@@ -2518,7 +2518,7 @@ fn a_global_reaches_another_file_in_the_editor() {
         .iter()
         .find(|i| i["label"] == "MAX")
         .unwrap_or_else(|| panic!("no `MAX` in {items:#?}"));
-    assert_eq!(hit["detail"], json!("global const MAX"));
+    assert_eq!(hit["detail"], json!("global const MAX: number"));
     assert!(
         hit["documentation"]["value"]
             .as_str()

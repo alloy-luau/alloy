@@ -1,9 +1,9 @@
-local __alloy = require("@alloy") --- Writes a line to the output.
+local __alloy = require("@alloy") local _gs = {} --- Writes a line to the output.
 local function log(msg: string)
     print(msg)
 end
 
-local counter = 0
+local counter = 0 _gs.counter = counter
 
 const MAX = 10
 
@@ -23,4 +23,4 @@ export type Named = { name: string }
 
 
 
-log(`{counter} {MAX}`) return { log = log, counter = counter, MAX = MAX, Vec2 = Vec2, State = State }
+log(`{_gs.counter} {MAX}`) _gs.log = log _gs.MAX = MAX _gs.Vec2 = Vec2 _gs.State = State return _gs

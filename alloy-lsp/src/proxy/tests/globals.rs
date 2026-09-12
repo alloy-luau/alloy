@@ -170,6 +170,36 @@ global const MAX: number
     );
 }
 
+/// A `global local` is one value for the project, so every use reads
+/// its slot off the declaring module and the child answers with the
+/// type alone. The declaration goes back in front of it.
+#[test]
+fn a_mutable_global_hovers_as_its_declaration() {
+    let st = files(&[
+        (
+            "file:///shared/log.aly",
+            "--- The count.\nglobal local counter = 0\n",
+        ),
+        ("file:///main.aly", "print(counter)\n"),
+    ]);
+    let doc = &st.docs["file:///main.aly"];
+    let at = doc.source.find("counter").expect("the word") as u32;
+    let text = super::super::hover::restyle_global_hover(
+        "```luau\nnumber\n```",
+        doc,
+        &st,
+        "file:///main.aly",
+        0,
+        at,
+    )
+    .expect("a hover");
+    assert!(
+        text.starts_with("```alloy\nglobal local counter: number\n```"),
+        "{text}"
+    );
+    assert!(text.contains("The count."), "{text}");
+}
+
 /// The file that declares the name keeps its own keywords: the global
 /// restyle is for the files that only read it.
 #[test]

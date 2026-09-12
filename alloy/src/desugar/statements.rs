@@ -665,6 +665,10 @@ impl<'s> Desugar<'s> {
             // A project global reaches this file without an import, so
             // the walk has to see the name and record the use.
             || self.options.globals.iter().any(|g| text.contains(&g.name))
+            // A `global local` this file declares reads its slot off
+            // the table the module returns, so the walk has to see it
+            // even though no require brings it in.
+            || self.own_mutable.iter().any(|n| text.contains(n.as_str()))
             || text.contains("import(")
             || text.contains("import<<")
             || self.structs.iter().any(|name| struct_called(text, name))

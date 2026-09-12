@@ -318,6 +318,120 @@ fn a_global_by_a_std_name_is_a_lint() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A `global local` is one value for the whole project. Every file
+/// that names it reads and writes the slot on the declaring module, so
+/// a write in one file is the value the next file reads. Bound by copy,
+/// each file would hold its own.
+#[test]
+fn a_global_that_is_not_const_is_one_value_for_the_project() {
+    let dir = temp_project("shared-state");
+    fs::write(
+        dir.join("src/a.aly"),
+        concat!(
+            "--- The count.\n",
+            "global local counter = 0\n",
+            "\n",
+            "--- Adds one.\n",
+            "global function bump(): ()\n",
+            "    counter = counter + 1\n",
+            "end\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        "--- Sets it.\nexport function set(): ()\n    counter = 100\nend\n",
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    assert!(report.is_clean(), "{:?}", messages(&report));
+
+    // The declaring module holds the slot and returns the table it
+    // sits on, so nothing copies the value out.
+    let a = output(&dir, "a.luau");
+    assert!(a.contains("local _gs = {}"), "{a}");
+    assert!(a.contains("local counter = 0 _gs.counter = counter"), "{a}");
+    assert!(a.contains("_gs.counter = _gs.counter + 1"), "{a}");
+    assert!(a.trim_end().ends_with("return _gs"), "{a}");
+
+    // The file that only names it binds nothing: every use reads the
+    // slot off the module.
+    let b = output(&dir, "b.luau");
+    assert!(b.contains("_g1.counter = 100"), "{b}");
+    assert!(!b.contains("local counter"), "{b}");
+
+    for (rel, src) in [("a.luau", "src/a.aly"), ("b.luau", "src/b.aly")] {
+        assert_eq!(
+            output(&dir, rel).lines().count(),
+            fs::read_to_string(dir.join(src)).unwrap().lines().count(),
+            "{rel}: line count changed"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A `global const` never changes, so the first line still binds it by
+/// copy and every use reads the name as it was written.
+#[test]
+fn a_global_const_is_still_bound_on_the_first_line() {
+    let dir = temp_project("const-binding");
+    fs::write(
+        dir.join("src/a.aly"),
+        "--- The ceiling.\nglobal const MAX = 10\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/b.aly"), "print(MAX)\n").unwrap();
+
+    let report = build(&dir);
+    assert!(report.is_clean(), "{:?}", messages(&report));
+
+    let b = output(&dir, "b.luau");
+    assert!(b.contains("local MAX = _g1.MAX"), "{b}");
+    assert!(b.contains("print(MAX)"), "{b}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A local of a block under the declaration is a name of its own, and
+/// so is a parameter, a table key, and a field.
+#[test]
+fn a_name_that_only_looks_like_a_global_is_left_alone() {
+    let dir = temp_project("shadow");
+    fs::write(
+        dir.join("src/a.aly"),
+        "--- The count.\nglobal local counter = 0\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        concat!(
+            "--- Every shape of the word.\n",
+            "export function all(): number\n",
+            "    local t = { counter = 1 }\n",
+            "    local function inner(counter: number): number\n",
+            "        return counter\n",
+            "    end\n",
+            "\n",
+            "    return t.counter + inner(2) + counter\n",
+            "end\n",
+        ),
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    assert!(report.is_clean(), "{:?}", messages(&report));
+
+    let b = output(&dir, "b.luau");
+    assert!(b.contains("local t = { counter = 1 }"), "{b}");
+    assert!(b.contains("inner(counter: number)"), "{b}");
+    assert!(b.contains("        return counter\n"), "{b}");
+    assert!(b.contains("t.counter + inner(2) + _g1.counter"), "{b}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// A `global local` is a value every file can assign. The lint names
 /// the declaration; `global const`, and every kind that declares
 /// rather than binds, says nothing.

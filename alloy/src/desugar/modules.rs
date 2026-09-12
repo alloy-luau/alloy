@@ -11,6 +11,11 @@ use super::*;
 /// so the value needs a binding to name there.
 pub(crate) const DEFAULT_LOCAL: &str = "_default";
 
+/// The table a module's `global local` values live on. The module
+/// returns it, so every file that names one reads and writes the same
+/// slot.
+pub(crate) const GLOBAL_STATE: &str = "_gs";
+
 impl<'s> Desugar<'s> {
     /// `import` becomes `require` plus locals or type aliases. A data
     /// path loses its extension: the build writes `data.json` as
@@ -712,10 +717,23 @@ impl<'s> Desugar<'s> {
     }
 
     /// `export local x = 1` becomes `local x = 1` and exports `x`.
+    ///
+    /// A `global local` is one value for the whole project, so its slot
+    /// is on the table the module returns. The local still stands: it
+    /// carries the annotation the author wrote and the type the value
+    /// infers, and the line right after it puts the value in the slot.
     pub(crate) fn exported_local(&mut self, span: TokSpan, l: &Local) {
-        for b in &l.names {
-            let name = self.text_of(b.name).to_string();
-            self.exports.push((name.clone(), name));
+        let shared = l.global && !l.is_const && self.declares_shared_globals();
+        let names: Vec<String> = l
+            .names
+            .iter()
+            .map(|b| self.text_of(b.name).to_string())
+            .collect();
+
+        for name in &names {
+            if !shared {
+                self.exports.push((name.clone(), name.clone()));
+            }
         }
 
         // The attributes stand above the word, and the span opens on
@@ -751,6 +769,21 @@ impl<'s> Desugar<'s> {
                 Child::Function(b) => d.function_block(b),
             });
         }
+
+        if shared {
+            let slots: Vec<String> = names
+                .iter()
+                .map(|n| format!("{GLOBAL_STATE}.{n}"))
+                .collect();
+            let at = self.byte_end(span);
+            self.generate(at, &format!(" {} = {}", slots.join(", "), names.join(", ")));
+        }
+    }
+
+    /// Whether this file owns a `global local`, so the module returns
+    /// the table its values live on.
+    pub(crate) fn declares_shared_globals(&self) -> bool {
+        !self.own_mutable.is_empty()
     }
 
     /// The export table, appended after the last token. The test
@@ -763,7 +796,8 @@ impl<'s> Desugar<'s> {
         // A module that exports only types binds no value, and Luau
         // requires a module to return exactly one. It returns an empty
         // table; the `export type` lines stand on their own.
-        let types_only = self.exports.is_empty();
+        let shared = self.declares_shared_globals();
+        let types_only = self.exports.is_empty() && !shared;
 
         if types_only && !exports_a_type(block) {
             return;
@@ -788,6 +822,22 @@ impl<'s> Desugar<'s> {
 
         if types_only {
             self.generate(at, " return {}");
+
+            return;
+        }
+
+        // The `global local` values already sit on `_gs`, so the
+        // module returns that table with its exports put in. A fresh
+        // table would copy the values and every file would hold its own.
+        if shared {
+            let mut text = String::new();
+
+            for (k, v) in &self.exports {
+                text.push_str(&format!(" {GLOBAL_STATE}.{k} = {v}"));
+            }
+
+            text.push_str(&format!(" return {GLOBAL_STATE}"));
+            self.generate(at, &text);
 
             return;
         }

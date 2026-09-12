@@ -14,10 +14,15 @@ pub(crate) fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -
 }
 
 /// The same, for a name another file of the project declares `global`.
-/// The child reads the binding the first line of the emit writes and
-/// calls it a `local`; the declaration said `global local` or
-/// `global const`, and the type the child printed is the one the
-/// declaring file infers. `owner` is the file that wrote it.
+/// The declaration said `global local` or `global const`, and the type
+/// the child printed is the one the declaring file infers. `owner` is
+/// the file that wrote it.
+///
+/// The child sees one of two shapes. A `global const` is bound by copy
+/// on the first line of the emit, so the child calls it a `local`. A
+/// `global local` is one value for the project and every use reads its
+/// slot off the declaring module, so the child answers with the type
+/// alone and no declaration in front of it.
 pub(crate) fn restyle_global_hover(
     value: &str,
     doc: &Doc,
@@ -40,7 +45,42 @@ pub(crate) fn restyle_global_hover(
         .iter()
         .find(|b| b.name == word && b.prefix.split(' ').next() == Some("global"))?;
 
-    restyle_with(value, word, binding)
+    if let Some(styled) = restyle_with(value, word, binding) {
+        return Some(styled);
+    }
+
+    bare_type_hover(value, word, binding)
+}
+
+/// The declaration in front of a type the child printed on its own.
+/// `number` alone says nothing about where the name comes from or
+/// whether a file may assign it.
+fn bare_type_hover(
+    value: &str,
+    word: &str,
+    binding: &alloy::declarations::Binding,
+) -> Option<String> {
+    // A function keeps its own header; only a value hovers as a type.
+    if binding.prefix.ends_with("function") {
+        return None;
+    }
+
+    let body = value.strip_prefix("```luau\n")?.strip_suffix("\n```")?;
+
+    // A header the child wrote already names the binding, and this is
+    // for the answers that do not.
+    if body.starts_with("local ") || body.starts_with("function") || body.starts_with("type ") {
+        return None;
+    }
+
+    let mut out = format!("```alloy\n{} {word}: {body}\n```", binding.prefix);
+
+    if let Some(doc) = binding.doc.as_deref() {
+        out.push_str("\n\n");
+        out.push_str(doc);
+    }
+
+    Some(out)
 }
 
 /// The word the cursor sits on, in the source the author wrote.

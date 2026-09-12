@@ -729,13 +729,15 @@ pub(crate) fn a_remote_offers_the_members_its_side_reaches() {
     assert!(!chat.holds("call", None));
 }
 /// The first line of the emit binds the module of each global under
-/// `_g1`. No source writes that name, so no list offers it.
+/// `_g1`, and a module's own `global local` values under `_gs`. No
+/// source writes either name, so no list offers one.
 #[test]
 pub(crate) fn the_global_module_temp_is_no_completion() {
     use super::super::completion::is_internal_name;
 
     assert!(is_internal_name("_g1"));
     assert!(is_internal_name("_g12"));
+    assert!(is_internal_name("_gs"));
     assert!(!is_internal_name("_gold"));
     assert!(!is_internal_name("counter"));
 }

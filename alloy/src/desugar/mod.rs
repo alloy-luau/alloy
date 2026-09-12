@@ -18,11 +18,13 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::lint::Lint;
+
 use alloy_syntax::ast::{
     Binding, Block, CallArgs, ChildName, Chunk, ClassMember, Cond, DefaultExport, Destructure,
     Expr, FunctionBody, GenericFor, If, IndexKey, Local, Stmt, TableField, TokSpan, TypeEdit,
 };
 use alloy_syntax::lexer::Tok;
+use modules::GLOBAL_STATE;
 
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 
@@ -186,6 +188,10 @@ pub struct GlobalRef {
     /// The declaration wrote `const`, so an assignment in any file of
     /// the project is an error.
     pub constant: bool,
+    /// `global local x = 1`: a value any file may assign. The name is
+    /// one slot on the declaring module, so every file reads and writes
+    /// the same one.
+    pub mutable: bool,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -377,6 +383,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         scopes: vec![HashSet::new()],
         uses_std: false,
         globals_used: Vec::new(),
+        global_modules: Vec::new(),
+        own_mutable: Vec::new(),
+        top_scope: 1,
         // The name and the directive are the file's own word; the
         // caller's side is the tree's, which is the weakest.
         file_side: crate::directives::effective_side(src, &options.file_name).or(options.side),
@@ -491,6 +500,16 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // before the walk, so a file with a bad global still renders.
     d.check_globals(src, toks, chunk);
 
+    // The `global local` names this file owns. A script's globals move
+    // into the module beside it, so the script owns none of them.
+    if options.in_project && !options.definitions && !options.hoist_globals {
+        d.own_mutable = crate::globals::declared_in(src, toks, chunk, std::path::Path::new(""))
+            .into_iter()
+            .filter(|g| g.kind == crate::globals::Kind::Value && !g.constant)
+            .map(|g| g.name)
+            .collect();
+    }
+
     // A namespace names its members before the prescan reads them: a
     // member renders under the namespace's prefix, and every table the
     // prescan fills is keyed by that rendered name.
@@ -519,6 +538,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         Some(first) => {
             let first_start = first.start.max(insert_at);
             d.copy(insert_at, first_start);
+            d.top_scope = d.scope_depth();
             d.block(&chunk.block);
             let last = toks[toks.len() - 1].end;
             d.return_at = Some(d.r.out_len());
@@ -849,6 +869,18 @@ struct Desugar<'s> {
     /// The project globals this file named, first use first. Each one
     /// puts a require and a binding on the first line.
     globals_used: Vec<(String, u32)>,
+    /// The require spec of each declaring module this file reaches,
+    /// first use first. The first line binds them as `_g1`, `_g2`, and
+    /// a `global local` reads its slot off one of them.
+    global_modules: Vec<String>,
+    /// The `global local` names this file declares. They live on the
+    /// table the module returns, so an assignment anywhere in the
+    /// project lands on the one value.
+    own_mutable: Vec<String>,
+    /// The index of the scope the file's top level binds into. A local
+    /// of any scope past it is a name of its own, and it shadows a
+    /// global the way it shadows anything else.
+    top_scope: usize,
     /// The side this file sits on, from its name or its directive.
     file_side: Option<crate::directives::Side>,
     /// Every name the top level of this file binds. A file that
@@ -2360,19 +2392,72 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        let spec = g.require.clone();
+
+        if !self.global_modules.contains(&spec) {
+            self.global_modules.push(spec);
+        }
+
         self.globals_used.push((name.to_string(), at));
+    }
+
+    /// The table a `global local` reads its slot off, when the name the
+    /// source wrote is one: `_gs` for a global this file declares,
+    /// `_g1` for one another module owns. `None` for every other name,
+    /// which stands as it was written.
+    ///
+    /// A global that is not `const` is one value for the whole project.
+    /// Bound by copy, each file would hold its own, and a write in one
+    /// would reach nothing.
+    pub(crate) fn shared_global_slot(&self, name: &str) -> Option<String> {
+        // The declaration itself sits in the file's own scope; a local
+        // of any block under it is a name of its own.
+        if self.is_local_since(self.top_scope + 1, name) {
+            return None;
+        }
+
+        if self.own_mutable.iter().any(|n| n == name) {
+            return Some(GLOBAL_STATE.to_string());
+        }
+
+        if !self.globals_used.iter().any(|(n, _)| n == name) {
+            return None;
+        }
+
+        let g = self.global_ref(name)?;
+
+        if !g.mutable {
+            return None;
+        }
+
+        let index = self.global_modules.iter().position(|m| *m == g.require)?;
+
+        Some(format!("_g{}", index + 1))
     }
 
     /// The require and the bindings for every global the file named, as
     /// one line. Names from one module share one require.
     fn global_prologue(&self) -> String {
-        if self.globals_used.is_empty() || self.options.definitions {
+        if self.options.definitions {
             return String::new();
+        }
+
+        let mut out = String::new();
+
+        // The table this file's own `global local` values live on. It
+        // opens empty: each declaration puts its value in on the line
+        // the author wrote it.
+        if !self.own_mutable.is_empty() {
+            out.push_str(&format!("local {GLOBAL_STATE} = {{}} "));
+        }
+
+        if self.globals_used.is_empty() {
+            return out;
         }
 
         // The module order follows the first use, so two builds of one
         // file write the same line.
-        let mut modules: Vec<&str> = Vec::new();
+        let modules: Vec<&str> = self.global_modules.iter().map(String::as_str).collect();
         let mut used: Vec<&GlobalRef> = Vec::new();
 
         for (name, _) in &self.globals_used {
@@ -2380,24 +2465,19 @@ impl<'s> Desugar<'s> {
                 continue;
             };
 
-            let spec = g.require.as_str();
-
-            if !modules.contains(&spec) {
-                modules.push(spec);
-            }
-
             used.push(g);
         }
-
-        let mut out = String::new();
 
         for (i, spec) in modules.iter().enumerate() {
             let temp = format!("_g{}", i + 1);
             out.push_str(&format!("local {temp} = require({}) ", luau_string(spec)));
             let here: Vec<&&GlobalRef> = used.iter().filter(|g| g.require == *spec).collect();
+            // A `global local` is read off the module at every use, so
+            // no binding here would hold: this file would write its own
+            // copy and the project would hold several.
             let names: Vec<String> = here
                 .iter()
-                .filter(|g| g.value)
+                .filter(|g| g.value && !g.mutable)
                 .map(|g| g.name.clone())
                 .collect();
 

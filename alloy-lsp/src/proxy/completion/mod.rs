@@ -660,8 +660,8 @@ pub(crate) fn strip_import_temps(value: &mut Value, shadow: &str) {
 }
 
 /// A name the emit made: `__alloy`, `__alloy_string`, `_m1`, `_g1`,
-/// `_1`, `Name__private`, `Name__all`, `__new`, and the mapped type
-/// functions.
+/// `_gs`, `_1`, `Name__private`, `Name__all`, `__new`, and the mapped
+/// type functions.
 pub fn is_internal_name(label: &str) -> bool {
     let digits_after = |prefix: &str| {
         label
@@ -691,6 +691,8 @@ pub fn is_internal_name(label: &str) -> bool {
     STD_HELPERS.contains(&label)
         || label.starts_with("__")
         || label == "__impl"
+        // The table a module's `global local` values live on.
+        || label == "_gs"
         || label.ends_with("__private")
         || label.ends_with("__all")
         || digits_after("_m")

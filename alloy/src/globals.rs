@@ -874,6 +874,7 @@ pub fn refs_for(
         out.push(crate::desugar::GlobalRef {
             namespace: g.kind == Kind::Namespace,
             constant: g.constant,
+            mutable: g.kind == Kind::Value && !g.constant,
             side: g.side,
             name: g.name.clone(),
             file: g.file.to_string_lossy().replace('\\', "/"),

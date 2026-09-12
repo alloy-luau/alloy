@@ -1,12 +1,18 @@
-//! What a dotted tag name reaches: `<Lib.Widgets.button/>`.
+//! What a dotted path reaches: `<Lib.Widgets.button/>` and `Lib.Store`.
 //!
-//! A component is a function that returns an instance, so anything that
-//! holds functions can hold one: a namespace, a table, a struct with an
-//! `impl`, and a module another file exports. A tag slot after a `.`
-//! offers the members this module resolves, and the hover on a dotted
-//! tag names the member it finds.
+//! One walk answers two questions. A tag slot wants the values a name
+//! holds, because a component is a function: a namespace, a table, a
+//! struct with an `impl`, and a module another file exports all hold
+//! one. A type slot wants the types a name declares. The walk over
+//! namespaces and imports is the same for both; only the leaf list
+//! differs, so `Want` picks it.
+//!
+//! A value and a type never mix. `Scribe.version` is no type, and
+//! `Scribe.Store` is no value.
 
-use alloy_syntax::ast::{Expr, ImportKind, ImportSpec, NamespaceDecl, Stmt, TableField, TokSpan};
+use alloy_syntax::ast::{
+    DefaultExport, Expr, ImportKind, ImportSpec, NamespaceDecl, Stmt, TableField, TokSpan,
+};
 use alloy_syntax::lexer::Tok;
 
 /// The LSP completion kinds this module hands out.
@@ -14,6 +20,18 @@ const FUNCTION: u64 = 3;
 const MODULE: u64 = 9;
 const STRUCT: u64 = 7;
 const FIELD: u64 = 5;
+const INTERFACE: u64 = 8;
+const ENUM: u64 = 13;
+
+/// Which half of a module the caret asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Want {
+    /// The names that hold a value: a function, a table, a field.
+    Values,
+    /// The names that declare a type: a struct, an enum, a trait, an
+    /// interface, a type alias, and a namespace that holds one.
+    Types,
+}
 
 /// How far an import chain is followed before the walk gives up.
 const MAX_DEPTH: u8 = 4;
@@ -54,10 +72,19 @@ impl Member {
 /// answers from an open document first, then from disk.
 pub type Load<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
-/// The members the dotted path reaches, with the functions first.
+/// The values the dotted path reaches, with the functions first.
 /// `path` is the tag name split on `.`, without the part being typed.
 pub fn members(src: &str, path: &[&str], load: &Load) -> Vec<Member> {
-    let mut out = walk(&readable(src), path, load, 0);
+    reach(src, path, load, Want::Values)
+}
+
+/// The types the dotted path reaches: `Scribe.` in a type slot.
+pub fn types(src: &str, path: &[&str], load: &Load) -> Vec<Member> {
+    reach(src, path, load, Want::Types)
+}
+
+fn reach(src: &str, path: &[&str], load: &Load, want: Want) -> Vec<Member> {
+    let mut out = walk(&readable(src), path, load, 0, want);
 
     out.sort_by_key(Member::sort_key);
     out.dedup_by(|a, b| a.name == b.name);
@@ -246,7 +273,7 @@ fn import_bindings(src: &str, toks: &[Tok], kind: &ImportKind) -> Vec<(String, &
 }
 
 /// The members of the name at the head of `path`, in one file.
-fn walk(src: &str, path: &[&str], load: &Load, depth: u8) -> Vec<Member> {
+fn walk(src: &str, path: &[&str], load: &Load, depth: u8, want: Want) -> Vec<Member> {
     let Some(head) = path.first().copied() else {
         return Vec::new();
     };
@@ -262,18 +289,25 @@ fn walk(src: &str, path: &[&str], load: &Load, depth: u8) -> Vec<Member> {
     let stmts = &parsed.chunk.block.stmts;
     let t = |span: TokSpan| text_of(src, toks, span);
     let rest = &path[1..];
+    let values = want == Want::Values;
 
     for stmt in stmts {
         match stmt.under_default() {
             Stmt::Namespace(ns) if t(ns.name) == head => {
-                return namespace_members(src, toks, ns, rest);
+                return namespace_members(src, toks, ns, rest, want);
             }
 
+            // A struct carries no type of its own, so a type slot
+            // after its name reaches nothing.
             Stmt::Struct(s) if t(s.name) == head && rest.is_empty() => {
-                return impl_members(src, toks, stmts, head);
+                return match values {
+                    true => impl_members(src, toks, stmts, head),
+
+                    false => Vec::new(),
+                };
             }
 
-            Stmt::Local(l) => {
+            Stmt::Local(l) if values => {
                 for (i, b) in l.names.iter().enumerate() {
                     if b.destructure.is_some() || t(b.name) != head {
                         continue;
@@ -295,7 +329,9 @@ fn walk(src: &str, path: &[&str], load: &Load, depth: u8) -> Vec<Member> {
                 let spec = t(im.path);
                 let spec = spec.trim_matches(['"', '\'']).to_string();
 
-                if let Some(found) = import_members(src, toks, &im.kind, &spec, path, load, depth) {
+                if let Some(found) =
+                    import_members(src, toks, &im.kind, &spec, path, load, depth, want)
+                {
                     return found;
                 }
             }
@@ -306,10 +342,15 @@ fn walk(src: &str, path: &[&str], load: &Load, depth: u8) -> Vec<Member> {
 
     // `function Widgets.button()` beside a plain `local Widgets = {}`
     // is how a Luau module writes a member.
-    dotted_functions(src, toks, stmts, path)
+    match values {
+        true => dotted_functions(src, toks, stmts, path),
+
+        false => Vec::new(),
+    }
 }
 
 /// The members an import reaches, when it binds the head of `path`.
+#[allow(clippy::too_many_arguments)]
 fn import_members(
     src: &str,
     toks: &[Tok],
@@ -318,6 +359,7 @@ fn import_members(
     path: &[&str],
     load: &Load,
     depth: u8,
+    want: Want,
 ) -> Option<Vec<Member>> {
     let t = |span: TokSpan| text_of(src, toks, span);
     let head = path.first().copied()?;
@@ -336,9 +378,9 @@ fn import_members(
         let next = readable(&load(spec)?);
 
         return Some(match rest.is_empty() {
-            true => exported_members(&next),
+            true => exported_members(&next, want),
 
-            false => walk(&next, rest, load, depth + 1),
+            false => walk(&next, rest, load, depth + 1, want),
         });
     }
 
@@ -353,6 +395,10 @@ fn import_members(
 
         ImportKind::Default(name) if t(*name) == head => default_name(&readable(&load(spec)?)),
 
+        // `import type { Group } from "./m"` binds a name a type slot
+        // reads, and no value at all.
+        ImportKind::TypeOnly(specs) if want == Want::Types => named(specs),
+
         _ => None,
     }?;
     let next = readable(&load(spec)?);
@@ -360,7 +406,7 @@ fn import_members(
 
     inner_path.extend(rest.iter().copied());
 
-    Some(walk(&next, &inner_path, load, depth + 1))
+    Some(walk(&next, &inner_path, load, depth + 1, want))
 }
 
 /// The name a module's `export default` declares, which an import binds
@@ -371,9 +417,15 @@ fn default_name(src: &str) -> Option<String> {
     let t = |span: TokSpan| text_of(src, toks, span);
 
     parsed.chunk.block.stmts.iter().find_map(|stmt| {
-        let Stmt::ExportDefault { .. } = stmt else {
+        let Stmt::ExportDefault { value, .. } = stmt else {
             return None;
         };
+
+        // `export default Kit`, the way a module sends a namespace it
+        // declared above. The name is the holder the import binds.
+        if let DefaultExport::Value(Expr::Name(name)) = value {
+            return Some(t(*name));
+        }
 
         match stmt.under_default() {
             Stmt::Namespace(ns) => Some(t(ns.name)),
@@ -389,9 +441,10 @@ fn default_name(src: &str) -> Option<String> {
     })
 }
 
-/// What a module exports and a tag can name: its functions, its
-/// namespaces, its tables, and its structs.
-fn exported_members(src: &str) -> Vec<Member> {
+/// What a module exports: its functions, its namespaces, its tables,
+/// and its structs for a value slot; its type declarations for a type
+/// slot.
+fn exported_members(src: &str, want: Want) -> Vec<Member> {
     let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
         return Vec::new();
     };
@@ -415,11 +468,27 @@ fn exported_members(src: &str) -> Vec<Member> {
 
                 Stmt::Function(f) => f.exported || f.global,
 
+                Stmt::TypeAlias(a) => a.exported || a.global,
+
+                Stmt::Enum(e) => e.exported || e.global,
+
+                Stmt::Trait(x) => x.exported || x.global,
+
+                Stmt::Interface(i) => i.exported || i.global,
+
+                Stmt::Class(c) => c.exported || c.global,
+
                 _ => false,
             },
         };
 
         if !exported {
+            continue;
+        }
+
+        if want == Want::Types {
+            out.extend(type_member(src, toks, stmt.under_default()));
+
             continue;
         }
 
@@ -492,8 +561,63 @@ fn exported_members(src: &str) -> Vec<Member> {
     out
 }
 
+/// The type one statement declares, for a type slot. A namespace is
+/// no type, but it stands on the way to one, so it joins the list when
+/// its body holds a type. Everything else, a function or a const, is a
+/// value and stays out.
+fn type_member(src: &str, toks: &[Tok], stmt: &Stmt) -> Option<Member> {
+    let t = |span: TokSpan| text_of(src, toks, span);
+    let (name, kind, detail) = match stmt {
+        Stmt::Struct(s) => (t(s.name), STRUCT, "struct"),
+
+        Stmt::Enum(e) => (t(e.name), ENUM, "enum"),
+
+        Stmt::Trait(x) => (t(x.name), INTERFACE, "trait"),
+
+        Stmt::Interface(i) => (t(i.name), INTERFACE, "interface"),
+
+        Stmt::TypeAlias(a) => (t(a.name), STRUCT, "type"),
+
+        Stmt::Class(c) => (t(c.name), STRUCT, "class"),
+
+        Stmt::Namespace(ns) if holds_a_type(src, toks, ns) => (t(ns.name), MODULE, "namespace"),
+
+        _ => return None,
+    };
+
+    (!name.is_empty()).then(|| Member::new(&name, kind, detail, Some(format!("{detail} {name}"))))
+}
+
+/// Whether a namespace declares a type, at any depth. A namespace of
+/// functions alone is a dead end in a type slot, so the list leaves it
+/// out.
+fn holds_a_type(src: &str, toks: &[Tok], ns: &NamespaceDecl) -> bool {
+    ns.members.iter().any(|m| {
+        !m.is_private(src, toks)
+            && match m.stmt.under_default() {
+                Stmt::Namespace(inner) => holds_a_type(src, toks, inner),
+
+                other => matches!(
+                    other,
+                    Stmt::Struct(_)
+                        | Stmt::Enum(_)
+                        | Stmt::Trait(_)
+                        | Stmt::Interface(_)
+                        | Stmt::TypeAlias(_)
+                        | Stmt::Class(_)
+                ),
+            }
+    })
+}
+
 /// The members of one namespace, or of what a member of it holds.
-fn namespace_members(src: &str, toks: &[Tok], ns: &NamespaceDecl, rest: &[&str]) -> Vec<Member> {
+fn namespace_members(
+    src: &str,
+    toks: &[Tok],
+    ns: &NamespaceDecl,
+    rest: &[&str],
+    want: Want,
+) -> Vec<Member> {
     let t = |span: TokSpan| text_of(src, toks, span);
 
     // `<Outer.Inner.`: the walk goes on inside the member named next.
@@ -501,10 +625,10 @@ fn namespace_members(src: &str, toks: &[Tok], ns: &NamespaceDecl, rest: &[&str])
         for m in &ns.members {
             match m.stmt.under_default() {
                 Stmt::Namespace(inner) if t(inner.name) == next => {
-                    return namespace_members(src, toks, inner, &rest[1..]);
+                    return namespace_members(src, toks, inner, &rest[1..], want);
                 }
 
-                Stmt::Local(l) => {
+                Stmt::Local(l) if want == Want::Values => {
                     for (i, b) in l.names.iter().enumerate() {
                         if t(b.name) == next
                             && let Some(v) = l.values.get(i)
@@ -527,6 +651,12 @@ fn namespace_members(src: &str, toks: &[Tok], ns: &NamespaceDecl, rest: &[&str])
         // A private member is out of reach for every other file, and a
         // tag that names one does not compile.
         if m.is_private(src, toks) {
+            continue;
+        }
+
+        if want == Want::Types {
+            out.extend(type_member(src, toks, m.stmt.under_default()));
+
             continue;
         }
 
@@ -866,6 +996,158 @@ mod tests {
         end\n";
 
         assert_eq!(names(&members(src, &["Scope"], &nothing)), ["component"]);
+    }
+
+    /// The module every type test imports.
+    fn scribe() -> &'static str {
+        "export type Store = { id: number }\n\
+         export type Entry = { key: string }\n\
+         export const version = 1\n\
+         export struct Card as\n\
+             title: string,\n\
+         end\n\
+         export enum Mode as\n\
+             Fast,\n\
+         end\n\
+         export namespace Deep as\n\
+             public type Inner = { n: number }\n\
+             private type Hidden = { h: number }\n\
+             public function helper() return 1 end\n\
+         end\n\
+         export namespace Only as\n\
+             public function act() return 1 end\n\
+         end\n\
+         export function make(): Store\n\
+             return { id = 1 }\n\
+         end\n"
+    }
+
+    fn scribe_load(spec: &str) -> Option<String> {
+        match spec {
+            "./scribe" => Some(scribe().to_string()),
+
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_star_import_offers_the_types_of_the_module() {
+        let src = "import * as Star from \"./scribe\"\n";
+        let found = types(src, &["Star"], &scribe_load);
+
+        assert_eq!(names(&found), ["Card", "Deep", "Entry", "Mode", "Store"]);
+        assert_eq!(
+            names(&types(src, &["Star", "Deep"], &scribe_load)),
+            ["Inner"]
+        );
+        assert!(types(src, &["Star", "Only"], &scribe_load).is_empty());
+    }
+
+    /// A value is no type. `Scribe.version` and `Scribe.make` are what
+    /// a type slot must never offer.
+    #[test]
+    fn a_type_slot_takes_no_value() {
+        let src = "import * as Star from \"./scribe\"\n";
+        let reached = types(src, &["Star"], &scribe_load);
+        let found = names(&reached);
+
+        assert!(!found.contains(&"version"));
+        assert!(!found.contains(&"make"));
+        assert!(!found.contains(&"helper"));
+
+        // The value walk still answers with them, and with no type.
+        let held = members(src, &["Star"], &scribe_load);
+        let values = names(&held);
+
+        assert!(values.contains(&"version"));
+        assert!(values.contains(&"make"));
+    }
+
+    #[test]
+    fn a_default_import_reaches_the_types_of_the_default() {
+        let kit = "export namespace Kit as\n\
+            public type Token = { t: string }\n\
+            public type Badge = { b: number }\n\
+            public function tag() return 1 end\n\
+        end\n\
+        export default Kit\n";
+        let load = |spec: &str| match spec {
+            "./kit" => Some(kit.to_string()),
+
+            _ => None,
+        };
+
+        assert_eq!(
+            names(&types("import Dflt from \"./kit\"\n", &["Dflt"], &load)),
+            ["Badge", "Token"]
+        );
+        assert_eq!(
+            names(&types(
+                "import Dflt, { Kit } from \"./kit\"\n",
+                &["Kit"],
+                &load
+            )),
+            ["Badge", "Token"]
+        );
+    }
+
+    #[test]
+    fn a_named_import_carries_a_namespace_of_types() {
+        let plain = "import { Deep } from \"./scribe\"\n";
+        let renamed = "import { Deep as D } from \"./scribe\"\n";
+        let type_only = "import type { Deep } from \"./scribe\"\n";
+
+        assert_eq!(names(&types(plain, &["Deep"], &scribe_load)), ["Inner"]);
+        assert_eq!(names(&types(renamed, &["D"], &scribe_load)), ["Inner"]);
+        assert_eq!(names(&types(type_only, &["Deep"], &scribe_load)), ["Inner"]);
+    }
+
+    #[test]
+    fn a_namespace_of_the_file_offers_its_own_types() {
+        let src = "namespace NS as\n\
+            public type Thing = { a: number }\n\
+            public struct Item as\n\
+                id: number,\n\
+            end\n\
+            private type Secret = { s: string }\n\
+            public function act() return 1 end\n\
+            public namespace Sub as\n\
+                public type Leaf = { l: number }\n\
+            end\n\
+        end\n";
+        let found = types(src, &["NS"], &nothing);
+
+        assert_eq!(names(&found), ["Item", "Sub", "Thing"]);
+        assert_eq!(names(&types(src, &["NS", "Sub"], &nothing)), ["Leaf"]);
+    }
+
+    #[test]
+    fn a_type_path_that_reaches_nothing_offers_nothing() {
+        let src = "import * as Star from \"./scribe\"\n\
+            local count = 3\n\
+            local tbl = { card = function() return 1 end }\n";
+
+        assert!(types(src, &["Missing"], &scribe_load).is_empty());
+        assert!(types(src, &["count"], &scribe_load).is_empty());
+        assert!(types(src, &["tbl"], &scribe_load).is_empty());
+        assert!(types(src, &["Star", "Store"], &scribe_load).is_empty());
+        assert!(types(src, &["Star", "Missing"], &scribe_load).is_empty());
+    }
+
+    /// A name the emit writes must never reach the list.
+    #[test]
+    fn no_type_carries_an_emit_only_name() {
+        let src = "import * as Star from \"./scribe\"\n";
+        let found = types(src, &["Star"], &scribe_load);
+
+        for m in found
+            .iter()
+            .chain(&types(src, &["Star", "Deep"], &scribe_load))
+        {
+            assert!(!m.name.contains("__"), "{}", m.name);
+            assert!(!m.name.contains('_'), "{}", m.name);
+            assert!(!m.detail.contains("__"), "{}", m.detail);
+        }
     }
 
     #[test]

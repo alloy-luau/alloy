@@ -399,6 +399,24 @@ impl State {
                         items.push(item);
                     }
 
+                    // `store: Scribe.|`: an import binds `Scribe`, so
+                    // no declaration of this file carries the path. The
+                    // walk follows the import into the module and lists
+                    // the types it exports, and no value among them.
+                    let load = |spec: &str| self.module_source(uri, spec);
+                    let segments: Vec<&str> = path.split('.').collect();
+
+                    for m in components::types(&doc.source, &segments, &load) {
+                        if items.iter().any(|i| i["label"] == json!(m.name)) {
+                            continue;
+                        }
+
+                        let hover = m.signature.as_ref().map(|s| format!("```alloy\n{s}\n```"));
+                        let mut item = word(&m.name, m.kind, hover, from);
+                        item["detail"] = json!(format!("{} {path}.{}", m.detail, m.name));
+                        items.push(item);
+                    }
+
                     return items;
                 }
 

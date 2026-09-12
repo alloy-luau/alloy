@@ -83,7 +83,14 @@ pub(crate) fn global_detail(g: &alloy::globals::Global) -> String {
         Kind::Namespace => "namespace",
     };
 
-    format!("global {word} {}", g.name)
+    // A value carries its type: the annotation the declaration wrote,
+    // or the type its literal writes. Without one the list would say
+    // `global local hp` and leave the reader to open the other file.
+    match &g.value_type {
+        Some(ty) => format!("global {word} {}: {ty}", g.name),
+
+        None => format!("global {word} {}", g.name),
+    }
 }
 
 /// The detail a completion item shows for a declaration: the kind
@@ -652,8 +659,9 @@ pub(crate) fn strip_import_temps(value: &mut Value, shadow: &str) {
     walk(value, &temps);
 }
 
-/// A name the emit made: `__alloy`, `__alloy_string`, `_m1`, `_1`,
-/// `Name__private`, `Name__all`, `__new`, and the mapped type functions.
+/// A name the emit made: `__alloy`, `__alloy_string`, `_m1`, `_g1`,
+/// `_1`, `Name__private`, `Name__all`, `__new`, and the mapped type
+/// functions.
 pub fn is_internal_name(label: &str) -> bool {
     let digits_after = |prefix: &str| {
         label
@@ -686,6 +694,7 @@ pub fn is_internal_name(label: &str) -> bool {
         || label.ends_with("__private")
         || label.ends_with("__all")
         || digits_after("_m")
+        || digits_after("_g")
         || digits_after("_")
         || digits_after("_c")
         || digits_after("_n")

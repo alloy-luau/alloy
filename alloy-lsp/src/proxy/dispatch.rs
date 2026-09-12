@@ -1059,6 +1059,16 @@ impl Server {
                                 text = rewritten;
                             }
 
+                            // A project global: the child typed the
+                            // binding the first line writes, so the
+                            // type is the declaring file's. The
+                            // keywords come from that file.
+                            if let Some(rewritten) =
+                                restyle_global_hover(&text, doc, &st, uri, line, character)
+                            {
+                                text = rewritten;
+                            }
+
                             if let Some(kept) = keep_annotation(&text, doc, line, character) {
                                 text = kept;
                             }
@@ -1154,6 +1164,16 @@ impl Server {
                             } else if text != value {
                                 result["contents"]["value"] = json!(text);
                             }
+                        } else if let Some((line, character)) = position
+                            && let Some(head) =
+                                global_declaration_hover(doc, &st, uri, line, character)
+                        {
+                            // The child has no type for the name yet.
+                            // A project global still reads as what its
+                            // declaring file wrote.
+                            *result = json!({
+                                "contents": { "kind": "markdown", "value": head }
+                            });
                         }
                     }
 

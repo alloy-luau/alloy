@@ -60,18 +60,15 @@ impl Server {
                 return None;
             }
 
-            let owner = st
-                .docs
-                .iter()
-                .find(|(u, d)| {
-                    u.as_str() != uri
-                        && d.globals
-                            .iter()
-                            .any(|g| g.name == word && st.global_reaches(uri, u, g))
-                })
-                .map(|(_, d)| d)?;
+            let owner = global_owner(&st, uri, &word)?;
 
-            remote_hover(&owner.source, &word).or_else(|| const_hover(&owner.source, &word))
+            // A `remote` has no type the child can print, so the
+            // declaration answers. A `global local` or a `global const`
+            // is a value the child types off the binding the first line
+            // writes, and that type is the inferred one; the answer
+            // comes back through `restyle_global_hover`, which puts the
+            // declaring keywords in front of it.
+            remote_hover(&owner.source, &word)
         };
         let answer = remote_hover(&doc.source, &word)
             .or_else(imported)
@@ -106,6 +103,49 @@ impl Server {
 
         true
     }
+}
+
+/// The declaration a project global wrote, for a hover the child left
+/// unanswered. The type is the one the source wrote, since nothing
+/// here infers one.
+pub(crate) fn global_declaration_hover(
+    doc: &Doc,
+    st: &State,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let offset = offset_of(&doc.source, line, character)?;
+
+    if !keywords::is_word_at(&doc.source, offset) {
+        return None;
+    }
+
+    let (start, end) = keywords::word_range(&doc.source, offset);
+
+    if follows_a_separator(&doc.source, start) {
+        return None;
+    }
+
+    let word = &doc.source[start..end];
+    let owner = global_owner(st, uri, word)?;
+
+    const_hover(&owner.source, word)
+}
+
+/// The open document that declares `word` as a project global this
+/// file reaches. A global needs no import, so the file that wrote it
+/// is the one to read.
+pub(crate) fn global_owner<'a>(st: &'a State, uri: &str, word: &str) -> Option<&'a Doc> {
+    st.docs
+        .iter()
+        .find(|(u, d)| {
+            u.as_str() != uri
+                && d.globals
+                    .iter()
+                    .any(|g| g.name == word && st.global_reaches(uri, u, g))
+        })
+        .map(|(_, d)| d)
 }
 
 /// Whether a word starts right after a `.` or a `:`, which makes it a
@@ -166,6 +206,18 @@ pub(crate) fn const_hover(source: &str, word: &str) -> Option<String> {
             if name == word {
                 // The value is the module's, not the reader's.
                 let head = text.split_once(" = ").map_or(text, |(h, _)| h);
+                // A declaration with no annotation still has a type.
+                // Without it the reader sees `global local hp` and has
+                // to open the other file to learn what it holds.
+                let head = match head.contains(':') {
+                    true => head.to_string(),
+
+                    false => match alloy::declarations::binding_type(source, word) {
+                        Some(ty) => format!("{head}: {ty}"),
+
+                        None => head.to_string(),
+                    },
+                };
                 let doc_text = alloy::declarations::doc_before(source, at)
                     .map(|d| format!("\n\n{d}"))
                     .unwrap_or_default();

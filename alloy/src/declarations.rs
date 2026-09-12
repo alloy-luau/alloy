@@ -824,8 +824,40 @@ fn member_signature(
     Some(format!("    {visibility} {head}"))
 }
 
+/// The type a top-level `local` or `const` binding holds: the
+/// annotation it wrote, or the type its literal value writes. A file
+/// that reaches the name from somewhere else reads it from here.
+pub fn binding_type(src: &str, name: &str) -> Option<String> {
+    let parsed = alloy_syntax::parse_lenient(src, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let text = |span: TokSpan| -> &str {
+        if span.end <= span.start || span.end as usize > toks.len() {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Local(l) = stmt else {
+            continue;
+        };
+        let Some(index) = l.names.iter().position(|b| text(b.name) == name) else {
+            continue;
+        };
+
+        if let Some(ty) = l.names[index].ty {
+            return Some(text(ty).trim().to_string());
+        }
+
+        return literal_type(l.values.get(index)?, &text);
+    }
+
+    None
+}
+
 /// The type a literal value writes, for a `const` with no annotation.
-fn literal_type<'a>(
+pub(crate) fn literal_type<'a>(
     value: &alloy_syntax::ast::Expr,
     text: &impl Fn(TokSpan) -> &'a str,
 ) -> Option<String> {
@@ -1281,6 +1313,18 @@ mod binding_tests {
         assert_eq!(prefix_of(src, "M.run").as_deref(), Some("export function"));
         assert_eq!(prefix_of(src, "b").as_deref(), Some("local"));
         assert_eq!(prefix_of(src, "y"), None);
+    }
+
+    /// A declaration with no annotation still has a type when its
+    /// value is a literal. A file that reaches the name from another
+    /// module reads it from here.
+    #[test]
+    fn a_binding_takes_the_type_its_value_writes() {
+        let src = "local limit = 3\nconst name: string = read()\nconst made = build()\n";
+        assert_eq!(binding_type(src, "limit").as_deref(), Some("number"));
+        assert_eq!(binding_type(src, "name").as_deref(), Some("string"));
+        assert_eq!(binding_type(src, "made"), None);
+        assert_eq!(binding_type(src, "gone"), None);
     }
 
     #[test]

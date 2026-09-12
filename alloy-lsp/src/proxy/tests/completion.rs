@@ -728,6 +728,18 @@ pub(crate) fn a_remote_offers_the_members_its_side_reaches() {
     assert!(chat.holds("fire", None) && chat.holds("on", None));
     assert!(!chat.holds("call", None));
 }
+/// The first line of the emit binds the module of each global under
+/// `_g1`. No source writes that name, so no list offers it.
+#[test]
+pub(crate) fn the_global_module_temp_is_no_completion() {
+    use super::super::completion::is_internal_name;
+
+    assert!(is_internal_name("_g1"));
+    assert!(is_internal_name("_g12"));
+    assert!(!is_internal_name("_gold"));
+    assert!(!is_internal_name("counter"));
+}
+
 /// A file sees its own declarations and what it imports, no more.
 #[test]
 pub(crate) fn a_type_list_holds_what_the_file_can_write() {

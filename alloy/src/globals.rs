@@ -106,6 +106,10 @@ pub struct Global {
     pub constant: bool,
     /// The parameter list of a generic type, `<T>`; empty otherwise.
     pub type_params: String,
+    /// The type a `global local` or a `global const` holds: the
+    /// annotation the declaration wrote, or the type its literal value
+    /// writes. `None` when only the checker can say.
+    pub value_type: Option<String>,
     /// The side this global reaches: the directive above it when it
     /// has one, else the side of the declaring file.
     pub side: Option<crate::directives::Side>,
@@ -209,7 +213,12 @@ pub fn declared_in(
     let side = crate::directives::effective_side(src, &file.to_string_lossy());
     let scanned = crate::directives::scan(src);
     let mut out = Vec::new();
-    let mut push = |name: &str, kind: Kind, name_span: TokSpan, span: TokSpan, params: String| {
+    let mut push = |name: &str,
+                    kind: Kind,
+                    name_span: TokSpan,
+                    span: TokSpan,
+                    params: String,
+                    value_type: Option<String>| {
         if name.is_empty() {
             return;
         }
@@ -229,6 +238,7 @@ pub fn declared_in(
             kind,
             constant: false,
             type_params: params,
+            value_type,
             side: directive.unwrap_or(side),
             side_directive: directive,
         });
@@ -238,17 +248,36 @@ pub fn declared_in(
         match stmt {
             Stmt::Function(f) if f.global => {
                 if let Some(first) = f.path.first() {
-                    push(text(*first), Kind::Function, *first, f.span, String::new());
+                    push(
+                        text(*first),
+                        Kind::Function,
+                        *first,
+                        f.span,
+                        String::new(),
+                        None,
+                    );
                 }
             }
 
-            Stmt::LocalFunction(f) if f.global => {
-                push(text(f.name), Kind::Function, f.name, f.span, String::new())
-            }
+            Stmt::LocalFunction(f) if f.global => push(
+                text(f.name),
+                Kind::Function,
+                f.name,
+                f.span,
+                String::new(),
+                None,
+            ),
 
             Stmt::Local(l) if l.global => {
                 for b in &l.names {
-                    push(text(b.name), Kind::Value, b.name, l.span, String::new());
+                    push(
+                        text(b.name),
+                        Kind::Value,
+                        b.name,
+                        l.span,
+                        String::new(),
+                        value_type(b, l, &text),
+                    );
                 }
             }
 
@@ -258,15 +287,26 @@ pub fn declared_in(
                 d.name,
                 d.span,
                 params_of(d.generics.map(text)),
+                None,
             ),
 
-            Stmt::Enum(d) if d.global => {
-                push(text(d.name), Kind::Enum, d.name, d.span, String::new())
-            }
+            Stmt::Enum(d) if d.global => push(
+                text(d.name),
+                Kind::Enum,
+                d.name,
+                d.span,
+                String::new(),
+                None,
+            ),
 
-            Stmt::Trait(d) if d.global => {
-                push(text(d.name), Kind::Trait, d.name, d.span, String::new())
-            }
+            Stmt::Trait(d) if d.global => push(
+                text(d.name),
+                Kind::Trait,
+                d.name,
+                d.span,
+                String::new(),
+                None,
+            ),
 
             Stmt::Interface(d) if d.global => push(
                 text(d.name),
@@ -274,15 +314,26 @@ pub fn declared_in(
                 d.name,
                 d.span,
                 params_of(d.generics.map(text)),
+                None,
             ),
 
-            Stmt::Class(d) if d.global => {
-                push(text(d.name), Kind::Class, d.name, d.span, String::new())
-            }
+            Stmt::Class(d) if d.global => push(
+                text(d.name),
+                Kind::Class,
+                d.name,
+                d.span,
+                String::new(),
+                None,
+            ),
 
-            Stmt::Remote(d) if d.global => {
-                push(text(d.name), Kind::Remote, d.name, d.span, String::new())
-            }
+            Stmt::Remote(d) if d.global => push(
+                text(d.name),
+                Kind::Remote,
+                d.name,
+                d.span,
+                String::new(),
+                None,
+            ),
 
             Stmt::TypeAlias(d) if d.global => {
                 // The alias keeps its parameters: a file that names it
@@ -293,33 +344,48 @@ pub fn declared_in(
                     .map(|t| t.end as usize)
                     .unwrap_or(src.len());
                 let params = crate::modules::type_params(src[after..].trim_start());
-                push(text(d.name), Kind::Type, d.name, d.span, params);
+                push(text(d.name), Kind::Type, d.name, d.span, params, None);
             }
 
             // A macro expands at compile time and an attribute is read
             // at compile time, so neither needs a require. The compiler
             // carries the declaration itself to every file.
-            Stmt::Macro(d) if d.global => {
-                push(text(d.name), Kind::Macro, d.name, d.span, String::new())
-            }
+            Stmt::Macro(d) if d.global => push(
+                text(d.name),
+                Kind::Macro,
+                d.name,
+                d.span,
+                String::new(),
+                None,
+            ),
 
-            Stmt::Attribute(d) if d.global => {
-                push(text(d.name), Kind::Attribute, d.name, d.span, String::new())
-            }
+            Stmt::Attribute(d) if d.global => push(
+                text(d.name),
+                Kind::Attribute,
+                d.name,
+                d.span,
+                String::new(),
+                None,
+            ),
 
-            Stmt::Impl(d) if d.global => {
-                push(text(d.target), Kind::Impl, d.target, d.span, String::new())
-            }
+            Stmt::Impl(d) if d.global => push(
+                text(d.target),
+                Kind::Impl,
+                d.target,
+                d.span,
+                String::new(),
+                None,
+            ),
 
             // A namespace reaches a file as one name. Its public types
             // reach it as `Math_Vec2`, the name the emit gives them, so
             // each one is a global of its own.
             Stmt::Namespace(d) if d.global => {
                 let name = text(d.name);
-                push(name, Kind::Namespace, d.name, d.span, String::new());
+                push(name, Kind::Namespace, d.name, d.span, String::new(), None);
 
                 for (member, params) in namespace_types(src, toks, d, name) {
-                    push(&member, Kind::Type, d.name, d.span, params);
+                    push(&member, Kind::Type, d.name, d.span, params, None);
                 }
             }
 
@@ -348,6 +414,25 @@ pub fn declared_in(
     }
 
     out
+}
+
+/// The type one `global local` or `global const` binding holds: the
+/// annotation the declaration wrote, or the type its literal value
+/// writes. A file that names the global reads it from here, since the
+/// declaring file is the only one that has the value.
+fn value_type<'a>(
+    binding: &alloy_syntax::ast::Binding,
+    local: &alloy_syntax::ast::Local,
+    text: &impl Fn(TokSpan) -> &'a str,
+) -> Option<String> {
+    if let Some(ty) = binding.ty {
+        return Some(text(ty).trim().to_string());
+    }
+
+    // `local a, b = 1, 2`: each name takes the value in its own place.
+    let index = local.names.iter().position(|n| n.name == binding.name)?;
+
+    crate::declarations::literal_type(local.values.get(index)?, text)
 }
 
 /// The public types of a `global namespace`, under the names the emit
@@ -907,6 +992,35 @@ mod tests {
             Path::new("s.aly"),
         );
         assert_eq!(g[0].type_params, "<T>");
+    }
+
+    /// A `global local` or a `global const` carries a type across the
+    /// project: the annotation it wrote, or the type its literal value
+    /// writes. Without it a file that reads the name shows the name
+    /// alone.
+    #[test]
+    fn a_global_value_carries_its_type() {
+        let annotated = declared("global local hp: number = 1\n", Path::new("a.aly"));
+        assert_eq!(annotated[0].value_type.as_deref(), Some("number"));
+
+        let inferred = declared("global local hp = 100\n", Path::new("a.aly"));
+        assert_eq!(inferred[0].value_type.as_deref(), Some("number"));
+
+        let pinned = declared("global const NAME = \"ball\"\n", Path::new("a.aly"));
+        assert_eq!(pinned[0].value_type.as_deref(), Some("string"));
+
+        // A name a call or a table builds needs the checker.
+        let opaque = declared("global local hp = compute()\n", Path::new("a.aly"));
+        assert_eq!(opaque[0].value_type, None);
+    }
+
+    /// `global local a, b = 1, "x"`: each name takes the value that
+    /// stands in its own place.
+    #[test]
+    fn each_name_of_one_declaration_takes_its_own_value() {
+        let g = declared("global local a, b = 1, \"x\"\n", Path::new("a.aly"));
+        assert_eq!(g[0].value_type.as_deref(), Some("number"));
+        assert_eq!(g[1].value_type.as_deref(), Some("string"));
     }
 
     #[test]

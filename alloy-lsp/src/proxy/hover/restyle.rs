@@ -7,6 +7,44 @@ use super::*;
 /// `export`; the Luau grammar drops the highlight after them. None when
 /// the header names something else or the source used the same keyword.
 pub(crate) fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
+    let word = word_at(doc, line, character)?;
+    let binding = doc.bindings.iter().find(|b| b.name == word)?;
+
+    restyle_with(value, word, binding)
+}
+
+/// The same, for a name another file of the project declares `global`.
+/// The child reads the binding the first line of the emit writes and
+/// calls it a `local`; the declaration said `global local` or
+/// `global const`, and the type the child printed is the one the
+/// declaring file infers. `owner` is the file that wrote it.
+pub(crate) fn restyle_global_hover(
+    value: &str,
+    doc: &Doc,
+    st: &State,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let word = word_at(doc, line, character)?;
+
+    // A name this file binds itself is this file's own; `restyle_hover`
+    // already answered it.
+    if doc.bindings.iter().any(|b| b.name == word) {
+        return None;
+    }
+
+    let owner = super::global_owner(st, uri, word)?;
+    let binding = owner
+        .bindings
+        .iter()
+        .find(|b| b.name == word && b.prefix.split(' ').next() == Some("global"))?;
+
+    restyle_with(value, word, binding)
+}
+
+/// The word the cursor sits on, in the source the author wrote.
+fn word_at(doc: &Doc, line: u32, character: u32) -> Option<&str> {
     let offset = offset_of(&doc.source, line, character)?;
 
     if !keywords::is_word_at(&doc.source, offset) {
@@ -14,8 +52,12 @@ pub(crate) fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -
     }
 
     let (start, end) = keywords::word_range(&doc.source, offset);
-    let word = &doc.source[start..end];
-    let binding = doc.bindings.iter().find(|b| b.name == word)?;
+
+    Some(&doc.source[start..end])
+}
+
+/// The child's header with one binding's keywords in front of it.
+fn restyle_with(value: &str, word: &str, binding: &alloy::declarations::Binding) -> Option<String> {
     let rest = value.strip_prefix("```luau\n")?;
 
     // The child reads a `---` comment the shadow keeps, and the hover

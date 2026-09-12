@@ -93,6 +93,116 @@ fn a_global_const_hovers_as_its_declaration() {
     assert!(text.contains("global const MAX"), "{text}");
 }
 
+/// A `global const` with no annotation still hovers with its type.
+/// The declaring file knows it; the file that reads the name would
+/// otherwise see the name alone.
+#[test]
+fn a_global_const_hovers_with_the_type_its_value_writes() {
+    let st = workspace();
+    let doc = &st.docs["file:///shared/log.aly"];
+    let text = super::super::hover::const_hover_of(&doc.source, "MAX").expect("a hover");
+    assert!(text.contains("global const MAX: number"), "{text}");
+}
+
+/// The completion detail of a global carries the type too.
+#[test]
+fn a_global_completes_with_its_type() {
+    let st = workspace();
+    let items = st.global_completions("file:///main.aly", &[], false);
+    let item = items
+        .iter()
+        .find(|i| i["label"] == "MAX")
+        .expect("the item");
+    assert_eq!(item["detail"], json!("global const MAX: number"));
+}
+
+/// The child types a global off the binding the first line of the emit
+/// writes and calls it a `local`. The keywords come from the file that
+/// declared it, so the type the checker inferred reaches every file.
+#[test]
+fn a_global_keeps_its_inferred_type_in_another_file() {
+    let st = files(&[
+        (
+            "file:///shared/log.aly",
+            "global local counter = 0
+global const MAX = 10
+",
+        ),
+        (
+            "file:///main.aly",
+            "print(counter, MAX)
+",
+        ),
+    ]);
+    let doc = &st.docs["file:///main.aly"];
+    let restyled = |word: &str, from_child: &str| {
+        let at = doc.source.find(word).expect("the word") as u32;
+
+        super::super::hover::restyle_global_hover(from_child, doc, &st, "file:///main.aly", 0, at)
+    };
+    assert_eq!(
+        restyled(
+            "counter",
+            "```luau
+local counter: number
+```"
+        ),
+        Some(
+            "```alloy
+global local counter: number
+```"
+            .to_string()
+        )
+    );
+    assert_eq!(
+        restyled(
+            "MAX",
+            "```luau
+local MAX: number
+```"
+        ),
+        Some(
+            "```alloy
+global const MAX: number
+```"
+            .to_string()
+        )
+    );
+}
+
+/// The file that declares the name keeps its own keywords: the global
+/// restyle is for the files that only read it.
+#[test]
+fn the_declaring_file_takes_no_global_restyle() {
+    let st = files(&[
+        (
+            "file:///shared/log.aly",
+            "global local counter = 0
+",
+        ),
+        (
+            "file:///main.aly",
+            "print(counter)
+",
+        ),
+    ]);
+    let doc = &st.docs["file:///shared/log.aly"];
+    let at = doc.source.find("counter").expect("the word") as u32;
+    assert_eq!(
+        super::super::hover::restyle_global_hover(
+            "```luau
+local counter: number
+```",
+            doc,
+            &st,
+            "file:///shared/log.aly",
+            0,
+            at,
+        ),
+        None
+    );
+}
+
 /// The declaration of a global struct hovers with the modifier the
 /// source wrote, so `export` and `global` read apart.
 #[test]
@@ -217,7 +327,7 @@ fn the_popup_names_the_script_that_declares_the_global() {
         .find(|i| i["label"] == "LIMIT")
         .expect("the item");
 
-    assert_eq!(item["detail"], json!("global const LIMIT"));
+    assert_eq!(item["detail"], json!("global const LIMIT: number"));
     assert_eq!(
         item["documentation"]["value"],
         json!("Declared in `main.server.aly`.")

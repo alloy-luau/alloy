@@ -404,9 +404,11 @@ impl State {
                     // walk follows the import into the module and lists
                     // the types it exports, and no value among them.
                     let load = |spec: &str| self.module_source(uri, spec);
+                    let returns_one = self.plain_modules(uri);
+                    let plain = |spec: &str| returns_one.iter().any(|s| s == spec);
                     let segments: Vec<&str> = path.split('.').collect();
 
-                    for m in components::types(&doc.source, &segments, &load) {
+                    for m in components::types(&doc.source, &segments, &load, &plain) {
                         if items.iter().any(|i| i["label"] == json!(m.name)) {
                             continue;
                         }
@@ -937,6 +939,22 @@ impl State {
         }
 
         items
+    }
+
+    /// The specs this file imports whose module returns one value: a
+    /// `.luau` or `.lua` file, a data file, and an Alloy module that
+    /// ends in `return <expr>`. `import M from` binds `require(...)`
+    /// whole for one of those, so `M.T` reads a type the module
+    /// exports; every other module binds the `default` field instead.
+    pub(crate) fn plain_modules(&self, uri: &str) -> Vec<String> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return Vec::new();
+        };
+
+        alloy::modules::plain_modules_for_file(&path, &doc.source)
     }
 
     /// through the project's aliases, and a relative spec is path

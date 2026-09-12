@@ -25,12 +25,30 @@ const ENUM: u64 = 13;
 
 /// Which half of a module the caret asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Want {
+enum Want {
     /// The names that hold a value: a function, a table, a field.
     Values,
-    /// The names that declare a type: a struct, an enum, a trait, an
-    /// interface, a type alias, and a namespace that holds one.
+    /// The names that declare a type, written where the caret sits: a
+    /// struct, an enum, a trait, an interface, a type alias, and a
+    /// namespace, which the path walks through to a type under it.
     Types,
+    /// The types a module binding reaches. Luau writes such a path as
+    /// `M.T` and no deeper, so a namespace leads nowhere here and
+    /// stays out of the list.
+    ImportedTypes,
+}
+
+impl Want {
+    fn is_types(self) -> bool {
+        self != Want::Values
+    }
+
+    /// Whether a namespace belongs in the list: it does where the path
+    /// can walk on through it, and a path through a module binding
+    /// cannot.
+    fn takes_a_namespace(self) -> bool {
+        self == Want::Types
+    }
 }
 
 /// How far an import chain is followed before the walk gives up.
@@ -72,19 +90,41 @@ impl Member {
 /// answers from an open document first, then from disk.
 pub type Load<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
+/// Whether a module spec names a module that returns one value. A
+/// default import of one binds `require(...)` whole, so `M.T` reads a
+/// type the module exports; a module with an export table binds the
+/// `default` field of it instead, and no type hangs off that.
+pub type Plain<'a> = dyn Fn(&str) -> bool + 'a;
+
+/// What the walk needs from the files around it.
+struct Reader<'a> {
+    load: &'a Load<'a>,
+    plain: &'a Plain<'a>,
+}
+
 /// The values the dotted path reaches, with the functions first.
 /// `path` is the tag name split on `.`, without the part being typed.
 pub fn members(src: &str, path: &[&str], load: &Load) -> Vec<Member> {
-    reach(src, path, load, Want::Values)
+    let never = |_: &str| false;
+
+    reach(
+        src,
+        path,
+        &Reader {
+            load,
+            plain: &never,
+        },
+        Want::Values,
+    )
 }
 
 /// The types the dotted path reaches: `Scribe.` in a type slot.
-pub fn types(src: &str, path: &[&str], load: &Load) -> Vec<Member> {
-    reach(src, path, load, Want::Types)
+pub fn types(src: &str, path: &[&str], load: &Load, plain: &Plain) -> Vec<Member> {
+    reach(src, path, &Reader { load, plain }, Want::Types)
 }
 
-fn reach(src: &str, path: &[&str], load: &Load, want: Want) -> Vec<Member> {
-    let mut out = walk(&readable(src), path, load, 0, want);
+fn reach(src: &str, path: &[&str], read: &Reader, want: Want) -> Vec<Member> {
+    let mut out = walk(&readable(src), path, read, 0, want);
 
     out.sort_by_key(Member::sort_key);
     out.dedup_by(|a, b| a.name == b.name);
@@ -273,7 +313,7 @@ fn import_bindings(src: &str, toks: &[Tok], kind: &ImportKind) -> Vec<(String, &
 }
 
 /// The members of the name at the head of `path`, in one file.
-fn walk(src: &str, path: &[&str], load: &Load, depth: u8, want: Want) -> Vec<Member> {
+fn walk(src: &str, path: &[&str], read: &Reader, depth: u8, want: Want) -> Vec<Member> {
     let Some(head) = path.first().copied() else {
         return Vec::new();
     };
@@ -330,7 +370,7 @@ fn walk(src: &str, path: &[&str], load: &Load, depth: u8, want: Want) -> Vec<Mem
                 let spec = spec.trim_matches(['"', '\'']).to_string();
 
                 if let Some(found) =
-                    import_members(src, toks, &im.kind, &spec, path, load, depth, want)
+                    import_members(src, toks, &im.kind, &spec, path, read, depth, want)
                 {
                     return found;
                 }
@@ -357,7 +397,7 @@ fn import_members(
     kind: &ImportKind,
     spec: &str,
     path: &[&str],
-    load: &Load,
+    read: &Reader,
     depth: u8,
     want: Want,
 ) -> Option<Vec<Member>> {
@@ -370,17 +410,41 @@ fn import_members(
             .find(|s| t(s.alias.unwrap_or(s.name)) == head)
             .map(|s| t(s.name))
     };
+    // Luau writes a type off a module binding as `M.T`. A second `.`
+    // is a syntax error there, so a type path stops at the first name
+    // inside the module.
+    let types = want.is_types();
+    let deeper = !rest.is_empty();
     // `import * as M`: the module itself is the holder, so `M.` lists
     // what it exports and `M.Group.` walks on inside it.
     let whole = matches!(kind, ImportKind::Namespace(alias) if t(*alias) == head);
+    // `import M from "p"`, and the default half of `import M, { a }`.
+    let default_here = match kind {
+        ImportKind::Default(name) | ImportKind::Both(name, _) => t(*name) == head,
+
+        _ => false,
+    };
+
+    if types && (whole || default_here) {
+        // A default import binds the module whole only when the
+        // module returns one value; otherwise it binds the `default`
+        // field, which carries no type.
+        let bound = whole || (read.plain)(spec);
+
+        return Some(match bound && !deeper {
+            true => exported_members(&readable(&(read.load)(spec)?), Want::ImportedTypes),
+
+            false => Vec::new(),
+        });
+    }
 
     if whole {
-        let next = readable(&load(spec)?);
+        let next = readable(&(read.load)(spec)?);
 
-        return Some(match rest.is_empty() {
-            true => exported_members(&next, want),
+        return Some(match deeper {
+            true => walk(&next, rest, read, depth + 1, want),
 
-            false => walk(&next, rest, load, depth + 1, want),
+            false => exported_members(&next, want),
         });
     }
 
@@ -388,25 +452,42 @@ fn import_members(
         ImportKind::Named(specs) => named(specs),
 
         ImportKind::Both(name, specs) => match t(*name) == head {
-            true => default_name(&readable(&load(spec)?)),
+            true => default_name(&readable(&(read.load)(spec)?)),
 
             false => named(specs),
         },
 
-        ImportKind::Default(name) if t(*name) == head => default_name(&readable(&load(spec)?)),
+        ImportKind::Default(name) if t(*name) == head => {
+            default_name(&readable(&(read.load)(spec)?))
+        }
 
         // `import type { Group } from "./m"` binds a name a type slot
         // reads, and no value at all.
-        ImportKind::TypeOnly(specs) if want == Want::Types => named(specs),
+        ImportKind::TypeOnly(specs) if types => named(specs),
 
         _ => None,
     }?;
-    let next = readable(&load(spec)?);
+
+    // The binding already spends the one step a type path has.
+    if types && deeper {
+        return Some(Vec::new());
+    }
+
+    let next = readable(&(read.load)(spec)?);
     let mut inner_path = vec![inner.as_str()];
 
     inner_path.extend(rest.iter().copied());
+    Some(walk(
+        &next,
+        &inner_path,
+        read,
+        depth + 1,
+        match types {
+            true => Want::ImportedTypes,
 
-    Some(walk(&next, &inner_path, load, depth + 1, want))
+            false => want,
+        },
+    ))
 }
 
 /// The name a module's `export default` declares, which an import binds
@@ -451,6 +532,7 @@ fn exported_members(src: &str, want: Want) -> Vec<Member> {
     let toks = &parsed.lexed.toks;
     let stmts = &parsed.chunk.block.stmts;
     let t = |span: TokSpan| text_of(src, toks, span);
+    let types = want.is_types();
     let mut out = Vec::new();
 
     for stmt in stmts {
@@ -486,8 +568,8 @@ fn exported_members(src: &str, want: Want) -> Vec<Member> {
             continue;
         }
 
-        if want == Want::Types {
-            out.extend(type_member(src, toks, stmt.under_default()));
+        if types {
+            out.extend(type_member(src, toks, stmt.under_default(), want));
 
             continue;
         }
@@ -563,9 +645,9 @@ fn exported_members(src: &str, want: Want) -> Vec<Member> {
 
 /// The type one statement declares, for a type slot. A namespace is
 /// no type, but it stands on the way to one, so it joins the list when
-/// its body holds a type. Everything else, a function or a const, is a
-/// value and stays out.
-fn type_member(src: &str, toks: &[Tok], stmt: &Stmt) -> Option<Member> {
+/// the path can walk on through it and its body holds a type.
+/// Everything else, a function or a const, is a value and stays out.
+fn type_member(src: &str, toks: &[Tok], stmt: &Stmt, want: Want) -> Option<Member> {
     let t = |span: TokSpan| text_of(src, toks, span);
     let (name, kind, detail) = match stmt {
         Stmt::Struct(s) => (t(s.name), STRUCT, "struct"),
@@ -580,7 +662,9 @@ fn type_member(src: &str, toks: &[Tok], stmt: &Stmt) -> Option<Member> {
 
         Stmt::Class(c) => (t(c.name), STRUCT, "class"),
 
-        Stmt::Namespace(ns) if holds_a_type(src, toks, ns) => (t(ns.name), MODULE, "namespace"),
+        Stmt::Namespace(ns) if want.takes_a_namespace() && holds_a_type(src, toks, ns) => {
+            (t(ns.name), MODULE, "namespace")
+        }
 
         _ => return None,
     };
@@ -654,8 +738,8 @@ fn namespace_members(
             continue;
         }
 
-        if want == Want::Types {
-            out.extend(type_member(src, toks, m.stmt.under_default()));
+        if want.is_types() {
+            out.extend(type_member(src, toks, m.stmt.under_default(), want));
 
             continue;
         }
@@ -998,7 +1082,8 @@ mod tests {
         assert_eq!(names(&members(src, &["Scope"], &nothing)), ["component"]);
     }
 
-    /// The module every type test imports.
+    /// The module every type test imports. It ends in no `return`,
+    /// so it carries an export table.
     fn scribe() -> &'static str {
         "export type Store = { id: number }\n\
          export type Entry = { key: string }\n\
@@ -1022,25 +1107,58 @@ mod tests {
          end\n"
     }
 
+    /// A plain Luau package: module-level `export type` beside a table
+    /// it returns. `require` of it binds the table whole.
+    fn package() -> &'static str {
+        "--!strict\n\
+         export type Store = { id: number }\n\
+         export type Entry = { key: string }\n\
+         local Scribe = {}\n\
+         function Scribe.open(name: string): Store\n\
+             return { id = 1 }\n\
+         end\n\
+         return Scribe\n"
+    }
+
     fn scribe_load(spec: &str) -> Option<String> {
         match spec {
             "./scribe" => Some(scribe().to_string()),
+
+            "@pkg/scribe" => Some(package().to_string()),
 
             _ => None,
         }
     }
 
+    /// Only `@pkg/scribe` returns one value.
+    fn scribe_plain(spec: &str) -> bool {
+        spec == "@pkg/scribe"
+    }
+
+    /// No module returns a value, so no default import binds one.
+    fn none_plain(_: &str) -> bool {
+        false
+    }
+
     #[test]
     fn a_star_import_offers_the_types_of_the_module() {
         let src = "import * as Star from \"./scribe\"\n";
-        let found = types(src, &["Star"], &scribe_load);
+        let found = types(src, &["Star"], &scribe_load, &scribe_plain);
 
-        assert_eq!(names(&found), ["Card", "Deep", "Entry", "Mode", "Store"]);
-        assert_eq!(
-            names(&types(src, &["Star", "Deep"], &scribe_load)),
-            ["Inner"]
-        );
-        assert!(types(src, &["Star", "Only"], &scribe_load).is_empty());
+        assert_eq!(names(&found), ["Card", "Entry", "Mode", "Store"]);
+    }
+
+    /// Luau writes a type off a module binding as `M.T`; `M.Group.T`
+    /// is a syntax error. So a namespace of the module leads nowhere
+    /// and stays out of the list, and a second `.` offers nothing.
+    #[test]
+    fn a_type_path_through_an_import_stops_at_one_name() {
+        let src = "import * as Star from \"./scribe\"\n";
+        let found = types(src, &["Star"], &scribe_load, &scribe_plain);
+
+        assert!(!names(&found).contains(&"Deep"));
+        assert!(types(src, &["Star", "Deep"], &scribe_load, &scribe_plain).is_empty());
+        assert!(types(src, &["Star", "Only"], &scribe_load, &scribe_plain).is_empty());
     }
 
     /// A value is no type. `Scribe.version` and `Scribe.make` are what
@@ -1048,7 +1166,7 @@ mod tests {
     #[test]
     fn a_type_slot_takes_no_value() {
         let src = "import * as Star from \"./scribe\"\n";
-        let reached = types(src, &["Star"], &scribe_load);
+        let reached = types(src, &["Star"], &scribe_load, &scribe_plain);
         let found = names(&reached);
 
         assert!(!found.contains(&"version"));
@@ -1063,32 +1181,30 @@ mod tests {
         assert!(values.contains(&"make"));
     }
 
+    /// `import Scribe from "@pkg/scribe"` on a plain Luau package.
+    /// The package returns one table, so the binding is the whole
+    /// `require` and every `export type` of it reads as `Scribe.T`.
     #[test]
-    fn a_default_import_reaches_the_types_of_the_default() {
-        let kit = "export namespace Kit as\n\
-            public type Token = { t: string }\n\
-            public type Badge = { b: number }\n\
-            public function tag() return 1 end\n\
-        end\n\
-        export default Kit\n";
-        let load = |spec: &str| match spec {
-            "./kit" => Some(kit.to_string()),
+    fn a_default_import_of_a_plain_module_reaches_its_types() {
+        let src = "import Scribe from \"@pkg/scribe\"\n";
+        let found = types(src, &["Scribe"], &scribe_load, &scribe_plain);
 
-            _ => None,
-        };
+        assert_eq!(names(&found), ["Entry", "Store"]);
+        // `open` is a value of the table, not a type.
+        assert!(!names(&found).contains(&"open"));
+        // And the path stops at the one name.
+        assert!(types(src, &["Scribe", "Store"], &scribe_load, &scribe_plain).is_empty());
+    }
 
-        assert_eq!(
-            names(&types("import Dflt from \"./kit\"\n", &["Dflt"], &load)),
-            ["Badge", "Token"]
-        );
-        assert_eq!(
-            names(&types(
-                "import Dflt, { Kit } from \"./kit\"\n",
-                &["Kit"],
-                &load
-            )),
-            ["Badge", "Token"]
-        );
+    /// A module with an export table binds `require(...).default`, and
+    /// no type hangs off that. `Aly.Store` does not typecheck, so the
+    /// slot offers nothing rather than a name that fails.
+    #[test]
+    fn a_default_import_of_an_export_table_reaches_no_type() {
+        let src = "import Aly from \"./scribe\"\n";
+
+        assert!(types(src, &["Aly"], &scribe_load, &none_plain).is_empty());
+        assert!(types(src, &["Aly"], &scribe_load, &scribe_plain).is_empty());
     }
 
     #[test]
@@ -1097,11 +1213,25 @@ mod tests {
         let renamed = "import { Deep as D } from \"./scribe\"\n";
         let type_only = "import type { Deep } from \"./scribe\"\n";
 
-        assert_eq!(names(&types(plain, &["Deep"], &scribe_load)), ["Inner"]);
-        assert_eq!(names(&types(renamed, &["D"], &scribe_load)), ["Inner"]);
-        assert_eq!(names(&types(type_only, &["Deep"], &scribe_load)), ["Inner"]);
+        assert_eq!(
+            names(&types(plain, &["Deep"], &scribe_load, &scribe_plain)),
+            ["Inner"]
+        );
+        assert_eq!(
+            names(&types(renamed, &["D"], &scribe_load, &scribe_plain)),
+            ["Inner"]
+        );
+        assert_eq!(
+            names(&types(type_only, &["Deep"], &scribe_load, &scribe_plain)),
+            ["Inner"]
+        );
+        // One name deep and no further.
+        assert!(types(renamed, &["D", "Inner"], &scribe_load, &scribe_plain).is_empty());
     }
 
+    /// A namespace of the file nests as far as the author wrote it:
+    /// the emit flattens `Outer.Inner.Leaf` to one name, so the whole
+    /// path is a type Luau reads.
     #[test]
     fn a_namespace_of_the_file_offers_its_own_types() {
         let src = "namespace NS as\n\
@@ -1115,10 +1245,13 @@ mod tests {
                 public type Leaf = { l: number }\n\
             end\n\
         end\n";
-        let found = types(src, &["NS"], &nothing);
+        let found = types(src, &["NS"], &nothing, &none_plain);
 
         assert_eq!(names(&found), ["Item", "Sub", "Thing"]);
-        assert_eq!(names(&types(src, &["NS", "Sub"], &nothing)), ["Leaf"]);
+        assert_eq!(
+            names(&types(src, &["NS", "Sub"], &nothing, &none_plain)),
+            ["Leaf"]
+        );
     }
 
     #[test]
@@ -1127,22 +1260,23 @@ mod tests {
             local count = 3\n\
             local tbl = { card = function() return 1 end }\n";
 
-        assert!(types(src, &["Missing"], &scribe_load).is_empty());
-        assert!(types(src, &["count"], &scribe_load).is_empty());
-        assert!(types(src, &["tbl"], &scribe_load).is_empty());
-        assert!(types(src, &["Star", "Store"], &scribe_load).is_empty());
-        assert!(types(src, &["Star", "Missing"], &scribe_load).is_empty());
+        assert!(types(src, &["Missing"], &scribe_load, &scribe_plain).is_empty());
+        assert!(types(src, &["count"], &scribe_load, &scribe_plain).is_empty());
+        assert!(types(src, &["tbl"], &scribe_load, &scribe_plain).is_empty());
+        assert!(types(src, &["Star", "Store"], &scribe_load, &scribe_plain).is_empty());
+        assert!(types(src, &["Star", "Missing"], &scribe_load, &scribe_plain).is_empty());
     }
 
     /// A name the emit writes must never reach the list.
     #[test]
     fn no_type_carries_an_emit_only_name() {
         let src = "import * as Star from \"./scribe\"\n";
-        let found = types(src, &["Star"], &scribe_load);
+        let pkg = "import Scribe from \"@pkg/scribe\"\n";
+        let found = types(src, &["Star"], &scribe_load, &scribe_plain);
 
         for m in found
             .iter()
-            .chain(&types(src, &["Star", "Deep"], &scribe_load))
+            .chain(&types(pkg, &["Scribe"], &scribe_load, &scribe_plain))
         {
             assert!(!m.name.contains("__"), "{}", m.name);
             assert!(!m.name.contains('_'), "{}", m.name);

@@ -140,8 +140,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The title is the tag: a reader scanning the releases page
+          # matches it against the tag they install by.
           gh release create "$GITHUB_REF_NAME" \
-            --title "Alloy ${{ needs.meta.outputs.version }}" \
+            --title "$GITHUB_REF_NAME" \
             --generate-notes \
             dist/*.zip
 

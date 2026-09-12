@@ -442,9 +442,11 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
     if let Some(v) = get("__value")
         && has("andThen")
     {
-        let t = if v == "nil" { "()" } else { v };
-
-        return Some(format!("Future<{t}>"));
+        // `nil` is what the emit writes and what a reader can write
+        // back. `()` is a type pack, so `Future<()>` names a type
+        // nobody can spell; it read as a different type from the one
+        // the source declared.
+        return Some(format!("Future<{v}>"));
     }
 
     if let Some(sig) = get("andThen")
@@ -459,8 +461,6 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
                     .map(|len| sig[from..from + len].to_string())
             })
             .unwrap_or_else(|| "any".to_string());
-
-        let t = if t == "nil" { "()".to_string() } else { t };
 
         return Some(format!("Future<{t}>"));
     }

@@ -623,9 +623,6 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_negated_members(&mut out);
     out = fold_temp_receiver(&out);
     fold_aliases(&mut out, known);
-    // An async body that returns nothing types as `Future<nil>`, since
-    // `()` is no type argument; it reads as `Future<()>`.
-    out = out.replace("Future<nil>", "Future<()>");
     fold_union_dupes(&mut out);
     fold_intersection_dupes(&mut out);
     fold_array_parens(&mut out);
@@ -2245,11 +2242,14 @@ mod tests {
     }
 
     #[test]
-    fn a_future_of_nothing_reads_as_unit() {
+    fn a_future_of_nothing_keeps_its_nil() {
+        // `Future<()>` names a type nobody can write: `()` is a type
+        // pack, not a type argument. The emit writes `Future<nil>`, so
+        // that is what a reader sees and can write back.
         let text = "```luau\nfunction tick(): Future<nil>\n```";
         assert_eq!(
             fold(text, &Known::default()),
-            "```luau\nfunction tick(): Future<()>\n```"
+            "```luau\nfunction tick(): Future<nil>\n```"
         );
     }
 

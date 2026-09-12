@@ -145,6 +145,38 @@ pub(crate) fn struct_braced(text: &str, name: &str) -> bool {
     false
 }
 
+/// Whether a declared return type already names a Future.
+///
+/// `async function f(): Future<T>` names the answer the caller gets,
+/// the way TypeScript writes `Promise<T>`. `async function f(): T`
+/// names what the Future settles with. Both spellings mean one thing,
+/// so the first is left alone instead of wrapped a second time.
+fn names_a_future(declared: &str) -> bool {
+    let t = declared.trim();
+    // A qualified name names the same type: `alloy.Future<T>`.
+    let bare = t.rsplit_once('.').map_or(t, |(_, last)| last);
+
+    // `Future<...>` and nothing else: `FutureQueue` is its own type.
+    bare.strip_prefix("Future")
+        .is_some_and(|rest| rest.starts_with('<'))
+}
+
+/// The `T` of a `Future<T>` a header declares, when it declares one.
+///
+/// The body of `async function f(): Future<T>` returns `T`; only the
+/// caller sees the Future. So the lambda inside carries `T`.
+fn settled_type(declared: &str) -> Option<String> {
+    if !names_a_future(declared) {
+        return None;
+    }
+
+    let t = declared.trim();
+    let open = t.find('<')?;
+    let inner = t[open + 1..].strip_suffix('>')?;
+
+    Some(inner.trim().to_string())
+}
+
 impl<'s> Desugar<'s> {
     pub(crate) fn block(&mut self, block: &Block) {
         if block.span.is_empty() {
@@ -1791,11 +1823,19 @@ impl<'s> Desugar<'s> {
             if body.is_async.is_some() {
                 let std = self.std();
 
-                // `Future<()>` is no Luau type: a type pack is no type
-                // argument. `nil` stands in, and the editor reads it
-                // back as `Future<()>`.
-                if self.text_of(rt).trim() == "()" {
+                // `Future<()>` is no Luau type: a type pack is no
+                // type argument. `nil` stands in, and the editor reads
+                // it back as `nil`, which a reader can write.
+                let declared = self.text_of(rt).trim().to_string();
+
+                // `async function f(): Future<T>` names the answer
+                // itself, the way a reader of TypeScript writes
+                // `Promise<T>`. Wrapping it again would build a Future
+                // of a Future, which is never what the line means.
+                if declared == "()" {
                     self.generate(rs, &format!("{std}.Future<nil>"));
+                } else if names_a_future(&declared) {
+                    self.copy(rs, re);
                 } else {
                     self.generate(rs, &format!("{std}.Future<"));
                     self.copy(rs, re);
@@ -1809,8 +1849,7 @@ impl<'s> Desugar<'s> {
         } else if body.is_async.is_some() && !returns_value(&body.block) {
             // An async body that returns nothing resolves to nothing: the
             // checker would infer `Future<unknown>` from the wrapper.
-            // `()` is no type argument, so nil stands in; the editor
-            // reads it back as `Future<()>`.
+            // `()` is no type argument, so nil stands in.
             let std = self.std();
             self.generate(cursor, &format!(": {std}.Future<nil>"));
         }
@@ -1848,6 +1887,10 @@ impl<'s> Desugar<'s> {
             let payload = match body.ret_type {
                 Some(rt) if !to_nil => {
                     let text = self.text_of(rt).trim().to_string();
+                    // A header that names `Future<T>` names the answer,
+                    // not what the body returns. The body returns `T`,
+                    // so the lambda carries that.
+                    let text = settled_type(&text).unwrap_or(text);
 
                     match text.as_str() {
                         "()" => String::new(),
@@ -2619,5 +2662,33 @@ mod tests {
             "{}",
             out.check
         );
+    }
+}
+
+#[cfg(test)]
+mod future_header_tests {
+    use super::{names_a_future, settled_type};
+
+    #[test]
+    fn a_header_that_names_a_future_is_seen() {
+        assert!(names_a_future("Future<nil>"));
+        assert!(names_a_future("Future<number>"));
+        assert!(names_a_future(" alloy.Future<T> "));
+    }
+
+    #[test]
+    fn another_type_is_not_a_future() {
+        assert!(!names_a_future("nil"));
+        assert!(!names_a_future("number"));
+        // A type whose name merely starts the same way.
+        assert!(!names_a_future("FutureQueue<T>"));
+        assert!(!names_a_future("Future"));
+    }
+
+    #[test]
+    fn the_settled_type_is_what_the_body_returns() {
+        assert_eq!(settled_type("Future<nil>").as_deref(), Some("nil"));
+        assert_eq!(settled_type("Future<number>").as_deref(), Some("number"));
+        assert_eq!(settled_type("nil"), None);
     }
 }

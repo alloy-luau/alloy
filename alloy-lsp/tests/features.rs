@@ -3098,3 +3098,135 @@ fn an_impl_header_hovers_as_its_block() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file that writes each contextual word both ways, with a `new` chain.
+const CONTEXTUAL: &str = "\
+--!strict
+struct Thing as
+    label: string
+    count: number
+end
+
+impl Thing as
+    function new(count: number): Thing
+        return new Thing { label = \"t\", count = count }
+    end
+
+    function get(self): number
+        return self.count
+    end
+end
+
+local new = Instance.new
+local export = { count = 1 }
+local try = pcall
+local match = string.match
+const LIMIT = 5
+local const = LIMIT
+
+local a = new Thing(1):get()
+local b = new Thing(2).count
+local picked = export.count
+local made = new Thing(6)
+print(new, export, try, match, const, a, b, picked, made)
+";
+
+/*
+The five contextual words and the `new` chain, over the protocol.
+
+A local named `new` must hover as the local and complete off its own
+type, and a chain off `new Thing()` must offer the struct's members. Both
+answers come from the child, so only an end to end run proves them.
+*/
+#[test]
+fn contextual_words_and_a_new_chain() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-ctx-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("ctx.aly");
+    std::fs::write(&file, CONTEXTUAL).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": CONTEXTUAL } } }),
+    );
+
+    // No reserved word and no unknown global: every word is a name here.
+    let diags = s.diagnostics(&uri, |_| true);
+    assert!(
+        diags.iter().all(|d| !d.contains("ReservedWord")),
+        "{diags:#?}"
+    );
+    s.drain(Duration::from_secs(2));
+
+    // Each local hovers with its own type, not with the keyword's page.
+    let h = s.hover(&uri, 16, 6);
+    assert!(
+        h.contains("local new") && h.contains("Instance"),
+        "new: {h}"
+    );
+    let h = s.hover(&uri, 17, 6);
+    assert!(
+        h.contains("local export") && h.contains("count"),
+        "export: {h}"
+    );
+    let h = s.hover(&uri, 18, 6);
+    assert!(h.contains("local try"), "try: {h}");
+    let h = s.hover(&uri, 19, 6);
+    assert!(h.contains("local match"), "match: {h}");
+    let h = s.hover(&uri, 21, 6);
+    assert!(
+        h.contains("local const") && h.contains("number"),
+        "const: {h}"
+    );
+
+    // The chain reads the struct's members at each link.
+    let h = s.hover(&uri, 23, 23);
+    assert!(
+        h.contains("Thing") && h.contains("number"),
+        "chain get: {h}"
+    );
+    let h = s.hover(&uri, 24, 23);
+    assert!(h.contains("number"), "chain field: {h}");
+    let h = s.hover(&uri, 23, 6);
+    assert!(
+        h.contains("local a") && h.contains("number"),
+        "chain type: {h}"
+    );
+    let h = s.hover(&uri, 24, 6);
+    assert!(
+        h.contains("local b") && h.contains("number"),
+        "chain field type: {h}"
+    );
+
+    // `new Thing():` offers the struct's methods; `.` adds its fields.
+    let labels = s.completion_labels(&uri, 23, 23);
+    assert!(labels.iter().any(|l| l == "get"), "methods: {labels:?}");
+    let labels = s.completion_labels(&uri, 24, 23);
+    assert!(
+        labels.iter().any(|l| l == "count") && labels.iter().any(|l| l == "label"),
+        "fields: {labels:?}"
+    );
+
+    // `export.` names the table's own field, so the local is a table.
+    let labels = s.completion_labels(&uri, 25, 22);
+    assert_eq!(labels, vec!["count".to_string()], "export field");
+
+    // `new ` still offers the struct names: the constructor is a keyword
+    // there, whatever local shares its spelling.
+    let labels = s.completion_labels(&uri, 26, 17);
+    assert!(
+        labels.iter().any(|l| l == "Thing"),
+        "new target: {labels:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

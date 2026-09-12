@@ -256,6 +256,28 @@ mod tests {
         assert!(hover("local p: Partial<V> = {}", 10).is_some());
     }
 
+    /*
+    A contextual word used as a name answers nothing here, so the child
+    answers with the local's own type.
+
+    The offsets below sit inside the word: `local new` puts `new` at 6,
+    `print(try` puts `try` at 6.
+    */
+    #[test]
+    fn a_contextual_name_leaves_the_hover_to_the_child() {
+        assert!(hover("local new = Instance.new\n", 6).is_none());
+        assert!(hover("local try = pcall\nprint(try)\n", 24).is_none());
+        assert!(hover("local match = string.match\nprint(match)\n", 33).is_none());
+        assert!(hover("local const = 1\nprint(const + 1)\n", 22).is_none());
+        assert!(hover("local export = {}\nreturn export\n", 25).is_none());
+
+        // The keyword reading still answers from the table.
+        assert!(hover("local v = try f()\n", 10).is_some());
+        assert!(hover("match x with\ncase 1 then print(1)\nend\n", 0).is_some());
+        assert!(hover("const LIMIT = 5\n", 0).is_some());
+        assert!(hover("export type T = number\n", 0).is_some());
+    }
+
     /// `destroy` and `after` answer from the table, and each one used
     /// as a member is the member.
     #[test]

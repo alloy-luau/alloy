@@ -8,9 +8,53 @@ use super::*;
 /// the header names something else or the source used the same keyword.
 pub(crate) fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
     let word = word_at(doc, line, character)?;
-    let binding = doc.bindings.iter().find(|b| b.name == word)?;
+    let binding = declaring_binding(doc, line, word)?;
 
     restyle_with(value, word, binding)
+}
+
+/*
+The binding a hover on `word` is about.
+
+One file may bind a name twice with different keywords: `impl Thing as
+function new` and `local new = Instance.new` both write `new`, and the
+first one found used to restyle the second. The line the cursor sits on
+decides when that line declares the name itself. Otherwise the keyword
+has to read the same at every binding of the name, or the hover keeps
+what the child printed, which is right for one reading and wrong about
+neither.
+*/
+fn declaring_binding<'a>(
+    doc: &'a Doc,
+    line: u32,
+    word: &str,
+) -> Option<&'a alloy::declarations::Binding> {
+    // The keywords this line writes, when it declares the name at all.
+    let here = doc.source.lines().nth(line as usize).and_then(|text| {
+        alloy::declarations::bindings(text)
+            .into_iter()
+            .find(|b| b.name == word)
+            .map(|b| b.prefix)
+    });
+    let mut found: Option<&alloy::declarations::Binding> = None;
+
+    for b in doc.bindings.iter().filter(|b| b.name == word) {
+        if let Some(prefix) = &here {
+            if &b.prefix == prefix {
+                return Some(b);
+            }
+
+            continue;
+        }
+
+        match found {
+            Some(other) if other.prefix != b.prefix => return None,
+
+            _ => found = Some(b),
+        }
+    }
+
+    found
 }
 
 /// The same, for a name another file of the project declares `global`.
@@ -983,11 +1027,21 @@ pub(crate) fn declared_signature(
     let name_end = name_end_in(body, &word)?;
     let child = head_spans(body, name_end)?;
     let owner = printed_owner(&body[..name_end], &word);
+    // The file may bind the name as a value too: `local new =
+    // Instance.new` beside an impl's `function new` writes the same
+    // word. The print then belongs to the local, and a declaration of
+    // that name says nothing about it.
+    let shadowed = doc
+        .bindings
+        .iter()
+        .any(|b| b.name == word && !b.prefix.ends_with("function"));
     let (source, is_async) = match owner
         .as_deref()
         .and_then(|o| impl_method_head(doc, o, &word))
     {
         Some(head) => (head, false),
+
+        None if shadowed => return None,
 
         None => declaration_head(doc, &word)?,
     };

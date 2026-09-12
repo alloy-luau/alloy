@@ -2291,6 +2291,22 @@ impl<'s> Desugar<'s> {
                     fix: None,
                 });
             }
+
+            // A `global local` is a value every file can assign. Only
+            // a value binding takes `const`; a function, a struct, or a
+            // type declares and nothing writes it.
+            if g.kind == crate::globals::Kind::Value && !g.constant {
+                self.lints.push(crate::lint::Lint {
+                    name: "mutable_global",
+                    start: g.start,
+                    end: g.end,
+                    message: format!(
+                        "`{}` is global and not `const`; any file of the project can assign it",
+                        g.name
+                    ),
+                    fix: None,
+                });
+            }
         }
     }
 

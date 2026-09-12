@@ -318,6 +318,42 @@ fn a_global_by_a_std_name_is_a_lint() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A `global local` is a value every file can assign. The lint names
+/// the declaration; `global const`, and every kind that declares
+/// rather than binds, says nothing.
+#[test]
+fn a_global_that_is_not_const_is_a_lint() {
+    let dir = temp_project("mutable-global");
+    fs::write(
+        dir.join("src/a.aly"),
+        concat!(
+            "--- The count.\n",
+            "global local counter = 0\n",
+            "--- The ceiling.\n",
+            "global const MAX = 10\n",
+            "--- Adds one.\n",
+            "global function bump(): ()\n",
+            "    counter = counter + 1\n",
+            "end\n",
+        ),
+    )
+    .unwrap();
+    fs::write(dir.join("src/b.aly"), "print(counter, MAX)\nbump()\n").unwrap();
+
+    let report = build(&dir);
+    assert!(report.is_clean(), "{:?}", messages(&report));
+    let hits: Vec<&alloy::lint::Lint> = report
+        .lints
+        .iter()
+        .map(|(_, l)| l)
+        .filter(|l| l.name == "mutable_global")
+        .collect();
+    assert_eq!(hits.len(), 1, "{:?}", report.lints);
+    assert!(hits[0].message.contains("`counter`"), "{}", hits[0].message);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// The name is already here, so the import hides where it comes from.
 #[test]
 fn an_import_of_a_global_reports() {

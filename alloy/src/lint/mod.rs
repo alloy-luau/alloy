@@ -629,6 +629,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "Pedantic. The std names `Signal`, `HashMap`, and the rest are ambient in every file. A `global` by one of those names wins over the std everywhere, and a reader who knows the std reads the wrong one. The project's name still works; the lint asks for a name of its own.",
     },
     LintInfo {
+        name: "mutable_global",
+        group: Group::Pedantic,
+        default: Level::Allow,
+        summary: "a `global local`, a project value any file can assign",
+        detail: "Pedantic. `global const MAX = 10` is read everywhere and set once. `global local` is a value every file of the project can assign, and no file names the one that did, so a wrong value has the whole project as its suspect list. Write `global const`, or keep the state in a module the files that change it import by name. The lint reports the declaration, not the assignment, and leaves the rewrite to the author: `const` holds only when nothing assigns the name.",
+    },
+    LintInfo {
         name: "explicit_any",
         group: Group::Pedantic,
         default: Level::Allow,
@@ -1057,6 +1064,29 @@ mod tests {
         assert_eq!(
             names("import m, { a } from \"./m\"\nprint(a, m)\n"),
             Vec::<&str>::new()
+        );
+    }
+
+    /// The lint table is what `alloy lint --list` and `alloy doc`
+    /// read, so a lint the compiler fires has to have a row there.
+    #[test]
+    fn a_global_that_is_not_const_has_a_row_in_the_table() {
+        let info = LINTS
+            .iter()
+            .find(|l| l.name == "mutable_global")
+            .expect("the row");
+        assert_eq!(info.group, Group::Pedantic);
+        assert_eq!(info.default, Level::Allow);
+
+        // Pedantic, so `strict` carries it and a project turns it off
+        // by name or by group.
+        assert_eq!(
+            level_of(&LintConfig::default(), "mutable_global"),
+            Level::Warn
+        );
+        assert_eq!(
+            level_of(&LintConfig::default().without_strict(), "mutable_global"),
+            Level::Allow
         );
     }
 

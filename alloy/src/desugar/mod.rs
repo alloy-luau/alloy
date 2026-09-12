@@ -192,6 +192,9 @@ pub struct GlobalRef {
     /// one slot on the declaring module, so every file reads and writes
     /// the same one.
     pub mutable: bool,
+    /// For a namespace, the `const` members a file reaches through it,
+    /// as the dotted paths a source writes: `Cfg.LIMIT`.
+    pub const_members: Vec<String>,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.

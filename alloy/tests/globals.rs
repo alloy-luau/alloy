@@ -831,6 +831,99 @@ fn an_assignment_to_a_global_const_reports_in_every_file() {
     assert!(hit.starts_with("b.aly"), "{hit}");
 }
 
+/// A `const` inside a namespace is reached by its path, so an
+/// assignment writes the path and not a bare name. The check reads it
+/// the same way, in the declaring file and in every other.
+#[test]
+fn an_assignment_to_a_namespace_const_reports() {
+    let dir = temp_project("namespace-const");
+    fs::write(
+        dir.join("src/a.aly"),
+        concat!(
+            "--- A group.\n",
+            "global namespace Cfg as\n",
+            "    --- Pinned.\n",
+            "    public const LIMIT = 5\n",
+            "    --- Free.\n",
+            "    public local loose = 1\n",
+            "    --- Deeper.\n",
+            "    public namespace Inner as\n",
+            "        --- Deep pinned.\n",
+            "        public const DEEP = 3\n",
+            "    end\n",
+            "end\n",
+            "\n",
+            "Cfg.LIMIT = 9\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        "Cfg.LIMIT += 1\nCfg.Inner.DEEP = 4\nCfg.loose = 2\nprint(Cfg.LIMIT)\n",
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    let hits: Vec<String> = messages(&report)
+        .into_iter()
+        .filter(|m| m.contains("is a `const`"))
+        .collect();
+    assert_eq!(hits.len(), 3, "{hits:?}");
+    // The declaring file names no file; another file names the one
+    // that wrote the declaration.
+    assert!(
+        hits.iter()
+            .any(|m| m.starts_with("a.aly") && m.contains("`Cfg.LIMIT` is a `const`;")),
+        "{hits:?}"
+    );
+    assert!(
+        hits.iter()
+            .any(|m| m.starts_with("b.aly") && m.contains("`Cfg.LIMIT` is a `const` of a.aly")),
+        "{hits:?}"
+    );
+    assert!(
+        hits.iter()
+            .any(|m| m.contains("`Cfg.Inner.DEEP` is a `const` of a.aly")),
+        "{hits:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A field of a plain table is no `const`, whatever it is called.
+#[test]
+fn a_plain_field_assignment_takes_no_const_report() {
+    let dir = temp_project("field-write");
+    fs::write(
+        dir.join("src/a.aly"),
+        concat!(
+            "--- A group.\n",
+            "global namespace Cfg as\n",
+            "    --- Pinned.\n",
+            "    public const LIMIT = 5\n",
+            "end\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        concat!(
+            "--- Writes a field.\n",
+            "export function go(): ()\n",
+            "    local t = { LIMIT = 1 }\n",
+            "    t.LIMIT = 2\n",
+            "    print(t.LIMIT, Cfg.LIMIT)\n",
+            "end\n",
+        ),
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    assert!(report.is_clean(), "{:?}", messages(&report));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// A local of the file wins: the global never reaches a name the file
 /// binds itself.
 #[test]

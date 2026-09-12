@@ -228,7 +228,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
 
     // A `global const` of another file is in scope here with no import,
     // so an assignment to one reads the same as one in its own file.
-    let const_globals: Vec<(String, String)> = globals::used(src, &options.globals)
+    let mut const_globals: Vec<(String, String)> = globals::used(src, &options.globals)
         .into_iter()
         .filter_map(|(name, _)| {
             // A name may be global on each side, so the one this file
@@ -242,7 +242,38 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         })
         .collect();
 
-    for (start, end, message) in lint::const_reassignments(src, &parsed.lexed.toks, &const_globals)
+    // A `const` of a namespace this file declares is reached by its
+    // path, `Cfg.LIMIT`, so an assignment names the path.
+    let mut namespace_consts: Vec<String> = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let alloy_syntax::ast::Stmt::Namespace(d) = stmt {
+            let span = d.name;
+            let toks = &parsed.lexed.toks;
+            let name = match toks.get(span.start as usize) {
+                Some(t) => src[t.start as usize..t.end as usize].to_string(),
+
+                None => continue,
+            };
+            namespace_consts.extend(globals::namespace_consts(src, toks, d, &name));
+        }
+    }
+
+    // The same members of another file's `global namespace`.
+    for (name, _) in globals::used(src, &options.globals) {
+        if let Some(g) = options
+            .globals
+            .iter()
+            .find(|g| g.name == name && globals::reaches(g.side, options.side))
+        {
+            for member in &g.const_members {
+                const_globals.push((member.clone(), g.file.clone()));
+            }
+        }
+    }
+
+    for (start, end, message) in
+        lint::const_reassignments(src, &parsed.lexed.toks, &const_globals, &namespace_consts)
     {
         diagnostics.push(Diagnostic {
             start,

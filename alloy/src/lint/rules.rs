@@ -51,10 +51,16 @@ fn directive_lints(src: &str) -> Vec<Lint> {
 /// `globals` names the `global const` declarations of the project this
 /// file reaches, each with the file that declares it. A `global` is in
 /// scope everywhere, so an assignment to one here reads the same way.
+/// A `const` inside a namespace is named there by its dotted path,
+/// `Cfg.LIMIT`, since that is what a source writes to reach it.
+///
+/// `namespace_consts` names the same members of this file's own
+/// namespaces, which need no file in the message.
 pub fn const_reassignments(
     src: &str,
     toks: &[Tok],
     globals: &[(String, String)],
+    namespace_consts: &[String],
 ) -> Vec<(u32, u32, String)> {
     let text = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or("");
     let lines = crate::fmt::structure::token_lines(src, toks);
@@ -85,20 +91,55 @@ pub fn const_reassignments(
         names.push(text(j));
     }
 
-    if names.is_empty() && globals.is_empty() {
+    if names.is_empty() && globals.is_empty() && namespace_consts.is_empty() {
         return Vec::new();
     }
 
+    let assigns = |i: usize| {
+        matches!(
+            text(i),
+            "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..=" | "??="
+        )
+    };
     let mut out = Vec::new();
 
     for (i, t) in toks.iter().enumerate() {
-        if t.kind != TokKind::Ident
-            || !starts(i)
-            || !matches!(
-                text(i + 1),
-                "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..=" | "??="
-            )
-        {
+        if t.kind != TokKind::Ident || !starts(i) {
+            continue;
+        }
+
+        // `Cfg.LIMIT = 1`: a `const` of a namespace is reached by its
+        // path, so the target of the assignment is the whole path.
+        let mut end = i + 1;
+
+        while text(end) == "." && toks.get(end + 1).map(|t| t.kind) == Some(TokKind::Ident) {
+            end += 2;
+        }
+
+        if !assigns(end) {
+            continue;
+        }
+
+        let path: String = (i..end)
+            .step_by(2)
+            .map(text)
+            .collect::<Vec<&str>>()
+            .join(".");
+
+        if end > i + 1 {
+            let message = if namespace_consts.contains(&path) {
+                format!(
+                    "`{path}` is a `const`; its value is set once and a reassignment is an error"
+                )
+            } else if let Some((_, file)) = globals.iter().find(|(n, _)| *n == path) {
+                format!(
+                    "`{path}` is a `const` of {file}; its value is set once and a reassignment is an error"
+                )
+            } else {
+                continue;
+            };
+            out.push((t.start, toks[end - 1].end, message));
+
             continue;
         }
 

@@ -110,6 +110,10 @@ pub struct Global {
     /// annotation the declaration wrote, or the type its literal value
     /// writes. `None` when only the checker can say.
     pub value_type: Option<String>,
+    /// For a `global namespace`, the `const` members a file reaches
+    /// through it, as the dotted paths a source writes: `Cfg.LIMIT`.
+    /// An assignment to one is an error the same way.
+    pub const_members: Vec<String>,
     /// The side this global reaches: the directive above it when it
     /// has one, else the side of the declaring file.
     pub side: Option<crate::directives::Side>,
@@ -239,6 +243,7 @@ pub fn declared_in(
             constant: false,
             type_params: params,
             value_type,
+            const_members: Vec::new(),
             side: directive.unwrap_or(side),
             side_directive: directive,
         });
@@ -393,6 +398,28 @@ pub fn declared_in(
         }
     }
 
+    // A `const` inside a `global namespace` is reached as `Cfg.LIMIT`,
+    // so the name an assignment writes is the dotted one.
+    for stmt in &chunk.block.stmts {
+        let Stmt::Namespace(d) = stmt else {
+            continue;
+        };
+
+        if !d.global {
+            continue;
+        }
+
+        let name = text(d.name).to_string();
+        let members = namespace_consts(src, toks, d, &name);
+
+        if let Some(g) = out
+            .iter_mut()
+            .find(|g| g.name == name && g.kind == Kind::Namespace)
+        {
+            g.const_members = members;
+        }
+    }
+
     // `global const N = 3`: an assignment to `N` in any file is an
     // error, the same as one in the declaring file.
     for stmt in &chunk.block.stmts {
@@ -433,6 +460,48 @@ fn value_type<'a>(
     let index = local.names.iter().position(|n| n.name == binding.name)?;
 
     crate::declarations::literal_type(local.values.get(index)?, text)
+}
+
+/// The `const` members a namespace holds, as the dotted paths a source
+/// writes: `Cfg.LIMIT`, `Cfg.Inner.LIMIT`. A private member reaches no
+/// other file, so it is left out.
+pub fn namespace_consts(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    prefix: &str,
+) -> Vec<String> {
+    let text = |span: TokSpan| -> &str {
+        if span.end <= span.start || span.end as usize > toks.len() {
+            return "";
+        }
+
+        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
+    };
+    let mut out = Vec::new();
+
+    for m in &ns.members {
+        if m.is_private(src, toks) {
+            continue;
+        }
+
+        match m.stmt.under_default() {
+            Stmt::Local(l) if l.is_const => {
+                for b in &l.names {
+                    out.push(format!("{prefix}.{}", text(b.name)));
+                }
+            }
+
+            Stmt::Namespace(inner) => {
+                let deeper = format!("{prefix}.{}", text(inner.name));
+                out.extend(namespace_consts(src, toks, inner, &deeper));
+            }
+
+            _ => {}
+        }
+    }
+
+    out
 }
 
 /// The public types of a `global namespace`, under the names the emit
@@ -875,6 +944,7 @@ pub fn refs_for(
             namespace: g.kind == Kind::Namespace,
             constant: g.constant,
             mutable: g.kind == Kind::Value && !g.constant,
+            const_members: g.const_members.clone(),
             side: g.side,
             name: g.name.clone(),
             file: g.file.to_string_lossy().replace('\\', "/"),

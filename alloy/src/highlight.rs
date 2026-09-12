@@ -83,6 +83,8 @@ const KEYWORDS: &[&str] = &[
     "namespace",
     "attribute",
     "on",
+    "requires",
+    "each",
     "where",
     "is",
     "read",

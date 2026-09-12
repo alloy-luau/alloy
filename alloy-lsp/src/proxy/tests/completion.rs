@@ -1424,3 +1424,128 @@ fn the_settings_hide_the_deprecated_rows() {
             .is_some_and(|d| d.source.contains("function old"))
     );
 }
+
+/// The literals an attribute argument takes: the members of a narrowed
+/// union, and the variants of an enum.
+#[test]
+pub(crate) fn an_attribute_argument_completes_its_own_literals() {
+    let items = |src: &str, head: &str| -> Vec<(String, String)> {
+        let at = src.rfind(head).expect("the head") + head.len();
+        let (st, uri) = one_file(src);
+        let ctx = context::detect(src, at).expect("an argument context");
+
+        st.context_items(uri, at, &ctx)
+            .iter()
+            .map(|i| {
+                (
+                    i["label"].as_str().unwrap_or_default().to_string(),
+                    i["textEdit"]["newText"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            })
+            .collect()
+    };
+    let enums = "enum Lifecycle as\n    Init\n    Start\nend\n";
+
+    // An enum-typed list: the variants, written the way a source writes
+    // them.
+    let src = format!(
+        "{enums}attribute provider(lifecycles: Lifecycle[]) on impl as\n    requires private function each lifecycles(self)\nend\n\n@provider({{ lifecycles = [  ] }})\nimpl S as\nend\n"
+    );
+    assert_eq!(
+        items(&src, "lifecycles = [ "),
+        [
+            ("Lifecycle.Init".to_string(), "Lifecycle.Init".to_string()),
+            ("Lifecycle.Start".to_string(), "Lifecycle.Start".to_string()),
+        ]
+    );
+
+    // A narrowed union of strings: the members, in quotes outside a
+    // string and bare inside one.
+    let src = "attribute phases(names: (\"init\" | \"start\")[]) on impl\n\n@phases({ names = [  ] })\nimpl S as\nend\n";
+    assert_eq!(
+        items(src, "names = [ "),
+        [
+            ("init".to_string(), "\"init\"".to_string()),
+            ("start".to_string(), "\"start\"".to_string()),
+        ]
+    );
+
+    let src = "attribute phases(names: (\"init\" | \"start\")[]) on impl\n\n@phases({ names = [ \"in ] })\nimpl S as\nend\n";
+    assert_eq!(
+        items(src, "[ \"in"),
+        [
+            ("init".to_string(), "init".to_string()),
+            ("start".to_string(), "start".to_string()),
+        ]
+    );
+
+    // A single value takes the same list.
+    let src = format!("{enums}attribute one(stage: Lifecycle) on impl\n\n@one()\nimpl S as\nend\n");
+    assert_eq!(items(&src, "@one(").len(), 2);
+
+    // A parameter with no narrowed type offers nothing: an argument is a
+    // literal, so no name from the scope belongs here.
+    let src = "attribute k(n: number) on impl\n\n@k()\nimpl S as\nend\n";
+    assert!(items(src, "@k(").is_empty());
+
+    // A built-in attribute has no declaration to read, and the list is
+    // empty rather than the whole scope.
+    assert!(items("@ratelimit()\nremote P() from server\n", "@ratelimit(").is_empty());
+}
+
+/// The member column of a declaration under a contract offers what the
+/// contract asks for, first.
+#[test]
+pub(crate) fn a_contract_offers_the_members_it_requires() {
+    let rows = |src: &str, head: &str| -> Vec<(String, String, String)> {
+        let at = src.rfind(head).expect("the head") + head.len();
+        let (st, uri) = one_file(src);
+        let ctx = context::detect(src, at).expect("a member column");
+
+        st.context_items(uri, at, &ctx)
+            .iter()
+            .map(|i| {
+                (
+                    i["label"].as_str().unwrap_or_default().to_string(),
+                    i["detail"].as_str().unwrap_or_default().to_string(),
+                    i["sortText"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    };
+    let src = concat!(
+        "attribute service on impl as\n",
+        "    requires public function Start(self)\n",
+        "end\n\n",
+        "attribute holds on struct as\n",
+        "    requires private field state: number\n",
+        "end\n\n",
+        "@holds\nstruct S as\n    x: number\n    \nend\n\n",
+        "@service\nimpl S as\n    \nend\n"
+    );
+
+    // The method column of the `impl`.
+    let members = rows(src, "impl S as\n    ");
+    assert_eq!(
+        members[0],
+        (
+            "Start".to_string(),
+            "required by `@service`".to_string(),
+            "0".to_string()
+        )
+    );
+
+    // The field column of the `struct`.
+    let fields = rows(src, "x: number\n    ");
+    assert_eq!(
+        fields[0],
+        (
+            "state".to_string(),
+            "required by `@holds`".to_string(),
+            "0".to_string()
+        )
+    );
+}

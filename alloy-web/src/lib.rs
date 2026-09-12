@@ -347,6 +347,66 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            // An entry of an attribute argument: the declared type of the
+            // parameter says what fits. A union of string literals offers
+            // its members and an enum its variants; nothing else belongs,
+            // since an argument is a literal.
+            Context::AttributeArg { prefix, attr, param, quote } => {
+                let from = offset - prefix.len();
+                let key = format!("@{attr}");
+                let params = s
+                    .decls
+                    .iter()
+                    .find(|d| d.name == key)
+                    .map(|d| alloy::declarations::attribute_params(&d.hover))
+                    .unwrap_or_default();
+                let ty = match param {
+                    Some(name) => params.iter().find(|(p, _)| p == name).map(|(_, t)| t),
+
+                    None => params.first().map(|(_, t)| t),
+                };
+
+                if let Some(ty) = ty {
+                    let element = alloy::desugar::element_type(ty);
+                    let detail = format!("takes `{element}` for `@{attr}`");
+
+                    if alloy::desugar::is_string_union(&element) {
+                        for part in element.split('|') {
+                            let text = part.trim().trim_matches(['"', '\'']);
+
+                            if text.is_empty() {
+                                continue;
+                            }
+
+                            let mut item = word(text, "constant", Some(detail.clone()), from);
+                            item["insert"] = json!(match quote {
+                                Some(_) => text.to_string(),
+
+                                None => format!("\"{text}\""),
+                            });
+                            items.push(item);
+                        }
+                    } else if quote.is_none() {
+                        for shape in &s.shapes {
+                            let Shape::Enum { name, variants } = shape else {
+                                continue;
+                            };
+
+                            if *name != element {
+                                continue;
+                            }
+
+                            for (v, _) in variants {
+                                let path = format!("{name}.{v}");
+                                let mut item = word(&path, "constant", Some(detail.clone()), from);
+                                item["insert"] = json!(path);
+                                items.push(item);
+                            }
+                        }
+                    }
+                }
+            }
+
             Context::DeriveArg { prefix } => {
                 for key in keywords::keys_with_prefix("derive:") {
                     let name = &key["derive:".len()..];
@@ -1196,6 +1256,10 @@ fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
             "remote",
             "interface",
             "type",
+            "local",
+            "namespace",
+            "impl",
+            "trait",
         ],
     }
 }

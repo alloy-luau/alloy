@@ -45,6 +45,8 @@ pub fn is_contextual(word: &str) -> bool {
             | "struct"
             | "interface"
             | "import"
+            | "requires"
+            | "each"
     )
 }
 
@@ -92,6 +94,12 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
         return true;
     }
 
+    // `each` sits after the `function` of its clause, so it answers
+    // before the rule that reads every word after a `function` as a name.
+    if word == "each" {
+        return each_member_follows(src, toks, i);
+    }
+
     if i > 0 && matches!(text(src, toks, i - 1), "." | ":" | "?." | "function") {
         return false;
     }
@@ -136,8 +144,71 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
 
         "import" => import_follows(src, toks, i),
 
+        "requires" => requires_clause_follows(src, toks, i),
+
         _ => true,
     }
+}
+
+/*
+Reports if a contract clause follows the `requires` at token `i`.
+
+The word opens a clause of an `attribute ... as ... end` body:
+`requires public function Start(self)`. The clause head decides, because
+it is a shape no expression carries: a kind word, `function` or `field`,
+with at most a visibility word in front of it, and a member name after.
+`requires = 1`, `requires(f)`, and `requires.list` are the Luau readings
+of a local named requires.
+*/
+pub fn requires_clause_follows(src: &str, toks: &[Tok], i: usize) -> bool {
+    if newline_after(src, toks, i) {
+        return false;
+    }
+
+    let mut n = i + 1;
+
+    if matches!(text(src, toks, n), "public" | "private") {
+        n += 1;
+    }
+
+    if !matches!(text(src, toks, n), "function" | "field") {
+        return false;
+    }
+
+    name_at(src, toks, n + 1) || (text(src, toks, n + 1) == "each" && name_at(src, toks, n + 2))
+}
+
+/*
+Reports if the `each` at token `i` expands a clause over a parameter.
+
+`each` is a keyword only between a clause's kind word and the parameter
+it reads, so the tokens behind it decide: `requires`, an optional
+visibility, and `function` or `field`. `local each = 1` and
+`t.each(f)` keep their Luau reading.
+*/
+pub fn each_member_follows(src: &str, toks: &[Tok], i: usize) -> bool {
+    if !name_at(src, toks, i + 1) {
+        return false;
+    }
+
+    let Some(kind) = i.checked_sub(1) else {
+        return false;
+    };
+
+    if !matches!(text(src, toks, kind), "function" | "field") {
+        return false;
+    }
+
+    let mut n = kind;
+
+    if matches!(
+        n.checked_sub(1).map(|k| text(src, toks, k)),
+        Some("public" | "private")
+    ) {
+        n -= 1;
+    }
+
+    n.checked_sub(1).map(|k| text(src, toks, k)) == Some("requires")
 }
 
 /*

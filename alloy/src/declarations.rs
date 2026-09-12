@@ -286,6 +286,18 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                 let list: Vec<String> = targets.iter().map(|t| format!("`{t}`")).collect();
                 notes_first.push(format!("**Applies to** {}", list.join(" · ")));
 
+                // The contract, one line per clause. A reader asks what
+                // the attribute holds them to, and the clause is the
+                // answer, in the words the declaration wrote.
+                if !d.requires.is_empty() {
+                    let clauses: Vec<String> = d
+                        .requires
+                        .iter()
+                        .map(|c| format!("- `{}`", require_text(c, &text)))
+                        .collect();
+                    notes_first.push(format!("\n\n**Requires**\n{}", clauses.join("\n")));
+                }
+
                 (text(d.name), vec![format!("@{}{params}", text(d.name))])
             }
 
@@ -921,6 +933,104 @@ fn member_name(stmt: &Stmt) -> Option<TokSpan> {
 
         other => other.declared_name(),
     }
+}
+
+/*
+One `requires` clause as a hover reads it: the visibility, the kind, the
+member, and the shape.
+
+`requires private function each lifecycles(self)` keeps the `each`, and
+the language server expands it against the arguments of a use. The
+declaration knows no arguments.
+*/
+pub fn require_text<'a>(
+    c: &alloy_syntax::ast::RequireClause,
+    text: &impl Fn(TokSpan) -> &'a str,
+) -> String {
+    use alloy_syntax::ast::RequireMember;
+
+    let mut out = String::new();
+
+    if let Some(v) = c.visibility {
+        out.push_str(text(v));
+        out.push(' ');
+    }
+
+    out.push_str(text(c.kind));
+    out.push(' ');
+
+    match c.member {
+        RequireMember::Name(n) => out.push_str(text(n)),
+
+        RequireMember::Each(n) => {
+            out.push_str("each ");
+            out.push_str(text(n));
+        }
+    }
+
+    if let Some(shape) = c.shape {
+        let shape = text(shape).trim();
+
+        if text(c.kind) == "field" {
+            out.push_str(": ");
+        }
+
+        out.push_str(shape);
+    }
+
+    out
+}
+
+/*
+The parameters a declared attribute's hover names, each with its type as
+the declaration wrote it.
+
+The hover opens with the use form, `@provider(lifecycles: Lifecycle[])`,
+which is the one place the parameter types are already gathered for every
+attribute a file reaches: its own, an imported one, and a global.
+*/
+pub fn attribute_params(hover: &str) -> Vec<(String, String)> {
+    let Some(line) = hover
+        .lines()
+        .find(|l| l.starts_with('@'))
+        .and_then(|l| l.split_once('('))
+        .map(|(_, rest)| rest)
+    else {
+        return Vec::new();
+    };
+    let Some(list) = line.strip_suffix(')') else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+
+    for c in list.chars() {
+        match c {
+            '(' | '<' | '[' | '{' => depth += 1,
+
+            ')' | '>' | ']' | '}' => depth -= 1,
+
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut current));
+
+                continue;
+            }
+
+            _ => {}
+        }
+
+        current.push(c);
+    }
+
+    out.push(current);
+    out.into_iter()
+        .filter_map(|part| {
+            let (name, ty) = part.split_once(':')?;
+
+            Some((name.trim().to_string(), ty.trim().to_string()))
+        })
+        .collect()
 }
 
 /// `name: T` for a parameter, or `name` alone.

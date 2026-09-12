@@ -81,10 +81,14 @@ impl Server {
             return false;
         };
 
+        // An attribute contract with an `each` clause reads best where
+        // it is used: the arguments of this use name the members, so the
+        // hover writes one line per member instead of the clause.
+        let hover = expand_each(&decl.hover, &doc.source, start);
         let (sl, sc) = position_of(&doc.source, start);
         let (el, ec) = position_of(&doc.source, end);
         let result = json!({
-            "contents": { "kind": "markdown", "value": decl.hover },
+            "contents": { "kind": "markdown", "value": hover },
             "range": {
                 "start": { "line": sl, "character": sc },
                 "end": { "line": el, "character": ec }
@@ -402,5 +406,175 @@ mod tests {
         // workspace still answers for it.
         assert!(!binds_a_value(&bindings, "Vec2"));
         assert!(!binds_a_value(&bindings, "nothing"));
+    }
+}
+
+/*
+The hover of an attribute, with every `each <param>` clause expanded
+against the arguments of the use at `at`.
+
+A clause reads `- \`private function each lifecycles (self)\`` in the
+declaration's hover. At a use the reader wants the members it asks for,
+so the line becomes one per entry of that argument. A caret on the
+declaration itself finds no argument list and keeps the clause.
+*/
+fn expand_each(hover: &str, source: &str, at: usize) -> String {
+    if !hover.contains("each ") {
+        return hover.to_string();
+    }
+
+    let mut out: Vec<String> = Vec::new();
+
+    for line in hover.lines() {
+        let Some((head, param, shape)) = each_clause(line) else {
+            out.push(line.to_string());
+
+            continue;
+        };
+        let names = each_arguments(source, at, &param);
+
+        if names.is_empty() {
+            out.push(line.to_string());
+
+            continue;
+        }
+
+        for name in names {
+            out.push(format!("- `{head}{name}{shape}`"));
+        }
+    }
+
+    out.join("\n")
+}
+
+/// A hover line that holds an `each` clause, split into the words before
+/// `each`, the parameter, and the shape after it.
+fn each_clause(line: &str) -> Option<(String, String, String)> {
+    let body = line.strip_prefix("- `")?.strip_suffix('`')?;
+    let (head, rest) = body.split_once("each ")?;
+    // The parameter runs to the shape: `(self)` for a function, `: T` for
+    // a field. A clause with no shape is the parameter alone.
+    let at = rest.find(['(', ':']).unwrap_or(rest.len());
+    let (param, shape) = rest.split_at(at);
+
+    Some((
+        head.to_string(),
+        param.trim().to_string(),
+        shape.to_string(),
+    ))
+}
+
+/*
+The member names the argument `param` carries, read from the attribute
+use the offset `at` sits in.
+
+The argument is a literal, which is what lets the compiler read it too.
+This reads the same text: the list between the brackets, one name per
+entry, with a dotted path reduced to its last segment.
+*/
+fn each_arguments(source: &str, at: usize, param: &str) -> Vec<String> {
+    let line_start = source[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = source[at..]
+        .find('\n')
+        .map(|i| at + i)
+        .unwrap_or(source.len());
+    let line = &source[line_start..line_end];
+
+    if !line.trim_start().starts_with('@') {
+        return Vec::new();
+    }
+
+    // The record form names the parameter; the positional form is the
+    // only list on the line.
+    let rest = match line.find(&format!("{param} =")) {
+        Some(i) => &line[i..],
+
+        None => line,
+    };
+    let Some(open) = rest.find('[') else {
+        return Vec::new();
+    };
+    let Some(close) = rest[open..].find(']') else {
+        return Vec::new();
+    };
+
+    rest[open + 1..open + close]
+        .split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim().trim_matches(['"', '\'']);
+            let name = entry.rsplit('.').next().unwrap_or(entry).trim();
+
+            (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                .then(|| name.to_string())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::{each_arguments, each_clause, expand_each};
+
+    #[test]
+    fn a_clause_line_splits_into_its_parts() {
+        assert_eq!(
+            each_clause("- `private function each lifecycles(self)`"),
+            Some((
+                "private function ".to_string(),
+                "lifecycles".to_string(),
+                "(self)".to_string()
+            ))
+        );
+        assert_eq!(
+            each_clause("- `field each keys: number`"),
+            Some((
+                "field ".to_string(),
+                "keys".to_string(),
+                ": number".to_string()
+            ))
+        );
+        assert_eq!(each_clause("- `public function Start(self)`"), None);
+        assert_eq!(each_clause("**Requires**"), None);
+    }
+
+    #[test]
+    fn the_arguments_of_a_use_name_the_members() {
+        let src =
+            "@provider({ lifecycles = [ Lifecycle.Init, Lifecycle.Start ] })\nimpl S as\nend\n";
+        let at = src.find("provider").expect("the name");
+        assert_eq!(
+            each_arguments(src, at, "lifecycles"),
+            ["Init".to_string(), "Start".to_string()]
+        );
+
+        // The positional form holds the only list on the line.
+        let src = "@provider([ \"Init\" ])\nimpl S as\nend\n";
+        let at = src.find("provider").expect("the name");
+        assert_eq!(each_arguments(src, at, "lifecycles"), ["Init".to_string()]);
+
+        // A declaration is no use: nothing to read.
+        let src = "attribute provider(lifecycles: Lifecycle[]) on impl as\nend\n";
+        let at = src.find("provider").expect("the name");
+        assert!(each_arguments(src, at, "lifecycles").is_empty());
+    }
+
+    /// At a use the clause becomes one line per member; at the
+    /// declaration it stays the clause the author wrote.
+    #[test]
+    fn the_hover_expands_each_at_a_use_and_not_at_the_declaration() {
+        let hover = "```alloy\n@provider(lifecycles: Lifecycle[])\n```\n\n**Requires**\n- `private function each lifecycles(self)`";
+        let use_src =
+            "@provider({ lifecycles = [ Lifecycle.Init, Lifecycle.Start ] })\nimpl S as\nend\n";
+        let at = use_src.find("provider").expect("the name");
+        assert!(
+            expand_each(hover, use_src, at).ends_with(
+                "**Requires**\n- `private function Init(self)`\n- `private function Start(self)`"
+            ),
+            "{}",
+            expand_each(hover, use_src, at)
+        );
+
+        let decl = "attribute provider(lifecycles: Lifecycle[]) on impl as\nend\n";
+        let at = decl.find("provider").expect("the name");
+        assert_eq!(expand_each(hover, decl, at), hover);
     }
 }

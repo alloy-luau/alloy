@@ -344,3 +344,51 @@ pub(crate) fn the_key_of_a_reserved_alias_is_found_in_every_file() {
     assert_eq!(alias_key_line("gamer = \"x\"\n", "game"), None);
     assert_eq!(alias_key_line(luaurc, "alloy"), None);
 }
+
+/// "Write the members `@service` requires": one action per attribute and
+/// insertion point, with the text the language puts there.
+#[test]
+pub(crate) fn a_contract_draws_an_action_that_writes_its_members() {
+    let src = concat!(
+        "attribute service on impl as\n",
+        "    requires public function Start(self)\n",
+        "    requires private field state: number\n",
+        "end\n\n",
+        "struct S as\n    x: number\nend\n\n",
+        "@service\nimpl S as\nend\n\nprint(S)\n"
+    );
+    let (st, uri) = one_file(src);
+    let line = src[..src.find("@service").expect("the use")]
+        .matches('\n')
+        .count() as u32;
+    let actions = st.contract_actions(uri, ((line, 0), (line, 8)));
+    let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
+    assert_eq!(
+        titles,
+        [
+            "Write the member `@service` requires: Start",
+            "Write the member `@service` requires: state"
+        ],
+        "{actions:#?}"
+    );
+
+    let edit_of = |action: &Value| -> (u32, String) {
+        let edit = &action["edit"]["changes"][uri][0];
+        (
+            edit["range"]["start"]["line"].as_u64().unwrap_or(0) as u32,
+            edit["newText"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    // The method goes in the `impl`, on the line of its `end`.
+    let (at, text) = edit_of(&actions[0]);
+    assert_eq!(text, "    public function Start(self)\n    end\n");
+    assert_eq!(src.lines().nth(at as usize), Some("end"));
+
+    // The field goes in the struct, which is where the language keeps it.
+    let (at, text) = edit_of(&actions[1]);
+    assert_eq!(text, "    private state: number\n");
+    assert_eq!(src.lines().nth(at as usize), Some("end"));
+
+    // A range that holds no attribute draws nothing.
+    assert!(st.contract_actions(uri, ((0, 0), (0, 4))).is_empty());
+}

@@ -600,7 +600,11 @@ impl<'a> Parser<'a> {
             }
 
             "impl" if self.name_at(1) => {
-                return self.impl_decl(start, exported).map(marked);
+                return self.impl_decl_with(start, attrs, exported).map(marked);
+            }
+
+            "interface" if self.name_at(1) => {
+                return self.interface_decl_with(start, attrs, exported).map(marked);
             }
 
             "namespace" if self.namespace_follows() => {

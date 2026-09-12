@@ -107,6 +107,15 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn impl_decl(&mut self, start: usize, exported: bool) -> Result<Stmt, ParseError> {
+        self.impl_decl_with(start, Vec::new(), exported)
+    }
+
+    pub(super) fn impl_decl_with(
+        &mut self,
+        start: usize,
+        attributes: Vec<Attr>,
+        exported: bool,
+    ) -> Result<Stmt, ParseError> {
         let head_start = self.pos;
         self.expect("impl")?;
         let first_start = self.pos;
@@ -194,6 +203,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Stmt::Impl(ImplDecl {
+            attributes,
             exported,
             global: false,
             trait_name,

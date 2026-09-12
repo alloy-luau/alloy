@@ -93,6 +93,10 @@ pub struct Output {
     /// tree past the first error, so a lint or a type error over the
     /// emit describes code no one wrote.
     pub parsed_clean: bool,
+    /// The members an attribute contract asks for that the declaration
+    /// under the attribute does not carry. The language server writes
+    /// them in and completes their names.
+    pub contract_gaps: Vec<desugar::ContractGap>,
 }
 
 /// One `import ... from "path"` of a file, or one data path with the
@@ -413,6 +417,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         expected_hits,
         lowered: None,
         parsed_clean,
+        contract_gaps: rendered.contract_gaps,
     })
 }
 

@@ -157,6 +157,77 @@ impl State {
     /// one per header in the range, and one that writes every header of
     /// the file. A file the parser reported on carries no lint, so this
     /// rewrite rides on the diagnostic, the way `alloy flux --fix` does.
+    /*
+    "Write the members `@provider` requires": one action per attribute
+    whose contract the declaration under it does not meet.
+
+    The compiler says which members are missing and where they go, so
+    the action writes them in the order the clauses read and the result
+    compiles.
+    */
+    pub(crate) fn contract_actions(
+        &self,
+        uri: &str,
+        range: ((u32, u32), (u32, u32)),
+    ) -> Vec<Value> {
+        let mut actions = Vec::new();
+        let Some(doc) = self.docs.get(uri) else {
+            return actions;
+        };
+        let gaps = doc
+            .output
+            .as_ref()
+            .map(|o| o.contract_gaps.as_slice())
+            .unwrap_or_default();
+
+        if gaps.is_empty() {
+            return actions;
+        }
+
+        let ((from_line, _), (to_line, _)) = range;
+        // One action per attribute and insertion point: a contract that
+        // asks for a field and a method writes each where it belongs.
+        let mut seen: Vec<(&str, u32)> = Vec::new();
+
+        for gap in gaps {
+            if seen.contains(&(gap.attr.as_str(), gap.insert_at)) {
+                continue;
+            }
+
+            let (line, _) = position_of(&doc.source, gap.start as usize);
+
+            if line < from_line || line > to_line {
+                continue;
+            }
+
+            seen.push((&gap.attr, gap.insert_at));
+            let mine: Vec<&alloy::desugar::ContractGap> = gaps
+                .iter()
+                .filter(|g| g.attr == gap.attr && g.insert_at == gap.insert_at)
+                .collect();
+            let text: String = mine.iter().map(|g| member_text(g)).collect();
+            let (el, ec) = position_of(&doc.source, gap.insert_at as usize);
+            let at = json!({ "line": el, "character": ec.saturating_sub(gap.indent) });
+            let names: Vec<String> = mine.iter().map(|g| g.member.clone()).collect();
+            actions.push(json!({
+                "title": format!(
+                    "Write the member{} `@{}` requires: {}",
+                    if names.len() == 1 { "" } else { "s" },
+                    gap.attr,
+                    names.join(", ")
+                ),
+                "kind": "quickfix",
+                "isPreferred": true,
+                "edit": { "changes": { uri: [{
+                    "range": { "start": at, "end": at },
+                    "newText": text,
+                }] } },
+            }));
+        }
+
+        actions
+    }
+
     pub(crate) fn header_as_actions(
         &self,
         uri: &str,
@@ -1213,4 +1284,42 @@ pub(crate) fn consumed_by_intrinsic(source: &str, name: &str) -> bool {
     }
 
     false
+}
+
+/*
+One missing member as the source writes it, indented to the body of the
+declaration it goes in.
+
+A function takes its parameter list and an `end`; a field takes its type.
+The visibility goes in front when the clause asked for one, and the
+member reads as the plain member it is when the clause took either.
+*/
+fn member_text(gap: &alloy::desugar::ContractGap) -> String {
+    let pad = " ".repeat(gap.indent as usize + 4);
+    let visibility = match gap.visibility.is_empty() {
+        true => String::new(),
+
+        false => format!("{} ", gap.visibility),
+    };
+
+    if gap.kind == "field" {
+        let ty = match gap.shape.is_empty() {
+            true => "unknown".to_string(),
+
+            false => gap.shape.clone(),
+        };
+
+        return format!("{pad}{visibility}{}: {ty}\n", gap.member);
+    }
+
+    let params = match gap.shape.is_empty() {
+        true => "(self)".to_string(),
+
+        false => gap.shape.clone(),
+    };
+
+    format!(
+        "{pad}{visibility}function {}{params}\n{pad}end\n",
+        gap.member
+    )
 }

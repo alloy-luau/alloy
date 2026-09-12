@@ -51,6 +51,13 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["@test", "test "], "TestError"),
         (&["@cfg"], "AttributeError"),
         (&["macro"], "MacroError"),
+        // An attribute contract: the report names the attribute and the
+        // clause it broke. Above the import rule, because the word
+        // `requires` holds the word `require`.
+        (
+            &["` requires ", "`each ", "`requires` clause"],
+            "AttributeContract",
+        ),
         (&["attribute", "derive"], "AttributeError"),
         (&["data file"], "DataError"),
         (&["import", "export", "require", "module"], "ImportError"),
@@ -105,6 +112,7 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         (&["@test", "test "], "3.14"),
         (&["@cfg"], "3.11"),
         (&["macro"], "3.10"),
+        (&["` requires ", "`each ", "`requires` clause"], "3.11"),
         (&["attribute", "derive"], "3.11"),
         (
             &[

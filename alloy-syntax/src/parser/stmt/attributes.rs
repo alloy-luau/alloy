@@ -140,14 +140,117 @@ impl<'a> Parser<'a> {
             targets.push(self.target_word()?);
         }
 
+        // `as ... end` states the contract. A declaration with none keeps
+        // the short form, which is what every attribute wrote before.
+        let requires = match self.at("as") && !self.newline_before_pos() && self.eat("as") {
+            true => self.require_clauses(start)?,
+
+            false => Vec::new(),
+        };
+
         Ok(Stmt::Attribute(AttributeDecl {
             exported,
             global: false,
             name,
             params,
             targets,
+            requires,
             span: TokSpan::new(start, self.pos),
         }))
+    }
+
+    /*
+    The body of an `attribute ... as ... end`: one `requires` clause per
+    line, up to the `end`.
+
+    `requires` and `each` are keywords here and nowhere else, so a file
+    that binds either name keeps it. The clause head is what the rest of
+    the toolchain reads too; the rule lives in [`crate::contextual`].
+    */
+    fn require_clauses(&mut self, opener: usize) -> Result<Vec<RequireClause>, ParseError> {
+        let mut out = Vec::new();
+
+        while !self.at("end") {
+            if self.at_end() {
+                return Err(self.err("unterminated attribute, expected `end`"));
+            }
+
+            out.push(self.require_clause()?);
+        }
+
+        self.expect_end(opener)?;
+
+        Ok(out)
+    }
+
+    fn require_clause(&mut self) -> Result<RequireClause, ParseError> {
+        let start = self.pos;
+        self.expect("requires")?;
+        let visibility = match matches!(self.text(), "public" | "private") {
+            true => {
+                let i = self.bump();
+
+                Some(TokSpan::new(i, i + 1))
+            }
+
+            false => None,
+        };
+
+        if !matches!(self.text(), "function" | "field") {
+            return Err(self.err(&format!(
+                "a `requires` clause asks for a `function` or a `field`, found {}",
+                self.found()
+            )));
+        }
+
+        let kind_at = self.bump();
+        let kind = TokSpan::new(kind_at, kind_at + 1);
+        let is_function = self.span_text(kind) == "function";
+        let member = match self.at("each") {
+            true => {
+                self.bump();
+
+                RequireMember::Each(self.expect_name()?)
+            }
+
+            false => RequireMember::Name(self.expect_name()?),
+        };
+
+        /*
+        A function's shape is its parameter list, with the return type
+        when the clause writes one. A field's shape is its type.
+
+        Both are optional: `requires function Start` asks for the member
+        alone, whatever signature it carries.
+        */
+        let shape = if is_function {
+            match self.at("(") {
+                true => {
+                    let sig_start = self.pos;
+                    self.param_list()?;
+
+                    if self.eat(":") || self.eat("->") {
+                        self.type_ret()?;
+                    }
+
+                    Some(TokSpan::new(sig_start, self.pos))
+                }
+
+                false => None,
+            }
+        } else if self.eat(":") {
+            Some(self.type_()?)
+        } else {
+            None
+        };
+
+        Ok(RequireClause {
+            visibility,
+            kind,
+            member,
+            shape,
+            span: TokSpan::new(start, self.pos),
+        })
     }
 
     fn target_word(&mut self) -> Result<TokSpan, ParseError> {
@@ -164,6 +267,8 @@ impl<'a> Parser<'a> {
                 | "type"
                 | "local"
                 | "namespace"
+                | "impl"
+                | "trait"
         ) {
             let i = self.bump();
 

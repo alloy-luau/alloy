@@ -311,6 +311,10 @@ pub struct TraitMethod {
 /// `interface Name extends A, B as fields end`.
 #[derive(Debug)]
 pub struct InterfaceDecl {
+    /// Parsed attributes, `@name(args)`, on the declaration. The emit
+    /// drops them; the checks read them, so `attribute X on interface`
+    /// holds.
+    pub attributes: Vec<Attr>,
     pub exported: bool,
     /// `global function f()`; the name is in scope in every file of
     /// the project. A global exports too, so an import still resolves.
@@ -340,7 +344,8 @@ pub struct RemoteDecl {
     pub span: TokSpan,
 }
 
-/// `attribute name(params) on targets`.
+/// `attribute name(params) on targets`, with the contract body the
+/// `as ... end` form adds.
 #[derive(Debug)]
 pub struct AttributeDecl {
     pub exported: bool,
@@ -350,7 +355,43 @@ pub struct AttributeDecl {
     pub name: TokSpan,
     pub params: Vec<Param>,
     pub targets: Vec<TokSpan>,
+    /// The `requires` clauses. Empty for the short form, which is every
+    /// declaration that states no contract.
+    pub requires: Vec<RequireClause>,
     pub span: TokSpan,
+}
+
+/*
+One `requires` clause of an attribute contract:
+
+    requires <visibility>? <kind> <name> <shape>
+
+A clause says what the thing the attribute sits on must carry. The
+compiler checks it where the attribute is used, and emits nothing: a
+contract is a check.
+*/
+#[derive(Debug)]
+pub struct RequireClause {
+    /// `public` or `private`. Absent accepts either.
+    pub visibility: Option<TokSpan>,
+    /// `function` or `field`.
+    pub kind: TokSpan,
+    pub member: RequireMember,
+    /// A function's parameter list, as a span from `(`, with the return
+    /// type when the clause writes one. A field's type, after the `:`.
+    pub shape: Option<TokSpan>,
+    pub span: TokSpan,
+}
+
+/// The member a clause names: one name, or one per entry of a list
+/// argument.
+#[derive(Debug)]
+pub enum RequireMember {
+    /// `requires public function Start(self)`.
+    Name(TokSpan),
+    /// `requires private function each lifecycles (self)`: the token is
+    /// the parameter whose entries name the members.
+    Each(TokSpan),
 }
 
 /// `macro name(params) ... end`: a template with expression parameters.
@@ -486,6 +527,9 @@ pub struct Variant {
 /// `impl Name ... end`, `impl Trait for Name ... end`.
 #[derive(Debug)]
 pub struct ImplDecl {
+    /// Parsed attributes, `@name(args)`, on the block. The emit drops
+    /// them; the checks read them, so `attribute X on impl` holds.
+    pub attributes: Vec<Attr>,
     pub exported: bool,
     /// `global function f()`; the name is in scope in every file of
     /// the project. A global exports too, so an import still resolves.

@@ -30,6 +30,7 @@ use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 
 mod attributes;
 mod awaits;
+pub(crate) mod contracts;
 mod enums;
 mod expressions;
 mod macros;
@@ -140,6 +141,11 @@ pub struct EmitOptions {
     pub global_macros: Vec<MacroSource>,
     /// The `global attribute` declarations of the project, by name.
     pub global_attributes: Vec<(String, AttrDecl)>,
+    /// The `export attribute` declarations of the modules this file
+    /// imports, by name. An attribute contract is checked where the
+    /// attribute is used, so a use here needs the declaration there.
+    /// See `crate::modules::import_attributes`.
+    pub import_attributes: Vec<(String, AttrDecl)>,
     /// An ingot rewrote the source before the compile read it. The
     /// order of the statements is then the ingot's, not the author's,
     /// so `import_order` says nothing about it.
@@ -206,8 +212,68 @@ struct FieldType {
 }
 
 /// One `attribute name(params) on targets` the file declares: the
-/// targets it takes, and each parameter's name and type.
-pub type AttrDecl = (Vec<String>, Vec<(String, Option<String>)>);
+/// targets it takes, each parameter's name and type, and the contract
+/// its `requires` clauses state.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AttrDecl {
+    pub targets: Vec<String>,
+    pub params: Vec<(String, Option<String>)>,
+    /// The `requires` clauses, in the order the body writes them. Empty
+    /// for a declaration that states no contract.
+    pub requires: Vec<Require>,
+}
+
+/*
+A member an attribute contract asks for that the declaration under the
+attribute does not carry.
+
+The report is the compiler's answer. This is the editor's: it says what
+to write and where, so the quick fix inserts a member that compiles and
+the completion offers its name.
+*/
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractGap {
+    /// The attribute the contract belongs to, with no sigil.
+    pub attr: String,
+    /// The byte range of the attribute, where the report sits.
+    pub start: u32,
+    pub end: u32,
+    pub member: String,
+    /// `function` or `field`.
+    pub kind: String,
+    /// `private`, `public`, or empty when the clause takes either.
+    pub visibility: String,
+    /// A function's parameter list, `(self)`, or a field's type. Empty
+    /// when the clause states no shape.
+    pub shape: String,
+    /// The byte offset of the `end` that closes the declaration. The
+    /// member goes on its own line in front of it.
+    pub insert_at: u32,
+    /// The column that `end` sits at, in bytes. A member of the body
+    /// sits one indent further in.
+    pub indent: u32,
+}
+
+pub use contracts::{element_type, is_string_union};
+
+/// One `requires` clause of an attribute contract, as the prescan keeps
+/// it. The check reads this and the members of the thing the attribute
+/// sits on; nothing here reaches the emit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Require {
+    /// `Some(true)` for `private`, `Some(false)` for `public`, and None
+    /// when the clause takes either.
+    pub private: Option<bool>,
+    /// `function` or `field`.
+    pub kind: String,
+    /// The member the clause asks for, or the parameter `each` reads.
+    pub member: String,
+    /// True when `member` names a parameter whose entries are the names.
+    pub each: bool,
+    /// A function's parameter list as the clause writes it, `(self)`, or
+    /// a field's type. Empty when the clause states no shape.
+    pub shape: String,
+}
 
 /// A struct another file declares, for the wire layout of a remote
 /// that carries it: each field with its type text and its width.
@@ -262,6 +328,7 @@ impl Default for EmitOptions {
             ambient_names: Vec::new(),
             global_macros: Vec::new(),
             global_attributes: Vec::new(),
+            import_attributes: Vec::new(),
             ingot_rewrite: false,
             hoist_globals: false,
             hoisted_from: None,
@@ -288,6 +355,8 @@ pub struct Rendered {
     /// The project globals the file named, each with the byte offset of
     /// its first use. The build reads them for the require graph.
     pub globals_used: Vec<(String, u32)>,
+    /// The members an attribute contract asked for and did not find.
+    pub contract_gaps: Vec<ContractGap>,
 }
 
 /// What `--@alloy-side` says when it sits anywhere but over a global.
@@ -417,6 +486,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         binding_types: HashMap::new(),
         enum_decls: HashMap::new(),
         impl_methods: HashMap::new(),
+        contract_gaps: Vec::new(),
+        field_body: HashMap::new(),
+        method_body: HashMap::new(),
+        type_members: HashMap::new(),
         renames: Vec::new(),
         ship_blanks: Vec::new(),
         structs: HashSet::new(),
@@ -472,7 +545,11 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         );
     }
 
-    for (name, decl) in &options.global_attributes {
+    for (name, decl) in options
+        .import_attributes
+        .iter()
+        .chain(&options.global_attributes)
+    {
         d.attr_decls.insert(name.clone(), decl.clone());
     }
 
@@ -632,6 +709,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ext_used: d.ext_hit,
         tests: d.test_names,
         globals_used: d.globals_used,
+        contract_gaps: d.contract_gaps,
     }
 }
 
@@ -929,6 +1007,23 @@ struct Desugar<'s> {
     /// Method and static names an `impl` block writes, by target. An enum
     /// member check reads it so a method call is not a missing variant.
     impl_methods: HashMap<String, HashSet<String>>,
+    /// The members an attribute contract asked for and did not find, in
+    /// source order. The report names each one; this is what the editor
+    /// writes in.
+    contract_gaps: Vec<ContractGap>,
+    /// Where a member of a type goes, by the type's name: the span of
+    /// the `struct` or `interface` that holds its fields, and the span of
+    /// an `impl` that holds its methods. A contract on an `impl` can ask
+    /// for a field, which belongs in the struct, so the quick fix writes
+    /// each kind where the language puts it.
+    field_body: HashMap<String, TokSpan>,
+    method_body: HashMap<String, TokSpan>,
+    /// Every member the file declares for a type, by the type's name:
+    /// the fields of a `struct` or an `interface` and the methods of
+    /// every `impl` over it. An attribute contract reads this, so a
+    /// clause on an `impl` sees the struct's fields and a clause on the
+    /// struct sees the impl's methods.
+    type_members: HashMap<String, Vec<contracts::Member>>,
     /// Pattern bindings under substitution in expression arms, innermost
     /// last: a binding name maps to the access path it stands for.
     renames: Vec<HashMap<String, String>>,

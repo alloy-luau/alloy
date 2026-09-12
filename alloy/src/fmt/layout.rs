@@ -31,6 +31,10 @@ impl<'s> Formatter<'s> {
         let prev = self.prev_code(i).map(|p| self.items[p].text.as_str());
 
         match text {
+            // `attribute X on struct` closes on its own line; the `as`
+            // form opens a body of `requires` clauses.
+            "attribute" => self.line_has_after(i, "as"),
+
             // `x is function` names a type; nothing opens.
             "function" => {
                 !self.line_has_before(i, "declare")
@@ -99,6 +103,21 @@ impl<'s> Formatter<'s> {
         i == 0 || self.items[i].newlines_before > 0
     }
 
+    /// Reports if `word` stands later on the line item `i` sits on.
+    pub(crate) fn line_has_after(&self, i: usize, word: &str) -> bool {
+        for j in i + 1..self.items.len() {
+            if self.items[j].newlines_before > 0 {
+                return false;
+            }
+
+            if self.items[j].is(word) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub(crate) fn line_has_before(&self, i: usize, word: &str) -> bool {
         let mut j = i;
 
@@ -145,6 +164,10 @@ impl<'s> Formatter<'s> {
         enum Frame {
             Block,
             Trait,
+            /// The body of an `attribute ... as ... end`. Its `function`
+            /// and `field` words belong to a `requires` clause, so
+            /// neither opens a block of its own.
+            Contract,
             Match,
             Arm,
             ExprIf,
@@ -186,7 +209,7 @@ impl<'s> Formatter<'s> {
 
                     if matches!(
                         stack.last(),
-                        Some(Frame::Block | Frame::Match | Frame::Trait)
+                        Some(Frame::Block | Frame::Match | Frame::Trait | Frame::Contract)
                     ) {
                         stack.pop();
                     }
@@ -265,6 +288,11 @@ impl<'s> Formatter<'s> {
                         stack.push(Frame::Match);
                     } else if text == "trait" && self.starts_block(i) {
                         stack.push(Frame::Trait);
+                    } else if text == "attribute" && self.starts_block(i) {
+                        stack.push(Frame::Contract);
+                    } else if stack.last() == Some(&Frame::Contract) {
+                        // Every word of a `requires` clause sits on one
+                        // line, so nothing inside a contract body opens.
                     } else if text == "function"
                         && stack.last() == Some(&Frame::Trait)
                         && it.newlines_before > 0

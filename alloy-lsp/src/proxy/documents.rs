@@ -339,6 +339,7 @@ impl Server {
             options.import_types = alloy::modules::import_types_for_file(&path, text);
             options.import_enums = alloy::modules::import_enums_for_file(&path, text);
             options.import_privates = alloy::modules::import_privates_for_file(&path, text);
+            options.import_attributes = alloy::modules::import_attributes_for_file(&path, text);
             options.import_result_asyncs =
                 alloy::modules::import_result_asyncs_for_file(&path, text);
             options.import_trait_defaults =
@@ -551,6 +552,8 @@ impl Server {
             options.import_types = alloy::modules::import_types_for_file(&path, &doc.source);
             options.import_enums = alloy::modules::import_enums_for_file(&path, &doc.source);
             options.import_privates = alloy::modules::import_privates_for_file(&path, &doc.source);
+            options.import_attributes =
+                alloy::modules::import_attributes_for_file(&path, &doc.source);
             options.import_result_asyncs =
                 alloy::modules::import_result_asyncs_for_file(&path, &doc.source);
             options.import_trait_defaults =

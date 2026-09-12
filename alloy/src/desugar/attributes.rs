@@ -9,6 +9,7 @@ use alloy_syntax::ast::{
 
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 
+use super::contracts::{Owner, is_list_type};
 use super::types::{literal_kind, literal_type, strip_bounds};
 use super::*;
 
@@ -142,6 +143,16 @@ impl<'s> Desugar<'s> {
             Stmt::Struct(st) => {
                 self.check_attrs(&st.attributes, "struct");
                 let name = self.text_of(st.name).to_string();
+                let members = self.type_members_of(&self.decl_name(st.name));
+                self.check_contracts(
+                    &st.attributes,
+                    Owner {
+                        target: "struct",
+                        name: &name,
+                        body: st.span,
+                    },
+                    &members,
+                );
                 let mut seen: HashSet<String> = HashSet::new();
 
                 for f in &st.fields {
@@ -157,6 +168,17 @@ impl<'s> Desugar<'s> {
 
             Stmt::Enum(e) => {
                 self.check_attrs(&e.attributes, "enum");
+                let name = self.text_of(e.name).to_string();
+                let members = self.type_members_of(&self.decl_name(e.name));
+                self.check_contracts(
+                    &e.attributes,
+                    Owner {
+                        target: "enum",
+                        name: &name,
+                        body: e.span,
+                    },
+                    &members,
+                );
 
                 for v in &e.variants {
                     self.check_attrs(&v.attributes, "variant");
@@ -166,11 +188,71 @@ impl<'s> Desugar<'s> {
             // A namespace takes attributes, and so does each member.
             Stmt::Namespace(ns) => {
                 self.check_attrs(&ns.attributes, "namespace");
+                let name = self.text_of(ns.name).to_string();
+                let members = self.namespace_members(ns);
+                self.check_contracts(
+                    &ns.attributes,
+                    Owner {
+                        target: "namespace",
+                        name: &name,
+                        body: ns.span,
+                    },
+                    &members,
+                );
 
                 for m in &ns.members {
                     self.check_stmt_attrs(&m.stmt);
                 }
             }
+
+            Stmt::Trait(t) => {
+                self.check_attrs(&t.attributes, "trait");
+                let name = self.text_of(t.name).to_string();
+                let members = self.trait_members(t);
+                self.check_contracts(
+                    &t.attributes,
+                    Owner {
+                        target: "trait",
+                        name: &name,
+                        body: t.span,
+                    },
+                    &members,
+                );
+            }
+
+            Stmt::Interface(i) => {
+                self.check_attrs(&i.attributes, "interface");
+                let name = self.text_of(i.name).to_string();
+                let members = self.type_members_of(&self.decl_name(i.name));
+                self.check_contracts(
+                    &i.attributes,
+                    Owner {
+                        target: "interface",
+                        name: &name,
+                        body: i.span,
+                    },
+                    &members,
+                );
+            }
+
+            // An `impl` carries its attributes on the block. The target
+            // names the owner, because that is what a report should say.
+            Stmt::Impl(i) => {
+                self.check_attrs(&i.attributes, "impl");
+                let name = self.impl_target_name(i.target);
+                let members = self.type_members_of(&name);
+                self.check_contracts(
+                    &i.attributes,
+                    Owner {
+                        target: "impl",
+                        name: &name,
+                        body: i.span,
+                    },
+                    &members,
+                );
+            }
+
+            Stmt::Attribute(a) => self.check_attribute_decl(a),
 
             _ => {}
         }
@@ -196,7 +278,7 @@ impl<'s> Desugar<'s> {
             let targets: Vec<String> = match (builtin_attr_targets(&name), &declared) {
                 (Some(t), _) => t.iter().map(|s| (*s).to_string()).collect(),
 
-                (None, Some((t, _))) => t.clone(),
+                (None, Some(d)) => d.targets.clone(),
 
                 (None, None) => {
                     // An imported attribute keeps its targets in the
@@ -223,7 +305,7 @@ impl<'s> Desugar<'s> {
                 continue;
             }
 
-            self.check_attr_args(a, &name, declared.as_ref().map(|(_, p)| p.as_slice()));
+            self.check_attr_args(a, &name, declared.as_ref().map(|d| d.params.as_slice()));
         }
 
         if let (Some(_), Some(at)) = (inline, noinline) {
@@ -241,7 +323,7 @@ impl<'s> Desugar<'s> {
         match (builtin_attr_targets(name), self.attr_decls.get(name)) {
             (Some(t), _) => t.contains(&target),
 
-            (None, Some((t, _))) => t.iter().any(|t| t == target),
+            (None, Some(d)) => d.targets.iter().any(|t| t == target),
 
             // An imported attribute keeps its targets in the module
             // that declares it; nothing here can say no.
@@ -323,8 +405,27 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        for (arg, (pname, ty)) in a.args.iter().zip(params) {
+        let params: Vec<(String, Option<String>)> = params.to_vec();
+
+        for (arg, (pname, ty)) in a.args.iter().zip(&params) {
             let Some(want) = ty.as_deref() else { continue };
+
+            // A list parameter carries entries, and the element type
+            // says what each one takes.
+            if is_list_type(want) {
+                self.check_argument_entries(name, pname, want, arg);
+
+                continue;
+            }
+
+            // A narrowed type names the values it takes. The literal is
+            // one of them, or the report names the one the file wrote.
+            if !self.admitted_values(want).is_empty() {
+                self.check_argument_entries(name, pname, want, arg);
+
+                continue;
+            }
+
             let Some(got) = literal_kind(arg) else {
                 continue;
             };
@@ -575,7 +676,16 @@ impl<'s> Desugar<'s> {
                             )
                         })
                         .collect();
-                    self.attr_decls.insert(name, (targets, params));
+                    let requires: Vec<Require> =
+                        a.requires.iter().map(|c| self.require_of(c)).collect();
+                    self.attr_decls.insert(
+                        name,
+                        AttrDecl {
+                            targets,
+                            params,
+                            requires,
+                        },
+                    );
                 }
 
                 Stmt::Import(i) => match &i.kind {
@@ -621,6 +731,12 @@ impl<'s> Desugar<'s> {
                         .entry(target.clone())
                         .or_default()
                         .extend(names);
+                    let members = self.impl_block_members(i);
+                    self.method_body.entry(target.clone()).or_insert(i.span);
+                    self.type_members
+                        .entry(target.clone())
+                        .or_default()
+                        .extend(members);
 
                     if i.methods.iter().any(|m| {
                         m.path
@@ -782,6 +898,19 @@ impl<'s> Desugar<'s> {
 
                 Stmt::Struct(st) => {
                     self.note_struct(st);
+                    let name = self.decl_name(st.name);
+                    let fields = self.field_members(&st.fields, true);
+                    self.field_body.insert(name.clone(), st.span);
+                    self.type_members.entry(name).or_default().extend(fields);
+                }
+
+                // An interface field takes no visibility, so every one
+                // is public and a contract reads it that way.
+                Stmt::Interface(i) => {
+                    let name = self.decl_name(i.name);
+                    let fields = self.field_members(&i.fields, false);
+                    self.field_body.insert(name.clone(), i.span);
+                    self.type_members.entry(name).or_default().extend(fields);
                 }
 
                 _ => {}

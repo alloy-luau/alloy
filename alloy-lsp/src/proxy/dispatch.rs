@@ -1387,6 +1387,7 @@ impl Server {
                         && let Some(range) = range
                         && let Some(actions) = result.as_array_mut()
                     {
+                        actions.extend(st.contract_actions(uri, range));
                         actions.extend(st.header_as_actions(uri, range));
                         actions.extend(st.lint_actions(uri, range));
                         actions.extend(st.ingot_actions(uri, range));

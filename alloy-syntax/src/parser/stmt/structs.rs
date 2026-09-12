@@ -161,6 +161,15 @@ impl<'a> Parser<'a> {
         start: usize,
         exported: bool,
     ) -> Result<Stmt, ParseError> {
+        self.interface_decl_with(start, Vec::new(), exported)
+    }
+
+    pub(super) fn interface_decl_with(
+        &mut self,
+        start: usize,
+        attributes: Vec<Attr>,
+        exported: bool,
+    ) -> Result<Stmt, ParseError> {
         let open = self.pos;
         self.expect("interface")?;
         let name = self.expect_name()?;
@@ -193,6 +202,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Stmt::Interface(InterfaceDecl {
+            attributes,
             exported,
             global: false,
             name,

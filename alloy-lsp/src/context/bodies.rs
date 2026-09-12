@@ -222,6 +222,8 @@ fn declaration_word(line: &str) -> Option<&'static str> {
         ("interface ", "interface"),
         ("type ", "type"),
         ("namespace ", "namespace"),
+        ("impl ", "impl"),
+        ("trait ", "trait"),
         ("local ", "local"),
         ("const ", "local"),
     ] {
@@ -321,6 +323,8 @@ pub(crate) fn attribute_target(
             return match declaration_word(line) {
                 Some("struct") | Some("interface") => (Some("field"), false),
                 Some("enum") => (Some("variant"), false),
+                // A member of an `impl` or a `trait` is a function.
+                Some("impl") | Some("trait") => (Some("function"), false),
                 _ => (None, false),
             };
         }

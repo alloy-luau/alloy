@@ -651,8 +651,29 @@ pub fn attribute_decls(files: &[(PathBuf, String)]) -> Vec<(String, crate::desug
     let mut out = Vec::new();
 
     for (_, src) in files {
+        out.extend(source_attribute_decls(src, |a| a.global));
+    }
+
+    out
+}
+
+/// The `export attribute` and `global attribute` declarations of one
+/// source, for a file that imports it. A global travels on its own, and
+/// it is here too so a barrel module that re-exports one still answers.
+pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
+    source_attribute_decls(src, |a| a.exported || a.global)
+}
+
+/// The `attribute` declarations of one source that `keep` accepts.
+fn source_attribute_decls(
+    src: &str,
+    keep: impl Fn(&alloy_syntax::ast::AttributeDecl) -> bool,
+) -> Vec<(String, crate::desugar::AttrDecl)> {
+    let mut out = Vec::new();
+
+    {
         let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
-            continue;
+            return out;
         };
         let toks = &parsed.lexed.toks;
 
@@ -661,7 +682,7 @@ pub fn attribute_decls(files: &[(PathBuf, String)]) -> Vec<(String, crate::desug
                 continue;
             };
 
-            if !a.global {
+            if !keep(a) {
                 continue;
             }
 
@@ -680,11 +701,47 @@ pub fn attribute_decls(files: &[(PathBuf, String)]) -> Vec<(String, crate::desug
                     )
                 })
                 .collect();
-            out.push((token_text(src, toks, a.name), (targets, params)));
+            let requires = a
+                .requires
+                .iter()
+                .map(|c| require_of(src, toks, c))
+                .collect();
+            out.push((
+                token_text(src, toks, a.name),
+                crate::desugar::AttrDecl {
+                    targets,
+                    params,
+                    requires,
+                },
+            ));
         }
     }
 
     out
+}
+
+/// One `requires` clause of a `global attribute`, as the check reads it.
+fn require_of(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    c: &alloy_syntax::ast::RequireClause,
+) -> crate::desugar::Require {
+    let (member, each) = match c.member {
+        alloy_syntax::ast::RequireMember::Name(n) => (token_text(src, toks, n), false),
+
+        alloy_syntax::ast::RequireMember::Each(n) => (token_text(src, toks, n), true),
+    };
+
+    crate::desugar::Require {
+        private: c.visibility.map(|v| token_text(src, toks, v) == "private"),
+        kind: token_text(src, toks, c.kind),
+        member,
+        each,
+        shape: c
+            .shape
+            .map(|s| span_text(src, toks, s).trim().to_string())
+            .unwrap_or_default(),
+    }
 }
 
 /// The text of the first token of a span.

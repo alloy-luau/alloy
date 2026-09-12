@@ -890,6 +890,105 @@ fn both_readings_live_in_one_file() {
     round_trip("local import = {}\nimport { a } from \"m\"\nprint(import, a)\n");
 }
 
+/// `attribute name on target as ... end`: the `requires` clauses of a
+/// contract. The body is where `requires` and `each` are keywords.
+#[test]
+fn attribute_contracts_parse() {
+    round_trip(
+        "attribute service on impl as
+    requires public function Start(self)
+    requires private field state: number
+end
+",
+    );
+    round_trip(
+        "attribute service on impl as
+    requires function Start
+end
+",
+    );
+    round_trip(
+        "attribute service on impl as
+    requires function Stop(self): boolean
+    requires function Tick(self) -> number
+end
+",
+    );
+    round_trip(
+        "attribute provider(lifecycles: Lifecycle[]) on impl as
+    requires private function each lifecycles(self)
+end
+",
+    );
+    round_trip(
+        "attribute provider(lifecycles: Lifecycle[]) on impl as
+    requires private function each lifecycles (self)
+end
+",
+    );
+    round_trip(
+        "attribute s on impl as
+end
+",
+    );
+    round_trip(
+        "export attribute s on impl as
+    requires function Start(self)
+end
+",
+    );
+    round_trip(
+        "global attribute s on impl as
+    requires function Start(self)
+end
+",
+    );
+    round_trip(
+        "attribute s on struct, impl, trait, enum, interface, namespace as
+    requires field x: number
+end
+",
+    );
+
+    // The short form is untouched.
+    round_trip(
+        "attribute tag(name: string) on struct
+",
+    );
+    round_trip(
+        "attribute tag(name: string) on struct, enum
+",
+    );
+}
+
+/// `requires` and `each` read as a keyword inside a contract body and as
+/// a name everywhere else.
+#[test]
+fn the_clause_words_are_contextual() {
+    name_case("local requires = 1\nprint(requires)\n");
+    name_case("requires = 1\n");
+    name_case("local requires = print\nrequires(1)\n");
+    name_case("local t = { requires = 1 }\nprint(t.requires)\n");
+    name_case("local each = 1\nprint(each)\n");
+    name_case("local each = print\neach(1)\n");
+    name_case("local t = {}\nprint(t.each)\n");
+    name_case("local function requires(x)\n    return x\nend\nprint(requires(1))\n");
+
+    // Both readings in one file.
+    round_trip(
+        "local requires = 1\nattribute s on impl as\n    requires function Start(self)\nend\nprint(requires)\n",
+    );
+}
+
+/// A clause whose head is neither `function` nor `field` reports.
+#[test]
+fn a_clause_needs_a_kind_word() {
+    rejects("attribute s on impl as\n    requires Start(self)\nend\n");
+    rejects("attribute s on impl as\n    requires public Start(self)\nend\n");
+    rejects("attribute s on impl as\n    requires function\nend\n");
+    rejects("attribute s on impl as\n    requires function Start(self)\n");
+}
+
 /// A word still reserved reports when a name takes it. Six are left, and
 /// each opens a declaration no expression resembles.
 #[test]

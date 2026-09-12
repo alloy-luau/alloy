@@ -538,6 +538,7 @@ fn block_opener(text: &str) -> bool {
             | "match"
             | "class"
             | "with"
+            | "attribute"
     )
 }
 

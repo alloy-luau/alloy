@@ -107,6 +107,54 @@ impl State {
                 }
             }
 
+            /*
+            An entry of an attribute argument. The declared type of the
+            parameter says what fits: a union of string literals offers
+            its members, and an enum offers its variants.
+
+            An argument is a literal the compiler reads, so nothing from
+            the scope belongs here. A parameter with no type to read
+            offers nothing, which is what the built-in attributes had.
+            */
+            Context::AttributeArg {
+                prefix,
+                attr,
+                param,
+                quote,
+            } => {
+                let from = offset - prefix.len();
+                let key = format!("@{attr}");
+                // The declaration is this file's, another open file's, or
+                // one an import reaches before the workspace pass has
+                // opened the module it lives in.
+                let params = self
+                    .decls_in_scope(uri)
+                    .into_iter()
+                    .find(|d| d.name == key)
+                    .or_else(|| doc.import_decls.iter().find(|d| d.name == key))
+                    .map(|d| alloy::declarations::attribute_params(&d.hover))
+                    .unwrap_or_default();
+                let ty = match param {
+                    Some(name) => params.iter().find(|(p, _)| p == name).map(|(_, t)| t),
+
+                    None => params.first().map(|(_, t)| t),
+                };
+
+                if let Some(ty) = ty {
+                    let element = element_type(ty);
+
+                    for (label, insert, detail) in
+                        self.literal_items(uri, &element, *quote, attr.as_str())
+                    {
+                        let mut item = word(&label, 21, None, from);
+                        item["textEdit"]["newText"] = json!(insert);
+                        item["detail"] = json!(detail);
+                        item["sortText"] = json!("0");
+                        items.push(item);
+                    }
+                }
+            }
+
             Context::Macro { sigil, .. } => {
                 for key in keywords::keys_with_prefix("$") {
                     items.push(word(
@@ -593,6 +641,26 @@ impl State {
             Context::FieldStart { prefix } => {
                 let from = offset - prefix.len();
 
+                // A contract on this declaration says which fields are
+                // missing. Those rank first.
+                for gap in contract_gaps_at(doc, offset) {
+                    let ty = match gap.shape.is_empty() {
+                        true => "unknown".to_string(),
+
+                        false => gap.shape.clone(),
+                    };
+                    let insert = match gap.visibility.is_empty() {
+                        true => format!("{}: {ty}", gap.member),
+
+                        false => format!("{} {}: {ty}", gap.visibility, gap.member),
+                    };
+                    let mut item = word(&gap.member, 5, None, from);
+                    item["textEdit"]["newText"] = json!(insert);
+                    item["detail"] = json!(format!("required by `@{}`", gap.attr));
+                    item["sortText"] = json!("0");
+                    items.push(item);
+                }
+
                 for (name, what) in [
                     ("read", "A read-only field."),
                     ("write", "A write-only field."),
@@ -628,6 +696,32 @@ impl State {
 
             Context::MemberStart { prefix } => {
                 let from = offset - prefix.len();
+
+                // A contract on this declaration says what is missing.
+                // Those members rank first: the author is here to write
+                // one of them.
+                for gap in contract_gaps_at(doc, offset) {
+                    let insert = match gap.visibility.is_empty() {
+                        true => format!("function {}{}", gap.member, gap_params(gap)),
+
+                        false => format!(
+                            "{} function {}{}",
+                            gap.visibility,
+                            gap.member,
+                            gap_params(gap)
+                        ),
+                    };
+                    let mut item = snippet(
+                        &gap.member,
+                        &format!("{insert}\n\t$0\nend"),
+                        2,
+                        &format!("required by `@{}`", gap.attr),
+                        Some(format!("`@{}` requires this member.", gap.attr)),
+                        from,
+                    );
+                    item["sortText"] = json!("0");
+                    items.push(item);
+                }
 
                 for (name, what) in [
                     ("function", "A method; `self` first for an instance method."),
@@ -1495,5 +1589,120 @@ pub(crate) fn readable_type(name: &str) -> String {
         Some(rest) if rest.starts_with(char::is_uppercase) => format!("Enum.{rest}"),
 
         _ => name.to_string(),
+    }
+}
+
+/// The element of a list type: `Lifecycle[]` and `Array<Lifecycle>` both
+/// give `Lifecycle`. Any other type is its own element, so a parameter
+/// that takes one value completes the same way.
+fn element_type(ty: &str) -> String {
+    let ty = ty.trim();
+    let inner = ty
+        .strip_suffix("[]")
+        .or_else(|| ty.strip_prefix("Array<").and_then(|r| r.strip_suffix('>')))
+        .unwrap_or(ty)
+        .trim();
+    let inner = inner
+        .strip_prefix('(')
+        .and_then(|r| r.strip_suffix(')'))
+        .unwrap_or(inner);
+
+    inner.trim().to_string()
+}
+
+impl State {
+    /*
+    The literals a type admits, as completion items: the label, the text
+    to insert, and the detail that says where the list came from.
+
+    A union of string literals gives one item per member. A name that an
+    enum in scope carries gives one item per variant, written the way a
+    source writes it, `Lifecycle.Init`. Any other type gives nothing: the
+    argument is a literal, and this offers only the ones the type names.
+    */
+    fn literal_items(
+        &self,
+        uri: &str,
+        element: &str,
+        quote: Option<char>,
+        attr: &str,
+    ) -> Vec<(String, String, String)> {
+        let detail = format!("takes `{element}` for `@{attr}`");
+
+        if element.contains('"') || element.contains('\'') {
+            return element
+                .split('|')
+                .filter_map(|part| {
+                    let text = part.trim().trim_matches(['"', '\'']);
+
+                    (!text.is_empty() && !part.trim().starts_with(|c: char| c.is_alphanumeric()))
+                        .then(|| {
+                            let insert = match quote {
+                                // The editor's word starts after the
+                                // quote, so the insert carries no quote
+                                // of its own.
+                                Some(_) => text.to_string(),
+
+                                None => format!("\"{text}\""),
+                            };
+
+                            (text.to_string(), insert, detail.clone())
+                        })
+                })
+                .collect();
+        }
+
+        // A quote is open, so an enum path does not fit there.
+        if quote.is_some() {
+            return Vec::new();
+        }
+
+        for shape in &self.known_shapes_at(Some(uri)).shapes {
+            let alloy::declarations::Shape::Enum { name, variants } = shape else {
+                continue;
+            };
+
+            if name != element {
+                continue;
+            }
+
+            return variants
+                .iter()
+                .map(|(v, _)| {
+                    let path = format!("{name}.{v}");
+
+                    (path.clone(), path, detail.clone())
+                })
+                .collect();
+        }
+
+        Vec::new()
+    }
+}
+
+/*
+The members a contract asks for in the declaration the offset sits in.
+
+A gap carries the `end` it belongs in front of, and the declaration runs
+from the attribute to that `end`, so an offset inside the body finds its
+own gaps and no others.
+*/
+fn contract_gaps_at(doc: &Doc, offset: usize) -> Vec<&alloy::desugar::ContractGap> {
+    doc.output
+        .as_ref()
+        .map(|o| o.contract_gaps.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter(|g| offset > g.start as usize && offset <= g.insert_at as usize)
+        .collect()
+}
+
+/// The parameter list a missing function takes: the one the clause wrote,
+/// or `(self)` when it wrote none.
+fn gap_params(gap: &alloy::desugar::ContractGap) -> String {
+    match gap.shape.is_empty() {
+        true => "(self)".to_string(),
+
+        false => gap.shape.clone(),
     }
 }

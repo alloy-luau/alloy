@@ -50,6 +50,18 @@ pub enum Context {
     },
     /// `@derive(Eq, De|`: a derive name.
     DeriveArg { prefix: String },
+    /// `@provider({ lifecycles = [ | ] })`: a literal an attribute
+    /// argument takes. `attr` names the attribute, `param` the parameter
+    /// the caret belongs to, and `quote` the opening quote when the caret
+    /// sits inside a string. The declared type of the parameter says what
+    /// fits, so a narrowed union completes its members and an enum its
+    /// variants.
+    AttributeArg {
+        prefix: String,
+        attr: String,
+        param: Option<String>,
+        quote: Option<char>,
+    },
     /// `@cfg(ser|`: a condition, or a word that joins them.
     CfgArg { prefix: String },
     /// `$dg|`: an intrinsic or a macro. `sigil` is the byte offset of `$`.
@@ -152,6 +164,78 @@ pub enum Context {
         receiver: String,
         quote: Option<char>,
     },
+}
+
+/*
+`@provider({ lifecycles = [ | ] })`: the caret inside the argument list of
+an attribute.
+
+The line opens with `@name(` and the parenthesis is still open. The
+parameter is the key of the record form, `lifecycles = [ ... ]`, and
+nothing when the use writes its arguments by position. The declared type
+of that parameter is what the completion reads.
+
+An attribute argument is a literal, so no scope belongs here: without a
+declared type to read, the context is still this one and it offers
+nothing, which is what the five built-in attributes had before.
+*/
+fn attribute_argument(head: &str, prefix: &str) -> Option<Context> {
+    let trimmed = head.trim_start();
+    let rest = trimmed.strip_prefix('@')?;
+    let name_end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+    let (attr, rest) = rest.split_at(name_end);
+
+    if attr.is_empty() || !rest.starts_with('(') {
+        return None;
+    }
+
+    // The list is open while more parentheses opened than closed.
+    if rest.matches('(').count() <= rest.matches(')').count() {
+        return None;
+    }
+
+    let quote = string_quote(head);
+    // `name =` names the parameter the caret sits under. A `==` is a
+    // comparison, not a key.
+    let param = rest
+        .rmatch_indices('=')
+        .find(|(i, _)| {
+            !rest[i + 1..].starts_with('=') && !rest[..*i].ends_with(['=', '<', '>', '~'])
+        })
+        .and_then(|(i, _)| {
+            let key = rest[..i].trim_end();
+            let key = key.rsplit(['{', '(', ',', ' ']).next()?;
+
+            (!key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                .then(|| key.to_string())
+        });
+
+    Some(Context::AttributeArg {
+        prefix: prefix.to_string(),
+        attr: attr.to_string(),
+        param,
+        quote,
+    })
+}
+
+/// The quote that opens the string the text ends inside, or None when
+/// the text ends outside one.
+fn string_quote(text: &str) -> Option<char> {
+    let mut quote = None;
+
+    for c in text.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+
+            Some(_) => {}
+
+            None if matches!(c, '"' | '\'' | '`') => quote = Some(c),
+
+            None => {}
+        }
+    }
+
+    quote
 }
 
 /// What the declaration of a name says about the name's type.
@@ -452,6 +536,12 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
 
     let trimmed = before.trim_start();
 
+    // A literal an attribute argument takes. It comes before the string
+    // rule, because an entry of a string union is written in quotes.
+    if let Some(ctx) = attribute_argument(head, prefix) {
+        return Some(ctx);
+    }
+
     // A key inside an index that never closed. The receiver's own type
     // names the keys; the child sees the whole scope there instead,
     // and after `?[` or `![` it sees the guard the emit wrote.
@@ -475,21 +565,6 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
     // children of an instance, so no list belongs here.
     if head.ends_with("=>") {
         return Some(Context::Nothing);
-    }
-
-    // The literal arguments of an attribute.
-    for name in [
-        "@ratelimit(",
-        "@timeout(",
-        "@rename(",
-        "@u8(",
-        "@deprecated(",
-    ] {
-        if let Some(i) = head.rfind(name)
-            && !head[i..].contains(')')
-        {
-            return Some(Context::Nothing);
-        }
     }
 
     // A word a type, a constructor, or a variant goes after.
@@ -933,7 +1008,17 @@ mod tests {
         );
         assert_eq!(at("local [ fir| ] = xs"), Some(Context::Nothing));
         assert_eq!(at("local s = \"hel|lo\""), None);
-        assert_eq!(at("@ratelimit(2|"), Some(Context::Nothing));
+        // An attribute argument is a literal, and a built-in one has no
+        // declared type to read, so the list is empty either way.
+        assert_eq!(
+            at("@ratelimit(2|"),
+            Some(Context::AttributeArg {
+                prefix: "2".to_string(),
+                attr: "ratelimit".to_string(),
+                param: None,
+                quote: None,
+            })
+        );
         assert_eq!(at("struct Holder as\n    read na|"), Some(Context::Nothing));
         assert_eq!(at("for k, v in pa|"), None);
         assert_eq!(at("remote Test(nam|"), Some(Context::Nothing));

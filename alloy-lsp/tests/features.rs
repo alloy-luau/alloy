@@ -1556,6 +1556,131 @@ fn an_imported_attribute_hovers_as_an_attribute() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/*
+An attribute contract reaches the using file: an `export attribute` that
+an import brings and a `global attribute` that needs none.
+
+The hover lists what the attribute requires with the argument expanded,
+the check reports the member the file does not carry, and the quick fix
+writes it in.
+*/
+#[test]
+fn an_attribute_contract_reaches_the_file_that_uses_it() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-contract-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lifecycle.aly"),
+        concat!(
+            "--- The stages a provider hooks into.\n",
+            "export enum Lifecycle as\n    Init\n    Start\nend\n\n",
+            "--- A provider that runs on the stages it names.\n",
+            "export attribute provider(lifecycles: Lifecycle[]) on impl as\n",
+            "    requires private function each lifecycles(self)\nend\n\n",
+            "--- A service the framework starts.\n",
+            "global attribute service on impl as\n",
+            "    requires public function Start(self)\nend\n"
+        ),
+    )
+    .unwrap();
+    let src = concat!(
+        "import { Lifecycle, provider } from \"./lifecycle\"\n\n",
+        "struct Data as\n    x: number\nend\n\n",
+        "@provider({ lifecycles = [ Lifecycle.Init, Lifecycle.Start ] })\n",
+        "@service\n",
+        "impl Data as\n",
+        "    private function Init(self)\n    end\n",
+        "    \n",
+        "end\n\n",
+        "print(Data)\n"
+    );
+    let file = dir.join("data.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // The imported attribute hovers with its clauses, and `each` reads
+    // the arguments of this use.
+    let imported = s.hover(&uri, 6, 3);
+    assert!(imported.contains("**Requires**"), "imported: {imported}");
+    assert!(
+        imported.contains("- `private function Init(self)`")
+            && imported.contains("- `private function Start(self)`"),
+        "imported: {imported}"
+    );
+    assert!(
+        !imported.contains("each lifecycles"),
+        "the use expands the clause: {imported}"
+    );
+
+    // The global attribute hovers the same way, with no import.
+    let global = s.hover(&uri, 7, 3);
+    assert!(
+        global.contains("- `public function Start(self)`"),
+        "global: {global}"
+    );
+
+    // Both contracts report in this file.
+    let diags = s.diagnostics(&uri, |ds| {
+        ds.iter().any(|d| d.contains("AttributeContract"))
+    });
+    assert!(
+        diags
+            .iter()
+            .any(|d| d
+                == "AttributeContract: `@provider` requires a private function `Start(self)`; `Data` declares none"),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d
+                == "AttributeContract: `@service` requires a public function `Start(self)`; `Data` declares none"),
+        "{diags:?}"
+    );
+
+    // The completion inside the block offers what the contracts ask for.
+    let labels = s.completion_labels(&uri, 11, 4);
+    assert!(labels.contains(&"Start".to_string()), "{labels:?}");
+
+    // The quick fix on the attribute writes the member in.
+    let actions = s.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 7, "character": 0 }, "end": { "line": 7, "character": 8 } },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    let list = actions.as_array().cloned().unwrap_or_default();
+    let fix = list
+        .iter()
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("Write the member `@service` requires"))
+        })
+        .unwrap_or_else(|| panic!("no contract fix: {list:#?}"));
+    let edit = &fix["edit"]["changes"][&uri][0];
+    assert_eq!(
+        edit["newText"],
+        "    public function Start(self)\n    end\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A line the compiler reports on gets no report from the checker: the
 /// reserved word alone, not `Unknown global` beside it.
 #[test]

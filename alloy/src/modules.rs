@@ -695,6 +695,59 @@ pub fn import_enums(
     out
 }
 
+/*
+The `export attribute` declarations of every module a source imports,
+with the targets, the parameters, and the `requires` clauses each one
+states.
+
+An attribute contract is checked where the attribute is used, and a use
+in this file reaches the declaration through an import. Without this the
+check would hold only inside the declaring module.
+*/
+pub fn import_attributes(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, crate::desugar::AttrDecl)> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut out: Vec<(String, crate::desugar::AttrDecl)> = Vec::new();
+
+    for spec in import_specs(source) {
+        let Some(path) = resolve(&spec, from, aliases) else {
+            continue;
+        };
+
+        if seen.contains(&path) {
+            continue;
+        }
+
+        seen.push(path.clone());
+
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+
+        for (name, decl) in crate::globals::exported_attribute_decls(&text) {
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((name, decl));
+            }
+        }
+    }
+
+    out
+}
+
+/// The imported attribute declarations of a file under the nearest
+/// `alloy.toml`.
+pub fn import_attributes_for_file(
+    path: &Path,
+    source: &str,
+) -> Vec<(String, crate::desugar::AttrDecl)> {
+    let (from, aliases) = file_context(path);
+
+    import_attributes(source, &from, &aliases)
+}
+
 /// The file each import of a source resolves to, under the nearest
 /// `alloy.toml`. A path that names no file is left out.
 pub fn import_targets_for_file(path: &Path, source: &str) -> Vec<PathBuf> {
@@ -881,6 +934,7 @@ pub fn exported_names(source: &str) -> Vec<String> {
             Stmt::Macro(d) if d.exported => out.push(text(d.name)),
             Stmt::LocalFunction(d) if d.exported => out.push(text(d.name)),
             Stmt::Namespace(d) if d.exported => out.push(text(d.name)),
+            Stmt::Attribute(d) if d.exported => out.push(text(d.name)),
 
             Stmt::Function(d) if d.exported => {
                 if let Some(first) = d.path.first() {

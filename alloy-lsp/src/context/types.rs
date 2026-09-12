@@ -54,11 +54,52 @@ fn in_type_arguments(head: &str) -> bool {
             .all(|c| is_word(c) || " ,<>?[]{}:.&|".contains(c))
 }
 
+/// Whether the head opens a type alias and stops at its `=`:
+/// `type A = `, `export type A<T> = `. The word after the `=` is the
+/// alias body, which is a type.
+fn opens_an_alias(head: &str) -> bool {
+    let words: Vec<&str> = head.split_whitespace().collect();
+    let named = match words.first() {
+        Some(&"type") => 1,
+
+        Some(&"export") | Some(&"global") if words.get(1) == Some(&"type") => 2,
+
+        _ => 0,
+    };
+
+    named > 0 && words.len() == named + 2 && words.last() == Some(&"=")
+}
+
+/// Whether the last word of the head is one a type goes after:
+/// `extends `, `satisfies `, `is `, `impl `, and the `for` of an
+/// `impl`. `Context::detect` reads these off a head that ends in a
+/// space; this reads them again so a dotted path in the slot resolves.
+fn after_a_type_word(head: &str) -> bool {
+    let words: Vec<&str> = head.split_whitespace().collect();
+
+    match words.last().copied() {
+        Some("satisfies" | "is" | "extends" | "impl") => true,
+
+        Some("for") => words.first() == Some(&"impl"),
+
+        _ => false,
+    }
+}
+
 /// Whether a type goes at the caret: after a `:` that annotates, after
-/// a `->`, or inside a type-argument list. A `::` is a cast the child
+/// a `->`, inside a type-argument list, after the `=` of a type alias,
+/// or after a word that names a type. A `::` is a cast the child
 /// reads, and a `:` with no space is a method call.
 pub(crate) fn takes_a_type(head: &str) -> bool {
     if in_type_arguments(head) {
+        return true;
+    }
+
+    if head.ends_with("= ") && opens_an_alias(head) {
+        return true;
+    }
+
+    if head.ends_with(' ') && after_a_type_word(head) {
         return true;
     }
 
@@ -116,5 +157,36 @@ mod tests {
         // No annotation opened the head, so the `|` says nothing.
         assert!(!takes_a_type("local x = a | "));
         assert!(!takes_a_type("| "));
+    }
+
+    /// `export type A = Star.` fell to the child, which answered with
+    /// the emit's own names.
+    #[test]
+    fn the_body_of_a_type_alias_takes_a_type() {
+        assert!(takes_a_type("type A = "));
+        assert!(takes_a_type("export type A = "));
+        assert!(takes_a_type("global type A = "));
+        assert!(takes_a_type("export type A<T> = "));
+        assert!(takes_a_type("export type A = Star."));
+
+        // An assignment is no alias, and neither is a half-written one.
+        assert!(!takes_a_type("local x = "));
+        assert!(!takes_a_type("export type A = number | string "));
+        assert!(!takes_a_type("type "));
+    }
+
+    /// `impl Star.` and `extends Star.` fell to the child, which
+    /// listed the values of the module and then every global.
+    #[test]
+    fn a_path_after_a_type_word_takes_a_type() {
+        assert!(takes_a_type("export interface I extends Star."));
+        assert!(takes_a_type("impl Star."));
+        assert!(takes_a_type("impl Star.Named for Star."));
+        assert!(takes_a_type("local v = 1 satisfies Star."));
+        assert!(takes_a_type("if v is Star."));
+
+        // `for` opens a type slot only in an `impl` head.
+        assert!(!takes_a_type("for item in Star."));
+        assert!(!takes_a_type("local v = Star."));
     }
 }

@@ -37,6 +37,10 @@ struct Item {
     newlines_before: usize,
     /// Whether the source had whitespace right before this item.
     space_before: bool,
+    /// A contextual Alloy word that reads as a plain name here, ex: the
+    /// `new` of `local new = Instance.new`. The layout and the spacing
+    /// treat it as the identifier it is.
+    name_here: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +61,17 @@ impl Item {
 
     fn is_ident(&self) -> bool {
         matches!(self.kind, ItemKind::Tok(TokKind::Ident))
+    }
+
+    /// A keyword of the language at this place. A contextual word used as
+    /// a name is not one, so `new(x)` spaces like any other call.
+    fn is_keyword_here(&self) -> bool {
+        is_keyword(&self.text) && !self.name_here
+    }
+
+    /// An opener of a block that `end` closes, at this place.
+    fn opens_block_here(&self) -> bool {
+        block_opener(&self.text) && !self.name_here
     }
 
     fn is_string(&self) -> bool {
@@ -261,6 +276,17 @@ pub fn format_with(src: &str, options: &FmtConfig) -> Result<String, String> {
 /// Tokens and comments as one ordered list, with the whitespace facts
 /// the layout needs.
 fn items_of(src: &str, toks: &[Tok], comments: &[(u32, u32)]) -> Vec<Item> {
+    // A contextual word is a name wherever the parser reads one, so the
+    // layout and the spacing ask the same module the parser asks.
+    let names: std::collections::HashSet<usize> = toks
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| {
+            alloy_syntax::contextual::is_contextual(t.text(src))
+                && !alloy_syntax::contextual::keyword_at(src, toks, *i)
+        })
+        .map(|(_, t)| t.start as usize)
+        .collect();
     let mut all: Vec<(usize, usize, ItemKind)> = toks
         .iter()
         .map(|t| (t.start as usize, t.end as usize, ItemKind::Tok(t.kind)))
@@ -291,6 +317,7 @@ fn items_of(src: &str, toks: &[Tok], comments: &[(u32, u32)]) -> Vec<Item> {
             kind,
             newlines_before: between.matches('\n').count(),
             space_before: !between.is_empty(),
+            name_here: names.contains(&a),
         });
         prev_end = b;
     }
@@ -424,6 +451,7 @@ fn synthetic(text: &str) -> Item {
         }),
         newlines_before: 0,
         space_before: false,
+        name_here: false,
     }
 }
 

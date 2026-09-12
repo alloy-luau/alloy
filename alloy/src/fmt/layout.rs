@@ -2,9 +2,7 @@
 //! bracket groups, which groups must break, and the rendering of the
 //! tree into lines.
 
-use super::{
-    Formatter, Node, block_opener, closer_of, closes, expression_context, is_keyword, opens,
-};
+use super::{Formatter, Node, closer_of, closes, expression_context, opens};
 
 impl<'s> Formatter<'s> {
     // --- block depth -------------------------------------------------------------
@@ -17,7 +15,7 @@ impl<'s> Formatter<'s> {
             return 0;
         }
 
-        if (block_opener(&it.text) && self.starts_block(i)) || self.is_loop_head(i) {
+        if (it.opens_block_here() && self.starts_block(i)) || self.is_loop_head(i) {
             1
         } else if it.is("end") || it.is("until") {
             -1
@@ -52,7 +50,8 @@ impl<'s> Formatter<'s> {
 
             "do" => !self.for_header_before(i),
 
-            "match" => !matches!(prev, Some(".") | Some(":")),
+            // A local named match opens nothing; `match x with` does.
+            "match" => !self.items[i].name_here && !matches!(prev, Some(".") | Some(":")),
 
             "struct" | "enum" | "trait" | "impl" | "interface" | "macro" | "namespace" => {
                 self.items[i].newlines_before > 0
@@ -262,7 +261,7 @@ impl<'s> Formatter<'s> {
                                 && stack.last() == Some(&Frame::ExprIf)))
                     {
                         stack.push(Frame::ExprIf);
-                    } else if text == "match" && self.starts_block(i) {
+                    } else if text == "match" && !it.name_here && self.starts_block(i) {
                         stack.push(Frame::Match);
                     } else if text == "trait" && self.starts_block(i) {
                         stack.push(Frame::Trait);
@@ -277,7 +276,7 @@ impl<'s> Formatter<'s> {
                         }
                     } else {
                         let opens_block = self.is_loop_head(i)
-                            || ((block_opener(text) && text != "with" || text == "class")
+                            || ((it.opens_block_here() && text != "with" || text == "class")
                                 && self.starts_block(i))
                             || (text == "with"
                                 && self.starts_block(i)
@@ -329,7 +328,7 @@ impl<'s> Formatter<'s> {
                     before.is(".") || before.is(":") || before.is("?.") || before.is("?:")
                 });
 
-                (t.is_ident() && (field || !is_keyword(&t.text))) || t.is(">")
+                (t.is_ident() && (field || !t.is_keyword_here())) || t.is(">")
             });
 
             if !opens_generic {
@@ -771,7 +770,7 @@ impl<'s> Formatter<'s> {
         self.prev_code(i).is_some_and(|p| {
             let t = &self.items[p];
 
-            (t.is_ident() && !is_keyword(&t.text))
+            (t.is_ident() && !t.is_keyword_here())
                 || t.is(")")
                 || t.is("]")
                 || t.is("}")

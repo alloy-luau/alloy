@@ -7,10 +7,7 @@ use alloy_syntax::lexer::TokKind;
 
 use crate::config::{CallChainStyle, CallParentheses, Collapse, LeadingZero, RequireGrouping};
 
-use super::{
-    Formatter, Item, ItemKind, block_opener, closes, expression_context, is_keyword, opens,
-    requote, synthetic,
-};
+use super::{Formatter, Item, ItemKind, closes, expression_context, opens, requote, synthetic};
 
 impl<'s> Formatter<'s> {
     // --- token rewrites -----------------------------------------------------
@@ -67,6 +64,7 @@ impl<'s> Formatter<'s> {
                             kind: ItemKind::Tok(TokKind::Ident),
                             newlines_before: 0,
                             space_before: true,
+                            name_here: false,
                         },
                     );
                     i = at + 1;
@@ -105,7 +103,7 @@ impl<'s> Formatter<'s> {
             if it.is("<") {
                 angle += 1;
                 j += 1;
-            } else if it.is(".") || it.is("for") || (it.is_ident() && !is_keyword(&it.text)) {
+            } else if it.is(".") || it.is("for") || (it.is_ident() && !it.is_keyword_here()) {
                 j += 1;
             } else {
                 break;
@@ -127,7 +125,7 @@ impl<'s> Formatter<'s> {
             return false;
         }
 
-        (a.is_ident() && !is_keyword(&a.text)) || a.is(")") || a.is("]") || a.is_string()
+        (a.is_ident() && !a.is_keyword_here()) || a.is(")") || a.is("]") || a.is_string()
     }
 
     /// `f "x"` and `f { }` take or lose their parentheses by the option.
@@ -239,7 +237,7 @@ impl<'s> Formatter<'s> {
                 return true;
             }
 
-            if !(t.is_ident() && !is_keyword(&t.text)) && !t.is(".") {
+            if !(t.is_ident() && !t.is_keyword_here()) && !t.is(".") {
                 return false;
             }
 
@@ -266,7 +264,7 @@ impl<'s> Formatter<'s> {
                 return true;
             }
 
-            if !(t.is("type") || t.is(",") || (t.is_ident() && !is_keyword(&t.text))) {
+            if !(t.is("type") || t.is(",") || (t.is_ident() && !t.is_keyword_here())) {
                 return false;
             }
 
@@ -443,13 +441,13 @@ impl<'s> Formatter<'s> {
             let simple = is_end
                 && body_start < body_end
                 && (body_start..body_end)
-                    .all(|k| !self.items[k].is_comment() && !block_opener(&self.items[k].text))
+                    .all(|k| !self.items[k].is_comment() && !self.items[k].opens_block_here())
                 && self.items[body_start].newlines_before == 1
                 && self.items[body_start].is("return")
                     | self.items[body_start].is("break")
                     | self.items[body_start].is("continue")
                     | (self.items[body_start].is_ident()
-                        && !is_keyword(&self.items[body_start].text));
+                        && !self.items[body_start].is_keyword_here());
 
             if simple {
                 let width: usize = (i..=body_end).map(|k| self.items[k].width() + 1).sum();

@@ -29,6 +29,15 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
             return None;
         }
 
+        // A contextual word, ex: the `new` of `local new = Instance.new`,
+        // is the local it names. The child holds its type and its
+        // definition, so it answers the hover.
+        if alloy_syntax::contextual::is_contextual(word)
+            && !alloy_syntax::contextual::keyword_at_byte(source, start)
+        {
+            return None;
+        }
+
         // An intrinsic or an attribute carries its sigil in the key.
         if start > 0 && matches!(bytes[start - 1], b'$' | b'@') {
             let key = &source[start - 1..end];

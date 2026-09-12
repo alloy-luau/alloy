@@ -1,0 +1,26 @@
+-- A constructor chains: a method call, a field, and a chain of both.
+struct Thing as
+    n: number
+end
+
+impl Thing as
+    function new(n: number): Thing
+        return new Thing { n = n }
+    end
+
+    function get(self): number
+        return self.n
+    end
+
+    function bump(self): Thing
+        self.n += 1
+        return self
+    end
+end
+
+local a = new Thing(1):get()
+local b = new Thing(2).n
+local c = new Thing(3):bump():get()
+local d = new Thing(4):bump().n
+new Thing(5):bump()
+print(a, b, c, d)

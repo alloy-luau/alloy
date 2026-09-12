@@ -371,55 +371,14 @@ impl<'a> Parser<'a> {
     /// after it. Expression-position words need their operand on the same
     /// line, or `local x = new` and `print(x)` on the next line would join.
     fn newline_after(&self, n: usize) -> bool {
-        let (Some(here), Some(next)) =
-            (self.toks.get(self.pos + n), self.toks.get(self.pos + n + 1))
-        else {
-            return true;
-        };
-
-        let (lo, hi) = (here.end as usize, next.start as usize);
-
-        lo < hi && self.src[lo..hi].contains('\n')
+        crate::contextual::newline_after(self.src, self.toks, self.pos + n)
     }
 
-    /*
-    Reports if the contextual word at the cursor is a prefix operator here:
-    `new`, `await`, `try`, `async`, `delete`. The operand must start on the
-    same line, and a word followed by `(`, `{`, a string, `=`, or a binary
-    operator is a plain identifier, so `new(x)`, `await = 1`, and
-    `try .. "s"` keep their Luau meaning.
-    */
+    /// Reports if the contextual word at the cursor is a prefix operator
+    /// here: `new`, `await`, `try`, `async`, `delete`. The rule lives in
+    /// [`crate::contextual`], so the formatter and the server read it too.
     fn prefix_word_here(&self) -> bool {
-        if self.newline_after(0) {
-            return false;
-        }
-
-        match self.kind_at(1) {
-            Some(TokKind::LParen)
-            | Some(TokKind::Str { .. })
-            | Some(TokKind::InterpStr | TokKind::InterpHead) => false,
-
-            Some(TokKind::Ident) => true,
-
-            Some(TokKind::Number) => true,
-
-            _ => {
-                let next = self.text_at(1);
-
-                !(next == "{"
-                    || next == "="
-                    || next == ","
-                    || next == "."
-                    || next == ":"
-                    || next == "["
-                    || next == "]"
-                    || next == ")"
-                    || next == "}"
-                    || next == ";"
-                    || is_compound_op(next)
-                    || binop_priority(next).is_some())
-            }
-        }
+        crate::contextual::prefix_operand_follows(self.src, self.toks, self.pos)
     }
 
     /// Reports if the contextual word at the cursor is an infix operator:
@@ -572,7 +531,7 @@ impl<'a> Parser<'a> {
 /// expression. After `.` or `:` each is a field, so `Instance.new` and
 /// an `impl`'s `function new` stay valid. Words with a meaning only
 /// inside a construct, `client`, `from`, `as`, `case`, and so on, are
-/// free names.
+/// free names, and so are the words [`is_contextual`] lists.
 pub fn is_alloy_reserved(word: &str) -> bool {
     matches!(
         word,
@@ -585,86 +544,51 @@ pub fn is_alloy_reserved(word: &str) -> bool {
             | "macro"
             | "attribute"
             | "namespace"
-            | "match"
-            | "const"
             | "async"
             | "await"
-            | "try"
-            | "new"
             | "delete"
             | "destroy"
             | "after"
             | "import"
-            | "export"
     )
 }
 
+/*
+The Alloy words a file may also use as a name.
+
+Luau reserves none of them, and each one appears in ordinary Roblox code:
+`Instance.new` lands in a local named `new`, a module table is named
+`export`, `try` holds `pcall`, `match` holds a string helper, and `const`
+is a Luau declaration Alloy passes through. Each word keeps its keyword
+reading only where the token after it cannot follow a name. Luau does the
+same with `export`: `export type T = number` and `local export = 1` live
+in one file, because `type` is what makes the word a keyword.
+
+The disambiguation lives at each dispatch, because the token that decides
+differs per word:
+
+- `new` is a constructor before a name, `Parser::prefix_word_here` plus a
+  name. `new(x)`, `new.field`, `new = 1`, and `new "s"` are the name.
+- `export` opens a declaration before `type`, `{`, `default`, or a
+  declaration word. Anything else is the name.
+- `try` is the operator before an operand on the same line,
+  `Parser::prefix_word_here`. `try(f)`, `try = 1`, `try.x` are the name.
+- `match` is the statement or the expression when
+  `Parser::match_follows` holds. `match(x)`, `match = 1`, `match[k]`
+  without a `with` are the name.
+- `const` declares when a name, `function`, `@`, `[`, or `{` follows.
+  `const = 1`, `const(x)`, `const.x` are the name.
+*/
+pub use crate::contextual::is_contextual;
+
 fn is_reserved(word: &str) -> bool {
-    matches!(
-        word,
-        "and"
-            | "break"
-            | "do"
-            | "else"
-            | "elseif"
-            | "end"
-            | "false"
-            | "for"
-            | "function"
-            | "if"
-            | "in"
-            | "local"
-            | "nil"
-            | "not"
-            | "or"
-            | "repeat"
-            | "return"
-            | "then"
-            | "true"
-            | "until"
-            | "while"
-            | "private"
-            | "public"
-    )
+    crate::contextual::is_luau_reserved(word)
 }
 
 fn is_unary_op(s: &str) -> bool {
     matches!(s, "not" | "-" | "#")
 }
 
-fn is_compound_op(s: &str) -> bool {
-    matches!(s, "+=" | "-=" | "*=" | "/=" | "%=" | "^=" | "..=" | "//=")
-}
+pub use crate::contextual::is_compound_op;
 
-/// The left and right binding power. A right value lower than the left value
-/// means the operator is right associative.
-fn binop_priority(s: &str) -> Option<(u8, u8)> {
-    Some(match s {
-        "or" => (1, 1),
-
-        "and" => (2, 2),
-
-        // `??` sits here, at 3: above `and` and `or`, below comparison, so
-        // `a ?? b == c` reads `a ?? (b == c)` as in C#. See `binop_at`.
-        "<" | ">" | "<=" | ">=" | "~=" | "==" | "in" => (4, 4),
-
-        // The bitwise words: below arithmetic, above comparison, C order.
-        "bor" => (5, 5),
-
-        "bxor" => (6, 6),
-
-        "band" => (7, 7),
-
-        "shl" | "shr" => (8, 8),
-
-        ".." => (9, 8),
-
-        "+" | "-" => (10, 10),
-
-        "*" | "/" | "//" | "%" => (11, 11),
-
-        "^" => (14, 13),
-
-        _ => return None,
-    })
-}
+pub use crate::contextual::binop_priority;

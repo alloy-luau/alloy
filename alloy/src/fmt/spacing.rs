@@ -6,9 +6,7 @@ use alloy_syntax::lexer::TokKind;
 
 use crate::config::{BlockGaps, FunctionNameSpace, IndentType};
 
-use super::{
-    Formatter, ItemKind, closes, continues, field_colon, is_closer, is_keyword, leaves_open, opens,
-};
+use super::{Formatter, ItemKind, closes, continues, field_colon, is_closer, leaves_open, opens};
 
 impl<'s> Formatter<'s> {
     // --- lines ----------------------------------------------------------------------------
@@ -183,7 +181,7 @@ impl<'s> Formatter<'s> {
         // A call or an index: `f(`, `t[`.
         if bt == "(" || bt == "[" {
             if a.is_ident() {
-                if is_keyword(at)
+                if a.is_keyword_here()
                     && !matches!(at, "self" | "nil" | "true" | "false")
                     && !self.name_position(ai)
                 {

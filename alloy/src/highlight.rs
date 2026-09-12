@@ -216,8 +216,16 @@ fn paint_line(line: &str, mode: Mode) -> String {
             let w: String = chars[i..j].iter().collect();
             let prev = if i > 0 { chars[i - 1] } else { ' ' };
             let after: String = chars[j..].iter().collect();
+            // A contextual word before a call or an assignment is the
+            // name it is. This highlighter reads one line at a time, so
+            // it decides from the character after the word.
+            let name_here = alloy_syntax::contextual::is_contextual(&w)
+                && after
+                    .trim_start()
+                    .starts_with(['(', '=', '.', ':', '[', ',', ')', '}', ';']);
             let keyword = matches!(mode, Mode::Alloy | Mode::Luau)
                 && KEYWORDS.contains(&w.as_str())
+                && !name_here
                 && prev != '.'
                 && prev != ':';
             let called = !keyword && after.trim_start().starts_with('(');

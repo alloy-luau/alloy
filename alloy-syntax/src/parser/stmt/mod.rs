@@ -123,13 +123,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Reports if a declaration follows the `const` at the cursor. The
+    /// rule lives in [`crate::contextual`], so the formatter and the
+    /// server read it too.
+    pub(in super::super) fn const_decl_follows(&self) -> bool {
+        crate::contextual::const_decl_follows(self.src, self.toks, self.pos)
+    }
+
     /// Reports if the token at the cursor is a keyword that begins a statement.
     fn opens_statement(&self) -> bool {
         matches!(
             self.text(),
             "local" | "if" | "while" | "for" | "repeat" | "do" | "function" | "return" | "break"
         ) || (self.at("continue") && self.continue_is_keyword())
-            || (self.at("const") && self.name_at(1))
+            || (self.at("const") && self.const_decl_follows())
             || (self.at("async") && matches!(self.text_at(1), "function" | "do"))
             || (self.at("delete") && self.name_at(1))
             || (self.at("destroy") && self.name_at(1))
@@ -295,7 +302,12 @@ impl<'a> Parser<'a> {
                 }))
             }
 
-            "local" | "const" => self.local_stmt(start),
+            "local" => self.local_stmt(start),
+
+            // `const` declares only where a declaration follows. Luau's own
+            // `const LIMIT = 5` keeps its reading, and `local const = 1`
+            // then `const = const + 1` keeps the name.
+            "const" if self.const_decl_follows() => self.local_stmt(start),
 
             "return" => {
                 self.bump();

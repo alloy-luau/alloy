@@ -670,7 +670,10 @@ impl<'a> Parser<'a> {
             let e = self.expr()?;
 
             return match &e {
-                Expr::New { .. } | Expr::Try { .. } | Expr::Await { .. } => {
+                // `new Thing():method()` is a call, so it stands alone the
+                // way `obj:method()` does. `new Thing().field` is an index
+                // and Luau refuses that as a statement, as it does `t.x`.
+                Expr::New { .. } | Expr::Try { .. } | Expr::Await { .. } | Expr::Call { .. } => {
                     Ok(Stmt::Call(e, TokSpan::new(start, self.pos)))
                 }
 

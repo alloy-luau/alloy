@@ -86,6 +86,9 @@ fn value_openers(text: &str) -> i32 {
 
     for (at, word) in words_at(text) {
         match word {
+            // A local named match opens nothing; `match x with` does.
+            "match" if !alloy_syntax::contextual::keyword_at_byte(text, at) => {}
+
             "function" | "match" | "repeat" | "struct" | "enum" | "interface" | "impl"
             | "trait" | "macro" | "namespace" => count += 1,
 

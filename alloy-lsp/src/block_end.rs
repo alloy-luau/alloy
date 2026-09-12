@@ -182,6 +182,9 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
                 stack.push((line, at));
             }
 
+            // A local named match opens nothing; `match x with` does.
+            "match" if !alloy_syntax::contextual::keyword_at(src, toks, i) => {}
+
             // `attribute r() on struct` names the target of the
             // declaration; the words open no block there.
             "struct" | "enum" | "interface" | "trait" | "impl" | "macro" | "match"

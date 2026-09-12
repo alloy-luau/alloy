@@ -348,6 +348,9 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                     }
                 }
 
+                // A local named match opens nothing; `match x with` does.
+                "match" if !alloy_syntax::contextual::keyword_at(src, toks, i) => {}
+
                 "match" => {
                     let in_expr = expression_context(prev);
                     push(&mut stack, Kind::MatchHead, 1, &mut opens, &mut closes);

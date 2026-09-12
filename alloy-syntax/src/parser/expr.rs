@@ -418,13 +418,18 @@ impl<'a> Parser<'a> {
             return Err(self.err("`new` needs `(args)` or `{ fields }` after the name"));
         }
 
-        Ok(Expr::New {
+        let e = Expr::New {
             name: Box::new(name),
             type_args,
             args,
             init,
             span: TokSpan::new(start, self.pos),
-        })
+        };
+
+        // `new Thing():method()` and `new Thing().field` read the way
+        // `(new Thing()):method()` does. The constructor is a primary
+        // expression, so the suffix loop takes it from here.
+        self.suffix_chain(start, e)
     }
 
     /// `$name(args)`, `$M.name(args)`.
@@ -531,8 +536,22 @@ impl<'a> Parser<'a> {
         self.enter()?;
 
         let start = self.pos;
-        let mut e = self.primary_expr()?;
+        let e = self.primary_expr()?;
+        let e = self.suffix_chain(start, e)?;
+        self.leave();
 
+        Ok(e)
+    }
+
+    /*
+    The suffixes that follow a primary expression: a field, an index, a
+    child, a method call, a call, `!`, and the `?.` family.
+
+    A `new` constructor enters here too, so `new Thing():method()` and
+    `new Thing().field` chain the way `(new Thing()):method()` does. The
+    loop starts at `start` so every node it builds spans from the `new`.
+    */
+    pub(super) fn suffix_chain(&mut self, start: usize, mut e: Expr) -> Result<Expr, ParseError> {
         loop {
             match self.text() {
                 "." => {
@@ -780,8 +799,6 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-
-        self.leave();
 
         Ok(e)
     }

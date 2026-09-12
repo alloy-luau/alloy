@@ -1,33 +1,15 @@
 //! The `match` statement and the `match` expression.
 
-use crate::lexer::TokKind;
-
 use super::super::*;
 
 impl<'a> Parser<'a> {
     // --- match -------------------------------------------------------------
 
     /// `match` is a keyword when an expression that is not a call shape
-    /// follows on the same line. `match(s, p)` and `match "x"` stay calls.
+    /// follows on the same line. The rule lives in [`crate::contextual`],
+    /// so the formatter and the server read it too.
     pub(in super::super) fn match_follows(&self) -> bool {
-        if self.newline_after(0) {
-            return false;
-        }
-
-        match self.kind_at(1) {
-            Some(TokKind::LParen)
-            | Some(TokKind::Str { .. })
-            | Some(TokKind::InterpStr | TokKind::InterpHead) => false,
-
-            Some(TokKind::Ident) => {
-                !is_reserved(self.text_at(1))
-                    || matches!(self.text_at(1), "nil" | "true" | "false" | "not")
-            }
-
-            Some(TokKind::Number) => true,
-
-            _ => matches!(self.text_at(1), "-" | "#" | "{" | "["),
-        }
+        crate::contextual::match_follows(self.src, self.toks, self.pos)
     }
 
     pub(super) fn match_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {

@@ -18,6 +18,7 @@ Parallelism is file level. One file parses fast and single threaded;
 */
 
 pub mod ast;
+pub mod contextual;
 pub mod lexer;
 pub mod parser;
 pub mod printer;

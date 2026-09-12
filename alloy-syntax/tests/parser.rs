@@ -626,6 +626,192 @@ fn export_stays_contextual() {
     round_trip("export.field = 2\n");
 }
 
+// --- the contextual words -------------------------------------------------
+
+/// The reserved-word diagnostics of one lenient parse.
+#[track_caller]
+fn reserved_reports(src: &str) -> Vec<String> {
+    let lexed = lexer::lex(src).expect("lex");
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, parser::ParseOptions::default());
+
+    diagnostics
+        .into_iter()
+        .map(|d| d.message)
+        .filter(|m| m.contains("reserved word"))
+        .collect()
+}
+
+/// The word parses as a plain name: the file round trips and nothing
+/// reports it as reserved.
+#[track_caller]
+fn name_case(src: &str) {
+    round_trip(src);
+    let reports = reserved_reports(src);
+    assert!(reports.is_empty(), "{src:?} reported {reports:?}");
+}
+
+/// `new`, `export`, `try`, `match`, and `const` are names wherever the
+/// token after them cannot follow the keyword.
+#[test]
+fn a_contextual_word_is_a_name() {
+    for word in ["new", "export", "try", "match", "const"] {
+        name_case(&format!("local {word} = 1\nprint({word})\n"));
+        name_case(&format!("{word} = 1\n"));
+        name_case(&format!("local t = {{}}\nprint(t.{word})\n"));
+        name_case(&format!("local {word} = {{}}\nprint({word}.f)\n"));
+        name_case(&format!("local {word} = {{}}\nprint({word}[1])\n"));
+        name_case(&format!("local {word} = {{}}\n{word}[1] = 2\n"));
+        name_case(&format!("local {word} = {{}}\nprint({word}:f())\n"));
+        name_case(&format!("local f = function({word}) return {word} end\n"));
+        name_case(&format!("local t = {{ {word} = 1 }}\nprint(t)\n"));
+        name_case(&format!(
+            "local {word}, other = 1, 2\nprint({word}, other)\n"
+        ));
+        name_case(&format!("local f = print\nf({word})\n"));
+        name_case(&format!("local x = 1\nlocal {word} = x\nprint({word})\n"));
+    }
+
+    // A call shape: the word takes arguments the way any function does.
+    name_case("local new = Instance.new\nlocal p = new(\"Part\")\nprint(p)\n");
+    name_case("local try = pcall\nprint(try(print))\n");
+    name_case("local match = string.match\nprint(match(\"a\", \"b\"))\n");
+    name_case("local const = print\nconst(1)\n");
+    name_case("local export = print\nexport(1)\n");
+
+    // Luau's own call forms: `f \"s\"` and `f { }`.
+    name_case("local new = print\nnew \"Part\"\n");
+    name_case("local new = print\nnew { n = 1 }\n");
+    name_case("local match = print\nmatch \"a\"\n");
+
+    // A binary operator after the word: the word is its left operand.
+    name_case("local try = \"a\"\nprint(try .. \"b\")\n");
+    name_case("local new = 1\nprint(new + 1)\n");
+    name_case("local const = 1\nconst += 1\n");
+}
+
+/// Each word still opens its own syntax.
+#[test]
+fn a_contextual_word_is_the_keyword() {
+    use alloy_syntax::ast::{Expr, Local, Stmt};
+
+    let head = |src: &str| {
+        let lexed = lexer::lex(src).expect("lex");
+
+        parser::parse(src, &lexed.toks)
+            .unwrap_or_else(|e| panic!("{src:?}: {}", e.message))
+            .block
+            .stmts
+            .into_iter()
+            .next()
+            .expect("a statement")
+    };
+
+    assert!(matches!(
+        head("match x with\ncase 1 then print(1)\nend\n"),
+        Stmt::Match(_)
+    ));
+    assert!(matches!(
+        head("match [a, b] with\ncase [1, 2] then print(1)\nend\n"),
+        Stmt::Match(_)
+    ));
+    assert!(matches!(
+        head("match { n = 1 } with\ncase { n = 1 } then print(1)\nend\n"),
+        Stmt::Match(_)
+    ));
+    assert!(matches!(
+        head("const LIMIT = 5\n"),
+        Stmt::Local(Local { is_const: true, .. })
+    ));
+    assert!(matches!(
+        head("const LIMIT: number = 5\n"),
+        Stmt::Local(Local { is_const: true, .. })
+    ));
+    assert!(matches!(
+        head("const function f() end\n"),
+        Stmt::LocalFunction(_)
+    ));
+    assert!(matches!(head("const { a } = t\n"), Stmt::Local(_)));
+    assert!(matches!(
+        head("export type T = number\n"),
+        Stmt::TypeAlias(_)
+    ));
+    assert!(matches!(head("export { a, b }\n"), Stmt::ExportList(_)));
+    assert!(matches!(head("export local x = 1\n"), Stmt::Local(_)));
+    assert!(matches!(
+        head("export function f() end\n"),
+        Stmt::Function(_)
+    ));
+
+    let value = |src: &str| match head(src) {
+        Stmt::Local(l) => l.values.into_iter().next().expect("a value"),
+
+        other => panic!("{src:?} parsed as {other:?}"),
+    };
+
+    assert!(matches!(value("local v = new Thing()\n"), Expr::New { .. }));
+    assert!(matches!(
+        value("local v = new Thing { n = 1 }\n"),
+        Expr::New { .. }
+    ));
+    assert!(matches!(value("local v = try f()\n"), Expr::Try { .. }));
+    assert!(matches!(
+        value("local v = try do return 1 end\n"),
+        Expr::TryBlock { .. }
+    ));
+    assert!(matches!(
+        value("local v = match x with\ncase 1 then 2\nend\n"),
+        Expr::Match { .. }
+    ));
+}
+
+/// One file writes the word both ways. Luau does this with `export`, and
+/// the five words follow it.
+#[test]
+fn both_readings_live_in_one_file() {
+    round_trip("export type T = number\nlocal export = {}\nexport = export\nreturn export\n");
+    round_trip("local match = {}\nmatch[1] = 2\nmatch x with\ncase 1 then print(1)\nend\n");
+    round_trip("const LIMIT = 5\nlocal const = 1\nconst = const + LIMIT\n");
+    round_trip("local new = Instance.new\nlocal v = new Thing()\nprint(new(\"Part\"), v)\n");
+    round_trip("local try = pcall\nlocal v = try f()\nprint(try(print), v)\n");
+}
+
+/// A word still reserved reports when a name takes it.
+#[test]
+fn a_reserved_word_still_reports() {
+    for word in [
+        "struct",
+        "enum",
+        "trait",
+        "impl",
+        "namespace",
+        "await",
+        "delete",
+        "import",
+    ] {
+        let src = format!("local {word} = 1\n");
+        assert!(
+            !reserved_reports(&src).is_empty(),
+            "{src:?} reported nothing"
+        );
+    }
+}
+
+/// `new Thing():method()` and `new Thing().field` chain off the
+/// constructor the way `(new Thing()):method()` does.
+#[test]
+fn a_constructor_chains() {
+    round_trip("local v = new Thing():get()\n");
+    round_trip("local v = new Thing().field\n");
+    round_trip("local v = new Thing(1):bump():get()\n");
+    round_trip("local v = new Thing { n = 1 }:get()\n");
+    round_trip("local v = new Thing { n = 1 }.n\n");
+    round_trip("new Thing():bump()\n");
+    round_trip("local v = new Thing()!\n");
+
+    // An index is no statement, the way `t.x` is none in Luau.
+    rejects("new Thing().field\n");
+}
+
 #[test]
 fn integer_literals_parse() {
     round_trip("local n = 123i\n");

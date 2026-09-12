@@ -1568,7 +1568,7 @@ fn a_compiler_error_line_silences_the_checker() {
     let dir = std::env::temp_dir().join(format!("alloy-lsp-kinds-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = "local test = new\nlocal n: number = \"s\"\nprint(test, n)\n";
+    let src = "local test = await\nlocal n: number = \"s\"\nprint(test, n)\n";
     let file = dir.join("k.aly");
     std::fs::write(&file, src).unwrap();
 

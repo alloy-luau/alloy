@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn reserved_words_cannot_be_names() {
-        let bad = compile("local new = 1\nlocal function await() end\nlocal function f(delete) end\nprint(match)\nlocal private = 1\n").unwrap();
+        let bad = compile("local struct = 1\nlocal function await() end\nlocal function f(delete) end\nprint(namespace)\nlocal private = 1\n").unwrap();
         assert_eq!(bad.diagnostics.len(), 5, "{:?}", bad.diagnostics);
         assert!(bad.diagnostics[0].message.contains("reserved"));
 

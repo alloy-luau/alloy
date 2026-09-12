@@ -45,11 +45,35 @@ pub(crate) fn restyle_global_hover(
         .iter()
         .find(|b| b.name == word && b.prefix.split(' ').next() == Some("global"))?;
 
-    if let Some(styled) = restyle_with(value, word, binding) {
-        return Some(styled);
-    }
+    let styled =
+        restyle_with(value, word, binding).or_else(|| bare_type_hover(value, word, binding));
 
-    bare_type_hover(value, word, binding)
+    // Under a mount the child reaches the declaring module by its
+    // instance path and may not resolve it, so it prints `unknown`.
+    // The declaration itself still says what the name holds.
+    match styled.filter(|text| !says_nothing_of_the_type(text)) {
+        Some(text) => Some(text),
+
+        None => super::modules::const_hover(&owner.source, word),
+    }
+}
+
+/// Whether a hover header carries a type that says nothing: the child
+/// prints `unknown` for a module it could not read, and `*error-type*`
+/// for one it read and could not check.
+fn says_nothing_of_the_type(text: &str) -> bool {
+    let Some(body) = text
+        .strip_prefix("```alloy\n")
+        .and_then(|r| r.split_once("\n```"))
+        .map(|(body, _)| body)
+    else {
+        return false;
+    };
+
+    matches!(
+        body.rsplit_once(": "),
+        Some((_, "unknown")) | Some((_, "*error-type*"))
+    )
 }
 
 /// The declaration in front of a type the child printed on its own.

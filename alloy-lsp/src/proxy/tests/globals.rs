@@ -200,6 +200,32 @@ fn a_mutable_global_hovers_as_its_declaration() {
     assert!(text.contains("The count."), "{text}");
 }
 
+/// Under a mount the child reaches the declaring module by its
+/// instance path and may not resolve it, so it prints `unknown`. The
+/// declaration still says what the name holds.
+#[test]
+fn a_type_the_child_could_not_read_falls_back_to_the_declaration() {
+    let st = files(&[
+        (
+            "file:///shared/log.aly",
+            "--- The ceiling.\nglobal const MAX = 10\n",
+        ),
+        ("file:///main.aly", "print(MAX)\n"),
+    ]);
+    let doc = &st.docs["file:///main.aly"];
+    let at = doc.source.find("MAX").expect("the word") as u32;
+    let text = super::super::hover::restyle_global_hover(
+        "```luau\nlocal MAX: unknown\n```",
+        doc,
+        &st,
+        "file:///main.aly",
+        0,
+        at,
+    )
+    .expect("a hover");
+    assert!(text.contains("global const MAX: number"), "{text}");
+}
+
 /// The file that declares the name keeps its own keywords: the global
 /// restyle is for the files that only read it.
 #[test]

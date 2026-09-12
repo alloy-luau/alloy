@@ -461,6 +461,21 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// The `[fmt]` table for a file, from the nearest `alloy.toml`.
+    ///
+    /// The climb starts at the file, not the workspace root, so a
+    /// project inside a multi-root workspace keeps its own layout. The
+    /// editor formats through this, the way `alloy fmt` does, so
+    /// format on save and the command agree.
+    pub(crate) fn fmt_config(&self, uri: &str) -> alloy::config::FmtConfig {
+        let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+
+        self.config_at(&dir)
+            .map(|c| c.1.fmt.clone())
+            .unwrap_or_default()
+    }
+
     /// The emit options and markup config for a file, from the nearest
     /// `alloy.toml`: its `[alx]` table, or a `luaux.toml` beside it.
     pub(crate) fn options_for(&self, uri: &str) -> (EmitOptions, alloy::luaux::Config) {

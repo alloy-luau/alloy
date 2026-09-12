@@ -896,6 +896,57 @@ fn a_lowered_block_never_hovers_its_closure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Format on save reads the project's `[fmt]` table, the way
+/// `alloy fmt` does. The proxy formatted with the built-in defaults, so
+/// a project that sets `indent_width = 2` still got four spaces in the
+/// editor and two in the terminal.
+#[test]
+fn formatting_reads_the_project_layout() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-fmt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[project]\nname = \"layout\"\n\n[fmt]\nindent_type = \"spaces\"\nindent_width = 2\n",
+    )
+    .unwrap();
+
+    // Eight spaces in, two levels deep.
+    let source = "local function f()\n        local x = 1\n        return x\nend\n\nreturn f\n";
+    let file = dir.join("src").join("layout.aly");
+    std::fs::write(&file, source).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": source } } }),
+    );
+
+    let r = s.request(
+        "textDocument/formatting",
+        json!({ "textDocument": { "uri": uri }, "options": { "tabSize": 4, "insertSpaces": true } }),
+    );
+    let text = r[0]["newText"].as_str().unwrap_or_default().to_string();
+
+    assert!(
+        text.contains("\n  local x = 1"),
+        "the project asked for two spaces: {text:?}"
+    );
+    assert!(
+        !text.contains("\n    local x = 1"),
+        "four spaces is the default, not this project's: {text:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const SERVICES: &str = "import Players from \"game:Players\"\nimport { ReplicatedStorage, RunService as Run } from \"game\"\n\nlocal remotes = ReplicatedStorage:WaitForChild(\"Remotes\")\n\nPlayers.PlayerAdded:Connect(function(player)\n    print(player.Name, remotes, Run.Heartbeat)\nend)\n";
 
 /// A service import binds `game:GetService`, so the hover names the

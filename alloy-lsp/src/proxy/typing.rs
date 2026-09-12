@@ -24,12 +24,20 @@ impl Server {
             return;
         }
 
-        let ingots = self.state.lock().expect("state").ingots.clone();
-        let formatted = alloy::fmt::format(&source).map(|f| match (&ingots, uri_to_path(uri)) {
-            (Some(ingots), Some(path)) => ingots.format(&path.to_string_lossy(), &f).0,
+        // The project's own `[fmt]` table, so format on save lays a
+        // file out the way `alloy fmt` does. Reading none of it made
+        // the editor ignore `indent_width` and the rest.
+        let (ingots, options) = {
+            let st = self.state.lock().expect("state");
 
-            _ => f,
-        });
+            (st.ingots.clone(), st.fmt_config(uri))
+        };
+        let formatted =
+            alloy::fmt::format_file(&source, &options).map(|f| match (&ingots, uri_to_path(uri)) {
+                (Some(ingots), Some(path)) => ingots.format(&path.to_string_lossy(), &f).0,
+
+                _ => f,
+            });
 
         match formatted {
             Ok(formatted) if formatted != source => {

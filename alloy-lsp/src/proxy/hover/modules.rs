@@ -412,7 +412,16 @@ pub(crate) fn service_hover(source: &str, word: &str, spec_line: Option<&str>) -
             continue;
         }
 
-        let mut out = format!("```alloy\n{text}\n```");
+        // On the binding, the reader wants the type the name carries,
+        // the way every other binding hovers. The import line above is
+        // the line they are already looking at. Inside the path, one
+        // word can name several services, so the line stands.
+        let head = match (spec_line.is_none(), hit.as_slice()) {
+            (true, [service]) => format!("local {word}: {service}"),
+
+            _ => text.to_string(),
+        };
+        let mut out = format!("```alloy\n{head}\n```");
 
         for service in hit {
             out.push('\n');

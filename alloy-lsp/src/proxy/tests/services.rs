@@ -131,15 +131,23 @@ pub(crate) fn a_service_hover_reads_the_import_line() {
     let second = src.lines().nth(1).unwrap();
     let on_binding = service_hover(src, "Players", None).expect("the binding");
 
+    // The binding names its type, the way every other binding hovers.
     assert_eq!(
         on_binding,
-        "```alloy\nimport Players from '@game/Players'\n```\n\
+        "```alloy\nlocal Players: Players\n```\n\
          `Players`: a Roblox service. The class extends `Instance`."
     );
 
-    // On the path, `game` and the service name both answer, and the
-    // line the caret sits on picks the import.
-    assert_eq!(service_hover(src, "game", Some(first)), Some(on_binding));
+    // Inside the path one word can name several services, so the line
+    // the reader is on stands instead.
+    assert_eq!(
+        service_hover(src, "game", Some(first)),
+        Some(
+            "```alloy\nimport Players from '@game/Players'\n```\n\
+             `Players`: a Roblox service. The class extends `Instance`."
+                .to_string()
+        )
+    );
     assert_eq!(
         service_hover(src, "game", Some(second)),
         Some(
@@ -149,8 +157,12 @@ pub(crate) fn a_service_hover_reads_the_import_line() {
         )
     );
 
+    // An alias keeps its own name and carries the service's type.
     let alias = service_hover(src, "Run", None).expect("the alias");
-    assert!(alias.starts_with("```alloy\nimport { RunService as Run } from '@game'"));
+    assert!(
+        alias.starts_with("```alloy\nlocal Run: RunService\n```"),
+        "{alias}"
+    );
     assert!(alias.ends_with("`RunService`: a Roblox service. The class extends `Instance`."));
 
     assert_eq!(service_hover(src, "print", None), None);
@@ -160,7 +172,7 @@ pub(crate) fn a_service_hover_reads_the_import_line() {
     assert_eq!(
         service_hover(old, "Players", None),
         Some(
-            "```alloy\nimport Players from 'game:Players'\n```\n\
+            "```alloy\nlocal Players: Players\n```\n\
              `Players`: a Roblox service. The class extends `Instance`."
                 .to_string()
         )

@@ -1213,8 +1213,9 @@ impl Server {
                                 }
                             }
 
-                            // An async function declares the inner type;
-                            // the child infers the Future around it.
+                            // An async function's hint names the Future
+                            // the caller gets, without the emit's own
+                            // module name on the front.
                             for h in hints.iter_mut() {
                                 let async_line = h
                                     .get("position")
@@ -1223,7 +1224,7 @@ impl Server {
                                     .is_some_and(|line| line.contains(".future(function"));
 
                                 if async_line {
-                                    unwrap_future_hint(h);
+                                    name_future_hint(h);
                                 }
                             }
                         }

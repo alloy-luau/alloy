@@ -662,7 +662,8 @@ fn hover_completion_and_extensions() {
             _ => String::new(),
         })
         .collect();
-    assert!(labels.iter().any(|l| l == ": number"), "{hints}");
+    // An async function's return hint names the Future the caller gets.
+    assert!(labels.iter().any(|l| l == ": Future<number>"), "{hints}");
     let h = s.hover(&uri, 32, 14);
     assert!(h.contains("export const answer"), "export: {h}");
     let h = s.hover(&uri, 33, 22);
@@ -974,7 +975,8 @@ fn a_service_import_hovers_as_its_service() {
 
     // `Players` where the file uses it, on line 6.
     let h = s.hover(&uri, 5, 2);
-    assert!(h.contains("import Players from"), "the binding: {h}");
+    // The binding names its type, the way every other binding hovers.
+    assert!(h.contains("local Players: Players"), "the binding: {h}");
     assert!(h.contains("a Roblox service"), "the binding: {h}");
 
     // Inside the path of the second line, on `game`.
@@ -2898,7 +2900,7 @@ fn a_service_binding_hovers_and_types() {
 
     // Line 3, the `Players` of `Players.MaxPlayers`.
     let h = s.hover(&uri, 3, 8);
-    assert!(h.contains("import Players from \"@game/Players\""), "{h}");
+    assert!(h.contains("local Players: Players"), "{h}");
     assert!(h.contains("a Roblox service"), "{h}");
 
     // Line 1, the alias the braces rename to.

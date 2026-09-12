@@ -49,7 +49,7 @@ use documents::{
     mount_alias_settings, normalize, project_aliases,
 };
 #[allow(unused_imports)]
-use hints::{clean_hints, emit_slot_hint, hint_label, unwrap_future_hint, writable_type};
+use hints::{clean_hints, emit_slot_hint, hint_label, name_future_hint, writable_type};
 #[allow(unused_imports)]
 use hover::{
     OPEN_ATTRIBUTES, attach_std_member_docs, case_binding_text, declared_annotation,

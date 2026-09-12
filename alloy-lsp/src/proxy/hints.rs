@@ -254,18 +254,26 @@ pub(crate) fn self_parameter(doc: &Doc, line: u32, character: u32) -> bool {
     text.contains("function ") && before.trim_end().ends_with("self")
 }
 
-/// A return type hint of `: Future<T>` becomes `: T`, in the label and
-/// in the edit that inserts it, since `async function f(): T` is what
-/// the source accepts.
-pub(crate) fn unwrap_future_hint(hint: &mut Value) {
+/// A return type hint on an async function names the Future the caller
+/// gets, with the emit's own module name off it: `: __alloy.Future<T>`
+/// becomes `: Future<T>`.
+///
+/// The hint once read `: T`, because `async function f(): T` was the
+/// only header the source took. Both headers are accepted now, and the
+/// Future is the type the call site actually sees, so the hint names
+/// that and its edit inserts a header that compiles.
+pub(crate) fn name_future_hint(hint: &mut Value) {
     pub(crate) fn unwrap(text: &str) -> Option<String> {
         let rest = text.strip_prefix(": ")?;
-        let inner = rest
-            .strip_prefix("__alloy.Future<")
-            .or_else(|| rest.strip_prefix("Future<"))?
-            .strip_suffix('>')?;
+        // `__alloy` is the emit's name for the std and belongs in no
+        // hint a reader sees.
+        let inner = rest.strip_prefix("__alloy.")?;
 
-        Some(format!(": {inner}"))
+        match inner.starts_with("Future<") {
+            true => Some(format!(": {inner}")),
+
+            false => None,
+        }
     }
 
     if let Some(new) = unwrap(&hint_label(hint)) {

@@ -59,6 +59,76 @@ fn opens_markup(src: &str, lt: usize) -> bool {
     )
 }
 
+/// Where the first statement of its own starts after `lt`. A tag holds
+/// no such line: its attributes and its holes sit indented inside it,
+/// so a line that opens a statement at column zero ends an unfinished
+/// tag. Without the bound one broken tag reaches the rest of the file,
+/// and every later `.` completes that tag's attributes.
+fn statement_line_after(src: &str, lt: usize) -> Option<usize> {
+    const HEADS: [&str; 12] = [
+        "function", "local", "end", "return", "if", "while", "for", "export", "import", "struct",
+        "trait", "enum",
+    ];
+    let mut at = lt + src[lt..].find('\n')? + 1;
+
+    while at < src.len() {
+        let line = src[at..].split('\n').next().unwrap_or_default();
+        let opens = HEADS.iter().any(|head| {
+            line.strip_prefix(head)
+                .is_some_and(|rest| !rest.starts_with(is_name_char))
+        });
+
+        if opens {
+            return Some(at);
+        }
+
+        at += line.len() + 1;
+    }
+
+    None
+}
+
+/// Whether a statement of its own stands between `lt` and `offset`.
+fn statement_between(src: &str, lt: usize, offset: usize) -> bool {
+    statement_line_after(src, lt).is_some_and(|at| at < offset)
+}
+
+/// The markup regions read from the text, for a file whose span scan
+/// cannot read them: one tag is unfinished, so the scan reports nothing
+/// and the child sees the author's tags. A tag that parses keeps its own
+/// span; the one that does not runs to the next statement line.
+pub fn recovered_spans(src: &str) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0;
+
+    while let Some(i) = src[from..].find('<') {
+        let lt = from + i;
+
+        if !opens_markup(src, lt) {
+            from = lt + 1;
+
+            continue;
+        }
+
+        let end = match alloy::luaux::markup::parse_node(src, lt) {
+            Ok((_, end)) => end,
+
+            Err(_) => statement_line_after(src, lt).unwrap_or(src.len()),
+        };
+
+        if end <= lt {
+            from = lt + 1;
+
+            continue;
+        }
+
+        spans.push((lt, end));
+        from = end;
+    }
+
+    spans
+}
+
 /// Whether `c` can stand in a tag name.
 fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '.'
@@ -189,7 +259,7 @@ pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
     let text = || in_markup_text(src, offset).then_some(Spot::Text);
     let lt = src[..offset].rfind('<')?;
 
-    if !opens_markup(src, lt) {
+    if !opens_markup(src, lt) || statement_between(src, lt, offset) {
         return text();
     }
 
@@ -451,7 +521,7 @@ pub fn hover_spot(src: &str, offset: usize) -> Option<Spot> {
 fn attribute_at(src: &str, offset: usize) -> Option<Spot> {
     let lt = src.get(..offset)?.rfind('<')?;
 
-    if !opens_markup(src, lt) || src[lt..].starts_with("</") {
+    if !opens_markup(src, lt) || src[lt..].starts_with("</") || statement_between(src, lt, offset) {
         return None;
     }
 
@@ -1376,5 +1446,46 @@ mod tests {
         let at = src.rfind('<').unwrap();
 
         assert!(!opens_markup(src, at), "`<<` is a shift, not a tag");
+    }
+
+    // The `.alx` of the report: an unclosed `<Frame Size={...}` on line
+    // 7. Before the bound, `math.` on line 11 offered Frame's GUI
+    // properties, and the tag reached the end of the file.
+    const UNCLOSED: &str = "local function Broken()\n    return <Frame Size={UDim2.fromScale(1, 1)}\nend\n\nlocal function AfterBroken(x: number)\n    return x + math.\nend\n";
+
+    #[test]
+    fn an_unclosed_tag_ends_at_the_next_statement() {
+        let at = UNCLOSED.find("math.").unwrap() + "math.".len();
+        assert_eq!(completion_spot(UNCLOSED, at), None);
+        assert_eq!(attribute_at(UNCLOSED, at), None);
+
+        // The tag itself still completes its own attributes.
+        let inside = UNCLOSED.find("<Frame S").unwrap() + "<Frame S".len();
+        assert_eq!(
+            completion_spot(UNCLOSED, inside),
+            Some(Spot::AttributeSlot {
+                class: "Frame".into(),
+                prefix: "S".into(),
+                existing: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_recovered_spans_hold_the_broken_tag_alone() {
+        let start = UNCLOSED.find('<').unwrap();
+        let end = UNCLOSED.find("end\n").unwrap();
+
+        assert_eq!(recovered_spans(UNCLOSED), vec![(start, end)]);
+
+        // A tag that parses keeps its own span, and the code after it
+        // stays outside every region.
+        let good = "local function A()\n    return <Frame />\nend\n";
+        let lt = good.find('<').unwrap();
+
+        assert_eq!(
+            recovered_spans(good),
+            vec![(lt, good.find("/>").unwrap() + 2)]
+        );
     }
 }

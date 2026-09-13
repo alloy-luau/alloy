@@ -351,7 +351,25 @@ impl Doc {
         // a region keeps its offset, so the code around the markup
         // answers and each position still maps.
         let blanked = |source: &str| -> Option<(Vec<(usize, usize)>, Repair)> {
-            let (spans, text) = alloy::alx::blank_markup(source)?;
+            // An unfinished tag stops the span scan, so `blank_markup`
+            // reports no region and the child would read the tags. The
+            // regions read from the text bound the broken one, and the
+            // code after it answers.
+            let (spans, text) = match alloy::alx::blank_markup(source) {
+                Some(pair) => pair,
+
+                None => {
+                    let spans = crate::markup::recovered_spans(source);
+
+                    if spans.is_empty() {
+                        return None;
+                    }
+
+                    let text = alloy::luaux::resolve::blank_luaux_regions(source, &spans);
+
+                    (spans, text)
+                }
+            };
             let compile = |text: &str| {
                 alloy::compile_file(&options.file_name, text, options, Some(jsx), ingots).ok()
             };

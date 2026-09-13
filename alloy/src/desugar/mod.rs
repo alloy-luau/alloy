@@ -430,6 +430,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         )]),
         attr_decls: HashMap::new(),
         imported_names: HashSet::new(),
+        import_renames: HashMap::new(),
+        star_modules: HashSet::new(),
         private_view_names: HashSet::new(),
         ret_types: Vec::new(),
         try_targets: Vec::new(),
@@ -857,6 +859,13 @@ struct Desugar<'s> {
     /// Names an `import` brings in. An attribute of an imported name is
     /// not checked here; this file cannot see its targets.
     imported_names: HashSet<String>,
+    /// `import { Box as B }`: the local name to the name the module
+    /// declares. An index the import carries is keyed by the declared
+    /// name, so a check of `new B { }` reads `Box` through this.
+    import_renames: HashMap<String, String>,
+    /// `import * as M`: the locals that stand for a whole module, so
+    /// `new M.Box { }` names the struct `Box` the module declares.
+    star_modules: HashSet<String>,
     /// Imported structs whose full view this file aliases as
     /// `Name__all`. An `impl` of one types `self` as the view.
     private_view_names: HashSet<String>,

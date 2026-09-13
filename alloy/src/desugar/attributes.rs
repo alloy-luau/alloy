@@ -693,20 +693,20 @@ impl<'s> Desugar<'s> {
                         self.imported_names.insert(self.text_of(*n).to_string());
                     }
 
-                    ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
-                        self.imported_names.insert(self.text_of(*n).to_string());
+                    ImportKind::Namespace(n, specs) => {
+                        let module = self.text_of(*n).to_string();
+                        self.star_modules.insert(module.clone());
+                        self.imported_names.insert(module);
+                        self.note_specs(specs);
+                    }
 
-                        for sp in specs {
-                            let name = sp.alias.unwrap_or(sp.name);
-                            self.imported_names.insert(self.text_of(name).to_string());
-                        }
+                    ImportKind::Both(n, specs) => {
+                        self.imported_names.insert(self.text_of(*n).to_string());
+                        self.note_specs(specs);
                     }
 
                     ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
-                        for sp in specs {
-                            let name = sp.alias.unwrap_or(sp.name);
-                            self.imported_names.insert(self.text_of(name).to_string());
-                        }
+                        self.note_specs(specs);
                     }
                 },
 
@@ -935,6 +935,25 @@ impl<'s> Desugar<'s> {
                 self.enums.insert(name.clone(), variants.clone());
                 self.enum_decls.insert(name.clone(), variants.clone());
             }
+        }
+    }
+
+    /// The names one import list binds, with the name each one renames:
+    /// `{ Box as B }` binds `B` and records that it stands for `Box`.
+    fn note_specs(&mut self, specs: &[alloy_syntax::ast::ImportSpec]) {
+        for sp in specs {
+            let name = self.text_of(sp.name).to_string();
+            let local = match sp.alias {
+                Some(a) => self.text_of(a).to_string(),
+
+                None => name.clone(),
+            };
+
+            if local != name {
+                self.import_renames.insert(local.clone(), name);
+            }
+
+            self.imported_names.insert(local);
         }
     }
 

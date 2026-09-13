@@ -1683,17 +1683,53 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The struct a `new` names, with the span a report lands on. The
+    /// name the parser keeps is what the source wrote, which may be an
+    /// import alias or a dotted path; every index of a struct is keyed
+    /// by the name the declaring file gives it, so the checks read one
+    /// name however the source spells it.
+    pub(crate) fn constructed_struct(&self, name: &Expr) -> Option<(TokSpan, String)> {
+        let Expr::Name(n) = name else {
+            return None;
+        };
+        let text = self.text_of(*n).to_string();
+
+        if self.struct_fields.contains_key(&text) {
+            return Some((*n, text));
+        }
+
+        // `new M.Box` through `import * as M`: the module declares
+        // `Box`. `new Zoo.Lion` on a namespace member: the emit renders
+        // it as `Zoo_Lion`, nesting and all.
+        if let Some((head, rest)) = text.split_once('.') {
+            let resolved = match self.star_modules.contains(head.trim()) {
+                true => rest.trim().to_string(),
+
+                false => self.ns_path_name(&text)?,
+            };
+
+            return Some((*n, resolved));
+        }
+
+        // `import { Box as B }`: the module declares `Box`.
+        match self.import_renames.get(&text) {
+            Some(declared) => Some((*n, declared.clone())),
+
+            None => Some((*n, text)),
+        }
+    }
+
     /// The fields form names every field without a default and no field
     /// the struct lacks. A spread or a computed key turns the check off,
     /// because the table's keys are then not in the source.
     pub(crate) fn check_struct_fields(&mut self, name: &Expr, table: &Expr) {
-        let Expr::Name(n) = name else {
+        let Some((n, sname)) = self.constructed_struct(name) else {
             return;
         };
-        let sname = self.text_of(*n).to_string();
         let Some(declared) = self.declared_fields(&sname) else {
             return;
         };
+        let shown = self.display_name(&sname);
         let Expr::Table { fields, .. } = table else {
             return;
         };
@@ -1710,7 +1746,7 @@ impl<'s> Desugar<'s> {
                         self.diagnose(
                             *name,
                             &format!(
-                                "`{sname}` has no field `{fname}`; its fields are {}",
+                                "`{shown}` has no field `{fname}`; its fields are {}",
                                 list_names(&known)
                             ),
                         );
@@ -1720,7 +1756,7 @@ impl<'s> Desugar<'s> {
                             start: self.byte_start(*name),
                             end: self.byte_end(*name),
                             message: format!(
-                                "`{fname}` is private to `{sname}`; only its impl sets it"
+                                "`{fname}` is private to `{shown}`; only its impl sets it"
                             ),
                             fix: None,
                         });
@@ -1737,7 +1773,7 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        self.check_missing_fields(*n, &sname, &given, "fields");
+        self.check_missing_fields(n, &sname, &given, "fields");
     }
 
     /// A private field of an imported struct, named in a `new` outside
@@ -1790,10 +1826,11 @@ impl<'s> Desugar<'s> {
         if missing.is_empty() {
             return;
         }
+        let shown = self.display_name(sname);
         let written = match form {
-            "paren" => format!("new {sname}()"),
+            "paren" => format!("new {shown}()"),
 
-            _ => format!("new {sname} {{ ... }}"),
+            _ => format!("new {shown} {{ ... }}"),
         };
         self.diagnose(
             n,
@@ -2004,6 +2041,76 @@ mod tests {
 
         assert!(private.diagnostics.is_empty(), "{:?}", private.diagnostics);
         assert_eq!(private_lints, vec!["private_access"]);
+    }
+
+    /// The name a `new` writes is not always the name the struct is
+    /// declared under: an import alias, a star import, and a namespace
+    /// path all reach the same struct, so each reads the same checks.
+    #[test]
+    fn a_construction_through_an_alias_a_star_import_or_a_namespace_checks() {
+        let options = crate::EmitOptions {
+            import_struct_fields: vec![(
+                "Box".to_string(),
+                vec![("id".to_string(), false), ("secret".to_string(), true)],
+            )],
+            import_privates: vec![("Box".to_string(), vec!["secret".to_string()])],
+            ..Default::default()
+        };
+        let run = |src: &str| -> (Vec<String>, Vec<String>) {
+            let out = crate::compile_with(src, &options).unwrap();
+
+            (
+                out.diagnostics.iter().map(|d| d.message.clone()).collect(),
+                out.lints
+                    .iter()
+                    .filter(|l| l.name == "private_access")
+                    .map(|l| l.message.clone())
+                    .collect(),
+            )
+        };
+
+        let (alias, alias_lints) = run(
+            "import { Box as B } from \"./box\"\n\nprint(new B { id = 1, gone = 2 })\nprint(new B { id = 1, secret = 5 })\n",
+        );
+        assert_eq!(
+            alias,
+            vec!["`Box` has no field `gone`; its fields are `id` and `secret`"]
+        );
+        assert_eq!(
+            alias_lints,
+            vec!["`secret` is private to `Box`; only its impl sets it"]
+        );
+
+        let (star, star_lints) = run(
+            "import * as M from \"./box\"\n\nprint(new M.Box { id = 1, gone = 2 })\nprint(new M.Box { id = 1, secret = 5 })\n",
+        );
+        assert_eq!(
+            star,
+            vec!["`Box` has no field `gone`; its fields are `id` and `secret`"]
+        );
+        assert_eq!(
+            star_lints,
+            vec!["`secret` is private to `Box`; only its impl sets it"]
+        );
+    }
+
+    /// A struct of a namespace renders under the namespace's name, and
+    /// `new Zoo.Lion { }` names it through the path. The report quotes
+    /// the path back, at one level and at two.
+    #[test]
+    fn a_construction_of_a_namespace_struct_checks_its_fields() {
+        let one = "namespace Zoo as\n    struct Lion as\n        name: string\n    end\nend\nprint(new Zoo.Lion { name = \"a\", bad = 1 })\n";
+        assert_eq!(
+            messages(one),
+            vec!["`Zoo.Lion` has no field `bad`; its fields are `name`"]
+        );
+
+        let two = "namespace A as\n    namespace B as\n        struct S as\n            n: number\n        end\n    end\nend\nprint(new A.B.S { bad = 1 })\n";
+        let got = messages(two);
+        assert!(
+            got.contains(&"`A.B.S` has no field `bad`; its fields are `n`".to_string()),
+            "{got:?}"
+        );
     }
 
     #[test]

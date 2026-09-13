@@ -313,6 +313,29 @@ impl<'s> Desugar<'s> {
         None
     }
 
+    /// The rendered name a dotted path through the file's namespaces
+    /// names: `Zoo.Lion` is `Zoo_Lion`, and `A.B.S` through a nested
+    /// namespace is `A_B_S`. `None` when the head names no namespace,
+    /// or the path runs off its members.
+    pub(crate) fn ns_path_name(&self, path: &str) -> Option<String> {
+        let mut parts = path.split('.').map(str::trim);
+        let mut key = parts.next()?.to_string();
+        let mut info = self.namespaces.get(&key)?;
+
+        for part in parts {
+            let m = info.member(part)?;
+
+            if !m.nested {
+                return Some(m.rendered.clone());
+            }
+
+            key = key_of(Some(&key), part);
+            info = self.namespaces.get(&key)?;
+        }
+
+        None
+    }
+
     /// The target an `impl` inside a namespace writes: a member of the
     /// namespace renders under its own name.
     pub(crate) fn impl_target_name(&self, span: TokSpan) -> String {

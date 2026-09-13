@@ -761,6 +761,263 @@ pub(crate) fn a_type_list_holds_what_the_file_can_write() {
         assert!(!labels.contains(&internal.to_string()), "{internal}");
     }
 }
+/// The labels a type slot holds. `at` is the text the caret sits after.
+fn type_slot_labels(st: &State, uri: &str, src: &str, at: &str) -> Vec<String> {
+    let offset = src.find(at).expect(at) + at.len();
+    let ctx = context::detect(src, offset).expect("a type slot");
+
+    st.context_items(uri, offset, &ctx)
+        .iter()
+        .map(|i| i["label"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+/// `stor: Scri|` offered no `Scribe`: the dotted path landed and the
+/// name in front of the `.` reached no list. A bare type slot takes
+/// every module and namespace a type hangs off, and the accept writes
+/// the `.` so the path carries on.
+#[test]
+pub(crate) fn a_bare_type_slot_offers_the_head_of_a_path() {
+    const SRC: &str = concat!(
+        "import Scribe from \"./scribe\"\n",
+        "import * as Star from \"./scribe\"\n",
+        "namespace Shapes as\n",
+        "    export type Box = { w: number }\n",
+        "end\n",
+        "namespace Funcs as\n",
+        "    export function go() end\n",
+        "end\n",
+        "struct P as\n",
+        "    stor: Scri\n",
+        "end\n",
+    );
+    // The default import binds the module whole only when the module
+    // returns one value, which the disk answers for.
+    let dir = std::env::temp_dir().join(format!("alloy-prefix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+    std::fs::write(
+        dir.join("src/scribe.luau"),
+        "export type Store = { id: number }\nlocal M = {}\nfunction M.open() end\nreturn M\n",
+    )
+    .expect("module");
+
+    let main = dir.join("src/main.aly");
+    std::fs::write(&main, SRC).expect("main");
+
+    let uri = format!("file://{}", main.display());
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+    let options = EmitOptions {
+        file_name: main.to_string_lossy().into_owned(),
+        in_project: true,
+        ..EmitOptions::default()
+    };
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(
+            SRC.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+
+    let uri = uri.as_str();
+    let offset = SRC.find("Scri\n").expect("the slot") + "Scri".len();
+    let ctx = context::detect(SRC, offset).expect("a type slot");
+    let items = st.context_items(uri, offset, &ctx);
+    let row = |name: &str| {
+        items
+            .iter()
+            .find(|i| i["label"] == json!(name))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+
+    for name in ["Scribe", "Star", "Shapes"] {
+        let item = row(name);
+
+        assert!(!item.is_null(), "{name}");
+        // The name alone is half a type, so the accept writes the `.`
+        // and asks the editor for the list under it.
+        assert_eq!(item["textEdit"]["newText"], json!(format!("{name}.")));
+        assert_eq!(
+            item["command"]["command"],
+            json!("editor.action.triggerSuggest")
+        );
+        assert_eq!(item["kind"], json!(9));
+    }
+
+    assert_eq!(row("Scribe")["detail"], json!("module"));
+    assert_eq!(row("Star")["detail"], json!("module"));
+    assert_eq!(row("Shapes")["detail"], json!("namespace"));
+    // A prefix sorts with the plain types, by name.
+    assert_eq!(row("Shapes")["sortText"], json!("1Shapes"));
+
+    // A namespace of functions alone reaches no type, and a value of
+    // the module is no type either.
+    assert!(row("Funcs").is_null());
+    assert!(row("open").is_null());
+
+    // The emit flattens `Shapes.Box` to one name. No source writes it.
+    assert!(row("Shapes_Box").is_null());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every shape that takes a type takes the head of a path too.
+#[test]
+pub(crate) fn every_type_slot_offers_the_head_of_a_path() {
+    const SRC: &str = concat!(
+        "import * as Star from \"./scribe\"\n",
+        "namespace Shapes as\n",
+        "    export type Box = { w: number }\n",
+        "end\n",
+        "struct P as\n",
+        "    field: \n",
+        "end\n",
+        "function fp(a: )\n",
+        "end\n",
+        "function fr(): \n",
+        "end\n",
+        "local lx: \n",
+        "type Ali = \n",
+        "type Gen = Result<\n",
+        "interface I as\n",
+        "    mem: \n",
+        "end\n",
+        "interface J extends \n",
+        "local sat = 1 satisfies \n",
+        "impl \n",
+    );
+    let st = files(&[
+        ("file:///t.aly", SRC),
+        (
+            "file:///scribe.luau",
+            "export type Store = { id: number }\nlocal M = {}\nreturn M\n",
+        ),
+    ]);
+    let uri = "file:///t.aly";
+    let slots = [
+        "    field: ",
+        "fp(a: ",
+        "fr(): ",
+        "local lx: ",
+        "type Ali = ",
+        "Result<",
+        "    mem: ",
+        "extends ",
+        "satisfies ",
+        "impl ",
+    ];
+
+    for at in slots {
+        let labels = type_slot_labels(&st, uri, SRC, at);
+
+        assert!(labels.contains(&"Star".to_string()), "{at}");
+        assert!(labels.contains(&"Shapes".to_string()), "{at}");
+        assert!(!labels.contains(&"Shapes_Box".to_string()), "{at}");
+    }
+}
+
+/// The emit writes `Shapes_Box` for a type inside a namespace, and the
+/// declaration index holds that name so a hover on the artifact reads.
+/// No list offers it, in a type slot or an enum payload.
+#[test]
+pub(crate) fn no_type_list_offers_a_folded_name() {
+    const SRC: &str = concat!(
+        "namespace Shapes as\n",
+        "    export type Box = { w: number }\n",
+        "    export namespace Deep as\n",
+        "        export type Ray = { d: number }\n",
+        "    end\n",
+        "end\n",
+        "enum E as\n",
+        "    One(\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let labels: Vec<String> = st
+        .type_completions(uri, &[])
+        .iter()
+        .map(|i| i["label"].as_str().unwrap_or("").to_string())
+        .collect();
+
+    for folded in ["Shapes_Box", "Shapes_Deep_Ray"] {
+        assert!(!labels.contains(&folded.to_string()), "{folded}");
+    }
+
+    // The hover still finds the member under the name the emit wrote.
+    let doc = st.docs.get(uri).expect("the document");
+    assert!(doc.decls.iter().any(|d| d.name == "Shapes_Box"));
+
+    let payload = type_slot_labels(&st, uri, SRC, "One(");
+    assert!(!payload.contains(&"Shapes_Box".to_string()));
+}
+
+/// A nested namespace is one more step of the path: `Shapes.` offers
+/// `Deep`, and accepting it writes the `.` that `Shapes.Deep.Ray`
+/// needs.
+#[test]
+pub(crate) fn a_nested_namespace_continues_the_path() {
+    const SRC: &str = concat!(
+        "namespace Shapes as\n",
+        "    export type Box = { w: number }\n",
+        "    export namespace Deep as\n",
+        "        export type Ray = { d: number }\n",
+        "    end\n",
+        "end\n",
+        "local a: Shapes.\n",
+        "local b: Shapes.Deep.\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let at = |head: &str| {
+        let offset = SRC.find(head).expect(head) + head.len();
+        let ctx = context::detect(SRC, offset).expect("a type slot");
+
+        st.context_items(uri, offset, &ctx)
+    };
+    let outer = at("local a: Shapes.");
+    let row = |items: &[Value], name: &str| {
+        items
+            .iter()
+            .find(|i| i["label"] == json!(name))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let deep = row(&outer, "Deep");
+
+    assert_eq!(deep["detail"], json!("namespace Shapes.Deep"));
+    assert_eq!(deep["textEdit"]["newText"], json!("Deep."));
+    assert_eq!(
+        deep["command"]["command"],
+        json!("editor.action.triggerSuggest")
+    );
+
+    // A type is the end of the path and writes its name alone.
+    assert_eq!(row(&outer, "Box")["textEdit"]["newText"], json!("Box"));
+    assert!(row(&outer, "Box")["command"].is_null());
+
+    // The step lands on the types under it.
+    let inner = at("local b: Shapes.Deep.");
+    let labels: Vec<String> = inner
+        .iter()
+        .map(|i| i["label"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(labels, ["Ray"]);
+}
+
 /// A struct literal lists the fields of its struct, and hides the
 /// private ones outside the impl.
 #[test]

@@ -123,6 +123,89 @@ pub fn types(src: &str, path: &[&str], load: &Load, plain: &Plain) -> Vec<Member
     reach(src, path, &Reader { load, plain }, Want::Types)
 }
 
+/// Every name of this file that can stand in front of the `.` of a
+/// type path: a module an import binds, and a namespace the file
+/// declares. The name alone is no type, so a bare type slot offers it
+/// as the start of `Scribe.Store` or `Shapes.Box`.
+///
+/// A candidate stays only when the walk finds a type under it. That is
+/// the same walk `types` runs for the dotted slot, so a name this list
+/// offers is a name the next `.` answers for: `import Aly from` on a
+/// module with an export table reaches no type, and a namespace of
+/// functions alone reaches none either.
+pub fn type_prefixes(src: &str, load: &Load, plain: &Plain) -> Vec<Member> {
+    let src = readable(src);
+    let Ok(parsed) = alloy_syntax::parse_lenient(&src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let t = |span: TokSpan| text_of(&src, toks, span);
+    let read = Reader { load, plain };
+    let mut named: Vec<(String, &'static str)> = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        match stmt.under_default() {
+            Stmt::Namespace(ns) => named.push((t(ns.name), "namespace")),
+
+            Stmt::Import(im) => named.extend(prefix_bindings(&src, toks, &im.kind)),
+
+            _ => {}
+        }
+    }
+
+    let mut out: Vec<Member> = Vec::new();
+
+    for (name, detail) in named {
+        if name.is_empty() || out.iter().any(|m| m.name == name) {
+            continue;
+        }
+
+        if walk(&src, &[name.as_str()], &read, 0, Want::Types).is_empty() {
+            continue;
+        }
+
+        out.push(Member::new(
+            &name,
+            MODULE,
+            detail,
+            Some(format!("{detail} {name}")),
+        ));
+    }
+
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// The names an import binds that may start a type path, each with the
+/// word the list shows. The binding of a whole module reads `module`;
+/// a name out of the braces reads `namespace`, since that is the one
+/// kind a path continues through. A type picked by name is already a
+/// type and takes no path, and the walk drops it.
+fn prefix_bindings(src: &str, toks: &[Tok], kind: &ImportKind) -> Vec<(String, &'static str)> {
+    let t = |span: TokSpan| text_of(src, toks, span);
+    // A type-only spec stays: `import { type Math }` brings the group
+    // and every type it carries.
+    let picked = |specs: &[ImportSpec]| -> Vec<(String, &'static str)> {
+        specs
+            .iter()
+            .map(|s| (t(s.alias.unwrap_or(s.name)), "namespace"))
+            .collect()
+    };
+
+    match kind {
+        ImportKind::Namespace(alias, specs) | ImportKind::Both(alias, specs) => {
+            let mut out = vec![(t(*alias), "module")];
+
+            out.extend(picked(specs));
+            out
+        }
+
+        ImportKind::Default(name) => vec![(t(*name), "module")],
+
+        ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => picked(specs),
+    }
+}
+
 fn reach(src: &str, path: &[&str], read: &Reader, want: Want) -> Vec<Member> {
     let mut out = walk(&readable(src), path, read, 0, want);
 
@@ -1291,6 +1374,80 @@ mod tests {
             assert!(!m.name.contains('_'), "{}", m.name);
             assert!(!m.detail.contains("__"), "{}", m.detail);
         }
+    }
+
+    /// `stor: Scri|` offered nothing useful: the dotted path worked and
+    /// the name in front of the `.` was in no list. A bare type slot
+    /// takes every name a type hangs off.
+    #[test]
+    fn a_bare_type_slot_takes_the_head_of_a_path() {
+        let src = "import Scribe from \"@pkg/scribe\"\n\
+            import * as Star from \"./scribe\"\n\
+            import { Deep } from \"./scribe\"\n\
+            import type { Only as O } from \"./scribe\"\n\
+            import Aly from \"./scribe\"\n\
+            namespace Shapes as\n\
+                export type Box = { w: number }\n\
+            end\n\
+            namespace Funcs as\n\
+                export function go() end\n\
+            end\n";
+        let found = type_prefixes(src, &scribe_load, &scribe_plain);
+
+        // `Aly` binds the `default` field of an export table and
+        // reaches no type; `Funcs` and `O` hold functions alone.
+        assert_eq!(names(&found), ["Deep", "Scribe", "Shapes", "Star"]);
+
+        let detail = |name: &str| {
+            found
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| m.detail.as_str())
+        };
+
+        assert_eq!(detail("Scribe"), Some("module"));
+        assert_eq!(detail("Star"), Some("module"));
+        assert_eq!(detail("Deep"), Some("namespace"));
+        assert_eq!(detail("Shapes"), Some("namespace"));
+
+        for m in &found {
+            assert_eq!(m.kind, MODULE, "{}", m.name);
+            assert!(!m.name.contains('_'), "{}", m.name);
+        }
+    }
+
+    /// A prefix stands in the list only where the next `.` answers, so
+    /// the two lists never disagree.
+    #[test]
+    fn a_prefix_and_its_path_agree() {
+        let src = "import Aly from \"./scribe\"\n\
+            import * as Star from \"./scribe\"\n\
+            namespace Funcs as\n\
+                export function go() end\n\
+            end\n\
+            namespace Shapes as\n\
+                export type Box = { w: number }\n\
+            end\n";
+
+        for name in ["Aly", "Star", "Funcs", "Shapes"] {
+            let offered = type_prefixes(src, &scribe_load, &scribe_plain)
+                .iter()
+                .any(|m| m.name == name);
+            let reached = !types(src, &[name], &scribe_load, &scribe_plain).is_empty();
+
+            assert_eq!(offered, reached, "{name}");
+        }
+    }
+
+    /// A value is no type. A file of tables and functions alone offers
+    /// no prefix, whatever the names look like.
+    #[test]
+    fn no_value_stands_in_a_type_slot() {
+        let src = "local Tbl = { card = function() return 1 end }\n\
+            local count = 3\n\
+            function Widgets.button() end\n";
+
+        assert!(type_prefixes(src, &nothing, &none_plain).is_empty());
     }
 
     #[test]

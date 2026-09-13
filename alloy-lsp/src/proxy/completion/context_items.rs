@@ -476,6 +476,18 @@ impl State {
                         let hover = m.signature.as_ref().map(|s| format!("```alloy\n{s}\n```"));
                         let mut item = word(&m.name, m.kind, hover, from);
                         item["detail"] = json!(format!("{} {path}.{}", m.detail, m.name));
+
+                        // `Shapes.Deep` is a step, not a type, so the
+                        // accept writes the `.` the way a bare slot
+                        // does for the head of the path.
+                        if m.detail == "namespace" {
+                            item["textEdit"]["newText"] = json!(format!("{}.", m.name));
+                            item["command"] = json!({
+                                "title": "Suggest",
+                                "command": "editor.action.triggerSuggest",
+                            });
+                        }
+
                         items.push(item);
                     }
 
@@ -491,6 +503,36 @@ impl State {
                     item = word(&label, kind, doc_text, from);
                     item["detail"] = detail;
                     item["sortText"] = json!(format!("{rank}{label}"));
+                    items.push(item);
+                }
+
+                // `stor: Scri|`: the module `Scribe` is no type itself,
+                // and `Scribe.Store` is one. The slot offers the name
+                // as the head of that path, beside the plain types and
+                // ranked with them, so the list reads by name.
+                let load = |spec: &str| self.module_source(uri, spec);
+                let returns_one = self.plain_modules(uri);
+                let plain = |spec: &str| returns_one.iter().any(|s| s == spec);
+
+                for m in components::type_prefixes(&doc.source, &load, &plain) {
+                    if items.iter().any(|i| i["label"] == json!(m.name)) {
+                        continue;
+                    }
+
+                    let hover = m.signature.as_ref().map(|s| format!("```alloy\n{s}\n```"));
+                    let rank = type_rank(*prefers, &m.detail);
+                    let mut item = word(&m.name, m.kind, hover, from);
+                    item["detail"] = json!(m.detail);
+                    item["sortText"] = json!(format!("{rank}{}", m.name));
+                    // The accept writes the `.` too. The name alone
+                    // leaves half a type in the slot, and the `.` puts
+                    // the caret where the dotted list answers, so one
+                    // accept and one keystroke reach `Scribe.Store`.
+                    item["textEdit"]["newText"] = json!(format!("{}.", m.name));
+                    item["command"] = json!({
+                        "title": "Suggest",
+                        "command": "editor.action.triggerSuggest",
+                    });
                     items.push(item);
                 }
             }

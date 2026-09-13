@@ -859,6 +859,24 @@ mod tests {
         );
     }
 
+    /// An `impl` on a struct another file declares writes its private
+    /// methods on the class table in both artifacts: only the struct's
+    /// own file declares the private table and the full view, so a
+    /// reference to either here names nothing.
+    #[test]
+    fn a_cross_file_impl_keeps_its_private_methods_on_the_class_table() {
+        let src = "import { Box } from \"./box\"\n\nimpl Box as\n    private function secretHelper(self): number\n        return 1\n    end\n\n    function pub(self): number\n        return self:secretHelper() + self.w\n    end\nend\n";
+        let out = compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.check.contains("__private"), "{}", out.check);
+        assert!(!out.check.contains("Box__all"), "{}", out.check);
+        assert!(
+            out.check.contains("function Box.secretHelper(self)"),
+            "{}",
+            out.check
+        );
+    }
+
     #[test]
     fn private_members_leave_the_public_view_of_the_check_artifact() {
         let src = "struct Counter as\n    read name: string\n    private count: number = 0\nend\nimpl Counter as\n    function bump(self): number\n        self.count += 1\n        self:log()\n        return self.count\n    end\n    public function peek(self): number\n        return self.count\n    end\n    private function log(self)\n        print(self.count)\n    end\nend\n";

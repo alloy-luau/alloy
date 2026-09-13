@@ -98,6 +98,16 @@ impl<'s> Desugar<'s> {
             target_name.clone()
         };
 
+        // A struct with private members: a private method lands on
+        // `Target__private` in the check artifact, and a public method
+        // rebinds `self` to the full view on its first line.
+        // Only the struct's own file declares the private table and the
+        // full view, so an impl on an imported struct writes its private
+        // methods on the class table, as the ship artifact does.
+        let declares_target =
+            self.structs.contains(&target_name) || self.enums.contains_key(&target_name);
+        let split = !foreign && declares_target && self.has_private_view(&target_name);
+
         if foreign {
             let std = self.std();
             self.generate(
@@ -137,10 +147,6 @@ impl<'s> Desugar<'s> {
             self.diagnose(i.target, &message);
         }
         let types_self = self.options.check && (foreign || local_type || !impl_generics.is_empty());
-        // A struct with private members: a private method lands on
-        // `Target__private` in the check artifact, and a public method
-        // rebinds `self` to the full view on its first line.
-        let split = !foreign && self.has_private_view(&target_name);
 
         self.impl_target = Some(target_name.clone());
 

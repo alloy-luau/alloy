@@ -28,6 +28,19 @@ fn relative_to_input(file: &str, root: &Path, config: &Config) -> Option<PathBuf
     full.strip_prefix(&input).ok().map(Path::to_path_buf)
 }
 
+/// What `alloy flux <file>` reports for a file outside `[build] in`.
+/// Flux runs the Luau checker, and the checker needs the project the
+/// file belongs to, so the run fails instead of passing on the lints
+/// alone.
+fn outside_input_message(file: &str, input: &Path) -> String {
+    let input = input.display();
+
+    format!(
+        "{file} is outside {input}; flux did not type check it. \
+         Run flux from the project that holds the file, or name a file under {input}"
+    )
+}
+
 pub(crate) fn flux_cmd(args: &[String]) -> ExitCode {
     if args.iter().any(|a| a == "--list") {
         return list_lints();
@@ -76,16 +89,15 @@ fn flux_once(args: &[String]) -> ExitCode {
             Some(rel) => only = Some(rel),
 
             None => {
-                let p = Painter::for_stderr();
-                eprintln!(
-                    "{}",
-                    p.note(&format!(
-                        "{file} is outside {}; the type check did not run",
-                        root.join(&config.build.input).display()
-                    ))
-                );
+                // The lints still say what they can about the file, so
+                // they print first; the error then carries the run.
+                let _ = lint_one(file, &lint_config, None, args);
+                fail(&outside_input_message(
+                    file,
+                    &root.join(&config.build.input),
+                ));
 
-                return lint_one(file, &lint_config, Some("flux"), args);
+                return ExitCode::FAILURE;
             }
         }
     }
@@ -223,5 +235,45 @@ fn flux_once(args: &[String]) -> ExitCode {
         eprintln!("{} {counts}", p.fail("flux"));
 
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file outside `[build] in` has no path relative to it, and the
+    /// message names the folder the file has to sit under.
+    #[test]
+    fn a_file_outside_the_input_has_no_relative_path() {
+        let dir = std::env::temp_dir().join(format!("alloy-flux-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("the folder");
+        std::fs::write(dir.join("alloy.toml"), "[build]\nin = \"src\"\n").expect("the file");
+        std::fs::write(dir.join("src/inside.aly"), "print(1)\n").expect("the file");
+        std::fs::write(dir.join("outside.aly"), "print(1)\n").expect("the file");
+
+        let config = Config::load(&dir.join("alloy.toml")).expect("the config");
+        let inside = dir.join("src/inside.aly");
+        let outside = dir.join("outside.aly");
+
+        assert_eq!(
+            relative_to_input(&inside.to_string_lossy(), &dir, &config),
+            Some(PathBuf::from("inside.aly"))
+        );
+        assert_eq!(
+            relative_to_input(&outside.to_string_lossy(), &dir, &config),
+            None
+        );
+
+        let message = outside_input_message("outside.aly", &dir.join("src"));
+
+        assert!(message.contains("flux did not type check it"), "{message}");
+        assert!(
+            message.contains(&dir.join("src").display().to_string()),
+            "{message}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

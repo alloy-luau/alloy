@@ -93,45 +93,6 @@ pub struct Step {
     pub opens: usize,
 }
 
-/// Tokens after which an `if` or a `function` is an expression.
-fn expression_context(prev: Option<&str>) -> bool {
-    match prev {
-        None => false,
-
-        Some(p) => matches!(
-            p,
-            "=" | "("
-                | ","
-                | "["
-                | "{"
-                | "return"
-                | "and"
-                | "or"
-                | "not"
-                | "+"
-                | "-"
-                | "*"
-                | "/"
-                | "//"
-                | "%"
-                | "^"
-                | ".."
-                | "=="
-                | "~="
-                | "<"
-                | ">"
-                | "<="
-                | ">="
-                | "??"
-                | "?"
-                | ":"
-                | "in"
-                | "?("
-                | "?["
-        ),
-    }
-}
-
 /// Computes the block structure of `toks`.
 pub fn structure(src: &str, toks: &[Tok]) -> Structure {
     let mut stack: Vec<Frame> = Vec::new();
@@ -264,7 +225,7 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                     // `): number?` ends a signature line; the `if` that
                     // opens the next line is a statement, not a ternary.
                     let first_on_line = i == 0 || lines[i - 1] != line;
-                    let in_expr = (expression_context(prev)
+                    let in_expr = (prev.is_some_and(super::expression_context)
                         && !(first_on_line && matches!(prev, Some("?" | "!" | ">" | ">>"))))
                         || (matches!(prev, Some("then" | "else"))
                             && top(&stack) == Some(Kind::ExprIf))
@@ -352,7 +313,7 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 "match" if !alloy_syntax::contextual::keyword_at(src, toks, i) => {}
 
                 "match" => {
-                    let in_expr = expression_context(prev);
+                    let in_expr = prev.is_some_and(super::expression_context);
                     push(&mut stack, Kind::MatchHead, 1, &mut opens, &mut closes);
 
                     if let Some(f) = stack.last_mut() {

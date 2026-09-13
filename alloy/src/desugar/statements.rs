@@ -1636,7 +1636,15 @@ impl<'s> Desugar<'s> {
     }
 
     /// Copies a gap, turning each comma into a space so newlines survive.
+    ///
+    /// An empty gap is no gap, the way `copy` reads one. A lenient parse
+    /// leaves a body with no closing `end`, so its last token is the
+    /// last member and the gap after it runs backwards.
     pub(crate) fn copy_gap_without_commas(&mut self, start: u32, end: u32) {
+        if start >= end {
+            return;
+        }
+
         let mut cursor = start;
         let gap = &self.src[start as usize..end as usize];
 

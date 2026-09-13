@@ -43,3 +43,13 @@ fn a_constructor_names_the_type_argument_form() {
     let good = "struct Pair<A, B> as\n    first: A\n    second: B\nend\n\nlocal p = new Pair<<number, string>> { first = 1, second = \"a\" }\n\nreturn p\n";
     assert!(messages(good).is_empty(), "{:?}", messages(good));
 }
+
+/// A lenient parse of an unclosed `enum` leaves a body whose last token
+/// is the last variant, so the gap after it runs backwards. The desugar
+/// read that gap and panicked on the byte range.
+#[test]
+fn an_unclosed_enum_reports_and_does_not_panic() {
+    let src = "enum E as\n    A\n    B\n\nfunction later(): number\n    return 1\nend\n";
+    let got = messages(src);
+    assert!(got.iter().any(|m| m.contains("needs an `end`")), "{got:?}");
+}

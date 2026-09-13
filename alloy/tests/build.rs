@@ -72,3 +72,38 @@ fn excludes_and_diagnostics_are_reported() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `reg.aly` and `reg.alx` both build `reg.luau`: the second write
+/// overwrites the first, and `require("./reg")` could not say which one
+/// it meant. The build names both files instead of writing one silently.
+#[test]
+fn two_sources_that_build_one_module_are_a_diagnostic() {
+    let dir = temp_project("twin-source");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"out\"\n").unwrap();
+    fs::write(dir.join("src/reg.aly"), "return 1\n").unwrap();
+    fs::write(
+        dir.join("src/reg.alx"),
+        "function view()\n    return <frame />\nend\n\nreturn view\n",
+    )
+    .unwrap();
+    // A name that differs in more than the extension is fine, and so is
+    // a definitions file beside the module it describes.
+    fs::write(dir.join("src/other.aly"), "return 2\n").unwrap();
+    fs::write(dir.join("src/other.d.aly"), "export type T = number\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let messages: Vec<String> = report
+        .diagnostics
+        .iter()
+        .map(|(p, d)| format!("{}: {}", p.display(), d.message))
+        .collect();
+
+    assert_eq!(
+        messages,
+        ["reg.aly: src/reg.aly and src/reg.alx both build src/reg.luau; rename one"],
+        "{messages:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

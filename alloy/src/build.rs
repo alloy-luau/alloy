@@ -224,10 +224,50 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         aliases,
     };
 
+    let shown = |p: &Path| build.input.join(p).to_string_lossy().replace('\\', "/");
+
     for path in sources.iter().chain(&plain) {
         let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
         let out_rel = output_for(&rel).unwrap_or_else(|| rel.clone());
         data_files.owners.entry(out_rel).or_insert(rel);
+    }
+
+    // Two sources whose names differ in the extension alone build one
+    // module: the second write overwrites the first, and
+    // `require("./reg")` could not say which one it meant either. The
+    // report names both, the way it does for a data file.
+    let mut builds: HashMap<PathBuf, PathBuf> = HashMap::new();
+
+    for path in &sources {
+        let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
+
+        if exclude.is_match(&rel) {
+            continue;
+        }
+
+        let Some(out_rel) = output_for(&rel) else {
+            continue;
+        };
+
+        match builds.get(&out_rel) {
+            Some(owner) => report.diagnostics.push((
+                rel.clone(),
+                Diagnostic {
+                    start: 0,
+                    end: 0,
+                    message: format!(
+                        "{} and {} both build {}; rename one",
+                        shown(&rel),
+                        shown(owner),
+                        shown(&out_rel)
+                    ),
+                },
+            )),
+
+            None => {
+                builds.insert(out_rel, rel);
+            }
+        }
     }
 
     // A plain `.luau` or `.lua` beside the sources goes to the output as

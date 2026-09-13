@@ -573,16 +573,35 @@ pub fn file_side(file: &str) -> Option<Side> {
 }
 
 /// The word of a `--@alloy-` comment that names no directive, or `None`
-/// when the line carries a known one or none at all.
+/// when the line carries a known one, prose about one, or none at all.
+///
+/// A directive opens its own comment, so a `--@alloy-` after a second
+/// `--` is the text of a comment that talks about a directive. A word
+/// that runs on past the name it holds is prose too, unless it stands
+/// within two edits of a real name, which reads as a typo.
 fn unknown_directive(line: &str) -> Option<String> {
     let at = line.find(PREFIX)?;
+
+    if line[..at].contains("--") {
+        return None;
+    }
+
     let rest = &line[at..];
     let word: String = rest
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '@')
         .collect();
 
-    (!NAMES.contains(&word.as_str())).then_some(word)
+    if NAMES.contains(&word.as_str()) {
+        return None;
+    }
+
+    let typo = NAMES
+        .iter()
+        .any(|n| crate::typecheck::edit_distance(n, &word) <= 2);
+    let runs_on = NAMES.iter().any(|n| word.starts_with(n));
+
+    (typo || !runs_on).then_some(word)
 }
 
 /// The byte range of the directive on `line`, for a diagnostic.
@@ -681,6 +700,25 @@ mod tests {
                 scan(&format!("{name} client\n")).unknown.is_empty(),
                 "{name} reads as unknown"
             );
+        }
+    }
+
+    /// A comment that talks about a directive is prose. The directive
+    /// opens its own comment, and a word that runs on past a name is not
+    /// that name. A word within two edits of a name is a typo and still
+    /// reports.
+    #[test]
+    fn a_comment_about_a_directive_is_no_directive() {
+        for line in [
+            "-- --@alloy-expect-error-ish, not a real directive\n",
+            "-- see --@alloy-ignore for this\n",
+            "--@alloy-expect-error-ish text\n",
+        ] {
+            assert!(scan(line).unknown.is_empty(), "{line:?}");
+        }
+
+        for line in ["--@alloy-ignor\n", "--@alloy-expct-error\n"] {
+            assert_eq!(scan(line).unknown.len(), 1, "{line:?}");
         }
     }
 

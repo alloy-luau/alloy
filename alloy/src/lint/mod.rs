@@ -113,6 +113,21 @@ pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
     (out, chosen.len())
 }
 
+/// Swaps the lints of one file for the lints of its rewritten text.
+///
+/// `--fix` writes the file, so every lint the run collected before the
+/// write is stale: a lint whose code the rewrite deleted still names a
+/// line, and each offset behind the rewrite has moved. The caller reads
+/// the file again, lints it, and hands the result here.
+pub fn after_fix(
+    remaining: &mut Vec<(std::path::PathBuf, Lint)>,
+    rel: &std::path::Path,
+    fresh: Vec<Lint>,
+) {
+    remaining.retain(|(r, _)| r.as_path() != rel);
+    remaining.extend(fresh.into_iter().map(|l| (rel.to_path_buf(), l)));
+}
+
 /// What a lint does when it fires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -951,6 +966,30 @@ mod tests {
                     && !matches!(*n, "unused_variable" | "unused_function")
             })
             .collect()
+    }
+
+    /// `--fix` deletes the code a lint named, so the lints of the old
+    /// text cannot be printed: the rewritten file answers instead.
+    #[test]
+    fn the_lints_of_a_fixed_file_come_from_its_new_text() {
+        let src = "function bad_bool(): boolean\n    if true then\n        return true\n    else\n        return false\n    end\nend\n";
+        let before = crate::compile(src).unwrap().lints;
+        assert!(before.iter().any(|l| l.name == "constant_condition"));
+        let (after, _) = apply_fixes(src, &before);
+        let rel = std::path::PathBuf::from("src/x.aly");
+        let mut remaining: Vec<(std::path::PathBuf, Lint)> = before
+            .iter()
+            .filter(|l| l.fix.is_none())
+            .map(|l| (rel.clone(), l.clone()))
+            .collect();
+        assert!(!remaining.is_empty());
+        after_fix(&mut remaining, &rel, crate::compile(&after).unwrap().lints);
+        assert!(
+            !remaining
+                .iter()
+                .any(|(_, l)| l.name == "constant_condition"),
+            "{remaining:?}"
+        );
     }
 
     #[test]

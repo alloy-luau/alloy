@@ -339,6 +339,27 @@ end
         "{:?}",
         out.lints
     );
+
+    // The helpers themselves drew lints, `explicit_any` and
+    // `manual_type_test` among them, and the rewrite landed on line 1 of
+    // the author's source.
+    let src = "-- A card page.\nimport * as UI from \"./card\"\nimport * as React from \"@packages/react\" --@alloy-ignore\n\nlocal function Spread(props: { x: number })\n    return <TextButton {props} />\nend\n\nreturn Spread, UI\n";
+    std::fs::write(&path, src).unwrap();
+    let out = alloy::compile_file(
+        path.to_str().unwrap(),
+        src,
+        &options,
+        Some(&luaux::Config::default()),
+        None,
+    )
+    .unwrap();
+    let first_line: Vec<&alloy::lint::Lint> = out
+        .lints
+        .iter()
+        .filter(|l| src[..l.start as usize].matches('\n').count() == 0)
+        .collect();
+    assert!(first_line.is_empty(), "{first_line:?}");
+    assert!(out.lints.iter().all(|l| l.fix.is_none()), "{:?}", out.lints);
 }
 
 /// A module that ends in `return <expr>` and exports nothing has no

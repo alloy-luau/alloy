@@ -68,9 +68,21 @@ pub fn compile_alx(
     })?;
 
     let lowering = lowering_map(src, &compiled);
+    let preamble = compiled.preamble;
     let lowered = compiled.output;
     let mut output = crate::compile_with(&lowered, options)?;
     let back = |offset: u32| lowering.to_source(offset);
+
+    // The lowering prepends its helpers in front of the file. They are
+    // the emit's text, not the author's, so a lint inside them has
+    // nothing the reader can act on, and its rewrite would land on the
+    // first line of the source.
+    if let Some((at, len)) = preamble {
+        let end = (at + len) as u32;
+        output
+            .lints
+            .retain(|l| l.start >= end || l.start < at as u32);
+    }
 
     for d in &mut output.diagnostics {
         d.start = back(d.start);

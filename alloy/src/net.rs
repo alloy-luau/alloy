@@ -194,6 +194,48 @@ pub fn check_size(got: u64, expected: u64) -> Result<(), String> {
     ))
 }
 
+/// `unzip` on unix, `tar` on Windows, which carries it in the box.
+pub fn unpack(zip: &Path, into: &Path) -> Result<(), String> {
+    let status = if cfg!(windows) {
+        Command::new("tar")
+            .arg("-xf")
+            .arg(zip)
+            .current_dir(into)
+            .status()
+    } else {
+        Command::new("unzip")
+            .arg("-qo")
+            .arg(zip)
+            .current_dir(into)
+            .status()
+    };
+
+    if status.is_ok_and(|s| s.success()) {
+        Ok(())
+    } else {
+        Err("cannot unpack the zip; `unzip` (or `tar` on Windows) is needed".to_string())
+    }
+}
+
+/// Downloads a zip to a temporary directory and unpacks it into `into`,
+/// which exists already. `name` names the asset in a message about the
+/// download. The temporary directory goes either way, so a failed
+/// download leaves nothing behind.
+pub fn fetch_zip(url: &str, expected_size: u64, into: &Path, name: &str) -> Result<(), String> {
+    let work = std::env::temp_dir().join(format!("alloy-zip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).map_err(|e| format!("cannot create {}: {e}", work.display()))?;
+
+    let zip = work.join("asset.zip");
+    let out = download(url, &zip)
+        .map_err(|e| format!("{name}: {e}"))
+        .and_then(|got| check_size(got, expected_size).map_err(|e| format!("{name}: {e}")))
+        .and_then(|()| unpack(&zip, into));
+    let _ = std::fs::remove_dir_all(&work);
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

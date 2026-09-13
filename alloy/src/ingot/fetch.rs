@@ -215,41 +215,7 @@ impl Source for GitHub {
         let url = asset["browser_download_url"]
             .as_str()
             .ok_or_else(|| format!("{name} carries no download link"))?;
-        let work = std::env::temp_dir().join(format!("alloy-ingot-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&work);
-        std::fs::create_dir_all(&work)
-            .map_err(|e| format!("cannot create {}: {e}", work.display()))?;
-        let zip = work.join("ingot.zip");
-        let got = crate::net::download(url, &zip).map_err(|e| format!("{name}: {e}"))?;
-        let out = crate::net::check_size(got, asset["size"].as_u64().unwrap_or(0))
-            .map_err(|e| format!("{name}: {e}"))
-            .and_then(|()| extract(&zip, dir));
-        let _ = std::fs::remove_dir_all(&work);
-
-        out
-    }
-}
-
-/// `unzip` on unix, `tar` on Windows, which carries it in the box.
-fn extract(zip: &Path, into: &Path) -> Result<(), String> {
-    let status = if cfg!(windows) {
-        std::process::Command::new("tar")
-            .arg("-xf")
-            .arg(zip)
-            .current_dir(into)
-            .status()
-    } else {
-        std::process::Command::new("unzip")
-            .arg("-qo")
-            .arg(zip)
-            .current_dir(into)
-            .status()
-    };
-
-    if status.is_ok_and(|s| s.success()) {
-        Ok(())
-    } else {
-        Err("cannot unpack the zip; `unzip` (or `tar` on Windows) is needed".to_string())
+        crate::net::fetch_zip(url, asset["size"].as_u64().unwrap_or(0), dir, name)
     }
 }
 

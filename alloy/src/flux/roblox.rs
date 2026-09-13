@@ -214,6 +214,20 @@ impl<'s> Scan<'s> {
             return true;
         }
 
+        // `props.part:clone()`: the receiver ends in a field, and the
+        // field's own annotation says what it holds.
+        if b >= a + 3
+            && matches!(self.t(b - 2), "." | "?.")
+            && self.is_name(b - 1)
+            && let Some(ty) = self.field_type(self.t(b - 1))
+        {
+            return if event {
+                names_event_type(ty)
+            } else {
+                names_instance_type(ty)
+            };
+        }
+
         if a + 1 != b || !self.is_name(a) {
             return false;
         }
@@ -232,6 +246,35 @@ impl<'s> Scan<'s> {
             Some((s, e)) => self.roblox_expr(s, e, event, false),
             None => false,
         }
+    }
+
+    /// The type a field declares: `part: Instance` in a table type, a
+    /// struct body, or an interface. A field of a parameter is the
+    /// receiver of a call, and the field's own annotation says what it
+    /// holds. The first declaration of the name answers, the way
+    /// `declared_type` answers for a binding.
+    fn field_type(&self, name: &str) -> Option<&'s str> {
+        for j in 0..self.toks.len() {
+            if !self.is_name(j) || self.t(j) != name || !self.at(j + 1, ":") {
+                continue;
+            }
+
+            // A field sits after `{` or a comma in a table type, and on
+            // its own line in a struct or an interface body.
+            if !matches!(self.prev(j), "{" | "," | "read" | "write") && !self.statement_start(j) {
+                continue;
+            }
+
+            let ty = j + 2;
+
+            // `t:method(...)` reads as an annotation from the tokens
+            // alone; the `(` after the name says it is a call.
+            if self.is_name(ty) && !self.at(ty + 1, "(") {
+                return Some(self.t(ty));
+            }
+        }
+
+        None
     }
 
     /// The tokens of the value in `local name = value`, on one line.
@@ -622,6 +665,27 @@ mod tests {
             vec!["deprecated_method"]
         );
         assert_eq!(names("script.Parent:clone()\n"), vec!["deprecated_method"]);
+        // A field of a parameter: the field's own annotation says what
+        // the receiver holds.
+        assert_eq!(
+            names(
+                "function _g(props: { part: Instance })\n    local n = props.part:clone()\n    print(n)\nend\n"
+            ),
+            vec!["deprecated_method"]
+        );
+        assert_eq!(
+            names(
+                "struct Props as\n    part: Instance\nend\n\nfunction _g(p: Props)\n    local n = p.part:clone()\n    print(n)\nend\n"
+            ),
+            vec!["deprecated_method"]
+        );
+        // A field of no Roblox type keeps the std's spelling.
+        assert_eq!(
+            names(
+                "function _g(props: { part: Widget })\n    local n = props.part:clone()\n    print(n)\nend\n"
+            ),
+            Vec::<&str>::new()
+        );
     }
 
     /// The std spells `connect`, `disconnect`, `wait`, and `clone` the

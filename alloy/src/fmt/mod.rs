@@ -717,6 +717,16 @@ mod tests {
         assert_eq!(fmt(src), want);
     }
 
+    /// A multi-line `if` expression indents every line that continues
+    /// it: the branch bodies and the `else`.
+    #[test]
+    fn an_if_expression_indents_its_branches() {
+        let src = "local x = if a > 0 then\n\"big\"\nelse\n\"small\"\n";
+        let want = "local x = if a > 0 then\n    \"big\"\n    else\n    \"small\"\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
     #[test]
     fn spacing_is_canonical() {
         assert_eq!(fmt("local x=1+2*3\n"), "local x = 1 + 2 * 3\n");

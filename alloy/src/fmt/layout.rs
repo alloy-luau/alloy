@@ -190,10 +190,17 @@ impl<'s> Formatter<'s> {
             let text = it.text.as_str();
             let prev = self.prev_code(i).map(|p| self.items[p].text.as_str());
 
+            // A line that opens the body of a branch continues the `if`
+            // expression, so it sits one level in like the `else` does.
+            let opens_expr_branch = it.newlines_before > 0
+                && stack.last() == Some(&Frame::ExprIf)
+                && matches!(prev, Some("then") | Some("else"));
+
             // A `then`, `else`, or `elseif` that opens a line continues
             // the `if` expression above it; any other token ends it.
             let continues_expr_if = matches!(text, "else" | "elseif")
-                || (text == "then" && stack.last() == Some(&Frame::ExprIf));
+                || (text == "then" && stack.last() == Some(&Frame::ExprIf))
+                || opens_expr_branch;
 
             if it.newlines_before > 0 && !continues_expr_if {
                 while stack.last() == Some(&Frame::ExprIf) {
@@ -274,7 +281,7 @@ impl<'s> Formatter<'s> {
                 }
 
                 _ => {
-                    depths[i] = level(&stack);
+                    depths[i] = level(&stack) + usize::from(opens_expr_branch);
 
                     if text == "if"
                         && ((prev.is_some_and(expression_context)

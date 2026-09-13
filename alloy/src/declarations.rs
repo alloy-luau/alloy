@@ -1522,6 +1522,33 @@ pub fn shapes(src: &str) -> Vec<Shape> {
     out
 }
 
+/// Every struct a source declares, with each field and whether it
+/// carries a default. `new Name { }` needs a value for every field
+/// without one, so the check of a construction of a struct another
+/// module declares reads this.
+pub fn struct_field_defaults(src: &str) -> Vec<(String, Vec<(String, bool)>)> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let Stmt::Struct(s) = stmt {
+            out.push((
+                text(s.name),
+                s.fields
+                    .iter()
+                    .map(|f| (text(f.name), f.default.is_some()))
+                    .collect(),
+            ));
+        }
+    }
+
+    out
+}
+
 /// `Readonly<Profile>`, `Partial<Profile>`, or `Sink<Profile>`.
 fn is_mapped_over_name(target: &str) -> bool {
     ["Readonly<", "Partial<", "Sink<"].iter().any(|head| {

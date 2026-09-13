@@ -120,6 +120,10 @@ pub struct EmitOptions {
     /// so `private_access` reports a read across a module boundary. See
     /// `crate::modules::import_privates`.
     pub import_privates: Vec<(String, Vec<String>)>,
+    /// Per struct an imported module declares, each field with whether
+    /// it carries a default, so `new Box { }` here reports the fields it
+    /// leaves unset. See `crate::modules::import_struct_fields`.
+    pub import_struct_fields: Vec<(String, Vec<(String, bool)>)>,
     /// The specs that name a module Alloy does not compile: a `.luau`
     /// or `.lua` file, or a data file. Such a module has no export
     /// table, so `import X from` binds the value it returns, not
@@ -266,6 +270,7 @@ impl Default for EmitOptions {
             import_trait_defaults: Vec::new(),
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
+            import_struct_fields: Vec::new(),
             plain_modules: Vec::new(),
             ambient_names: Vec::new(),
             import_attributes: Vec::new(),

@@ -621,6 +621,43 @@ pub fn import_shapes(
     out
 }
 
+/// The fields of every struct a module the source imports declares,
+/// each with whether it carries a default. The construction check reads
+/// them, so `new Box { }` on an imported struct names the fields it
+/// leaves unset.
+pub fn import_struct_fields(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<(String, bool)>)> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut out: Vec<(String, Vec<(String, bool)>)> = Vec::new();
+
+    for spec in import_specs(source) {
+        let Some(path) = resolve(&spec, from, aliases) else {
+            continue;
+        };
+
+        if seen.contains(&path) {
+            continue;
+        }
+
+        seen.push(path.clone());
+
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+
+        for (name, fields) in crate::declarations::struct_field_defaults(&text) {
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((name, fields));
+            }
+        }
+    }
+
+    out
+}
+
 /// The private fields of every struct a module the source imports
 /// declares: the struct's name with its private field names. The
 /// `private_access` lint reads a field of an imported struct through it.
@@ -1034,6 +1071,7 @@ impl crate::EmitOptions {
         self.import_types = import_types(source, from, aliases);
         self.import_enums = import_enums(source, from, aliases);
         self.import_privates = import_privates(source, from, aliases);
+        self.import_struct_fields = import_struct_fields(source, from, aliases);
         self.import_attributes = import_attributes(source, from, aliases);
         self.macros = import_macros(source, from, aliases);
         self.plain_modules = plain_modules(source, from, aliases);

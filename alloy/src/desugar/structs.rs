@@ -1715,10 +1715,23 @@ impl<'s> Desugar<'s> {
         self.check_missing_fields(*n, &sname, &given, "fields");
     }
 
+    /// The fields of a struct with whether each carries a default: this
+    /// file's own declaration, else the shape a module it imports
+    /// declares.
+    fn declared_fields(&self, name: &str) -> Option<Vec<(String, bool)>> {
+        self.struct_fields.get(name).cloned().or_else(|| {
+            self.options
+                .import_struct_fields
+                .iter()
+                .find(|(s, _)| s == name)
+                .map(|(_, fields)| fields.clone())
+        })
+    }
+
     /// Reports the fields a construction leaves unset. `form` says what
     /// the source wrote, so the message quotes it back.
     fn check_missing_fields(&mut self, n: TokSpan, sname: &str, given: &[String], form: &str) {
-        let Some(declared) = self.struct_fields.get(sname).cloned() else {
+        let Some(declared) = self.declared_fields(sname) else {
             return;
         };
         let missing: Vec<&str> = declared
@@ -1789,6 +1802,34 @@ impl<'s> Desugar<'s> {
         }
 
         if !self.structs.contains(&text) {
+            // A struct another module declares. The fields form still
+            // names every field without a default, and the imported
+            // shape carries them; every check below reads this file's
+            // own declaration, so the imported case ends here.
+            if args.is_none()
+                && let Some(Expr::Table { fields, .. }) = init
+            {
+                let mut given = Vec::new();
+                let mut open = false;
+
+                for f in fields {
+                    match f {
+                        TableField::Named { name, .. } => {
+                            given.push(self.text_of(*name).to_string())
+                        }
+
+                        // A spread or a computed key turns the check
+                        // off: the table's keys are then not in the
+                        // source.
+                        _ => open = true,
+                    }
+                }
+
+                if !open {
+                    self.check_missing_fields(*n, &text, &given, "fields");
+                }
+            }
+
             return;
         }
 
@@ -1863,6 +1904,36 @@ mod tests {
         // The same type written with other spacing is the same type.
         let same = "trait Held as\n    function slot(self): Array<number>\nend\nstruct Bag as\n    n: number\nend\nimpl Held for Bag as\n    function slot(self): Array< number >\n        return Array.new()\n    end\nend\nprint(new Bag { n = 1 })\n";
         assert!(messages(same).is_empty(), "{:?}", messages(same));
+    }
+
+    /// A struct another module declares is still built whole: the
+    /// imported shape says which fields carry a default, so the fields
+    /// form names the ones it leaves unset.
+    #[test]
+    fn a_construction_of_an_imported_struct_names_its_unset_fields() {
+        let options = crate::EmitOptions {
+            import_struct_fields: vec![(
+                "Box".to_string(),
+                vec![("w".to_string(), true), ("label".to_string(), false)],
+            )],
+            ..Default::default()
+        };
+        let messages = |src: &str| -> Vec<String> {
+            crate::compile_with(src, &options)
+                .unwrap()
+                .diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect()
+        };
+
+        assert_eq!(
+            messages("import { Box } from \"./box\"\n\nprint(new Box { })\n"),
+            vec!["`new Box { ... }` leaves `label` unset; a field without a default needs a value"]
+        );
+
+        let whole = messages("import { Box } from \"./box\"\n\nprint(new Box { label = \"a\" })\n");
+        assert!(whole.is_empty(), "{whole:?}");
     }
 
     #[test]

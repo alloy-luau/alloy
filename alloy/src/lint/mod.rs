@@ -1111,4 +1111,24 @@ mod tests {
             }
         }
     }
+
+    /// `alloy doc <lint>` answers for every name `alloy lint --list`
+    /// prints. A `LINTS` entry answers from its own `detail`; a markup
+    /// lint carries no detail, so its page is a table entry under
+    /// `alx.`.
+    #[test]
+    fn every_lint_has_a_doc_entry() {
+        for l in LINTS {
+            assert!(!l.detail.is_empty(), "no doc for lint `{}`", l.name);
+        }
+
+        for l in ALX_LINTS {
+            let key = format!("{ALX_PREFIX}{}", l.name);
+
+            assert!(
+                crate::docs::lookup(&key).is_some(),
+                "no doc for lint `{key}`"
+            );
+        }
+    }
 }

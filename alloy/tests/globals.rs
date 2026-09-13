@@ -372,6 +372,117 @@ fn a_global_that_is_not_const_is_one_value_for_the_project() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// `typeof(<a global>)` reads a value, so the name inside it takes the
+/// slot the way a value use does. In the declaring file the local is in
+/// scope, but the slot is what every other file holds, and both files
+/// have to name the same value.
+#[test]
+fn a_typeof_of_a_global_reads_the_shared_slot() {
+    let dir = temp_project("typeof-global");
+    fs::write(
+        dir.join("src/a.aly"),
+        concat!(
+            "--- The count.\n",
+            "global local counter = 0\n",
+            "\n",
+            "--- Reads the type back.\n",
+            "export function here(): typeof(counter)\n",
+            "    local g: typeof(counter) = counter\n",
+            "\n",
+            "    return g\n",
+            "end\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        concat!(
+            "--- Names it in a type only.\n",
+            "export function there(): number\n",
+            "    local g: typeof(counter) = 1\n",
+            "\n",
+            "    return g\n",
+            "end\n",
+            "\n",
+            "--- An alias and a generic argument name it too.\n",
+            "export type Count = typeof(counter)\n",
+            "\n",
+            "--- A list of them.\n",
+            "export type Counts = Array<typeof(counter)>\n",
+        ),
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    assert!(report.is_clean(), "{:?}", messages(&report));
+
+    let a = output(&dir, "a.luau");
+    assert!(a.contains("here(): typeof(_gs.counter)"), "{a}");
+    assert!(
+        a.contains("local g: typeof(_gs.counter) = _gs.counter"),
+        "{a}"
+    );
+
+    // A file that names the global in a type only still gets the
+    // require on its first line.
+    let b = output(&dir, "b.luau");
+    assert!(b.contains("local _g1 = require("), "{b}");
+    assert!(b.contains("local g: typeof(_g1.counter) = 1"), "{b}");
+    assert!(b.contains("type Count = typeof(_g1.counter)"), "{b}");
+    assert!(b.contains("Array<typeof(_g1.counter)>"), "{b}");
+    assert!(!b.contains("typeof(counter)"), "{b}");
+
+    for (rel, src) in [("a.luau", "src/a.aly"), ("b.luau", "src/b.aly")] {
+        assert_eq!(
+            output(&dir, rel).lines().count(),
+            fs::read_to_string(dir.join(src)).unwrap().lines().count(),
+            "{rel}: line count changed"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A `typeof` over a name that is not the global leaves the name as it
+/// was written: a local of a block under the declaration, a field, and
+/// a table key are each their own.
+#[test]
+fn a_typeof_of_a_name_that_only_looks_like_a_global_is_left_alone() {
+    let dir = temp_project("typeof-shadow");
+    fs::write(
+        dir.join("src/a.aly"),
+        "--- The count.\nglobal local counter = 0\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        concat!(
+            "--- Every shape of the word in a type.\n",
+            "export function all(): number\n",
+            "    local counter = 2\n",
+            "    local a: typeof(counter) = counter\n",
+            "    local t = { counter = 1 }\n",
+            "    local b: typeof(t.counter) = 1\n",
+            "    local c: typeof({ counter = 1 }) = t\n",
+            "\n",
+            "    return a + b + c.counter\n",
+            "end\n",
+        ),
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    assert!(report.is_clean(), "{:?}", messages(&report));
+
+    let b = output(&dir, "b.luau");
+    assert!(b.contains("local a: typeof(counter) = counter"), "{b}");
+    assert!(b.contains("local b: typeof(t.counter) = 1"), "{b}");
+    assert!(b.contains("local c: typeof({ counter = 1 }) = t"), "{b}");
+    assert!(!b.contains("_g1.counter"), "{b}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// A `global const` never changes, so the first line still binds it by
 /// copy and every use reads the name as it was written.
 #[test]

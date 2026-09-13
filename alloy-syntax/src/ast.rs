@@ -50,6 +50,10 @@ pub enum TypeEdit {
     /// A std type name used bare in a type: `Result<T, E>`, `Future<T>`,
     /// `Array<T>`, `HashMap<K, V>`, `Set<T>`. Emit qualifies it.
     AmbientName(TokSpan),
+    /// The expression inside `typeof(...)` in a type slot. The names it
+    /// reads are values, not types, so emit rewrites them the way it
+    /// rewrites a name in an expression.
+    TypeofValue(TokSpan),
     /// `{ [K in keyof T]: V }`: the whole table type span, the key name,
     /// the source type name, the value shape, and the value's modifier.
     Mapped {

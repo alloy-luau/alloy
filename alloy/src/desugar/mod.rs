@@ -23,7 +23,7 @@ use alloy_syntax::ast::{
     Binding, Block, CallArgs, ChildName, Chunk, ClassMember, Cond, DefaultExport, Destructure,
     Expr, FunctionBody, GenericFor, If, IndexKey, Local, Stmt, TableField, TokSpan, TypeEdit,
 };
-use alloy_syntax::lexer::Tok;
+use alloy_syntax::lexer::{Tok, TokKind};
 use modules::GLOBAL_STATE;
 
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
@@ -427,6 +427,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
         TypeEdit::AmbientName(span) => (toks[span.start as usize].start, u32::MAX),
 
+        TypeEdit::TypeofValue(span) => (toks[span.start as usize].start, u32::MAX),
+
         TypeEdit::Mapped { table, .. } => (toks[table.start as usize].start, 0),
     });
 
@@ -573,6 +575,27 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             let name = d.text_of(*span).to_string();
             let at = d.byte_start(*span);
             d.use_global(&name, at);
+        }
+
+        // `typeof(g)` reads a value, so the name inside it needs the
+        // require the first line writes, the same as a value use.
+        for edit in &chunk.type_edits {
+            let TypeEdit::TypeofValue(span) = edit else {
+                continue;
+            };
+
+            for i in span.start as usize..span.end as usize {
+                if toks[i].kind != TokKind::Ident
+                    || alloy_syntax::contextual::is_luau_reserved(toks[i].text(src))
+                    || (i > 0 && matches!(toks[i - 1].text(src), "." | ":"))
+                {
+                    continue;
+                }
+
+                let name = toks[i].text(src).to_string();
+                let at = toks[i].start;
+                d.use_global(&name, at);
+            }
         }
     }
 
@@ -2053,6 +2076,15 @@ impl<'s> Desugar<'s> {
                 self.byte_start(*span) >= start && self.byte_end(*span) <= end
             }
 
+            TypeEdit::TypeofValue(span) => {
+                self.byte_start(*span) >= start
+                    && self.byte_end(*span) <= end
+                    // With no shared global inside, the expression
+                    // copies as it stands, and a later edit of the same
+                    // range gets its turn.
+                    && !self.typeof_global_names(*span).is_empty()
+            }
+
             TypeEdit::Mapped { table, .. } => {
                 self.byte_start(*table) >= start && self.byte_end(*table) <= end
             }
@@ -2077,6 +2109,27 @@ impl<'s> Desugar<'s> {
                 }
 
                 self.copy(ne, end);
+
+                return;
+            }
+
+            Some(TypeEdit::TypeofValue(span)) => {
+                // `typeof(x)` reads the value `x`, so a `global local`
+                // inside it takes the slot prefix a value use takes.
+                // Without it the name is not bound here at all.
+                let mut at = start;
+
+                for (name, table) in self.typeof_global_names(span) {
+                    let (ns, ne) = (self.byte_start(name), self.byte_end(name));
+                    self.copy(at, ns);
+                    self.generate(ns, &format!("{table}."));
+                    // A bare name holds no edit of its own, and the
+                    // plain copy keeps this edit from matching again.
+                    self.r.copy(ns, ne);
+                    at = ne;
+                }
+
+                self.copy(at, end);
 
                 return;
             }
@@ -2169,6 +2222,8 @@ impl<'s> Desugar<'s> {
                     ),
 
                     TypeEdit::AmbientName(span) => (self.byte_start(*span), self.byte_end(*span)),
+
+                    TypeEdit::TypeofValue(span) => (self.byte_start(*span), self.byte_end(*span)),
 
                     TypeEdit::Mapped { table, .. } => {
                         (self.byte_start(*table), self.byte_end(*table))
@@ -2531,6 +2586,44 @@ impl<'s> Desugar<'s> {
         let index = self.global_modules.iter().position(|m| *m == g.require)?;
 
         Some(format!("_g{}", index + 1))
+    }
+
+    /// The names one `typeof(...)` expression reads off a shared global
+    /// slot, each with the table it reads off, in source order.
+    ///
+    /// `typeof` takes a value, so a `global local` inside it is the one
+    /// slot its module holds. A field, a method name, and a table key
+    /// are not that name.
+    fn typeof_global_names(&self, span: TokSpan) -> Vec<(TokSpan, String)> {
+        let mut out = Vec::new();
+
+        for i in span.start as usize..span.end as usize {
+            if self.toks[i].kind != TokKind::Ident {
+                continue;
+            }
+
+            let text = self.toks[i].text(self.src);
+
+            if alloy_syntax::contextual::is_luau_reserved(text) {
+                continue;
+            }
+
+            // After `.` or `:` the name is a field or a method.
+            if i > 0 && matches!(self.toks[i - 1].text(self.src), "." | ":") {
+                continue;
+            }
+
+            // `{ counter = 1 }`: the name in front of `=` is a key.
+            if self.toks.get(i + 1).map(|t| t.text(self.src)) == Some("=") {
+                continue;
+            }
+
+            if let Some(table) = self.shared_global_slot(text) {
+                out.push((TokSpan::new(i, i + 1), table));
+            }
+        }
+
+        out
     }
 
     /// The require and the bindings for every global the file named, as

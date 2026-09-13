@@ -182,8 +182,19 @@ impl<'a> Parser<'a> {
             "typeof" if self.text_at(1) == "(" => {
                 self.bump();
                 self.bump();
+                let start = self.pos;
                 self.expr()?;
+                let end = self.pos;
                 self.expect(")")?;
+
+                // The expression reads values. Emit rewrites a name in
+                // it the way it rewrites one in an expression, so the
+                // span is recorded and not the names: a type is a span
+                // here and the parser keeps no tree for it.
+                if end > start {
+                    self.type_edits
+                        .push(TypeEdit::TypeofValue(TokSpan::new(start, end)));
+                }
 
                 Ok(())
             }

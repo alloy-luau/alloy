@@ -9,11 +9,58 @@ use super::*;
 
 impl State {
     /// The compiler's diagnostics of one document as LSP diagnostics.
+    /// Another open source that builds the same module as this one:
+    /// `reg.aly` beside `reg.alx`. One name cannot mean two files, in
+    /// the output or in a `require`.
+    pub(crate) fn twin_module(&self, uri: &str) -> Option<String> {
+        let path = uri_to_path(uri)?;
+        let module = imports::module_path(&path);
+
+        self.docs
+            .keys()
+            .filter(|u| u.as_str() != uri && is_alloy_uri(u))
+            .find(|u| {
+                uri_to_path(u).is_some_and(|p| p != path && imports::module_path(&p) == module)
+            })
+            .cloned()
+    }
+
     pub(crate) fn alloy_diagnostics(&self, uri: &str) -> Vec<Value> {
         let mut diagnostics = Vec::new();
         let Some(doc) = self.docs.get(uri) else {
             return diagnostics;
         };
+
+        // Two sources whose names differ in the extension alone build
+        // one module. The build overwrote one with the other, and here
+        // the shadow of one takes the other's place, so every answer
+        // about this file is about someone else's code.
+        if let Some(twin) = self.twin_module(uri) {
+            let name = |u: &str| u.rsplit('/').next().unwrap_or(u).to_string();
+            let module = imports::module_path(Path::new(&name(uri)));
+            // The first line carries it: the collision is the file's
+            // name, which no range inside the text points at.
+            let width = doc
+                .source
+                .lines()
+                .next()
+                .map(|l| l.trim_end().encode_utf16().count() as u32)
+                .unwrap_or(0);
+            diagnostics.push(json!({
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": width },
+                },
+                "severity": 1,
+                "source": "Alloy",
+                "message": format!(
+                    "{} and {} both build {}.luau; rename one",
+                    name(uri),
+                    name(&twin),
+                    module.display()
+                ),
+            }));
+        }
 
         // A compile that stopped leaves no output. Its one error is all
         // the file can say; the child reads Alloy source and reports

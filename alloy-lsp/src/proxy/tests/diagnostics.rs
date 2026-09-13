@@ -392,3 +392,64 @@ pub(crate) fn a_contract_draws_an_action_that_writes_its_members() {
     // A range that holds no attribute draws nothing.
     assert!(st.contract_actions(uri, ((0, 0), (0, 4))).is_empty());
 }
+
+/// `reg.aly` beside `reg.alx` build one module, so the shadow of one
+/// takes the other's place and every answer about the first is about
+/// someone else's code. The file says so on its first line.
+#[test]
+pub(crate) fn two_sources_that_build_one_module_say_so() {
+    let st = super::support::files(&[
+        (
+            "file:///src/reg.aly",
+            "local v = 1
+print(v)
+",
+        ),
+        (
+            "file:///src/reg.alx",
+            "return function() end
+",
+        ),
+        (
+            "file:///src/other.aly",
+            "local w = 2
+print(w)
+",
+        ),
+    ]);
+
+    assert_eq!(
+        st.twin_module("file:///src/reg.aly").as_deref(),
+        Some("file:///src/reg.alx")
+    );
+    assert_eq!(st.twin_module("file:///src/other.aly"), None);
+
+    let said = |uri: &str| -> Vec<String> {
+        st.alloy_diagnostics(uri)
+            .iter()
+            .filter_map(|d| d["message"].as_str().map(str::to_string))
+            .filter(|m| m.contains("both build"))
+            .collect()
+    };
+
+    assert_eq!(
+        said("file:///src/reg.aly"),
+        ["reg.aly and reg.alx both build reg.luau; rename one"]
+    );
+    assert!(said("file:///src/other.aly").is_empty());
+
+    // The first line carries it, and it covers text the reader sees.
+    let item = st
+        .alloy_diagnostics("file:///src/reg.aly")
+        .into_iter()
+        .find(|d| {
+            d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("both build"))
+        })
+        .expect("the report");
+
+    assert_eq!(item["range"]["start"], json!({ "line": 0, "character": 0 }));
+    assert_eq!(item["range"]["end"], json!({ "line": 0, "character": 11 }));
+    assert_eq!(item["severity"], json!(1));
+}

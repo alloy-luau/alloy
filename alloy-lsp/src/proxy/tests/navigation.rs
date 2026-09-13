@@ -927,6 +927,44 @@ fn a_local_declaration_of_any_kind_names_a_target() {
     );
 }
 
+/// A field of a struct and a method of its own `impl` land on one table
+/// after the emit, so either name refuses a rename onto the other. The
+/// child reads the artifact, where the field list is generated text.
+#[test]
+fn a_field_and_an_impl_method_refuse_each_other() {
+    const SRC: &str = concat!(
+        "struct Box as\n",
+        "    size: number\n",
+        "end\n",
+        "\n",
+        "impl Box as\n",
+        "    function area(self): number\n",
+        "        return self.size * self.size\n",
+        "    end\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let at = |text: &str| SRC.find(text).expect(text);
+    let field = st.name_target(uri, at("size: number"));
+
+    assert!(matches!(field, Some(Target::Field { .. })));
+    assert_eq!(
+        st.rename_clash(uri, at("size: number"), field.as_ref(), "area")
+            .as_deref(),
+        Some("`area` is already a method on line 6")
+    );
+
+    // The other way round. The child renames a method of a plain
+    // `impl`, and the fields it stands beside are the proxy's to read.
+    let method = at("area(self)");
+
+    assert!(st.name_target(uri, method).is_none());
+    assert_eq!(
+        st.rename_clash(uri, method, None, "size").as_deref(),
+        Some("`size` is already a field on line 2")
+    );
+}
+
 /// A rename onto a name the scope already binds is refused. The edit
 /// set would bind one name twice, and the reader would lose what the
 /// lines below it mean.

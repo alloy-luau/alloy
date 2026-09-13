@@ -1044,11 +1044,11 @@ impl State {
                 says(&kind, &text, at)
             }
 
-            Some(Target::Field { owner, .. }) => self.docs.values().find_map(|d| {
-                let (at, _) = field_declaration(&d.source, owner, new_name)?;
+            Some(Target::Field { owner, .. }) => {
+                let (kind, src, at) = self.struct_member_site(owner, new_name)?;
 
-                says("field", &d.source, at)
-            }),
+                says(kind, src, at)
+            }
 
             Some(Target::Variant { file, owner, .. }) => {
                 let text = self.module_text(file)?;
@@ -1060,13 +1060,33 @@ impl State {
                 says("variant", &text, at)
             }
 
-            Some(Target::Method { trait_name, .. }) => self.docs.values().find_map(|d| {
-                let site = trait_method_sites(&d.source)
-                    .into_iter()
-                    .find(|s| s.trait_name.as_deref() == Some(trait_name) && s.name == *new_name)?;
+            Some(Target::Method { trait_name, .. }) => self
+                .docs
+                .values()
+                .find_map(|d| {
+                    let site = trait_method_sites(&d.source).into_iter().find(|s| {
+                        s.trait_name.as_deref() == Some(trait_name) && s.name == *new_name
+                    })?;
 
-                says("method", &d.source, site.at.0)
-            }),
+                    says("method", &d.source, site.at.0)
+                })
+                .or_else(|| {
+                    // Every struct that meets the trait writes the
+                    // method on its own table, beside its fields.
+                    let targets: Vec<String> = self
+                        .docs
+                        .values()
+                        .flat_map(|d| trait_method_sites(&d.source))
+                        .filter(|s| s.trait_name.as_deref() == Some(trait_name))
+                        .filter_map(|s| s.target)
+                        .collect();
+
+                    targets.iter().find_map(|owner| {
+                        let (kind, src, at) = self.struct_member_site(owner, new_name)?;
+
+                        says(kind, src, at)
+                    })
+                }),
 
             Some(Target::Nothing) => None,
 
@@ -1078,6 +1098,20 @@ impl State {
                 let (s, e) = at_word?;
                 let word = &doc.source[s..e];
                 let head = doc.source[..s].trim_end();
+
+                // A method of a plain `impl S` sits on the table of `S`,
+                // beside its fields, so a field of the new name is a
+                // clash. The child reads the artifact, where the field
+                // list is generated text, and sees none of it.
+                if let Some(owner) = trait_method_sites(&doc.source)
+                    .into_iter()
+                    .find(|site| site.at == (s, e))
+                    .and_then(|site| site.target)
+                    && let Some((kind, src, at)) = self.struct_member_site(&owner, new_name)
+                {
+                    return says(kind, src, at);
+                }
+
                 // A word after a dot is a member of another value, and a
                 // method lives on its own struct. Neither reads the
                 // names of the file.
@@ -1098,6 +1132,23 @@ impl State {
                 says(&kind, &doc.source, at)
             }
         }
+    }
+
+    /// A name that already stands on a struct: a field of its body, or a
+    /// method one of its `impl` blocks writes. The emit puts both on one
+    /// table, so either kind blocks the other.
+    fn struct_member_site(&self, owner: &str, name: &str) -> Option<(&'static str, &str, usize)> {
+        self.docs.values().find_map(|d| {
+            if let Some((at, _)) = field_declaration(&d.source, owner, name) {
+                return Some(("field", d.source.as_str(), at));
+            }
+
+            let site = trait_method_sites(&d.source)
+                .into_iter()
+                .find(|s| s.target.as_deref() == Some(owner) && s.name == name)?;
+
+            Some(("method", d.source.as_str(), site.at.0))
+        })
     }
 
     /// The whole rename of one struct field, as a workspace edit. The

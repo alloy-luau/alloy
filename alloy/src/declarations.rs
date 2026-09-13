@@ -68,16 +68,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
     };
 
     let toks = &parsed.lexed.toks;
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start {
-            return "";
-        }
-
-        let start = toks[span.start as usize].start as usize;
-        let end = toks[span.end as usize - 1].end as usize;
-
-        &src[start..end]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let stmts = &parsed.chunk.block.stmts;
 
     // Target -> (traits, methods), from every impl in the file. A
@@ -395,13 +386,7 @@ fn namespace_summaries(
     outer: &str,
     out: &mut Vec<Declaration>,
 ) {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let start_of = |span: TokSpan| toks[span.start as usize].start as usize;
     let name = text(ns.name);
     let path = match outer.is_empty() {
@@ -573,13 +558,7 @@ fn namespace_range(
     outer: &str,
     out: &mut Vec<NamespaceSpan>,
 ) {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let name = text(ns.name);
     let path = match outer.is_empty() {
         true => name.to_string(),
@@ -637,13 +616,7 @@ fn namespace_pairs(
     outer: &str,
     out: &mut Vec<(String, String)>,
 ) {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let name = text(ns.name);
     let path = match outer.is_empty() {
         true => name.to_string(),
@@ -685,13 +658,7 @@ pub fn method_signature(
     toks: &[alloy_syntax::lexer::Tok],
     m: &alloy_syntax::ast::Function,
 ) -> Option<String> {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let visibility = match m.visibility.map(text) {
         Some("private") => "private",
 
@@ -722,13 +689,7 @@ fn member_signature(
     toks: &[alloy_syntax::lexer::Tok],
     m: &alloy_syntax::ast::NamespaceMember,
 ) -> Option<String> {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let visibility = match m.is_private(src, toks) {
         true => "private",
 
@@ -842,13 +803,7 @@ fn member_signature(
 pub fn binding_type(src: &str, name: &str) -> Option<String> {
     let parsed = alloy_syntax::parse_lenient(src, Default::default()).ok()?;
     let toks = &parsed.lexed.toks;
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start || span.end as usize > toks.len() {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
 
     for stmt in &parsed.chunk.block.stmts {
         let Stmt::Local(l) = stmt else {
@@ -1524,15 +1479,7 @@ pub fn shapes(src: &str) -> Vec<Shape> {
         return Vec::new();
     };
     let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| -> String {
-        let a = toks[span.start as usize].start as usize;
-        let b = toks[(span.end as usize)
-            .saturating_sub(1)
-            .max(span.start as usize)]
-        .end as usize;
-
-        src[a..b].to_string()
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {

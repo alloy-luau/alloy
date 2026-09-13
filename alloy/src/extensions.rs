@@ -63,16 +63,7 @@ fn impls(src: &str, own: bool) -> Vec<Extension> {
     };
 
     let toks = &parsed.lexed.toks;
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start {
-            return "";
-        }
-
-        let start = toks[span.start as usize].start as usize;
-        let end = toks[span.end as usize - 1].end as usize;
-
-        &src[start..end]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
 
     let stmts = &parsed.chunk.block.stmts;
     let mut local: HashSet<&str> = HashSet::new();

@@ -197,16 +197,7 @@ pub fn declared_in(
     chunk: &alloy_syntax::ast::Chunk,
     file: &Path,
 ) -> Vec<Global> {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start || span.end as usize > toks.len() {
-            return "";
-        }
-
-        let start = toks[span.start as usize].start as usize;
-        let end = toks[span.end as usize - 1].end as usize;
-
-        &src[start..end]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let at = |span: TokSpan| -> u32 {
         match toks.get(span.start as usize) {
             Some(t) => t.start,
@@ -471,13 +462,7 @@ pub fn namespace_consts(
     ns: &alloy_syntax::ast::NamespaceDecl,
     prefix: &str,
 ) -> Vec<String> {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start || span.end as usize > toks.len() {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let mut out = Vec::new();
 
     for m in &ns.members {
@@ -512,13 +497,7 @@ fn namespace_types(
     ns: &alloy_syntax::ast::NamespaceDecl,
     prefix: &str,
 ) -> Vec<(String, String)> {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start || span.end as usize > toks.len() {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let mut out = Vec::new();
 
     for m in &ns.members {
@@ -746,21 +725,12 @@ fn require_of(
 
 /// The text of the first token of a span.
 fn token_text(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> String {
-    match toks.get(span.start as usize) {
-        Some(t) => src[t.start as usize..t.end as usize].to_string(),
-
-        None => String::new(),
-    }
+    span.text(src, toks).to_string()
 }
 
 /// The source a span covers, as written.
 fn span_text(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> String {
-    if span.end <= span.start || span.end as usize > toks.len() {
-        return String::new();
-    }
-
-    src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-        .to_string()
+    span.text_or_empty(src, toks).to_string()
 }
 
 /// The tokens of a span joined by one space, the shape a macro body

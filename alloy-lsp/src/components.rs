@@ -319,18 +319,7 @@ fn readable(src: &str) -> String {
 }
 
 fn text_of(src: &str, toks: &[Tok], span: TokSpan) -> String {
-    if span.end <= span.start {
-        return String::new();
-    }
-
-    let (Some(first), Some(last)) = (
-        toks.get(span.start as usize),
-        toks.get(span.end as usize - 1),
-    ) else {
-        return String::new();
-    };
-
-    src[first.start as usize..last.end as usize].to_string()
+    span.text_or_empty(src, toks).to_string()
 }
 
 /// The header of a declaration: what the author wrote up to the end of

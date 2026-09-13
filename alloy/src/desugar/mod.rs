@@ -738,14 +738,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
 /// The names one top-level statement binds.
 pub fn bound_names(src: &str, toks: &[Tok], stmt: &Stmt) -> Vec<String> {
-    let text = |span: TokSpan| -> String {
-        if span.end <= span.start || span.end as usize > toks.len() {
-            return String::new();
-        }
-
-        src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-            .to_string()
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks).to_string();
 
     match stmt {
         Stmt::Local(l) => l.names.iter().map(|b| text(b.name)).collect(),
@@ -782,14 +775,7 @@ pub fn bound_names(src: &str, toks: &[Tok], stmt: &Stmt) -> Vec<String> {
 /// declaration, an import. A global by one of these names is the file's
 /// own name, so nothing is injected over it.
 fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
-    let text = |span: TokSpan| -> String {
-        if span.end <= span.start || span.end as usize > toks.len() {
-            return String::new();
-        }
-
-        src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-            .to_string()
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks).to_string();
     let mut out = HashSet::new();
 
     for stmt in &chunk.block.stmts {

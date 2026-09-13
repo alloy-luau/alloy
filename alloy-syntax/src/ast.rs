@@ -23,6 +23,30 @@ impl TokSpan {
     pub fn is_empty(&self) -> bool {
         self.start == self.end
     }
+
+    /// The source the span covers, as written. An empty span reads the
+    /// token at `start`, so a zero-width span still names a place. A
+    /// span past the end of the token list reads "".
+    pub fn text<'s>(self, src: &'s str, toks: &[crate::lexer::Tok]) -> &'s str {
+        let last = (self.end as usize)
+            .saturating_sub(1)
+            .max(self.start as usize);
+        let (Some(first), Some(last)) = (toks.get(self.start as usize), toks.get(last)) else {
+            return "";
+        };
+
+        &src[first.start as usize..last.end as usize]
+    }
+
+    /// The source the span covers, or "" when the span is empty. A
+    /// caller that reads "no tokens" as "no text" takes this one.
+    pub fn text_or_empty<'s>(self, src: &'s str, toks: &[crate::lexer::Tok]) -> &'s str {
+        match self.end <= self.start {
+            true => "",
+
+            false => self.text(src, toks),
+        }
+    }
 }
 
 #[derive(Debug)]

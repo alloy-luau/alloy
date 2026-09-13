@@ -189,13 +189,7 @@ struct Fn {
 /// `export` said "project wide" before `global` existed; `global impl`
 /// says it now, and the rewrite is the one word.
 fn export_impl(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
-    let text = |span: alloy_syntax::ast::TokSpan| -> &str {
-        if span.end <= span.start || span.end as usize > toks.len() {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text_or_empty(src, toks);
     // A struct or an enum of this file is never foreign, whatever its name.
     let mut local: Vec<&str> = Vec::new();
 
@@ -254,13 +248,7 @@ fn export_impl(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
 /// A use of a namespace the file declares `@deprecated`. The attribute
 /// has no Luau form on a namespace, so nothing else reports it.
 fn deprecated_namespaces(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
-    let text = |span: alloy_syntax::ast::TokSpan| -> &str {
-        match toks.get(span.start as usize) {
-            Some(t) => t.text(src),
-
-            None => "",
-        }
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks);
     // The name, the message the attribute carries, and the byte range
     // of the declaration. A member reads a sibling by its own name, so
     // a hit inside the body is the long way to write it, not a use.

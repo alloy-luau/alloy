@@ -77,15 +77,7 @@ fn exported_namespace_types(source: &str) -> Vec<String> {
         return Vec::new();
     };
     let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| -> String {
-        let a = toks[span.start as usize].start as usize;
-        let b = toks[(span.end as usize)
-            .saturating_sub(1)
-            .max(span.start as usize)]
-        .end as usize;
-
-        source[a..b].to_string()
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
     let mut listed: Vec<String> = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
@@ -125,15 +117,7 @@ fn collect_namespace_types(
 ) {
     use alloy_syntax::ast::Stmt;
 
-    let text = |span: alloy_syntax::ast::TokSpan| -> String {
-        let a = toks[span.start as usize].start as usize;
-        let b = toks[(span.end as usize)
-            .saturating_sub(1)
-            .max(span.start as usize)]
-        .end as usize;
-
-        source[a..b].to_string()
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
 
     for m in &ns.members {
         if m.is_private(source, toks) {
@@ -206,11 +190,7 @@ pub fn exported_trait_defaults(source: &str) -> Vec<(String, Vec<String>)> {
         return Vec::new();
     };
     let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| {
-        let t = toks[span.start as usize];
-
-        source[t.start as usize..t.end as usize].to_string()
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
@@ -911,15 +891,7 @@ pub fn exported_names(source: &str) -> Vec<String> {
         return Vec::new();
     };
     let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| -> String {
-        let a = toks[span.start as usize].start as usize;
-        let b = toks[(span.end as usize)
-            .saturating_sub(1)
-            .max(span.start as usize)]
-        .end as usize;
-
-        source[a..b].to_string()
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
@@ -1071,15 +1043,7 @@ pub fn returned_keys(source: &str) -> Option<Vec<String>> {
     let parsed = alloy_syntax::parse_lenient(&source, options).ok()?;
     let toks = &parsed.lexed.toks;
     let stmts = &parsed.chunk.block.stmts;
-    let text = |span: alloy_syntax::ast::TokSpan| -> String {
-        let a = toks[span.start as usize].start as usize;
-        let b = toks[(span.end as usize)
-            .saturating_sub(1)
-            .max(span.start as usize)]
-        .end as usize;
-
-        source[a..b].to_string()
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(&source, toks).to_string();
 
     let Some(Stmt::Return(r)) = stmts.last() else {
         return None;
@@ -1185,13 +1149,7 @@ fn assigned_keys(source: &str, name: &str) -> Vec<String> {
         return Vec::new();
     };
     let toks = &parsed.lexed.toks;
-    let word = |span: alloy_syntax::ast::TokSpan| -> String {
-        match toks.get(span.start as usize) {
-            Some(t) => source[t.start as usize..t.end as usize].to_string(),
-
-            None => String::new(),
-        }
-    };
+    let word = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
@@ -1329,11 +1287,7 @@ pub fn import_problems(
 
         (a, b)
     };
-    let text = |span: alloy_syntax::ast::TokSpan| -> &str {
-        let (a, b) = range(span);
-
-        &source[a as usize..b as usize]
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks);
     let mut out = Vec::new();
     let mut exports: HashMap<PathBuf, Surface> = HashMap::new();
     // Every name the file binds through an import. A type and a value

@@ -487,15 +487,7 @@ impl<'a> Parser<'a> {
 
     /// The source a token span covers.
     fn span_text(&self, span: TokSpan) -> &'a str {
-        let last = (span.end as usize)
-            .saturating_sub(1)
-            .max(span.start as usize);
-        let (Some(first), Some(last)) = (self.toks.get(span.start as usize), self.toks.get(last))
-        else {
-            return "";
-        };
-
-        &self.src[first.start as usize..last.end as usize]
+        span.text(self.src, self.toks)
     }
 
     fn err(&self, message: &str) -> ParseError {

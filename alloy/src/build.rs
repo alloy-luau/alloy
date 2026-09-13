@@ -104,13 +104,8 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
         let Ok(parsed) = alloy_syntax::parse_one(&src) else {
             continue;
         };
-        let text = |span: alloy_syntax::ast::TokSpan| -> String {
-            let toks = &parsed.lexed.toks;
-            let start = toks[span.start as usize].start as usize;
-            let end = toks[span.end as usize - 1].end as usize;
-
-            src[start..end].to_string()
-        };
+        let text =
+            |span: alloy_syntax::ast::TokSpan| span.text(&src, &parsed.lexed.toks).to_string();
 
         for stmt in &parsed.chunk.block.stmts {
             let alloy_syntax::ast::Stmt::Struct(st) = stmt else {

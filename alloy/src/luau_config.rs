@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use alloy_syntax::ast::{Expr, Stmt, TableField, TokSpan};
+use alloy_syntax::ast::{Expr, Stmt, TableField};
 use alloy_syntax::lexer::Tok;
 
 /// The keys the tools read.
@@ -83,12 +83,12 @@ pub fn parse_config_luau(text: &str) -> Option<LuauConfig> {
     if let Some(Expr::Table { fields, .. }) = field(text, toks, luau, "aliases") {
         for f in fields {
             let (key, value) = match f {
-                TableField::Named { name, value } => (text_of(text, toks, *name), value),
+                TableField::Named { name, value } => (name.text(text, toks), value),
 
                 TableField::Computed {
                     key: Expr::String(k),
                     value,
-                } => (unquote(text_of(text, toks, *k)), value),
+                } => (unquote(k.text(text, toks)), value),
 
                 _ => continue,
             };
@@ -108,13 +108,6 @@ pub fn parse_config_luau(text: &str) -> Option<LuauConfig> {
 }
 
 /// The source text of a token span.
-fn text_of<'s>(src: &'s str, toks: &[Tok], span: TokSpan) -> &'s str {
-    let a = toks[span.start as usize].start as usize;
-    let b = toks[span.end as usize - 1].end as usize;
-
-    &src[a..b]
-}
-
 /// The value of a named field of a table literal.
 fn field<'a>(src: &str, toks: &[Tok], table: &'a Expr, name: &str) -> Option<&'a Expr> {
     let Expr::Table { fields, .. } = table else {
@@ -122,12 +115,12 @@ fn field<'a>(src: &str, toks: &[Tok], table: &'a Expr, name: &str) -> Option<&'a
     };
 
     fields.iter().find_map(|f| match f {
-        TableField::Named { name: n, value } if text_of(src, toks, *n) == name => Some(value),
+        TableField::Named { name: n, value } if n.text(src, toks) == name => Some(value),
 
         TableField::Computed {
             key: Expr::String(k),
             value,
-        } if unquote(text_of(src, toks, *k)) == name => Some(value),
+        } if unquote(k.text(src, toks)) == name => Some(value),
 
         _ => None,
     })
@@ -135,7 +128,7 @@ fn field<'a>(src: &str, toks: &[Tok], table: &'a Expr, name: &str) -> Option<&'a
 
 fn string_of(src: &str, toks: &[Tok], e: &Expr) -> Option<String> {
     match e {
-        Expr::String(s) => Some(unquote(text_of(src, toks, *s)).to_string()),
+        Expr::String(s) => Some(unquote(s.text(src, toks)).to_string()),
 
         _ => None,
     }

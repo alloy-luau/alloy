@@ -63,13 +63,7 @@ fn block_of(
     toks: &[alloy_syntax::lexer::Tok],
     i: &alloy_syntax::ast::ImplDecl,
 ) -> ImplBlock {
-    let text = |span: TokSpan| -> &str {
-        if span.end <= span.start {
-            return "";
-        }
-
-        &src[toks[span.start as usize].start as usize..toks[span.end as usize - 1].end as usize]
-    };
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
     let target = text(i.target).to_string();
     let generics = i
         .generics

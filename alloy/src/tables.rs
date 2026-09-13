@@ -20,15 +20,7 @@ pub fn plain_tables(src: &str) -> Vec<(String, Vec<String>)> {
         return Vec::new();
     };
     let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| -> String {
-        let a = toks[span.start as usize].start as usize;
-        let b = toks[(span.end as usize)
-            .saturating_sub(1)
-            .max(span.start as usize)]
-        .end as usize;
-
-        src[a..b].to_string()
-    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
     let mut order: Vec<String> = Vec::new();
     let mut members: HashMap<String, Vec<String>> = HashMap::new();
     let mut dropped: HashSet<String> = HashSet::new();

@@ -95,9 +95,7 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
         return Vec::new();
     };
     let toks = &parsed.lexed.toks;
-    let name_of = |span: alloy_syntax::ast::TokSpan| -> String {
-        toks[span.start as usize].text(text).to_string()
-    };
+    let name_of = |span: alloy_syntax::ast::TokSpan| span.text(text, toks).to_string();
     let mut out = Vec::new();
     let mut push =
         |name: String, is_type: bool, is_default: bool, is_attribute: bool, kind: u64| {

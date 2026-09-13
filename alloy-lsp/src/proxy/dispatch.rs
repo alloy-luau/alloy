@@ -1242,7 +1242,7 @@ impl Server {
                             // inner function is generated even when the
                             // copied newline follows. A hint that names an
                             // error type describes the emit, not the source.
-                            hints.retain(|h| {
+                            hints.retain_mut(|h| {
                                 let error_type = hint_label(h).contains("*error-type*");
                                 let offset = h
                                     .get("position")
@@ -1250,6 +1250,22 @@ impl Server {
                                     .and_then(|(l, c)| offset_of(&doc.shadow, l, c));
                                 let generated = offset
                                     .is_some_and(|o| doc.generated_offset(o.saturating_sub(1)));
+
+                                // A destructuring binding is generated
+                                // text end to end, and the names the
+                                // braces hold are the author's own. The
+                                // hint travels with the name it types
+                                // and moves onto it after the mapping,
+                                // which puts every hint of the line on
+                                // the line's first byte.
+                                if generated
+                                    && !error_type
+                                    && let Some(name) = destructured_name(doc, h)
+                                {
+                                    h[DESTRUCTURED] = json!(name);
+
+                                    return true;
+                                }
 
                                 !error_type && !generated
                             });

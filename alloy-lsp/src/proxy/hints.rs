@@ -17,12 +17,88 @@ pub(crate) fn hint_label(hint: &Value) -> String {
     }
 }
 
+/// The key a hint on a destructuring binding carries from the filter to
+/// the fold: the name it types. The mapping runs between the two, and it
+/// puts every hint of that line on the line's first byte.
+pub(crate) const DESTRUCTURED: &str = "_alloyDestructured";
+
+/// The name a hint on a destructuring binding belongs to.
+///
+/// `local { x, y } = t` lowers to `local _1 = t local x, y = _1.x, _1.y`.
+/// The whole line is generated text, so the filter drops every hint on
+/// it; the names the braces hold are the author's own, and the lowering
+/// writes each one again. The temp `_1` is nobody's name.
+pub(crate) fn destructured_name(doc: &Doc, hint: &Value) -> Option<String> {
+    let (line, character) = hint.get("position").and_then(position_of_value)?;
+    let source = doc.source.lines().nth(line as usize)?;
+    let open = source.find('{')?;
+
+    // A destructuring binding, not a table literal: the braces stand
+    // right after the `local`.
+    if source[..open].trim() != "local" {
+        return None;
+    }
+
+    let close = source[open..].find('}')? + open;
+    let shadow = doc.shadow.lines().nth(line as usize)?;
+    let end = offset_of(shadow, 0, character).filter(|e| *e > 0)?;
+
+    if !keywords::is_word_at(shadow, end - 1) {
+        return None;
+    }
+
+    let (start, name_end) = keywords::word_range(shadow, end - 1);
+
+    // The hint stands right after the name it types.
+    if name_end != end {
+        return None;
+    }
+
+    let name = &shadow[start..name_end];
+
+    whole_word(&source[open..close], name).map(|_| name.to_string())
+}
+
+/// Moves a hint of a destructuring binding onto the name inside the
+/// braces, where the reader wrote it.
+fn move_destructured(doc: &Doc, hint: &mut Value) {
+    let name = hint
+        .as_object_mut()
+        .and_then(|o| o.remove(DESTRUCTURED))
+        .and_then(|n| n.as_str().map(str::to_string));
+    let Some(name) = name else {
+        return;
+    };
+    let Some((line, _)) = hint.get("position").and_then(position_of_value) else {
+        return;
+    };
+    let Some(source) = doc.source.lines().nth(line as usize) else {
+        return;
+    };
+    let at = source
+        .find('{')
+        .and_then(|open| {
+            let close = source[open..].find('}')? + open;
+
+            whole_word(&source[open..close], &name).map(|c| open + c + name.len())
+        })
+        .map(|at| position_of(source, at).1);
+
+    if let Some(character) = at {
+        hint["position"] = json!({ "line": line, "character": character });
+    }
+}
+
 /// The hints as the source can hold them. A parameter hint that names
 /// an emit slot goes. A type hint loses `@checked`, reads by the name
 /// its line gives when the print is unwritable, and inserts nothing
 /// when no name is at hand.
 pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
     hints.retain(|h| !emit_slot_hint(h));
+
+    for h in hints.iter_mut() {
+        move_destructured(doc, h);
+    }
 
     let parameters = declared_type_parameters(&doc.source);
 
@@ -55,6 +131,13 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
         // says what it is.
         let on_self = position.is_some_and(|(l, c)| self_parameter(doc, l, c));
         let from_source = position.and_then(|(l, c)| source_type(doc, l, c));
+
+        // `unknown` says nothing about the binding, and `~nil` is the
+        // checker's own spelling for a negation Alloy never writes. An
+        // empty gutter is quieter than a hint with no content.
+        if matches!(annotation, "unknown" | "~nil") && from_source.is_none() {
+            return false;
+        }
 
         let label = match (named && !on_self, from_source) {
             (true, _) => label,

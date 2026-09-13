@@ -1054,3 +1054,73 @@ pub(crate) fn a_name_in_a_nested_default_arm_reads_the_outer_binding() {
     let other = SRC.find("\"other\"").expect("default");
     assert_eq!(case_binding_span(doc, line_of(other), "x", &known), None);
 }
+
+/*
+A destructuring binding and a hint that says nothing.
+
+`local { x, y } = t` lowers to `local _1 = t local x, y = _1.x, _1.y`.
+The whole line is generated text, so the filter dropped every hint on it
+and the names in the braces got none. The temp `_1` is nobody's name.
+
+`unknown` and the checker's own `~nil` annotate nothing and tell the
+reader nothing, so neither belongs in the gutter.
+*/
+#[test]
+fn a_destructuring_binding_gets_its_type_hints() {
+    let src = "local t = { x = 1, y = \"two\" }\nlocal { x, y } = t\nprint(x, y)\n";
+    let (st, uri) = super::support::one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let shadow = doc.shadow.lines().nth(1).expect("the lowered line");
+    // Right after the name, where a type hint reads.
+    let after = |pat: &str, name: usize| (shadow.find(pat).expect(pat) + name) as u32;
+    let hint = |character: u32, label: &str| json!({ "kind": 1, "label": label, "position": { "line": 1, "character": character } });
+
+    // The shadow writes both names again, and the temp beside them.
+    assert_eq!(
+        destructured_name(doc, &hint(after("x,", 1), ": number")).as_deref(),
+        Some("x")
+    );
+    assert_eq!(
+        destructured_name(doc, &hint(after("y =", 1), ": string")).as_deref(),
+        Some("y")
+    );
+    assert_eq!(destructured_name(doc, &hint(after("_1", 2), ": { }")), None);
+
+    // After the mapping every hint of the line sits on its first byte.
+    // The name each one carries says where it belongs.
+    let mut hints = vec![
+        json!({
+            "kind": 1,
+            "label": ": number",
+            "position": { "line": 1, "character": 0 },
+            DESTRUCTURED: "x",
+        }),
+        json!({
+            "kind": 1,
+            "label": ": string",
+            "position": { "line": 1, "character": 0 },
+            DESTRUCTURED: "y",
+        }),
+        // `for k, v in pairs(counts)` over an untyped record.
+        json!({ "kind": 1, "label": ": ~nil", "position": { "line": 2, "character": 7 } }),
+        json!({ "kind": 1, "label": ": unknown", "position": { "line": 2, "character": 10 } }),
+    ];
+    clean_hints(&mut hints, doc);
+
+    let places: Vec<(String, u32)> = hints
+        .iter()
+        .map(|h| {
+            let (_, character) = position_of_value(&h["position"]).expect("position");
+
+            (hint_label(h), character)
+        })
+        .collect();
+
+    // `x` sits at column 8 of the source line and `y` at column 11.
+    assert_eq!(
+        places,
+        [(": number".to_string(), 9), (": string".to_string(), 12)],
+        "{hints:?}"
+    );
+    assert!(!hints.iter().any(|h| h.get(DESTRUCTURED).is_some()));
+}

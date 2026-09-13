@@ -52,7 +52,8 @@ use documents::{
 };
 #[allow(unused_imports)]
 use hints::{
-    clean_hints, emit_slot_hint, hint_label, name_future_hint, undeclared_variable, writable_type,
+    DESTRUCTURED, clean_hints, destructured_name, emit_slot_hint, hint_label, name_future_hint,
+    undeclared_variable, writable_type,
 };
 #[allow(unused_imports)]
 use hover::{

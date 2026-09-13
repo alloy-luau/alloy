@@ -506,9 +506,11 @@ impl Server {
                     let symbols = {
                         let st = self.state.lock().expect("state");
 
+                        let path = uri_to_path(&uri).unwrap_or_else(|| PathBuf::from(&uri));
+
                         st.docs
                             .get(&uri)
-                            .and_then(|doc| document_symbols(&doc.source))
+                            .and_then(|doc| document_symbols(&doc.source, &path))
                     };
 
                     if let Some(symbols) = symbols {
@@ -843,6 +845,10 @@ impl Server {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let query = message
+            .pointer("/params/query")
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         if let Some(id) = message.get("id") {
             let key = id_key(id);
@@ -855,6 +861,7 @@ impl Server {
                     trigger,
                     range,
                     diagnostics,
+                    query,
                 },
             );
         }
@@ -1041,7 +1048,7 @@ impl Server {
             edit_capabilities(&mut message);
         }
 
-        let (method, ctx, position, trigger, range, reported) = match pending {
+        let (method, ctx, position, trigger, range, reported, query) = match pending {
             Some(p) => (
                 p.method,
                 p.ctx,
@@ -1049,9 +1056,10 @@ impl Server {
                 p.trigger,
                 p.range,
                 p.diagnostics,
+                p.query,
             ),
 
-            None => (String::new(), None, None, None, None, Vec::new()),
+            None => (String::new(), None, None, None, None, Vec::new(), None),
         };
 
         // The child answers null when it has no action; the Alloy
@@ -1508,6 +1516,9 @@ impl Server {
                                     !in_a_dot_directory(&path, &mirror, root.as_deref())
                                 })
                         });
+                        // A `declare Name: T` binds no name the child can
+                        // point at, so the definitions files answer here.
+                        ambient_symbols(&st, query.as_deref(), symbols);
                     }
                 }
 

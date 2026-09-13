@@ -14,6 +14,8 @@ pub(crate) struct Pending {
     /// The diagnostics the editor sent with a code action request. An
     /// import quick fix reads the name the report could not resolve.
     pub(crate) diagnostics: Vec<Value>,
+    /// The text a workspace symbol request searches for.
+    pub(crate) query: Option<String>,
 }
 
 /// An `alloy.toml` and the path it was read from.

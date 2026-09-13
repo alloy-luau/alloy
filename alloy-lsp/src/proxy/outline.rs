@@ -17,6 +17,9 @@ use alloy_syntax::ast::{DefaultExport, Stmt};
 use alloy_syntax::lexer::Tok;
 use serde_json::{Value, json};
 
+use std::path::Path;
+
+use super::{State, range_value, uri_to_path};
 use crate::doc::position_of;
 
 // `SymbolKind` of the protocol.
@@ -33,6 +36,73 @@ const CONSTANT: u8 = 14;
 const STRUCT: u8 = 23;
 const EVENT: u8 = 24;
 const ENUM_MEMBER: u8 = 22;
+
+/// The `declare Name: T` values of the open definitions files, for a
+/// workspace symbol query. The child indexes the compiled definitions,
+/// where that form binds no name it can point at; a `declare function`
+/// it does index, and a name it already sent comes once.
+pub(crate) fn ambient_symbols(st: &State, query: Option<&str>, out: &mut Vec<Value>) {
+    let query = query.unwrap_or_default().to_lowercase();
+
+    for (uri, doc) in &st.docs {
+        if !uri.ends_with(".d.aly") {
+            continue;
+        }
+
+        let Some(path) = uri_to_path(uri) else {
+            continue;
+        };
+
+        for (name, (from, to)) in ambient_values(&doc.source, &path) {
+            let known = out
+                .iter()
+                .any(|v| v.get("name").and_then(Value::as_str) == Some(name.as_str()));
+
+            if known || !name.to_lowercase().contains(&query) {
+                continue;
+            }
+
+            out.push(json!({
+                "name": name,
+                "kind": VARIABLE,
+                "location": {
+                    "uri": uri,
+                    "range": range_value(position_of(&doc.source, from), position_of(&doc.source, to)),
+                },
+            }));
+        }
+    }
+}
+
+/// Every `declare Name: T` of a source, with the byte range of its name.
+fn ambient_values(src: &str, path: &Path) -> Vec<(String, (usize, usize))> {
+    let options = alloy_syntax::parser::ParseOptions::for_path(path);
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, options) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Declare(d) = stmt else {
+            continue;
+        };
+        let at = d.span.start as usize;
+        let word = |i: usize| toks.get(i).map(|t| &src[t.start as usize..t.end as usize]);
+
+        if word(at + 2) != Some(":") {
+            continue;
+        }
+
+        let name = alloy_syntax::ast::TokSpan::new(at + 1, at + 2);
+
+        if let Some(bytes) = bytes_of(name, toks) {
+            out.push((text_of(name, src, toks), bytes));
+        }
+    }
+
+    out
+}
 
 /// One entry of the outline, before it becomes JSON.
 struct Entry {
@@ -69,8 +139,9 @@ impl Entry {
 
 /// The outline of an Alloy source, or `None` when the file does not
 /// parse far enough to hold one.
-pub(crate) fn document_symbols(src: &str) -> Option<Vec<Value>> {
-    let parsed = alloy_syntax::parse_lenient(src, Default::default()).ok()?;
+pub(crate) fn document_symbols(src: &str, path: &Path) -> Option<Vec<Value>> {
+    let options = alloy_syntax::parser::ParseOptions::for_path(path);
+    let parsed = alloy_syntax::parse_lenient(src, options).ok()?;
     let toks = &parsed.lexed.toks;
     let mut entries: Vec<Entry> = Vec::new();
 
@@ -259,6 +330,32 @@ fn push_statement(stmt: &Stmt, src: &str, toks: &[Tok], out: &mut Vec<Entry>) {
             }
         }
 
+        // `declare function f(...)`, `declare x: T`, `declare class N`,
+        // and `declare extern type N`. The tree keeps the span alone, so
+        // the name is the token the form's keyword is followed by.
+        Stmt::Declare(d) => {
+            let at = d.span.start as usize;
+            let word = |i: usize| toks.get(i).map(|t| &src[t.start as usize..t.end as usize]);
+            let (name_at, kind) = match word(at + 1) {
+                Some("function") => (at + 2, FUNCTION),
+
+                Some("class") => (at + 2, CLASS),
+
+                Some("extern") => (at + 3, CLASS),
+
+                // `declare x: T` binds a value; anything else is no
+                // declaration this walk knows.
+                _ if word(at + 2) == Some(":") => (at + 1, VARIABLE),
+
+                _ => return,
+            };
+            let name = alloy_syntax::ast::TokSpan::new(name_at, name_at + 1);
+
+            if bytes_of(name, toks).is_some() {
+                out.push(named(name, kind, Vec::new()));
+            }
+        }
+
         // The methods of an `impl` belong to the type it names, so they
         // join that entry instead of opening a second one under the
         // same word.
@@ -301,7 +398,10 @@ mod tests {
         }
 
         let mut out = Vec::new();
-        walk(&document_symbols(src).expect("outline"), &mut out);
+        walk(
+            &document_symbols(src, Path::new("t.aly")).expect("outline"),
+            &mut out,
+        );
 
         out
     }
@@ -351,7 +451,9 @@ mod tests {
             ]
         );
 
-        let text = serde_json::to_string(&document_symbols(src).expect("outline")).unwrap();
+        let text =
+            serde_json::to_string(&document_symbols(src, Path::new("t.aly")).expect("outline"))
+                .unwrap();
 
         for leak in ["__alloy", "__new", "_1", "MathX_triple"] {
             assert!(!text.contains(leak), "{leak} in {text}");
@@ -385,6 +487,37 @@ mod tests {
             ]
         );
         assert_eq!(enum_variants("local x = 1\n"), Vec::new());
+    }
+
+    /// A `.d.aly` parses only as a definitions file, so the outline read
+    /// nothing and the child answered with the emit's names.
+    #[test]
+    fn a_definitions_file_lists_its_declarations() {
+        let src = "declare AmbientThing: {\n    value: number,\n}\n\ndeclare function ambientFn(x: number): number\n";
+        let symbols = document_symbols(src, Path::new("amb.d.aly")).expect("outline");
+        let names: Vec<(&str, u64)> = symbols
+            .iter()
+            .map(|s| {
+                (
+                    s["name"].as_str().unwrap_or(""),
+                    s["kind"].as_u64().unwrap_or(0),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                ("AmbientThing", u64::from(VARIABLE)),
+                ("ambientFn", u64::from(FUNCTION)),
+            ]
+        );
+
+        // The workspace walk finds the value form the child cannot index.
+        assert_eq!(
+            ambient_values(src, Path::new("amb.d.aly")),
+            vec![("AmbientThing".to_string(), (8, 20))]
+        );
     }
 
     /// Plain code keeps its outline: a local, a function, a type alias.

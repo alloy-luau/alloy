@@ -68,7 +68,7 @@ use hover::{
 #[allow(unused_imports)]
 use navigation::{data_module_of, import_entries, in_a_dot_directory, service_definition};
 #[allow(unused_imports)]
-use outline::document_symbols;
+use outline::{ambient_symbols, document_symbols};
 #[allow(unused_imports)]
 use typing::{append_initializer, end_follows};
 

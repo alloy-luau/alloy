@@ -827,18 +827,6 @@ impl Server {
     ) {
         let uri = text_document_uri(&message);
 
-        // Semantic tokens for markup come from the lowered code, whose
-        // columns are not the source's; the grammar colors `.alx`.
-        if let Some(u) = &uri
-            && u.ends_with(".alx")
-            && method.is_some_and(|m| m.starts_with("textDocument/semanticTokens"))
-            && let Some(id) = message.get("id").cloned()
-        {
-            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": { "data": [] } }));
-
-            return;
-        }
-
         // The child never sees a `.d.aly` document, so a request on one
         // gets an empty answer here instead of the child's error.
         if let Some(u) = &uri

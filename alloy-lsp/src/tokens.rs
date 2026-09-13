@@ -109,6 +109,29 @@ mod tests {
         assert_eq!(out, vec![5, x_col, 1, 9, 0]);
     }
 
+    /// An `.alx` file with no markup maps like any other: the tokens
+    /// keep their place. The proxy once answered every `.alx` request
+    /// with an empty list, so even this file drew nothing.
+    #[test]
+    fn an_alx_file_with_no_markup_keeps_its_tokens() {
+        let src = "local function add(a: number, b: number): number\n    return a + b\nend\n";
+        let options = EmitOptions {
+            file_name: "plain.alx".into(),
+            ..EmitOptions::default()
+        };
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let col = src.lines().next().unwrap().find("number").unwrap() as u64;
+        // `number` on the first line, then the second `number` after it.
+        let data = [0, col, 6, 1, 0, 0, 9, 6, 1, 0];
+        assert_eq!(remap(&data, &doc), vec![0, col, 6, 1, 0, 0, 9, 6, 1, 0]);
+    }
+
     /// The map crosses the markup lowering byte for byte, so a token of
     /// the emitted call lands on the text the author wrote: the code of
     /// a hole, and the string an attribute is given.

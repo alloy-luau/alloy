@@ -710,3 +710,33 @@ fn a_parameter_and_a_loop_variable_shadow_too() {
     assert!(shadows_an_import(src, "shared", at("shared in pairs")));
     assert!(shadows_an_import(src, "shared", at("print(shared)") + 6));
 }
+
+/// Inside a trait's own default method `self` is whichever type
+/// implements the trait. The trait itself is what the reader can name,
+/// and the print was `any`.
+#[test]
+pub(crate) fn self_inside_a_trait_default_method_names_the_trait() {
+    let src = concat!(
+        "trait Shape as\n",
+        "    function area(self): number\n",
+        "\n",
+        "    function describe(self): string\n",
+        "        return `area {self:area()}`\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "struct Circle as\n",
+        "    radius: number\n",
+        "end\n",
+        "\n",
+        "impl Shape for Circle as\n",
+        "    function area(self): number\n",
+        "        return self.radius\n",
+        "    end\n",
+        "end\n",
+    );
+
+    assert_eq!(hover_of(src, 4, 25, "local self: any"), "self: Shape");
+    // The `impl` below still names the struct it is for.
+    assert_eq!(hover_of(src, 14, 20, "local self: any"), "local self: Circle");
+}

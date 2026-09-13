@@ -460,8 +460,14 @@ pub(crate) fn impl_self_type(doc: &Doc, line: u32) -> Option<String> {
             let text = l.trim_start();
             // A foreign impl is exported, so it works project wide.
             let text = text.strip_prefix("export ").unwrap_or(text);
+            let text = text.strip_prefix("global ").unwrap_or(text);
 
-            text.strip_prefix("impl ").map(str::to_string)
+            // Inside a trait's own default method `self` is whichever
+            // type implements the trait. The trait itself is what the
+            // reader can name there.
+            text.strip_prefix("impl ")
+                .or_else(|| text.strip_prefix("trait "))
+                .map(str::to_string)
         })
         .last()?;
     // `impl Shape for Sq` names the struct after `for`.

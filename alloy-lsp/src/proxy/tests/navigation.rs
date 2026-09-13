@@ -7,6 +7,7 @@
 
 use super::super::navigation::{
     export_span, impl_method_span, import_entries, module_bindings, module_head_line,
+    trait_method_span,
 };
 use super::super::*;
 
@@ -400,4 +401,35 @@ fn an_impl_declares_the_method_a_receiver_calls() {
     assert_eq!(span("new"), None);
     // A name outside every block is no method.
     assert_eq!(span("value"), None);
+}
+
+/// `self:area()` inside a trait's own default method. Every
+/// implementation writes `function area(self)` again, so the impl scan
+/// found several and answered with an arbitrary file. The trait declares
+/// the method once.
+#[test]
+pub(crate) fn a_trait_default_method_reaches_the_traits_own_signature() {
+    let src = concat!(
+        "trait Shape as\n",
+        "    function area(self): number\n",
+        "\n",
+        "    function describe(self): string\n",
+        "        return `area {self:area()}`\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "impl Shape for Circle as\n",
+        "    function area(self): number\n",
+        "        return 1\n",
+        "    end\n",
+        "end\n",
+    );
+
+    assert_eq!(
+        trait_method_span(src, 4, "area").map(|(a, _)| a),
+        Some(src.find("area(self): number").expect("area"))
+    );
+    // Outside the trait body, and for a name the trait does not write.
+    assert_eq!(trait_method_span(src, 9, "area"), None);
+    assert_eq!(trait_method_span(src, 4, "radius"), None);
 }

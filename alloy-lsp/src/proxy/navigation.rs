@@ -411,6 +411,21 @@ impl Server {
         let word = &doc.source[start..end];
         let raw_before = &doc.source[..start];
 
+        // `self:area()` inside a trait's own default method. Every
+        // implementation writes the method again; the trait declares it
+        // once, and that line is what the reader means.
+        if raw_before.ends_with("self:")
+            && let Some((a, b)) = trait_method_span(&doc.source, line, word)
+        {
+            let s = position_of(&doc.source, a);
+            let e = position_of(&doc.source, b);
+            let result = json!([{ "uri": uri, "range": range_value(s, e) }]);
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         // `value:method()`: the receiver is a local or a literal, and
         // the emit writes the method on the target's table, where the
         // child lands on generated text. The `impl` block that declares
@@ -754,6 +769,51 @@ impl State {
 /// is not in the text at the caret; a name two blocks declare says
 /// nothing about which one the call reaches, and the child answers
 /// those.
+/// Where the trait whose body holds `line` declares `name`. A trait
+/// stands at the margin, so its `end` is the first `end` in column
+/// zero under it.
+pub(crate) fn trait_method_span(src: &str, line: u32, name: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = src.lines().collect();
+    let at = (line as usize).min(lines.len().saturating_sub(1));
+    let head = (0..=at).rev().find(|i| {
+        let text = lines[*i];
+        let text = text.strip_prefix("export ").unwrap_or(text);
+        let text = text.strip_prefix("global ").unwrap_or(text);
+
+        text.starts_with("trait ")
+    })?;
+    let close = (head + 1..lines.len()).find(|i| lines[*i] == "end")?;
+
+    if at <= head || at > close {
+        return None;
+    }
+
+    let mut start = lines[..=head].iter().map(|l| l.len() + 1).sum::<usize>();
+
+    for text in &lines[head + 1..close] {
+        let line_start = start;
+        start += text.len() + 1;
+        let trimmed = text.trim_start();
+        let body = trimmed
+            .strip_prefix("private ")
+            .or_else(|| trimmed.strip_prefix("public "))
+            .unwrap_or(trimmed);
+        let Some(rest) = body.strip_prefix("function ") else {
+            continue;
+        };
+
+        if !rest.starts_with(name) || !rest[name.len()..].starts_with(['(', '<']) {
+            continue;
+        }
+
+        let at = line_start + (text.len() - rest.len());
+
+        return Some((at, at + name.len()));
+    }
+
+    None
+}
+
 pub(crate) fn impl_method_span(src: &str, name: &str) -> Option<(usize, usize)> {
     let mut inside = false;
     let mut at = 0;

@@ -372,13 +372,26 @@ pub fn expression_start(src: &str, offset: usize) -> bool {
 /// escapes skipped; a long string is not counted.
 fn inside_string(before: &str) -> bool {
     let mut open: Option<char> = None;
+    // A `{ }` hole of an interpolated string holds code, so a caret in
+    // one is no caret in a string.
+    let mut hole = 0i32;
     let mut chars = before.chars();
 
     while let Some(c) = chars.next() {
         match open {
             Some(q) => {
-                if c == '\\' {
+                if hole > 0 {
+                    match c {
+                        '{' => hole += 1,
+
+                        '}' => hole -= 1,
+
+                        _ => {}
+                    }
+                } else if c == '\\' {
                     chars.next();
+                } else if q == '`' && c == '{' {
+                    hole = 1;
                 } else if c == q {
                     open = None;
                 }
@@ -394,7 +407,7 @@ fn inside_string(before: &str) -> bool {
         }
     }
 
-    open.is_some()
+    open.is_some() && hole == 0
 }
 
 /// Whether the caret sits inside a quoted string on its own line.
@@ -1505,6 +1518,23 @@ mod tests {
         let src = "local m = map:get(\"rare\")\n";
         assert!(in_string(src, src.find("rare").unwrap() + 2));
         assert!(!in_string(src, src.find("map").unwrap() + 1));
+    }
+
+    // A `{ }` hole of an interpolated string holds code. Read as text,
+    // it turned off every list the proxy adds, so `self:` in a trait's
+    // `return `area {self:area()}`` offered nothing.
+    #[test]
+    fn a_hole_of_an_interpolated_string_is_code() {
+        let src = "local s = `area {self:area()} m`\n";
+
+        assert!(!in_string(src, src.find("self:").unwrap() + "self:".len()));
+        // The text on either side of the hole is still text.
+        assert!(in_string(src, src.find("area {").unwrap() + 2));
+        assert!(in_string(src, src.find(" m`").unwrap() + 1));
+        // A hole inside a hole closes with its own brace.
+        let nested = "local s = `{ f({ a = 1 }) }`\n";
+
+        assert!(!in_string(nested, nested.find(") }").unwrap()));
     }
 
     #[test]

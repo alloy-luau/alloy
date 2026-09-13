@@ -181,6 +181,158 @@ impl Server {
         true
     }
 
+    /// Renames a name an import list binds. The emit writes the binding
+    /// as generated text, so the child's edits map back to the first
+    /// byte of the import line: one-character ranges, in the wrong
+    /// file as often as the right one.
+    ///
+    /// The name belongs to the module that declares it, so the rename
+    /// reaches the declaration, every import list that names it, every
+    /// use under an unaliased entry, and every `M.name` under a module
+    /// binding. An entry with an alias keeps its own name: the alias is
+    /// this file's word, and renaming it touches this file alone.
+    pub(crate) fn rename_answer(&self, uri: &str, message: &Value, id: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = message
+            .pointer("/params/position")
+            .and_then(position_of_value)
+        else {
+            return false;
+        };
+        // An attribute is written `@tag`, so a reader may type the
+        // sigil into the box. The edit writes the name alone.
+        let new_name = message
+            .pointer("/params/newName")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('@')
+            .to_string();
+
+        if new_name.is_empty() {
+            return false;
+        }
+
+        let st = self.state.lock().expect("state");
+
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        let Some(entry) = st.import_entry_at(&doc.source, offset) else {
+            // The caret on the name a module exports. The child renamed
+            // the value beside it there, one character wide, and left
+            // every importer as it was.
+            if let Some(file) = uri_to_path(uri)
+                && keywords::is_word_at(&doc.source, offset)
+            {
+                let (s, e) = keywords::word_range(&doc.source, offset);
+                let word = doc.source[s..e].to_string();
+                let declares = export_span(&doc.source, &word) == Some((s, e));
+                let exported = imports::exports_of(&doc.source, uri.ends_with(".alx"))
+                    .iter()
+                    .any(|x| x.name == word);
+
+                if declares
+                    && exported
+                    && let Some(target) = st.export_rename(&file, &word, &new_name)
+                {
+                    drop(st);
+                    self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": target }));
+
+                    return true;
+                }
+
+                // `M.version` under `import * as M`: the module holds
+                // the name, so the rename is the export's.
+                if let Some((file, name)) = st.module_member_at(uri, &doc.source, offset)
+                    && let Some(target) = st.export_rename(&file, &name, &new_name)
+                {
+                    drop(st);
+                    self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": target }));
+
+                    return true;
+                }
+
+                // `import M from "./m"` and `import * as M`: the name is
+                // this file's own, so the rename stops at its edges.
+                if module_bindings(&doc.source)
+                    .iter()
+                    .any(|(bound, _)| *bound == word)
+                    || imports::bound_names(&doc.source).contains(&word)
+                {
+                    let edits: Vec<Value> = name_uses(&doc.source, &word)
+                        .into_iter()
+                        .map(|(s, e)| text_edit(&doc.source, s, e, &new_name))
+                        .collect();
+                    let result = json!({ "changes": { uri: edits } });
+                    drop(st);
+                    self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+                    return true;
+                }
+            }
+
+            // An `import` statement holds no other name a rename can
+            // reach: not the keywords, not the module path. The child
+            // would edit a byte the emit wrote, in another file as
+            // often as this one.
+            if on_import_statement(&doc.source, offset) {
+                drop(st);
+                self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": { "changes": {} } }));
+
+                return true;
+            }
+
+            return false;
+        };
+        let on_alias = entry
+            .alias_at
+            .is_some_and(|(s, e)| (s..=e).contains(&offset));
+
+        // The alias is this file's own word. Nothing outside the file
+        // knows it, so nothing outside the file changes.
+        if on_alias
+            || (entry.alias_at.is_some() && !(entry.name_at.0..=entry.name_at.1).contains(&offset))
+        {
+            let Some((s, e)) = entry.alias_at else {
+                return false;
+            };
+            let mut edits = vec![text_edit(&doc.source, s, e, &new_name)];
+
+            for (s, e) in name_uses(&doc.source, &entry.bound) {
+                if (s, e) != (entry.name_at.0, entry.name_at.1) {
+                    edits.push(text_edit(&doc.source, s, e, &new_name));
+                }
+            }
+
+            edits.dedup();
+            let result = json!({ "changes": { uri: edits } });
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
+        let Some(file) = st.entry_module(uri, &entry) else {
+            return false;
+        };
+        let Some(target) = st.export_rename(&file, &entry.name, &new_name) else {
+            return false;
+        };
+        drop(st);
+        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": target }));
+
+        true
+    }
+
     /// Go to definition for a name Alloy declares: a struct, an enum or a
     /// variant, a trait, an interface, a type alias, a macro, or an
     /// attribute, in this file first and then any file of the workspace.
@@ -269,6 +421,16 @@ impl Server {
             return true;
         }
 
+        // `import { version } from "./m"`, and every use of `version`
+        // under it: the module declares the name, and the emit binds it
+        // in generated text the child cannot point at.
+        if let Some(result) = st.import_name_definition(uri, &doc.source, offset) {
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         let (start, end) = keywords::word_range(&doc.source, offset);
         let word = &doc.source[start..end];
         let raw_before = &doc.source[..start];
@@ -323,6 +485,197 @@ impl Server {
 }
 
 impl State {
+    /// The definition a name in an import list points at: where the
+    /// module the line reads declares it. The emit binds the name in
+    /// generated text, so the child lands on the first byte of the
+    /// import line and the editor shows a one-character range there.
+    ///
+    /// A use of the name reads the same way: the module is where the
+    /// name comes from, and the import list is one step on the way.
+    pub(crate) fn import_name_definition(
+        &self,
+        uri: &str,
+        source: &str,
+        offset: usize,
+    ) -> Option<Value> {
+        let (file, name) = match self.import_entry_at(source, offset) {
+            Some(entry) => (self.entry_module(uri, &entry)?, entry.name),
+
+            // `M.version` under `import * as M`: the module is the
+            // holder, and the field is the name it exports.
+            None => {
+                let (s, e) = self.module_member_at(uri, source, offset)?;
+
+                (s, e)
+            }
+        };
+        let text = self.module_text(&file)?;
+        let (a, b) = export_span(&text, &name)?;
+        let s = position_of(&text, a);
+        let e = position_of(&text, b);
+
+        Some(json!([{ "uri": path_to_uri(&file), "range": range_value(s, e) }]))
+    }
+
+    /// The module and the export name a `M.name` under
+    /// `import * as M from "..."` reads.
+    pub(crate) fn module_member_at(
+        &self,
+        uri: &str,
+        source: &str,
+        offset: usize,
+    ) -> Option<(PathBuf, String)> {
+        if !keywords::is_word_at(source, offset) {
+            return None;
+        }
+
+        let (s, e) = keywords::word_range(source, offset);
+        let name = source[s..e].to_string();
+        let head = source[..s].trim_end().strip_suffix('.')?;
+        let at = head.len().saturating_sub(1);
+
+        if head.is_empty() || !keywords::is_word_at(source, at) {
+            return None;
+        }
+
+        let (hs, he) = keywords::word_range(source, at);
+        let holder = &source[hs..he];
+        let spec = module_bindings(source)
+            .into_iter()
+            .find(|(bound, _)| bound == holder)
+            .map(|(_, spec)| spec)?;
+        let file = imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
+
+        Some((file, name))
+    }
+
+    /// The import entry a byte offset belongs to: one whose own name or
+    /// alias holds it, else the entry that binds the word there.
+    pub(crate) fn import_entry_at(&self, source: &str, offset: usize) -> Option<ImportEntry> {
+        let entries = import_entries(source);
+        let inside = |(s, e): (usize, usize)| (s..=e).contains(&offset);
+
+        if let Some(found) = entries
+            .iter()
+            .find(|e| inside(e.name_at) || e.alias_at.is_some_and(inside))
+        {
+            return Some(found.clone());
+        }
+
+        if !keywords::is_word_at(source, offset) {
+            return None;
+        }
+
+        let (s, e) = keywords::word_range(source, offset);
+        let word = &source[s..e];
+
+        entries.iter().find(|it| it.bound == word).cloned()
+    }
+
+    /// The file an entry's module spec names.
+    fn entry_module(&self, uri: &str, entry: &ImportEntry) -> Option<PathBuf> {
+        imports::module_file(&imports::module_path(&self.resolve_spec(uri, &entry.spec)?))
+    }
+
+    /// A module's text: the open document first, then the disk.
+    fn module_text(&self, file: &Path) -> Option<String> {
+        let uri = path_to_uri(file);
+
+        match self.docs.get(&uri) {
+            Some(doc) => Some(doc.source.clone()),
+
+            None => std::fs::read_to_string(file).ok(),
+        }
+    }
+
+    /// The whole rename of one name a module exports, as a workspace
+    /// edit: the declaration and every use in the module, then each
+    /// file that imports it. An entry with an alias keeps the alias and
+    /// only its own name changes; an entry without one changes with
+    /// every use under it, and `M.name` under a module binding too.
+    pub(crate) fn export_rename(&self, file: &Path, name: &str, new_name: &str) -> Option<Value> {
+        let module = imports::module_path(file);
+        let module_uri = path_to_uri(file);
+        let text = self.module_text(file)?;
+
+        export_span(&text, name)?;
+
+        let mut changes: Map<String, Value> = Map::new();
+        let mut here: Vec<Value> = name_uses(&text, name)
+            .into_iter()
+            .map(|(s, e)| text_edit(&text, s, e, new_name))
+            .collect();
+
+        for (u, d) in &self.docs {
+            if *u == module_uri {
+                continue;
+            }
+
+            let reaches = |spec: &str| {
+                self.resolve_spec(u, spec)
+                    .map(|p| imports::module_path(&p))
+                    .is_some_and(|p| p == module)
+            };
+            let mine: Vec<ImportEntry> = import_entries(&d.source)
+                .into_iter()
+                .filter(|it| it.name == name && reaches(&it.spec))
+                .collect();
+            let holders: Vec<String> = module_bindings(&d.source)
+                .into_iter()
+                .filter(|(_, spec)| reaches(spec))
+                .map(|(bound, _)| bound)
+                .collect();
+            let mut edits: Vec<Value> = Vec::new();
+
+            // An entry with no alias binds the name itself, so every
+            // use of it in the file is this name.
+            let plain = mine.iter().any(|it| it.alias_at.is_none());
+
+            for it in &mine {
+                edits.push(text_edit(&d.source, it.name_at.0, it.name_at.1, new_name));
+            }
+
+            if plain {
+                for (s, e) in name_uses(&d.source, name) {
+                    edits.push(text_edit(&d.source, s, e, new_name));
+                }
+            }
+
+            for (s, e) in member_uses(&d.source, &holders, name) {
+                edits.push(text_edit(&d.source, s, e, new_name));
+            }
+
+            edits.sort_by_key(|e| {
+                (
+                    e["range"]["start"]["line"].as_u64().unwrap_or(0),
+                    e["range"]["start"]["character"].as_u64().unwrap_or(0),
+                )
+            });
+            edits.dedup();
+
+            if !edits.is_empty() {
+                changes.insert(u.clone(), json!(edits));
+            }
+        }
+
+        // A `M.name` read inside the module itself, through its own
+        // import of another file, is someone else's name; the walk over
+        // this file's own uses has it right already.
+        here.sort_by_key(|e| {
+            (
+                e["range"]["start"]["line"].as_u64().unwrap_or(0),
+                e["range"]["start"]["character"].as_u64().unwrap_or(0),
+            )
+        });
+        here.dedup();
+
+        if !here.is_empty() {
+            changes.insert(module_uri, json!(here));
+        }
+
+        (!changes.is_empty()).then(|| json!({ "changes": changes }))
+    }
+
     /// The definition a default import's binding names: the
     /// `export default` of the module the line reads. `import M from`
     /// and `import M, { a } from` both bind it. A plain Luau module has
@@ -597,6 +950,229 @@ fn name_uses(src: &str, name: &str) -> Vec<(usize, usize)> {
             .is_some_and(|p| matches!(lexed.toks[p].text(src), "." | ":" | "?." | "?:"));
 
         if !after_dot {
+            out.push((t.start as usize, t.end as usize));
+        }
+    }
+
+    out
+}
+
+/// Whether a byte offset sits on a line that opens an `import`
+/// statement.
+fn on_import_statement(src: &str, offset: usize) -> bool {
+    let start = src[..offset.min(src.len())]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+
+    src[start..end].trim_start().starts_with("import ")
+}
+
+/// One text edit, from a byte range of a source.
+fn text_edit(src: &str, start: usize, end: usize, new_text: &str) -> Value {
+    json!({
+        "range": range_value(position_of(src, start), position_of(src, end)),
+        "newText": new_text,
+    })
+}
+
+/// One entry of an `import { ... }` list, with where its parts sit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportEntry {
+    /// The name the module exports, without the `@` of an attribute.
+    pub name: String,
+    /// The name this file writes: the alias when the entry has one.
+    pub bound: String,
+    /// The byte range of the export name inside the entry.
+    pub name_at: (usize, usize),
+    /// The byte range of the alias, when the entry has one.
+    pub alias_at: Option<(usize, usize)>,
+    /// The module path the line reads, as the source spells it.
+    pub spec: String,
+}
+
+/// Every name an `import { ... }` list of the file binds, with byte
+/// ranges. The emit writes the binding as generated text, so the child
+/// answers about a byte no author wrote; these ranges are the author's.
+pub(crate) fn import_entries(src: &str) -> Vec<ImportEntry> {
+    let mut out = Vec::new();
+    let mut line_start = 0;
+
+    for line in src.split_inclusive('\n') {
+        let here = line_start;
+        line_start += line.len();
+
+        if !line.trim_start().starts_with("import ") {
+            continue;
+        }
+
+        let Some(spec) = import_spec(line) else {
+            continue;
+        };
+        let Some(open) = line.find('{') else {
+            continue;
+        };
+        let close = line[open..].find('}').map(|c| open + c);
+        let Some(close) = close else {
+            continue;
+        };
+
+        for entry in split_entries(&line[open + 1..close]) {
+            let at = open + 1 + entry.0;
+            let words = words_of(entry.1);
+            // `type T`, `T as U`, `type T as U`, `@tag`, `@tag as t`.
+            let (name, alias) = match words.as_slice() {
+                [name, (_, "as"), alias] => (*name, Some(*alias)),
+                [(_, "type"), name, (_, "as"), alias] => (*name, Some(*alias)),
+                [(_, "type"), name] => (*name, None),
+                [name] => (*name, None),
+                _ => continue,
+            };
+            fn bare(text: &str) -> &str {
+                text.trim_start_matches('@')
+            }
+            let sigil = name.1.len() - bare(name.1).len();
+
+            out.push(ImportEntry {
+                name: bare(name.1).to_string(),
+                bound: bare(alias.map_or(name.1, |a| a.1)).to_string(),
+                name_at: (
+                    here + at + name.0 + sigil,
+                    here + at + name.0 + name.1.len(),
+                ),
+                alias_at: alias.map(|a| {
+                    let start = here + at + a.0 + (a.1.len() - bare(a.1).len());
+
+                    (start, here + at + a.0 + a.1.len())
+                }),
+                spec: spec.clone(),
+            });
+        }
+    }
+
+    out
+}
+
+/// The entries of one list, each with its byte offset inside the text
+/// between the braces.
+fn split_entries(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+
+    for part in text.split(',') {
+        out.push((at, part));
+        at += part.len() + 1;
+    }
+
+    out
+}
+
+/// The words of one entry, each with its byte offset inside the entry.
+fn words_of(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+
+    while at < text.len() {
+        let rest = &text[at..];
+        let skip = rest.len() - rest.trim_start().len();
+        let start = at + skip;
+        let word = text[start..].split_whitespace().next().unwrap_or("");
+
+        if word.is_empty() {
+            break;
+        }
+
+        out.push((start, word));
+        at = start + word.len();
+    }
+
+    out
+}
+
+/// The keywords that stand right in front of the name a declaration
+/// binds. `export` and `global` say where the name goes, not what it
+/// is, so they sit further left.
+const DECLARES: [&str; 13] = [
+    "const",
+    "local",
+    "function",
+    "type",
+    "struct",
+    "enum",
+    "trait",
+    "interface",
+    "class",
+    "attribute",
+    "macro",
+    "remote",
+    "namespace",
+];
+
+/// Where a module declares a name it exports, as the byte range of the
+/// name. `export default` has an answer of its own, in
+/// `default_import_definition`.
+pub(crate) fn export_span(src: &str, name: &str) -> Option<(usize, usize)> {
+    let lexed = alloy_syntax::lexer::lex(src).ok()?;
+    let toks = &lexed.toks;
+
+    toks.iter().enumerate().find_map(|(i, t)| {
+        let before = toks.get(i.wrapping_sub(1))?.text(src);
+
+        (t.text(src) == name && DECLARES.contains(&before))
+            .then_some((t.start as usize, t.end as usize))
+    })
+}
+
+/// The names an import line binds to a whole module, each with the spec
+/// of its line: `import * as M from "./m"` and nothing else. A member
+/// of such a module is written `M.name`, which a rename of `name` has
+/// to follow.
+///
+/// A default binding is not one of these. `import M from "./m"` on a
+/// module with an export table binds the `default` field, so `M.name`
+/// there is a field of that value and not the module's export.
+pub(crate) fn module_bindings(src: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+
+    for line in src.lines() {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix("import ") else {
+            continue;
+        };
+        let Some(after_star) = rest.trim_start().strip_prefix('*') else {
+            continue;
+        };
+        let Some(name) = after_star.trim_start().strip_prefix("as ") else {
+            continue;
+        };
+        let Some(spec) = import_spec(line) else {
+            continue;
+        };
+
+        out.push((
+            name.split_whitespace().next().unwrap_or("").to_string(),
+            spec,
+        ));
+    }
+
+    out.retain(|(name, _)| !name.is_empty());
+    out
+}
+
+/// Every `Holder.name` in a source, as the byte range of `name`.
+fn member_uses(src: &str, holders: &[String], name: &str) -> Vec<(usize, usize)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let toks = &lexed.toks;
+    let mut out = Vec::new();
+
+    for (i, t) in toks.iter().enumerate() {
+        if t.text(src) != name || i < 2 {
+            continue;
+        }
+
+        if toks[i - 1].text(src) == "." && holders.iter().any(|h| h == toks[i - 2].text(src)) {
             out.push((t.start as usize, t.end as usize));
         }
     }

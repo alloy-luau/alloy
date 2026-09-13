@@ -851,6 +851,11 @@ impl Server {
             .and_then(Value::as_str)
             .map(str::to_string);
         let range = message.pointer("/params/range").and_then(range_of);
+        let diagnostics = message
+            .pointer("/params/context/diagnostics")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
 
         if let Some(id) = message.get("id") {
             let key = id_key(id);
@@ -862,6 +867,7 @@ impl Server {
                     position,
                     trigger,
                     range,
+                    diagnostics,
                 },
             );
         }
@@ -1048,10 +1054,17 @@ impl Server {
             edit_capabilities(&mut message);
         }
 
-        let (method, ctx, position, trigger, range) = match pending {
-            Some(p) => (p.method, p.ctx, p.position, p.trigger, p.range),
+        let (method, ctx, position, trigger, range, reported) = match pending {
+            Some(p) => (
+                p.method,
+                p.ctx,
+                p.position,
+                p.trigger,
+                p.range,
+                p.diagnostics,
+            ),
 
-            None => (String::new(), None, None, None, None),
+            None => (String::new(), None, None, None, None, Vec::new()),
         };
 
         // The child answers null when it has no action; the Alloy
@@ -1437,6 +1450,7 @@ impl Server {
                         actions.extend(st.header_as_actions(uri, range));
                         actions.extend(st.lint_actions(uri, range));
                         actions.extend(st.ingot_actions(uri, range));
+                        actions.extend(st.import_actions(uri, &reported));
                     }
                 }
 

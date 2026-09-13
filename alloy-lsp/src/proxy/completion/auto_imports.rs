@@ -31,6 +31,78 @@ impl State {
         imports::auto_import_items(&doc.source, &path, &files, &prefix, &bound, &aliases)
     }
 
+    /*
+    Quick fixes for a name another module exports that this file does
+    not import: one `import` line per module that has the name.
+
+    The completion list already walks the workspace for these edits. The
+    action reads the same walk, so the line it writes and the line the
+    completion inserts cannot drift apart.
+    */
+    pub(crate) fn import_actions(&self, uri: &str, diagnostics: &[Value]) -> Vec<Value> {
+        let mut actions = Vec::new();
+        let Some(doc) = self.docs.get(uri) else {
+            return actions;
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return actions;
+        };
+        let bound = markup_bound(&doc.source);
+        let files: Vec<(PathBuf, &[imports::Export])> = self
+            .docs
+            .iter()
+            .filter_map(|(u, d)| uri_to_path(u).map(|p| (p, d.exports.as_slice())))
+            .collect();
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let aliases = project_aliases(&dir, self.root.as_deref());
+        let mut seen: Vec<String> = Vec::new();
+
+        for report in diagnostics {
+            let Some(name) = report
+                .get("message")
+                .and_then(Value::as_str)
+                .and_then(unresolved_name)
+            else {
+                continue;
+            };
+            let offers =
+                imports::auto_import_items(&doc.source, &path, &files, name, &bound, &aliases);
+
+            for item in offers {
+                // The prefix walk answers every name that starts with
+                // this one; the report named exactly one.
+                if item["label"].as_str() != Some(name) {
+                    continue;
+                }
+
+                let Some(edit) = item.pointer("/additionalTextEdits/0").cloned() else {
+                    continue;
+                };
+                let Some(shape) = item["detail"]
+                    .as_str()
+                    .and_then(|d| d.strip_prefix("auto-import: "))
+                else {
+                    continue;
+                };
+
+                if seen.contains(&shape.to_string()) {
+                    continue;
+                }
+
+                seen.push(shape.to_string());
+                actions.push(json!({
+                    "title": format!("Add `{shape}`"),
+                    "kind": "quickfix",
+                    "isPreferred": true,
+                    "diagnostics": [report],
+                    "edit": { "changes": { uri: [edit] } },
+                }));
+            }
+        }
+
+        actions
+    }
+
     /// The child's module and service auto-imports, as Alloy imports.
     ///
     /// luau-lsp offers a module by its instance path and inserts a
@@ -250,5 +322,39 @@ impl State {
             globs: alloy::build::globs(&patterns)
                 .unwrap_or_else(|_| alloy::globset::GlobSet::empty()),
         }
+    }
+}
+
+/// The name an unresolved report names, for the import that would
+/// resolve it: `Unknown type 'Vec2'` and
+/// `Unknown global 'Utils'; consider assigning to it first`.
+fn unresolved_name(message: &str) -> Option<&str> {
+    let rest = message
+        .split_once("Unknown type '")
+        .or_else(|| message.split_once("Unknown global '"))
+        .map(|(_, rest)| rest)?;
+
+    rest.split_once('\'').map(|(name, _)| name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unresolved_name;
+
+    #[test]
+    fn an_unresolved_report_names_what_to_import() {
+        assert_eq!(
+            unresolved_name("TypeError: Unknown type 'Vec2'"),
+            Some("Vec2")
+        );
+        assert_eq!(
+            unresolved_name("TypeError: Unknown global 'Utils'; consider assigning to it first"),
+            Some("Utils")
+        );
+        assert_eq!(
+            unresolved_name("TypeError: `Vec2` is a type, not a struct"),
+            None
+        );
+        assert_eq!(unresolved_name("unused_variable: `x` is never read"), None);
     }
 }

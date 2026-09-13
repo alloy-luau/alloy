@@ -2148,3 +2148,41 @@ pub(crate) fn an_attribute_contract_lists_its_own_words() {
     // A `function` that does declare a name still does.
     assert!(declares_a_name_at("local function |", 15));
 }
+
+/// `Unknown type 'Vec2'` where another module exports `Vec2`: the
+/// quick fix writes the import line the completion list would insert.
+#[test]
+pub(crate) fn an_unresolved_name_offers_the_import_that_binds_it() {
+    let st = super::support::files(&[
+        (
+            "file:///defs.aly",
+            "export struct Vec2 as\n    x: number\nend\n",
+        ),
+        (
+            "file:///use.aly",
+            "local function make(): Vec2\n    return new Vec2 { x = 1 }\nend\n",
+        ),
+    ]);
+    let report = json!({
+        "message": "TypeError: Unknown type 'Vec2'",
+        "range": { "start": { "line": 0, "character": 23 }, "end": { "line": 0, "character": 27 } },
+    });
+    let actions = st.import_actions("file:///use.aly", &[report]);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0]["title"],
+        json!("Add `import { Vec2 } from \"./defs\"`")
+    );
+    assert_eq!(actions[0]["kind"], json!("quickfix"));
+    assert_eq!(
+        actions[0]["edit"]["changes"]["file:///use.aly"][0]["newText"],
+        json!("import { Vec2 } from \"./defs\"\n")
+    );
+
+    // A report that names nothing to import offers nothing.
+    let other = json!({ "message": "TypeError: `Vec2` is a type, not a struct" });
+    assert!(
+        st.import_actions("file:///use.aly", &[other]).is_empty(),
+        "a report with no unresolved name"
+    );
+}

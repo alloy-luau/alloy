@@ -11,6 +11,9 @@ pub(crate) struct Pending {
     pub(crate) trigger: Option<String>,
     /// The source range of the request, for code actions.
     pub(crate) range: Option<((u32, u32), (u32, u32))>,
+    /// The diagnostics the editor sent with a code action request. An
+    /// import quick fix reads the name the report could not resolve.
+    pub(crate) diagnostics: Vec<Value>,
 }
 
 /// An `alloy.toml` and the path it was read from.

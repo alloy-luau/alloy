@@ -112,7 +112,11 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
     let b = src.as_bytes();
     let mut toks = Vec::with_capacity(src.len() / 6);
     let mut comments: Vec<(u32, u32)> = Vec::new();
-    let mut i = 0usize;
+    // A leading byte order mark, the three bytes `EF BB BF`, is not source.
+    // Editors on Windows write one, and the file reads as if it were
+    // absent. No token covers the mark, so the printer keeps it in the gap
+    // before the first token. A mark anywhere else stays an error.
+    let mut i = if src.starts_with('\u{feff}') { 3 } else { 0 };
     // The brace depth inside each open interpolation hole, innermost last.
     // A `}` at depth zero closes the hole and resumes the string.
     let mut holes: Vec<usize> = Vec::new();
@@ -592,6 +596,20 @@ mod tests {
             &src[inner_start as usize..inner_end as usize],
             "@pkg/signal"
         );
+    }
+
+    /// A byte order mark leads the file on Windows. The lexer steps over
+    /// it, and the tokens keep the offsets the source has.
+    #[test]
+    fn a_leading_byte_order_mark_is_not_source() {
+        let src = "\u{feff}local x = 1\n";
+        let toks = lex(src).unwrap().toks;
+        let texts: Vec<_> = toks.iter().map(|t| t.text(src)).collect();
+        assert_eq!(texts, vec!["local", "x", "=", "1"]);
+        assert_eq!(toks[0].start, 3, "the offsets hold the mark's three bytes");
+
+        // A mark inside the file is still an error.
+        assert!(lex("local x = 1\n\u{feff}\n").is_err());
     }
 
     #[test]

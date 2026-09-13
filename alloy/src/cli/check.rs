@@ -2,9 +2,7 @@
 
 use std::process::ExitCode;
 
-use alloy::config::LintConfig;
-
-use crate::cli::lint_support::{lint_one, print_lints};
+use crate::cli::lint_support::{lint_context, lint_one, print_lints};
 use crate::cli::support::{
     apply_build_options, is_source, positionals, print_diagnostics, project,
 };
@@ -20,7 +18,14 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
             return usage();
         }
 
-        return lint_one(file, &LintConfig::default(), Some("check"), args);
+        // The project's alloy.toml still applies to one file: its lint
+        // levels, and a broken one reports here the way it does for
+        // `alloy build`. `lint_context` prints that report itself.
+        let Some((args, _, _, lint_config)) = lint_context(args) else {
+            return ExitCode::FAILURE;
+        };
+
+        return lint_one(file, &lint_config, Some("check"), &args);
     }
 
     let (root, mut config) = match project(args) {

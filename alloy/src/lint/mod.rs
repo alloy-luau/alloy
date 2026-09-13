@@ -35,12 +35,66 @@ pub struct Fix {
     pub start: u32,
     pub end: u32,
     pub replacement: String,
+    /// The bytes the lint read at that range. The applier compares them
+    /// with the file it writes, so a range that came from another text
+    /// never lands on the author's source.
+    pub saw: String,
+}
+
+impl Fix {
+    /// A rewrite of `src[start..end]`, which keeps those bytes.
+    pub fn new(src: &str, start: u32, end: u32, replacement: impl Into<String>) -> Fix {
+        Fix {
+            start,
+            end,
+            replacement: replacement.into(),
+            saw: src
+                .get(start as usize..end as usize)
+                .unwrap_or_default()
+                .to_string(),
+        }
+    }
+}
+
+/// Whether a rewrite still covers the bytes the lint read.
+///
+/// A `.alx` file and a file an ingot rewrote reach the lints as another
+/// text. A rewrite whose offsets come from that text points somewhere
+/// else in the author's file, and writing it corrupts the file.
+pub fn fix_applies(src: &str, fix: &Fix) -> bool {
+    src.get(fix.start as usize..fix.end as usize) == Some(fix.saw.as_str())
+}
+
+/// Moves the lints of a pass's output back to the text the author
+/// wrote. `map` is that pass's map and `src` is the author's text.
+///
+/// A rewrite keeps a range of its own, so it maps on its own. It
+/// survives only when the source reads what the lint read; a rewrite
+/// over text the pass generated has nothing to write back.
+pub fn to_source(lints: &mut [Lint], src: &str, map: &crate::render::SpanMap) {
+    for l in lints {
+        l.start = map.to_source(l.start);
+        l.end = map.to_source(l.end).max(l.start);
+
+        if let Some(f) = &mut l.fix {
+            f.start = map.to_source(f.start);
+            f.end = map.to_source(f.end).max(f.start);
+
+            if !fix_applies(src, f) {
+                l.fix = None;
+            }
+        }
+    }
 }
 
 /// Applies the fixes of `lints` to `src`, last to first so the offsets
 /// hold. Two fixes that overlap keep the first.
 pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
-    let mut fixes: Vec<&Fix> = lints.iter().filter_map(|l| l.fix.as_ref()).collect();
+    let mut fixes: Vec<&Fix> = lints
+        .iter()
+        .filter_map(|l| l.fix.as_ref())
+        .filter(|f| fix_applies(src, f))
+        .collect();
     fixes.sort_by_key(|f| (f.start, f.end));
     let mut chosen: Vec<&Fix> = Vec::new();
 

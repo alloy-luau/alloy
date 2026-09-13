@@ -251,11 +251,7 @@ impl Ingots {
                         let fix = edits_of(&json!([f["fix"]]))
                             .into_iter()
                             .next()
-                            .map(|e| Fix {
-                                start: e.start,
-                                end: e.end,
-                                replacement: e.text,
-                            });
+                            .map(|e| Fix::new(source, e.start, e.end, e.text));
                         out.lints.push(Lint {
                             name: crate::lint::intern(&format!("{}/{lint}", ingot.name)),
                             start: start.min(len),

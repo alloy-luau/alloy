@@ -427,21 +427,10 @@ pub fn compile_file(
             // ingot wrote has no line to point at.
             out.lints.retain(|l| !map.is_generated(l.start));
 
-            for l in &mut out.lints {
-                l.start = map.to_source(l.start);
-                l.end = map.to_source(l.end).max(l.start);
-
-                if let Some(f) = &mut l.fix {
-                    // A fix over transformed bytes cannot apply to the
-                    // author's text; keep the lint and drop the rewrite.
-                    if map.is_generated(f.start) || map.is_generated(f.end.saturating_sub(1)) {
-                        l.fix = None;
-                    } else {
-                        f.start = map.to_source(f.start);
-                        f.end = map.to_source(f.end).max(f.start);
-                    }
-                }
-            }
+            // A fix over transformed bytes cannot apply to the
+            // author's text; `to_source` keeps the lint and drops the
+            // rewrite.
+            lint::to_source(&mut out.lints, source, &map);
 
             for i in &mut out.imports {
                 i.start = map.to_source(i.start);

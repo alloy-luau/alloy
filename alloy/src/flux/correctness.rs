@@ -743,11 +743,7 @@ impl<'s> Scan<'s> {
                 message:
                     "a bare `return` at the end of a function does what the `end` does; delete it"
                         .to_string(),
-                fix: Some(Fix {
-                    start: from,
-                    end: to,
-                    replacement: String::new(),
-                }),
+                fix: Some(Fix::new(self.src, from, to, "")),
             });
         }
     }

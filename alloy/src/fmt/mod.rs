@@ -155,11 +155,7 @@ pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
 
         if angle == 0 && j > i + 1 && j < toks.len() && text(j) != "as" {
             let at = toks[j - 1].end;
-            out.push(crate::lint::Fix {
-                start: at,
-                end: at,
-                replacement: " as".to_string(),
-            });
+            out.push(crate::lint::Fix::new(src, at, at, " as"));
         }
 
         i = j.max(i + 1);

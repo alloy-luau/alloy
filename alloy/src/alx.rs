@@ -83,11 +83,10 @@ pub fn compile_alx(
     // A component is a function a tag names, `<Row />`, so its name
     // is PascalCase by the markup's own rule.
     output.lints.retain(|l| l.name != "pascal_case_function");
-
-    for l in &mut output.lints {
-        l.start = back(l.start);
-        l.end = back(l.end);
-    }
+    // A rewrite carries a range of its own, and the lowering moves
+    // every byte after the first tag. Without this the rewrite lands at
+    // the wrong offset and writes over the author's code.
+    crate::lint::to_source(&mut output.lints, src, &lowering);
 
     for e in compiled.errors {
         output.diagnostics.push(Diagnostic {
@@ -1080,6 +1079,39 @@ pub fn bound_names(src: &str) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lint's rewrite after the lowering. The markup grows the text,
+    /// so a rewrite that kept the lowered offsets writes over the wrong
+    /// bytes of the author's file. The range is a source range, and the
+    /// applier drops one that no longer covers what the lint read.
+    #[test]
+    fn a_rewrite_reads_the_source_the_author_wrote() {
+        let src = "import { create } from \"./util\"\n\nlocal function Cond(props: { open: boolean })\n    return <Frame>{function() return if props.open then <TextLabel /> else nil end}</Frame>\nend\n\nlocal function Dead(n: number)\n    return n\nend\n\nreturn Cond\n";
+        let out = compile_alx(src, &EmitOptions::default(), luaux::Config::bare())
+            .expect("the markup compiles")
+            .output;
+        let lint = out
+            .lints
+            .iter()
+            .find(|l| l.name == "unused_function")
+            .expect("`Dead` is never called");
+        let fix = lint.fix.as_ref().expect("the rewrite");
+
+        assert_eq!(&src[fix.start as usize..fix.end as usize], fix.saw);
+
+        let (text, n) = crate::lint::apply_fixes(src, &out.lints);
+
+        assert_eq!(n, 1);
+        assert!(text.contains("local function _Dead(n: number)"), "{text}");
+
+        // The guard: a range the source moved under writes nothing.
+        let moved = crate::lint::Fix {
+            saw: "Gone".to_string(),
+            ..fix.clone()
+        };
+
+        assert!(!crate::lint::fix_applies(src, &moved));
+    }
 
     #[test]
     fn the_scan_sees_alloy_bindings() {

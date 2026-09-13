@@ -257,11 +257,7 @@ impl<'s> Scan<'s> {
             start: self.start(a),
             end: self.end(b),
             message,
-            fix: fix.map(|replacement| Fix {
-                start: self.start(a),
-                end: self.end(b),
-                replacement,
-            }),
+            fix: fix.map(|replacement| Fix::new(self.src, self.start(a), self.end(b), replacement)),
         });
     }
 

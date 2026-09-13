@@ -345,6 +345,10 @@ fn is_fixable(path: &Path, l: &Lint, config: &LintConfig, directives: &mut FileD
 
     let source = std::fs::read_to_string(path).unwrap_or_default();
 
+    if !lint::fix_applies(&source, fix) {
+        return false;
+    }
+
     !directives
         .of(path)
         .preserves(alloy::directives::line_of(&source, fix.start as usize))
@@ -420,7 +424,12 @@ pub(crate) fn print_lints(
         if let Some(fix) = &l.fix {
             let at = alloy::directives::line_of(&source, fix.start as usize);
 
-            if directives.preserves(at) {
+            if !lint::fix_applies(&source, fix) {
+                eprintln!(
+                    "{}",
+                    p.note("fix skipped: the source moved, so this rewrite is not written")
+                );
+            } else if directives.preserves(at) {
                 eprintln!(
                     "{}",
                     p.note(

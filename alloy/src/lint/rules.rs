@@ -377,11 +377,12 @@ fn game_alias(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
             message: format!(
                 "`{quote}{spec}{quote}` is the old service path; write `{quote}{alias}{quote}`"
             ),
-            fix: Some(Fix {
-                start: first.start,
+            fix: Some(Fix::new(
+                src,
+                first.start,
                 end,
-                replacement: format!("{quote}{alias}{quote}"),
-            }),
+                format!("{quote}{alias}{quote}"),
+            )),
         });
     }
 
@@ -930,11 +931,7 @@ pub fn run(
                 message: format!(
                     "`{member}` is not a method; call it with `{owner}.{member}(...)`, not `{owner}:{member}(...)`"
                 ),
-                fix: Some(Fix {
-                    start: toks[i + 1].start,
-                    end: toks[i + 1].end,
-                    replacement: ".".to_string(),
-                }),
+                fix: Some(Fix::new(src, toks[i + 1].start, toks[i + 1].end, ".")),
             });
         }
     }
@@ -1071,11 +1068,7 @@ pub fn run(
             } else {
                 format!("`{name}` is the legacy scheduler; call `task.{name}` instead")
             },
-            fix: Some(Fix {
-                start: t.start,
-                end: t.end,
-                replacement,
-            }),
+            fix: Some(Fix::new(src, t.start, t.end, replacement)),
         });
     }
 

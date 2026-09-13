@@ -393,6 +393,45 @@ pub(crate) fn a_contract_draws_an_action_that_writes_its_members() {
     assert!(st.contract_actions(uri, ((0, 0), (0, 4))).is_empty());
 }
 
+/// A clause that declares a return type gets a stub that returns. An
+/// empty body would leave `Not all codepaths in this function return
+/// 'boolean'` where the action just wrote the member.
+#[test]
+pub(crate) fn a_stub_with_a_return_type_returns() {
+    let src = concat!(
+        "attribute service on impl as\n",
+        "    requires function Stop(self): boolean\n",
+        "    requires private function Tick(self, dt: number)\n",
+        // The `:` that counts is the one after the parameter list. A
+        // parameter's own function type carries parentheses of its own.
+        "    requires function On(self, cb: (number) -> ())\n",
+        "end\n\n",
+        "struct S as\n    x: number\nend\n\n",
+        "@service\nimpl S as\nend\n\nprint(S)\n"
+    );
+    let (st, uri) = one_file(src);
+    let line = src[..src.find("@service").expect("the use")]
+        .matches('\n')
+        .count() as u32;
+    let actions = st.contract_actions(uri, ((line, 0), (line, 8)));
+    let text = actions[0]["edit"]["changes"][uri][0]["newText"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(
+        text,
+        concat!(
+            "    function Stop(self): boolean\n",
+            "        error(\"todo\")\n",
+            "    end\n",
+            "    private function Tick(self, dt: number)\n",
+            "    end\n",
+            "    function On(self, cb: (number) -> ())\n",
+            "    end\n",
+        ),
+        "{actions:#?}"
+    );
+}
+
 /// `reg.aly` beside `reg.alx` build one module, so the shadow of one
 /// takes the other's place and every answer about the first is about
 /// someone else's code. The file says so on its first line.

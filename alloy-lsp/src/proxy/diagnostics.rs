@@ -1364,9 +1364,44 @@ fn member_text(gap: &alloy::desugar::ContractGap) -> String {
 
         false => gap.shape.clone(),
     };
+    // A stub whose clause declares a return type must return, or the
+    // checker reports that not all codepaths do. `error` returns
+    // `never`, which every return type takes: `boolean`, a tuple, a
+    // type parameter. A value of the right type would be a lie the
+    // author has to find later.
+    let body = match declares_a_return(&params) {
+        true => format!("{pad}    error(\"todo\")\n"),
+
+        false => String::new(),
+    };
 
     format!(
-        "{pad}{visibility}function {}{params}\n{pad}end\n",
+        "{pad}{visibility}function {}{params}\n{body}{pad}end\n",
         gap.member
     )
+}
+
+/// Whether a clause's shape declares a return type: `(self): boolean`
+/// does, `(self, dt: number)` does not. The `:` after the closing
+/// parenthesis of the parameter list is the one that counts.
+fn declares_a_return(shape: &str) -> bool {
+    let mut depth = 0i32;
+
+    for (i, c) in shape.char_indices() {
+        match c {
+            '(' => depth += 1,
+
+            ')' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return shape[i + 1..].trim_start().starts_with(':');
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    false
 }

@@ -3,6 +3,7 @@
 use alloy_syntax::lexer::TokKind;
 
 use super::hover::import_spec;
+use super::outline::enum_variants;
 use super::*;
 
 impl Server {
@@ -227,6 +228,14 @@ impl Server {
                 json!({ "changes": { uri: edits } })
             }
 
+            Target::Variant { file, owner, name } => {
+                match st.variant_edits(&file, &owner, &name, &new_name) {
+                    Some(edit) => edit,
+
+                    None => return false,
+                }
+            }
+
             Target::Nothing => json!({ "changes": {} }),
         };
         drop(st);
@@ -279,6 +288,14 @@ impl Server {
                     })
                 })
                 .collect(),
+
+            Target::Variant { file, owner, name } => {
+                match st.variant_edits(&file, &owner, &name, &name) {
+                    Some(edit) => locations_of(&edit),
+
+                    None => return false,
+                }
+            }
 
             Target::Nothing => Vec::new(),
         };
@@ -554,6 +571,101 @@ impl State {
         entries.iter().find(|it| it.bound == word).cloned()
     }
 
+    /// The enum that declares a variant by this name and that the file
+    /// at hand reaches: the enum this file declares itself, or one whose
+    /// name the file writes.
+    fn variant_owner(&self, uri: &str, name: &str) -> Option<String> {
+        let doc = self.docs.get(uri)?;
+        let here = doc
+            .shapes
+            .iter()
+            .find(|s| names_a_variant(s, name))
+            .map(|s| s.name().to_string());
+
+        if here.is_some() {
+            return here;
+        }
+
+        self.docs
+            .values()
+            .flat_map(|d| d.shapes.iter())
+            .find(|s| names_a_variant(s, name) && !name_uses(&doc.source, s.name()).is_empty())
+            .map(|s| s.name().to_string())
+    }
+
+    /*
+    The whole rename of one enum variant, as a workspace edit.
+
+    The declaration sits in the enum body and every use is written
+    `Shape.Circle`, under whatever name the reading file bound the enum
+    to. The emit turns the variant into a tag, so nothing the child sees
+    carries either place.
+    */
+    pub(crate) fn variant_edits(
+        &self,
+        file: &Path,
+        owner: &str,
+        name: &str,
+        new_name: &str,
+    ) -> Option<Value> {
+        let module = imports::module_path(file);
+        let module_uri = path_to_uri(file);
+        let text = self.module_text(file)?;
+        let (start, end) = enum_variants(&text)
+            .into_iter()
+            .find(|(o, v, _)| o == owner && v == name)
+            .map(|(_, _, at)| at)?;
+        let mut changes: Map<String, Value> = Map::new();
+        let mut here = vec![text_edit(&text, start, end, new_name)];
+
+        for (a, b) in member_uses(&text, std::slice::from_ref(&owner.to_string()), name) {
+            here.push(text_edit(&text, a, b, new_name));
+        }
+
+        for (u, d) in &self.docs {
+            if *u == module_uri {
+                continue;
+            }
+
+            let reaches = |spec: &str| {
+                self.resolve_spec(u, spec)
+                    .map(|p| imports::module_path(&p))
+                    .is_some_and(|p| p == module)
+            };
+            let mut holders: Vec<String> = import_entries(&d.source)
+                .into_iter()
+                .filter(|it| it.name == owner && reaches(&it.spec))
+                .map(|it| it.bound)
+                .collect();
+
+            // `import * as M`: the enum reads `M.Shape`, so the word
+            // before the variant is still the enum's own name.
+            if module_bindings(&d.source)
+                .iter()
+                .any(|(_, spec)| reaches(spec))
+            {
+                holders.push(owner.to_string());
+            }
+
+            let mut edits: Vec<Value> = member_uses(&d.source, &holders, name)
+                .into_iter()
+                .map(|(a, b)| text_edit(&d.source, a, b, new_name))
+                .collect();
+            edits.sort_by_key(sort_key);
+            edits.dedup();
+
+            if !edits.is_empty() {
+                changes.insert(u.clone(), json!(edits));
+            }
+        }
+
+        here.sort_by_key(sort_key);
+        here.dedup();
+        changes.insert(module_uri, json!(here));
+
+        Some(json!({ "changes": changes }))
+    }
+
     /*
     What the caret names, for a rename and for a reference list.
 
@@ -595,6 +707,28 @@ impl State {
             // name, so the answer is the export's.
             if let Some((file, name)) = self.module_member_at(uri, source, offset) {
                 return Some(Target::Export(file, name));
+            }
+
+            // A variant of an enum this file reaches: the one the
+            // caret sits on in the enum body, or the one after the dot
+            // of `Shape.Circle`.
+            if let Some(owner) = self.variant_owner(uri, &word) {
+                let declares = self.docs.iter().find_map(|(u, d)| {
+                    let holds = d
+                        .shapes
+                        .iter()
+                        .any(|s| s.name() == owner && names_a_variant(s, &word));
+
+                    holds.then(|| uri_to_path(u)).flatten()
+                });
+
+                if let Some(file) = declares {
+                    return Some(Target::Variant {
+                        file,
+                        owner,
+                        name: word,
+                    });
+                }
             }
 
             // `import M from "./m"` and `import * as M`: the name is
@@ -1234,10 +1368,37 @@ pub(crate) enum Target {
     /// A name this file alone binds: the alias of an import entry, or
     /// the binding of a whole module.
     Local(String),
+    /// An enum variant, with the file that declares the enum and the
+    /// enum's own name. The emit leaves a variant as a tag inside a
+    /// record, so the child has no binding to point at.
+    Variant {
+        file: PathBuf,
+        owner: String,
+        name: String,
+    },
     /// An `import` statement holds no other name either answer can
     /// reach: not the keywords, not the module path. The child would
     /// point at a byte the emit wrote.
     Nothing,
+}
+
+/// Whether a shape is an enum with a variant of that name.
+fn names_a_variant(shape: &alloy::declarations::Shape, name: &str) -> bool {
+    match shape {
+        alloy::declarations::Shape::Enum { variants, .. } => {
+            variants.iter().any(|(v, _)| v == name)
+        }
+
+        _ => false,
+    }
+}
+
+/// Where one edit starts, so a file's edits read in source order.
+fn sort_key(edit: &Value) -> (u64, u64) {
+    (
+        edit["range"]["start"]["line"].as_u64().unwrap_or(0),
+        edit["range"]["start"]["character"].as_u64().unwrap_or(0),
+    )
 }
 
 /// The locations of a workspace edit, for the reference list that

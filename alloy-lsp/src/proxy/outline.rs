@@ -81,6 +81,37 @@ pub(crate) fn document_symbols(src: &str) -> Option<Vec<Value>> {
     Some(entries.iter().map(|e| e.to_value(src)).collect())
 }
 
+/*
+Every enum variant the source declares: the enum's name, the variant's,
+and the byte range of the variant's own name.
+
+A variant has no binding of its own in the emit. It is a tag inside the
+record the enum builds, so the child has no place to point at and no
+name to rename. The source holds both.
+*/
+pub(crate) fn enum_variants(src: &str) -> Vec<(String, String, (usize, usize))> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Enum(e) = stmt.under_default() else {
+            continue;
+        };
+        let owner = text_of(e.name, src, toks);
+
+        for v in &e.variants {
+            if let Some(at) = bytes_of(v.name, toks) {
+                out.push((owner.clone(), text_of(v.name, src, toks), at));
+            }
+        }
+    }
+
+    out
+}
+
 /// The byte range a token span covers. An empty span reads the token it
 /// starts on, so a name still has a place.
 fn bytes_of(span: alloy_syntax::ast::TokSpan, toks: &[Tok]) -> Option<(usize, usize)> {
@@ -325,6 +356,35 @@ mod tests {
         for leak in ["__alloy", "__new", "_1", "MathX_triple"] {
             assert!(!text.contains(leak), "{leak} in {text}");
         }
+    }
+
+    /// A variant's name, with the enum that declares it and where it
+    /// sits.
+    #[test]
+    fn a_variant_names_its_enum() {
+        let src = "enum Shape as\n    Circle(number)\n    Square(number)\nend\n";
+        assert_eq!(
+            enum_variants(src),
+            vec![
+                (
+                    "Shape".to_string(),
+                    "Circle".to_string(),
+                    (
+                        src.find("Circle").expect("Circle"),
+                        src.find("Circle").expect("Circle") + 6
+                    )
+                ),
+                (
+                    "Shape".to_string(),
+                    "Square".to_string(),
+                    (
+                        src.find("Square").expect("Square"),
+                        src.find("Square").expect("Square") + 6
+                    )
+                ),
+            ]
+        );
+        assert_eq!(enum_variants("local x = 1\n"), Vec::new());
     }
 
     /// Plain code keeps its outline: a local, a function, a type alias.

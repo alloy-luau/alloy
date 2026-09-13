@@ -547,3 +547,77 @@ pub(crate) fn one_target_answers_the_rename_and_the_references() {
     assert_eq!(count, 4, "{edit}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An enum variant: the caret in the enum body and the caret on
+/// `Shape.Circle` in another file both name the variant, and the edit
+/// reaches the declaration and the use.
+#[test]
+pub(crate) fn a_variant_renames_where_it_is_declared_and_used() {
+    let module = "export enum Shape as\n    Circle(number)\n    Square(number)\nend\n";
+    let user = "import { Shape } from \"./m3\"\nlocal c = Shape.Circle(3)\nprint(c)\n";
+    let dir = std::env::temp_dir().join(format!("alloy-nav-variant-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+    let mut uris = Vec::new();
+
+    for (rel, src) in [("m3.aly", module), ("u3.aly", user)] {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let uri = format!("file://{}", path.display());
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            in_project: true,
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            uri.clone(),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+        uris.push(uri);
+    }
+
+    let variant = |uri: &str, offset: usize| match st.name_target(uri, offset) {
+        Some(Target::Variant { owner, name, .. }) => Some((owner, name)),
+
+        _ => None,
+    };
+    let wanted = Some(("Shape".to_string(), "Circle".to_string()));
+    assert_eq!(
+        variant(&uris[0], module.find("Circle").expect("declaration")),
+        wanted
+    );
+    assert_eq!(variant(&uris[1], user.find("Circle").expect("use")), wanted);
+
+    // A word no enum declares keeps to the other answers.
+    assert_eq!(variant(&uris[1], user.find("Shape").expect("Shape")), None);
+
+    let edit = st
+        .variant_edits(&dir.join("src").join("m3.aly"), "Shape", "Circle", "Round")
+        .expect("edit");
+    let count: usize = edit["changes"]
+        .as_object()
+        .expect("changes")
+        .values()
+        .map(|v| v.as_array().map_or(0, Vec::len))
+        .sum();
+    assert_eq!(count, 2, "{edit}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

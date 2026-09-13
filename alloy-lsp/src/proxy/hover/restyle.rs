@@ -892,8 +892,12 @@ pub(crate) fn declared_signature(
     let (fence, rest) = value.split_once('\n')?;
     let (body, tail) = rest.split_once("\n```")?;
 
-    if body.contains('\n') || !body.contains("function ") {
+    if body.contains('\n') {
         return None;
+    }
+
+    if !body.contains("function ") {
+        return forward_declaration(fence, body, tail, doc, &word);
     }
 
     let name_end = name_end_in(body, &word)?;
@@ -989,6 +993,43 @@ pub(crate) fn declared_signature(
     }
 
     (out != body).then(|| format!("{fence}\n{out}\n```{tail}"))
+}
+
+/// The head the source declares for a name the checker never bound.
+///
+/// `local x = later()` above `function later()` reads a global the emit
+/// writes further down, so the checker has no type there and prints
+/// `type later = *error-type*`. The declaration below says what the
+/// name is, and the reader wrote the call to it.
+fn forward_declaration(
+    fence: &str,
+    body: &str,
+    tail: &str,
+    doc: &Doc,
+    word: &str,
+) -> Option<String> {
+    let rest = body.strip_prefix("type ")?.strip_prefix(word)?;
+
+    if !matches!(rest.trim(), "= *error-type*" | "= unknown" | "= any") {
+        return None;
+    }
+
+    let (source, is_async) = declaration_head(doc, word)?;
+    let spans = head_spans(source, word.len())?;
+    let mut out = format!("function {}", &source[..spans.params.1]);
+
+    if let Some((a, b)) = spans.ret {
+        let ret = source[a..b].trim();
+
+        out.push_str(": ");
+        out.push_str(&match is_async && !alloy::desugar::names_a_future(ret) {
+            true => format!("Future<{ret}>"),
+
+            false => ret.to_string(),
+        });
+    }
+
+    Some(format!("{fence}\n{out}\n```{tail}"))
 }
 
 /// The byte past the last occurrence of a function's name in a printed

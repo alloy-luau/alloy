@@ -837,3 +837,22 @@ pub(crate) fn a_hover_home_takes_the_nearest_line_above() {
     assert_eq!(shadow_home(shadow, 0, "s"), Some((2, 6)));
     assert_eq!(shadow_home(shadow, 2, "zz"), None);
 }
+
+/// `local x = later()` above `function later()`: the emit writes the
+/// global further down, so the checker has no type at the call and
+/// prints an error type. The declaration answers.
+#[test]
+pub(crate) fn a_call_above_its_declaration_hovers_as_the_declaration() {
+    let src = "local x = later()\n\nfunction later(): number\n    return 42\nend\n\nprint(x)\n";
+    assert_eq!(
+        hover_of(src, 0, 10, "type later = *error-type*"),
+        "function later(): number"
+    );
+
+    // A word no declaration covers keeps the print, and the null guard
+    // in the dispatch drops it.
+    assert_eq!(
+        hover_of(src, 0, 10, "type missing = unknown"),
+        "type missing = unknown"
+    );
+}

@@ -886,17 +886,6 @@ pub(crate) fn parameter_names(list: &str) -> Vec<(String, bool)> {
     out
 }
 
-/// Whether a return type already names a Future. `Future<T>` and `T`
-/// mean the same answer on an `async function`, so only the second
-/// takes a wrapper.
-fn names_a_future(declared: &str) -> bool {
-    let t = declared.trim();
-    let bare = t.rsplit_once('.').map_or(t, |(_, last)| last);
-
-    bare.strip_prefix("Future")
-        .is_some_and(|rest| rest.starts_with('<'))
-}
-
 /// The head of the declaration of `name`, from the name onward, and
 /// whether it is `async`. `None` when no source in reach declares the
 /// name exactly once: two declarations name two things.
@@ -1059,7 +1048,7 @@ pub(crate) fn declared_signature(
 
             // A header that already names a Future names the answer
             // itself; wrapping it again builds a Future of a Future.
-            match is_async && !names_a_future(text) {
+            match is_async && !alloy::desugar::names_a_future(text) {
                 true => format!("Future<{text}>"),
 
                 false => text.to_string(),
@@ -1395,7 +1384,7 @@ pub(crate) fn name_by_declaration(
     // A header may name the answer itself, `async function f(): Future<T>`,
     // or what it settles with, `async function f(): T`. Both mean one
     // thing, so a header that already names a Future is left alone.
-    let ret = match is_async && !names_a_future(ret) {
+    let ret = match is_async && !alloy::desugar::names_a_future(ret) {
         true => format!("Future<{ret}>"),
 
         false => ret.to_string(),

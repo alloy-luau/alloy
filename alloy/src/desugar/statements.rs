@@ -151,7 +151,7 @@ pub(crate) fn struct_braced(text: &str, name: &str) -> bool {
 /// the way TypeScript writes `Promise<T>`. `async function f(): T`
 /// names what the Future settles with. Both spellings mean one thing,
 /// so the first is left alone instead of wrapped a second time.
-fn names_a_future(declared: &str) -> bool {
+pub fn names_a_future(declared: &str) -> bool {
     let t = declared.trim();
     // A qualified name names the same type: `alloy.Future<T>`.
     let bare = t.rsplit_once('.').map_or(t, |(_, last)| last);

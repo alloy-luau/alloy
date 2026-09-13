@@ -255,6 +255,7 @@ pub struct ContractGap {
 }
 
 pub use contracts::{element_type, is_string_union};
+pub use statements::names_a_future;
 
 /// One `requires` clause of an attribute contract, as the prescan keeps
 /// it. The check reads this and the members of the thing the attribute

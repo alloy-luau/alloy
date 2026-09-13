@@ -1138,9 +1138,17 @@ pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
             .unwrap_or(0) as usize;
 
         if let Some(spec) = alloy::typecheck::required_spec(&raw, &doc.source, line) {
+            // A plain `.luau` module has no export table, so its report
+            // asks for a `return` alone.
+            let luau = here
+                .as_deref()
+                .and_then(|uri| st.resolve_spec(uri, &spec))
+                .and_then(|p| imports::module_file(&imports::module_path(&p)))
+                .and_then(|f| f.extension().map(|e| e == "luau" || e == "lua"))
+                .unwrap_or(false);
             d["message"] = json!(format!(
                 "UnknownModule: {}",
-                alloy::typecheck::no_module_return_message(&spec)
+                alloy::typecheck::no_module_return_message(&spec, luau)
             ));
             d["severity"] = json!(1);
             d["source"] = json!("Alloy");

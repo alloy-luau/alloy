@@ -216,6 +216,16 @@ impl Piece {
     }
 }
 
+/// Whether the source keeps an attribute on the same line as `<Name`.
+/// The close of such a tag follows the last attribute, on the line that
+/// attribute ends on.
+fn attribute_beside_name(src: &str, start: usize, name: &str) -> bool {
+    let after = (start + 1 + name.len()).min(src.len());
+    let head = src[after..].split('\n').next().unwrap_or("");
+
+    !head.trim().is_empty()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn print_tag(
     src: &str,
@@ -293,6 +303,25 @@ fn print_tag(
         && open.chars().count() <= width
     {
         out.push((level, open.clone()));
+    } else if open_flat.is_none() && attribute_beside_name(src, start, name) {
+        // An attribute that prints over several lines, a function body
+        // for instance, is not a wide tag. The source decides: an
+        // attribute the author wrote beside `<Name` stays there, so the
+        // tag keeps the line count the span map was built on.
+        out.push((level, format!("<{name}")));
+
+        for a in &attrs {
+            let head = out.last_mut().expect("the tag name opened the list");
+
+            head.1.push(' ');
+            head.1.push_str(&a[0].1);
+            out.extend(a[1..].iter().map(|(l, text)| (level + l, text.clone())));
+        }
+
+        out.last_mut()
+            .expect("the tag name opened the list")
+            .1
+            .push_str(close_text);
     } else {
         out.push((level, format!("<{name}")));
         let fill = !alx.attribute_per_line && attrs_flat.is_some();
@@ -675,6 +704,18 @@ mod tests {
         o.alx.bracket_same_line = true;
         let want = "local x = <Frame\n    Size={UDim2.fromScale(1, 1)}\n    BackgroundTransparency={1}\n    Position={UDim2.fromScale(0.5, 0.5)}\n    AnchorPoint={Vector2.new(0.5, 0.5)} />\n";
         assert_eq!(format_alx(src, &o).unwrap(), want);
+    }
+
+    /// A multi-line attribute is not a wide tag: the tag the author
+    /// opened on one line stayed on one line, and the line count with
+    /// it. The span map reads the line count, so it never moves.
+    #[test]
+    fn a_multi_line_attribute_keeps_the_tag_on_its_line() {
+        let src = "return (\n    <TextButton Activated={function()\n        go()\n    end}>\n        {name}\n    </TextButton>\n)\n";
+        assert_eq!(fmt(src), src);
+        assert_eq!(fmt(src).lines().count(), src.lines().count());
+        let closed = "local x = <Frame Size={function()\n    go()\nend} />\n";
+        assert_eq!(fmt(closed).lines().count(), closed.lines().count());
     }
 
     #[test]

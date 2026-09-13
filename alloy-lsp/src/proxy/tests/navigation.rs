@@ -5,7 +5,9 @@
 //! child answers about a byte no author wrote. Its ranges came back one
 //! character wide, in the module as often as the using file.
 
-use super::super::navigation::{export_span, import_entries, module_bindings};
+use super::super::navigation::{
+    export_span, impl_method_span, import_entries, module_bindings, module_head_line,
+};
 use super::super::*;
 
 const MODULE: &str = concat!(
@@ -312,4 +314,90 @@ pub(crate) fn a_rename_of_an_imported_name_reaches_every_file() {
     assert!(st.export_rename(&file, "missing", "other").is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `.ember` holds the packages a require reaches and `.alloy` the
+/// build's sourcemap, so both stand in the mirror the child indexes.
+/// Their modules are no source the reader wrote, and `workspace/symbol`
+/// used to list them while `node_modules` and the build output stayed
+/// out.
+#[test]
+fn a_dot_directory_holds_no_workspace_symbol() {
+    let mirror = Path::new("/m");
+    let root = Path::new("/w");
+    let dotted = |path: &str| in_a_dot_directory(Path::new(path), mirror, Some(root));
+
+    assert!(dotted("/m/.ember/widget.luau"));
+    assert!(dotted("/m/.alloy/decoy.luau"));
+    assert!(dotted("/w/.vscode/settings.luau"));
+    assert!(!dotted("/m/src/game.luau"));
+    assert!(!dotted("/w/src/game.aly"));
+    // A file whose own name opens with a dot declares nothing.
+    assert!(!dotted("/m/.luaurc"));
+    // A project under a dot directory of the home tree is still the
+    // project: only the path below the root decides.
+    assert!(!in_a_dot_directory(
+        Path::new("/home/a/.games/w/src/game.aly"),
+        mirror,
+        Some(Path::new("/home/a/.games/w")),
+    ));
+}
+
+/// A binding that holds a whole module opens the module's own file:
+/// `import * as M` and the default binding of a plain Luau module, which
+/// declares no `export default`.
+#[test]
+fn a_whole_module_binding_opens_at_its_return() {
+    assert_eq!(
+        module_head_line(
+            "local M = {}\n\nfunction M.zero(): number\n    return 0\nend\n\nreturn M\n"
+        ),
+        6
+    );
+    // An Alloy module hands nothing back by a `return`, so its file
+    // opens at the first line.
+    assert_eq!(module_head_line("export const LIMIT = 100\n"), 0);
+    // A `return` inside a function body is not the module's.
+    assert_eq!(
+        module_head_line("local function f()\n    return 1\nend\n"),
+        0
+    );
+}
+
+/// `boxed:get()`: the receiver is a local, so the emit writes the method
+/// on the target's table and the child landed on the `end` of the
+/// generic struct's header. A foreign target answered nothing at all.
+#[test]
+fn an_impl_declares_the_method_a_receiver_calls() {
+    let src = concat!(
+        "struct Box<T> as\n",
+        "    value: T\n",
+        "end\n",
+        "\n",
+        "impl Box<T> as\n",
+        "    function new(value: T): Box<T>\n",
+        "        return new Box { value = value }\n",
+        "    end\n",
+        "\n",
+        "    function get(self): T\n",
+        "        return self.value\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "export impl string as\n",
+        "    function shout(self): string\n",
+        "        return string.upper(self)\n",
+        "    end\n",
+        "end\n",
+    );
+    let span = |name: &str| impl_method_span(src, name).map(|(a, _)| a);
+
+    // A blank line inside the block closes nothing.
+    assert_eq!(span("get"), Some(src.find("get(self)").expect("get")));
+    assert_eq!(span("shout"), Some(src.find("shout(self)").expect("shout")));
+    // `Box.new` is written at the call site and reaches the declaration
+    // path instead; it takes no `self`.
+    assert_eq!(span("new"), None);
+    // A name outside every block is no method.
+    assert_eq!(span("value"), None);
 }

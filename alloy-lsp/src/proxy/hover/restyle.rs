@@ -946,7 +946,8 @@ pub(crate) fn impl_method_head<'a>(doc: &'a Doc, owner: &str, name: &str) -> Opt
                 continue;
             }
 
-            if !line.starts_with([' ', '\t']) && text != "end" {
+            // A blank line has no margin and closes no body.
+            if !text.is_empty() && !line.starts_with([' ', '\t']) && text != "end" {
                 inside = false;
             }
 
@@ -1465,4 +1466,150 @@ pub(crate) fn drop_bound_intersections(value: &str, doc: &Doc) -> Option<String>
     }
 
     (out != value).then_some(out)
+}
+
+/// The variadic tail Luau's solver gives a function it infers from a
+/// definition with no parameters. The printed pack is `(...any)`, which
+/// reads as "takes anything" beside the `(x: number)` of a function
+/// with one. The names below get `()` back.
+const PRINTED_PACK: &str = "(...any) ->";
+
+/// Every name a source in reach declares as a function with an empty
+/// parameter list. A name two sources declare both ways is left out:
+/// the print may belong to either one.
+///
+/// `export default function make()` binds `default` in the module's
+/// table, so the key the reader sees goes in beside the name.
+pub(crate) fn empty_parameter_names(doc: &Doc, st: &State) -> HashSet<String> {
+    let globals = st
+        .docs
+        .values()
+        .filter(|d| !d.globals.is_empty())
+        .map(|d| &d.source);
+    let mut empty: HashSet<String> = HashSet::new();
+    let mut takes: HashSet<String> = HashSet::new();
+
+    for src in std::iter::once(&doc.source)
+        .chain(doc.import_sources.iter())
+        .chain(globals)
+    {
+        for line in src.lines() {
+            let Some((name, is_default, empty_list)) = declared_parameter_list(line.trim()) else {
+                continue;
+            };
+            let target = match empty_list {
+                true => &mut empty,
+
+                false => &mut takes,
+            };
+
+            if is_default {
+                target.insert("default".to_string());
+            }
+
+            target.insert(name);
+        }
+    }
+
+    empty.retain(|name| !takes.contains(name));
+
+    empty
+}
+
+/// What one line says about a function it declares: the name, whether
+/// `default` binds it too, and whether its parameter list is empty.
+fn declared_parameter_list(text: &str) -> Option<(String, bool, bool)> {
+    // The keywords that may stand in front of `function`, in any order
+    // a grammar allows. `remote` is not one: every member of a remote
+    // surface really does take anything.
+    const AHEAD: [&str; 7] = [
+        "export ", "global ", "local ", "public ", "private ", "async ", "default ",
+    ];
+    let mut head = text;
+    let mut is_default = false;
+
+    while let Some((keyword, rest)) = AHEAD.iter().find_map(|k| Some((*k, head.strip_prefix(k)?))) {
+        is_default = is_default || keyword == "default ";
+        head = rest;
+    }
+
+    let rest = head.strip_prefix("function ")?;
+    let path: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':'))
+        .collect();
+    let after = &rest[path.len()..];
+    let after = match after.starts_with('<') {
+        true => &after[angle_len(after)?..],
+
+        false => after,
+    };
+    let list = after.strip_prefix('(')?;
+    // `function M.zero()` in a plain Luau module writes the member as
+    // a path; the table key is its last segment.
+    let name = path.rsplit(['.', ':']).next()?.to_string();
+
+    (!name.is_empty()).then_some((name, is_default, list.trim_start().starts_with(')')))
+}
+
+/// `zero: (...any) -> T` back to `zero: () -> T` for every key the
+/// sources declare with an empty parameter list.
+pub(crate) fn close_empty_packs(text: &str, empty: &HashSet<String>) -> String {
+    let mut out = text.to_string();
+    let mut from = 0;
+
+    while let Some(at) = out[from..].find(PRINTED_PACK).map(|i| from + i) {
+        from = at + PRINTED_PACK.len();
+
+        let key = {
+            let Some(head) = out[..at].strip_suffix(": ") else {
+                continue;
+            };
+            let mut key: Vec<char> = head
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            key.reverse();
+
+            key.into_iter().collect::<String>()
+        };
+
+        if !empty.contains(&key) {
+            continue;
+        }
+
+        out.replace_range(at.."(...any)".len() + at, "()");
+        from = at + "()".len();
+    }
+
+    out
+}
+
+/// The same for a completion list, where the label names the member and
+/// the detail carries the type with nothing in front of it.
+pub(crate) fn close_item_packs(value: &mut Value, empty: &HashSet<String>) {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| close_item_packs(item, empty)),
+
+        Value::Object(map) => {
+            let closed = map
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|label| empty.contains(*label))
+                .and_then(|_| map.get("detail")?.as_str()?.strip_prefix("(...any)"))
+                .map(|rest| format!("(){rest}"));
+
+            if let Some(detail) = closed {
+                map.insert("detail".to_string(), Value::String(detail));
+            }
+
+            map.values_mut()
+                .for_each(|item| close_item_packs(item, empty));
+        }
+
+        _ => {}
+    }
 }

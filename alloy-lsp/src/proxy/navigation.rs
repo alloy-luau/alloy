@@ -410,6 +410,21 @@ impl Server {
         let (start, end) = keywords::word_range(&doc.source, offset);
         let word = &doc.source[start..end];
         let raw_before = &doc.source[..start];
+
+        // `value:method()`: the receiver is a local or a literal, and
+        // the emit writes the method on the target's table, where the
+        // child lands on generated text. The `impl` block that declares
+        // the method is what the reader means, and a generic header or a
+        // foreign target changes nothing about that.
+        if raw_before.ends_with(':')
+            && let Some(result) = st.impl_method_definition(uri, word)
+        {
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         let key = if raw_before.ends_with('$') || raw_before.trim_end().ends_with("macro") {
             format!("${word}")
         } else if raw_before.ends_with('@') || raw_before.trim_end().ends_with("attribute") {
@@ -548,6 +563,27 @@ impl State {
         entries.iter().find(|it| it.bound == word).cloned()
     }
 
+    /// Where the project declares an `impl` method of that name, with
+    /// the URI of the file that wrote it. The file at hand answers
+    /// first, then the rest of the workspace: a method of an imported
+    /// struct is declared where the struct is.
+    pub(crate) fn impl_method_definition(&self, uri: &str, name: &str) -> Option<Value> {
+        let here = self.docs.get(uri).map(|d| (uri.to_string(), d));
+        let rest = self
+            .docs
+            .iter()
+            .filter(|(u, _)| u.as_str() != uri)
+            .map(|(u, d)| (u.clone(), d));
+
+        here.into_iter().chain(rest).find_map(|(u, d)| {
+            let (a, b) = impl_method_span(&d.source, name)?;
+            let s = position_of(&d.source, a);
+            let e = position_of(&d.source, b);
+
+            Some(json!([{ "uri": u, "range": range_value(s, e) }]))
+        })
+    }
+
     /// The file an entry's module spec names.
     fn entry_module(&self, uri: &str, entry: &ImportEntry) -> Option<PathBuf> {
         imports::module_file(&imports::module_path(&self.resolve_spec(uri, &entry.spec)?))
@@ -654,8 +690,11 @@ impl State {
 
     /// The definition a default import's binding names: the
     /// `export default` of the module the line reads. `import M from`
-    /// and `import M, { a } from` both bind it. A plain Luau module has
-    /// no such declaration, and the path link already opens the file.
+    /// and `import M, { a } from` both bind it.
+    ///
+    /// Two bindings hold the whole module instead: the `M` of
+    /// `import * as M`, and the binding of a plain Luau module, which
+    /// declares no default. Both land on the module's own file.
     pub(crate) fn default_import_definition(
         &self,
         uri: &str,
@@ -691,8 +730,14 @@ impl State {
         let file = imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
         let is_alx = file.extension().is_some_and(|e| e == "alx");
 
+        // `import * as M` binds the table the module hands back, not
+        // the one name its `export default` writes.
+        if head.contains('*') {
+            return module_location(&file);
+        }
+
         if !is_alx && !file.extension().is_some_and(|e| e == "aly") {
-            return None;
+            return module_location(&file);
         }
 
         let text = std::fs::read_to_string(&file).ok()?;
@@ -702,6 +747,108 @@ impl State {
 
         Some(json!([{ "uri": path_to_uri(&file), "range": range_value(s, e) }]))
     }
+}
+
+/// Where one `impl` block of a source declares a method, as the byte
+/// range of its name. A receiver is a local or a literal, so the target
+/// is not in the text at the caret; a name two blocks declare says
+/// nothing about which one the call reaches, and the child answers
+/// those.
+pub(crate) fn impl_method_span(src: &str, name: &str) -> Option<(usize, usize)> {
+    let mut inside = false;
+    let mut at = 0;
+    let mut found = None;
+
+    for line in src.lines() {
+        let start = at;
+        at += line.len() + 1;
+        let text = line.trim();
+        let head = text.strip_prefix("export ").unwrap_or(text);
+
+        if head.starts_with("impl ") {
+            inside = true;
+
+            continue;
+        }
+
+        // An impl body is indented; a line at the margin closes it. A
+        // blank line has no margin and closes nothing.
+        if !text.is_empty() && !line.starts_with([' ', '\t']) && text != "end" {
+            inside = false;
+        }
+
+        if !inside {
+            continue;
+        }
+
+        let head = text.strip_prefix("private ").unwrap_or(text);
+        let Some(rest) = head.strip_prefix("function ") else {
+            continue;
+        };
+
+        if !rest.starts_with(name) || !rest[name.len()..].starts_with('(') {
+            continue;
+        }
+
+        // A method takes `self`; an associated function like
+        // `Vec2.new` is written `Vec2.new(` at the call and reaches
+        // the declaration path instead.
+        if !rest[name.len()..].starts_with("(self") {
+            continue;
+        }
+
+        if found.is_some() {
+            return None;
+        }
+
+        let indent = line.len() - line.trim_start().len();
+        let offset = start + indent + (text.len() - head.len()) + "function ".len();
+        found = Some((offset, offset + name.len()));
+    }
+
+    found
+}
+
+/// The module file itself, for a binding that holds the whole module.
+/// A plain Luau module hands its table over on a top level `return`,
+/// which is the line the reader means; a module with no such line opens
+/// at its first.
+fn module_location(file: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let at = (module_head_line(&text), 0);
+
+    Some(json!([{ "uri": path_to_uri(file), "range": range_value(at, at) }]))
+}
+
+/// The line a whole-module binding opens at: the last top level
+/// `return`, which is where a plain Luau module hands its table over.
+/// A module with no such line opens at its first.
+pub(crate) fn module_head_line(text: &str) -> u32 {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| *line == "return" || line.starts_with("return "))
+        .last()
+        .map_or(0, |(i, _)| i as u32)
+}
+
+/// Whether a path lies in a dot directory of the project: `.ember`
+/// holds the packages a require reaches and `.alloy` the build's
+/// sourcemap, so both stand in the mirror the child indexes. Neither is
+/// a source the reader wrote. The auto import walk leaves every dot
+/// directory out, and `workspace/symbol` agrees with it.
+pub(crate) fn in_a_dot_directory(path: &Path, mirror: &Path, root: Option<&Path>) -> bool {
+    let Some(rest) = path
+        .strip_prefix(mirror)
+        .ok()
+        .or_else(|| root.and_then(|r| path.strip_prefix(r).ok()))
+    else {
+        return false;
+    };
+
+    rest.parent().is_some_and(|dirs| {
+        dirs.components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    })
 }
 
 /// The file an instance path names, through the `[mount]` table:

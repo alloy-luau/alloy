@@ -1,3 +1,4 @@
+use super::super::hover::shadows_an_import;
 use super::super::*;
 use super::support::one_file;
 
@@ -581,4 +582,131 @@ fn a_guarded_index_reads_the_element_type() {
         optional_index_hover("```alloy\nP?\n```", doc, 3, column(3)),
         None
     );
+}
+
+/// Luau's solver gives a function it infers from a definition with no
+/// parameters a variadic tail, so a module's table printed
+/// `default: (...any) -> string` beside `add: (a: number, b: number)`.
+/// The declaration says the list is empty.
+#[test]
+fn a_function_with_no_parameters_closes_its_pack() {
+    let src = concat!(
+        "export function add(a: number, b: number): number\n",
+        "    return a + b\n",
+        "end\n",
+        "\n",
+        "export async function fetchName(): string\n",
+        "    return \"alice\"\n",
+        "end\n",
+        "\n",
+        "export namespace Geo as\n",
+        "    function origin(): number\n",
+        "        return 0\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "export default function makeDefault(): string\n",
+        "    return \"d\"\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = &st.docs[uri];
+    let empty = empty_parameter_names(doc, &st);
+
+    assert!(empty.contains("fetchName"));
+    assert!(empty.contains("origin"));
+    // `export default function makeDefault` binds `default` in the
+    // module's table, which is the key the reader sees.
+    assert!(empty.contains("default"));
+    assert!(empty.contains("makeDefault"));
+    assert!(!empty.contains("add"));
+
+    let printed = concat!(
+        "local M: {\n",
+        "    Geo: {\n",
+        "        origin: (...any) -> number\n",
+        "    },\n",
+        "    add: (...any) -> number,\n",
+        "    default: (...any) -> string,\n",
+        "    fetchName: (...any) -> Future<string>\n",
+        "}",
+    );
+
+    assert_eq!(
+        close_empty_packs(printed, &empty),
+        concat!(
+            "local M: {\n",
+            "    Geo: {\n",
+            "        origin: () -> number\n",
+            "    },\n",
+            // A print with more names than the source wrote belongs to
+            // another function; `add` takes two parameters.
+            "    add: (...any) -> number,\n",
+            "    default: () -> string,\n",
+            "    fetchName: () -> Future<string>\n",
+            "}",
+        )
+    );
+}
+
+/// A written `(...any)` is a function that really takes anything. The
+/// std types carry several, and none of them closes.
+#[test]
+fn a_declared_variadic_keeps_its_pack() {
+    let (st, uri) = one_file("export function takes(...: any): number\n    return 1\nend\n");
+    let doc = &st.docs[uri];
+    let empty = empty_parameter_names(doc, &st);
+    let printed = "local M: {\n    takes: (...any) -> number\n}";
+
+    assert!(!empty.contains("takes"));
+    assert_eq!(close_empty_packs(printed, &empty), printed);
+}
+
+/// A `local` inside a function shadows an import of the same name. The
+/// hover read the import's declaration at the local's own line and at
+/// every use of it.
+#[test]
+fn a_local_shadows_the_import_it_hides() {
+    let src = concat!(
+        "import { shared } from \"./src\"\n",
+        "\n",
+        "local function useShared(): string\n",
+        "    local shared = \"local-shadow\"\n",
+        "\n",
+        "    return shared\n",
+        "end\n",
+        "\n",
+        "print(shared, useShared())\n",
+    );
+    let at = |needle: &str| src.find(needle).expect("the word");
+
+    // The local's own line, and the use under it.
+    assert!(shadows_an_import(src, "shared", at("shared = ")));
+    assert!(shadows_an_import(src, "shared", at("return shared") + 7));
+    // The import list itself, and the use at the top level, where the
+    // local is out of scope.
+    assert!(!shadows_an_import(src, "shared", at("shared }")));
+    assert!(!shadows_an_import(src, "shared", at("shared, useShared")));
+}
+
+/// A parameter and a `for` variable shadow an import the same way.
+#[test]
+fn a_parameter_and_a_loop_variable_shadow_too() {
+    let src = concat!(
+        "import { shared } from \"./src\"\n",
+        "\n",
+        "local function f(shared: string): string\n",
+        "    return shared\n",
+        "end\n",
+        "\n",
+        "for shared in pairs({}) do\n",
+        "    print(shared)\n",
+        "end\n",
+    );
+    let at = |needle: &str| src.find(needle).expect("the word");
+
+    assert!(shadows_an_import(src, "shared", at("shared: string")));
+    assert!(shadows_an_import(src, "shared", at("return shared") + 7));
+    assert!(shadows_an_import(src, "shared", at("shared in pairs")));
+    assert!(shadows_an_import(src, "shared", at("print(shared)") + 6));
 }

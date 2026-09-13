@@ -1086,6 +1086,15 @@ impl Server {
                             text = fold_std_shapes(&text);
                             text = crate::shapes::fold(&text, &st.known_shapes_at(ctx.as_deref()));
 
+                            // A module's table prints every member the
+                            // solver inferred, and a function defined
+                            // with no parameters carries a variadic
+                            // tail there. The declaration says the list
+                            // is empty.
+                            if text.contains("(...any)") {
+                                text = close_empty_packs(&text, &empty_parameter_names(doc, &st));
+                            }
+
                             if let Some(written) = declared_signature(&text, doc, line, character) {
                                 text = written;
                             }
@@ -1372,6 +1381,17 @@ impl Server {
                 // unit enum as a union of strings; the names go back.
                 crate::shapes::fold_value(result, &st.known_shapes_at(ctx.as_deref()));
 
+                // The same variadic tail the hover drops: a member of a
+                // module reads `(...any) -> T` where the source wrote
+                // no parameters at all.
+                if matches!(
+                    method.as_str(),
+                    "textDocument/completion" | "completionItem/resolve"
+                ) && let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u))
+                {
+                    close_item_packs(result, &empty_parameter_names(doc, &st));
+                }
+
                 // A type hint inserts its edit on a click: the label shows
                 // that text, so the two never differ.
                 if method == "textDocument/inlayHint"
@@ -1461,6 +1481,26 @@ impl Server {
                             link["range"] = range_value((line, s), (line, e));
 
                             true
+                        });
+                    }
+                }
+
+                // Every symbol the child found in a dot directory of the
+                // mirror: `.ember` and `.alloy` stand there for the
+                // requires and the sourcemap, and hold no source the
+                // reader wrote.
+                "workspace/symbol" => {
+                    if let Some(symbols) = result.as_array_mut() {
+                        let (mirror, root) = (st.mirror.clone(), st.root.clone());
+
+                        symbols.retain(|symbol| {
+                            symbol
+                                .pointer("/location/uri")
+                                .and_then(Value::as_str)
+                                .and_then(uri_to_path)
+                                .is_none_or(|path| {
+                                    !in_a_dot_directory(&path, &mirror, root.as_deref())
+                                })
                         });
                     }
                 }

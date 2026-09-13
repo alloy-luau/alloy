@@ -61,9 +61,11 @@ impl Server {
             // declaring keywords in front of it.
             remote_hover(&owner.source, &word)
         };
-        let answer = remote_hover(&doc.source, &word)
-            .or_else(imported)
-            .or_else(from_global)
+        let shadowed = shadows_an_import(&doc.source, &word, start);
+        let inner = |answer: Option<String>| answer.filter(|_| !shadowed);
+        let answer = inner(remote_hover(&doc.source, &word))
+            .or_else(|| inner(imported()))
+            .or_else(|| inner(from_global()))
             .or_else(|| service_hover(&doc.source, &word, spec_line))
             .or_else(|| {
                 let dir = path
@@ -131,6 +133,32 @@ pub(crate) fn global_owner<'a>(st: &'a State, uri: &str, word: &str) -> Option<&
                     .any(|g| g.name == word && st.global_reaches(uri, u, g))
         })
         .map(|(_, d)| d)
+}
+
+/// Whether a nearer binding than an import or a project global holds
+/// the word at `start`: a `local`, a parameter, a `for` variable, or a
+/// `case` binding. The child types that one, and the outer declaration
+/// says nothing about it.
+///
+/// The caret's own line counts on its own: `locals_in_scope` leaves a
+/// `local x = |` out, since there the caret sits in the value and not in
+/// the name. The scope reads from the end of that line, so a parameter
+/// answers where its own list writes it.
+pub(crate) fn shadows_an_import(source: &str, word: &str, start: usize) -> bool {
+    let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |i| start + i);
+    let line = &source[line_start..line_end];
+
+    // An import line binds nothing of its own here: `bindings` reads
+    // the declaring keywords, and `import` is not one.
+    alloy::declarations::bindings(line)
+        .iter()
+        .any(|b| b.name == word)
+        || crate::context::locals_in_scope(source, line_end)
+            .iter()
+            .any(|l| l.name == word)
 }
 
 /// Whether a word starts right after a `.` or a `:`, which makes it a

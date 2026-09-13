@@ -360,15 +360,6 @@ impl<'s> Desugar<'s> {
     }
 
     pub(crate) fn stmt(&mut self, stmt: &Stmt) {
-        // A hoisted global lives in the module beside the script; its
-        // lines here go blank, and the injected require binds the name.
-        if self.options.hoist_globals && crate::globals::is_global(stmt) {
-            let span = stmt.span();
-            self.blank_lines(self.byte_start(span), self.byte_end(span));
-
-            return;
-        }
-
         // Declarations come first so a later statement sees them.
         match stmt {
             Stmt::Local(l) => {
@@ -661,6 +652,11 @@ impl<'s> Desugar<'s> {
             return true;
         }
 
+        // `global type X = T` reports and renders as `export type X = T`.
+        if matches!(s, Stmt::TypeAlias(_)) && self.wrote_global(s.span()) {
+            return true;
+        }
+
         // `declare class` takes the spelling Luau reads today.
         if is_declare_class(self.src, self.toks, s) {
             return true;
@@ -691,13 +687,6 @@ impl<'s> Desugar<'s> {
         }
 
         AMBIENT.iter().any(|n| text.contains(n))
-            // A project global reaches this file without an import, so
-            // the walk has to see the name and record the use.
-            || self.options.globals.iter().any(|g| text.contains(&g.name))
-            // A `global local` this file declares reads its slot off
-            // the table the module returns, so the walk has to see it
-            // even though no require brings it in.
-            || self.own_mutable.iter().any(|n| text.contains(n.as_str()))
             || text.contains("import(")
             || text.contains("import<<")
             || self.structs.iter().any(|name| struct_called(text, name))
@@ -1115,7 +1104,7 @@ impl<'s> Desugar<'s> {
                     .max()
                     .unwrap_or(start);
 
-                if t.global {
+                if self.wrote_global(t.span) {
                     let after_kw = self.toks[rest.start as usize].end;
                     self.copy(after_attrs, start);
                     self.generate(start, "export");
@@ -1134,16 +1123,14 @@ impl<'s> Desugar<'s> {
             // `export type { T }` below it sends the alias out; Luau
             // has no other way to re-export one.
             Stmt::TypeAlias(t)
-                if !t.exported
-                    && !t.global
-                    && self.export_listed_types.contains(self.text_of(t.name)) =>
+                if !t.exported && self.export_listed_types.contains(self.text_of(t.name)) =>
             {
                 let start = self.byte_start(t.span);
                 self.generate(start, "export ");
                 self.copy(start, self.byte_end(t.span));
             }
 
-            Stmt::TypeAlias(t) if t.global => {
+            Stmt::TypeAlias(t) if self.wrote_global(t.span) => {
                 let start = self.byte_start(t.span);
                 let after = self.toks[t.span.start as usize].end;
                 self.generate(start, "export");

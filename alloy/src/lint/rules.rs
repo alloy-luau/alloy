@@ -41,6 +41,42 @@ fn directive_lints(src: &str) -> Vec<Lint> {
         .collect()
 }
 
+/// The `const` members a namespace holds, as the dotted paths a source
+/// writes: `Cfg.LIMIT`, `Cfg.Inner.LIMIT`. A private member reaches no
+/// other file, so it is left out.
+pub fn namespace_consts(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    prefix: &str,
+) -> Vec<String> {
+    let text = |span: alloy_syntax::ast::TokSpan| span.text_or_empty(src, toks);
+    let mut out = Vec::new();
+
+    for m in &ns.members {
+        if m.is_private(src, toks) {
+            continue;
+        }
+
+        match m.stmt.under_default() {
+            alloy_syntax::ast::Stmt::Local(l) if l.is_const => {
+                for b in &l.names {
+                    out.push(format!("{prefix}.{}", text(b.name)));
+                }
+            }
+
+            alloy_syntax::ast::Stmt::Namespace(inner) => {
+                let deeper = format!("{prefix}.{}", text(inner.name));
+                out.extend(namespace_consts(src, toks, inner, &deeper));
+            }
+
+            _ => {}
+        }
+    }
+
+    out
+}
+
 /// `const N = 3` then `N = 4`: the byte range of each reassignment and
 /// its message.
 ///
@@ -48,18 +84,12 @@ fn directive_lints(src: &str) -> Vec<Lint> {
 /// reports it as a syntax error in the emit, which only `alloy flux`
 /// runs, and in the checker's words.
 ///
-/// `globals` names the `global const` declarations of the project this
-/// file reaches, each with the file that declares it. A `global` is in
-/// scope everywhere, so an assignment to one here reads the same way.
-/// A `const` inside a namespace is named there by its dotted path,
-/// `Cfg.LIMIT`, since that is what a source writes to reach it.
-///
-/// `namespace_consts` names the same members of this file's own
-/// namespaces, which need no file in the message.
+/// A `const` inside a namespace is named by its dotted path,
+/// `Cfg.LIMIT`, since that is what a source writes to reach it;
+/// `namespace_consts` holds those paths.
 pub fn const_reassignments(
     src: &str,
     toks: &[Tok],
-    globals: &[(String, String)],
     namespace_consts: &[String],
 ) -> Vec<(u32, u32, String)> {
     let text = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or("");
@@ -91,7 +121,7 @@ pub fn const_reassignments(
         names.push(text(j));
     }
 
-    if names.is_empty() && globals.is_empty() && namespace_consts.is_empty() {
+    if names.is_empty() && namespace_consts.is_empty() {
         return Vec::new();
     }
 
@@ -127,34 +157,26 @@ pub fn const_reassignments(
             .join(".");
 
         if end > i + 1 {
-            let message = if namespace_consts.contains(&path) {
-                format!(
-                    "`{path}` is a `const`; its value is set once and a reassignment is an error"
-                )
-            } else if let Some((_, file)) = globals.iter().find(|(n, _)| *n == path) {
-                format!(
-                    "`{path}` is a `const` of {file}; its value is set once and a reassignment is an error"
-                )
-            } else {
+            if !namespace_consts.contains(&path) {
                 continue;
-            };
+            }
+
+            let message = format!(
+                "`{path}` is a `const`; its value is set once and a reassignment is an error"
+            );
             out.push((t.start, toks[end - 1].end, message));
 
             continue;
         }
 
         let name = text(i);
-        // A `const` of this file wins: the file's own declaration is
-        // the nearer one, and a global by that name never reaches here.
-        let message = if names.contains(&name) {
-            format!("`{name}` is a `const`; its value is set once and a reassignment is an error")
-        } else if let Some((_, file)) = globals.iter().find(|(n, _)| n == name) {
-            format!(
-                "`{name}` is a `const` of {file}; its value is set once and a reassignment is an error"
-            )
-        } else {
+
+        if !names.contains(&name) {
             continue;
-        };
+        }
+
+        let message =
+            format!("`{name}` is a `const`; its value is set once and a reassignment is an error");
         out.push((t.start, t.end, message));
     }
 
@@ -182,67 +204,6 @@ struct Fn {
     exported: bool,
     /// Inside an `impl` or a `trait`.
     in_impl: bool,
-}
-
-/// Runs the token and statement lints on one file.
-/// `export_impl`: an `impl` on a foreign type wearing the old keyword.
-/// `export` said "project wide" before `global` existed; `global impl`
-/// says it now, and the rewrite is the one word.
-fn export_impl(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
-    let text = |span: alloy_syntax::ast::TokSpan| span.text_or_empty(src, toks);
-    // A struct or an enum of this file is never foreign, whatever its name.
-    let mut local: Vec<&str> = Vec::new();
-
-    for stmt in &chunk.block.stmts {
-        match stmt {
-            Stmt::Struct(d) => local.push(text(d.name)),
-
-            Stmt::Enum(d) => local.push(text(d.name)),
-
-            _ => {}
-        }
-    }
-
-    let mut out = Vec::new();
-
-    for stmt in &chunk.block.stmts {
-        let Stmt::Impl(i) = stmt else {
-            continue;
-        };
-        let target = text(i.target);
-
-        if !i.exported
-            || i.global
-            || local.contains(&target)
-            || !crate::extensions::is_foreign(target)
-        {
-            continue;
-        }
-
-        let Some(word) = toks.get(i.span.start as usize) else {
-            continue;
-        };
-
-        if word.text(src) != "export" {
-            continue;
-        }
-
-        out.push(Lint {
-            name: "export_impl",
-            start: word.start,
-            end: word.end,
-            message: format!(
-                "`impl {target}` works project wide; `global impl` is the word for that"
-            ),
-            fix: Some(crate::lint::Fix {
-                start: word.start,
-                end: word.end,
-                replacement: "global".to_string(),
-            }),
-        });
-    }
-
-    out
 }
 
 /// A use of a namespace the file declares `@deprecated`. The attribute
@@ -443,7 +404,6 @@ pub fn run(
     }
 
     lints.extend(directive_lints(src));
-    lints.extend(export_impl(src, toks, chunk));
     lints.extend(deprecated_namespaces(src, toks, chunk));
     lints.extend(game_alias(src, toks, chunk));
     if !ingot_rewrite {

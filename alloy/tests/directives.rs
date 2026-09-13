@@ -209,28 +209,14 @@ fn an_end_that_closes_nothing_reports() {
 
 const REMOTE: &str = "remote Buy(item: string) from client\n";
 
+/// The file name says which half of a remote the file sees.
 #[test]
-fn a_side_directive_shapes_the_remote_the_way_the_file_name_does() {
+fn the_file_name_shapes_the_remote() {
     let by_name = compile_as(REMOTE, "shop.server.aly");
-    let by_directive = compile_as(&format!("--@alloy-file-side server\n{REMOTE}"), "shop.aly");
-    assert!(
-        by_directive.diagnostics.is_empty(),
-        "{:?}",
-        by_directive.diagnostics
-    );
 
     // The server sees `on`, and never the client's `fire`.
     assert!(by_name.check.contains("on: "), "{}", by_name.check);
-    assert!(
-        by_directive.check.contains("on: "),
-        "{}",
-        by_directive.check
-    );
-    assert!(
-        !by_directive.check.contains("fire: "),
-        "{}",
-        by_directive.check
-    );
+    assert!(!by_name.check.contains("fire: "), "{}", by_name.check);
 
     // A shared file sees both halves.
     let shared = compile_as(REMOTE, "shop.aly");
@@ -238,37 +224,16 @@ fn a_side_directive_shapes_the_remote_the_way_the_file_name_does() {
     assert!(shared.check.contains("on: "), "{}", shared.check);
 }
 
+/// The side directives left with `global`; the words name no directive.
 #[test]
-fn a_side_that_contradicts_the_file_name_reports() {
-    let out = compile_as(
-        &format!("--@alloy-file-side client\n{REMOTE}"),
-        "shop.server.aly",
-    );
-    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
-    assert_eq!(messages.len(), 1, "{messages:?}");
-    assert!(
-        messages[0].contains("contradicts the file name"),
-        "{messages:?}"
-    );
+fn the_side_directives_are_gone() {
+    let file_side = messages("--@alloy-file-side client\nlocal a = 1\n");
+    assert_eq!(file_side.len(), 1, "{file_side:?}");
+    assert!(file_side[0].contains("is no directive"), "{file_side:?}");
 
-    // The same directive in a file the name agrees with is clean.
-    let agrees = compile_as(
-        &format!("--@alloy-file-side server\n{REMOTE}"),
-        "shop.server.aly",
-    );
-    assert!(agrees.diagnostics.is_empty(), "{:?}", agrees.diagnostics);
-}
-
-#[test]
-fn a_side_that_names_neither_client_nor_server_reports() {
-    let bad = messages("--@alloy-file-side middle\nlocal a = 1\n");
-    assert_eq!(bad.len(), 1);
-    assert!(bad[0].contains("the sides are `client`, `server`, and `shared`"));
-
-    // `--@alloy-side` belongs over a global; anywhere else it reports.
-    let stray = messages("--@alloy-side client\nlocal a = 1\n");
-    assert_eq!(stray.len(), 1, "{stray:?}");
-    assert!(stray[0].contains("sits above a global"), "{stray:?}");
+    let decl_side = messages("--@alloy-side client\nlocal a = 1\n");
+    assert_eq!(decl_side.len(), 1, "{decl_side:?}");
+    assert!(decl_side[0].contains("is no directive"), "{decl_side:?}");
 }
 
 // --- 5. the preserved line ---------------------------------------------------

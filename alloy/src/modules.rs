@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use alloy_syntax::ast::TokSpan;
+
 use crate::config::Config;
 
 /// The type names a source exports: `export struct X`, `export enum X`,
@@ -96,7 +98,7 @@ fn exported_namespace_types(source: &str) -> Vec<String> {
         };
         let name = text(ns.name);
 
-        if !ns.exported && !ns.global && !listed.contains(&name) {
+        if !ns.exported && !listed.contains(&name) {
             continue;
         }
 
@@ -707,7 +709,7 @@ pub fn import_attributes(
             continue;
         };
 
-        for (name, decl) in crate::globals::exported_attribute_decls(&text) {
+        for (name, decl) in exported_attribute_decls(&text) {
             if !out.iter().any(|(n, _)| *n == name) {
                 out.push((name, decl));
             }
@@ -715,6 +717,94 @@ pub fn import_attributes(
     }
 
     out
+}
+
+/// The `export attribute` declarations of one source, for a file that
+/// imports it.
+pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
+    let mut out = Vec::new();
+
+    {
+        let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+            return out;
+        };
+        let toks = &parsed.lexed.toks;
+
+        for stmt in &parsed.chunk.block.stmts {
+            let alloy_syntax::ast::Stmt::Attribute(a) = stmt else {
+                continue;
+            };
+
+            if !a.exported {
+                continue;
+            }
+
+            let targets = a
+                .targets
+                .iter()
+                .map(|t| token_text(src, toks, *t))
+                .collect();
+            let params = a
+                .params
+                .iter()
+                .map(|p| {
+                    (
+                        token_text(src, toks, p.name),
+                        p.ty.map(|t| span_text(src, toks, t).trim().to_string()),
+                    )
+                })
+                .collect();
+            let requires = a
+                .requires
+                .iter()
+                .map(|c| require_of(src, toks, c))
+                .collect();
+            out.push((
+                token_text(src, toks, a.name),
+                crate::desugar::AttrDecl {
+                    targets,
+                    params,
+                    requires,
+                },
+            ));
+        }
+    }
+
+    out
+}
+
+/// One `requires` clause of an `attribute`, as the check reads it.
+fn require_of(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    c: &alloy_syntax::ast::RequireClause,
+) -> crate::desugar::Require {
+    let (member, each) = match c.member {
+        alloy_syntax::ast::RequireMember::Name(n) => (token_text(src, toks, n), false),
+
+        alloy_syntax::ast::RequireMember::Each(n) => (token_text(src, toks, n), true),
+    };
+
+    crate::desugar::Require {
+        private: c.visibility.map(|v| token_text(src, toks, v) == "private"),
+        kind: token_text(src, toks, c.kind),
+        member,
+        each,
+        shape: c
+            .shape
+            .map(|s| span_text(src, toks, s).trim().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// The text of the first token of a span.
+fn token_text(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> String {
+    span.text(src, toks).to_string()
+}
+
+/// The source a span covers, as written.
+fn span_text(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> String {
+    span.text_or_empty(src, toks).to_string()
 }
 
 /// The imported attribute declarations of a file under the nearest
@@ -1241,7 +1331,7 @@ impl Surface {
 
         Surface {
             names: exported_names(source),
-            attributes: crate::globals::exported_attribute_decls(source)
+            attributes: exported_attribute_decls(source)
                 .into_iter()
                 .map(|(name, _)| name)
                 .collect(),

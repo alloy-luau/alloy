@@ -11,11 +11,6 @@ use super::*;
 /// so the value needs a binding to name there.
 pub(crate) const DEFAULT_LOCAL: &str = "_default";
 
-/// The table a module's `global local` values live on. The module
-/// returns it, so every file that names one reads and writes the same
-/// slot.
-pub(crate) const GLOBAL_STATE: &str = "_gs";
-
 impl<'s> Desugar<'s> {
     /// `import` becomes `require` plus locals or type aliases. A data
     /// path loses its extension: the build writes `data.json` as
@@ -116,34 +111,7 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// A name that is already global needs no import, and an import of
-    /// one hides that the name reaches every file. The spec reports.
-    fn reject_global_imports(&mut self, i: &Import) {
-        let specs = match &i.kind {
-            ImportKind::Namespace(_, specs)
-            | ImportKind::Both(_, specs)
-            | ImportKind::Named(specs)
-            | ImportKind::TypeOnly(specs) => specs.clone(),
-
-            _ => Vec::new(),
-        };
-
-        for sp in specs {
-            let name = self.text_of(sp.name).to_string();
-
-            if self.options.globals.iter().any(|g| g.name == name) {
-                self.diagnostics.push(Diagnostic {
-                    start: self.byte_start(sp.name),
-                    end: self.byte_end(sp.name),
-                    message: format!("`{name}` is global; it is in scope without an import"),
-                });
-            }
-        }
-    }
-
     pub(crate) fn import_stmt(&mut self, i: &Import) {
-        self.reject_global_imports(i);
-
         let anchor = self.byte_start(i.span);
         // The spec as written: `strip_literal` drops a data extension,
         // and the extension is what says the module is not Alloy's.
@@ -410,12 +378,7 @@ impl<'s> Desugar<'s> {
                     }
                 }
 
-                // A `global` exports too, and two globals of one name
-                // are the globals check's report, not this one.
-                other
-                    if crate::desugar::namespaces::is_exported(other.under_default())
-                        && !crate::globals::is_global(other.under_default()) =>
-                {
+                other if crate::desugar::namespaces::is_exported(other.under_default()) => {
                     let mut one = Vec::new();
                     let mut none = Vec::new();
                     self.binding_names(other, &mut one, &mut none);
@@ -698,29 +661,15 @@ impl<'s> Desugar<'s> {
     }
 
     /// `export local x = 1` becomes `local x = 1` and exports `x`.
-    ///
-    /// A `global local` is one value for the whole project, so its slot
-    /// is on the table the module returns. The local still stands: it
-    /// carries the annotation the author wrote and the type the value
-    /// infers, and the line right after it puts the value in the slot.
     pub(crate) fn exported_local(&mut self, span: TokSpan, l: &Local) {
-        let shared = l.global && !l.is_const && self.declares_shared_globals();
-        let names: Vec<String> = l
-            .names
-            .iter()
-            .map(|b| self.text_of(b.name).to_string())
-            .collect();
-
-        for name in &names {
-            if !shared {
-                self.exports.push((name.clone(), name.clone()));
-            }
+        for b in &l.names {
+            let name = self.text_of(b.name).to_string();
+            self.exports.push((name.clone(), name));
         }
 
         // The attributes stand above the word, and the span opens on
-        // the first of them. Their lines go blank; the `export` or
-        // `global` word after them goes, and the rest renders as a
-        // plain local.
+        // the first of them. Their lines go blank; the `export` word
+        // after them goes, and the rest renders as a plain local.
         for a in &l.attrs {
             self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
         }
@@ -750,21 +699,6 @@ impl<'s> Desugar<'s> {
                 Child::Function(b) => d.function_block(b),
             });
         }
-
-        if shared {
-            let slots: Vec<String> = names
-                .iter()
-                .map(|n| format!("{GLOBAL_STATE}.{n}"))
-                .collect();
-            let at = self.byte_end(span);
-            self.generate(at, &format!(" {} = {}", slots.join(", "), names.join(", ")));
-        }
-    }
-
-    /// Whether this file owns a `global local`, so the module returns
-    /// the table its values live on.
-    pub(crate) fn declares_shared_globals(&self) -> bool {
-        !self.own_mutable.is_empty()
     }
 
     /// The export table, appended after the last token. The test
@@ -777,8 +711,7 @@ impl<'s> Desugar<'s> {
         // A module that exports only types binds no value, and Luau
         // requires a module to return exactly one. It returns an empty
         // table; the `export type` lines stand on their own.
-        let shared = self.declares_shared_globals();
-        let types_only = self.exports.is_empty() && !shared;
+        let types_only = self.exports.is_empty();
 
         if types_only && !exports_a_type(block) {
             return;
@@ -803,22 +736,6 @@ impl<'s> Desugar<'s> {
 
         if types_only {
             self.generate(at, " return {}");
-
-            return;
-        }
-
-        // The `global local` values already sit on `_gs`, so the
-        // module returns that table with its exports put in. A fresh
-        // table would copy the values and every file would hold its own.
-        if shared {
-            let mut text = String::new();
-
-            for (k, v) in &self.exports {
-                text.push_str(&format!(" {GLOBAL_STATE}.{k} = {v}"));
-            }
-
-            text.push_str(&format!(" return {GLOBAL_STATE}"));
-            self.generate(at, &text);
 
             return;
         }

@@ -1557,8 +1557,8 @@ fn an_imported_attribute_hovers_as_an_attribute() {
 }
 
 /*
-An attribute contract reaches the using file: an `export attribute` that
-an import brings and a `global attribute` that needs none.
+An attribute contract reaches the using file: two `export attribute`
+declarations one import brings in.
 
 The hover lists what the attribute requires with the argument expanded,
 the check reports the member the file does not carry, and the quick fix
@@ -1583,13 +1583,13 @@ fn an_attribute_contract_reaches_the_file_that_uses_it() {
             "export attribute provider(lifecycles: Lifecycle[]) on impl as\n",
             "    requires private function each lifecycles(self)\nend\n\n",
             "--- A service the framework starts.\n",
-            "global attribute service on impl as\n",
+            "export attribute service on impl as\n",
             "    requires public function Start(self)\nend\n"
         ),
     )
     .unwrap();
     let src = concat!(
-        "import { Lifecycle, provider } from \"./lifecycle\"\n\n",
+        "import { Lifecycle, provider, @service } from \"./lifecycle\"\n\n",
         "struct Data as\n    x: number\nend\n\n",
         "@provider({ lifecycles = [ Lifecycle.Init, Lifecycle.Start ] })\n",
         "@service\n",
@@ -1624,11 +1624,11 @@ fn an_attribute_contract_reaches_the_file_that_uses_it() {
         "the use expands the clause: {imported}"
     );
 
-    // The global attribute hovers the same way, with no import.
-    let global = s.hover(&uri, 7, 3);
+    // The second attribute of the import hovers the same way.
+    let service = s.hover(&uri, 7, 3);
     assert!(
-        global.contains("- `public function Start(self)`"),
-        "global: {global}"
+        service.contains("- `public function Start(self)`"),
+        "service: {service}"
     );
 
     // Both contracts report in this file.
@@ -2575,12 +2575,11 @@ fn the_editor_can_turn_both_helpers_off() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Two files of one project: one declares globals, the other names
-/// them with no import. The editor gets a clean file, a hover on the
-/// declaration, a completion list that holds the names, and a
-/// definition that lands in the declaring file.
+/// The migration, end to end: a `global` declaration reports with the
+/// removal message, the quick fix writes `export` over the word, and the
+/// file that reads the name gets the `import` line from the auto import.
 #[test]
-fn a_global_reaches_another_file_in_the_editor() {
+fn the_global_removal_reports_and_the_fixes_migrate_it() {
     let Some(child) = luau_lsp() else {
         eprintln!("luau-lsp not found; skipping");
         return;
@@ -2588,116 +2587,119 @@ fn a_global_reaches_another_file_in_the_editor() {
 
     let dir = std::env::temp_dir().join(format!("alloy-lsp-globals-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("src/shared")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("alloy.toml"),
         "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n",
     )
     .unwrap();
-    std::fs::write(
-        dir.join("src/shared/log.aly"),
-        "--- Writes a line to the output.\nglobal function log(msg: string)\n    print(msg)\nend\n\nglobal const MAX = 10\n",
-    )
-    .unwrap();
-    let main_src = "local n: number = MAX\nlog(`start {n}`)\nlocal bad: string = MAX\nprint(bad)\n";
-    let main = dir.join("src/main.aly");
-    std::fs::write(&main, main_src).unwrap();
+    let a_src = "--- A count.\nglobal local counter = 0\n";
+    let a = dir.join("src/a.aly");
+    std::fs::write(&a, a_src).unwrap();
 
     let mut s = start(&child, &dir);
-    let uri = format!("file://{}", main.display());
+    let a_uri = format!("file://{}", a.display());
     write(
         &mut s.stdin,
         &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
-            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": main_src } } }),
+            "textDocument": { "uri": a_uri, "languageId": "alloy-luau", "version": 1, "text": a_src } } }),
     );
 
-    // The globals type through the require the emit writes: `MAX` is a
-    // number, so the string annotation is the one error the file has.
-    let diags = s.diagnostics(&uri, |ds| {
-        ds.iter()
-            .any(|d| d.contains("number") && d.contains("string"))
+    // The declaration reports at the word, and the message names the
+    // `export` and the `import` that replace it.
+    let diags = s.diagnostics(&a_uri, |ds| {
+        ds.iter().any(|d| d.contains("`global` is removed"))
     });
-    assert!(
-        diags.iter().all(|d| !d.contains("Unknown global")),
-        "{diags:#?}"
-    );
-
-    // Hover on the call reads the declaration in the other file.
-    let h = s.hover(&uri, 1, 1);
-    assert!(h.contains("log"), "{h}");
-    assert!(h.contains("Writes a line to the output."), "{h}");
-
-    // In a file that names no global yet, the list still holds them,
-    // with the file that declares each one in the detail.
-    let probe_src = "local v = \n";
-    let probe = dir.join("src/probe.aly");
-    std::fs::write(&probe, probe_src).unwrap();
-    let probe_uri = format!("file://{}", probe.display());
-    write(
-        &mut s.stdin,
-        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
-            "textDocument": { "uri": probe_uri, "languageId": "alloy-luau", "version": 1, "text": probe_src } } }),
-    );
-    let items = s.completion_items(&probe_uri, 0, 10);
-    let hit = items
+    let said = diags
         .iter()
-        .find(|i| i["label"] == "MAX")
-        .unwrap_or_else(|| panic!("no `MAX` in {items:#?}"));
-    assert_eq!(hit["detail"], json!("global const MAX: number"));
-    assert!(
-        hit["documentation"]["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("shared/log.aly"),
-        "{hit}"
-    );
+        .find(|d| d.contains("`global` is removed"))
+        .expect("the report");
+    assert!(said.starts_with("ImportError:"), "{said}");
+    assert!(said.contains("`export local`"), "{said}");
+    assert!(said.contains("import { counter } from \"./a\""), "{said}");
 
-    // Go to definition lands on the declaration, not on the require the
-    // emit writes on the first line.
-    let def = s.request(
-        "textDocument/definition",
-        json!({ "textDocument": { "uri": uri }, "position": { "line": 1, "character": 1 } }),
-    );
-    let target = def
-        .as_array()
-        .and_then(|a| a.first().cloned())
-        .unwrap_or(def.clone());
-    assert!(
-        target["uri"]
-            .as_str()
-            .unwrap_or_default()
-            .ends_with("shared/log.aly"),
-        "{def}"
-    );
-    assert_eq!(target["range"]["start"]["line"], json!(1), "{def}");
-
-    // References span the project: the declaration and every file that
-    // names the global, with no import to follow.
-    let refs = s.request(
-        "textDocument/references",
+    // The quick fix on the declaration rewrites the one word.
+    let actions = s.request(
+        "textDocument/codeAction",
         json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": 1, "character": 1 },
-            "context": { "includeDeclaration": true }
+            "textDocument": { "uri": a_uri },
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 6 } },
+            "context": { "diagnostics": [] },
         }),
     );
-    let uris: Vec<String> = refs
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    let list = actions.as_array().cloned().unwrap_or_default();
+    let fix = list
         .iter()
-        .filter_map(|r| r["uri"].as_str().map(str::to_string))
-        .collect();
-    assert!(uris.iter().any(|u| u.ends_with("shared/log.aly")), "{refs}");
-    assert!(uris.iter().any(|u| u.ends_with("main.aly")), "{refs}");
+        .find(|x| x["title"] == json!("replace `global` with `export`"))
+        .unwrap_or_else(|| panic!("no fix in {list:#?}"));
+    let edit = &fix["edit"]["changes"][&a_uri][0];
+    assert_eq!(edit["newText"], json!("export"));
+    assert_eq!(edit["range"]["start"], json!({ "line": 1, "character": 0 }));
+    assert_eq!(edit["range"]["end"], json!({ "line": 1, "character": 6 }));
+
+    // With the fix applied, the module exports the name.
+    let fixed = "--- A count.\nexport local counter = 0\n";
+    std::fs::write(&a, fixed).unwrap();
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": { "uri": a_uri, "version": 2 },
+            "contentChanges": [{ "text": fixed }] } }),
+    );
+
+    // The file that read the name bare now has an unknown name, and the
+    // auto import offers the line that binds it.
+    let b_src = "print(counter)\n";
+    let b = dir.join("src/b.aly");
+    std::fs::write(&b, b_src).unwrap();
+    let b_uri = format!("file://{}", b.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": b_uri, "languageId": "alloy-luau", "version": 1, "text": b_src } } }),
+    );
+    let unknown = s.diagnostics(&b_uri, |ds| ds.iter().any(|d| d.contains("counter")));
+    let said = unknown
+        .iter()
+        .find(|d| d.contains("counter"))
+        .unwrap_or_else(|| panic!("no report: {unknown:#?}"));
+    let where_it_is = json!({
+        "start": { "line": 0, "character": 6 },
+        "end": { "line": 0, "character": 13 },
+    });
+    // The editor sends the report it holds with the request, and the
+    // import fix reads the name off it.
+    let offers = s.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": b_uri },
+            "range": where_it_is,
+            "context": { "diagnostics": [{ "range": where_it_is, "message": said }] },
+        }),
+    );
+    let offered = offers.as_array().cloned().unwrap_or_default();
+    let add = offered
+        .iter()
+        .find(|x| {
+            x["title"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("Add `import { counter }"))
+        })
+        .unwrap_or_else(|| panic!("no import fix in {offered:#?}"));
+    let line = &add["edit"]["changes"][&b_uri][0];
+    assert_eq!(
+        line["newText"],
+        json!("import { counter } from \"./a\"\n"),
+        "{add}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A space asks for a completion only where a side directive takes a
-/// word; anywhere else the answer is empty, so no popup opens.
+/// A space in code asks for nothing, so no popup opens where the
+/// author is typing words.
 #[test]
-fn a_space_completes_the_side_of_a_directive() {
+fn a_space_in_code_completes_nothing() {
     let Some(child) = luau_lsp() else {
         eprintln!("luau-lsp not found; skipping");
         return;
@@ -2706,7 +2708,7 @@ fn a_space_completes_the_side_of_a_directive() {
     let dir = std::env::temp_dir().join(format!("alloy-lsp-sidespace-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = "--@alloy-file-side \nlocal x = 1\n";
+    let src = "local x = 1\n";
     let file = dir.join("t.aly");
     std::fs::write(&file, src).unwrap();
 
@@ -2718,29 +2720,11 @@ fn a_space_completes_the_side_of_a_directive() {
             "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
     );
 
-    let on_directive = s.request(
-        "textDocument/completion",
-        json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": 0, "character": 19 },
-            "context": { "triggerKind": 2, "triggerCharacter": " " }
-        }),
-    );
-    let labels: Vec<String> = on_directive
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|i| i["label"].as_str().map(str::to_string))
-        .collect();
-    assert_eq!(labels, ["client", "server", "shared"], "{on_directive}");
-
-    // A space in code opens nothing.
     let plain = s.request(
         "textDocument/completion",
         json!({
             "textDocument": { "uri": uri },
-            "position": { "line": 1, "character": 10 },
+            "position": { "line": 0, "character": 10 },
             "context": { "triggerKind": 2, "triggerCharacter": " " }
         }),
     );
@@ -2749,17 +2733,17 @@ fn a_space_completes_the_side_of_a_directive() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A file added on disk after the server started declares a global.
-/// The poll reads it, every open document is compiled again, and the
-/// name resolves where it did not before.
+/// A module added on disk after the server started. The poll reads it,
+/// the open file that imports it is compiled again, and the report on
+/// the import is gone.
 #[test]
-fn a_global_added_on_disk_reaches_the_open_files() {
+fn a_module_added_on_disk_reaches_the_open_files() {
     let Some(child) = luau_lsp() else {
         eprintln!("luau-lsp not found; skipping");
         return;
     };
 
-    let dir = std::env::temp_dir().join(format!("alloy-lsp-newglobal-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-newmodule-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
@@ -2767,7 +2751,7 @@ fn a_global_added_on_disk_reaches_the_open_files() {
         "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n",
     )
     .unwrap();
-    let src = "local n: number = shout(\"hi\")\nprint(n)\n";
+    let src = "import { shout } from \"./shout\"\n\nlocal n: number = shout(\"hi\")\nprint(n)\n";
     let file = dir.join("src/main.aly");
     std::fs::write(&file, src).unwrap();
 
@@ -2783,24 +2767,24 @@ fn a_global_added_on_disk_reaches_the_open_files() {
             "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
     );
 
-    // Nothing declares `shout` yet.
+    // The module is not there yet.
     s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("shout")));
 
-    // A file with the global lands on disk after the server started.
+    // It lands on disk after the server started.
     std::fs::write(
         dir.join("src/shout.aly"),
-        "--- Writes a loud line.\nglobal function shout(msg: string): number\n    print(msg)\n    return 1\nend\n",
+        "--- Writes a loud line.\nexport function shout(msg: string): number\n    print(msg)\n    return 1\nend\n",
     )
     .unwrap();
 
-    // The poll reads it, and the open file is compiled again: the name
-    // resolves, so the report on it is gone.
+    // The poll reads it, and the open file is compiled again: the
+    // import resolves, so the report on it is gone.
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut hover = String::new();
 
     while Instant::now() < deadline {
         s.drain(Duration::from_secs(2));
-        hover = s.hover(&uri, 0, 20);
+        hover = s.hover(&uri, 2, 20);
 
         if hover.contains("Writes a loud line.") {
             break;

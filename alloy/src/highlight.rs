@@ -75,7 +75,6 @@ const KEYWORDS: &[&str] = &[
     "after",
     "import",
     "export",
-    "global",
     "from",
     "type",
     "remote",

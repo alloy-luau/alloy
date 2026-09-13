@@ -94,6 +94,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         method_context: 0,
         type_edits: Vec::new(),
         type_names: Vec::new(),
+        global_keywords: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
@@ -109,6 +110,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         block,
         type_edits: p.type_edits,
         type_names: p.type_names,
+        global_keywords: p.global_keywords,
     })
 }
 
@@ -146,6 +148,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         method_context: 0,
         type_edits: Vec::new(),
         type_names: Vec::new(),
+        global_keywords: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
@@ -186,6 +189,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         block,
         type_edits: p.type_edits,
         type_names: p.type_names,
+        global_keywords: p.global_keywords,
     };
 
     (chunk, p.diagnostics)
@@ -207,6 +211,9 @@ struct Parser<'a> {
     /// Alloy syntax inside type spans, for emit.
     type_edits: Vec<TypeEdit>,
     type_names: Vec<TokSpan>,
+    /// The `global` keyword of every declaration that wrote one; see
+    /// `Chunk::global_keywords`.
+    global_keywords: Vec<TokSpan>,
     /// Above zero inside the then-branch of a ternary, where `:` closes
     /// the branch instead of opening a method call.
     no_method_call: u32,

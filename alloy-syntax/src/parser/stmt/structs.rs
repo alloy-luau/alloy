@@ -148,7 +148,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Struct(StructDecl {
             attributes,
             exported,
-            global: false,
             name,
             generics,
             fields,
@@ -204,7 +203,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Interface(InterfaceDecl {
             attributes,
             exported,
-            global: false,
             name,
             generics,
             extends,
@@ -284,7 +282,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Trait(TraitDecl {
             attributes,
             exported,
-            global: false,
             name,
             methods,
             span: TokSpan::new(start, self.pos),
@@ -383,7 +380,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Remote(RemoteDecl {
             attributes,
             exported,
-            global: false,
             is_function,
             name,
             params,
@@ -439,7 +435,6 @@ impl<'a> Parser<'a> {
 
         Ok(Stmt::Macro(MacroDecl {
             exported,
-            global: false,
             name,
             params,
             body,

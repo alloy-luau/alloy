@@ -187,7 +187,6 @@ pub const WORDS: &[&str] = &[
     "for",
     "from",
     "function",
-    "global",
     "if",
     "impl",
     "import",

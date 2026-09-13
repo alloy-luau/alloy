@@ -57,100 +57,6 @@ fn declaring_binding<'a>(
     found
 }
 
-/// The same, for a name another file of the project declares `global`.
-/// The declaration said `global local` or `global const`, and the type
-/// the child printed is the one the declaring file infers. `owner` is
-/// the file that wrote it.
-///
-/// The child sees one of two shapes. A `global const` is bound by copy
-/// on the first line of the emit, so the child calls it a `local`. A
-/// `global local` is one value for the project and every use reads its
-/// slot off the declaring module, so the child answers with the type
-/// alone and no declaration in front of it.
-pub(crate) fn restyle_global_hover(
-    value: &str,
-    doc: &Doc,
-    st: &State,
-    uri: &str,
-    line: u32,
-    character: u32,
-) -> Option<String> {
-    let word = word_at(doc, line, character)?;
-
-    // A name this file binds itself is this file's own; `restyle_hover`
-    // already answered it.
-    if doc.bindings.iter().any(|b| b.name == word) {
-        return None;
-    }
-
-    let owner = super::global_owner(st, uri, word)?;
-    let binding = owner
-        .bindings
-        .iter()
-        .find(|b| b.name == word && b.prefix.split(' ').next() == Some("global"))?;
-
-    let styled =
-        restyle_with(value, word, binding).or_else(|| bare_type_hover(value, word, binding));
-
-    // Under a mount the child reaches the declaring module by its
-    // instance path and may not resolve it, so it prints `unknown`.
-    // The declaration itself still says what the name holds.
-    match styled.filter(|text| !says_nothing_of_the_type(text)) {
-        Some(text) => Some(text),
-
-        None => super::modules::const_hover(&owner.source, word),
-    }
-}
-
-/// Whether a hover header carries a type that says nothing: the child
-/// prints `unknown` for a module it could not read, and `*error-type*`
-/// for one it read and could not check.
-fn says_nothing_of_the_type(text: &str) -> bool {
-    let Some(body) = text
-        .strip_prefix("```alloy\n")
-        .and_then(|r| r.split_once("\n```"))
-        .map(|(body, _)| body)
-    else {
-        return false;
-    };
-
-    matches!(
-        body.rsplit_once(": "),
-        Some((_, "unknown")) | Some((_, "*error-type*"))
-    )
-}
-
-/// The declaration in front of a type the child printed on its own.
-/// `number` alone says nothing about where the name comes from or
-/// whether a file may assign it.
-fn bare_type_hover(
-    value: &str,
-    word: &str,
-    binding: &alloy::declarations::Binding,
-) -> Option<String> {
-    // A function keeps its own header; only a value hovers as a type.
-    if binding.prefix.ends_with("function") {
-        return None;
-    }
-
-    let body = value.strip_prefix("```luau\n")?.strip_suffix("\n```")?;
-
-    // A header the child wrote already names the binding, and this is
-    // for the answers that do not.
-    if body.starts_with("local ") || body.starts_with("function") || body.starts_with("type ") {
-        return None;
-    }
-
-    let mut out = format!("```alloy\n{} {word}: {body}\n```", binding.prefix);
-
-    if let Some(doc) = binding.doc.as_deref() {
-        out.push_str("\n\n");
-        out.push_str(doc);
-    }
-
-    Some(out)
-}
-
 /// The word the cursor sits on, in the source the author wrote.
 fn word_at(doc: &Doc, line: u32, character: u32) -> Option<&str> {
     let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
@@ -1514,19 +1420,11 @@ const PRINTED_PACK: &str = "(...any) ->";
 ///
 /// `export default function make()` binds `default` in the module's
 /// table, so the key the reader sees goes in beside the name.
-pub(crate) fn empty_parameter_names(doc: &Doc, st: &State) -> HashSet<String> {
-    let globals = st
-        .docs
-        .values()
-        .filter(|d| !d.globals.is_empty())
-        .map(|d| &d.source);
+pub(crate) fn empty_parameter_names(doc: &Doc) -> HashSet<String> {
     let mut empty: HashSet<String> = HashSet::new();
     let mut takes: HashSet<String> = HashSet::new();
 
-    for src in std::iter::once(&doc.source)
-        .chain(doc.import_sources.iter())
-        .chain(globals)
-    {
+    for src in std::iter::once(&doc.source).chain(doc.import_sources.iter()) {
         for line in src.lines() {
             let Some((name, is_default, empty_list)) = declared_parameter_list(line.trim()) else {
                 continue;

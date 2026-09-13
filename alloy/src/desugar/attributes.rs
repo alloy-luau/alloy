@@ -1010,8 +1010,7 @@ impl<'s> Desugar<'s> {
             || AMBIENT_TYPES.contains(&head)
             || PRIMITIVES.contains(&head)
             || crate::extensions::is_foreign(head)
-            || crate::globals::LUAU_GLOBALS.contains(&head)
-            || self.options.globals.iter().any(|g| g.name == head)
+            || LUAU_GLOBALS.contains(&head)
             || self.options.ambient_names.iter().any(|n| n == head)
     }
 
@@ -1438,6 +1437,63 @@ impl<'s> Desugar<'s> {
         }
     }
 }
+
+/// The names a Luau or Roblox program already has. An attribute
+/// argument may name one of them.
+const LUAU_GLOBALS: &[&str] = &[
+    "_G",
+    "_VERSION",
+    "assert",
+    "bit32",
+    "buffer",
+    "collectgarbage",
+    "coroutine",
+    "debug",
+    "delay",
+    "error",
+    "game",
+    "getfenv",
+    "getmetatable",
+    "gcinfo",
+    "ipairs",
+    "loadstring",
+    "math",
+    "newproxy",
+    "next",
+    "os",
+    "pairs",
+    "pcall",
+    "plugin",
+    "print",
+    "rawequal",
+    "rawget",
+    "rawlen",
+    "rawset",
+    "require",
+    "script",
+    "select",
+    "setfenv",
+    "setmetatable",
+    "shared",
+    "spawn",
+    "string",
+    "table",
+    "task",
+    "tick",
+    "time",
+    "tonumber",
+    "tostring",
+    "type",
+    "typeof",
+    "unpack",
+    "utf8",
+    "wait",
+    "warn",
+    "workspace",
+    "xpcall",
+    "Enum",
+    "Instance",
+];
 
 #[cfg(test)]
 mod tests {

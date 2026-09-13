@@ -611,7 +611,7 @@ fn a_function_with_no_parameters_closes_its_pack() {
     );
     let (st, uri) = one_file(src);
     let doc = &st.docs[uri];
-    let empty = empty_parameter_names(doc, &st);
+    let empty = empty_parameter_names(doc);
 
     assert!(empty.contains("fetchName"));
     assert!(empty.contains("origin"));
@@ -655,7 +655,7 @@ fn a_function_with_no_parameters_closes_its_pack() {
 fn a_declared_variadic_keeps_its_pack() {
     let (st, uri) = one_file("export function takes(...: any): number\n    return 1\nend\n");
     let doc = &st.docs[uri];
-    let empty = empty_parameter_names(doc, &st);
+    let empty = empty_parameter_names(doc);
     let printed = "local M: {\n    takes: (...any) -> number\n}";
 
     assert!(!empty.contains("takes"));

@@ -76,19 +76,6 @@ impl<'s> Desugar<'s> {
                     let std = self.std();
                     self.generate(anchor, &format!("{std}.{name}"));
                 } else {
-                    // A project global keeps the name it was written
-                    // with; the first line binds it.
-                    let name = name.to_string();
-                    self.use_global(&name, anchor);
-
-                    // A `global local` is one value for the project, so
-                    // the name reads its slot off the module that owns
-                    // it. The name itself stays copied, so a message
-                    // and a hover land on the word the author wrote.
-                    if let Some(table) = self.shared_global_slot(&name) {
-                        self.generate(anchor, &format!("{table}."));
-                    }
-
                     self.copy_span(*span);
                 }
             }

@@ -317,7 +317,6 @@ impl<'s> Desugar<'s> {
                 macros,
                 // The outer file already binds every global it names;
                 // the fragment lands inside it and needs no prologue.
-                globals: Vec::new(),
                 ..self.options.clone()
             },
         ) {

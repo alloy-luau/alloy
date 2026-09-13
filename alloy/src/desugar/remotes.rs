@@ -602,11 +602,8 @@ impl<'s> Desugar<'s> {
             _ => format!("({client}) & ({server})"),
         };
         // A `.client.aly` or `.server.aly` file sees one side of the
-        // remote; `--@alloy-side` says the same in a file whose name
-        // does not, and the tree says it for a module under
-        // `ServerScriptService` or `StarterGui`. Every other file is
-        // shared and sees both, as a module that branches on
-        // `RunService` does.
+        // remote. Every other file is shared and sees both, as a module
+        // that branches on `RunService` does.
         let side = self.file_side;
         let client_fires = r.from_client && side != Some(crate::directives::Side::Server);
         let server_fires = r.from_server && side != Some(crate::directives::Side::Client);

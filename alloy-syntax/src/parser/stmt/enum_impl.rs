@@ -84,7 +84,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Enum(EnumDecl {
             attributes: Vec::new(),
             exported,
-            global: false,
             name,
             variants,
             span: TokSpan::new(start, self.pos),
@@ -205,7 +204,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Impl(ImplDecl {
             attributes,
             exported,
-            global: false,
             trait_name,
             target,
             generics,

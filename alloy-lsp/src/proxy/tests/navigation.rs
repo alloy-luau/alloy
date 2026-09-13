@@ -184,7 +184,6 @@ fn project(name: &str) -> (State, std::path::PathBuf) {
         let uri = format!("file://{}", path.display());
         let options = EmitOptions {
             file_name: path.to_string_lossy().into_owned(),
-            in_project: true,
             ..EmitOptions::default()
         };
         st.docs.insert(
@@ -498,7 +497,6 @@ pub(crate) fn one_target_answers_the_rename_and_the_references() {
         let uri = format!("file://{}", path.display());
         let options = EmitOptions {
             file_name: path.to_string_lossy().into_owned(),
-            in_project: true,
             ..EmitOptions::default()
         };
         st.docs.insert(
@@ -578,7 +576,6 @@ pub(crate) fn a_variant_renames_where_it_is_declared_and_used() {
         let uri = format!("file://{}", path.display());
         let options = EmitOptions {
             file_name: path.to_string_lossy().into_owned(),
-            in_project: true,
             ..EmitOptions::default()
         };
         st.docs.insert(

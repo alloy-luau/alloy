@@ -25,6 +25,9 @@ pub fn kind_for(message: &str) -> &'static str {
     let m = message.to_ascii_lowercase();
     let rules: &[(&[&str], &str)] = &[
         (&["internal:"], "InternalError"),
+        // The removal report names a declaration kind, which the rules
+        // below would read as the kind's own family.
+        (&["`global` is removed"], "ImportError"),
         (&["needs `as` before its body"], "SyntaxError"),
         (&["markup:"], "MarkupError"),
         (&["names no module"], "UnknownModule"),
@@ -96,6 +99,7 @@ pub fn labeled(message: &str) -> String {
 pub fn code_for(message: &str) -> Option<&'static str> {
     let m = message.to_ascii_lowercase();
     let rules: &[(&[&str], &str)] = &[
+        (&["`global` is removed"], "3.2"),
         (&["names no module"], "3.2"),
         // The export list's own reports read "binding", which the
         // pattern rule below would take.

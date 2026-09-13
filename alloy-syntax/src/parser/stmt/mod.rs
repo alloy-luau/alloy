@@ -393,8 +393,10 @@ impl<'a> Parser<'a> {
             */
             "global" if self.global_follows() => self.global_stmt(start),
 
+            // `export global local x = 1` reports the removal too.
             "export" if self.text_at(1) == "global" => {
-                Err(self.err("`global` already reaches every file; drop `export`"))
+                self.bump();
+                self.global_stmt(start)
             }
 
             /*
@@ -561,24 +563,20 @@ impl<'a> Parser<'a> {
         let attributes: Vec<TokSpan> = attrs.iter().map(|a| a.span).collect();
 
         // `@attr global function f()` reads the way
-        // `@attr export function f()` does. A global exports too.
-        let is_global = self.at("global") && self.global_follows();
-        let exported = is_global || self.at("export");
+        // `@attr export function f()` does. `global` is removed, so the
+        // word reports and the declaration exports.
+        let was_global = self.at("global") && self.global_follows();
 
-        if exported {
-            self.bump();
+        if was_global {
+            let at = self.bump();
+            self.removed_global(at);
         }
 
-        // Declarations that take attributes.
-        let marked = |stmt: Stmt| match is_global {
-            true => mark_global(stmt),
-
-            false => stmt,
-        };
+        let exported = self.eat("export") || was_global;
 
         match self.text() {
             "struct" if self.name_at(1) => {
-                return self.struct_decl(start, attrs, exported).map(marked);
+                return self.struct_decl(start, attrs, exported);
             }
 
             "enum" if self.name_at(1) => {
@@ -588,27 +586,27 @@ impl<'a> Parser<'a> {
                     e.attributes = attrs;
                 }
 
-                return Ok(marked(stmt));
+                return Ok(stmt);
             }
 
             "trait" if self.name_at(1) => {
-                return self.trait_decl(start, attrs, exported).map(marked);
+                return self.trait_decl(start, attrs, exported);
             }
 
             "remote" if self.name_at(1) || self.text_at(1) == "function" => {
-                return self.remote_decl(start, attrs, exported).map(marked);
+                return self.remote_decl(start, attrs, exported);
             }
 
             "impl" if self.name_at(1) => {
-                return self.impl_decl_with(start, attrs, exported).map(marked);
+                return self.impl_decl_with(start, attrs, exported);
             }
 
             "interface" if self.name_at(1) => {
-                return self.interface_decl_with(start, attrs, exported).map(marked);
+                return self.interface_decl_with(start, attrs, exported);
             }
 
             "namespace" if self.namespace_follows() => {
-                return self.namespace_decl(start, attrs, exported).map(marked);
+                return self.namespace_decl(start, attrs, exported);
             }
 
             // `attribute X on type` declares one, so a type alias takes
@@ -620,7 +618,6 @@ impl<'a> Parser<'a> {
                 if let Stmt::TypeAlias(t) = &mut stmt {
                     t.attributes = attrs;
                     t.exported = exported;
-                    t.global = is_global;
                 }
 
                 return Ok(stmt);
@@ -680,10 +677,6 @@ impl<'a> Parser<'a> {
             stmt = mark_exported(stmt);
         }
 
-        if is_global {
-            stmt = mark_global(stmt);
-        }
-
         Ok(stmt)
     }
 
@@ -704,19 +697,17 @@ impl<'a> Parser<'a> {
 
     /// `global <declaration>`: the declaration parses from `global`, so
     /// its span covers the word and the emit replaces the whole thing.
-    /// A global exports too, and the project injects the binding in
-    /// every file that names it.
+    /// `global` left the language, so the word reports and the
+    /// declaration parses as an `export`.
     fn global_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
-        if self.text_at(1) == "export" {
-            return Err(self.err("`global` already reaches every file; drop `export`"));
-        }
-
         // `type` reads its own keyword, the way `export type` does.
         if self.text_at(1) == "type" {
             return self.type_alias(start);
         }
 
-        self.bump();
+        let at = self.bump();
+        self.removed_global(at);
+        self.eat("export");
 
         let stmt = match self.text() {
             "struct" => self.struct_decl(start, Vec::new(), true)?,
@@ -755,99 +746,13 @@ impl<'a> Parser<'a> {
             _ => mark_exported(self.local_stmt(start)?),
         };
 
-        Ok(mark_global(stmt))
+        Ok(stmt)
     }
-}
 
-/// The statement with its global flag set. `global` reaches every
-/// declaration `export` reaches, so the match covers the same nodes.
-fn mark_global(stmt: Stmt) -> Stmt {
-    match stmt {
-        Stmt::Local(mut n) => {
-            n.global = true;
-
-            Stmt::Local(n)
-        }
-
-        Stmt::Function(mut n) => {
-            n.global = true;
-
-            Stmt::Function(n)
-        }
-
-        Stmt::LocalFunction(mut n) => {
-            n.global = true;
-
-            Stmt::LocalFunction(n)
-        }
-
-        Stmt::Struct(mut n) => {
-            n.global = true;
-
-            Stmt::Struct(n)
-        }
-
-        Stmt::Enum(mut n) => {
-            n.global = true;
-
-            Stmt::Enum(n)
-        }
-
-        Stmt::Trait(mut n) => {
-            n.global = true;
-
-            Stmt::Trait(n)
-        }
-
-        Stmt::Interface(mut n) => {
-            n.global = true;
-
-            Stmt::Interface(n)
-        }
-
-        Stmt::Class(mut n) => {
-            n.global = true;
-
-            Stmt::Class(n)
-        }
-
-        Stmt::TypeAlias(mut n) => {
-            n.global = true;
-
-            Stmt::TypeAlias(n)
-        }
-
-        Stmt::Impl(mut n) => {
-            n.global = true;
-
-            Stmt::Impl(n)
-        }
-
-        Stmt::Remote(mut n) => {
-            n.global = true;
-
-            Stmt::Remote(n)
-        }
-
-        Stmt::Macro(mut n) => {
-            n.global = true;
-
-            Stmt::Macro(n)
-        }
-
-        Stmt::Attribute(mut n) => {
-            n.global = true;
-
-            Stmt::Attribute(n)
-        }
-
-        Stmt::Namespace(mut n) => {
-            n.global = true;
-
-            Stmt::Namespace(n)
-        }
-
-        other => other,
+    /// Records the `global` keyword at `at`, for the report the
+    /// compiler writes. See `Chunk::global_keywords`.
+    pub(super) fn removed_global(&mut self, at: usize) {
+        self.global_keywords.push(TokSpan::new(at, at + 1));
     }
 }
 

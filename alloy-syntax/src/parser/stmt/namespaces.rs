@@ -22,7 +22,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Namespace(NamespaceDecl {
             attributes,
             exported,
-            global: false,
             name,
             members,
             span: TokSpan::new(start, self.pos),

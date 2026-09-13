@@ -1,8 +1,6 @@
 use super::super::*;
 
-/// A workspace of several files, each `(uri, source)`. The state has
-/// no project on disk, so a test that needs the globals of a project
-/// passes `in_project` through the options here.
+/// A workspace of several files, each `(uri, source)`.
 pub(crate) fn files(sources: &[(&str, &str)]) -> State {
     let mut st = State {
         root: Some(PathBuf::from("/")),
@@ -14,7 +12,6 @@ pub(crate) fn files(sources: &[(&str, &str)]) -> State {
     for (uri, src) in sources {
         let options = EmitOptions {
             file_name: uri.trim_start_matches("file://").to_string(),
-            in_project: true,
             ..EmitOptions::default()
         };
         st.docs.insert(

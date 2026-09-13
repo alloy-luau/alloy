@@ -13,12 +13,9 @@ pub(crate) use fields::{
     foreign_method_hover, function_name_of, remote_parameter_hover, used_field_hover,
 };
 pub(crate) use members::{attach_std_member_docs, std_member_hover, std_receiver};
-pub(crate) use modules::{
-    global_declaration_hover, global_owner, import_spec, module_hover, remote_spec, service_hover,
-};
+pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 
 #[cfg(test)]
-pub(crate) use modules::const_hover as const_hover_of;
 #[cfg(test)]
 pub(crate) use modules::shadows_an_import;
 pub(crate) use restyle::{
@@ -26,8 +23,7 @@ pub(crate) use restyle::{
     drop_bound_intersections, empty_parameter_names, fold_std_shapes, invents_a_type,
     is_byte_count, keep_annotation, lowers_a_block, name_by_declaration, name_method_receiver,
     name_solver_variable, name_trait_method, names_a_key, prefer_constructed_struct,
-    restates_itself, restore_struct_arguments, restyle_global_hover, restyle_hover, source_type,
-    unlocal_parameter,
+    restates_itself, restore_struct_arguments, restyle_hover, source_type, unlocal_parameter,
 };
 
 use super::completion::{lands_on_member, member_position, sep_of};

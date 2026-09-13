@@ -123,20 +123,6 @@ impl State {
         loaded
     }
 
-    /// The project tree under a base folder.
-    pub(crate) fn tree_at(&self, base: &Path, config: &Config) -> Arc<alloy::project::Tree> {
-        if let Some(hit) = self.trees.borrow().get(base) {
-            return hit.clone();
-        }
-
-        let tree = Arc::new(alloy::project::Tree::load(base, config));
-        self.trees
-            .borrow_mut()
-            .insert(base.to_path_buf(), tree.clone());
-
-        tree
-    }
-
     /// The structs and enums of every open document, for the folds.
     pub(crate) fn known_shapes(&self) -> crate::shapes::Known {
         self.known_shapes_at(None)
@@ -173,86 +159,14 @@ impl State {
         }
     }
 
-    /// The `global` declarations of every open document, each with the
-    /// path a message names: the file relative to `[build] in`. A
-    /// script's globals belong to the module the build hoists them into.
-    pub(crate) fn project_globals(&self) -> Vec<alloy::globals::Global> {
-        let mut out = Vec::new();
+    /// The side a document sees: `ui.client.aly` is the client's and
+    /// `main.server.aly` the server's. Every other name is shared.
+    pub(crate) fn side_at(&self, uri: &str) -> Option<alloy::directives::Side> {
+        let name = uri_to_path(uri)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| uri.to_string());
 
-        for (uri, doc) in &self.docs {
-            let Some(rel) = self.project_rel(uri) else {
-                continue;
-            };
-
-            if rel.to_string_lossy().ends_with(".d.aly") {
-                continue;
-            }
-
-            let script = alloy::modules::is_script(&rel.to_string_lossy());
-
-            for g in &doc.globals {
-                let mut g = g.clone();
-                g.side = g
-                    .side_directive
-                    .unwrap_or_else(|| self.side_of(uri, &doc.source));
-                // `file` names the module a require reaches; a script
-                // cannot be required, so its globals live in the module
-                // the build hoists them into. `declared_in` keeps the
-                // file the author wrote, which is what a message and a
-                // completion detail name.
-                g.declared_in = rel.clone();
-                g.file = match script {
-                    true => PathBuf::from(alloy::globals::hoist_name(&rel.to_string_lossy())),
-
-                    false => rel.clone(),
-                };
-                out.push(g);
-            }
-        }
-
-        out.sort_by(|a, b| (&a.file, a.offset).cmp(&(&b.file, b.offset)));
-        out
-    }
-
-    /// What every file of the project reaches without an import: the
-    /// global macros, the global attributes, and the names a `.d.aly`
-    /// declares that a `global` also takes. Each document holds its
-    /// own, so the set is a walk of the open documents, not a parse of
-    /// every source again.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn project_declarations(
-        &self,
-        globals: &[alloy::globals::Global],
-    ) -> (
-        Vec<alloy::desugar::MacroSource>,
-        Vec<(String, alloy::desugar::AttrDecl)>,
-        Vec<(String, String)>,
-    ) {
-        let mut macros = Vec::new();
-        let mut attributes = Vec::new();
-        let mut clashes = Vec::new();
-
-        for (uri, doc) in &self.docs {
-            macros.extend(doc.macros.iter().cloned());
-            attributes.extend(doc.attributes.iter().cloned());
-
-            if doc.ambient.is_empty() {
-                continue;
-            }
-
-            let Some(rel) = self.project_rel(uri) else {
-                continue;
-            };
-            let file = rel.to_string_lossy().replace('\\', "/");
-
-            for name in &doc.ambient {
-                if globals.iter().any(|g| &g.name == name) {
-                    clashes.push((name.clone(), file.clone()));
-                }
-            }
-        }
-
-        (macros, attributes, clashes)
+        alloy::directives::file_side(&name)
     }
 
     /// Writes the mirror's Luau configuration for a project root once.
@@ -382,79 +296,6 @@ impl State {
         Some(held)
     }
 
-    /// The side a document sees: its name, then `--@alloy-side`, then
-    /// the place the project's tree gives it.
-    pub(crate) fn side_of(&self, uri: &str, source: &str) -> Option<alloy::directives::Side> {
-        let name = uri_to_path(uri)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| uri.to_string());
-
-        if let Some(side) = alloy::directives::effective_side(source, &name) {
-            return Some(side);
-        }
-
-        let path = uri_to_path(uri)?;
-        let found = self.config_at(path.parent()?)?;
-        let (config_path, config) = (&found.0, &found.1);
-        let base = config_path.parent()?.to_path_buf();
-        let tree = self.tree_at(&base, config);
-        let rel = self.project_rel(uri)?;
-        let from_root = config.build.input.join(&rel);
-
-        // `[contexts]` names the folders that hold one side's code;
-        // the tree's service is the word under that.
-        if let Some(side) = config.contexts.side_of(&rel, &from_root) {
-            return side;
-        }
-
-        let place = alloy::project::instance_path(&tree, &from_root)?;
-
-        alloy::directives::mount_side(&place)
-    }
-
-    /// The side of a document, or none when the file is shared. The
-    /// source comes from the document the state holds.
-    pub(crate) fn side_at(&self, uri: &str) -> Option<alloy::directives::Side> {
-        self.side_of(uri, self.docs.get(uri).map(|d| d.source.as_str())?)
-    }
-
-    /// Whether one `global` declaration of `owner` reaches the file
-    /// `uri`. A file reaches the globals of its own side and the shared
-    /// ones. The compiler reads the same rule, so a name the editor
-    /// offers is a name that compiles.
-    pub(crate) fn global_reaches(
-        &self,
-        uri: &str,
-        owner: &str,
-        g: &alloy::globals::Global,
-    ) -> bool {
-        let theirs = g.side_directive.unwrap_or_else(|| self.side_at(owner));
-
-        alloy::globals::reaches(theirs, self.side_at(uri))
-    }
-
-    /// The path of a document relative to `[build] in`, the way the
-    /// build and a message name it.
-    pub(crate) fn project_rel(&self, uri: &str) -> Option<PathBuf> {
-        let path = uri_to_path(uri)?;
-        let root = self.root.as_deref()?;
-        // With no alloy.toml the workspace root is the input; a file
-        // outside it keeps its own path.
-        let found = path.parent().and_then(|d| self.config_at(d));
-        let base = match found {
-            Some(config) => config.0.parent()?.join(&config.1.build.input),
-
-            None => root.to_path_buf(),
-        };
-
-        Some(
-            normalize(&path)
-                .strip_prefix(normalize(&base))
-                .ok()?
-                .to_path_buf(),
-        )
-    }
-
     /// The `[lint]` table of the workspace's alloy.toml, or the defaults.
     pub(crate) fn lint_config(&self) -> alloy::config::LintConfig {
         self.root
@@ -514,12 +355,6 @@ impl State {
                 self.ensure_runtime(&normalize(&root.join(&config.build.out)));
                 self.ensure_luau_config(&root, config);
 
-                let globals = self.project_globals();
-                let rel = self.project_rel(uri).unwrap_or_default();
-                let script = alloy::modules::is_script(&rel.to_string_lossy());
-                let (global_macros, global_attributes, ambient_clashes) =
-                    self.project_declarations(&globals);
-
                 EmitOptions {
                     wait_timeout: config.emit.wait_timeout,
                     file_name,
@@ -527,16 +362,6 @@ impl State {
                     definitions,
                     erase_type_imports: config.emit.erase_type_imports,
                     extensions: self.extensions.clone(),
-                    global_macros,
-                    global_attributes,
-                    globals: alloy::globals::refs_for(&globals, &rel, &HashMap::new()),
-                    hoist_globals: script,
-                    side: self.side_of(
-                        uri,
-                        self.docs.get(uri).map(|d| d.source.as_str()).unwrap_or(""),
-                    ),
-                    ambient_clashes,
-                    in_project: true,
                     ..EmitOptions::default()
                 }
             }

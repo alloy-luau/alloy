@@ -184,9 +184,7 @@ impl State {
         let Some(spec) = spec else {
             return;
         };
-        let side = uri_to_path(uri)
-            .map(|p| p.to_string_lossy().into_owned())
-            .and_then(|name| alloy::directives::effective_side(&doc.source, &name));
+        let side = self.side_at(uri);
 
         items.retain(|i| {
             i["label"]

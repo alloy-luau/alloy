@@ -819,7 +819,6 @@ pub(crate) fn a_bare_type_slot_offers_the_head_of_a_path() {
     };
     let options = EmitOptions {
         file_name: main.to_string_lossy().into_owned(),
-        in_project: true,
         ..EmitOptions::default()
     };
     st.docs.insert(
@@ -1353,7 +1352,6 @@ pub(crate) fn an_import_of_a_returning_module_completes_its_keys() {
     };
     let options = EmitOptions {
         file_name: main.to_string_lossy().into_owned(),
-        in_project: true,
         ..EmitOptions::default()
     };
     st.docs.insert(
@@ -1843,7 +1841,6 @@ pub(crate) fn an_import_list_offers_the_module_and_marks_its_attributes() {
     };
     let options = EmitOptions {
         file_name: main.to_string_lossy().into_owned(),
-        in_project: true,
         ..EmitOptions::default()
     };
     st.docs.insert(

@@ -561,30 +561,18 @@ impl Server {
                     return true;
                 }
 
-                // A space triggers a completion for the side of a
-                // directive and for the field after the comma of an
-                // object initializer; every other space answers
-                // nothing, so no list opens where the author is typing
-                // words.
+                // A space triggers a completion for the field after the
+                // comma of an object initializer; every other space
+                // answers nothing, so no list opens where the author is
+                // typing words.
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
                     && message.pointer("/params/context/triggerCharacter") == Some(&json!(" "))
+                    && !self.opens_a_field_list(&uri, &message)
                 {
-                    let items = {
-                        let st = self.state.lock().expect("state");
-                        let (line, character) = message
-                            .pointer("/params/position")
-                            .and_then(position_of_value)
-                            .unwrap_or((0, 0));
+                    self.respond(&id, json!([]));
 
-                        st.side_word_completions(&uri, line, character)
-                    };
-
-                    if !items.is_empty() || !self.opens_a_field_list(&uri, &message) {
-                        self.respond(&id, json!(items));
-
-                        return true;
-                    }
+                    return true;
                 }
 
                 // A closing quote asks for nothing: the editor sends the
@@ -737,8 +725,7 @@ impl Server {
                 let uri = text_document_uri(&message).unwrap_or_default();
 
                 if let Some(id) = message.get("id").cloned()
-                    && (self.global_references(&uri, &message, &id)
-                        || self.namespace_references(&uri, &message, &id)
+                    && (self.namespace_references(&uri, &message, &id)
                         || self.name_references(&uri, &message, &id))
                 {
                     return true;
@@ -1098,16 +1085,6 @@ impl Server {
                                 text = rewritten;
                             }
 
-                            // A project global: the child typed the
-                            // binding the first line writes, so the
-                            // type is the declaring file's. The
-                            // keywords come from that file.
-                            if let Some(rewritten) =
-                                restyle_global_hover(&text, doc, &st, uri, line, character)
-                            {
-                                text = rewritten;
-                            }
-
                             if let Some(kept) = keep_annotation(&text, doc, line, character) {
                                 text = kept;
                             }
@@ -1121,7 +1098,7 @@ impl Server {
                             // tail there. The declaration says the list
                             // is empty.
                             if text.contains("(...any)") {
-                                text = close_empty_packs(&text, &empty_parameter_names(doc, &st));
+                                text = close_empty_packs(&text, &empty_parameter_names(doc));
                             }
 
                             if let Some(written) = declared_signature(&text, doc, line, character) {
@@ -1212,16 +1189,6 @@ impl Server {
                             } else if text != value {
                                 result["contents"]["value"] = json!(text);
                             }
-                        } else if let Some((line, character)) = position
-                            && let Some(head) =
-                                global_declaration_hover(doc, &st, uri, line, character)
-                        {
-                            // The child has no type for the name yet.
-                            // A project global still reads as what its
-                            // declaring file wrote.
-                            *result = json!({
-                                "contents": { "kind": "markdown", "value": head }
-                            });
                         }
                     }
 
@@ -1418,7 +1385,7 @@ impl Server {
                     "textDocument/completion" | "completionItem/resolve"
                 ) && let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u))
                 {
-                    close_item_packs(result, &empty_parameter_names(doc, &st));
+                    close_item_packs(result, &empty_parameter_names(doc));
                 }
 
                 // A type hint inserts its edit on a click: the label shows
@@ -1448,6 +1415,7 @@ impl Server {
                     {
                         actions.extend(st.contract_actions(uri, range));
                         actions.extend(st.header_as_actions(uri, range));
+                        actions.extend(st.global_actions(uri, range));
                         actions.extend(st.lint_actions(uri, range));
                         actions.extend(st.ingot_actions(uri, range));
                         actions.extend(st.import_actions(uri, &reported));

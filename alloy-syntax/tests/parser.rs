@@ -1181,25 +1181,34 @@ fn max_depth_follows_the_option() {
     assert!(alloy_syntax::parser::parse_with("return 1\n", &toks, zero).is_err());
 }
 
-/// `global` in front of a declaration: the modifier `export` sits at,
-/// for the names a project reaches without an import.
+/// `global` left the language. The declaration still parses, as an
+/// `export`, and the parser records the keyword for the report.
 #[test]
-fn global_declarations_parse() {
-    round_trip("global function log(msg: string)\n    print(msg)\nend\n");
-    round_trip("global async function fetch()\nend\n");
-    round_trip("global const MAX = 10\n");
-    round_trip("global local count = 0\n");
-    round_trip("global local function helper()\nend\n");
-    round_trip("global struct Vec2 as\n    x: number\n    y: number\nend\n");
-    round_trip("global enum State as\n    Idle\n    Busy\nend\n");
-    round_trip("global trait Show as\n    function show(self): string\nend\n");
-    round_trip("global interface Named as\n    name: string\nend\n");
-    round_trip("global type Id = number\n");
-    round_trip("global class Point as\n    x\nend\n");
-    round_trip(
-        "global impl BasePart as\n    function flat(self): BasePart\n        return self\n    end\nend\n",
-    );
-    round_trip("@deprecated\nglobal function old()\nend\n");
+fn a_global_declaration_records_its_keyword() {
+    for src in [
+        "global function log(msg: string)\n    print(msg)\nend\n",
+        "global const MAX = 10\n",
+        "global local count = 0\n",
+        "global struct Vec2 as\n    x: number\nend\n",
+        "global type Id = number\n",
+        "global namespace Math as\n    const PI = 3.14\nend\n",
+        "global attribute tag(name: string) on struct\n",
+        "@deprecated\nglobal function old()\nend\n",
+        "export global function f()\nend\n",
+        "global export function f()\nend\n",
+    ] {
+        round_trip(src);
+        let lexed = lexer::lex(src).unwrap();
+        let chunk = parser::parse(src, &lexed.toks).unwrap();
+        assert_eq!(
+            chunk.global_keywords.len(),
+            1,
+            "one `global` keyword recorded for:\n{src}"
+        );
+        let span = chunk.global_keywords[0];
+
+        assert_eq!(span.text(src, &lexed.toks), "global");
+    }
 }
 
 /// `global` stays contextual: a name spelled global still reads as a name.
@@ -1208,22 +1217,16 @@ fn global_is_contextual() {
     round_trip("local global = 1\nprint(global)\n");
     round_trip("global = 2\n");
     round_trip("local t = { global = 1 }\nprint(t.global)\n");
-}
 
-/// `global` reaches every declaration the language has.
-#[test]
-fn global_reaches_the_compile_time_declarations() {
-    round_trip("global macro twice(x)\n    x + x\nend\n");
-    round_trip("global attribute tag(name: string) on struct\n");
-    round_trip("global remote Hit(id: number) from client\n");
-    round_trip("global remote function Ask(id: number) -> number from server\n");
-}
+    let src = "local global = 1\n";
+    let lexed = lexer::lex(src).unwrap();
 
-/// The two modifiers do not stack.
-#[test]
-fn global_rejects_the_forms_it_has_no_meaning_for() {
-    rejects("export global function f()\nend\n");
-    rejects("global export function f()\nend\n");
+    assert!(
+        parser::parse(src, &lexed.toks)
+            .unwrap()
+            .global_keywords
+            .is_empty()
+    );
 }
 
 /// `namespace Name as ... end`: one name over a group of declarations.
@@ -1247,7 +1250,6 @@ fn namespace_declarations_parse() {
         "struct Vec2 as\n    x: number\nend\nnamespace Math as\n    impl Vec2 as\n        function len(self): number\n            return self.x\n        end\n    end\nend\n",
     );
     round_trip("export namespace Math as\n    const PI = 3.14\nend\n");
-    round_trip("global namespace Math as\n    const PI = 3.14\nend\n");
 }
 
 /// A member takes `public` or `private`, and the attributes sit above.

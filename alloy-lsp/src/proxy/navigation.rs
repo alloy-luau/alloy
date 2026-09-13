@@ -7,62 +7,6 @@ use super::outline::enum_variants;
 use super::*;
 
 impl Server {
-    /// The references of a project global: the declaration, and every
-    /// file that names it. A global reaches every file with no import,
-    /// so the child, which reads one file's requires, cannot find them.
-    pub(crate) fn global_references(&self, uri: &str, message: &Value, id: &Value) -> bool {
-        if !is_alloy_uri(uri) {
-            return false;
-        }
-
-        let Some((line, character)) = position_of_message(message) else {
-            return false;
-        };
-
-        let st = self.state.lock().expect("state");
-
-        let Some(doc) = st.docs.get(uri) else {
-            return false;
-        };
-
-        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
-            return false;
-        };
-        let word = doc.source[start..end].to_string();
-
-        // The global this file reaches by that name. A global of the
-        // other side is another name; nothing here refers to it.
-        let Some(side) = st.docs.iter().find_map(|(u, d)| {
-            d.globals
-                .iter()
-                .find(|g| g.name == word && st.global_reaches(uri, u, g))
-                .map(|g| g.side_directive.unwrap_or_else(|| st.side_at(u)))
-        }) else {
-            return false;
-        };
-
-        let mut out: Vec<Value> = Vec::new();
-
-        for (u, d) in &st.docs {
-            // A file that cannot reach the global writes another name.
-            if !alloy::globals::reaches(side, st.side_at(u)) {
-                continue;
-            }
-
-            for (s, e) in name_uses(&d.source, &word) {
-                out.push(json!({
-                    "uri": u,
-                    "range": range_value(position_of(&d.source, s), position_of(&d.source, e)),
-                }));
-            }
-        }
-
-        drop(st);
-        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": out }));
-
-        true
-    }
-
     /// The references of a namespace and of one of its members. The
     /// emit renames a member, so the child, which reads the artifact,
     /// answers with the name the reader never wrote.
@@ -352,29 +296,6 @@ impl Server {
         if let Some(result) =
             service_definition(&doc.source, uri, &doc.source[word_start..word_end])
         {
-            drop(st);
-            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-
-            return true;
-        }
-
-        // A project global: the name reaches this file with no import,
-        // and the emit binds it on the first line, so the child would
-        // land there. The declaration is what the reader means.
-        let word = &doc.source[word_start..word_end];
-
-        if !doc.globals.iter().any(|g| g.name == word)
-            && let Some((target_uri, target)) = st.docs.iter().find_map(|(u, d)| {
-                d.globals
-                    .iter()
-                    .find(|g| g.name == word && st.global_reaches(uri, u, g))
-                    .map(|g| (u.clone(), g))
-            })
-        {
-            let target_doc = &st.docs[&target_uri];
-            let s = position_of(&target_doc.source, target.offset as usize);
-            let e = position_of(&target_doc.source, target.offset as usize + word.len());
-            let result = json!([{ "uri": target_uri, "range": range_value(s, e) }]);
             drop(st);
             self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
 

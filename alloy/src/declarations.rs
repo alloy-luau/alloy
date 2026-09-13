@@ -98,13 +98,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
         }
     }
 
-    // `global` says more than `export`: the name reaches every file.
     let export = |exported: bool| if exported { "export " } else { "" };
-    let modifier = |exported: bool, global: bool| match global {
-        true => "global ",
-
-        false => export(exported),
-    };
     let start_of = |span: TokSpan| toks[span.start as usize].start as usize;
     let mut out = Vec::new();
     let mut notes_first: Vec<String> = Vec::new();
@@ -190,10 +184,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
             Stmt::Struct(d) => {
                 let name = text(d.name);
                 let generics = d.generics.map(text).unwrap_or("");
-                let mut lines = vec![format!(
-                    "{}struct {name}{generics} as",
-                    modifier(d.exported, d.global)
-                )];
+                let mut lines = vec![format!("{}struct {name}{generics} as", export(d.exported))];
                 lines.extend(d.fields.iter().map(|f| format!("    {}", text(f.span))));
                 lines.push("end".to_string());
 
@@ -212,7 +203,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                 };
                 let mut lines = vec![format!(
                     "{}interface {name}{generics}{extends} as",
-                    modifier(d.exported, d.global)
+                    export(d.exported)
                 )];
                 lines.extend(d.fields.iter().map(|f| format!("    {}", text(f.span))));
                 lines.push("end".to_string());
@@ -222,7 +213,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
             Stmt::Enum(d) => {
                 let name = text(d.name);
-                let mut lines = vec![format!("{}enum {name} as", modifier(d.exported, d.global))];
+                let mut lines = vec![format!("{}enum {name} as", export(d.exported))];
                 lines.extend(d.variants.iter().map(|v| format!("    {}", text(v.span))));
                 lines.push("end".to_string());
 
@@ -245,7 +236,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                 let params: Vec<String> = d.params.iter().map(|p| param_text(p, &text)).collect();
                 let header = format!(
                     "{}macro {}({})",
-                    modifier(d.exported, d.global),
+                    export(d.exported),
                     text(d.name),
                     params.join(", ")
                 );
@@ -296,7 +287,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
             Stmt::Trait(d) => {
                 let name = text(d.name);
-                let mut lines = vec![format!("{}trait {name} as", modifier(d.exported, d.global))];
+                let mut lines = vec![format!("{}trait {name} as", export(d.exported))];
                 lines.extend(
                     d.methods
                         .iter()
@@ -394,12 +385,10 @@ fn namespace_summaries(
 
         false => format!("{outer}.{name}"),
     };
-    let modifier = match (ns.global, ns.exported) {
-        (true, _) => "global ",
+    let modifier = match ns.exported {
+        true => "export ",
 
-        (false, true) => "export ",
-
-        _ => "",
+        false => "",
     };
     let mut members: Vec<String> = Vec::new();
 
@@ -582,7 +571,7 @@ fn namespace_range(
         start: toks[ns.span.start as usize].start as usize,
         end: toks[ns.span.end as usize - 1].end as usize,
         members,
-        exported: ns.exported || ns.global,
+        exported: ns.exported,
     });
 }
 
@@ -1066,12 +1055,12 @@ mod tests {
 
     #[test]
     fn every_member_kind_reads_as_its_signature() {
-        let src = "global namespace Big as\n    public function helper(x: number): number\n        return x\n    end\n    public enum Kind as\n        A\n    end\n    public type Id = number\n    public interface Named as\n        name: string\n    end\n    public trait Show as\n        function show(self): string\n    end\n    public namespace Inner as\n        const B = 2\n    end\n    public const NAME = \"a\"\n    public const ON = true\nend\n";
+        let src = "export namespace Big as\n    public function helper(x: number): number\n        return x\n    end\n    public enum Kind as\n        A\n    end\n    public type Id = number\n    public interface Named as\n        name: string\n    end\n    public trait Show as\n        function show(self): string\n    end\n    public namespace Inner as\n        const B = 2\n    end\n    public const NAME = \"a\"\n    public const ON = true\nend\n";
         let d = summaries(src, false);
         let ns = d.iter().find(|x| x.name == "Big").unwrap();
         assert_eq!(
             ns.hover,
-            "```alloy\nglobal namespace Big as\n    public function helper(x: number): number\n    public enum Kind\n    public type Id = number\n    public interface Named\n    public trait Show\n    public namespace Inner\n    public const NAME: string\n    public const ON: boolean\nend\n```"
+            "```alloy\nexport namespace Big as\n    public function helper(x: number): number\n    public enum Kind\n    public type Id = number\n    public interface Named\n    public trait Show\n    public namespace Inner\n    public const NAME: string\n    public const ON: boolean\nend\n```"
         );
     }
 

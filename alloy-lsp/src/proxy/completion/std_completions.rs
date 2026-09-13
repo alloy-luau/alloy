@@ -1,78 +1,6 @@
 use super::*;
 
 impl State {
-    /// Completion items for the project's globals: names every file
-    /// reaches without an import, the way the std names are reached.
-    /// The detail says which file declares each one.
-    pub(crate) fn global_completions(&self, uri: &str, labels: &[&str], types: bool) -> Vec<Value> {
-        let mine: Vec<String> = self
-            .docs
-            .get(uri)
-            .map(|d| d.globals.iter().map(|g| g.name.clone()).collect())
-            .unwrap_or_default();
-        let mut out = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        // The side of the file asking. A global of the other side is
-        // out of scope here, and the compiler reports a use of one, so
-        // the list must not offer it.
-        let side = self.side_at(uri);
-
-        for g in self.project_globals() {
-            let fits = match types {
-                true => g.kind.is_type(),
-
-                false => g.kind.is_value() || matches!(g.kind, alloy::globals::Kind::Macro),
-            };
-
-            if !fits
-                || !alloy::globals::reaches(g.side, side)
-                || mine.contains(&g.name)
-                || labels.contains(&g.name.as_str())
-                || !seen.insert(g.name.clone())
-            {
-                continue;
-            }
-
-            let kind = match g.kind {
-                alloy::globals::Kind::Function | alloy::globals::Kind::Macro => 3,
-                alloy::globals::Kind::Value => 21,
-                alloy::globals::Kind::Struct | alloy::globals::Kind::Class => 7,
-                alloy::globals::Kind::Enum => 13,
-                alloy::globals::Kind::Trait | alloy::globals::Kind::Interface => 8,
-                alloy::globals::Kind::Type => 7,
-                _ => 6,
-            };
-            // The declaring file, which is the one the reader can
-            // open. A script's globals move into a module of the
-            // build's own making, and that name says nothing here.
-            let file = g.declared_in.to_string_lossy().replace('\\', "/");
-            let doc = self
-                .docs
-                .values()
-                .flat_map(|d| d.decls.iter())
-                .find(|d| d.name == g.name)
-                .map(|d| d.hover.clone());
-            let mut item = json!({
-                "label": g.name,
-                "kind": kind,
-                "detail": global_detail(&g),
-            });
-            // The file is the one the reader opens, so it stays in the
-            // popup; the detail line says what the name is instead.
-            let where_from = format!("Declared in `{file}`.");
-            let text = match doc {
-                Some(hover) => format!("{hover}\n\n{where_from}"),
-
-                None => where_from,
-            };
-            item["documentation"] = json!({ "kind": "markdown", "value": text });
-
-            out.push(item);
-        }
-
-        out
-    }
-
     /// Completion items for the ambient std names, `HashMap` and the
     /// rest. The child knows them only as `__alloy.Name`, so a name typed
     /// at the start of an expression never reaches its list.
@@ -152,7 +80,7 @@ impl State {
             return Vec::new();
         }
 
-        let mut items: Vec<Value> = self.global_completions(uri, &labels, false);
+        let mut items: Vec<Value> = Vec::new();
         items.extend(
             alloy::desugar::AMBIENT
                 .iter()
@@ -256,16 +184,6 @@ impl State {
             for name in declared_type_parameters(&doc.source) {
                 push(&name, 25, "type parameter", None);
             }
-        }
-
-        // A global type is in every type slot of the project, the way a
-        // std type is, and no import brings it in.
-        for item in self.global_completions(uri, labels, true) {
-            let name = item["label"].as_str().unwrap_or_default().to_string();
-            let kind = item["kind"].as_u64().unwrap_or(7);
-            let detail = item["detail"].as_str().unwrap_or("global").to_string();
-            let doc = item["documentation"]["value"].as_str().map(str::to_string);
-            push(&name, kind, &detail, doc);
         }
 
         // The list the parser marks as ambient in a type slot, so the

@@ -94,7 +94,6 @@ impl<'s> Desugar<'s> {
         for stmt in &block.stmts {
             if let Stmt::TypeAlias(t) = stmt.under_default()
                 && !t.exported
-                && !t.global
             {
                 aliases.push(self.text_of(t.name).to_string());
             }
@@ -123,57 +122,8 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        self.scan_global_namespaces();
         self.scan_imported_namespaces(&block.stmts);
         self.scan_namespaces_in(&block.stmts, None);
-    }
-
-    /// The `global namespace` declarations of the project. Each one
-    /// reaches this file as a name, and its types reach it under the
-    /// names the emit gives them.
-    fn scan_global_namespaces(&mut self) {
-        let heads: Vec<String> = self
-            .options
-            .globals
-            .iter()
-            .filter(|g| g.namespace)
-            .map(|g| g.name.clone())
-            .collect();
-
-        for name in heads {
-            let head = format!("{name}_");
-            let members: Vec<NsMember> = self
-                .options
-                .globals
-                .iter()
-                .filter(|g| g.ty)
-                .filter_map(|g| {
-                    let rest = g.name.strip_prefix(&head)?;
-
-                    Some(NsMember {
-                        name: rest.to_string(),
-                        rendered: g.name.clone(),
-                        private: false,
-                        value: true,
-                        ty: true,
-                        nested: false,
-                    })
-                })
-                .collect();
-            self.namespaces.insert(
-                name.clone(),
-                NamespaceInfo {
-                    path: name.clone(),
-                    prefix: format!("{name}_"),
-                    name,
-                    members,
-                    parent: None,
-                    start: 0,
-                    end: 0,
-                    exported: false,
-                },
-            );
-        }
     }
 
     /// The namespaces the file imports. A module that exports
@@ -269,7 +219,6 @@ impl<'s> Desugar<'s> {
             };
             // A namespace an `export { ... }` list names exports too.
             let exported = ns.exported
-                || ns.global
                 || match parent {
                     Some(p) => self.namespaces.get(p).is_some_and(|i| i.exported),
 
@@ -537,6 +486,12 @@ impl<'s> Desugar<'s> {
         collect_member_exports(stmts, &mut hits);
 
         for span in hits {
+            // A member that wrote `global` has the removal report; one
+            // message about the word is enough.
+            if self.wrote_global(span) {
+                continue;
+            }
+
             let word = TokSpan::new(span.start as usize, span.start as usize + 1);
             let at = match self.text_of(word) == "export" {
                 true => word,
@@ -564,15 +519,6 @@ impl<'s> Desugar<'s> {
                 self.diagnose(ns.name, &message);
             } else {
                 seen.push((name.clone(), ns.name));
-            }
-
-            for m in &ns.members {
-                if crate::globals::is_global(&m.stmt) {
-                    self.diagnose(
-                        m.stmt.span(),
-                        "`global` reaches every file and a namespace member reaches its namespace; the two do not stack",
-                    );
-                }
             }
 
             let key = key_of(parent, &name);
@@ -1129,15 +1075,9 @@ fn collect_member_exports(stmts: &[Stmt], out: &mut Vec<TokSpan>) {
         for m in &ns.members {
             let inner = m.stmt.under_default();
 
-            // `export impl` is the project-wide form of a foreign impl.
-            // It binds no name on the table, so it is not a member
-            // export; the `export_impl` lint has the word to say. A
-            // `global` member sets the export flag too, and
-            // `check_namespace_names` already reports that one.
-            if !matches!(inner, Stmt::Impl(_))
-                && !crate::globals::is_global(inner)
-                && is_exported(inner)
-            {
+            // An `impl` binds no name on the table, so it is not a
+            // member export.
+            if !matches!(inner, Stmt::Impl(_)) && is_exported(inner) {
                 out.push(inner.span());
             }
 

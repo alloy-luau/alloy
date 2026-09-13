@@ -275,6 +275,57 @@ impl State {
         actions
     }
 
+    /// The quick fix of the `global` report: the word becomes `export`.
+    /// `global` left the language, and the declaration it sits on is an
+    /// `export` with one word changed.
+    pub(crate) fn global_actions(&self, uri: &str, range: ((u32, u32), (u32, u32))) -> Vec<Value> {
+        let mut actions = Vec::new();
+        let Some(doc) = self.docs.get(uri) else {
+            return actions;
+        };
+        let ((from_line, _), (to_line, _)) = range;
+
+        for d in doc
+            .output
+            .as_ref()
+            .map(|o| o.diagnostics.as_slice())
+            .unwrap_or_default()
+        {
+            if !d.message.starts_with("`global` is removed") {
+                continue;
+            }
+
+            let (line, at) = position_of(&doc.source, d.start as usize);
+
+            if line < from_line || line > to_line {
+                continue;
+            }
+
+            let (el, ec) = position_of(&doc.source, d.end as usize);
+            let where_it_is = json!({
+                "start": { "line": line, "character": at },
+                "end": { "line": el, "character": ec },
+            });
+            actions.push(json!({
+                "title": "replace `global` with `export`",
+                "kind": "quickfix",
+                "isPreferred": true,
+                "diagnostics": [{
+                    "range": where_it_is,
+                    "severity": 1,
+                    "source": "Alloy",
+                    "message": alloy::docs::labeled(&d.message),
+                }],
+                "edit": { "changes": { uri: [{
+                    "range": where_it_is,
+                    "newText": "export",
+                }] } },
+            }));
+        }
+
+        actions
+    }
+
     pub(crate) fn header_as_actions(
         &self,
         uri: &str,

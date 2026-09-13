@@ -73,20 +73,6 @@ pub struct Doc {
     /// from it while it stands; `output` stays the author's own
     /// compile, so the diagnostics still name what they always did.
     pub repair: Option<Repair>,
-    /// The `global` declarations of this file. The workspace's set is
-    /// every document's, and it says what each file reaches for free.
-    pub globals: Vec<alloy::globals::Global>,
-    /// The `global macro` declarations of this file. Every compile in
-    /// the project takes the set of every open document. The set is one
-    /// clone of these lists; reading it from the sources again would
-    /// parse the whole workspace once per file.
-    pub macros: Vec<alloy::desugar::MacroSource>,
-    /// The `global attribute` declarations of this file, kept for the
-    /// same reason as `macros`.
-    pub attributes: Vec<(String, alloy::desugar::AttrDecl)>,
-    /// The names a `.d.aly` declares. A `global` of the same name is a
-    /// clash the compile must hear about.
-    pub ambient: Vec<String>,
     /// For a `.alx` whose markup could not lower: the byte ranges the
     /// shadow blanked. The artifact holds no text of the author's
     /// there, so nothing answers inside one.
@@ -282,10 +268,6 @@ impl Doc {
             error: None,
             is_alx: options.file_name.ends_with(".alx"),
             repair: None,
-            globals: Vec::new(),
-            macros: Vec::new(),
-            attributes: Vec::new(),
-            ambient: Vec::new(),
             blanked: Vec::new(),
         };
         doc.compile(options, jsx, ingots);
@@ -308,19 +290,7 @@ impl Doc {
         let text = lexable(&self.source);
         let text = text.as_ref();
         self.exports = crate::imports::exports_of(text, self.is_alx);
-        // The path here is the real one; the workspace fills the path a
-        // message names when it gathers the set.
-        let path = std::path::Path::new(&options.file_name);
-        self.globals = alloy::globals::declared(&alloy::globals::index_text(path, text), path);
         self.decls = alloy::declarations::summaries(text, options.definitions);
-        let own = [(path.to_path_buf(), text.to_string())];
-        self.macros = alloy::globals::macro_sources(&own);
-        self.attributes = alloy::globals::attribute_decls(&own);
-        self.ambient = match options.definitions {
-            true => self.decls.iter().map(|d| d.name.clone()).collect(),
-
-            false => Vec::new(),
-        };
         self.namespaces = alloy::declarations::namespace_names(text);
         self.tables = alloy::tables::plain_tables(text);
         self.impl_blocks = alloy::impl_blocks::impl_blocks(text);

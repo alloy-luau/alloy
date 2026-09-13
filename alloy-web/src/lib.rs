@@ -273,8 +273,6 @@ pub fn complete(offset: u32) -> String {
                 ("--@alloy-expect-error", "Silences the next line, and is an error when that line has none. Text after the name is the reason."),
                 ("--@alloy-nocheck", "Silences every diagnostic in this file."),
                 ("--@alloy-lint", "Sets a lint's level for this file: `--@alloy-lint raw_require=allow`."),
-                ("--@alloy-file-side", "`client`, `server`, or `shared`: the side this file sits on, and the half of every remote it sees."),
-                ("--@alloy-side", "`client`, `server`, or `shared` for the `global` under it; it says nothing about the rest of the file."),
                 ("--@alloy-preserve", "`alloy flux --fix` writes no rewrite on that line."),
                 ("--!strict", "The checker's strict mode for this file."),
                 ("--!nonstrict", "The checker's nonstrict mode for this file."),

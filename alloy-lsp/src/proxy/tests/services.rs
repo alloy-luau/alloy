@@ -390,7 +390,6 @@ pub(crate) fn the_auto_import_pass_drops_a_store_module() {
     };
     let options = EmitOptions {
         file_name: main.to_string_lossy().into_owned(),
-        in_project: true,
         ..EmitOptions::default()
     };
     st.docs.insert(

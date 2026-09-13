@@ -15,7 +15,7 @@ use std::collections::HashSet;
 
 use crate::config::LintConfig;
 
-pub use rules::{const_reassignments, run};
+pub use rules::{const_reassignments, namespace_consts, run};
 
 /// One lint hit: a byte range in the source, the message, and the
 /// rewrite when the lint has one that keeps the program the same.
@@ -387,13 +387,6 @@ pub const LINTS: &[LintInfo] = &[
     },
     // --- style -----------------------------------------------------------------
     LintInfo {
-        name: "export_impl",
-        group: Group::Style,
-        default: Level::Allow,
-        summary: "`export impl` on a foreign type, where `global impl` says it",
-        detail: "An `impl` on a foreign type such as `BasePart` or `string` works project wide. `export` said that before `global` existed; `global impl` is the spelling now. Off by default while `export impl` is still accepted: `[lint.rules] export_impl = \"warn\"` turns it on, and `alloy flux --fix` rewrites the keyword.",
-    },
-    LintInfo {
         name: "prefer_destroy",
         group: Group::Style,
         default: Level::Allow,
@@ -621,20 +614,6 @@ pub const LINTS: &[LintInfo] = &[
         detail: "The body movers are deprecated. `LinearVelocity` replaces `BodyVelocity`, `AlignPosition` replaces `BodyPosition`, `AlignOrientation` replaces `BodyGyro`, `VectorForce` replaces `BodyForce` and `BodyThrust`, `AngularVelocity` replaces `BodyAngularVelocity`, and `LineForce` with `AlignOrientation` replaces `RocketPropulsion`. Each needs an `Attachment`; no automatic rewrite.",
     },
     // --- pedantic --------------------------------------------------------------
-    LintInfo {
-        name: "shadowed_global",
-        group: Group::Pedantic,
-        default: Level::Allow,
-        summary: "a `global` by the name of a std name",
-        detail: "Pedantic. The std names `Signal`, `HashMap`, and the rest are ambient in every file. A `global` by one of those names wins over the std everywhere, and a reader who knows the std reads the wrong one. The project's name still works; the lint asks for a name of its own.",
-    },
-    LintInfo {
-        name: "mutable_global",
-        group: Group::Pedantic,
-        default: Level::Allow,
-        summary: "a `global local`, a project value any file can assign",
-        detail: "Pedantic. `global const MAX = 10` is read everywhere and set once. `global local` is a value every file of the project can assign, and no file names the one that did, so a wrong value has the whole project as its suspect list. Write `global const`, or keep the state in a module the files that change it import by name. The lint reports the declaration, not the assignment, and leaves the rewrite to the author: `const` holds only when nothing assigns the name.",
-    },
     LintInfo {
         name: "explicit_any",
         group: Group::Pedantic,
@@ -1019,38 +998,6 @@ mod tests {
         assert_eq!(names("task.wait(1)\n"), Vec::<&str>::new());
     }
 
-    /// `export impl` on a foreign type still parses; the lint asks for
-    /// `global impl`, and its rewrite is the one word. It is off by
-    /// default while both spellings are accepted.
-    #[test]
-    fn export_impl_asks_for_global_impl() {
-        let src = "export impl Vector3 as\n    function flat(self): Vector3\n        return self\n    end\nend\n";
-        let out = crate::compile(src).unwrap();
-        let hit = out
-            .lints
-            .iter()
-            .find(|l| l.name == "export_impl")
-            .expect("the lint fires");
-        assert!(hit.message.contains("`global impl`"), "{}", hit.message);
-        let fix = hit.fix.as_ref().expect("a rewrite");
-        assert_eq!(fix.replacement, "global");
-        assert_eq!(&src[fix.start as usize..fix.end as usize], "export");
-        assert_eq!(
-            level_of(&LintConfig::default(), "export_impl"),
-            Level::Allow
-        );
-
-        // `global impl` says it already, and an `impl` on a struct of
-        // this file is an export of the struct, not a project-wide one.
-        let global = crate::compile(&src.replace("export impl", "global impl")).unwrap();
-        assert!(!global.lints.iter().any(|l| l.name == "export_impl"));
-        let own = crate::compile(
-            "struct Vec2 as\n    x: number\nend\nexport impl Vec2 as\n    function len(self): number\n        return self.x\n    end\nend\n",
-        )
-        .unwrap();
-        assert!(!own.lints.iter().any(|l| l.name == "export_impl"));
-    }
-
     #[test]
     fn an_unused_import_is_a_lint() {
         assert_eq!(
@@ -1064,29 +1011,6 @@ mod tests {
         assert_eq!(
             names("import m, { a } from \"./m\"\nprint(a, m)\n"),
             Vec::<&str>::new()
-        );
-    }
-
-    /// The lint table is what `alloy lint --list` and `alloy doc`
-    /// read, so a lint the compiler fires has to have a row there.
-    #[test]
-    fn a_global_that_is_not_const_has_a_row_in_the_table() {
-        let info = LINTS
-            .iter()
-            .find(|l| l.name == "mutable_global")
-            .expect("the row");
-        assert_eq!(info.group, Group::Pedantic);
-        assert_eq!(info.default, Level::Allow);
-
-        // Pedantic, so `strict` carries it and a project turns it off
-        // by name or by group.
-        assert_eq!(
-            level_of(&LintConfig::default(), "mutable_global"),
-            Level::Warn
-        );
-        assert_eq!(
-            level_of(&LintConfig::default().without_strict(), "mutable_global"),
-            Level::Allow
         );
     }
 

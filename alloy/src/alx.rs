@@ -35,16 +35,7 @@ pub fn compile_alx(
         message: markup_message(&e.message, None),
     })?;
     let blanked = luaux::resolve::blank_luaux_regions(src, &spans);
-    let mut bound = bound_names(&blanked);
-    // A project global is in scope in every file without an import, so
-    // markup may name one: the factory itself is often a global const.
-    bound.extend(
-        options
-            .globals
-            .iter()
-            .filter(|g| g.value)
-            .map(|g| g.name.clone()),
-    );
+    let bound = bound_names(&blanked);
     config.extra_bound = bound.clone();
 
     let compiled = match config.backend {

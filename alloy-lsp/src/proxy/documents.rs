@@ -259,62 +259,6 @@ impl Server {
         }
     }
 
-    /// The module a script's globals move into, written into the
-    /// mirror beside the script. The script's shadow requires it, so
-    /// the child needs the file to be there.
-    pub(crate) fn write_hoisted(&self, uri: &str, source: &str) {
-        let Some(path) = uri_to_path(uri) else {
-            return;
-        };
-
-        if !alloy::modules::is_script(&path.to_string_lossy()) {
-            return;
-        }
-
-        let (options, jsx) = {
-            let st = self.state.lock().expect("state");
-            let (mut o, j) = st.options_for(uri);
-            let rel = st.project_rel(uri).unwrap_or_default();
-            let module_rel = PathBuf::from(alloy::globals::hoist_name(&rel.to_string_lossy()));
-            o.globals =
-                alloy::globals::refs_for(&st.project_globals(), &module_rel, &HashMap::new());
-            o.hoist_globals = false;
-            // The declarations are the script's, so a message names the
-            // script and not the module the build made.
-            o.hoisted_from = Some(rel.to_string_lossy().replace('\\', "/"));
-            // The module keeps the script's side; its own name has no
-            // suffix to say it.
-            o.side = st.side_of(uri, source);
-
-            (o, j)
-        };
-        let name = alloy::globals::hoist_name(
-            &path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        );
-        let module_path = path.with_file_name(name);
-        let module_src = alloy::globals::hoisted_module(&alloy::globals::index_text(&path, source));
-        let mut options = options;
-        options.file_name = module_path.to_string_lossy().into_owned();
-        let text = match alloy::compile_file(
-            &options.file_name,
-            &module_src,
-            &options,
-            Some(&jsx),
-            None,
-        ) {
-            Ok(out) => out.check,
-
-            Err(_) => return,
-        };
-        self.state
-            .lock()
-            .expect("state")
-            .write_mirror(&module_path, &text);
-    }
-
     /// The compile options of one document: the project's, and the
     /// import maps the file's own text asks for. A value import of a
     /// struct or an enum binds its type too, and the maps say which.
@@ -352,19 +296,17 @@ impl Server {
 
     /// Opens or replaces a document and its shadow.
     pub(crate) fn open_doc(&self, uri: &str, text: String, version: i64, by_editor: bool) {
-        let (had_globals, had_exports) = {
+        let had_exports = {
             let st = self.state.lock().expect("state");
 
             match st.docs.get(uri) {
-                Some(d) => (workspace_surface(d), export_surface(d)),
+                Some(d) => export_surface(d),
 
                 None => Default::default(),
             }
         };
         let (options, jsx, ingots) = self.compile_options(uri, &text);
         let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
-        let source = doc.source.clone();
-        let fresh_globals = workspace_surface(&doc);
         let fresh_exports = export_surface(&doc);
         let (shadow, existed) = {
             let mut st = self.state.lock().expect("state");
@@ -427,42 +369,16 @@ impl Server {
             self.to_child(&message);
         }
 
-        self.write_hoisted(uri, &source);
-
         // A pass over the workspace opens every file; one refresh at
         // the end of it costs one recompile each, not one per file.
-        if self.scan.try_lock().is_ok() {
-            if had_globals != fresh_globals {
-                self.refresh_globals(uri);
-            }
-
-            if had_exports != fresh_exports
-                && let Some(path) = uri_to_path(uri)
-            {
-                self.refresh_importers(&[path]);
-            }
+        if self.scan.try_lock().is_ok()
+            && had_exports != fresh_exports
+            && let Some(path) = uri_to_path(uri)
+        {
+            self.refresh_importers(&[path]);
         }
 
         self.publish(uri);
-    }
-
-    /// Sends every other document to the child again. A global the
-    /// workspace gained, lost, or renamed changes what each file binds
-    /// on its first line, so every other shadow is stale.
-    pub(crate) fn refresh_globals(&self, except: &str) {
-        let uris: Vec<String> = {
-            let st = self.state.lock().expect("state");
-
-            st.docs.keys().filter(|u| *u != except).cloned().collect()
-        };
-
-        for uri in uris {
-            self.wait_for_requests();
-            self.resend_doc(&uri);
-            // The Alloy diagnostics of the other file move with the
-            // set: a name it reaches, or a name it no longer reaches.
-            self.publish(&uri);
-        }
     }
 
     /// Compiles one document again and gives the child the fresh
@@ -561,12 +477,9 @@ impl Server {
             options.plain_modules = alloy::modules::plain_modules_for_file(&path, &doc.source);
         }
 
-        let had_globals = workspace_surface(doc);
         let had_exports = export_surface(doc);
         doc.compile(&options, &jsx, ingots.as_deref());
-        let fresh_globals = workspace_surface(doc);
         let fresh_exports = export_surface(doc);
-        let source = doc.source.clone();
         let shadow_text = doc.shadow.clone();
         let shadow = st.child_uri(uri);
 
@@ -586,12 +499,6 @@ impl Server {
 
         if child_sees(uri) {
             self.to_child(&message);
-        }
-
-        self.write_hoisted(uri, &source);
-
-        if had_globals != fresh_globals {
-            self.refresh_globals(uri);
         }
 
         if had_exports != fresh_exports
@@ -785,7 +692,6 @@ impl Server {
 
         // One pass at a time, the way `open_mirror` holds it.
         let _pass = self.scan.lock().unwrap_or_else(|e| e.into_inner());
-        let mut opened = false;
 
         for path in files {
             if self.stopping.load(std::sync::atomic::Ordering::Relaxed) {
@@ -802,24 +708,7 @@ impl Server {
 
             if let Ok(text) = std::fs::read_to_string(&path) {
                 self.open_doc(&uri, text, 0, false);
-                opened = true;
             }
-        }
-
-        log::took("scan: opened the shadows", shadows);
-
-        // The globals of the workspace are known once every file is
-        // open, so every file that names one is compiled again here.
-        let has_globals = {
-            let st = self.state.lock().expect("state");
-
-            st.docs.values().any(|d| !d.globals.is_empty())
-        };
-
-        if opened && has_globals {
-            let globals = std::time::Instant::now();
-            self.refresh_globals("");
-            log::took("scan: compiled the globals again", globals);
         }
 
         log::took("workspace shadows opened", shadows);
@@ -1612,19 +1501,6 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// The alias the shadow requires the runtime by. The mirror's Luau
 /// configuration points it at the file the mirror holds, so a shadow
 /// resolves the runtime on disk, with no sourcemap and no build.
-/// The names a document declares as global, in order, for the compare
-/// that says whether the workspace's set changed.
-fn global_names(globals: &[alloy::globals::Global]) -> Vec<String> {
-    globals.iter().map(|g| g.name.clone()).collect()
-}
-
-/// What one document lends the workspace: the names it declares as
-/// `global` and the names a `.d.aly` declares. A change to either
-/// changes what every other file binds, so every other shadow is stale.
-fn workspace_surface(doc: &Doc) -> (Vec<String>, Vec<String>) {
-    (global_names(&doc.globals), doc.ambient.clone())
-}
-
 /// What one document lends the files that import it: each name it
 /// sends out and whether that name is the default. A change here moves
 /// the reports of every importer, and the import checks read the module

@@ -47,52 +47,6 @@ const DECLARATION_WORDS: [&str; 8] = [
     "declare",
 ];
 
-/// The detail a project global shows: `global const MAX`, the way a
-/// declaration of this file reads. The declaring file goes in the
-/// documentation, where a long path costs the list nothing.
-pub(crate) fn global_detail(g: &alloy::globals::Global) -> String {
-    use alloy::globals::Kind;
-
-    let word = match g.kind {
-        Kind::Function => "function",
-
-        Kind::Value if g.constant => "const",
-
-        Kind::Value => "local",
-
-        Kind::Struct => "struct",
-
-        Kind::Enum => "enum",
-
-        Kind::Trait => "trait",
-
-        Kind::Interface => "interface",
-
-        Kind::Class => "class",
-
-        Kind::Type => "type",
-
-        Kind::Remote => "remote",
-
-        Kind::Macro => "macro",
-
-        Kind::Attribute => "attribute",
-
-        Kind::Impl => "impl",
-
-        Kind::Namespace => "namespace",
-    };
-
-    // A value carries its type: the annotation the declaration wrote,
-    // or the type its literal writes. Without one the list would say
-    // `global local hp` and leave the reader to open the other file.
-    match &g.value_type {
-        Some(ty) => format!("global {word} {}: {ty}", g.name),
-
-        None => format!("global {word} {}", g.name),
-    }
-}
-
 /// The detail a completion item shows for a declaration: the kind
 /// first, then the name. `Test` alone says nothing about what `Test`
 /// is, and the kind is what the reader is choosing between.
@@ -108,21 +62,15 @@ pub(crate) fn declaration_detail(hover: &str) -> Option<String> {
     }
 
     let head = head.strip_suffix(" as").unwrap_or(head).trim();
-    // `export` says where the name goes, not what it is. `global` says
-    // both, so it stays in front of the kind.
-    let head = head.strip_prefix("export ").unwrap_or(head);
-    let (prefix, rest) = match head.strip_prefix("global ") {
-        Some(rest) => ("global ", rest),
-
-        None => ("", head),
-    };
+    // `export` says where the name goes, not what it is.
+    let rest = head.strip_prefix("export ").unwrap_or(head);
     let word = rest.split_whitespace().next()?;
 
     if matches!(
         word,
         "function" | "async" | "macro" | "attribute" | "remote" | "const" | "local"
     ) {
-        return Some(format!("{prefix}{rest}"));
+        return Some(rest.to_string());
     }
 
     if !DECLARATION_WORDS.contains(&word) {
@@ -138,7 +86,7 @@ pub(crate) fn declaration_detail(hover: &str) -> Option<String> {
     match name.is_empty() {
         true => None,
 
-        false => Some(format!("{prefix}{word} {name}")),
+        false => Some(format!("{word} {name}")),
     }
 }
 
@@ -441,42 +389,6 @@ impl State {
         items
     }
 
-    /// The list a space opens: the sides after `--@alloy-side` and
-    /// `--@alloy-file-side`, and nothing anywhere else.
-    ///
-    /// The editor asks on a space only when the server lists one as a
-    /// trigger, so the space is in the list, and every other space
-    /// answers an empty list, which opens no popup.
-    pub(crate) fn side_word_completions(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
-        let Some(doc) = self.docs.get(uri) else {
-            return Vec::new();
-        };
-
-        let Some(offset) = offset_of(&doc.source, line, character) else {
-            return Vec::new();
-        };
-
-        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
-        let head = doc.source[line_start..offset].trim_start();
-        let opens = ["--@alloy-file-side ", "--@alloy-side "].contains(&head);
-
-        if !opens {
-            return Vec::new();
-        }
-
-        alloy::directives::SIDE_WORDS
-            .iter()
-            .map(|(word, doc_text)| {
-                json!({
-                    "label": word,
-                    "kind": 14,
-                    "detail": "Alloy side",
-                    "documentation": { "kind": "markdown", "value": doc_text },
-                })
-            })
-            .collect()
-    }
-
     /// Completion items for the comment directives. In a comment that
     /// holds nothing yet, `--`, `--@`, or `--!` lists them; on a line
     /// with nothing before the cursor, they come last, so a bare request
@@ -517,7 +429,7 @@ impl State {
         let (_, start_char) = position_of(&doc.source, edit_start);
         let alloy_only = typed.starts_with('@');
         let luau_only = typed.starts_with('!');
-        let directives: [(&str, &str); 12] = [
+        let directives: [(&str, &str); 10] = [
             (
                 "--@alloy-ignore",
                 "Silences the next line that holds code, or this line when it sits at the end of one: the compiler's, the lints, and the checker's diagnostics. Text after the name is the reason.",
@@ -541,14 +453,6 @@ impl State {
             (
                 "--@alloy-lint",
                 "Sets a lint's level for this file, over `[lint]` in alloy.toml: `--@alloy-lint raw_require=allow`. Several are separated by commas, and a group name sets its whole group.",
-            ),
-            (
-                "--@alloy-file-side",
-                "`client`, `server`, or `shared`: this file sees that side of every remote, the way a `.client.aly` or `.server.aly` name does.",
-            ),
-            (
-                "--@alloy-side",
-                "`client`, `server`, or `shared` for the `global` under it. It says nothing about the rest of the file; `--@alloy-file-side` is the one for that.",
             ),
             (
                 "--@alloy-preserve",

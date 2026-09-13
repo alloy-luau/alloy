@@ -136,26 +136,6 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
     shapes
 }
 
-/// The module a script's globals are hoisted into: `main.server.aly`
-/// gives `main.server.globals.aly`, beside it.
-fn hoist_path(rel: &Path) -> PathBuf {
-    let name = rel.file_name().map(|n| n.to_string_lossy().into_owned());
-    let Some(name) = name else {
-        return rel.to_path_buf();
-    };
-    let stem = name
-        .strip_suffix(".aly")
-        .or_else(|| name.strip_suffix(".alx"))
-        .unwrap_or(&name);
-
-    rel.with_file_name(format!("{stem}.globals.aly"))
-}
-
-/// A path as a message writes it: forward slashes on every platform.
-fn display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
 /// The Alloy sources under `input`, sorted.
 pub fn sources(input: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut list = Vec::new();
@@ -311,128 +291,25 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
     }
 
-    // `global` is project wide too: the index says which file declares
-    // each name, so a file that uses one requires that file and binds
-    // the name on its first line.
-    let mut texts: Vec<(PathBuf, String)> = Vec::new();
+    // A `.d.aly` declares a name with no module behind it, so a check
+    // that asks whether a name exists reads the list.
+    let mut ambient_names: Vec<String> = Vec::new();
 
     for path in &sources {
         let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
 
-        if let Ok(text) = std::fs::read_to_string(path) {
-            let text = crate::globals::index_text(&rel, &text);
-            texts.push((rel, text));
-        }
-    }
-
-    let included: Vec<(PathBuf, String)> = texts
-        .iter()
-        .filter(|(rel, _)| !exclude.is_match(rel))
-        .cloned()
-        .collect();
-    // A script cannot be required, so its globals move into a module
-    // beside it. The script requires that module the way every other
-    // file does, and the declarations leave the script blank.
-    let hoists: Vec<(PathBuf, PathBuf)> = included
-        .iter()
-        .filter(|(rel, text)| {
-            crate::modules::is_script(&rel.to_string_lossy())
-                && !crate::globals::declared(text, rel).is_empty()
-        })
-        .map(|(rel, _)| (rel.clone(), hoist_path(rel)))
-        .collect();
-    let hoist_of = |rel: &Path| {
-        hoists
-            .iter()
-            .find(|(script, _)| script == rel)
-            .map(|(_, module)| module.clone())
-    };
-    // The side of a file: its name, then `--@alloy-side`, then the
-    // place the tree gives it. A module under `ServerScriptService`
-    // never reaches the client, whatever its name.
-    let side_of = |rel: &Path, text: &str| {
-        let from_root = build.input.join(rel);
-        let place = crate::project::instance_path(&tree, &from_root);
-        let context = config.contexts.side_of(rel, &from_root);
-
-        crate::directives::side_of(text, &display_path(rel), context, place.as_deref())
-    };
-    let mut project_globals = crate::globals::index(&included);
-
-    for g in &mut project_globals {
-        // The file's side, unless the global carries a directive of
-        // its own.
-        if let Some((rel, text)) = included.iter().find(|(rel, _)| rel == &g.file) {
-            g.side = g.side_directive.unwrap_or_else(|| side_of(rel, text));
-        }
-
-        if let Some(module) = hoist_of(&g.file) {
-            g.file = module;
-        }
-    }
-
-    // A macro expands and an attribute is read where it is written, so
-    // the declaration travels to every file instead of a require.
-    let global_macros = crate::globals::macro_sources(&included);
-    let global_attributes = crate::globals::attribute_decls(&included);
-    // A `.d.aly` declares a name with no module behind it. A `global`
-    // by that name gives the name two declarations and no way to pick.
-    let ambient = crate::globals::ambient_names(&included);
-    let ambient_clashes: Vec<(String, String)> = ambient
-        .iter()
-        .filter(|(n, _)| project_globals.iter().any(|g| &g.name == n))
-        .map(|(n, f)| (n.clone(), display_path(f)))
-        .collect();
-    let ambient_names: Vec<String> = ambient.into_iter().map(|(n, _)| n).collect();
-    // Under a mount the ship artifact reaches a global's module by its
-    // instance path, the way it reaches the runtime.
-    let mut ship_globals: HashMap<PathBuf, String> = HashMap::new();
-
-    for g in &project_globals {
-        if let Some(place) = crate::project::instance_path(&tree, &build.input.join(&g.file)) {
-            ship_globals.insert(g.file.clone(), format!("@game/{}", place.join("/")));
-        }
-    }
-
-    // A file the project excludes gets no require injected, so a global
-    // in it, or a use of one from it, would fail at runtime.
-    for (rel, text) in &texts {
-        if !exclude.is_match(rel) {
+        if exclude.is_match(&rel) || !rel.to_string_lossy().ends_with(".d.aly") {
             continue;
         }
 
-        for g in crate::globals::declared(text, rel) {
-            report.diagnostics.push((
-                rel.clone(),
-                Diagnostic {
-                    start: g.start,
-                    end: g.end,
-                    message: format!(
-                        "`{}` is global, and `[build] exclude` drops this file, so no file reaches it",
-                        g.name
-                    ),
-                },
-            ));
-        }
-
-        let refs = crate::globals::refs_for(&project_globals, rel, &ship_globals);
-
-        for (name, at) in crate::globals::used(text, &refs) {
-            report.diagnostics.push((
-                rel.clone(),
-                Diagnostic {
-                    start: at,
-                    end: at + name.len() as u32,
-                    message: format!(
-                        "`{name}` is global, and `[build] exclude` drops this file, so the require is never written"
-                    ),
-                },
-            ));
+        if let Ok(text) = std::fs::read_to_string(path) {
+            ambient_names.extend(
+                crate::declarations::summaries(&text, true)
+                    .into_iter()
+                    .map(|d| d.name),
+            );
         }
     }
-
-    // Which globals each file named, for the require graph below.
-    let mut global_uses: Vec<(PathBuf, Vec<(String, u32)>)> = Vec::new();
 
     // `[alx]` in alloy.toml, or a `luaux.toml` beside it, picks the UI
     // library for `.alx`.
@@ -495,13 +372,6 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
             ship_std_require,
-            globals: crate::globals::refs_for(&project_globals, &rel, &ship_globals),
-            global_macros: global_macros.clone(),
-            global_attributes: global_attributes.clone(),
-            hoist_globals: hoist_of(&rel).is_some(),
-            side: side_of(&rel, &source),
-            in_project: true,
-            ambient_clashes: ambient_clashes.clone(),
             ambient_names: ambient_names.clone(),
             import_types: crate::modules::import_types(&source, &path, &module_aliases),
             import_enums: crate::modules::import_enums(&source, &path, &module_aliases),
@@ -581,7 +451,6 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         imports.push((rel.clone(), compiled.imports.clone()));
-        global_uses.push((rel.clone(), compiled.globals_used.clone()));
 
         // A module that names no file, a name the module does not
         // export, and a name imported twice: each fails at runtime, so
@@ -667,104 +536,6 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             report.diagnostics.push((rel.clone(), d));
         }
 
-        // The module a script's globals moved into. Its text is the
-        // script with the rest blanked, so every offset still points at
-        // the line the author wrote.
-        if let Some(module_rel) = hoist_of(&rel) {
-            for (name, at) in crate::globals::script_leaks(&source) {
-                report.diagnostics.push((
-                    rel.clone(),
-                    Diagnostic {
-                        start: at,
-                        end: at + name.len() as u32,
-                        message: format!(
-                            "a global in a script may use only imports, other globals, and literals; move `{name}` into a module"
-                        ),
-                    },
-                ));
-            }
-
-            let module_out = output_for(&module_rel).unwrap_or_else(|| module_rel.clone());
-            expected.insert(out.join(&module_out));
-            let module_options = EmitOptions {
-                file_name: display_path(&module_rel),
-                hoist_globals: false,
-                // The declarations are the script's; a message names
-                // the file the author wrote.
-                hoisted_from: Some(display_path(&rel)),
-                // The module keeps the script's side; its own name has
-                // no suffix to say it.
-                side: side_of(&rel, &source),
-                globals: crate::globals::refs_for(&project_globals, &module_rel, &ship_globals),
-                ..options.clone()
-            };
-            let module_src = crate::globals::hoisted_module(&source);
-            let module_path = path.with_file_name(
-                module_rel
-                    .file_name()
-                    .map(|n| n.to_os_string())
-                    .unwrap_or_default(),
-            );
-
-            match crate::compile_file(
-                &module_path.to_string_lossy(),
-                &module_src,
-                &module_options,
-                jsx,
-                Some(&ingots),
-            ) {
-                Ok(module) => {
-                    for d in &module.diagnostics {
-                        // The script and the module its globals moved
-                        // into both hold the declarations, so both
-                        // report the same thing at the same place.
-                        let said = report.diagnostics.iter().any(|(r, o)| {
-                            *r == rel && o.start == d.start && o.message == d.message
-                        });
-
-                        if !said {
-                            report.diagnostics.push((rel.clone(), d.clone()));
-                        }
-                    }
-
-                    if keep {
-                        report.checks.push(crate::typecheck::CheckSource {
-                            rel: module_rel.clone(),
-                            source: module_src.clone(),
-                            check: module.check.clone(),
-                            map: module.map.clone(),
-                            lint_lines: Vec::new(),
-                            error_lines: Vec::new(),
-                            parsed_clean: module.parsed_clean,
-                            expected_hits: Vec::new(),
-                        });
-                    }
-
-                    if write {
-                        let ship = crate::project::rewrite_requires(&tree, &module.ship);
-                        let text = match build.artifact {
-                            Artifact::Ship => &ship,
-
-                            Artifact::Check => &module.check,
-                        };
-                        let target = out.join(&module_out);
-
-                        if let Some(parent) = target.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-
-                        if std::fs::read_to_string(&target).ok().as_deref() != Some(text.as_str()) {
-                            std::fs::write(&target, text)?;
-                        }
-
-                        report.written.push(module_out.clone());
-                    }
-                }
-
-                Err(e) => report.failures.push((rel.clone(), e.located(&module_src))),
-            }
-        }
-
         if !write {
             report.written.push(rel_out);
 
@@ -793,9 +564,6 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     }
 
     report.lints.extend(circular_imports(&imports));
-    report
-        .diagnostics
-        .extend(global_cycles(&imports, &global_uses, &project_globals));
     report
         .diagnostics
         .sort_by(|a, b| (&a.0, a.1.start).cmp(&(&b.0, b.1.start)));
@@ -1138,89 +906,6 @@ fn circular_imports(imports: &[(PathBuf, Vec<crate::ImportRef>)]) -> Vec<(PathBu
                         sources[*to].display()
                     ),
                     fix: None,
-                },
-            )
-        })
-        .collect()
-}
-
-/// A global whose module leads back to a file that uses it. The
-/// injected require closes the loop, and neither file names the other,
-/// so the build reports it where the use sits.
-fn global_cycles(
-    imports: &[(PathBuf, Vec<crate::ImportRef>)],
-    uses: &[(PathBuf, Vec<(String, u32)>)],
-    globals: &[crate::globals::Global],
-) -> Vec<(PathBuf, Diagnostic)> {
-    let sources: Vec<PathBuf> = imports.iter().map(|(p, _)| p.clone()).collect();
-    let index = |path: &Path| sources.iter().position(|s| s == path);
-    let mut edges: Vec<(usize, usize)> = Vec::new();
-
-    for (i, (from, list)) in imports.iter().enumerate() {
-        for im in list {
-            if let Some(to) = resolve_import(from, &im.path, &sources)
-                && let Some(j) = index(&to)
-            {
-                edges.push((i, j));
-            }
-        }
-    }
-
-    // The injected require is an edge too: a file that names a global
-    // requires the file that declares it.
-    let mut injected: Vec<(usize, usize, &str, u32)> = Vec::new();
-
-    for (rel, names) in uses {
-        let Some(i) = index(rel) else {
-            continue;
-        };
-
-        for (name, at) in names {
-            let Some(g) = globals.iter().find(|g| &g.name == name) else {
-                continue;
-            };
-            let Some(j) = index(&g.file) else {
-                continue;
-            };
-            edges.push((i, j));
-            injected.push((i, j, name, *at));
-        }
-    }
-
-    // Whether `start` reaches `goal` along the edges.
-    let reaches = |start: usize, goal: usize| {
-        let mut seen = vec![false; sources.len()];
-        let mut stack = vec![start];
-
-        while let Some(n) = stack.pop() {
-            if n == goal {
-                return true;
-            }
-
-            if std::mem::replace(&mut seen[n], true) {
-                continue;
-            }
-
-            stack.extend(edges.iter().filter(|(a, _)| *a == n).map(|(_, b)| *b));
-        }
-
-        false
-    };
-
-    injected
-        .iter()
-        .filter(|(user, decl, _, _)| reaches(*decl, *user))
-        .map(|(user, decl, name, at)| {
-            (
-                sources[*user].clone(),
-                Diagnostic {
-                    start: *at,
-                    end: at + name.len() as u32,
-                    message: format!(
-                        "`{name}` is global in `{}`, and that file leads back to `{}`, which uses it; the requires form a cycle",
-                        display_path(&sources[*decl]),
-                        display_path(&sources[*user])
-                    ),
                 },
             )
         })

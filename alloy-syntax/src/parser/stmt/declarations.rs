@@ -273,7 +273,6 @@ impl<'a> Parser<'a> {
             attrs: Vec::new(),
             keyword,
             exported: false,
-            global: false,
             is_const,
             names,
             values,
@@ -297,7 +296,6 @@ impl<'a> Parser<'a> {
             attributes,
             attrs: Vec::new(),
             exported: false,
-            global: false,
             is_const,
             name,
             body,
@@ -339,7 +337,6 @@ impl<'a> Parser<'a> {
             attributes,
             attrs: Vec::new(),
             exported: false,
-            global: false,
             visibility: None,
             path,
             is_method,
@@ -478,7 +475,6 @@ impl<'a> Parser<'a> {
 
         Ok(Stmt::Class(Class {
             exported,
-            global: false,
             open,
             name,
             extends,
@@ -570,10 +566,16 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn type_alias(&mut self, start: usize) -> Result<Stmt, ParseError> {
-        // `global type X = T` exports the alias and puts it in scope in
-        // every file, so the flags travel together.
-        let global = self.eat("global");
-        let exported = global || self.eat("export");
+        // `global type X = T` is an `export type` with a report on the
+        // word; see `Chunk::global_keywords`.
+        let was_global = self.at("global");
+
+        if was_global {
+            let at = self.bump();
+            self.removed_global(at);
+        }
+
+        let exported = self.eat("export") || was_global;
         self.expect("type")?;
 
         if self.at("function") {
@@ -584,7 +586,6 @@ impl<'a> Parser<'a> {
 
             return Ok(Stmt::TypeAlias(TypeAlias {
                 exported,
-                global,
                 name,
                 attributes: Vec::new(),
                 span: TokSpan::new(start, self.pos),
@@ -601,7 +602,6 @@ impl<'a> Parser<'a> {
         self.type_()?;
         Ok(Stmt::TypeAlias(TypeAlias {
             exported,
-            global,
             name,
             attributes: Vec::new(),
             span: TokSpan::new(start, self.pos),

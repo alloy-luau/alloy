@@ -627,12 +627,11 @@ fn a_returning_module_types_through_its_value() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The globals of a project, through the analyzer. The build writes the
-/// require and the binding on the first line of each file that names
-/// one; `luau-lsp analyze` reads the emitted tree and must find every
-/// name, every type, and no error of its own.
+/// The shared names of a project, through the analyzer. Each file
+/// imports what it reads; `luau-lsp analyze` reads the emitted tree and
+/// must find every name, every type, and no error of its own.
 #[test]
-fn a_project_with_globals_analyzes() {
+fn a_project_with_imports_analyzes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("tools/types/globalTypes.d.luau");
 
@@ -642,7 +641,7 @@ fn a_project_with_globals_analyzes() {
         return;
     }
 
-    let dir = std::env::temp_dir().join(format!("alloy-analyze-globals-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("alloy-analyze-imports-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src/shared")).unwrap();
     std::fs::write(
@@ -653,17 +652,17 @@ fn a_project_with_globals_analyzes() {
     std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
     std::fs::write(
         dir.join("src/shared/log.aly"),
-        "--- Writes a line.\nglobal function log(msg: string)\n    print(msg)\nend\n\nglobal struct Vec2 as\n    x: number\n    y: number\nend\n",
+        "--- Writes a line.\nexport function log(msg: string)\n    print(msg)\nend\n\nexport struct Vec2 as\n    x: number\n    y: number\nend\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("src/shared/ids.aly"),
-        "global type Id = number\n\nglobal const MAX = 10\n",
+        "export type Id = number\n\nexport const MAX = 10\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("src/main.aly"),
-        "local n: Id = MAX\nlog(`start {n}`)\n\nfunction origin(): Vec2\n    return new Vec2 { x = 0, y = 0 }\nend\n\nprint(origin().x)\n",
+        "import { log, Vec2 } from \"./shared/log\"\nimport { MAX } from \"./shared/ids\"\nimport type { Id } from \"./shared/ids\"\n\nlocal n: Id = MAX\nlog(`start {n}`)\n\nfunction origin(): Vec2\n    return new Vec2 { x = 0, y = 0 }\nend\n\nprint(origin().x)\n",
     )
     .unwrap();
 

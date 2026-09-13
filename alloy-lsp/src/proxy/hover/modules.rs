@@ -40,32 +40,10 @@ impl Server {
             .find('\n')
             .map_or(doc.source.len(), |i| start + i);
         let spec_line = quoted.then(|| &doc.source[line_start..line_end]);
-        // A project global is a bare name. `Analytics.count` names a
-        // member, and a global that shares the word says nothing about
-        // it.
-        let after_separator = follows_a_separator(&doc.source, start);
-        // A project global is declared in another file and needs no
-        // import, so the file that wrote it is the one to read.
-        let from_global = || {
-            if after_separator {
-                return None;
-            }
-
-            let owner = global_owner(&st, uri, &word)?;
-
-            // A `remote` has no type the child can print, so the
-            // declaration answers. A `global local` or a `global const`
-            // is a value the child types off the binding the first line
-            // writes, and that type is the inferred one; the answer
-            // comes back through `restyle_global_hover`, which puts the
-            // declaring keywords in front of it.
-            remote_hover(&owner.source, &word)
-        };
         let shadowed = shadows_an_import(&doc.source, &word, start);
         let inner = |answer: Option<String>| answer.filter(|_| !shadowed);
         let answer = inner(remote_hover(&doc.source, &word))
             .or_else(|| inner(imported()))
-            .or_else(|| inner(from_global()))
             .or_else(|| service_hover(&doc.source, &word, spec_line))
             .or_else(|| {
                 let dir = path
@@ -98,44 +76,7 @@ impl Server {
     }
 }
 
-/// The declaration a project global wrote, for a hover the child left
-/// unanswered. The type is the one the source wrote, since nothing
-/// here infers one.
-pub(crate) fn global_declaration_hover(
-    doc: &Doc,
-    st: &State,
-    uri: &str,
-    line: u32,
-    character: u32,
-) -> Option<String> {
-    let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
-
-    if follows_a_separator(&doc.source, start) {
-        return None;
-    }
-
-    let word = &doc.source[start..end];
-    let owner = global_owner(st, uri, word)?;
-
-    const_hover(&owner.source, word)
-}
-
-/// The open document that declares `word` as a project global this
-/// file reaches. A global needs no import, so the file that wrote it
-/// is the one to read.
-pub(crate) fn global_owner<'a>(st: &'a State, uri: &str, word: &str) -> Option<&'a Doc> {
-    st.docs
-        .iter()
-        .find(|(u, d)| {
-            u.as_str() != uri
-                && d.globals
-                    .iter()
-                    .any(|g| g.name == word && st.global_reaches(uri, u, g))
-        })
-        .map(|(_, d)| d)
-}
-
-/// Whether a nearer binding than an import or a project global holds
+/// Whether a nearer binding than an import holds
 /// the word at `start`: a `local`, a parameter, a `for` variable, or a
 /// `case` binding. The child types that one, and the outer declaration
 /// says nothing about it.
@@ -159,12 +100,6 @@ pub(crate) fn shadows_an_import(source: &str, word: &str, start: usize) -> bool 
         || crate::context::locals_in_scope(source, line_end)
             .iter()
             .any(|l| l.name == word)
-}
-
-/// Whether a word starts right after a `.` or a `:`, which makes it a
-/// member of what stands before it and no name of its own.
-pub(crate) fn follows_a_separator(source: &str, start: usize) -> bool {
-    matches!(source[..start].chars().next_back(), Some('.' | ':'))
 }
 
 /// The hover of a `remote`: the declaration as the source wrote it,
@@ -497,21 +432,4 @@ pub(crate) fn service_hover(source: &str, word: &str, spec_line: Option<&str>) -
     }
 
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `Analytics.count` names a member. A project global that shares
-    /// the word said `global local count` about it, which is another
-    /// file's declaration and nothing to do with the module.
-    #[test]
-    fn a_member_is_no_project_global() {
-        let src = "import Analytics from \"./a\"\nprint(Analytics.count(), count)\n";
-        let at = |word: &str| follows_a_separator(src, src.find(word).expect("the word"));
-        assert!(at("count("));
-        assert!(!at("count)"));
-        assert!(!at("Analytics."));
-    }
 }

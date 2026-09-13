@@ -621,25 +621,25 @@ fn exported_members(src: &str, want: Want) -> Vec<Member> {
             Stmt::ExportDefault { .. } => true,
 
             _ => match stmt {
-                Stmt::Namespace(ns) => ns.exported || ns.global,
+                Stmt::Namespace(ns) => ns.exported,
 
-                Stmt::Struct(s) => s.exported || s.global,
+                Stmt::Struct(s) => s.exported,
 
-                Stmt::Local(l) => l.exported || l.global,
+                Stmt::Local(l) => l.exported,
 
-                Stmt::LocalFunction(f) => f.exported || f.global,
+                Stmt::LocalFunction(f) => f.exported,
 
-                Stmt::Function(f) => f.exported || f.global,
+                Stmt::Function(f) => f.exported,
 
-                Stmt::TypeAlias(a) => a.exported || a.global,
+                Stmt::TypeAlias(a) => a.exported,
 
-                Stmt::Enum(e) => e.exported || e.global,
+                Stmt::Enum(e) => e.exported,
 
-                Stmt::Trait(x) => x.exported || x.global,
+                Stmt::Trait(x) => x.exported,
 
-                Stmt::Interface(i) => i.exported || i.global,
+                Stmt::Interface(i) => i.exported,
 
-                Stmt::Class(c) => c.exported || c.global,
+                Stmt::Class(c) => c.exported,
 
                 _ => false,
             },

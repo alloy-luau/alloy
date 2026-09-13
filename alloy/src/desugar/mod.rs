@@ -23,8 +23,7 @@ use alloy_syntax::ast::{
     Binding, Block, CallArgs, ChildName, Chunk, ClassMember, Cond, DefaultExport, Destructure,
     Expr, FunctionBody, GenericFor, If, IndexKey, Local, Stmt, TableField, TokSpan, TypeEdit,
 };
-use alloy_syntax::lexer::{Tok, TokKind};
-use modules::GLOBAL_STATE;
+use alloy_syntax::lexer::Tok;
 
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 
@@ -121,26 +120,10 @@ pub struct EmitOptions {
     /// table, so `import X from` binds the value it returns, not
     /// `require(...).default`. See `crate::modules::plain_modules`.
     pub plain_modules: Vec<String>,
-    /// The `global` declarations of the project, as this file reaches
-    /// them. A file that names one gets the require and the binding on
-    /// its first line. See `crate::globals`.
-    pub globals: Vec<GlobalRef>,
-    /// Whether the file compiles inside a project. `global` needs one:
-    /// without alloy.toml there is no set of files to reach.
-    pub in_project: bool,
-    /// A `global` this file declares whose name a definitions file of
-    /// the project already declares, with that file. Two declarations,
-    /// no way to pick.
-    pub ambient_clashes: Vec<(String, String)>,
     /// Every name a `.d.aly` of the project declares. Such a name has
     /// no module behind it, so a check that asks whether a name exists
     /// has to read the list.
     pub ambient_names: Vec<String>,
-    /// The `global macro` declarations of the project. A macro expands
-    /// where it is written, so the declaration travels, not a require.
-    pub global_macros: Vec<MacroSource>,
-    /// The `global attribute` declarations of the project, by name.
-    pub global_attributes: Vec<(String, AttrDecl)>,
     /// The `export attribute` declarations of the modules this file
     /// imports, by name. An attribute contract is checked where the
     /// attribute is used, so a use here needs the declaration there.
@@ -150,57 +133,6 @@ pub struct EmitOptions {
     /// order of the statements is then the ingot's, not the author's,
     /// so `import_order` says nothing about it.
     pub ingot_rewrite: bool,
-    /// The file is a script whose globals the build hoisted into a
-    /// module beside it. The declarations go, and the injected require
-    /// brings the names back.
-    pub hoist_globals: bool,
-    /// The script this file holds the globals of, when the build
-    /// hoisted them here. A message names the script the author wrote,
-    /// never the module the build made.
-    pub hoisted_from: Option<String>,
-    /// The side the project's tree gives the file, for a name that
-    /// says none. The module a script's globals moved into takes the
-    /// script's side this way too.
-    pub side: Option<crate::directives::Side>,
-}
-
-/// One `global` of the project, as the file being compiled reaches it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GlobalRef {
-    pub name: String,
-    /// The module the require reaches. For a global in a script this
-    /// is the module the build hoists the declaration into.
-    pub file: String,
-    /// The file that wrote the declaration, which is what a message
-    /// names. A script keeps its own name here.
-    pub declared_in: String,
-    /// The require spec that reaches the declaring module from here.
-    pub require: String,
-    /// The ship artifact's require when it differs: under a mount it is
-    /// the instance path, while the check artifact keeps the file path.
-    pub ship_require: Option<String>,
-    /// Whether the name binds a value.
-    pub value: bool,
-    /// Whether the name is a type too, so the file needs an alias.
-    pub ty: bool,
-    /// The parameter list of a generic type, `<T>`.
-    pub type_params: String,
-    /// The side the declaring file sits on. A global of one side is out
-    /// of scope on the other; a shared module reaches both.
-    pub side: Option<crate::directives::Side>,
-    /// The name is a `global namespace`. Its types reach a file as
-    /// `Math_Vec2`, so a type slot that writes `Math.Vec2` reads them.
-    pub namespace: bool,
-    /// The declaration wrote `const`, so an assignment in any file of
-    /// the project is an error.
-    pub constant: bool,
-    /// `global local x = 1`: a value any file may assign. The name is
-    /// one slot on the declaring module, so every file reads and writes
-    /// the same one.
-    pub mutable: bool,
-    /// For a namespace, the `const` members a file reaches through it,
-    /// as the dotted paths a source writes: `Cfg.LIMIT`.
-    pub const_members: Vec<String>,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -325,17 +257,9 @@ impl Default for EmitOptions {
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
             plain_modules: Vec::new(),
-            globals: Vec::new(),
-            in_project: false,
-            ambient_clashes: Vec::new(),
             ambient_names: Vec::new(),
-            global_macros: Vec::new(),
-            global_attributes: Vec::new(),
             import_attributes: Vec::new(),
             ingot_rewrite: false,
-            hoist_globals: false,
-            hoisted_from: None,
-            side: None,
         }
     }
 }
@@ -355,16 +279,31 @@ pub struct Rendered {
     pub ext_used: bool,
     /// The `@test` functions: name and whether it is async.
     pub tests: Vec<(String, bool)>,
-    /// The project globals the file named, each with the byte offset of
-    /// its first use. The build reads them for the require graph.
-    pub globals_used: Vec<(String, u32)>,
     /// The members an attribute contract asked for and did not find.
     pub contract_gaps: Vec<ContractGap>,
 }
 
-/// What `--@alloy-side` says when it sits anywhere but over a global.
-pub const SIDE_ON_GLOBAL: &str =
-    "`--@alloy-side` sits above a global; `--@alloy-file-side` is the one for a whole file";
+/// The words a declaration may write between `global` and the name it
+/// declares, for the report `global` draws.
+const DECL_WORDS: &[&str] = &[
+    "local",
+    "const",
+    "function",
+    "async",
+    "struct",
+    "enum",
+    "trait",
+    "interface",
+    "remote",
+    "impl",
+    "class",
+    "open",
+    "macro",
+    "attribute",
+    "namespace",
+    "type",
+    "export",
+];
 
 /// The std names that are ambient in Alloy source.
 pub const AMBIENT: &[&str] = &[
@@ -430,8 +369,6 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
         TypeEdit::AmbientName(span) => (toks[span.start as usize].start, u32::MAX),
 
-        TypeEdit::TypeofValue(span) => (toks[span.start as usize].start, u32::MAX),
-
         TypeEdit::Mapped { table, .. } => (toks[table.start as usize].start, 0),
     });
 
@@ -459,23 +396,11 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         type_edits: edits,
         scopes: vec![HashSet::new()],
         uses_std: false,
-        globals_used: Vec::new(),
-        global_modules: Vec::new(),
-        own_mutable: Vec::new(),
         top_scope: 1,
-        // The name and the directive are the file's own word; the
-        // caller's side is the tree's, which is the weakest.
-        file_side: crate::directives::effective_side(src, &options.file_name).or(options.side),
-        own_names: match options.hoist_globals {
-            // A hoisted global lives in the module beside the script,
-            // so the script reaches it the way every other file does.
-            true => top_level_names(src, toks, chunk)
-                .into_iter()
-                .filter(|n| !options.globals.iter().any(|g| &g.name == n))
-                .collect(),
-
-            false => top_level_names(src, toks, chunk),
-        },
+        // `ui.client.aly` sees the client half of a remote, and
+        // `main.server.aly` the server half.
+        file_side: crate::directives::file_side(&options.file_name),
+        own_names: top_level_names(src, toks, chunk),
         exports: Vec::new(),
         has_default_export: false,
         enums: HashMap::from([(
@@ -536,26 +461,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         type_name_spans: chunk.type_names.clone(),
     };
 
-    // A global macro is in scope before the file's own declarations, so
-    // a file that declares the same name wins over the project's.
-    for m in &options.global_macros {
-        d.macros.insert(
-            m.name.clone(),
-            MacroRef {
-                params: m.params.clone(),
-                defaults: m.defaults.clone(),
-                variadic: m.variadic,
-                body: m.body.clone(),
-                tail: m.tail.clone(),
-            },
-        );
-    }
-
-    for (name, decl) in options
-        .import_attributes
-        .iter()
-        .chain(&options.global_attributes)
-    {
+    for (name, decl) in &options.import_attributes {
         d.attr_decls.insert(name.clone(), decl.clone());
     }
 
@@ -572,51 +478,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         );
     }
 
-    // A type slot names a global the same way a value does. The parser
-    // recorded every bare type name; the ones a global owns need the
-    // alias the first line writes.
-    if !options.globals.is_empty() {
-        for span in &chunk.type_names {
-            let name = d.text_of(*span).to_string();
-            let at = d.byte_start(*span);
-            d.use_global(&name, at);
-        }
-
-        // `typeof(g)` reads a value, so the name inside it needs the
-        // require the first line writes, the same as a value use.
-        for edit in &chunk.type_edits {
-            let TypeEdit::TypeofValue(span) = edit else {
-                continue;
-            };
-
-            for i in span.start as usize..span.end as usize {
-                if toks[i].kind != TokKind::Ident
-                    || alloy_syntax::contextual::is_luau_reserved(toks[i].text(src))
-                    || (i > 0 && matches!(toks[i - 1].text(src), "." | ":"))
-                {
-                    continue;
-                }
-
-                let name = toks[i].text(src).to_string();
-                let at = toks[i].start;
-                d.use_global(&name, at);
-            }
-        }
-    }
-
-    // What each `global` of this file needs to be true. The check runs
-    // before the walk, so a file with a bad global still renders.
-    d.check_globals(src, toks, chunk);
-
-    // The `global local` names this file owns. A script's globals move
-    // into the module beside it, so the script owns none of them.
-    if options.in_project && !options.definitions && !options.hoist_globals {
-        d.own_mutable = crate::globals::declared_in(src, toks, chunk, std::path::Path::new(""))
-            .into_iter()
-            .filter(|g| g.kind == crate::globals::Kind::Value && !g.constant)
-            .map(|g| g.name)
-            .collect();
-    }
+    // `global` left the language; each one the file wrote reports.
+    d.report_globals(src, toks, chunk);
 
     // A namespace names its members before the prescan reads them: a
     // member renders under the namespace's prefix, and every table the
@@ -675,14 +538,6 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         d.generate(insert_at, &line);
     }
 
-    // Every global the file named: the require of its module, then the
-    // binding. The text holds no newline, so the line count stands.
-    let global_line = d.global_prologue();
-
-    if !global_line.is_empty() {
-        d.generate(insert_at, &global_line);
-    }
-
     for kind in d.mapped_used.clone() {
         let line = format!("{} ", Desugar::mapped_type_function(kind));
         d.generate(insert_at, &line);
@@ -736,7 +591,6 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         uses_std: d.uses_std,
         ext_used: d.ext_hit,
         tests: d.test_names,
-        globals_used: d.globals_used,
         contract_gaps: d.contract_gaps,
     }
 }
@@ -961,25 +815,13 @@ struct Desugar<'s> {
     scopes: Vec<HashSet<String>>,
     /// Whether the file needs the std require.
     uses_std: bool,
-    /// The project globals this file named, first use first. Each one
-    /// puts a require and a binding on the first line.
-    globals_used: Vec<(String, u32)>,
-    /// The require spec of each declaring module this file reaches,
-    /// first use first. The first line binds them as `_g1`, `_g2`, and
-    /// a `global local` reads its slot off one of them.
-    global_modules: Vec<String>,
-    /// The `global local` names this file declares. They live on the
-    /// table the module returns, so an assignment anywhere in the
-    /// project lands on the one value.
-    own_mutable: Vec<String>,
     /// The index of the scope the file's top level binds into. A local
-    /// of any scope past it is a name of its own, and it shadows a
-    /// global the way it shadows anything else.
+    /// of any scope past it is a name of its own, and it shadows an
+    /// ambient name the way it shadows anything else.
     top_scope: usize,
     /// The side this file sits on, from its name or its directive.
     file_side: Option<crate::directives::Side>,
-    /// Every name the top level of this file binds. A file that
-    /// declares a name of its own keeps it; no global is injected over it.
+    /// Every name the top level of this file binds.
     own_names: HashSet<String>,
     /// Names the module exports, as `name = value` pairs for the table.
     exports: Vec<(String, String)>,
@@ -1788,10 +1630,6 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
 
         Stmt::GenericFor(f) if for_needs_rewrite(f) => return true,
 
-        // `global type X = T` is `export type X = T` to Luau; the
-        // project index is what the modifier adds.
-        Stmt::TypeAlias(t) if t.global => return true,
-
         Stmt::Import(_)
         | Stmt::ExportList(_)
         | Stmt::ExportDefault { .. }
@@ -2041,9 +1879,6 @@ impl<'s> Desugar<'s> {
         // type slot outside the namespace writes the path. Both read
         // the same name here.
         if let Some((s, e, text)) = self.namespace_type_at(start, end) {
-            // A `global namespace` reaches the file as that name, so
-            // the first line has to bind it.
-            self.use_global(&text.clone(), s);
             self.r.copy(start, s);
             self.generate(s, &text);
             self.copy(e, end);
@@ -2070,15 +1905,6 @@ impl<'s> Desugar<'s> {
                 self.byte_start(*span) >= start && self.byte_end(*span) <= end
             }
 
-            TypeEdit::TypeofValue(span) => {
-                self.byte_start(*span) >= start
-                    && self.byte_end(*span) <= end
-                    // With no shared global inside, the expression
-                    // copies as it stands, and a later edit of the same
-                    // range gets its turn.
-                    && !self.typeof_global_names(*span).is_empty()
-            }
-
             TypeEdit::Mapped { table, .. } => {
                 self.byte_start(*table) >= start && self.byte_end(*table) <= end
             }
@@ -2103,27 +1929,6 @@ impl<'s> Desugar<'s> {
                 }
 
                 self.copy(ne, end);
-
-                return;
-            }
-
-            Some(TypeEdit::TypeofValue(span)) => {
-                // `typeof(x)` reads the value `x`, so a `global local`
-                // inside it takes the slot prefix a value use takes.
-                // Without it the name is not bound here at all.
-                let mut at = start;
-
-                for (name, table) in self.typeof_global_names(span) {
-                    let (ns, ne) = (self.byte_start(name), self.byte_end(name));
-                    self.copy(at, ns);
-                    self.generate(ns, &format!("{table}."));
-                    // A bare name holds no edit of its own, and the
-                    // plain copy keeps this edit from matching again.
-                    self.r.copy(ns, ne);
-                    at = ne;
-                }
-
-                self.copy(at, end);
 
                 return;
             }
@@ -2216,8 +2021,6 @@ impl<'s> Desugar<'s> {
                     ),
 
                     TypeEdit::AmbientName(span) => (self.byte_start(*span), self.byte_end(*span)),
-
-                    TypeEdit::TypeofValue(span) => (self.byte_start(*span), self.byte_end(*span)),
 
                     TypeEdit::Mapped { table, .. } => {
                         (self.byte_start(*table), self.byte_end(*table))
@@ -2331,360 +2134,89 @@ impl<'s> Desugar<'s> {
         self.scopes.iter().skip(depth).any(|s| s.contains(name))
     }
 
-    /// Reports what a `global` of this file needs: a project to reach,
-    /// a module to live in, and a name nothing else owns.
-    fn check_globals(&mut self, src: &str, toks: &[Tok], chunk: &Chunk) {
-        let decls = crate::globals::declared_in(src, toks, chunk, std::path::Path::new(""));
+    /// Whether a declaration opens with the removed `global` keyword.
+    /// The emit writes `export` in its place, so the artifact the
+    /// checker reads is valid Luau even on a file that reports.
+    pub(crate) fn wrote_global(&self, span: TokSpan) -> bool {
+        self.toks.get(span.start as usize).map(|t| t.text(self.src)) == Some("global")
+    }
 
-        // `--@alloy-side` names the side of the global under it, so
-        // anywhere else it says nothing. `--@alloy-file-side` is the
-        // directive for the whole file.
-        let scanned = crate::directives::scan(src);
+    /// Reports each `global` this file wrote. The word left the
+    /// language; the report names the `export` declaration and the
+    /// `import` that replace it. See the globals-removal RFC.
+    fn report_globals(&mut self, src: &str, toks: &[Tok], chunk: &Chunk) {
+        // The module every reader writes in its `import`. The file that
+        // declares the name is the module that holds it.
+        let stem = self
+            .options
+            .file_name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .split('.')
+            .next()
+            .unwrap_or_default();
+        let spec = match stem.is_empty() {
+            true => "./that-module".to_string(),
 
-        let lines: Vec<&str> = src.lines().collect();
+            false => format!("./{stem}"),
+        };
 
-        for (line, _) in &scanned.decl_sides {
-            // The declaration under the directive, past blank lines,
-            // comments, and attributes.
-            let mut at = line + 1;
+        for span in &chunk.global_keywords {
+            let Some(word) = toks.get(span.start as usize) else {
+                continue;
+            };
+            // The words between `global` and the name it declares:
+            // `local`, `local function`, `remote function`, `open class`.
+            let mut at = span.start as usize + 1;
+            let mut words: Vec<&str> = Vec::new();
 
-            while lines.get(at).is_some_and(|l| {
-                let t = l.trim();
+            while let Some(t) = toks.get(at) {
+                let text = t.text(src);
 
-                t.is_empty() || t.starts_with("--") || t.starts_with('@')
-            }) {
+                if !DECL_WORDS.contains(&text) {
+                    break;
+                }
+
+                if text != "export" {
+                    words.push(text);
+                }
+
                 at += 1;
             }
 
-            let is_global = decls
-                .iter()
-                .any(|g| src[..g.start as usize].matches('\n').count() == at);
+            let kind = words.join(" ");
+            let name = toks.get(at).map(|t| t.text(src)).unwrap_or_default();
+            // An attribute is written `@tag` wherever it is applied,
+            // and an import list writes it the same way.
+            let imported = match kind.as_str() {
+                "attribute" => format!("@{name}"),
 
-            if !is_global {
-                let (start, end) = crate::directives::span_of_line(src, *line);
-                self.diagnostics.push(Diagnostic {
-                    start: start as u32,
-                    end: end as u32,
-                    message: SIDE_ON_GLOBAL.to_string(),
-                });
-            }
-        }
-
-        if decls.is_empty() {
-            return;
-        }
-
-        // The module a script's globals moved into carries the script's
-        // declarations, so a message names the script.
-        let file = self
-            .options
-            .hoisted_from
-            .clone()
-            .unwrap_or_else(|| self.options.file_name.clone());
-
-        for g in &decls {
-            let mut say = |message: String| {
-                self.diagnostics.push(Diagnostic {
-                    start: g.start,
-                    end: g.end,
-                    message,
-                });
+                _ => name.to_string(),
             };
+            let message = match kind.as_str() {
+                // An `export impl` already reaches every file that
+                // imports the module, and it binds no name of its own.
+                "impl" => {
+                    "`global` is removed; `export impl` reaches every file that imports this module"
+                        .to_string()
+                }
 
-            if !self.options.in_project {
-                say("`global` needs a project; there is no everywhere to reach".to_string());
+                // A macro expands where it is written, and no import
+                // carries one, so it stays in the file that declares it.
+                "macro" => "`global` is removed; a macro is in scope in the file that declares it"
+                    .to_string(),
 
-                continue;
-            }
-
-            if self.options.definitions {
-                say("a declaration file declares; `global` belongs in a module".to_string());
-
-                continue;
-            }
-
-            if crate::globals::LUAU_GLOBALS.contains(&g.name.as_str()) {
-                say(format!(
-                    "`{}` is a Luau global; a project global cannot take its name",
-                    g.name
-                ));
-
-                continue;
-            }
-
-            if let Some((_, ambient)) = self
-                .options
-                .ambient_clashes
-                .iter()
-                .find(|(n, _)| n == &g.name)
-            {
-                say(format!(
-                    "`{}` is declared in {ambient} and global in {file}",
-                    g.name
-                ));
-
-                continue;
-            }
-
-            // A script's globals live in the module the build hoists
-            // them into, so that module is this file, not another.
-            let own = crate::globals::hoist_name(&file);
-            // The index names a file relative to `[build] in`; the
-            // compiler names the one it renders however the caller
-            // wrote it, absolute from the CLI. A path that ends in the
-            // other is the same file, so a global never reports
-            // against itself.
-            let same_file = |other: &str| {
-                let (a, b) = (other.replace('\\', "/"), file.replace('\\', "/"));
-
-                a == b || a.ends_with(&format!("/{b}")) || b.ends_with(&format!("/{a}"))
-            };
-            // The side this declaration reaches: its own directive, or
-            // the side of the file it sits in. A server name and a
-            // client name never meet, so both may stand.
-            let side = g.side_directive.unwrap_or(self.file_side);
-
-            if let Some(other) = self.options.globals.iter().find(|o| {
-                o.name == g.name
-                    && !(self.options.hoist_globals && o.file == own)
-                    && !same_file(&o.declared_in)
-                    && crate::globals::sides_collide(o.side, side)
-            }) {
-                say(format!(
-                    "`{}` is global in both {file} and {}",
-                    g.name, other.declared_in
-                ));
-
-                continue;
-            }
-
-            if AMBIENT.contains(&g.name.as_str()) || AMBIENT_TYPES.contains(&g.name.as_str()) {
-                self.lints.push(crate::lint::Lint {
-                    name: "shadowed_global",
-                    start: g.start,
-                    end: g.end,
-                    message: format!(
-                        "`{}` is a std name; the global shadows it in every file",
-                        g.name
-                    ),
-                    fix: None,
-                });
-            }
-
-            // A `global local` is a value every file can assign. Only
-            // a value binding takes `const`; a function, a struct, or a
-            // type declares and nothing writes it.
-            if g.kind == crate::globals::Kind::Value && !g.constant {
-                self.lints.push(crate::lint::Lint {
-                    name: "mutable_global",
-                    start: g.start,
-                    end: g.end,
-                    message: format!(
-                        "`{}` is global and not `const`; any file of the project can assign it",
-                        g.name
-                    ),
-                    fix: None,
-                });
-            }
-        }
-    }
-
-    /// The global one name reaches in this file. A server global and a
-    /// client global may share a name, so the file's own side picks;
-    /// with neither on this side the first stands, and the caller
-    /// reports the side it sits on.
-    fn global_ref(&self, name: &str) -> Option<&GlobalRef> {
-        let mut named = self.options.globals.iter().filter(|g| g.name == name);
-        let first = named.clone().next()?;
-
-        Some(
-            named
-                .find(|g| crate::globals::reaches(g.side, self.file_side))
-                .unwrap_or(first),
-        )
-    }
-
-    /// Records a use of a project global. The name reaches the file
-    /// without an import, so the emit puts the require and the binding
-    /// on the first line. A name the file binds itself is the file's own.
-    pub(crate) fn use_global(&mut self, name: &str, at: u32) {
-        if self.own_names.contains(name)
-            || self.is_local(name)
-            || self.globals_used.iter().any(|(n, _)| n == name)
-        {
-            return;
-        }
-
-        let Some(g) = self.global_ref(name) else {
-            return;
-        };
-
-        // A global of one side reaches that side alone. A shared file
-        // runs on either side, so it cannot hold one.
-        if let Some(theirs) = g.side
-            && self.file_side != Some(theirs)
-        {
-            let word = theirs.name();
-            let message = match self.file_side {
-                Some(_) => format!("`{name}` is global on the {word} only"),
-
-                None => format!("`{name}` is global on the {word}; this file is shared"),
+                _ => format!(
+                    "`global` is removed; declare `{name}` with `export {kind}` and write `import {{ {imported} }} from \"{spec}\"` where it is read"
+                ),
             };
             self.diagnostics.push(Diagnostic {
-                start: at,
-                end: at + name.len() as u32,
+                start: word.start,
+                end: word.end,
                 message,
             });
-
-            return;
         }
-
-        let spec = g.require.clone();
-
-        if !self.global_modules.contains(&spec) {
-            self.global_modules.push(spec);
-        }
-
-        self.globals_used.push((name.to_string(), at));
-    }
-
-    /// The table a `global local` reads its slot off, when the name the
-    /// source wrote is one: `_gs` for a global this file declares,
-    /// `_g1` for one another module owns. `None` for every other name,
-    /// which stands as it was written.
-    ///
-    /// A global that is not `const` is one value for the whole project.
-    /// Bound by copy, each file would hold its own, and a write in one
-    /// would reach nothing.
-    pub(crate) fn shared_global_slot(&self, name: &str) -> Option<String> {
-        // The declaration itself sits in the file's own scope; a local
-        // of any block under it is a name of its own.
-        if self.is_local_since(self.top_scope + 1, name) {
-            return None;
-        }
-
-        if self.own_mutable.iter().any(|n| n == name) {
-            return Some(GLOBAL_STATE.to_string());
-        }
-
-        if !self.globals_used.iter().any(|(n, _)| n == name) {
-            return None;
-        }
-
-        let g = self.global_ref(name)?;
-
-        if !g.mutable {
-            return None;
-        }
-
-        let index = self.global_modules.iter().position(|m| *m == g.require)?;
-
-        Some(format!("_g{}", index + 1))
-    }
-
-    /// The names one `typeof(...)` expression reads off a shared global
-    /// slot, each with the table it reads off, in source order.
-    ///
-    /// `typeof` takes a value, so a `global local` inside it is the one
-    /// slot its module holds. A field, a method name, and a table key
-    /// are not that name.
-    fn typeof_global_names(&self, span: TokSpan) -> Vec<(TokSpan, String)> {
-        let mut out = Vec::new();
-
-        for i in span.start as usize..span.end as usize {
-            if self.toks[i].kind != TokKind::Ident {
-                continue;
-            }
-
-            let text = self.toks[i].text(self.src);
-
-            if alloy_syntax::contextual::is_luau_reserved(text) {
-                continue;
-            }
-
-            // After `.` or `:` the name is a field or a method.
-            if i > 0 && matches!(self.toks[i - 1].text(self.src), "." | ":") {
-                continue;
-            }
-
-            // `{ counter = 1 }`: the name in front of `=` is a key.
-            if self.toks.get(i + 1).map(|t| t.text(self.src)) == Some("=") {
-                continue;
-            }
-
-            if let Some(table) = self.shared_global_slot(text) {
-                out.push((TokSpan::new(i, i + 1), table));
-            }
-        }
-
-        out
-    }
-
-    /// The require and the bindings for every global the file named, as
-    /// one line. Names from one module share one require.
-    fn global_prologue(&self) -> String {
-        if self.options.definitions {
-            return String::new();
-        }
-
-        let mut out = String::new();
-
-        // The table this file's own `global local` values live on. It
-        // opens empty: each declaration puts its value in on the line
-        // the author wrote it.
-        if !self.own_mutable.is_empty() {
-            out.push_str(&format!("local {GLOBAL_STATE} = {{}} "));
-        }
-
-        if self.globals_used.is_empty() {
-            return out;
-        }
-
-        // The module order follows the first use, so two builds of one
-        // file write the same line.
-        let modules: Vec<&str> = self.global_modules.iter().map(String::as_str).collect();
-        let mut used: Vec<&GlobalRef> = Vec::new();
-
-        for (name, _) in &self.globals_used {
-            let Some(g) = self.global_ref(name) else {
-                continue;
-            };
-
-            used.push(g);
-        }
-
-        for (i, spec) in modules.iter().enumerate() {
-            let temp = format!("_g{}", i + 1);
-            out.push_str(&format!("local {temp} = require({}) ", luau_string(spec)));
-            let here: Vec<&&GlobalRef> = used.iter().filter(|g| g.require == *spec).collect();
-            // A `global local` is read off the module at every use, so
-            // no binding here would hold: this file would write its own
-            // copy and the project would hold several.
-            let names: Vec<String> = here
-                .iter()
-                .filter(|g| g.value && !g.mutable)
-                .map(|g| g.name.clone())
-                .collect();
-
-            if !names.is_empty() {
-                let values: Vec<String> = names.iter().map(|n| format!("{temp}.{n}")).collect();
-                out.push_str(&format!(
-                    "local {} = {} ",
-                    names.join(", "),
-                    values.join(", ")
-                ));
-            }
-
-            for g in here.iter().filter(|g| g.ty) {
-                let args = crate::modules::type_params(&g.type_params);
-                out.push_str(&format!(
-                    "type {}{} = {temp}.{}{} ",
-                    g.name, g.type_params, g.name, args
-                ));
-            }
-        }
-
-        out
     }
 
     // --- blocks and statements --------------------------------------------

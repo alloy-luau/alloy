@@ -21,7 +21,6 @@ pub mod extensions;
 pub mod flux;
 pub mod fmt;
 pub mod game_import;
-pub mod globals;
 pub mod impl_blocks;
 pub mod ingot;
 pub mod jsonc;
@@ -83,9 +82,6 @@ pub struct Output {
     pub data_refs: Vec<ImportRef>,
     /// The `@test` functions, in order: name and whether it is async.
     pub tests: Vec<(String, bool)>,
-    /// The project globals the file named, each with the byte offset of
-    /// its first use. The build reads them for the require graph.
-    pub globals_used: Vec<(String, u32)>,
     /// Zero-based lines an `--@alloy-expect-error` covers that the
     /// compiler or a lint reported on.
     pub expected_hits: Vec<usize>,
@@ -173,31 +169,16 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         message: e.message,
     })?;
 
-    // The ship artifact reaches the runtime and every global module by
-    // the instance path a mount gives it; the check artifact keeps the
-    // file path. Only the specs differ, so one options clone carries both.
-    let ship_globals: Vec<desugar::GlobalRef> = options
-        .globals
-        .iter()
-        .map(|g| desugar::GlobalRef {
-            require: g.ship_require.clone().unwrap_or_else(|| g.require.clone()),
-            ..g.clone()
-        })
-        .collect();
-    let ship_options = match options.ship_std_require.is_some()
-        || options.globals.iter().any(|g| g.ship_require.is_some())
-    {
-        true => Some(EmitOptions {
-            std_require: options
-                .ship_std_require
-                .clone()
-                .unwrap_or_else(|| options.std_require.clone()),
-            globals: ship_globals,
+    // The ship artifact reaches the runtime by the instance path a
+    // mount gives it; the check artifact keeps the file path. Only the
+    // spec differs, so one options clone carries both.
+    let ship_options = options
+        .ship_std_require
+        .clone()
+        .map(|std_require| EmitOptions {
+            std_require,
             ..options.clone()
-        }),
-
-        false => None,
-    };
+        });
     let mut rendered = desugar::render(
         src,
         &parsed.lexed.toks,
@@ -234,22 +215,6 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     let parsed_clean = diagnostics.is_empty();
     diagnostics.extend(rendered.diagnostics);
 
-    // A `global const` of another file is in scope here with no import,
-    // so an assignment to one reads the same as one in its own file.
-    let mut const_globals: Vec<(String, String)> = globals::used(src, &options.globals)
-        .into_iter()
-        .filter_map(|(name, _)| {
-            // A name may be global on each side, so the one this file
-            // reaches is the one whose `const` binds here.
-            options
-                .globals
-                .iter()
-                .find(|g| g.name == name && globals::reaches(g.side, options.side))
-                .filter(|g| g.constant)
-                .map(|g| (name, g.file.clone()))
-        })
-        .collect();
-
     // A `const` of a namespace this file declares is reached by its
     // path, `Cfg.LIMIT`, so an assignment names the path.
     let mut namespace_consts: Vec<String> = Vec::new();
@@ -263,25 +228,12 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
 
                 None => continue,
             };
-            namespace_consts.extend(globals::namespace_consts(src, toks, d, &name));
-        }
-    }
-
-    // The same members of another file's `global namespace`.
-    for (name, _) in globals::used(src, &options.globals) {
-        if let Some(g) = options
-            .globals
-            .iter()
-            .find(|g| g.name == name && globals::reaches(g.side, options.side))
-        {
-            for member in &g.const_members {
-                const_globals.push((member.clone(), g.file.clone()));
-            }
+            namespace_consts.extend(lint::namespace_consts(src, toks, d, &name));
         }
     }
 
     for (start, end, message) in
-        lint::const_reassignments(src, &parsed.lexed.toks, &const_globals, &namespace_consts)
+        lint::const_reassignments(src, &parsed.lexed.toks, &namespace_consts)
     {
         diagnostics.push(Diagnostic {
             start,
@@ -295,11 +247,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     // cannot accept reports the same way, on its own line.
     let scanned = directives::scan(src);
 
-    for (line, message) in scanned
-        .problems()
-        .into_iter()
-        .chain(scanned.side_problem(&options.file_name))
-    {
+    for (line, message) in scanned.problems() {
         let (start, end) = directives::span_of_line(src, line);
         diagnostics.push(Diagnostic {
             start: start as u32,
@@ -417,7 +365,6 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         imports,
         data_refs: data::references(src),
         tests: rendered.tests,
-        globals_used: rendered.globals_used,
         expected_hits,
         lowered: None,
         parsed_clean,

@@ -234,12 +234,13 @@ fn one_name_twice_in_a_file_reports() {
     );
 }
 
-/// `global` inside a namespace reports: the two reaches do not stack.
+/// `global` inside a namespace reports the removal, the way it does
+/// anywhere else.
 #[test]
 fn a_global_inside_a_namespace_reports() {
     let hits = messages("namespace M as\n    global const a = 1\nend\n");
     assert_eq!(hits.len(), 1, "{hits:?}");
-    assert!(hits[0].contains("`global` reaches every file"), "{hits:?}");
+    assert!(hits[0].starts_with("`global` is removed;"), "{hits:?}");
 }
 
 /// A namespace of one name in each of two namespaces is fine.
@@ -299,29 +300,6 @@ fn an_export_list_sends_a_namespace() {
 
     let main = output(&dir, "main.luau");
     assert!(main.contains("type Geom_Point = _m1.Geom_Point"), "{main}");
-}
-
-/// `global namespace` reaches every file without an import.
-#[test]
-fn a_global_namespace_reaches_every_file() {
-    let dir = temp_project("global");
-    fs::write(
-        dir.join("src/shared.aly"),
-        "global namespace Math as\n    const PI = 3.14\n    struct Vec2 as\n        x: number\n    end\nend\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.join("src/main.aly"),
-        "local v: Math.Vec2 = { x = Math.PI }\n\nprint(v)\n",
-    )
-    .unwrap();
-    let report = build(&dir);
-    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
-
-    let main = output(&dir, "main.luau");
-    assert!(main.contains("local Math = _g1.Math"), "{main}");
-    assert!(main.contains("type Math_Vec2 = _g1.Math_Vec2"), "{main}");
-    assert!(main.contains("local v: Math_Vec2"), "{main}");
 }
 
 /// A private member of an exported namespace does not travel.

@@ -236,11 +236,18 @@ pub fn exported_trait_defaults(source: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// One method a trait leaves to the impl: the name, the parameter count
+/// with `self` counted, and the return type the signature declares.
+pub type TraitMethodSig = (String, usize, Option<String>);
+
+/// Per trait, the methods an impl of it has to write.
+pub type TraitRequired = Vec<(String, Vec<TraitMethodSig>)>;
+
 /// The traits a source exports with the methods an impl has to write:
 /// the name, the parameter count with `self` counted, and the return
 /// type the signature declares. A method with a body is a default, so
 /// an impl may leave it out and it stays out of this list.
-pub fn exported_trait_methods(source: &str) -> Vec<(String, Vec<(String, usize, Option<String>)>)> {
+pub fn exported_trait_methods(source: &str) -> TraitRequired {
     let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
         return Vec::new();
     };
@@ -252,7 +259,7 @@ pub fn exported_trait_methods(source: &str) -> Vec<(String, Vec<(String, usize, 
         if let alloy_syntax::ast::Stmt::Trait(t) = stmt
             && t.exported
         {
-            let required: Vec<(String, usize, Option<String>)> = t
+            let required: Vec<TraitMethodSig> = t
                 .methods
                 .iter()
                 .filter(|m| m.body.is_none())
@@ -279,8 +286,8 @@ pub fn import_trait_methods(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
-) -> Vec<(String, Vec<(String, usize, Option<String>)>)> {
-    let mut out: Vec<(String, Vec<(String, usize, Option<String>)>)> = Vec::new();
+) -> TraitRequired {
+    let mut out: TraitRequired = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
 
     for spec in import_specs(source) {

@@ -180,6 +180,14 @@ impl Server {
                 }
             }
 
+            Target::Method { trait_name, name } => {
+                match st.method_edits(&trait_name, &name, &new_name) {
+                    Some(edit) => edit,
+
+                    None => return false,
+                }
+            }
+
             Target::Nothing => json!({ "changes": {} }),
         };
         drop(st);
@@ -235,6 +243,14 @@ impl Server {
 
             Target::Variant { file, owner, name } => {
                 match st.variant_edits(&file, &owner, &name, &name) {
+                    Some(edit) => locations_of(&edit),
+
+                    None => return false,
+                }
+            }
+
+            Target::Method { trait_name, name } => {
+                match st.method_edits(&trait_name, &name, &name) {
                     Some(edit) => locations_of(&edit),
 
                     None => return false,
@@ -637,6 +653,12 @@ impl State {
         {
             let (s, e) = keywords::word_range(source, offset);
             let word = source[s..e].to_string();
+            // A trait's method: the trait declares it once and every
+            // `impl` writes it again, so the three places are one name.
+            if let Some(target) = self.method_target(doc, offset) {
+                return Some(target);
+            }
+
             let declares = export_span(source, &word) == Some((s, e));
             let exported = imports::exports_of(source, doc.is_alx)
                 .iter()
@@ -686,6 +708,140 @@ impl State {
         }
 
         on_import_statement(source, offset).then_some(Target::Nothing)
+    }
+
+    /// The trait method at the caret: the trait's own declaration, a
+    /// method of an `impl Trait for S`, or a call on a value whose
+    /// struct has such an impl. `None` for anything else, and for a
+    /// method of a plain `impl S`, which no trait declares.
+    fn method_target(&self, doc: &Doc, offset: usize) -> Option<Target> {
+        let (s, e) = keywords::word_range(&doc.source, offset);
+        let name = doc.source[s..e].to_string();
+        let here = trait_method_sites(&doc.source)
+            .into_iter()
+            .find(|site| site.at == (s, e));
+
+        if let Some(site) = here {
+            return site
+                .trait_name
+                .map(|trait_name| Target::Method { trait_name, name });
+        }
+
+        // `b:hello()`: the struct the receiver holds says which trait,
+        // through its own `impl` of it.
+        let head = doc.source[..s].trim_end();
+
+        if !head.ends_with(':') || head.ends_with("::") {
+            return None;
+        }
+
+        let owner = receiver_type(doc, head.len() - 1);
+        let mut traits: Vec<String> = Vec::new();
+
+        for site in self
+            .docs
+            .values()
+            .flat_map(|d| trait_method_sites(&d.source))
+        {
+            let Some(trait_name) = site.trait_name else {
+                continue;
+            };
+            let mine = match (&owner, &site.target) {
+                (Some(o), Some(t)) => o == t,
+
+                // A receiver with no type of its own: one trait that
+                // declares the name is still the one the call means.
+                (None, _) => true,
+
+                _ => false,
+            };
+
+            if site.name == name && mine && !traits.contains(&trait_name) {
+                traits.push(trait_name);
+            }
+        }
+
+        match traits.as_slice() {
+            [trait_name] => Some(Target::Method {
+                trait_name: trait_name.clone(),
+                name,
+            }),
+
+            // Two traits of one method name say nothing about which one
+            // the call reaches; the child answers instead.
+            _ => None,
+        }
+    }
+
+    /*
+    The whole rename of one trait method, as a workspace edit.
+
+    A trait declares the method once, every `impl Trait for S` writes it
+    again, and a call reads it off a value. The emit gives a trait no
+    table of its own and types the receiver as `any`, so the child finds
+    the impl it stands in and nothing else.
+
+    A call counts when the receiver holds a struct that implements the
+    trait. One whose type the source does not say counts only when no
+    other trait and no plain `impl` writes the name, so a call on
+    another struct that shares the spelling stays as it is.
+    */
+    pub(crate) fn method_edits(
+        &self,
+        trait_name: &str,
+        name: &str,
+        new_name: &str,
+    ) -> Option<Value> {
+        let sites: Vec<(String, MethodSite)> = self
+            .docs
+            .iter()
+            .flat_map(|(u, d)| {
+                trait_method_sites(&d.source)
+                    .into_iter()
+                    .map(move |site| (u.clone(), site))
+            })
+            .collect();
+        let targets: Vec<&str> = sites
+            .iter()
+            .filter(|(_, s)| s.name == name && s.trait_name.as_deref() == Some(trait_name))
+            .filter_map(|(_, s)| s.target.as_deref())
+            .collect();
+        // The name belongs to this trait alone: nothing else declares it.
+        let only_one = !sites
+            .iter()
+            .any(|(_, s)| s.name == name && s.trait_name.as_deref() != Some(trait_name));
+        let mut changes: Map<String, Value> = Map::new();
+
+        for (u, d) in &self.docs {
+            let mut edits: Vec<Value> = sites
+                .iter()
+                .filter(|(owner, s)| {
+                    owner == u && s.name == name && s.trait_name.as_deref() == Some(trait_name)
+                })
+                .map(|(_, s)| text_edit(&d.source, s.at.0, s.at.1, new_name))
+                .collect();
+
+            for (start, end, receiver) in method_calls(&d.source, name) {
+                let holds = match receiver_type(d, receiver) {
+                    Some(ty) => targets.contains(&ty.as_str()),
+
+                    None => only_one,
+                };
+
+                if holds {
+                    edits.push(text_edit(&d.source, start, end, new_name));
+                }
+            }
+
+            edits.sort_by_key(sort_key);
+            edits.dedup();
+
+            if !edits.is_empty() {
+                changes.insert(u.clone(), json!(edits));
+            }
+        }
+
+        (!changes.is_empty()).then(|| json!({ "changes": changes }))
     }
 
     /// The struct a field at the caret belongs to: the receiver's type
@@ -1075,6 +1231,129 @@ pub(crate) fn impl_method_span(src: &str, name: &str) -> Option<(usize, usize)> 
     }
 
     found
+}
+
+/// One place a method of a trait is written: the trait's own body, or
+/// an `impl` block.
+pub(crate) struct MethodSite {
+    /// The trait the site belongs to: the trait itself, or the one an
+    /// `impl Trait for S` meets. `None` for a plain `impl S`.
+    pub trait_name: Option<String>,
+    /// The type an `impl` targets. `None` inside a trait's own body.
+    pub target: Option<String>,
+    pub name: String,
+    /// The byte range of the method's name.
+    pub at: (usize, usize),
+}
+
+/// The leading name of a text: `Alpha<T> as` gives `Alpha`.
+fn name_head(text: &str) -> String {
+    text.trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// Every method a source writes inside a `trait` body or an `impl`
+/// block. A trait and an impl both stand at the margin and both close
+/// with an `end` there, so the header above a line says which block it
+/// belongs to.
+pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
+    let mut out = Vec::new();
+    let mut head: Option<(Option<String>, Option<String>)> = None;
+    let mut at = 0;
+
+    for line in src.lines() {
+        let start = at;
+        at += line.len() + 1;
+        let text = line.trim();
+        let margin = !line.starts_with([' ', '\t']);
+        let bare = text.strip_prefix("export ").unwrap_or(text);
+        let bare = bare.strip_prefix("global ").unwrap_or(bare);
+
+        if let Some(rest) = bare.strip_prefix("trait ") {
+            head = Some((Some(name_head(rest)), None));
+
+            continue;
+        }
+
+        if let Some(rest) = bare.strip_prefix("impl ") {
+            head = match rest.split_once(" for ") {
+                Some((t, s)) => Some((Some(name_head(t)), Some(name_head(s)))),
+
+                None => Some((None, Some(name_head(rest)))),
+            };
+
+            continue;
+        }
+
+        // A body is indented, and the block closes with an `end` at the
+        // margin. A blank line has no margin and closes nothing.
+        if margin && (text == "end" || !text.is_empty()) {
+            head = None;
+        }
+
+        let Some((trait_name, target)) = &head else {
+            continue;
+        };
+        let body = text
+            .strip_prefix("private ")
+            .or_else(|| text.strip_prefix("public "))
+            .unwrap_or(text);
+        let Some(rest) = body.strip_prefix("function ") else {
+            continue;
+        };
+        let name = name_head(rest);
+
+        if name.is_empty() || !rest[name.len()..].starts_with(['(', '<']) {
+            continue;
+        }
+
+        let indent = line.len() - line.trim_start().len();
+        let offset = start + indent + (text.len() - body.len()) + "function ".len();
+        let at = (offset, offset + name.len());
+        out.push(MethodSite {
+            trait_name: trait_name.clone(),
+            target: target.clone(),
+            name,
+            at,
+        });
+    }
+
+    out
+}
+
+/// Every `recv:name(` call of a source: the byte range of the method's
+/// name, and a byte of the receiver in front of it.
+fn method_calls(src: &str, name: &str) -> Vec<(usize, usize, usize)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let toks = &lexed.toks;
+    let mut out = Vec::new();
+
+    for (i, t) in toks.iter().enumerate() {
+        if t.text(src) != name || i < 2 {
+            continue;
+        }
+
+        if !matches!(toks[i - 1].text(src), ":" | "?:") {
+            continue;
+        }
+
+        let opens_a_call = toks.get(i + 1).is_some_and(|n| {
+            matches!(
+                n.kind,
+                TokKind::LParen | TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpHead
+            ) || n.text(src) == "{"
+        });
+
+        if opens_a_call {
+            out.push((t.start as usize, t.end as usize, toks[i - 1].start as usize));
+        }
+    }
+
+    out
 }
 
 /// Where a struct body declares one field, as the byte range of the
@@ -1484,6 +1763,11 @@ pub(crate) enum Target {
         owner: String,
         name: String,
     },
+    /// A method a trait declares. The trait writes it once, every
+    /// `impl Trait for S` writes it again, and a call reads it off a
+    /// value; the emit types the receiver as `any`, so the child ties
+    /// none of the three together.
+    Method { trait_name: String, name: String },
     /// An `import` statement holds no other name either answer can
     /// reach: not the keywords, not the module path. The child would
     /// point at a byte the emit wrote.

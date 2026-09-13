@@ -674,3 +674,99 @@ fn a_field_rename_reaches_the_constructor_and_the_declaration() {
     // `end` the child pointed at.
     assert_eq!(edits, [(1, 4), (8, 22), (12, 13)], "{result}");
 }
+
+/// A trait's method is one name in three places: the trait's own
+/// declaration, every `impl Trait for S`, and a call on a value of such
+/// a struct. A plain `impl` that shares the spelling is another method.
+///
+/// The emit gives a trait no table and types the receiver as `any`, so
+/// the child answers with the impl it stands in and nothing else.
+#[test]
+fn a_trait_method_renames_the_trait_every_impl_and_the_calls() {
+    const TRAIT: &str = concat!(
+        "export trait Greet as\n",
+        "    function hello(self): string\n",
+        "end\n",
+        "\n",
+        "export struct Alpha as\n",
+        "    n: number\n",
+        "end\n",
+        "\n",
+        "impl Greet for Alpha as\n",
+        "    function hello(self): string\n",
+        "        return \"alpha\"\n",
+        "    end\n",
+        "end\n",
+    );
+    // `Loud` meets no trait, so its `hello` is a method of its own.
+    const USER: &str = concat!(
+        "import { Greet } from \"./tr\"\n",
+        "\n",
+        "export struct Beta as\n",
+        "    n: number\n",
+        "end\n",
+        "\n",
+        "impl Greet for Beta as\n",
+        "    function hello(self): string\n",
+        "        return \"beta\"\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "struct Loud as\n",
+        "    n: number\n",
+        "end\n",
+        "\n",
+        "impl Loud as\n",
+        "    function hello(self): string\n",
+        "        return \"loud\"\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "local b = new Beta { n = 1 }\n",
+        "local l = new Loud { n = 2 }\n",
+        "print(b:hello(), l:hello())\n",
+    );
+    let st = super::support::files(&[("file:///tr.aly", TRAIT), ("file:///u.aly", USER)]);
+    let call = USER.find("b:hello").expect("the call") + 2;
+    let target = st.name_target("file:///u.aly", call);
+
+    let Some(Target::Method { trait_name, name }) = target else {
+        panic!("the caret names no trait method");
+    };
+
+    assert_eq!((trait_name.as_str(), name.as_str()), ("Greet", "hello"));
+
+    let edit = st
+        .method_edits(&trait_name, &name, "greetings")
+        .expect("edit");
+    let at = |uri: &str, src: &str| -> Vec<usize> {
+        edit["changes"][uri]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| {
+                let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+                offset_of(src, line, column).expect("offset")
+            })
+            .collect()
+    };
+
+    // The trait's declaration and `Alpha`'s impl.
+    assert_eq!(
+        at("file:///tr.aly", TRAIT),
+        [
+            TRAIT.find("hello").expect("declaration"),
+            TRAIT.rfind("hello").expect("the impl"),
+        ],
+        "{edit}"
+    );
+
+    // `Beta`'s impl and the call on `b`. `Loud`'s own method and the
+    // call on `l` share the spelling and stay as they are.
+    assert_eq!(
+        at("file:///u.aly", USER),
+        [USER.find("hello").expect("the impl"), call],
+        "{edit}"
+    );
+}

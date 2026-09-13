@@ -502,8 +502,14 @@ pub(crate) fn used_field_owner(doc: &Doc, start: usize) -> Option<String> {
         return None;
     }
 
-    let receiver_end = head.len() - 1;
-    let receiver_head = doc.source[..receiver_end].trim_end();
+    receiver_type(doc, head.len() - 1)
+}
+
+/// The type a receiver holds, for the separator at `at`: the type of the
+/// `impl` block around a `self`, else what the receiver's own
+/// declaration says. `p.x` and `p:m()` read the same receiver.
+pub(crate) fn receiver_type(doc: &Doc, at: usize) -> Option<String> {
+    let receiver_head = doc.source[..at].trim_end();
 
     if !receiver_head.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
         return None;
@@ -515,7 +521,7 @@ pub(crate) fn used_field_owner(doc: &Doc, start: usize) -> Option<String> {
     // name reads its annotation or what it starts from.
     let owner = match receiver {
         "self" => {
-            let (line, _) = position_of(&doc.source, start);
+            let (line, _) = position_of(&doc.source, rs);
             impl_self_type(doc, line)?
         }
 

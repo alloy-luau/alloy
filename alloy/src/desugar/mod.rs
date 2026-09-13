@@ -116,7 +116,7 @@ pub struct EmitOptions {
     /// the parameter count with `self` counted, and the return type.
     /// An `impl Trait for S` has to write each one. See
     /// `crate::modules::import_trait_methods`.
-    pub import_trait_methods: Vec<(String, Vec<(String, usize, Option<String>)>)>,
+    pub import_trait_methods: crate::modules::TraitRequired,
     /// The imported async functions declared to return a `Result`: a
     /// `try await f()` on one is the Result itself. See
     /// `crate::modules::import_result_asyncs`.

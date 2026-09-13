@@ -98,6 +98,32 @@ pub(crate) fn an_import_list_reads_the_range_of_every_name() {
     let (s, e) = aliased[0].alias_at.expect("the alias");
     assert_eq!(&ALIASED[s..e], "ver");
 
+    // A list over several lines reads the same: the walk runs to the
+    // `from` of the statement and not to the end of the line.
+    const WRAPPED: &str = concat!(
+        "import {\n",
+        "    version,\n",
+        "    make as build,\n",
+        "} from \"./m\"\n",
+        "\n",
+        "local t = { n = 1 }\n",
+    );
+    let wrapped = import_entries(WRAPPED);
+
+    assert_eq!(wrapped.len(), 2, "{wrapped:?}");
+    assert_eq!(
+        &WRAPPED[wrapped[0].name_at.0..wrapped[0].name_at.1],
+        "version"
+    );
+    assert_eq!(wrapped[0].spec, "./m");
+    assert_eq!(wrapped[1].bound, "build");
+
+    let (s, e) = wrapped[1].alias_at.expect("the alias");
+    assert_eq!(&WRAPPED[s..e], "build");
+
+    // A table literal under an import with no list is nobody's entry.
+    assert!(import_entries("import M from \"./m\"\nlocal t = { n = 1 }\n").is_empty());
+
     // `import * as M` binds a module and no name out of a list.
     assert!(import_entries(STARRED).is_empty());
     assert_eq!(

@@ -957,15 +957,34 @@ fn name_uses(src: &str, name: &str) -> Vec<(usize, usize)> {
     out
 }
 
-/// Whether a byte offset sits on a line that opens an `import`
-/// statement.
+/// Whether a byte offset sits inside an `import` statement. A name list
+/// may run over several lines, so the statement reaches to the end of
+/// the line its `from` sits on.
 fn on_import_statement(src: &str, offset: usize) -> bool {
-    let start = src[..offset.min(src.len())]
-        .rfind('\n')
-        .map_or(0, |i| i + 1);
-    let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+    let mut line_start = 0;
 
-    src[start..end].trim_start().starts_with("import ")
+    for line in src.split_inclusive('\n') {
+        let here = line_start;
+        line_start += line.len();
+
+        if !line.trim_start().starts_with("import ") {
+            continue;
+        }
+
+        let end = match src[here..].find(" from ") {
+            Some(i) => src[here + i..]
+                .find('\n')
+                .map_or(src.len(), |j| here + i + j),
+
+            None => line_start,
+        };
+
+        if (here..=end).contains(&offset) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// One text edit, from a byte range of a source.
@@ -994,6 +1013,10 @@ pub(crate) struct ImportEntry {
 /// Every name an `import { ... }` list of the file binds, with byte
 /// ranges. The emit writes the binding as generated text, so the child
 /// answers about a byte no author wrote; these ranges are the author's.
+///
+/// The list may run over several lines, so the walk reads from the
+/// `import` to the `from` of the same statement and not to the end of
+/// the line.
 pub(crate) fn import_entries(src: &str) -> Vec<ImportEntry> {
     let mut out = Vec::new();
     let mut line_start = 0;
@@ -1006,18 +1029,24 @@ pub(crate) fn import_entries(src: &str) -> Vec<ImportEntry> {
             continue;
         }
 
-        let Some(spec) = import_spec(line) else {
+        // The `from` closes the head of the statement. A `{` past it
+        // belongs to someone else's code.
+        let Some(from) = src[here..].find(" from ").map(|i| here + i) else {
             continue;
         };
-        let Some(open) = line.find('{') else {
+        let head = &src[here..from];
+        let Some(open) = head.find('{').map(|i| here + i) else {
             continue;
         };
-        let close = line[open..].find('}').map(|c| open + c);
-        let Some(close) = close else {
+        let Some(close) = src[open..from].find('}').map(|i| open + i) else {
+            continue;
+        };
+        let tail_end = src[from..].find('\n').map_or(src.len(), |i| from + i);
+        let Some(spec) = import_spec(&src[from..tail_end]) else {
             continue;
         };
 
-        for entry in split_entries(&line[open + 1..close]) {
+        for entry in split_entries(&src[open + 1..close]) {
             let at = open + 1 + entry.0;
             let words = words_of(entry.1);
             // `type T`, `T as U`, `type T as U`, `@tag`, `@tag as t`.
@@ -1028,22 +1057,21 @@ pub(crate) fn import_entries(src: &str) -> Vec<ImportEntry> {
                 [name] => (*name, None),
                 _ => continue,
             };
+
             fn bare(text: &str) -> &str {
                 text.trim_start_matches('@')
             }
+
             let sigil = name.1.len() - bare(name.1).len();
 
             out.push(ImportEntry {
                 name: bare(name.1).to_string(),
                 bound: bare(alias.map_or(name.1, |a| a.1)).to_string(),
-                name_at: (
-                    here + at + name.0 + sigil,
-                    here + at + name.0 + name.1.len(),
-                ),
+                name_at: (at + name.0 + sigil, at + name.0 + name.1.len()),
                 alias_at: alias.map(|a| {
-                    let start = here + at + a.0 + (a.1.len() - bare(a.1).len());
+                    let start = at + a.0 + (a.1.len() - bare(a.1).len());
 
-                    (start, here + at + a.0 + a.1.len())
+                    (start, at + a.0 + a.1.len())
                 }),
                 spec: spec.clone(),
             });

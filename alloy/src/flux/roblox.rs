@@ -506,6 +506,7 @@ impl<'s> Scan<'s> {
                             | "macro"
                             | "impl"
                             | "class"
+                            | "namespace"
                     ))
             {
                 j += 1;

@@ -613,6 +613,12 @@ pub fn macro_sources(files: &[(PathBuf, String)]) -> Vec<crate::desugar::MacroSo
                     .filter(|p| !p.is_vararg)
                     .map(|p| token_text(src, toks, p.name))
                     .collect(),
+                defaults: m
+                    .params
+                    .iter()
+                    .filter(|p| !p.is_vararg)
+                    .map(|p| p.default.as_ref().map(|d| token_text(src, toks, d.span())))
+                    .collect(),
                 variadic: m.params.iter().any(|p| p.is_vararg),
                 body: join_tokens(src, toks, m.body.span),
                 tail: m.tail.as_ref().map(|t| join_tokens(src, toks, t.span())),

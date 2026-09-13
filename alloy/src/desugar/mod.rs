@@ -296,6 +296,8 @@ pub struct WireField {
 pub struct MacroSource {
     pub name: String,
     pub params: Vec<String>,
+    /// The default of each parameter, as source text.
+    pub defaults: Vec<Option<String>>,
     pub variadic: bool,
     pub body: String,
     pub tail: Option<String>,
@@ -541,6 +543,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             m.name.clone(),
             MacroRef {
                 params: m.params.clone(),
+                defaults: m.defaults.clone(),
                 variadic: m.variadic,
                 body: m.body.clone(),
                 tail: m.tail.clone(),
@@ -561,6 +564,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             m.name.clone(),
             MacroRef {
                 params: m.params.clone(),
+                defaults: m.defaults.clone(),
                 variadic: m.variadic,
                 body: m.body.clone(),
                 tail: m.tail.clone(),

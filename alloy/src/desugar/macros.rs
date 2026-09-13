@@ -11,6 +11,9 @@ use super::*;
 #[derive(Clone)]
 pub(crate) struct MacroRef {
     pub(crate) params: Vec<String>,
+    /// The default of each parameter, as source text. A parameter with
+    /// one is optional, the way a function's is.
+    pub(crate) defaults: Vec<Option<String>>,
     pub(crate) variadic: bool,
     /// The statements, tokens joined by spaces.
     pub(crate) body: String,
@@ -139,8 +142,17 @@ impl<'s> Desugar<'s> {
     and sugar inside the body work. A body with statements in expression
     position wraps in a closure.
     */
-    pub(crate) fn expand_macro(&mut self, m: &MacroRef, args: &[Expr], span: TokSpan) -> String {
+    pub(crate) fn expand_macro(
+        &mut self,
+        m: &MacroRef,
+        name: &str,
+        args: &[Expr],
+        span: TokSpan,
+    ) -> String {
         let anchor = self.byte_start(span);
+
+        self.macro_arity(m, name, args.len(), span);
+
         let arg_texts: Vec<String> = args
             .iter()
             .map(|a| self.text_of(a.span()).to_string())
@@ -148,7 +160,11 @@ impl<'s> Desugar<'s> {
         let mut subst: HashMap<&str, String> = HashMap::new();
 
         for (i, p) in m.params.iter().enumerate() {
-            let text = arg_texts.get(i).cloned().unwrap_or("nil".to_string());
+            let text = arg_texts
+                .get(i)
+                .cloned()
+                .or_else(|| m.defaults.get(i).cloned().flatten())
+                .unwrap_or("nil".to_string());
             subst.insert(p.as_str(), text);
         }
 
@@ -179,6 +195,17 @@ impl<'s> Desugar<'s> {
                 }
 
                 if word == "..." && m.variadic {
+                    // Nothing behind the vararg: the comma in front of
+                    // it has no argument to separate, and `f(a, )` is
+                    // not Luau.
+                    if rest.is_empty() {
+                        while out.ends_with([' ', ',']) {
+                            out.pop();
+                        }
+
+                        continue;
+                    }
+
                     out.push_str(&rest.join(", "));
                 } else if let Some(a) = subst.get(word)
                     && word.chars().all(|c| c.is_alphanumeric() || c == '_')
@@ -222,6 +249,34 @@ impl<'s> Desugar<'s> {
         self.compile_fragment(&nested_src, anchor, as_expr)
     }
 
+    /// The count a macro call has to give. A substitution has no call to
+    /// check, so an argument too many is dropped and one too few becomes
+    /// `nil`: the report has to come from here.
+    fn macro_arity(&mut self, m: &MacroRef, name: &str, given: usize, span: TokSpan) -> bool {
+        let most = m.params.len();
+        // A default makes a parameter optional, so it is not required.
+        let least = m.defaults.iter().filter(|d| d.is_none()).count();
+        let open = m.variadic || least != most;
+
+        if given >= least && (m.variadic || given <= most) {
+            return true;
+        }
+
+        let wanted = if given < least { least } else { most };
+        let message = format!(
+            "the macro `{name}` takes {}{wanted} argument{}, {given} given",
+            match (open, given < least) {
+                (true, true) => "at least ",
+                (true, false) => "at most ",
+                (false, _) => "",
+            },
+            if wanted == 1 { "" } else { "s" }
+        );
+        self.diagnose(span, &message);
+
+        false
+    }
+
     /// Compiles a piece of Alloy on its own and splices the Luau in: the
     /// body of a macro with its arguments in place, or the match an
     /// intrinsic builds. The piece sees globals and what it names; it
@@ -238,6 +293,7 @@ impl<'s> Desugar<'s> {
             .map(|(name, r)| MacroSource {
                 name: name.clone(),
                 params: r.params.clone(),
+                defaults: r.defaults.clone(),
                 variadic: r.variadic,
                 body: r.body.clone(),
                 tail: r.tail.clone(),
@@ -521,5 +577,59 @@ mod tests {
         );
         assert!(messages("local m = $map[[\"sword\", 10]]\nprint(m)\n").is_empty());
         assert!(messages("local m = $map[]\nprint(m)\n").is_empty());
+    }
+
+    /// A macro substitutes; there is no call for the checker to count.
+    /// An argument too many was dropped and one too few became `nil`,
+    /// both without a word.
+    #[test]
+    fn a_macro_call_counts_its_arguments() {
+        let decl = "macro clamp01(x)\n    math.clamp(x, 0, 1)\nend\n\n";
+        assert_eq!(
+            messages(&format!("{decl}local c = $clamp01(5, 6)\nprint(c)\n")),
+            vec!["the macro `clamp01` takes 1 argument, 2 given"]
+        );
+        assert_eq!(
+            messages(&format!("{decl}local c = $clamp01()\nprint(c)\n")),
+            vec!["the macro `clamp01` takes 1 argument, 0 given"]
+        );
+        assert!(messages(&format!("{decl}local c = $clamp01(5)\nprint(c)\n")).is_empty());
+
+        // A variadic macro takes the named parameters and any number
+        // after them.
+        let variadic = "macro log(tag, ...)\n    print(tag, ...)\nend\n\n";
+        assert_eq!(
+            messages(&format!("{variadic}$log()\n")),
+            vec!["the macro `log` takes at least 1 argument, 0 given"]
+        );
+        assert!(messages(&format!("{variadic}$log(\"a\", 1, 2)\n")).is_empty());
+
+        // A vararg with nothing behind it left `print(tag, )`.
+        assert!(messages(&format!("{variadic}$log(\"a\")\n")).is_empty());
+
+        // A default makes the parameter optional, and the default's
+        // own text stands in for the argument it replaces.
+        let optional = "macro retry_count(n = 3)\n    n\nend\n\n";
+        assert!(messages(&format!("{optional}local t = $retry_count()\nprint(t)\n")).is_empty());
+        assert!(messages(&format!("{optional}local t = $retry_count(5)\nprint(t)\n")).is_empty());
+        assert_eq!(
+            messages(&format!(
+                "{optional}local t = $retry_count(5, 6)\nprint(t)\n"
+            )),
+            vec!["the macro `retry_count` takes at most 1 argument, 2 given"]
+        );
+        assert!(
+            crate::compile(&format!("{optional}local t = $retry_count()\nprint(t)\n"))
+                .unwrap()
+                .ship
+                .contains("local t = 3"),
+            "the default did not stand in"
+        );
+
+        let none = "macro tick()\n    print(1)\nend\n\n";
+        assert_eq!(
+            messages(&format!("{none}$tick(1)\n")),
+            vec!["the macro `tick` takes 0 arguments, 1 given"]
+        );
     }
 }

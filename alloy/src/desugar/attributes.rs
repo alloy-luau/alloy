@@ -857,6 +857,16 @@ impl<'s> Desugar<'s> {
                         .filter(|p| !p.is_vararg)
                         .map(|p| self.text_of(p.name).to_string())
                         .collect();
+                    let defaults: Vec<Option<String>> = m
+                        .params
+                        .iter()
+                        .filter(|p| !p.is_vararg)
+                        .map(|p| {
+                            p.default
+                                .as_ref()
+                                .map(|d| self.text_of(d.span()).to_string())
+                        })
+                        .collect();
                     let variadic = m.params.iter().any(|p| p.is_vararg);
                     let name = self.text_of(m.name).to_string();
                     let body = self.join_tokens(m.body.span);
@@ -865,6 +875,7 @@ impl<'s> Desugar<'s> {
                         name,
                         MacroRef {
                             params,
+                            defaults,
                             variadic,
                             body,
                             tail,

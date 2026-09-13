@@ -216,6 +216,21 @@ pub fn format_file(src: &str, options: &FmtConfig) -> Result<String, String> {
 /// Formats Alloy source. `Err` carries the lexer's message: a file that
 /// does not lex stays as it is.
 pub fn format_with(src: &str, options: &FmtConfig) -> Result<String, String> {
+    let text = format_tokens(src, options)?;
+
+    // The lexer steps over a leading byte order mark, so the rebuilt
+    // text drops it and `fmt --check` reports every tidy file a Windows
+    // editor wrote. The mark belongs to the source, the way its line
+    // endings do, so it goes back in front and a second pass writes the
+    // same bytes.
+    match src.starts_with(crate::directives::BOM) {
+        true => Ok(format!("{}{text}", crate::directives::BOM)),
+
+        false => Ok(text),
+    }
+}
+
+fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     let Lexed { toks, comments } = lex(src).map_err(|e| e.message)?;
     let items = items_of(src, &toks, &comments);
 
@@ -1052,6 +1067,23 @@ mod tests {
         windows.line_endings = LineEndings::Windows;
         let back = format_with(&flat, &windows).unwrap();
         assert_eq!(back, src);
+    }
+
+    /// A Windows editor writes a byte order mark in front of the file.
+    /// The lexer steps over it, so the rebuilt text dropped it and
+    /// `fmt --check` reported every tidy file as one that would change.
+    #[test]
+    fn a_byte_order_mark_round_trips() {
+        let src = "\u{feff}local x = 1\nlocal y = 2\n";
+        assert_eq!(format(src).unwrap(), src);
+
+        // A pass over the formatted text writes the same bytes.
+        let once = format("\u{feff}local   x=1\n").unwrap();
+        assert_eq!(once, "\u{feff}local x = 1\n");
+        assert_eq!(format(&once).unwrap(), once);
+
+        // A file without the mark never gains one.
+        assert!(!format("local x = 1\n").unwrap().starts_with('\u{feff}'));
     }
 
     /// The header of an `impl` and of a `trait` closes with `as`, the

@@ -188,10 +188,16 @@ fn failure_line(path: &str, message: &str) -> String {
     }
 }
 
-pub(crate) fn print_diagnostics(input: &Path, report: &alloy::build::Report) {
+/// Prints every diagnostic and every failure of a build, each against
+/// the source it names under `input`.
+pub(crate) fn print_diagnostics(
+    input: &Path,
+    diagnostics: &[(PathBuf, alloy::Diagnostic)],
+    failures: &[(PathBuf, String)],
+) {
     let p = Painter::for_stderr();
 
-    for (rel, d) in &report.diagnostics {
+    for (rel, d) in diagnostics {
         let path = input.join(rel);
         let source = std::fs::read_to_string(&path).unwrap_or_default();
         let (line, col) = line_col(&source, d.start as usize);
@@ -208,7 +214,7 @@ pub(crate) fn print_diagnostics(input: &Path, report: &alloy::build::Report) {
         );
     }
 
-    for (rel, message) in &report.failures {
+    for (rel, message) in failures {
         print_failure(&p, &input.join(rel).display().to_string(), message);
     }
 }

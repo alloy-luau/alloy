@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::cli::build::{watch_loop, watch_roots};
-use crate::cli::support::{
-    line_col, option, positionals, print_diagnostics, print_failure, project,
-};
+use crate::cli::support::{line_col, option, positionals, print_diagnostics, project};
 use crate::fail;
 use crate::ui::{self, Level, Painter};
 use crate::usage;
@@ -160,7 +158,7 @@ fn test_once(args: &[String]) -> ExitCode {
             }
         };
         let input = root.join(&config.build.input);
-        print_diagnostics(&input, &build);
+        print_diagnostics(&input, &build.diagnostics, &build.failures);
 
         if !build.is_clean() {
             eprintln!("{}", p.fail("test: the build has errors; no spec written"));
@@ -179,26 +177,7 @@ fn test_once(args: &[String]) -> ExitCode {
     };
     let input = root.join(&config.build.input);
 
-    for (rel, d) in &report.diagnostics {
-        let path = input.join(rel);
-        let source = std::fs::read_to_string(&path).unwrap_or_default();
-        let (line, col) = line_col(&source, d.start as usize);
-        eprintln!(
-            "{}",
-            p.diagnostic(
-                &path.display().to_string(),
-                line,
-                col,
-                Level::Error,
-                alloy::docs::code_for(&d.message),
-                &alloy::docs::labeled(&d.message)
-            )
-        );
-    }
-
-    for (rel, message) in &report.failures {
-        print_failure(&p, &input.join(rel).display().to_string(), message);
-    }
+    print_diagnostics(&input, &report.diagnostics, &report.failures);
 
     for note in &report.notes {
         eprintln!("{}", p.note(note));

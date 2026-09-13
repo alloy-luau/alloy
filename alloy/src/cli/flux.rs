@@ -121,7 +121,7 @@ fn flux_once(args: &[String]) -> ExitCode {
     let report = report;
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
-    print_diagnostics(&input, &report);
+    print_diagnostics(&input, &report.diagnostics, &report.failures);
 
     // The type check: errors count as errors, the checker's lints take
     // their level from the `luau` group.

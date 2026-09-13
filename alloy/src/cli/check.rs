@@ -44,7 +44,7 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
 
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
-    print_diagnostics(&input, &report);
+    print_diagnostics(&input, &report.diagnostics, &report.failures);
     let (warnings, denied) = print_lints(&input, &report.lints, &config.lint, args);
     let counts = p.summary(&[
         (report.written.len(), "files", ui::DIM),

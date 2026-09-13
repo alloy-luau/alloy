@@ -172,7 +172,7 @@ fn build_project(args: &[String]) -> ExitCode {
 
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
-    print_diagnostics(&input, &report);
+    print_diagnostics(&input, &report.diagnostics, &report.failures);
 
     for note in &report.notes {
         eprintln!("{}", p.note(note));

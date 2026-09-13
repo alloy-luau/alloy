@@ -50,7 +50,7 @@ pub(crate) fn lint_cmd(args: &[String]) -> ExitCode {
 
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
-    print_diagnostics(&input, &report);
+    print_diagnostics(&input, &report.diagnostics, &report.failures);
     let fix = args.iter().any(|a| a == "--fix");
     let header_rewrites = if fix {
         apply_header_as_fixes(&input, &report.diagnostics)

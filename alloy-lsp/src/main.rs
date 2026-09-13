@@ -31,6 +31,7 @@ mod ingots;
 mod keywords;
 mod log;
 mod markup;
+mod names;
 mod proxy;
 mod rpc;
 mod settings;

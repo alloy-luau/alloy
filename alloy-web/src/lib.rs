@@ -12,6 +12,9 @@ mod context;
 #[path = "../../alloy-lsp/src/keywords.rs"]
 mod keywords;
 #[allow(dead_code)]
+#[path = "../../alloy-lsp/src/names.rs"]
+mod names;
+#[allow(dead_code)]
 #[path = "../../alloy-lsp/src/shapes/mod.rs"]
 mod shapes;
 
@@ -23,6 +26,7 @@ use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 
 use context::Context;
+use names::{EXPRESSION_GLOBALS, builtin_attribute_targets, declares_a_name_at};
 
 struct Session {
     source: String,
@@ -1075,49 +1079,6 @@ fn variant_insert(variant: &str, signature: &str) -> String {
     }
 }
 
-/// The globals a value expression reaches for. The analyzer owns the
-/// full global list; these are the names an arm or a ternary writes,
-/// for the positions where it answers nothing.
-const EXPRESSION_GLOBALS: &[&str] = &[
-    "print",
-    "warn",
-    "error",
-    "assert",
-    "tostring",
-    "tonumber",
-    "typeof",
-    "type",
-    "ipairs",
-    "pairs",
-    "next",
-    "select",
-    "pcall",
-    "math",
-    "string",
-    "table",
-    "os",
-    "task",
-    "buffer",
-    "coroutine",
-    "utf8",
-    "game",
-    "workspace",
-    "script",
-    "Instance",
-    "Enum",
-    "Vector3",
-    "Vector2",
-    "CFrame",
-    "Color3",
-    "UDim",
-    "UDim2",
-    "TweenInfo",
-    "BrickColor",
-    "Random",
-    "NumberRange",
-    "DateTime",
-];
-
 /// The names an expression at the caret may write: the locals and the
 /// parameters in scope, the structs and the enums the file declares,
 /// the std names, and the words an expression takes.
@@ -1254,78 +1215,6 @@ fn word_start(source: &str, offset: usize) -> usize {
     }
 
     start
-}
-
-/// Whether `offset` sits in the name a declaring keyword introduces.
-fn declares_a_name_at(source: &str, offset: usize) -> bool {
-    const DECLARERS: &[&str] = &[
-        "enum",
-        "struct",
-        "trait",
-        "interface",
-        "type",
-        "function",
-        "local",
-        "const",
-        "macro",
-        "attribute",
-        "remote",
-        "namespace",
-        "impl",
-        "class",
-        "import",
-    ];
-    let bytes = source.as_bytes();
-    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    let start = word_start(source, offset);
-
-    if offset < bytes.len() && is_word(bytes[offset]) && start == offset {
-        return false;
-    }
-
-    let mut end = start;
-
-    while end > 0 && bytes[end - 1] == b' ' {
-        end -= 1;
-    }
-
-    if end == start {
-        return false;
-    }
-
-    let mut ws = end;
-
-    while ws > 0 && is_word(bytes[ws - 1]) {
-        ws -= 1;
-    }
-
-    DECLARERS.contains(&&source[ws..end])
-}
-
-fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
-    match key {
-        "@derive" | "@sealed" => &["struct", "enum"],
-        "@cfg" => &["function", "local"],
-        "@test" | "@native" | "@checked" | "@deprecated" | "@inline" | "@noinline" => &["function"],
-        "@unreliable" | "@ratelimit" | "@timeout" | "@validate" => &["remote"],
-        "@u8" | "@u16" | "@u32" | "@i8" | "@i16" | "@i32" | "@f32" => &["param", "field"],
-        "@rename" | "@skip" => &["field"],
-        _ => &[
-            "function",
-            "struct",
-            "enum",
-            "variant",
-            "field",
-            "param",
-            "remote",
-            "interface",
-            "type",
-            "local",
-            "namespace",
-            "impl",
-            "trait",
-        ],
-    }
 }
 
 #[cfg(test)]

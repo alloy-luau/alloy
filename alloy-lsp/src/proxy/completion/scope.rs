@@ -1,4 +1,5 @@
 use super::*;
+use crate::names::EXPRESSION_GLOBALS;
 
 impl State {
     /// The names an expression at the caret may write: the locals and
@@ -216,46 +217,3 @@ impl State {
         out
     }
 }
-
-/// The globals a value expression reaches for, for the list the proxy
-/// builds where luau-lsp answers nothing. The full global list is the
-/// child's to give; these are the names an arm or a ternary writes.
-const EXPRESSION_GLOBALS: &[&str] = &[
-    "print",
-    "warn",
-    "error",
-    "assert",
-    "tostring",
-    "tonumber",
-    "typeof",
-    "type",
-    "ipairs",
-    "pairs",
-    "next",
-    "select",
-    "pcall",
-    "math",
-    "string",
-    "table",
-    "os",
-    "task",
-    "buffer",
-    "coroutine",
-    "utf8",
-    "game",
-    "workspace",
-    "script",
-    "Instance",
-    "Enum",
-    "Vector3",
-    "Vector2",
-    "CFrame",
-    "Color3",
-    "UDim",
-    "UDim2",
-    "TweenInfo",
-    "BrickColor",
-    "Random",
-    "NumberRange",
-    "DateTime",
-];

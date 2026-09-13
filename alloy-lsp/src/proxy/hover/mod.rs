@@ -31,6 +31,7 @@ use super::completion::{lands_on_member, member_position, sep_of};
 use super::diagnostics::names_word;
 use super::documents::project_aliases;
 use super::*;
+pub(crate) use crate::names::{builtin_attribute_targets, declares_a_name_at};
 
 impl Server {
     /// Answers a hover on bytes the desugar replaced: an Alloy keyword or
@@ -555,134 +556,12 @@ pub(crate) fn indexes_a_value(source: &str, at: usize) -> bool {
         .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | ')' | ']' | '"' | '\'' | '`'))
 }
 
-/// Whether `offset` sits in a name a declaring keyword introduces: the
-/// word before the one at the cursor is `enum`, `struct`, `function`,
-/// `local`, and the rest. The name is the author's, so no list belongs
-/// there, at the first column of the name as much as mid-word.
-///
-/// `impl` and `class` take a type, not a new name, and an `import`
-/// names nothing of its own but the alias of `* as M`.
-pub(crate) fn declares_a_name_at(source: &str, offset: usize) -> bool {
-    const DECLARERS: &[&str] = &[
-        "enum",
-        "struct",
-        "trait",
-        "interface",
-        "type",
-        "function",
-        "local",
-        "const",
-        "macro",
-        "attribute",
-        "remote",
-        "namespace",
-    ];
-    let offset = offset.min(source.len());
-    let bytes = source.as_bytes();
-    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    let mut start = offset;
-
-    while start > 0 && is_word(bytes[start - 1]) {
-        start -= 1;
-    }
-
-    let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
-    let statement = source[line_start..offset].trim_start();
-    let import = statement
-        .strip_prefix("import")
-        .is_some_and(|rest| !rest.starts_with(|c: char| is_word(c as u8)));
-
-    // Every name in an `import` comes from the module; the alias of
-    // `* as M` and a default binding are the author's own.
-    if import {
-        let head = source[line_start..start].trim_end();
-
-        if head
-            .strip_suffix("as")
-            .is_some_and(|h| h.trim_end().ends_with('*'))
-        {
-            return true;
-        }
-
-        let mut word_end = start;
-
-        while word_end < bytes.len() && is_word(bytes[word_end]) {
-            word_end += 1;
-        }
-
-        let after_keyword = head
-            .trim_start()
-            .strip_prefix("import")
-            .map(str::trim)
-            .unwrap_or("-");
-
-        return after_keyword.is_empty()
-            && word_end > start
-            && source[word_end..].trim_start().starts_with("from");
-    }
-
-    let mut end = start;
-
-    while end > 0 && bytes[end - 1] == b' ' {
-        end -= 1;
-    }
-
-    if end == start {
-        return false;
-    }
-
-    let mut word_start = end;
-
-    while word_start > 0 && is_word(bytes[word_start - 1]) {
-        word_start -= 1;
-    }
-
-    DECLARERS.contains(&&source[word_start..end])
-}
-
-/// What a built-in attribute goes on. The list mirrors
-/// `builtin_attr_targets` in the compiler, which is what reports an
-/// attribute on the wrong declaration.
 /// The built-in attributes that read with nothing under the caret.
 /// Luau takes these before the reader writes the function, and each
 /// one says something on its own. Every other built-in names a target:
 /// a wire width, a remote attribute, `@derive`, `@sealed`, `@test`, and
 /// `@cfg` all need the declaration in front of them to mean anything.
 pub(crate) const OPEN_ATTRIBUTES: &[&str] = &["@native", "@checked", "@deprecated"];
-
-pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
-    match key {
-        "@derive" | "@sealed" => &["struct", "enum"],
-
-        "@cfg" => &["function", "local", "namespace"],
-
-        "@deprecated" => &["function", "namespace"],
-
-        "@test" | "@native" | "@checked" | "@inline" | "@noinline" => &["function"],
-
-        "@unreliable" | "@ratelimit" | "@timeout" | "@validate" | "@immediate" => &["remote"],
-
-        "@u8" | "@u16" | "@u32" | "@i8" | "@i16" | "@i32" | "@f32" => &["param", "field"],
-
-        "@rename" | "@skip" => &["field"],
-
-        _ => &[
-            "function",
-            "struct",
-            "enum",
-            "variant",
-            "field",
-            "param",
-            "remote",
-            "interface",
-            "type",
-            "local",
-            "namespace",
-            "impl",
-            "trait",
-        ],
-    }
-}
 
 /// The targets a declared attribute's hover names:
 /// `**Applies to** \`field\` · \`struct\``.

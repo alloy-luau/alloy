@@ -826,6 +826,124 @@ fn token_text(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> St
     span.text(src, toks).to_string()
 }
 
+/// The macros an import brings in: an `export macro` of the module a
+/// name in braces comes from, under the name this file binds.
+///
+/// A macro is source, not a value, so it travels as text and expands
+/// where it is called. The body sees its parameters and the globals of
+/// the file it lands in. A name the defining file binds, an import or a
+/// local, does not come along, and the Luau checker reports it as an
+/// unknown global at the call.
+pub fn import_macros(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<crate::MacroSource> {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
+    let mut out: Vec<crate::MacroSource> = Vec::new();
+    let mut exports: HashMap<PathBuf, Vec<crate::MacroSource>> = HashMap::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Import(node) = stmt else {
+            continue;
+        };
+        let specs = match &node.kind {
+            ImportKind::Named(list)
+            | ImportKind::Both(_, list)
+            | ImportKind::Namespace(_, list) => list,
+
+            ImportKind::Default(_) | ImportKind::TypeOnly(_) => continue,
+        };
+
+        if specs.is_empty() {
+            continue;
+        }
+
+        let spec = text(node.path);
+        let Some(path) = resolve(spec.trim_matches(['"', '\'']), from, aliases) else {
+            continue;
+        };
+        let found = exports.entry(path.clone()).or_insert_with(|| {
+            std::fs::read_to_string(&path)
+                .map(|t| exported_macros(&t))
+                .unwrap_or_default()
+        });
+
+        for sp in specs {
+            if sp.is_type || sp.is_attribute {
+                continue;
+            }
+
+            let name = text(sp.name);
+            let Some(m) = found.iter().find(|m| m.name == name) else {
+                continue;
+            };
+            let local = sp.alias.map(&text).unwrap_or(name);
+
+            if !out.iter().any(|had| had.name == local) {
+                out.push(crate::MacroSource {
+                    name: local,
+                    ..m.clone()
+                });
+            }
+        }
+    }
+
+    out
+}
+
+/// The `export macro` declarations of one source, as the text a nested
+/// compile expands.
+pub fn exported_macros(source: &str) -> Vec<crate::MacroSource> {
+    use alloy_syntax::ast::Stmt;
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
+    // The body and each default are one line of tokens joined by
+    // spaces, the shape the expander reads; see `Desugar::join_tokens`.
+    let join = |span: alloy_syntax::ast::TokSpan| {
+        (span.start..span.end)
+            .map(|i| toks[i as usize].text(source))
+            .collect::<Vec<&str>>()
+            .join(" ")
+    };
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Macro(m) = stmt else {
+            continue;
+        };
+
+        if !m.exported {
+            continue;
+        }
+
+        let named = || m.params.iter().filter(|p| !p.is_vararg);
+
+        out.push(crate::MacroSource {
+            name: text(m.name),
+            params: named().map(|p| text(p.name)).collect(),
+            defaults: named()
+                .map(|p| p.default.as_ref().map(|d| join(d.span())))
+                .collect(),
+            variadic: m.params.iter().any(|p| p.is_vararg),
+            body: join(m.body.span),
+            tail: m.tail.as_ref().map(|t| join(t.span())),
+        });
+    }
+
+    out
+}
+
 /// The source a span covers, as written.
 fn span_text(src: &str, toks: &[alloy_syntax::lexer::Tok], span: TokSpan) -> String {
     span.text_or_empty(src, toks).to_string()

@@ -192,7 +192,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "macro",
-        "```alloy\nmacro name(params) ... end\n```\nA compile-time template with expression parameters, called as `$name(...)`. Every `local` in the body is renamed per expansion.",
+        "```alloy\nmacro name(params) ... end\nexport macro logit(x) print(x) end\nimport { logit } from \"./mac\"\n```\nA compile-time template with expression parameters, called as `$name(...)`. Every `local` in the body is renamed per expansion. A parameter takes a default, `macro sum(a, b = 2)`, and `...` makes the macro variadic.\n\n`export macro` sends the template out and `import { logit }` brings it in, under the name this file binds; `as` renames it. A macro is source, not a value, so nothing lands in the module's table and the import binds no local.\n\nThe body sees its parameters and the globals of the file it expands in. A name the defining file binds, an import or a local, does not travel with the macro: the expansion reads it as a global where it lands, and `alloy flux` reports it as an unknown global at the call. A macro that has to reach another module takes the value as a parameter.",
     ),
     (
         "namespace",

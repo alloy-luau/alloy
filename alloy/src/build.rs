@@ -377,6 +377,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             import_enums: crate::modules::import_enums(&source, &path, &module_aliases),
             import_privates: crate::modules::import_privates(&source, &path, &module_aliases),
             import_attributes: crate::modules::import_attributes(&source, &path, &module_aliases),
+            macros: crate::modules::import_macros(&source, &path, &module_aliases),
             plain_modules: crate::modules::plain_modules(&source, &path, &module_aliases),
             import_result_asyncs: crate::modules::import_result_asyncs(
                 &source,

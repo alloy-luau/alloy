@@ -245,6 +245,14 @@ impl<'s> Desugar<'s> {
                 .map(|a| self.text_of(a).to_string())
                 .unwrap_or(name.clone());
 
+            // An `export macro` is source, not a value: the module's
+            // table carries no key for it. The import brings the
+            // definition in through `EmitOptions.macros`, and `$name`
+            // expands here.
+            if self.options.macros.iter().any(|m| m.name == local) {
+                continue;
+            }
+
             let args = self.module_type_params(path, &name);
             let type_args = type_arguments(&args);
 

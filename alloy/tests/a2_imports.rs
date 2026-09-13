@@ -657,3 +657,54 @@ fn a_bare_import_of_a_type_only_export_needs_no_key() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/*
+An `export macro` travels as source. `import { name }` brings the
+definition in, `$name(...)` expands it here, and the module's table
+carries no key for the name, so the emit binds no local.
+*/
+#[test]
+fn an_imported_macro_expands_where_it_is_called() {
+    let dir = scratch("macro-import");
+    std::fs::write(
+        dir.join("mac.aly"),
+        "export macro logit(x) print(tostring(x)) end\nexport macro sum(a, b = 2) return a + b end\nmacro local_only(x) print(x) end\n",
+    )
+    .unwrap();
+    let source = "import { logit, sum as add } from \"./mac\"\n$logit(\"hi\")\nlocal n = $add(1)\nprint(n)\n";
+    let main = dir.join("main.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+
+    assert!(problems.is_empty(), "{messages:?}");
+
+    let macros = alloy::modules::import_macros(source, &main, &[]);
+    let names: Vec<&str> = macros.iter().map(|m| m.name.as_str()).collect();
+
+    // The alias renames the macro, and a macro the module keeps to
+    // itself does not travel.
+    assert_eq!(names, vec!["logit", "add"]);
+
+    let options = alloy::EmitOptions {
+        macros,
+        ..Default::default()
+    };
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert!(out.diagnostics.is_empty(), "{messages:?}");
+    assert!(!out.ship.contains('$'), "{}", out.ship);
+    assert!(!out.ship.contains("local logit"), "{}", out.ship);
+    assert!(
+        out.ship.contains("print ( tostring ( \"hi\" ) )"),
+        "{}",
+        out.ship
+    );
+    // The default of the second parameter fills the argument that is
+    // not given.
+    assert!(out.ship.contains("1 + 2"), "{}", out.ship);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

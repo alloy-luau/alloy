@@ -381,10 +381,21 @@ impl Server {
                         _ => Vec::new(),
                     };
 
+                    // The props of a component stand where it is
+                    // declared, which an import may bring from another
+                    // module.
+                    let declared = match &spot {
+                        markup::Spot::AttributeSlot { class, .. } => {
+                            markup::component_source(&doc.source, class, &load)
+                        }
+
+                        _ => None,
+                    };
+
                     Value::Array(markup::completions(
                         &spot,
                         &bound,
-                        &doc.source,
+                        declared.as_deref().unwrap_or(&doc.source),
                         &props,
                         &reach,
                     ))

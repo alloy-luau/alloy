@@ -7,7 +7,8 @@ use alloy::luaux::markup::{Attribute, Child, Element, Node};
 use alloy::luaux::roblox;
 use serde_json::{Value, json};
 
-use crate::components::Member;
+use crate::components::{Load, Member};
+use crate::context::{Field, record_entries};
 
 /// What sits under the cursor inside markup.
 #[derive(Debug, PartialEq, Eq)]
@@ -360,9 +361,14 @@ fn in_markup_text(src: &str, offset: usize) -> bool {
     depth == 0 && !in_tag
 }
 
-/// The prop names a component takes, read from its parameter type: the
-/// record written in place, or the alias that names one.
-pub fn component_props(src: &str, name: &str) -> Vec<String> {
+/// The props a component takes, read from the type its first parameter
+/// names: the record written in place, or the `type`, `struct`, or
+/// `interface` that names one. `src` is the source that declares the
+/// component, which `component_source` resolves.
+pub fn component_props(src: &str, name: &str) -> Vec<Field> {
+    // `<Cards.Card>`: the declaration carries the last segment alone,
+    // in the module or the namespace the path names.
+    let name = name.rsplit('.').next().unwrap_or(name);
     let head = format!("function {name}(");
 
     let Some(at) = src.find(&head) else {
@@ -373,63 +379,137 @@ pub fn component_props(src: &str, name: &str) -> Vec<String> {
     let Some(close) = rest.find(')') else {
         return Vec::new();
     };
-    let param = &rest[..close];
 
-    let Some((_, declared)) = param.split_once(": ") else {
+    let Some((_, declared)) = rest[..close].split_once(':') else {
         return Vec::new();
     };
     let declared = declared.trim();
 
     if declared.starts_with('{') {
-        return record_keys(declared);
+        return record_entries(declared);
     }
 
-    // `props: Props`, where `type Props = { ... }`.
-    let alias = format!("type {declared} = ");
-
-    match src.find(&alias) {
-        Some(k) => record_keys(src[k + alias.len()..].trim_start()),
-
-        None => Vec::new(),
-    }
+    // `props: Props`, where the file declares `Props`. A private field
+    // stays out: a tag cannot set one.
+    declared_fields(src, declared)
+        .into_iter()
+        .filter(|f| !f.private)
+        .collect()
 }
 
-/// The keys of a record type that starts the text, `{ a: number, b:
-/// string }`, at brace depth one.
-fn record_keys(text: &str) -> Vec<String> {
-    let Some(body) = text.strip_prefix('{') else {
-        return Vec::new();
-    };
-    let mut depth = 0i32;
-    let mut out = Vec::new();
-    let mut word = String::new();
-    let mut key = true;
+/// The source that declares the component a tag names: `None` when this
+/// file declares it, and otherwise the module an import brings it from.
+/// The module declares the component under its own name, so a tag that
+/// reads an import's alias finds nothing.
+pub fn component_source(src: &str, name: &str, load: &Load) -> Option<String> {
+    let last = name.rsplit('.').next()?;
 
-    for c in body.chars() {
+    if roblox::is_class(last) {
+        return None;
+    }
+
+    let head = format!("function {last}(");
+
+    if src.contains(&head) {
+        return None;
+    }
+
+    let mut specs: Vec<String> = crate::imports::imported_specs(src).into_iter().collect();
+    specs.sort();
+
+    specs
+        .into_iter()
+        .filter_map(|spec| load(&spec))
+        .find(|text| text.contains(&head))
+}
+
+/// The fields the type `name` declares in `src`: a `type` alias over a
+/// record, a `struct` body, or an `interface` body. A `type` alias over
+/// anything else declares no field.
+fn declared_fields(src: &str, name: &str) -> Vec<Field> {
+    let mut at = 0;
+
+    for line in src.split_inclusive('\n') {
+        let here = at;
+        at += line.len();
+        let mut text = line.trim();
+
+        for word in ["export ", "global ", "local ", "public ", "private "] {
+            text = text.strip_prefix(word).unwrap_or(text);
+        }
+
+        if let Some(rest) = text.strip_prefix("type ")
+            && declares(rest, name)
+        {
+            let Some((_, body)) = src[here..].split_once('=') else {
+                return Vec::new();
+            };
+
+            return braced(body.trim_start())
+                .map(record_entries)
+                .unwrap_or_default();
+        }
+
+        for keyword in ["struct ", "interface "] {
+            if let Some(rest) = text.strip_prefix(keyword)
+                && declares(rest, name)
+            {
+                return record_entries(block_body(&src[at..]));
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+/// Whether a declaration's text opens with the name `name`, and not
+/// with a longer name that starts the same way.
+fn declares(text: &str, name: &str) -> bool {
+    text.strip_prefix(name)
+        .is_some_and(|rest| !rest.starts_with(is_name_char))
+}
+
+/// The braces that open `text`, `{ ... }`, with their nesting read.
+fn braced(text: &str) -> Option<&str> {
+    if !text.starts_with('{') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+
+    for (i, c) in text.char_indices() {
         match c {
-            '{' | '(' | '[' | '<' => depth += 1,
-            '}' | ')' | ']' | '>' if depth == 0 => break,
-            '}' | ')' | ']' | '>' => depth -= 1,
-            ',' if depth == 0 => {
-                word.clear();
-                key = true;
-            }
-            ':' if depth == 0 && key => {
-                let name = word.trim().to_string();
+            '{' => depth += 1,
 
-                if !name.is_empty() {
-                    out.push(name);
+            '}' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(&text[..=i]);
                 }
-
-                word.clear();
-                key = false;
             }
-            _ if depth == 0 && key => word.push(c),
+
             _ => {}
         }
     }
 
-    out
+    None
+}
+
+/// The body of a block declaration, from the text after its header line
+/// to the line that closes it.
+fn block_body(text: &str) -> &str {
+    let mut at = 0;
+
+    for line in text.split_inclusive('\n') {
+        if line.trim() == "end" {
+            return &text[..at];
+        }
+
+        at += line.len();
+    }
+
+    text
 }
 
 /// The attribute names written in an opening tag's text.
@@ -759,6 +839,10 @@ pub struct IngotProp {
 /// `reach` holds what the tag slot can name: the members of the path in
 /// front of the last `.` for a dotted tag, and otherwise every name of
 /// the file that holds a component.
+///
+/// `src` is the source that declares the component an attribute slot
+/// sits in: this file, or the module an import brings the component
+/// from. `component_source` resolves it.
 pub fn completions(
     spot: &Spot,
     bound: &HashSet<String>,
@@ -868,14 +952,19 @@ pub fn completions(
             // not a Roblox class's properties.
             if !roblox::is_class(class) {
                 for prop in component_props(src, class) {
-                    if prop.starts_with(prefix.as_str()) && !taken.contains(prop.as_str()) {
+                    if prop.name.starts_with(prefix.as_str()) && !taken.contains(prop.name.as_str())
+                    {
                         items.push(json!({
-                            "label": prop,
+                            "label": prop.name,
                             "kind": 10,
-                            "detail": format!("prop of {class}"),
-                            "insertText": format!("{prop}={{$1}}"),
+                            "detail": prop.ty,
+                            "documentation": {
+                                "kind": "markdown",
+                                "value": format!("`{}`: a prop of component `{class}`.", prop.name),
+                            },
+                            "insertText": format!("{}={{$1}}", prop.name),
                             "insertTextFormat": 2,
-                            "sortText": format!("1{prop}"),
+                            "sortText": format!("1{}", prop.name),
                         }));
                     }
                 }
@@ -1320,11 +1409,45 @@ mod tests {
     #[test]
     fn a_component_offers_the_props_it_declares() {
         let src = "type Props = { title: string, count: number }\nlocal function Panel(props: Props) end\nlocal function Badge(props: { label: string }) end";
-        assert_eq!(component_props(src, "Badge"), vec!["label".to_string()]);
+        let named = |src: &str, name: &str| -> Vec<(String, String)> {
+            component_props(src, name)
+                .into_iter()
+                .map(|f| (f.name, f.ty))
+                .collect()
+        };
+        assert_eq!(named(src, "Badge"), [("label".into(), "string".into())]);
         assert_eq!(
-            component_props(src, "Panel"),
-            vec!["title".to_string(), "count".to_string()]
+            named(src, "Panel"),
+            [
+                ("title".to_string(), "string".to_string()),
+                ("count".to_string(), "number".to_string())
+            ]
         );
+
+        // A struct and an interface carry fields the same way, and a
+        // private one stays out.
+        let block = concat!(
+            "export struct CardProps as\n",
+            "    title: string\n",
+            "    count: number\n",
+            "    private seen: boolean\n",
+            "end\n",
+            "export interface RowProps as\n",
+            "    label: string\n",
+            "end\n",
+            "export function Card(props: CardProps): any end\n",
+            "export function Row(props: RowProps): any end\n",
+        );
+        assert_eq!(
+            named(block, "Card"),
+            [
+                ("title".to_string(), "string".to_string()),
+                ("count".to_string(), "number".to_string())
+            ]
+        );
+        assert_eq!(named(block, "Row"), [("label".into(), "string".into())]);
+        // `type Id = number` names no record, so the tag reads nothing.
+        assert!(named("type Id = number\nfunction Tag(p: Id) end", "Tag").is_empty());
 
         let items = completions(
             &Spot::AttributeSlot {
@@ -1342,6 +1465,52 @@ mod tests {
         assert_eq!(items[0]["label"], "label");
         assert_eq!(items[1]["label"], "key");
         assert_eq!(items[2]["label"], "ClassName");
+    }
+
+    /// An imported component declares its props in its own module, so
+    /// the slot reads that file and not this one.
+    #[test]
+    fn an_imported_components_props_come_from_its_module() {
+        let card = concat!(
+            "export type CardProps = {\n",
+            "    title: string,\n",
+            "    count: number,\n",
+            "}\n",
+            "export function Card(props: CardProps): any end\n",
+        );
+        let src = "import { Card } from \"./card\"\nlocal function App(): any\n    return (<Card  />)\nend\n";
+        let load = |spec: &str| (spec == "./card").then(|| card.to_string());
+        let owner = component_source(src, "Card", &load).expect("the module");
+        let items = completions(
+            &Spot::AttributeSlot {
+                class: "Card".into(),
+                prefix: String::new(),
+                existing: vec![],
+            },
+            &HashSet::new(),
+            &owner,
+            &[],
+            &[],
+        );
+
+        assert_eq!(items[0]["label"], "title");
+        assert_eq!(items[0]["detail"], "string");
+        assert_eq!(items[1]["label"], "count");
+        assert_eq!(items[1]["detail"], "number");
+        // The file that declares the component reads itself, and a
+        // Roblox class reads no module at all.
+        assert_eq!(component_source(card, "Card", &load), None);
+        assert_eq!(component_source(src, "Frame", &load), None);
+
+        // `<Cards.Card>` off `import * as Cards` names the same props.
+        let dotted = "import * as Cards from \"./card\"\nlocal function App(): any\n    return (<Cards.Card  />)\nend\n";
+        let owner = component_source(dotted, "Cards.Card", &load).expect("the module");
+        let props: Vec<String> = component_props(&owner, "Cards.Card")
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+
+        assert_eq!(props, ["title".to_string(), "count".to_string()]);
     }
 
     /// `ClassName` is on no Roblox class, so the tag lists it only when

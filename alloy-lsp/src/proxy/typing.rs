@@ -7,12 +7,12 @@ impl Server {
     /// one edit that replaces the whole text. An `.alx` file, a file
     /// that does not lex, and one already formatted get no edits.
     pub(crate) fn format_document(&self, uri: &str, id: &Value) {
-        let source = {
+        let open = {
             let st = self.state.lock().expect("state");
 
-            st.docs.get(uri).map(|d| d.source.clone())
+            st.docs.get(uri).map(|d| (d.source.clone(), d.bom))
         };
-        let Some(source) = source else {
+        let Some((source, bom)) = open else {
             self.respond(id, Value::Null);
 
             return;
@@ -42,11 +42,19 @@ impl Server {
         match formatted {
             Ok(formatted) if formatted != source => {
                 let (el, ec) = position_of(&source, source.len());
+                // The document dropped a leading byte order mark on the
+                // way in, and this edit writes the whole text: the mark
+                // goes back where the editor had it.
+                let text = match bom {
+                    true => format!("{MARK}{formatted}"),
+
+                    false => formatted,
+                };
                 self.respond(
                     id,
                     json!([{
                         "range": { "start": { "line": 0, "character": 0 }, "end": { "line": el, "character": ec } },
-                        "newText": formatted,
+                        "newText": text,
                     }]),
                 );
             }

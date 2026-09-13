@@ -77,6 +77,24 @@ pub struct Doc {
     /// shadow blanked. The artifact holds no text of the author's
     /// there, so nothing answers inside one.
     pub blanked: Vec<(usize, usize)>,
+    /// Whether the text the editor sent opens with a byte order mark.
+    /// `source` holds none either way, and a whole-document edit the
+    /// proxy writes back carries the mark again.
+    pub bom: bool,
+}
+
+/// A byte order mark, which stands at the start of the whole text and
+/// nowhere else. An editor hides it, the Luau lexer refuses it, and
+/// every position helper counts it, so the document drops it on the way
+/// in and `format_document` writes it back.
+pub const MARK: &str = "\u{feff}";
+
+/// Drops a leading byte order mark, so the source, the shadow, the
+/// mirror and every offset agree.
+fn strip_mark(text: &mut String) {
+    if text.starts_with(MARK) {
+        text.drain(..MARK.len());
+    }
 }
 
 /// The source with the operators Luau has no reading for blanked, each
@@ -247,6 +265,11 @@ impl Doc {
         jsx: &alloy::luaux::Config,
         ingots: Option<&alloy::ingot::Ingots>,
     ) -> Self {
+        let mut source = source;
+        let bom = source.starts_with(MARK);
+
+        strip_mark(&mut source);
+
         let mut doc = Self {
             source,
             version,
@@ -269,6 +292,7 @@ impl Doc {
             is_alx: options.file_name.ends_with(".alx"),
             repair: None,
             blanked: Vec::new(),
+            bom,
         };
         doc.compile(options, jsx, ingots);
 
@@ -590,8 +614,13 @@ impl Doc {
             .any(|(start, end)| (*start..*end).contains(&offset))
     }
 
-    /// Applies one LSP content change.
+    /// Applies one LSP content change. A whole-document change says
+    /// again whether the editor's text opens with the mark.
     pub fn apply_change(&mut self, range: Option<((u32, u32), (u32, u32))>, text: &str) {
+        if range.is_none() {
+            self.bom = text.starts_with(MARK);
+        }
+
         apply_change(&mut self.source, range, text);
     }
 }
@@ -608,6 +637,8 @@ pub fn apply_change(source: &mut String, range: Option<((u32, u32), (u32, u32))>
             source.replace_range(start..end, text);
         }
     }
+
+    strip_mark(source);
 }
 
 /// The byte offset of an LSP position, clamped to the line.
@@ -711,6 +742,39 @@ mod tests {
         let (line, _) = doc.to_shadow(0, 12);
         assert_eq!(line, 0);
         assert_eq!(doc.to_source(0, 20).0, 0);
+    }
+
+    /// A leading byte order mark leaves the document at the door. The
+    /// Luau lexer refuses it, and a shadow that carries it moves every
+    /// column of the first line one to the right.
+    #[test]
+    fn a_byte_order_mark_leaves_the_source_and_the_shadow() {
+        let mut doc = Doc::new(
+            format!("{MARK}local greeting = \"hi\"\nprint(greeting)\n"),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+
+        // The mark is remembered, so `format_document` writes it back.
+        assert!(doc.bom);
+        assert!(!doc.source.starts_with(MARK));
+        assert!(!doc.shadow.starts_with(MARK));
+        assert_eq!(&doc.source[6..14], "greeting");
+        assert_eq!(offset_of(&doc.source, 0, 6), Some(6));
+        assert_eq!(position_of(&doc.source, 6), (0, 6));
+
+        // The editor saved the file without the mark.
+        doc.apply_change(None, "local greeting = \"ho\"\n");
+
+        assert!(!doc.bom);
+
+        // And put it back.
+        doc.apply_change(None, &format!("{MARK}local greeting = \"hi\"\n"));
+
+        assert!(doc.bom);
+        assert_eq!(doc.source, "local greeting = \"hi\"\n");
     }
 
     #[test]

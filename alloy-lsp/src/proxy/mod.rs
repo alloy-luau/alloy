@@ -86,7 +86,7 @@ use alloy::EmitOptions;
 use alloy::config::Config;
 use serde_json::{Map, Value, json};
 
-use crate::doc::{Doc, offset_of, position_of};
+use crate::doc::{Doc, MARK, offset_of, position_of};
 use crate::imports::{self, Rename};
 use crate::{block_end, components, context, keywords, log, markup, settings, tokens};
 

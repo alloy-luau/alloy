@@ -210,6 +210,29 @@ fn a_header_without_as_reports_and_still_parses() {
     }
 }
 
+/// A trait is one shape, so its header takes no type parameters. The
+/// report names that, and the body still parses.
+#[test]
+fn a_generic_trait_header_reports_the_type_parameters() {
+    let src = "trait Container<T> as\n\tfunction get(self): number\nend\n";
+    let lexed = lexer::lex(src).unwrap();
+    let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert_eq!(diagnostics.len(), 1, "one report, got {diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "a trait takes no type parameters; put `<T>` on the method"
+    );
+    assert_eq!(diagnostics[0].offset, 15, "the report sits on the `<`");
+    assert!(
+        !chunk
+            .block
+            .stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::Error(_))),
+        "the body still parses"
+    );
+}
+
 /// The `as` form reports nothing.
 #[test]
 fn a_header_with_as_is_clean() {

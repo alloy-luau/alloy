@@ -107,7 +107,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "trait",
-        "```alloy\ntrait Name as\n    function m(self): T\nend\n```\nA behavior contract: method signatures, with a body as a default. `impl Trait for Name` implements it and `<T: Trait>` bounds a generic; `<T: A & B>` asks for both.\n\nAn `impl` of an operator trait writes the metamethod: `Add` (`add`, `__add`), `Sub`, `Mul`, `Div`, `Eq` (`eq`, `__eq`), `Lt` and `Le` (`__lt`, `__le`), `Display` (`to_string`, `__tostring`), `Call` (`call`, `__call`), `Len`, `Concat`, and `Drop` (`drop`, which `delete` runs as `Destroy`). A bound names a shape the std exports, `Display`, `Debug`, `Clone`, `Eq`, `PartialEq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Serialize`; a file's own trait of the same name wins. `alloy doc Traits` lists them.\n\nEmits a type with the method signatures.",
+        "```alloy\ntrait Name as\n    function m(self): T\nend\n```\nA behavior contract: method signatures, with a body as a default. `impl Trait for Name` implements it and `<T: Trait>` bounds a generic; `<T: A & B>` asks for both. The trait itself takes no type parameters.\n\nAn `impl` of an operator trait writes the metamethod: `Add` (`add`, `__add`), `Sub`, `Mul`, `Div`, `Eq` (`eq`, `__eq`), `Lt` and `Le` (`__lt`, `__le`), `Display` (`to_string`, `__tostring`), `Call` (`call`, `__call`), `Len`, `Concat`, and `Drop` (`drop`, which `delete` runs as `Destroy`). A bound names a shape the std exports, `Display`, `Debug`, `Clone`, `Eq`, `PartialEq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Serialize`; a file's own trait of the same name wins. `alloy doc Traits` lists them.\n\nEmits a type with the method signatures.",
     ),
     (
         "interface",

@@ -29,6 +29,9 @@ pub fn kind_for(message: &str) -> &'static str {
         // below would read as the kind's own family.
         (&["`global` is removed"], "ImportError"),
         (&["needs `as` before its body"], "SyntaxError"),
+        // A header the parser cannot read. The `trait` rule below would
+        // read the word as a contract report.
+        (&["takes no type parameters"], "SyntaxError"),
         (&["markup:"], "MarkupError"),
         (&["names no module"], "UnknownModule"),
         (&["is a script, not a module"], "UnknownModule"),

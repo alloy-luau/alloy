@@ -226,6 +226,18 @@ impl<'a> Parser<'a> {
         let head_start = self.pos;
         self.expect("trait")?;
         let name = self.expect_name()?;
+
+        // A trait is not generic: it is one shape, and a bound names it,
+        // `<T: Trait>`. Reading the list keeps the rest of the file.
+        if self.at("<") {
+            let at = self.toks[self.pos].start as usize;
+            self.report_at(
+                at,
+                "a trait takes no type parameters; put `<T>` on the method",
+            );
+            self.angle_span()?;
+        }
+
         self.header_as(head_start);
         let mut methods = Vec::new();
 

@@ -1804,6 +1804,9 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
         | Stmt::Interface(_)
         | Stmt::Remote(_)
         | Stmt::Attribute(_)
+        // `class` has no lowering yet. The render reports it and blanks
+        // the block, and it only runs when the walk reaches it.
+        | Stmt::Class(_)
         | Stmt::Macro(_) => return true,
 
         Stmt::Function(f) if !f.attrs.is_empty() => return true,

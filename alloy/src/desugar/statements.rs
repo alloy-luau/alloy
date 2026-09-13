@@ -335,6 +335,30 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// `declare class Name [extends Base] <members> end` as the
+    /// spelling Luau reads today: `declare extern type Name [extends
+    /// Base] with <members> end`. The members copy, so a type of the
+    /// project inside one still lowers.
+    fn declare_class(&mut self, span: TokSpan) {
+        let tok = |i: usize| TokSpan::new(i, i + 1);
+        let first = span.start as usize;
+        // `declare class Name`, then `extends Base` when it is written.
+        let head_end = match self.text_of(tok(first + 3)) == "extends" {
+            true => first + 5,
+
+            false => first + 3,
+        };
+
+        self.copy(self.byte_start(span), self.byte_end(tok(first)));
+        self.generate(self.byte_start(tok(first + 1)), " extern type");
+        self.copy(
+            self.byte_end(tok(first + 1)),
+            self.byte_end(tok(head_end - 1)),
+        );
+        self.generate(self.byte_end(tok(head_end - 1)), " with");
+        self.copy(self.byte_end(tok(head_end - 1)), self.byte_end(span));
+    }
+
     pub(crate) fn stmt(&mut self, stmt: &Stmt) {
         // A hoisted global lives in the module beside the script; its
         // lines here go blank, and the injected require binds the name.
@@ -634,6 +658,11 @@ impl<'s> Desugar<'s> {
         if let Stmt::TypeAlias(t) = s
             && self.export_listed_types.contains(self.text_of(t.name))
         {
+            return true;
+        }
+
+        // `declare class` takes the spelling Luau reads today.
+        if is_declare_class(self.src, self.toks, s) {
             return true;
         }
 
@@ -1142,6 +1171,15 @@ impl<'s> Desugar<'s> {
                     "`class` is parsed and not compiled yet; a `struct` with an `impl` is the form that runs",
                 );
                 self.blank_lines(self.byte_start(c.span), self.byte_end(c.span));
+            }
+
+            // `declare class Name ... end` is the spelling Luau's own
+            // definition parser dropped; it reads `declare extern type
+            // Name ... with ... end` now. One statement it cannot parse
+            // costs the whole definitions file, so every other
+            // declaration beside it stops reaching the checker.
+            Stmt::Declare(d) if is_declare_class(self.src, self.toks, stmt) => {
+                self.declare_class(d.span);
             }
 
             Stmt::GenericFor(f) if for_needs_rewrite(f) => self.generic_for(stmt.span(), f),
@@ -2478,6 +2516,18 @@ impl<'s> Desugar<'s> {
 
         i
     }
+}
+
+/// Whether a statement is `declare class Name ... end`, the definition
+/// spelling Luau's own parser dropped.
+fn is_declare_class(src: &str, toks: &[alloy_syntax::lexer::Tok], s: &Stmt) -> bool {
+    let Stmt::Declare(d) = s else {
+        return false;
+    };
+    let at = d.span.start as usize + 1;
+
+    toks.get(at)
+        .is_some_and(|t| &src[t.start as usize..t.end as usize] == "class")
 }
 
 #[cfg(test)]

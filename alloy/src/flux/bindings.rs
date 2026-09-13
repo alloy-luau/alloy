@@ -581,8 +581,13 @@ impl<'s> Scan<'s> {
                     if !self.at(f, "function")
                         || !self.is_name(f + 1)
                         || !self.at(f + 2, "(")
-                        || self
-                            .inside_block(i, &["impl", "trait", "struct", "declare", "namespace"])
+                        || self.inside_block(
+                            i,
+                            // A `class` body has no lowering yet and the
+                            // render blanks it, so its members are not
+                            // functions of the file.
+                            &["impl", "trait", "struct", "declare", "namespace", "class"],
+                        )
                         || self.has_attribute(i)
                     {
                         continue;

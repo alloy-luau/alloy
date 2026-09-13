@@ -635,6 +635,78 @@ fn a_struct_pattern_covers_its_shape() {
     );
 }
 
+/// `class` has no lowering yet. The render reported it and blanked the
+/// block, but the walk never reached the statement, so the raw source
+/// shipped into the `.luau` and `build` called it a success.
+#[test]
+fn a_class_reports_once_and_leaves_no_text() {
+    let src = "class Critter\n    public hp: number\n    function heal(self) end\nend\n";
+    let (ship, check, messages) = compile(src);
+
+    assert_eq!(
+        messages,
+        vec![
+            "`class` is parsed and not compiled yet; a `struct` with an `impl` is the form that runs"
+                .to_string()
+        ]
+    );
+
+    for out in [&ship, &check] {
+        assert!(out.trim().is_empty(), "{out:?}");
+        assert_eq!(out.lines().count(), src.lines().count());
+    }
+}
+
+/// `declare class Name ... end` is the spelling Luau's own definition
+/// parser dropped. One statement it cannot read costs the whole
+/// definitions file, so every declaration beside it stopped reaching
+/// the checker.
+#[test]
+fn a_declare_class_takes_the_spelling_luau_reads() {
+    let options = alloy::EmitOptions {
+        file_name: "decl.d.aly".to_string(),
+        definitions: true,
+        ..alloy::EmitOptions::default()
+    };
+    let src = "declare function greet(name: string): string\ndeclare version: number\ndeclare class Widget extends Instance\n    Label: string\nend\n";
+    let out = alloy::compile_with(src, &options).unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert_eq!(out.check.lines().count(), src.lines().count());
+    assert!(
+        out.check
+            .contains("declare extern type Widget extends Instance with"),
+        "{}",
+        out.check
+    );
+    assert!(!out.check.contains("declare class"), "{}", out.check);
+    // A declaration beside it is untouched.
+    assert!(
+        out.check
+            .contains("declare function greet(name: string): string"),
+        "{}",
+        out.check
+    );
+
+    // No `extends`, and the spelling Luau reads already, both hold.
+    let plain =
+        alloy::compile_with("declare class Widget\n    Label: string\nend\n", &options).unwrap();
+    assert!(
+        plain.check.contains("declare extern type Widget with"),
+        "{}",
+        plain.check
+    );
+    let already = alloy::compile_with(
+        "declare extern type Widget with\n    Label: string\nend\n",
+        &options,
+    )
+    .unwrap();
+    assert!(
+        already.check.contains("declare extern type Widget with"),
+        "{}",
+        already.check
+    );
+}
+
 /// Arm order said whether a struct match covered. A specific arm in
 /// front of a general one reported a match that every value reaches.
 #[test]

@@ -1778,10 +1778,17 @@ impl<'s> Desugar<'s> {
         // `Box`. `new Zoo.Lion` on a namespace member: the emit renders
         // it as `Zoo_Lion`, nesting and all.
         if let Some((head, rest)) = text.split_once('.') {
-            let path = match self.star_modules.contains(head.trim()) {
+            // `import { M as Mod }`: the module declares the namespace
+            // under its own name, and every import index is keyed by
+            // that one, so the head folds back before the lookup.
+            let head = self
+                .import_renames
+                .get(head.trim())
+                .map_or(head.trim(), String::as_str);
+            let path = match self.star_modules.contains(head) {
                 true => rest.trim().to_string(),
 
-                false => text.clone(),
+                false => format!("{head}.{}", rest.trim()),
             };
 
             // A namespace this file declares renders under one name.
@@ -2342,6 +2349,45 @@ mod tests {
         assert_eq!(
             star_lints,
             vec!["`secret` is private to `Box`; only its impl sets it"]
+        );
+    }
+
+    /// `import { M as Mod }` renames the namespace here; the module
+    /// declares it as `M`, which is the name every import index is keyed
+    /// by. Reading the written head found no struct, so the field checks
+    /// and `private_access` went silent.
+    #[test]
+    fn a_construction_through_an_alias_of_a_namespace_module_checks() {
+        let options = crate::EmitOptions {
+            import_struct_fields: vec![(
+                "M.A.S".to_string(),
+                vec![("ok".to_string(), false), ("secret".to_string(), true)],
+            )],
+            import_privates: vec![("M.A.S".to_string(), vec!["secret".to_string()])],
+            ..Default::default()
+        };
+        let run = |src: &str| -> (Vec<String>, Vec<&'static str>) {
+            let out = crate::compile_with(src, &options).unwrap();
+
+            (
+                out.diagnostics.iter().map(|d| d.message.clone()).collect(),
+                out.lints
+                    .iter()
+                    .map(|l| l.name)
+                    .filter(|n| *n == "private_access")
+                    .collect(),
+            )
+        };
+
+        let (_, private) =
+            run("import { M as Mod } from \"./m\"\n\nprint(new Mod.A.S { ok = 1, secret = 9 })\n");
+        assert_eq!(private, vec!["private_access"]);
+
+        let (unknown, _) =
+            run("import { M as Mod } from \"./m\"\n\nprint(new Mod.A.S { ok = 1, bad = 2 })\n");
+        assert_eq!(
+            unknown,
+            vec!["`M.A.S` has no field `bad`; its fields are `ok` and `secret`"]
         );
     }
 

@@ -99,15 +99,38 @@ pub(crate) fn is_source(path: &str) -> bool {
     path.ends_with(".aly") || path.ends_with(".alx")
 }
 
+/// Where the search for `alloy.toml` starts: the folder of the first
+/// path on the command line, else the working directory. A file names
+/// its own project, so `alloy flux /elsewhere/src/x.aly` reads the
+/// `alloy.toml` above that file and not the one above the cwd.
+fn search_dir(args: &[String], cwd: &Path) -> PathBuf {
+    let Some(first) = positionals(args).into_iter().next() else {
+        return cwd.to_path_buf();
+    };
+    let path = std::path::absolute(&first).unwrap_or_else(|_| PathBuf::from(&first));
+
+    if path.is_dir() {
+        path
+    } else if path.is_file() {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| cwd.to_path_buf())
+    } else {
+        cwd.to_path_buf()
+    }
+}
+
 /// The project root and its config: `--config`, else the nearest
-/// `alloy.toml`, else the defaults in the working directory.
+/// `alloy.toml` above the named path, else the one above the working
+/// directory, else the defaults in the working directory.
 pub(crate) fn project(args: &[String]) -> Result<(PathBuf, Config), String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let dir = search_dir(args, &cwd);
 
     let found = match option(args, "--config") {
         Some(path) => Some(PathBuf::from(path)),
 
-        None => Config::find(&cwd),
+        None => Config::find(&dir).or_else(|| Config::find(&cwd)),
     };
 
     match found {
@@ -283,4 +306,36 @@ pub(crate) fn line_col(text: &str, offset: usize) -> (usize, usize) {
     let col = upto.rfind('\n').map_or(offset, |i| offset - i - 1) + 1;
 
     (line, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The search for `alloy.toml` starts at the named file, so a
+    /// command that names a file in another project reads that
+    /// project's config and not the one above the working directory.
+    #[test]
+    fn the_config_search_starts_at_the_named_path() {
+        let dir = std::env::temp_dir().join(format!("alloy-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("the folder");
+        std::fs::write(dir.join("src/a.aly"), "print(1)\n").expect("the file");
+
+        let cwd = Path::new("/cwd");
+        let file = dir.join("src/a.aly").display().to_string();
+
+        assert_eq!(
+            search_dir(std::slice::from_ref(&file), cwd),
+            dir.join("src")
+        );
+        assert_eq!(
+            search_dir(&[dir.join("src").display().to_string()], cwd),
+            dir.join("src")
+        );
+        assert_eq!(search_dir(&[], cwd), cwd);
+        assert_eq!(search_dir(&["no-such-file.aly".to_string()], cwd), cwd);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

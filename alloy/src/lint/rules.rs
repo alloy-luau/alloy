@@ -339,6 +339,18 @@ fn import_order(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
 
     for stmt in &chunk.block.stmts {
         let Stmt::Import(i) = stmt else {
+            // The markup lowering prepends its helpers in front of the
+            // file, and the lints read the lowered text. A name that
+            // starts with `__` is the emit's, not the author's, so it
+            // puts no code in front of an import.
+            if let Stmt::LocalFunction(f) = stmt
+                && src[toks[f.name.start as usize].start as usize
+                    ..toks[f.name.end as usize - 1].end as usize]
+                    .starts_with("__")
+            {
+                continue;
+            }
+
             // A declaration binds a name and a call runs; both stand
             // in front of the import in the source and behind it in the
             // emit.

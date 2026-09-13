@@ -304,6 +304,43 @@ fn an_import_under_code_draws_the_order_lint() {
     assert!(!lints.iter().any(|l| l.name == "import_order"));
 }
 
+/// The markup lowering prepends its helpers in front of the file, and
+/// the lints read the lowered text. A spread attribute pulls one in, and
+/// `import_order` counted it as code above the imports.
+#[test]
+fn a_markup_helper_is_no_code_above_an_import() {
+    let dir = scratch("markup-helper");
+    std::fs::write(
+        dir.join("card.alx"),
+        "export function Card(props: { x: number }): any
+    return <TextLabel Text={tostring(props.x)} />
+end
+",
+    )
+    .unwrap();
+    let path = dir.join("page.alx");
+    let src = "import * as React from \"@packages/react\" --@alloy-ignore\nimport * as UI from \"./card\"\n\nlocal function Spread(props: { x: number })\n    return <TextButton {props} />\nend\n\nreturn Spread, UI\n";
+    std::fs::write(&path, src).unwrap();
+    let options = alloy::EmitOptions {
+        file_name: "page.alx".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_file(
+        path.to_str().unwrap(),
+        src,
+        &options,
+        Some(&luaux::Config::default()),
+        None,
+    )
+    .unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        !out.lints.iter().any(|l| l.name == "import_order"),
+        "{:?}",
+        out.lints
+    );
+}
+
 /// A module that ends in `return <expr>` and exports nothing has no
 /// export table. The returned value is the module: a bare name binds
 /// it, `* as` binds it, and a name in braces reads one key of it.

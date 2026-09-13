@@ -874,7 +874,20 @@ impl<'s> Desugar<'s> {
 
             (None, Some(_)) => {
                 if self.options.check {
-                    format!("{n}.{ctor}{t}(")
+                    // The fields form builds the value outright, so it
+                    // calls the raw constructor the check artifact types,
+                    // `__new`. A user `new` in the struct's own impl takes
+                    // the parameters it declares, and is not this call.
+                    let known = self
+                        .constructed_struct(name)
+                        .and_then(|(_, s)| self.declared_fields(&s))
+                        .is_some();
+
+                    if known {
+                        format!("{}{t}(", self.raw_ctor(&n))
+                    } else {
+                        format!("{n}.{ctor}{t}(")
+                    }
                 } else {
                     let std = self.std();
 

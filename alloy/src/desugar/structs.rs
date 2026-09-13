@@ -1901,7 +1901,7 @@ impl<'s> Desugar<'s> {
     /// The fields of a struct with whether each carries a default: this
     /// file's own declaration, else the shape a module it imports
     /// declares.
-    fn declared_fields(&self, name: &str) -> Option<Vec<(String, bool)>> {
+    pub(crate) fn declared_fields(&self, name: &str) -> Option<Vec<(String, bool)>> {
         self.struct_fields.get(name).cloned().or_else(|| {
             self.options
                 .import_struct_fields
@@ -2255,6 +2255,43 @@ mod tests {
 
         assert!(private.diagnostics.is_empty(), "{:?}", private.diagnostics);
         assert_eq!(private_lints, vec!["private_access"]);
+    }
+
+    /// The fields form builds the value outright, so the check artifact
+    /// calls `__new`, the typed raw constructor. A `new` the struct's
+    /// impl writes takes the parameters it declares, and the call is not
+    /// that one.
+    #[test]
+    fn the_fields_form_on_an_imported_struct_calls_the_raw_constructor() {
+        let options = crate::EmitOptions {
+            check: true,
+            import_struct_fields: vec![("Box".to_string(), vec![("label".to_string(), false)])],
+            ..Default::default()
+        };
+        let out = crate::compile_with(
+            "import { Box } from \"./box\"\n\nprint(new Box { label = \"a\" })\n",
+            &options,
+        )
+        .unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("Box.__new({ label = \"a\" })"),
+            "{}",
+            out.check
+        );
+        // A name the file knows nothing about keeps `new`: it has no
+        // `__new` of Alloy's making.
+        let foreign = crate::compile_with(
+            "local Part = require(\"./part\")\nprint(new Part { n = 1 })\n",
+            &options,
+        )
+        .unwrap();
+        assert!(
+            foreign.check.contains("Part.new({ n = 1 })"),
+            "{}",
+            foreign.check
+        );
     }
 
     /// The name a `new` writes is not always the name the struct is

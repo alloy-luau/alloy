@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use alloy_syntax::ast::{Stmt, TokSpan};
+use alloy_syntax::ast::{Param, Stmt, TokSpan};
 
 use crate::desugar::PRIMITIVES;
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
@@ -44,7 +44,7 @@ pub fn is_primitive(name: &str) -> bool {
 /// Every extension the source declares. A struct or enum declared in the
 /// file is never foreign, whatever its name.
 pub fn collect(src: &str) -> Vec<Extension> {
-    impls(src, false).0
+    impls(src, false).methods
 }
 
 /// Every `impl X as` the source writes on a struct or an enum another
@@ -52,7 +52,7 @@ pub fn collect(src: &str) -> Vec<Extension> {
 /// require brought in; the declaring file's check artifact declares
 /// them, so every file reads the same shape.
 pub fn struct_impls(src: &str) -> Vec<Extension> {
-    impls(src, true).0
+    impls(src, true).methods
 }
 
 /// What the other files of a project put on a struct or an enum one
@@ -70,24 +70,53 @@ pub struct ProjectImpls {
 }
 
 /// The `impl` blocks every source of a project writes on a struct or an
-/// enum another file declares. One walk per file answers both readers:
-/// the check artifact and the privacy lint.
+/// enum another file declares. One walk per file answers every reader:
+/// the check artifact, the privacy lint, and the default methods an
+/// `impl Trait for S` brings with it.
 pub fn project_impls(sources: &[String]) -> ProjectImpls {
+    let files: Vec<FileImpls> = sources.iter().map(|src| impls(src, true)).collect();
     let mut out = ProjectImpls::default();
 
-    for src in sources {
-        let (methods, privates) = impls(src, true);
-        out.methods.extend(methods);
+    for file in &files {
+        out.methods.extend(file.methods.iter().cloned());
 
-        for (target, name) in privates {
-            match out.privates.iter_mut().find(|(t, _)| *t == target) {
+        for (target, name) in &file.privates {
+            match out.privates.iter_mut().find(|(t, _)| t == target) {
                 Some((_, list)) => {
-                    if !list.contains(&name) {
-                        list.push(name);
+                    if !list.contains(name) {
+                        list.push(name.clone());
                     }
                 }
 
-                None => out.privates.push((target, vec![name])),
+                None => out.privates.push((target.clone(), vec![name.clone()])),
+            }
+        }
+    }
+
+    // `impl Trait for S` flattens the trait's default methods onto `S`,
+    // so the struct carries them too. The trait may sit in a third file,
+    // which is why the pass runs over the whole project and after every
+    // method the impls write: one the impl wrote keeps its own type.
+    for file in &files {
+        for (trait_name, target) in &file.trait_impls {
+            let defaults = files
+                .iter()
+                .flat_map(|f| &f.defaults)
+                .filter(|d| d.target == *trait_name);
+
+            for d in defaults {
+                if out
+                    .methods
+                    .iter()
+                    .any(|m| m.target == *target && m.name == d.name)
+                {
+                    continue;
+                }
+
+                out.methods.push(Extension {
+                    target: target.clone(),
+                    ..d.clone()
+                });
             }
         }
     }
@@ -95,12 +124,26 @@ pub fn project_impls(sources: &[String]) -> ProjectImpls {
     out
 }
 
-/// The methods of the `impl` blocks of one file, and the ones the impl
-/// declares private as `(target, method)`. `own` picks which targets
-/// count: a type of the project, or a foreign one.
-fn impls(src: &str, own: bool) -> (Vec<Extension>, Vec<(String, String)>) {
+/// What one file says about the methods of a struct or an enum another
+/// file declares.
+#[derive(Default)]
+struct FileImpls {
+    methods: Vec<Extension>,
+    /// `(target, method)` for every method an `impl` declares private.
+    privates: Vec<(String, String)>,
+    /// `(trait, target)` for every `impl Trait for S` the file writes.
+    trait_impls: Vec<(String, String)>,
+    /// The default methods of every `trait` the file declares, each with
+    /// the trait as its target.
+    defaults: Vec<Extension>,
+}
+
+/// The `impl` blocks of one file, the methods they keep private, and the
+/// traits they name. `own` picks which targets count: a type of the
+/// project, or a foreign one.
+fn impls(src: &str, own: bool) -> FileImpls {
     let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
-        return (Vec::new(), Vec::new());
+        return FileImpls::default();
     };
 
     let toks = &parsed.lexed.toks;
@@ -123,10 +166,57 @@ fn impls(src: &str, own: bool) -> (Vec<Extension>, Vec<(String, String)>) {
         }
     }
 
-    let mut out = Vec::new();
-    let mut privates = Vec::new();
+    let mut out = FileImpls::default();
+    // The parameters after `self`, as `name: type` pairs, with whether
+    // the method takes `self`. An impl method and a trait's default
+    // method read the same way; only their return types differ, because
+    // a trait method keeps its whole signature as one span.
+    let signature = |params: &[Param]| {
+        let has_self = params.first().is_some_and(|p| text(p.name) == "self");
+        let mut list = Vec::new();
+
+        for p in params.iter().skip(usize::from(has_self)) {
+            let mut ty = p.ty.map(text).unwrap_or("any").trim().to_string();
+
+            // A default makes the parameter optional, as the emit does.
+            if p.default.is_some() && !ty.ends_with('?') {
+                ty.push('?');
+            }
+
+            if p.is_vararg {
+                list.push(format!("...: {ty}"));
+            } else {
+                list.push(format!("{}: {ty}", text(p.name)));
+            }
+        }
+
+        (has_self, list.join(", "))
+    };
+    let declared_ret = |span: TokSpan| {
+        let t = text(span).trim().trim_start_matches(':').trim().to_string();
+
+        (!t.is_empty()).then_some(t)
+    };
 
     for stmt in stmts {
+        if let Stmt::Trait(t) = stmt {
+            for m in &t.methods {
+                // A method with no body is abstract: the impl writes it.
+                if m.body.is_none() {
+                    continue;
+                }
+
+                let (has_self, params) = signature(&m.params);
+                out.defaults.push(Extension {
+                    target: text(t.name).to_string(),
+                    name: text(m.name).to_string(),
+                    is_static: !has_self,
+                    params,
+                    ret: trait_ret(text(m.signature)),
+                });
+            }
+        }
+
         let Stmt::Impl(i) = stmt else {
             continue;
         };
@@ -145,50 +235,65 @@ fn impls(src: &str, own: bool) -> (Vec<Extension>, Vec<(String, String)>) {
             continue;
         }
 
+        if let Some(name) = i.trait_name {
+            out.trait_impls
+                .push((text(name).to_string(), target.to_string()));
+        }
+
         for m in &i.methods {
             let Some(first) = m.path.first() else {
                 continue;
             };
 
-            let params = &m.body.params;
-            let has_self = params.first().is_some_and(|p| text(p.name) == "self");
-            let rest = params.iter().skip(usize::from(has_self));
-            let mut list = Vec::new();
-
-            for p in rest {
-                let mut ty = p.ty.map(text).unwrap_or("any").trim().to_string();
-
-                // A default makes the parameter optional, as the emit does.
-                if p.default.is_some() && !ty.ends_with('?') {
-                    ty.push('?');
-                }
-
-                if p.is_vararg {
-                    list.push(format!("...: {ty}"));
-                } else {
-                    list.push(format!("{}: {ty}", text(p.name)));
-                }
-            }
+            let (has_self, params) = signature(&m.body.params);
+            let ret = m.body.ret_type.and_then(declared_ret);
 
             if m.visibility.is_some_and(|v| text(v) == "private") {
-                privates.push((target.to_string(), text(*first).to_string()));
+                out.privates
+                    .push((target.to_string(), text(*first).to_string()));
             }
 
-            out.push(Extension {
+            out.methods.push(Extension {
                 target: target.to_string(),
                 name: text(*first).to_string(),
                 is_static: !has_self,
-                params: list.join(", "),
-                ret: m
-                    .body
-                    .ret_type
-                    .map(|t| text(t).trim().trim_start_matches(':').trim().to_string())
-                    .filter(|t| !t.is_empty()),
+                params,
+                ret,
             });
         }
     }
 
-    (out, privates)
+    out
+}
+
+/// The return type a trait method declares. Its signature is one span
+/// from the `(`, so the type is the text after the `)` that closes the
+/// parameter list. None when the method declares none.
+fn trait_ret(signature: &str) -> Option<String> {
+    let mut depth = 0i32;
+
+    for (at, c) in signature.char_indices() {
+        match c {
+            '(' => depth += 1,
+
+            ')' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    let rest = signature[at + c.len_utf8()..]
+                        .trim()
+                        .trim_start_matches(':')
+                        .trim();
+
+                    return (!rest.is_empty()).then(|| rest.to_string());
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// A definitions file with the extensions injected, written under
@@ -444,6 +549,28 @@ mod tests {
         // file has not got, so they stay here.
         let generic = "import { Bag } from \"./bag\"\n\nimpl Bag<T> as\n    function first(self): T\n        return self.items[1]\n    end\nend\n";
         assert!(struct_impls(generic).is_empty());
+    }
+
+    /// An `impl Trait for S` on a struct another file declares brings
+    /// the trait's default methods with it, from a third file. The
+    /// struct's own file declares them, so a reader anywhere finds
+    /// `greet` on `Cat`.
+    #[test]
+    fn a_trait_default_reaches_the_struct_of_a_cross_file_impl() {
+        let greeter = "export trait Greeter as\n    function name(self): string\n    function greet(self): string\n        return \"hi\"\n    end\nend\n";
+        let catimpl = "import { Greeter } from \"./greeter\"\nimport { Cat } from \"./animal\"\n\nimpl Greeter for Cat as\n    function name(self): string\n        return self.label\n    end\nend\n";
+        let found = project_impls(&[catimpl.to_string(), greeter.to_string()]);
+        let greet = found
+            .methods
+            .iter()
+            .find(|m| m.name == "greet")
+            .unwrap_or_else(|| panic!("{:?}", found.methods));
+
+        assert_eq!(greet.target, "Cat");
+        assert_eq!(greet.ret.as_deref(), Some("string"));
+        assert!(!greet.is_static);
+        // A method the impl writes keeps the impl's own type, once.
+        assert_eq!(found.methods.iter().filter(|m| m.name == "name").count(), 1);
     }
 
     /// An `impl` in another file keeps its private methods private. The

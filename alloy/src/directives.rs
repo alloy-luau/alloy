@@ -602,11 +602,6 @@ impl Directives {
         last(name).or_else(|| last(group))
     }
 
-    /// Whether the file sets any level, so a caller can skip the work.
-    pub fn has_levels(&self) -> bool {
-        !self.levels.is_empty()
-    }
-
     /// Whether the line is one an `--@alloy-expect-error` covers.
     pub fn expects(&self, line: usize) -> bool {
         self.expected.contains_key(&line)

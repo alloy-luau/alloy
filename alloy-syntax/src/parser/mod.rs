@@ -191,35 +191,6 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
     (chunk, p.diagnostics)
 }
 
-/// Parses one expression that covers the whole token stream. Use this for a
-/// source slice that another caller cut, for example the `host` span of a
-/// worm that holds an attribute value.
-pub fn parse_expr(src: &str, toks: &[Tok]) -> Result<Expr, ParseError> {
-    let mut p = Parser {
-        src,
-        toks,
-        pos: 0,
-        depth: 0,
-        options: ParseOptions::default(),
-        lenient: false,
-        diagnostics: Vec::new(),
-        method_context: 0,
-        type_edits: Vec::new(),
-        type_names: Vec::new(),
-        no_method_call: 0,
-        in_match_arm: 0,
-        pattern_arg: 0,
-    };
-
-    let expr = p.expr()?;
-
-    if !p.at_end() {
-        return Err(p.err("unexpected token after the expression"));
-    }
-
-    Ok(expr)
-}
-
 struct Parser<'a> {
     options: ParseOptions,
     src: &'a str,

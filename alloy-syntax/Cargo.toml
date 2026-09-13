@@ -13,8 +13,5 @@ categories = ["parser-implementations"]
 name = "alloy_syntax"
 path = "src/lib.rs"
 
-[dependencies]
-rayon = "1"
-
 [lints]
 workspace = true

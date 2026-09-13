@@ -446,11 +446,6 @@ fn toml_key_line(text: &str, key: &str) -> Option<usize> {
     None
 }
 
-/// The Luau type a value reads as, for a completion detail.
-pub fn luau_type_of(text: &str, format: Format) -> Result<String, String> {
-    parse(text, format).map(|n| luau_type(&n))
-}
-
 fn luau_type(node: &Node) -> String {
     match node {
         Node::Nil => "nil".to_string(),

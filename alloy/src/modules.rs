@@ -989,12 +989,6 @@ pub fn returns_value(source: &str) -> bool {
     )
 }
 
-/// Whether a module returns a value and exports names too. The two
-/// rules each name one value for the module, so the build reports it.
-pub fn returns_and_exports(source: &str) -> bool {
-    returns_value(source) && exports_values(source)
-}
-
 /// Whether a module puts a value in its export table. `export type`
 /// and `export interface` name types alone, and a module of those
 /// still returns its own value.

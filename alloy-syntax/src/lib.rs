@@ -13,8 +13,8 @@ and a transform can splice byte ranges against the original text with no
 loss. These two properties are the contract of the crate, and the fuzz
 target holds the round trip.
 
-Parallelism is file level. One file parses fast and single threaded;
-[`parse_many`] spreads a list of files over a thread pool.
+Parallelism is file level. One file parses fast and single threaded, so a
+caller that holds many files spreads them itself.
 */
 
 pub mod ast;
@@ -75,20 +75,4 @@ pub fn parse_lenient(src: &str, options: parser::ParseOptions) -> Result<Lenient
         chunk,
         diagnostics,
     })
-}
-
-/*
-Many sources, parsed on a thread pool.
-
-Each file allocates its own tree, so results move between threads without a
-lock. The order of the output matches the order of the input, because a
-caller pairs results with the paths it holds.
-*/
-pub fn parse_many<S: AsRef<str> + Sync>(sources: &[S]) -> Vec<Result<Parsed, ParseFailure>> {
-    use rayon::prelude::*;
-
-    sources
-        .par_iter()
-        .map(|src| parse_one(src.as_ref()))
-        .collect()
 }

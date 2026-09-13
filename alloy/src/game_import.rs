@@ -85,11 +85,6 @@ pub fn alias_form(spec: &str) -> Option<String> {
     }
 }
 
-/// Whether a spec names a service rather than a module.
-pub fn is_game_spec(spec: &str) -> bool {
-    game_path(spec).is_some()
-}
-
 /// Whether a name is one of the services the definitions declare.
 pub fn is_service(name: &str) -> bool {
     SERVICES.binary_search(&name).is_ok()

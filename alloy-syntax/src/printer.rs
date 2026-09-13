@@ -22,13 +22,6 @@ pub fn print_range(src: &str, toks: &[Tok], from: u32, to: u32, out: &mut String
     }
 }
 
-pub fn print_span(src: &str, toks: &[Tok], span: TokSpan) -> String {
-    let mut out = String::new();
-    print_range(src, toks, span.start, span.end, &mut out);
-
-    out
-}
-
 /// Prints a whole parsed file, with the leading and trailing trivia included.
 pub fn print_chunk(src: &str, toks: &[Tok], chunk: &Chunk) -> String {
     let mut out = String::new();

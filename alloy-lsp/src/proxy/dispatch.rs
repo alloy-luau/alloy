@@ -1426,6 +1426,7 @@ impl Server {
                         actions.extend(st.lint_actions(uri, range));
                         actions.extend(st.ingot_actions(uri, range));
                         actions.extend(st.import_actions(uri, &reported));
+                        st.unused_import_actions(uri, range, actions);
                     }
                 }
 

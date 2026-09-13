@@ -1486,3 +1486,274 @@ fn declares_a_return(shape: &str) -> bool {
 
     false
 }
+
+/// One `import` statement of a source: the whole statement with its
+/// newline, and every name it binds with the bytes to cut to drop that
+/// one name. A name outside the `{ ... }` list, a `* as M` or a default
+/// binding, carries no cut of its own; the statement goes whole or that
+/// name stays.
+struct ImportLine {
+    span: (usize, usize),
+    names: Vec<Bound>,
+}
+
+/// One name an `import` statement binds: the byte range of the name and
+/// the bytes to cut to drop that one name.
+struct Bound {
+    name: (usize, usize),
+    cut: Option<(usize, usize)>,
+}
+
+/// The `import` statements of a source. A statement may run over several
+/// lines, so the walk reads from the `import` to the `from` of the same
+/// statement.
+fn import_lines(src: &str) -> Vec<ImportLine> {
+    let mut out = Vec::new();
+    let mut at = 0;
+
+    for line in src.split_inclusive('\n') {
+        let here = at;
+        at += line.len();
+
+        if !line.trim_start().starts_with("import ") {
+            continue;
+        }
+
+        let Some(from) = src[here..].find(" from ").map(|i| here + i) else {
+            continue;
+        };
+        let end = src[from..].find('\n').map_or(src.len(), |i| from + i + 1);
+        let mut names: Vec<Bound> = Vec::new();
+
+        if let Some(name) = head_name(src, here, from) {
+            names.push(Bound { name, cut: None });
+        }
+
+        if let Some(open) = src[here..from].find('{').map(|i| here + i)
+            && let Some(close) = src[open..from].find('}').map(|i| open + i)
+        {
+            names.extend(list_cuts(src, open, close));
+        }
+
+        if !names.is_empty() {
+            out.push(ImportLine {
+                span: (here, end),
+                names,
+            });
+        }
+    }
+
+    out
+}
+
+/// The name a statement's head binds outside its list: the `M` of
+/// `* as M`, or a default binding. `None` when the head opens the list.
+fn head_name(src: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    let head = src.get(start..end)?;
+    let after = head.strip_prefix("import ")?;
+    let lead = "import ".len() + (after.len() - after.trim_start().len());
+    let rest = after.trim_start();
+
+    if rest.starts_with('{') || rest.starts_with("type") {
+        return None;
+    }
+
+    let at = match rest.strip_prefix('*') {
+        Some(star) => {
+            let gap = star.len() - star.trim_start().len();
+            let named = star.trim_start().strip_prefix("as ")?;
+
+            lead + 1 + gap + 3 + (named.len() - named.trim_start().len())
+        }
+
+        None => lead,
+    };
+    let word: String = src[start + at..end]
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    (!word.is_empty()).then(|| (start + at, start + at + word.len()))
+}
+
+/// Each entry of an `import { ... }` list with the bytes to cut to drop
+/// it: the entry and the comma after it, or the comma before the last
+/// one. `type T as U` binds `U`, so the name is the entry's last word.
+fn list_cuts(src: &str, open: usize, close: usize) -> Vec<Bound> {
+    let mut parts: Vec<(usize, usize)> = Vec::new();
+    let mut start = open + 1;
+
+    for (i, c) in src[open + 1..close].char_indices() {
+        if c == ',' {
+            parts.push((start, open + 1 + i));
+            start = open + 2 + i;
+        }
+    }
+
+    parts.push((start, close));
+    let parts: Vec<(usize, usize)> = parts
+        .into_iter()
+        .filter_map(|(s, e)| {
+            let text = src.get(s..e)?;
+            let lead = text.len() - text.trim_start().len();
+
+            (!text.trim().is_empty()).then(|| (s + lead, s + text.trim_end().len()))
+        })
+        .collect();
+    let mut out = Vec::new();
+
+    for (k, &(s, e)) in parts.iter().enumerate() {
+        let entry = &src[s..e];
+        let word = entry.split_whitespace().next_back().unwrap_or(entry);
+        let name_at = s + (entry.len() - word.len());
+        let cut = match (parts.get(k + 1), k) {
+            (Some(&(next, _)), _) => (s, next),
+
+            (None, 0) => (s, e),
+
+            (None, _) => (parts[k - 1].1, e),
+        };
+
+        out.push(Bound {
+            name: (
+                name_at + (word.len() - word.trim_start_matches('@').len()),
+                e,
+            ),
+            cut: Some(cut),
+        });
+    }
+
+    out
+}
+
+impl State {
+    /// The removals for the unused names of a file's imports, and the
+    /// child's own removal dropped when it takes a name the file still
+    /// uses. The `unused_import` lint carries no fix, and luau-lsp reads
+    /// the emit, where one import is one `require`: its `Remove all
+    /// unused code` cuts the whole statement even when two of three
+    /// names are alive.
+    pub(crate) fn unused_import_actions(
+        &self,
+        uri: &str,
+        range: ((u32, u32), (u32, u32)),
+        actions: &mut Vec<Value>,
+    ) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(out) = &doc.output else {
+            return;
+        };
+
+        if alloy::lint::level_in(
+            &self.lint_config(),
+            &alloy::directives::scan(&doc.source),
+            "unused_import",
+        ) == alloy::lint::Level::Allow
+        {
+            return;
+        }
+
+        let unused: Vec<(usize, usize)> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "unused_import")
+            .map(|l| (l.start as usize, l.end.max(l.start) as usize))
+            .collect();
+
+        if unused.is_empty() {
+            return;
+        }
+
+        let ((from_line, _), (to_line, _)) = range;
+        let mut mine: Vec<Value> = Vec::new();
+        let mut covered: Vec<u32> = Vec::new();
+
+        for line in import_lines(&doc.source) {
+            let dead = |b: &Bound| unused.iter().any(|&(s, e)| (s, e) == b.name);
+            let dead_names: Vec<&Bound> = line.names.iter().filter(|b| dead(b)).collect();
+
+            if dead_names.is_empty() {
+                continue;
+            }
+
+            let (sl, _) = position_of(&doc.source, line.span.0);
+            let (el, _) = position_of(&doc.source, line.span.1.saturating_sub(1));
+            // Every name gone takes the statement; else each dead entry
+            // goes with the comma that joins it to its neighbour.
+            let cuts: Vec<(usize, usize)> = match dead_names.len() == line.names.len() {
+                true => vec![line.span],
+
+                false => dead_names.iter().filter_map(|b| b.cut).collect(),
+            };
+
+            if cuts.is_empty() || el < from_line || sl > to_line {
+                continue;
+            }
+
+            covered.push(sl);
+            let edits: Vec<Value> = cuts
+                .iter()
+                .map(|&(s, e)| {
+                    let (a, b) = position_of(&doc.source, s);
+                    let (c, d) = position_of(&doc.source, e);
+
+                    json!({
+                        "range": { "start": { "line": a, "character": b }, "end": { "line": c, "character": d } },
+                        "newText": "",
+                    })
+                })
+                .collect();
+            let (nl, nc) = position_of(&doc.source, dead_names[0].name.0);
+            let (ne, nec) = position_of(&doc.source, dead_names[0].name.1);
+            let title = match dead_names.len() {
+                1 => "Remove unused import".to_string(),
+
+                n => format!("Remove {n} unused imports"),
+            };
+            let message = out
+                .lints
+                .iter()
+                .find(|l| l.start as usize == dead_names[0].name.0)
+                .map(|l| l.message.clone())
+                .unwrap_or_default();
+            mine.push(json!({
+                "title": title,
+                "kind": "quickfix",
+                "isPreferred": true,
+                "diagnostics": [{
+                    "range": { "start": { "line": nl, "character": nc }, "end": { "line": ne, "character": nec } },
+                    "severity": 2,
+                    "source": "Alloy",
+                    "code": alloy::docs::LINT_CODE,
+                    "message": format!("unused_import: {message}"),
+                }],
+                "edit": { "changes": { uri: edits } },
+            }));
+        }
+
+        // The child reads the emit and cuts the whole `require` line,
+        // which takes the names the file still uses. Ours is the edit
+        // for that statement, so the child's goes.
+        actions.retain(|a| {
+            let Some(edits) = a
+                .get("edit")
+                .and_then(|e| e.get("changes"))
+                .and_then(|c| c.get(uri))
+                .and_then(Value::as_array)
+            else {
+                return true;
+            };
+
+            !edits.iter().any(|e| {
+                e.get("newText").and_then(Value::as_str) == Some("")
+                    && e.pointer("/range/start/character").and_then(Value::as_u64) == Some(0)
+                    && e.pointer("/range/start/line")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|l| covered.contains(&(l as u32)))
+            })
+        });
+        actions.extend(mine);
+    }
+}

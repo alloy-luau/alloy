@@ -517,3 +517,56 @@ pub(crate) fn the_checkers_limit_stands_alone_on_its_line() {
     collapse_diagnostics(&mut items);
     assert_eq!(items, vec![limit, lint, other]);
 }
+
+/// `import { Widget, makeWidget, HELPER }` with only `makeWidget` used:
+/// the child cut the whole line, which takes the name still in use.
+#[test]
+pub(crate) fn a_partly_unused_import_list_loses_the_dead_names_alone() {
+    let (st, uri) = one_file(
+        "import { Widget, makeWidget, HELPER } from \"./mod\"\n\nlocal w = makeWidget(2)\nprint(w)\n",
+    );
+    let whole_line = json!({
+        "title": "Remove all unused code",
+        "edit": { "changes": { uri: [{
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 1, "character": 0 } },
+            "newText": "",
+        }] } },
+    });
+    let mut actions = vec![whole_line];
+    st.unused_import_actions(uri, ((0, 0), (0, 0)), &mut actions);
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["title"], "Remove 2 unused imports");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri],
+        json!([
+            {
+                "range": { "start": { "line": 0, "character": 9 }, "end": { "line": 0, "character": 17 } },
+                "newText": "",
+            },
+            {
+                "range": { "start": { "line": 0, "character": 27 }, "end": { "line": 0, "character": 35 } },
+                "newText": "",
+            },
+        ])
+    );
+}
+
+/// `import type { Widget }` unused got no action at all: the child reads
+/// the emit, where a type-only import writes no `require`.
+#[test]
+pub(crate) fn an_unused_type_import_loses_its_whole_line() {
+    let (st, uri) = one_file("import type { Widget } from \"./mod\"\n\nprint(\"hello\")\n");
+    let mut actions = Vec::new();
+    st.unused_import_actions(uri, ((0, 0), (0, 0)), &mut actions);
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["title"], "Remove unused import");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri],
+        json!([{
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 1, "character": 0 } },
+            "newText": "",
+        }])
+    );
+}

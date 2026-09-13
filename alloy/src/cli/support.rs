@@ -95,6 +95,61 @@ pub(crate) fn positionals(args: &[String]) -> Vec<String> {
     positional
 }
 
+/// The options one command takes, or `None` when the name is no command
+/// of ours. The lists are what each command reads, so a flag added to a
+/// command belongs here too.
+fn flags_of(command: &str) -> Option<Vec<&'static str>> {
+    // The lints read the same flags wherever they run, and
+    // `apply_build_options` reads the same ones for every command that
+    // compiles.
+    const LINTS: &[&str] = &[
+        "--fix",
+        "--strict",
+        "--deny-warnings",
+        "--warn",
+        "--allow",
+        "--deny",
+        "--config",
+    ];
+    const BUILD: &[&str] = &["--out", "--check", "--wait-timeout", "--config"];
+
+    let flags = match command {
+        "build" => [BUILD, &["--watch", "--map"]].concat(),
+        "check" => [BUILD, LINTS].concat(),
+        "lint" => [LINTS, &["--list"]].concat(),
+        "flux" => [LINTS, &["--list", "--watch", "--explain", "--no-typecheck"]].concat(),
+        "test" => [BUILD, &["--run", "--coverage", "--filter", "--watch"]].concat(),
+        "fmt" => vec!["--check", "--config"],
+        "doc" => vec!["--json"],
+        "init" => vec![],
+        "self" => vec!["--dir", "--version", "--dry-run"],
+        "ingot" => vec!["--lint", "--output", "--format", "--hover", "--complete"],
+
+        _ => return None,
+    };
+
+    Some(flags)
+}
+
+/// The message for the first argument that starts with `--` and is no
+/// option of the command. An option no command takes does nothing, and a
+/// run that reads as a working one is worse than a failure.
+///
+/// Everything after `--` belongs to another tool, so the walk stops
+/// there, and `--help` reaches every command.
+pub(crate) fn unknown_flag(command: &str, args: &[String]) -> Option<String> {
+    let flags = flags_of(command)?;
+
+    args.iter()
+        .take_while(|a| *a != "--")
+        .find(|a| a.starts_with("--") && *a != "--help" && !flags.contains(&a.as_str()))
+        .map(|a| {
+            format!(
+                "`{a}` is not an option of `alloy {command}`; alloy {command} --help lists them"
+            )
+        })
+}
+
 pub(crate) fn is_source(path: &str) -> bool {
     path.ends_with(".aly") || path.ends_with(".alx")
 }
@@ -335,5 +390,29 @@ mod tests {
         assert_eq!(search_dir(&["no-such-file.aly".to_string()], cwd), cwd);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An option a command does not take is a failure, not a silent run.
+    /// A flag it does take, an argument after `--`, and `--help` pass.
+    #[test]
+    fn an_option_no_command_takes_reports() {
+        let args =
+            |list: &[&str]| -> Vec<String> { list.iter().map(|a| (*a).to_string()).collect() };
+
+        assert_eq!(
+            unknown_flag("check", &args(&["--json", "src/x.aly"])),
+            Some(
+                "`--json` is not an option of `alloy check`; alloy check --help lists them"
+                    .to_string()
+            )
+        );
+        assert!(unknown_flag("fmt", &args(&["--stdin"])).is_some());
+        assert!(unknown_flag("check", &args(&["--fix", "--strict"])).is_none());
+        assert!(unknown_flag("fmt", &args(&["--check", "src"])).is_none());
+        assert!(unknown_flag("test", &args(&["--run", "--", "--nocolor"])).is_none());
+        assert!(unknown_flag("check", &args(&["--help"])).is_none());
+        // A name no command carries reports itself, so the flags are not
+        // read for it.
+        assert!(unknown_flag("--version", &args(&["--nope"])).is_none());
     }
 }

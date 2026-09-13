@@ -109,7 +109,14 @@ pub fn from_editor(options: &Value) -> Value {
 
     // The Alloy extension decides the Studio plugin: off unless its own
     // setting says so, on its own port, so it never fights the luau-lsp
-    // extension's server for the same one.
+    // extension's server for the same one. luau-lsp reads the legacy
+    // `plugin` key as well as `studioPlugin`, so a user's global
+    // `luau-lsp.plugin.enabled` rode through the section above and bound
+    // the port anyway; that key goes.
+    if let Some(o) = out.as_object_mut() {
+        o.remove("plugin");
+    }
+
     if let Some(plugin) = options.get("studioPlugin") {
         merge(&mut out, &json!({ "studioPlugin": plugin }));
     }
@@ -316,6 +323,20 @@ mod tests {
         );
         assert_eq!(s["studioPlugin"]["enabled"], false);
         assert_eq!(s["studioPlugin"]["port"], 3668);
+    }
+
+    /// `luau-lsp.plugin.enabled` is the legacy spelling luau-lsp still
+    /// reads. Left in the passthrough, it bound the Studio port under a
+    /// second editor and the child died with "already in use".
+    #[test]
+    fn the_legacy_plugin_key_never_reaches_the_child() {
+        let s = from_editor(&json!({ "luauLsp": { "plugin": { "enabled": true, "port": 3667 } } }));
+        assert!(s.get("plugin").is_none(), "{s}");
+        let s = from_editor(
+            &json!({ "luauLsp": { "plugin": { "enabled": true } }, "studioPlugin": { "enabled": false, "port": 3668 } }),
+        );
+        assert!(s.get("plugin").is_none(), "{s}");
+        assert_eq!(s["studioPlugin"]["enabled"], false);
     }
 
     #[test]

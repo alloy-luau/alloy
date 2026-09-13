@@ -2314,3 +2314,58 @@ fn an_aliased_macro_reads_under_the_name_the_file_writes() {
         Some("logit".to_string())
     );
 }
+
+/// Signature help the proxy answers itself. A macro call is gone from
+/// the emit, and a file with an unclosed `(` has no compile at all, so
+/// the shadow stays the Alloy source and the child parses none of it.
+/// That file is the one a reader asking for a signature always has.
+#[test]
+fn a_macro_and_an_unclosed_call_answer_from_the_declaration() {
+    const SRC: &str = concat!(
+        "macro double(x) x * 2 end\n",
+        "\n",
+        "export function generic_id<T>(v: T, extra: number): T\n",
+        "    return v\n",
+        "end\n",
+        "\n",
+        "print(generic_id(1,\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let label = |help: &Value| {
+        help["signatures"][0]["label"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    let params = |help: &Value| {
+        help["signatures"][0]["parameters"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p["label"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<String>>()
+    };
+
+    // Past the comma: the second parameter is the one being written.
+    let help = st.declared_signature_help(uri, 6, 19).expect("the call");
+    assert_eq!(
+        label(&help),
+        "function generic_id<T>(v: T, extra: number): T"
+    );
+    assert_eq!(params(&help), ["v: T", "extra: number"]);
+    assert_eq!(help["activeParameter"], json!(1));
+
+    // A macro reads by its sigil, and its body is no part of the
+    // signature.
+    let (st2, uri2) = super::support::one_file("macro double(x) x * 2 end\n\nprint($double(\n");
+    let help = st2.declared_signature_help(uri2, 2, 14).expect("the call");
+    assert_eq!(label(&help), "macro double(x)");
+    assert_eq!(params(&help), ["x"]);
+    assert_eq!(help["activeParameter"], json!(0));
+
+    // A member of a value stays with the child, which types the
+    // receiver; the proxy reads no declaration for one.
+    let (st3, uri3) = super::support::one_file("local w = 1\nprint(w:combine(\n");
+    assert!(st3.declared_signature_help(uri3, 1, 16).is_none());
+}

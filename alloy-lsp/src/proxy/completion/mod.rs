@@ -308,6 +308,43 @@ impl State {
         }
     }
 
+    /// Signature help from the declaration the call names. Two calls
+    /// reach nothing in the child: a macro call, which the emit expands
+    /// away, and any call in a file the compile could not read, where
+    /// the shadow stays the Alloy source the child cannot parse. An
+    /// unclosed `(` is that file, and it is the file a reader asking for
+    /// signature help always has.
+    pub(crate) fn declared_signature_help(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<Value> {
+        let doc = self.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let (key, active) = open_call(&doc.source, offset)?;
+        // The declaration index reads a parse, and a file with an
+        // unclosed call has none; the source line still has the
+        // signature. A module the file imports answers the same way.
+        let (label, parameters) = std::iter::once(doc.source.as_str())
+            .chain(doc.import_sources.iter().map(String::as_str))
+            .find_map(|src| callable_signature(declared_line(src, &key)?))?;
+        let parameters: Vec<Value> = parameters
+            .into_iter()
+            .map(|p| json!({ "label": p }))
+            .collect();
+
+        Some(json!({
+            "signatures": [{
+                "label": label,
+                "parameters": parameters,
+                "activeParameter": active,
+            }],
+            "activeSignature": 0,
+            "activeParameter": active,
+        }))
+    }
+
     /// Completion items for the extensions on a primitive. The child does
     /// not know them, so the proxy adds them when the receiver is a
     /// string: after `:` when the child listed the string methods, and
@@ -893,4 +930,164 @@ pub(crate) fn clean_completion(
         item["detail"] = json!(detail);
         set_call(item, &label, &detail, snippets);
     }
+}
+
+/// The call the caret sits in: the name in front of the innermost `(`
+/// that is still open, and how many arguments stand before the caret.
+/// `$double(` keeps its sigil, which is how a macro is declared.
+///
+/// `None` when no call is open, or when the name is a member of
+/// something else: the child answers for those.
+pub(crate) fn open_call(src: &str, offset: usize) -> Option<(String, u32)> {
+    let head = &src[..offset.min(src.len())];
+    // One frame per open bracket: where a `(` opened, and how many
+    // commas the level has taken.
+    let mut opens: Vec<(Option<usize>, u32)> = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut chars = head.char_indices();
+
+    while let Some((i, c)) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                }
+            }
+
+            None => match c {
+                '"' | '\'' | '`' => quote = Some(c),
+
+                '-' if head[i..].starts_with("--") => {
+                    let end = head[i..].find('\n').map_or(head.len(), |n| i + n);
+
+                    while chars.as_str().len() > head.len() - end {
+                        chars.next();
+                    }
+                }
+
+                '(' => opens.push((Some(i), 0)),
+                '[' | '{' => opens.push((None, 0)),
+
+                ')' | ']' | '}' => {
+                    opens.pop();
+                }
+
+                ',' => {
+                    if let Some((_, count)) = opens.last_mut() {
+                        *count += 1;
+                    }
+                }
+
+                _ => {}
+            },
+        }
+    }
+
+    let (open, active) = opens
+        .iter()
+        .rev()
+        .find_map(|(open, count)| open.map(|o| (o, *count)))?;
+    let before = head[..open].trim_end();
+
+    if !before.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let (start, end) = keywords::word_range(src, before.len() - 1);
+    let sigil = src[..start].ends_with('$');
+
+    // `w:combine(` and `M.make(` name a member of a value; the child
+    // types the receiver and answers for those.
+    if !sigil && src[..start].ends_with(['.', ':']) {
+        return None;
+    }
+
+    let name = &src[start..end];
+
+    Some((
+        match sigil {
+            true => format!("${name}"),
+
+            false => name.to_string(),
+        },
+        active,
+    ))
+}
+
+/// The line a source declares a callable name on: a `function`, a
+/// `macro`, or a `remote`. `$double` and `double` name the same
+/// declaration; the sigil is how a macro is called.
+pub(crate) fn declared_line<'a>(src: &'a str, key: &str) -> Option<&'a str> {
+    const CALLABLE: [&str; 3] = ["function", "macro", "remote"];
+
+    let name = key.trim_start_matches('$');
+    let lexed = alloy_syntax::lexer::lex(src).ok()?;
+    let toks = &lexed.toks;
+    let at = toks.iter().enumerate().find_map(|(i, t)| {
+        let before = i.checked_sub(1).map(|p| toks[p].text(src))?;
+
+        (t.text(src) == name && CALLABLE.contains(&before)).then_some(t.start as usize)
+    })?;
+    let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = src[at..].find('\n').map_or(src.len(), |i| at + i);
+
+    Some(&src[start..end])
+}
+
+/// The signature a declaration line or hover writes, with its
+/// parameters: the text past the keywords that say where the name goes,
+/// cut to the end of the parameter list. A return type belongs to the
+/// signature; the body of a one-line `macro` does not.
+///
+/// `None` when the text declares nothing a reader calls.
+pub(crate) fn callable_signature(text: &str) -> Option<(String, Vec<String>)> {
+    let line = text.lines().find(|l| !l.starts_with("```"))?.trim();
+    let mut head = line;
+
+    for word in [
+        "export ", "global ", "local ", "private ", "public ", "async ",
+    ] {
+        head = head.strip_prefix(word).unwrap_or(head);
+    }
+
+    let callable = ["function ", "macro ", "remote "]
+        .iter()
+        .any(|k| head.starts_with(k));
+
+    if !callable {
+        return None;
+    }
+
+    let open = head.find('(')?;
+    let mut depth = 0i32;
+    let mut close = None;
+
+    for (i, c) in head[open..].char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+
+            ')' | ']' | '}' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    close = Some(open + i);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let close = close?;
+    let label = match head[close + 1..].trim_start().starts_with(':') {
+        true => head.to_string(),
+
+        false => head[..=close].to_string(),
+    };
+
+    Some((label, payload_types(&head[open..=close])))
 }

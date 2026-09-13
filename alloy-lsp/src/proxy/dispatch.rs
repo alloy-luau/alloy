@@ -1441,6 +1441,23 @@ impl Server {
                 "textDocument/signatureHelp" => {
                     if let Some(uri) = &ctx {
                         st.rewrite_variant_signatures(uri, result);
+
+                        // The child answered nothing: a macro call is
+                        // gone from the emit, and a file with an
+                        // unclosed call has no compile at all, so the
+                        // shadow is the Alloy source. The declaration
+                        // the call names says what it takes.
+                        let empty = result
+                            .pointer("/signatures")
+                            .and_then(Value::as_array)
+                            .is_none_or(Vec::is_empty);
+
+                        if empty
+                            && let Some((line, character)) = position
+                            && let Some(help) = st.declared_signature_help(uri, line, character)
+                        {
+                            *result = help;
+                        }
                     }
                 }
 

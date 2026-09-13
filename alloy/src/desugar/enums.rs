@@ -858,13 +858,13 @@ impl<'s> Desugar<'s> {
                 // A struct has one shape, so a pattern that names one
                 // covers it when each field it names binds. A bare
                 // table pattern tests fields on a value of any shape
-                // and covers nothing.
+                // and covers nothing. One arm that tests a literal
+                // field covers nothing on its own, so the scan reads
+                // the next arm instead of answering for the column.
                 Pattern::Struct { .. } => {
-                    if !self.struct_pattern_covers(p) {
-                        return false;
+                    if self.struct_pattern_covers(p) {
+                        return true;
                     }
-
-                    return true;
                 }
 
                 _ => return false,

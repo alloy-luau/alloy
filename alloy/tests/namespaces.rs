@@ -634,3 +634,62 @@ fn a_struct_pattern_covers_its_shape() {
         "struct Damage as\n    amount: number\nend\n\nenum Hit as\n    Critical(Damage)\n    Normal(Damage)\nend\n\nlocal hit = Hit.Normal(new Damage { amount = 1 })\nlocal r = match hit with\n    case Critical(Damage { amount }) then amount\n    case Normal(d) then d.amount\nend\n\nprint(r)\n",
     );
 }
+
+/// Arm order said whether a struct match covered. A specific arm in
+/// front of a general one reported a match that every value reaches.
+#[test]
+fn a_struct_match_covers_in_either_arm_order() {
+    let specific_first = "struct Point as\n    x: number\n    y: number\nend\n\nlocal function describe(pt: Point): string\n    return match pt with\n        case Point { x = 0, y = 0 } then \"origin\"\n        case Point { x = x, y = y } then `({x}, {y})`\n    end\nend\n\nprint(describe)\n";
+    let general_first = "struct Point as\n    x: number\n    y: number\nend\n\nlocal function describe(pt: Point): string\n    return match pt with\n        case Point { x = x, y = y } then `({x}, {y})`\n        case Point { x = 0, y = 0 } then \"origin\"\n    end\nend\n\nprint(describe)\n";
+    clean(specific_first);
+    clean(general_first);
+}
+
+/// Literal fields in every arm cover nothing, so the report stands.
+#[test]
+fn a_struct_match_of_literals_alone_is_not_exhaustive() {
+    let hits = messages(
+        "struct Point as\n    x: number\n    y: number\nend\n\nlocal function describe(pt: Point): string\n    return match pt with\n        case Point { x = 0, y = 0 } then \"origin\"\n        case Point { x = 1, y = 1 } then \"one\"\n    end\nend\n\nprint(describe)\n",
+    );
+    assert!(
+        hits.iter().any(|m| m.contains("not exhaustive")),
+        "{hits:?}"
+    );
+}
+
+/// A `.d.aly` returns no module, so the namespace table had to become an
+/// ambient name; its `declare` members leaked into the bare scope.
+#[test]
+fn a_definitions_namespace_declares_itself_and_keeps_its_members() {
+    let options = alloy::EmitOptions {
+        file_name: "e.d.aly".to_string(),
+        definitions: true,
+        ..alloy::EmitOptions::default()
+    };
+    let src = "export type Profile = { id: number }\n\nexport namespace Store as\n    declare function get_id(profile: Profile): number\n    public const VERSION = 1\nend\n";
+    let out = alloy::compile_with(src, &options).unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert_eq!(out.check.lines().count(), src.lines().count());
+    assert!(
+        out.check.contains("declare Store: typeof(Store)"),
+        "{}",
+        out.check
+    );
+    // The member is a local slot of its own, never a bare declaration.
+    assert!(
+        out.check
+            .contains("local Store_get_id: (profile: Profile) -> number"),
+        "{}",
+        out.check
+    );
+    assert!(
+        !out.check.contains("declare function get_id"),
+        "{}",
+        out.check
+    );
+    assert!(
+        out.check.contains("Store.get_id = Store_get_id"),
+        "{}",
+        out.check
+    );
+}

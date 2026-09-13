@@ -1648,6 +1648,10 @@ impl Server {
                         }
 
                         st.filter_remote_members(uri, line, character, result);
+                        // A static of an `impl` sits on the same table as
+                        // the methods, so the child offers it after a
+                        // `self.` where no `self` can call it.
+                        st.drop_impl_statics(uri, line, character, result);
                         // After the merge: the child's rows and the
                         // proxy's own read alike, so one pass marks
                         // every deprecated row and hides what the

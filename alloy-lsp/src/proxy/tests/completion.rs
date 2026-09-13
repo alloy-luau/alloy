@@ -2238,3 +2238,35 @@ fn an_impl_of_an_imported_struct_lists_its_own_methods() {
             .is_empty()
     );
 }
+
+/// The child offers a static after a `self.`: the emit writes a method
+/// with no receiver on the same table as the methods that take one.
+#[test]
+fn a_static_never_follows_self() {
+    let block = concat!(
+        "struct Widget as\n",
+        "    w: number\n",
+        "end\n",
+        "\n",
+        "impl Widget as\n",
+        "    function zero(): Widget\n",
+        "        return new Widget { w = 0 }\n",
+        "    end\n",
+        "\n",
+        "    function inst(self): number\n",
+        "        return self.w\n",
+        "    end\n",
+        "end\n",
+    );
+    let st = files(&[("file:///widget.aly", block)]);
+    let mut result = json!([{ "label": "zero" }, { "label": "inst" }, { "label": "w" }]);
+    st.drop_impl_statics("file:///widget.aly", 10, 20, &mut result);
+
+    assert_eq!(result, json!([{ "label": "inst" }, { "label": "w" }]));
+
+    // `Widget.zero()` still reaches it: the filter reads the `self.`.
+    let mut whole = json!([{ "label": "zero" }]);
+    st.drop_impl_statics("file:///widget.aly", 5, 12, &mut whole);
+
+    assert_eq!(whole, json!([{ "label": "zero" }]));
+}

@@ -53,32 +53,14 @@ impl State {
         character: u32,
         result: &Value,
     ) -> Vec<Value> {
-        let Some(doc) = self.docs.get(uri) else {
+        let Some((target, methods)) = self.self_impl_methods(uri, line, character) else {
             return Vec::new();
         };
-        let Some(offset) = offset_of(&doc.source, line, character) else {
-            return Vec::new();
-        };
-
-        if !takes_a_self_member(&doc.source, offset) {
-            return Vec::new();
-        }
-
-        let Some(target) = context::impl_target(&doc.source, offset) else {
-            return Vec::new();
-        };
-        // A private method belongs to the impl alone, so it comes from
-        // this file and no other.
-        let mut methods = impl_methods(&doc.source, &target, true);
-
-        // Another file's `impl` of the same struct writes on the same
-        // table, and an exported one reaches every file.
-        for (u, other) in &self.docs {
-            if u != uri {
-                methods.extend(impl_methods(&other.source, &target, false));
-            }
-        }
-
+        let methods: Vec<(String, String)> = methods
+            .into_iter()
+            .filter(|(_, _, takes_self)| *takes_self)
+            .map(|(label, detail, _)| (label, detail))
+            .collect();
         let mut taken: Vec<String> = result
             .get("items")
             .and_then(Value::as_array)
@@ -113,6 +95,79 @@ impl State {
         }
 
         items
+    }
+
+    /// The methods of every `impl` of the struct the `self.` at a
+    /// position belongs to, with whether each takes a receiver. `None`
+    /// when the position follows no `self.` or `self:`.
+    fn self_impl_methods(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<(String, Vec<ImplMethod>)> {
+        let doc = self.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+
+        if !takes_a_self_member(&doc.source, offset) {
+            return None;
+        }
+
+        let target = context::impl_target(&doc.source, offset)?;
+        // A private method belongs to the impl alone, so it comes from
+        // this file and no other.
+        let mut methods = impl_methods(&doc.source, &target, true);
+
+        // Another file's `impl` of the same struct writes on the same
+        // table, and an exported one reaches every file.
+        for (u, other) in &self.docs {
+            if u != uri {
+                methods.extend(impl_methods(&other.source, &target, false));
+            }
+        }
+
+        Some((target, methods))
+    }
+
+    /// Drops the statics of an `impl` from a list after `self.`. The emit
+    /// writes a method with no receiver on the same table as the rest, so
+    /// the child offers it where no `self` can call it.
+    pub(crate) fn drop_impl_statics(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let Some((_, methods)) = self.self_impl_methods(uri, line, character) else {
+            return;
+        };
+        let statics: Vec<String> = methods
+            .into_iter()
+            .filter(|(_, _, takes_self)| !takes_self)
+            .map(|(label, _, _)| label)
+            .collect();
+
+        if statics.is_empty() {
+            return;
+        }
+
+        let items = match result {
+            Value::Array(v) => v,
+
+            Value::Object(o) => match o.get_mut("items").and_then(Value::as_array_mut) {
+                Some(v) => v,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+        items.retain(|i| {
+            !i.get("label")
+                .and_then(Value::as_str)
+                .is_some_and(|l| statics.iter().any(|s| s == l))
+        });
     }
 
     /// The members a dotted value path reaches, for a path the child
@@ -899,10 +954,14 @@ fn takes_a_self_member(source: &str, offset: usize) -> bool {
     &head[from..sigil] == "self"
 }
 
-/// The methods every `impl` of a struct writes, each as its label and
-/// the signature the source wrote. A method with no receiver is a
-/// static, which no `self.` reaches.
-fn impl_methods(source: &str, target: &str, private_too: bool) -> Vec<(String, String)> {
+/// One method of an `impl`: its label, the signature the source wrote,
+/// and whether it takes a receiver.
+type ImplMethod = (String, String, bool);
+
+/// The methods every `impl` of a struct writes, each as its label, the
+/// signature the source wrote, and whether it takes a receiver. A method
+/// with no receiver is a static, which no `self.` reaches.
+fn impl_methods(source: &str, target: &str, private_too: bool) -> Vec<ImplMethod> {
     let mut out = Vec::new();
     let mut inside = false;
 
@@ -949,11 +1008,11 @@ fn impl_methods(source: &str, target: &str, private_too: bool) -> Vec<(String, S
 
         let signature = &rest[label.len()..];
 
-        if (private && !private_too) || !signature.contains("(self") {
+        if private && !private_too {
             continue;
         }
 
-        out.push((label, as_type(signature)));
+        out.push((label, as_type(signature), signature.contains("(self")));
     }
 
     out

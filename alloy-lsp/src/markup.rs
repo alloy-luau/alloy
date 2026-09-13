@@ -59,38 +59,9 @@ fn opens_markup(src: &str, lt: usize) -> bool {
     )
 }
 
-/// Where the first statement of its own starts after `lt`. A tag holds
-/// no such line: its attributes and its holes sit indented inside it,
-/// so a line that opens a statement at column zero ends an unfinished
-/// tag. Without the bound one broken tag reaches the rest of the file,
-/// and every later `.` completes that tag's attributes.
-fn statement_line_after(src: &str, lt: usize) -> Option<usize> {
-    const HEADS: [&str; 12] = [
-        "function", "local", "end", "return", "if", "while", "for", "export", "import", "struct",
-        "trait", "enum",
-    ];
-    let mut at = lt + src[lt..].find('\n')? + 1;
-
-    while at < src.len() {
-        let line = src[at..].split('\n').next().unwrap_or_default();
-        let opens = HEADS.iter().any(|head| {
-            line.strip_prefix(head)
-                .is_some_and(|rest| !rest.starts_with(is_name_char))
-        });
-
-        if opens {
-            return Some(at);
-        }
-
-        at += line.len() + 1;
-    }
-
-    None
-}
-
 /// Whether a statement of its own stands between `lt` and `offset`.
 fn statement_between(src: &str, lt: usize, offset: usize) -> bool {
-    statement_line_after(src, lt).is_some_and(|at| at < offset)
+    alloy::luaux::markup::statement_line_after(src, lt).is_some_and(|at| at < offset)
 }
 
 /// The markup regions read from the text, for a file whose span scan
@@ -113,7 +84,7 @@ pub fn recovered_spans(src: &str) -> Vec<(usize, usize)> {
         let end = match alloy::luaux::markup::parse_node(src, lt) {
             Ok((_, end)) => end,
 
-            Err(_) => statement_line_after(src, lt).unwrap_or(src.len()),
+            Err(_) => alloy::luaux::markup::statement_line_after(src, lt).unwrap_or(src.len()),
         };
 
         if end <= lt {

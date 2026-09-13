@@ -23,6 +23,49 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/*
+Whether `at` opens a line that starts a statement of its own.
+
+A tag keeps its attributes and its holes inside it, indented under the
+`<`. A line that opens a statement at column zero belongs to the code
+around the tag, so a tag whose attribute list reaches one is unclosed
+and the report belongs at the `<`, not wherever the walk ran out of
+names.
+*/
+pub fn opens_a_statement_line(src: &str, at: usize) -> bool {
+    const HEADS: [&str; 12] = [
+        "function", "local", "end", "return", "if", "while", "for", "export", "import", "struct",
+        "trait", "enum",
+    ];
+
+    if at != 0 && !src[..at.min(src.len())].ends_with('\n') {
+        return false;
+    }
+
+    let line = src[at.min(src.len())..].split('\n').next().unwrap_or("");
+
+    HEADS.iter().any(|head| {
+        line.strip_prefix(head)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+    })
+}
+
+/// Where the first statement of its own starts after `lt`, for a caller
+/// that bounds an unfinished tag.
+pub fn statement_line_after(src: &str, lt: usize) -> Option<usize> {
+    let mut at = lt + src[lt..].find('\n')? + 1;
+
+    while at < src.len() {
+        if opens_a_statement_line(src, at) {
+            return Some(at);
+        }
+
+        at += src[at..].split('\n').next().unwrap_or("").len() + 1;
+    }
+
+    None
+}
+
 /// Parses one LuauX node starting at `start`, which must be a `<`.
 /// Returns the node and the offset just past it.
 pub fn parse_node(src: &str, start: usize) -> Result<(Node, usize), ParseError> {
@@ -97,7 +140,7 @@ impl<'a> Parser<'a> {
         }
 
         let name = self.parse_element_name()?;
-        let attributes = self.parse_attributes()?;
+        let attributes = self.parse_attributes(start)?;
 
         if self.at("/>") {
             self.pos += 2;
@@ -168,7 +211,7 @@ impl<'a> Parser<'a> {
         Ok(self.src[start..self.pos].to_string())
     }
 
-    fn parse_attributes(&mut self) -> Result<Vec<Attribute>, ParseError> {
+    fn parse_attributes(&mut self, tag: usize) -> Result<Vec<Attribute>, ParseError> {
         let mut attributes = Vec::new();
 
         loop {
@@ -176,6 +219,14 @@ impl<'a> Parser<'a> {
 
             if self.at("/>") || self.at(">") || self.byte().is_none() {
                 return Ok(attributes);
+            }
+
+            // The list ran past the tag into the code under it. Every
+            // word from here on is someone else's, and reading them as
+            // attributes moves the report to whatever line runs out of
+            // names first.
+            if opens_a_statement_line(self.src, self.pos) {
+                return self.error_at("expected `>` or `/>` to close the tag", tag);
             }
 
             let start = self.pos;
@@ -268,7 +319,7 @@ impl<'a> Parser<'a> {
                 loop {
                     match self.byte() {
                         None | Some(b'\n') => {
-                            return self.error_at("unterminated attribute string", start)
+                            return self.error_at("unterminated attribute string", start);
                         }
                         // Skip the escape without interpreting it; Luau will.
                         // Step over the backslash, then over one whole
@@ -869,5 +920,33 @@ mod tests {
     fn stops_at_the_end_of_the_node() {
         let (_, end) = parse_node("local x = <Frame/> + 1", 10).expect("parse");
         assert_eq!(end, 18);
+    }
+
+    /// An unclosed tag reports at its `<`. The attribute walk once read
+    /// the code under the tag as names, so the report landed wherever
+    /// those ran out.
+    #[test]
+    fn an_unclosed_tag_reports_at_its_opening() {
+        let src = concat!(
+            "local function Broken()\n",
+            "    return <Frame Size={1}\n",
+            "end\n",
+            "\n",
+            "local function After(x: number)\n",
+            "    return x\n",
+            "end\n",
+        );
+        let lt = src.find('<').expect("`<`");
+        let error = parse_node(src, lt).expect_err("should fail");
+        assert_eq!(error.offset, lt, "{}", error.message);
+        assert!(error.message.contains("close the tag"), "{}", error.message);
+
+        // The bound is the line that opens a statement, not any newline.
+        assert!(opens_a_statement_line(src, src.find("end\n").expect("end")));
+        assert!(!opens_a_statement_line(
+            src,
+            src.find("    return").expect("return")
+        ));
+        assert_eq!(statement_line_after(src, lt), src.find("end\n"));
     }
 }

@@ -2058,8 +2058,13 @@ alloy.Iter = Iter
 -- Operators and sugar.
 -- ---------------------------------------------------------------------------
 
+--- What `in` accepts on its right: a string read by substring, or a
+--- table read by key, which covers an Array, a Set, a HashMap, a struct,
+--- and a record. A number or a boolean has nothing to search.
+export type Container = string | {}
+
 --- `x in t`, dispatched on the container.
-function alloy.contains(container: any, value: any): boolean
+function alloy.contains(container: Container, value: any): boolean
 	if type(container) == "string" then
 		return string.find(container :: string, tostring(value), 1, true) ~= nil
 	end

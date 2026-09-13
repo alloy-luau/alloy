@@ -358,6 +358,45 @@ fn analyze(src: &str, name: &str) {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
+/// `in` on a value that is no container compiled clean and threw inside
+/// the std at run time.
+#[test]
+fn in_on_a_value_that_is_no_container_reports() {
+    let bad = "local n = 5\nlocal found = 1 in n\nprint(found)\n";
+    let Some(reported) = reports(bad, "in-bad") else {
+        return;
+    };
+    assert!(
+        reported.iter().any(|l| l.contains("but got 'number'")),
+        "{reported:?}"
+    );
+
+    // Every container the std dispatches on still passes.
+    let good = "struct Rec as\n    x: number\nend\n\nlocal arr = [ 1, 2 ]\nlocal st: Set<string> = Set.new()\nlocal hm: HashMap<string, number> = HashMap.new()\nlocal rec = new Rec { x = 1 }\nlocal raw = { a = 1 }\nprint(1 in arr, \"x\" in st, \"k\" in hm, \"h\" in \"hello\", \"x\" in rec, \"a\" in raw)\n";
+    analyze(good, "in-good");
+}
+
+/// `satisfies` emitted a `::`, which casts either way, so a literal that
+/// leaves a key of `T` out went through.
+#[test]
+fn satisfies_reports_a_key_the_literal_leaves_out() {
+    let missing = "local shape = { x = 0 } satisfies { x: number, y: number }\nprint(shape)\n";
+    let Some(reported) = reports(missing, "satisfies-missing") else {
+        return;
+    };
+    assert!(
+        reported.iter().any(|l| l.contains("missing field 'y'")),
+        "{reported:?}"
+    );
+
+    // A literal that covers `T` passes, and an Alloy spelling in `T`
+    // lowers the way a declaration's does.
+    analyze(
+        "local shape = { x = 0, y = 1 } satisfies { x: number, y: number }\nlocal list = { xs = [ 1 ] } satisfies { xs: number[] }\nprint(shape, list)\n",
+        "satisfies-good",
+    );
+}
+
 /// `unwrap_or` on a mapped Result answered `any`, so a fallback of
 /// another type named neither side.
 #[test]

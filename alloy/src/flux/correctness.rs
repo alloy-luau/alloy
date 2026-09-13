@@ -982,6 +982,26 @@ mod tests {
         );
     }
 
+    /// A `return` whose value spans several lines is one statement, so
+    /// no line of it is code after the jump. The broken form of a long
+    /// `if` expression is the shape `alloy fmt` writes.
+    #[test]
+    fn a_return_over_several_lines_stays_clean() {
+        let broken = "local function f(n: number): string\n    return if n == 1 then\n        \"one\"\n        elseif n == 2 then\n        \"two\"\n        else\n        \"other\"\nend\n";
+        assert_eq!(names(broken), Vec::<&str>::new());
+
+        let table_and_call = "local function g(a: number)\n    return {\n        value = a,\n        name = tostring(\n            a\n        ),\n    }\nend\n";
+        assert_eq!(names(table_and_call), Vec::<&str>::new());
+
+        // A real statement after the jump still fires.
+        assert_eq!(
+            names(
+                "local function h(n: number): string\n    return if n == 1 then\n        \"one\"\n        else\n        \"other\"\n    print(n)\nend\n"
+            ),
+            vec!["unreachable_code"]
+        );
+    }
+
     #[test]
     fn a_literal_condition_fires() {
         assert_eq!(

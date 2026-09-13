@@ -462,15 +462,38 @@ impl<'s> Scan<'s> {
 
     /// The exclusive end of the statement that starts at `i`: the next
     /// token on a later line that does not continue the expression, a
-    /// `;`, or a closer. A block opener inside it skips to its `end`.
+    /// `;`, or a closer. A block opener inside it skips to its `end`,
+    /// and an `if` expression runs to the end of its `else` branch.
     pub(crate) fn statement_end(&self, i: usize) -> usize {
         let mut j = i + 1;
         let mut depth = 0i32;
+        // The `if` expressions still waiting for an `else`, and whether
+        // the `else` branch of one is open. A long `if` expression sits
+        // on several lines, so the tokens say where it ends; the lines
+        // do not.
+        let mut open_ifs = 0usize;
+        let mut else_branch = false;
 
         while j < self.toks.len() {
             let text = self.t(j);
 
             if depth == 0 {
+                if text == "if" && !self.is_statement_if(j) {
+                    open_ifs += 1;
+                } else if open_ifs > 0 && matches!(text, "else" | "elseif") {
+                    // The `else` or `elseif` of the expression, not of a
+                    // block: it ends no statement, and the branch below
+                    // it continues this one.
+                    if text == "else" {
+                        open_ifs -= 1;
+                        else_branch = true;
+                    }
+
+                    j += 1;
+
+                    continue;
+                }
+
                 if CLOSERS.contains(&text) || text == ";" {
                     return j;
                 }
@@ -504,7 +527,8 @@ impl<'s> Scan<'s> {
                             | ":"
                             | "??"
                             | "."
-                    ) || matches!(text, "." | ":" | "?." | "?:");
+                    ) || matches!(text, "." | ":" | "?." | "?:")
+                        || ((open_ifs > 0 || else_branch) && matches!(prev, "then" | "else"));
 
                     if !continues {
                         return j;

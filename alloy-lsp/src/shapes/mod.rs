@@ -2280,39 +2280,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-mod dbg2 {
-    use super::*;
-
-    #[test]
-    fn debug_enum_payload() {
-        let known = Known {
-            shapes: vec![
-                Shape::Struct {
-                    name: "Scope2".into(),
-                    fields: vec![("tag".into(), false)],
-                    generics: vec![],
-                    types: vec!["string".into()],
-                },
-                Shape::Enum {
-                    name: "Shape".into(),
-                    variants: vec![
-                        ("Circle".into(), vec!["number".into()]),
-                        ("Rect".into(), vec!["number".into(), "number".into()]),
-                        ("Empty".into(), vec![]),
-                    ],
-                },
-            ],
-            interfaces: Vec::new(),
-            namespaces: Vec::new(),
-            tables: Vec::new(),
-        };
-        let text = "Key 'area' is missing from 'string' in the type '\"Empty\" | { _1: number, tag: \"Circle\" } | { _1: number, _2: number, tag: \"Rect\" }'";
-        println!("OUT: {:?}", fold(text, &known));
-        println!(
-            "NOB: {:?}",
-            name_of_body("{ _1: number, tag: \"Circle\" }", &known)
-        );
-    }
-}

@@ -738,5 +738,8 @@ pub(crate) fn self_inside_a_trait_default_method_names_the_trait() {
 
     assert_eq!(hover_of(src, 4, 25, "local self: any"), "self: Shape");
     // The `impl` below still names the struct it is for.
-    assert_eq!(hover_of(src, 14, 20, "local self: any"), "local self: Circle");
+    assert_eq!(
+        hover_of(src, 14, 20, "local self: any"),
+        "local self: Circle"
+    );
 }

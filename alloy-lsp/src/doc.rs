@@ -185,6 +185,14 @@ fn dangling_members(source: &str) -> Vec<(usize, &'static str)> {
         let (fill, member) = match tok.kind {
             TokKind::Dot | TokKind::Colon => (HOLE, true),
 
+            // `a ??` wants a value after it the way `a.` wants a name,
+            // and one dangling `??` stopped the repair for the whole
+            // file. The lexer reads the pair as two `?`, so the spot is
+            // the second one when the first sits right against it.
+            TokKind::Symbol if tok.text(source) == "?" && follows_a_question(&lexed, source, i) => {
+                (HOLE, true)
+            }
+
             TokKind::Symbol if tok.text(source) == "[" => (BRACKET_HOLE, false),
 
             _ => continue,
@@ -207,6 +215,18 @@ fn dangling_members(source: &str) -> Vec<(usize, &'static str)> {
     }
 
     spots
+}
+
+/// Whether the token at `i` closes a `??`: the token before it is a `?`
+/// with no byte between the two.
+fn follows_a_question(lexed: &alloy_syntax::lexer::Lexed, source: &str, i: usize) -> bool {
+    i.checked_sub(1)
+        .and_then(|k| lexed.toks.get(k))
+        .is_some_and(|prev| {
+            matches!(prev.kind, TokKind::Symbol)
+                && prev.text(source) == "?"
+                && prev.end == lexed.toks[i].start
+        })
 }
 
 /// The source with a placeholder after every dangling access operator,
@@ -770,6 +790,39 @@ mod tests {
         );
         assert!(doc.repair.is_none());
         assert!(dangling_members(src).is_empty());
+    }
+
+    /// `a ??` wants a value the way `a.` wants a name. One dangling
+    /// `??` on a line of its own stopped the repair for the whole file,
+    /// and a `b?.` in another function then fell through to the global
+    /// scope.
+    #[test]
+    fn a_dangling_coalesce_repairs_too() {
+        let src = "local n = 1
+local r = n ??
+print(r)
+";
+
+        assert_eq!(dangling_members(src), vec![(26, HOLE)]);
+
+        // An optional type and a guarded access carry a `?` of their
+        // own, and neither one wants a value after it.
+        assert!(
+            dangling_members(
+                "local b: number? = nil
+print(b)
+"
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            dangling_members(
+                "local b: { v: number }? = nil
+local r = b?.
+"
+            ),
+            vec![(43, HOLE)]
+        );
     }
 
     /// A `.` inside a string, a comment, or a number is no operator.

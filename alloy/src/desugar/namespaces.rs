@@ -280,7 +280,7 @@ impl<'s> Desugar<'s> {
             for m in &ns.members {
                 let private = m.is_private(self.src, self.toks);
 
-                for b in member_bindings(m) {
+                for b in member_bindings(m, self.src, self.toks) {
                     let member = self.text_of(b.name).to_string();
                     let rendered = match b.nested {
                         true => format!("{path}.{member}"),
@@ -785,6 +785,17 @@ impl<'s> Desugar<'s> {
         // The closing `end` has nothing to close.
         self.blank_lines(end_tok.start, end_tok.end);
 
+        // A definitions file returns no module, so a `local` table
+        // reaches no other file. The closing line declares the name
+        // ambient, which is what the group means in a `.d.aly`. A
+        // nested one travels as a field of the outermost table.
+        if self.options.definitions && info.parent.is_none() {
+            self.generate(
+                end_tok.start,
+                &format!("declare {0}: typeof({0})", info.path),
+            );
+        }
+
         if ns.exported {
             self.exports.push((info.name.clone(), info.path.clone()));
         }
@@ -807,7 +818,7 @@ impl<'s> Desugar<'s> {
 
         // A declaration whose head copies from source takes the prefix
         // as an insert; one whose head is generated reads `decl_name`.
-        for b in member_bindings(m) {
+        for b in member_bindings(m, self.src, self.toks) {
             if !b.prefixed || !copies_its_name(m.stmt.under_default()) {
                 continue;
             }
@@ -839,7 +850,42 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        self.stmt(&m.stmt);
+        // `declare function f(p: P): R` inside a namespace has no body
+        // to render, so it becomes the local slot the table reads:
+        // `local Name_f: (p: P) -> R`. Copying the type from the source
+        // keeps the rewrite a namespace type asks for.
+        let declared = match m.stmt.under_default() {
+            Stmt::Declare(d) => declare_head(d.span, self.src, self.toks),
+
+            _ => None,
+        };
+
+        if let Some(h) = declared {
+            let name_start = self.byte_start(h.name);
+
+            self.generate(stmt_start, "local ");
+            self.generate(name_start, &info.prefix);
+            self.copy(name_start, self.byte_end(h.name));
+            self.generate(self.byte_end(h.name), ": ");
+            self.copy(self.byte_start(h.ty), self.byte_end(h.ty));
+
+            match h.ret {
+                Some(r) => {
+                    self.generate(self.byte_end(h.ty), " -> ");
+                    self.copy(self.byte_start(r), self.byte_end(r));
+                }
+
+                // A `declare function` with no return type returns
+                // nothing, the way Luau reads the same head.
+                None if h.ret.is_none() && self.text_of(h.ty).starts_with('(') => {
+                    self.generate(self.byte_end(h.ty), " -> ()");
+                }
+
+                None => {}
+            }
+        } else {
+            self.stmt(&m.stmt);
+        }
 
         // The table takes every public member that binds a value. A
         // private one stays a local, so `Math.helper` finds nothing at
@@ -847,7 +893,7 @@ impl<'s> Desugar<'s> {
         let mut tail = String::new();
         let private = m.is_private(self.src, self.toks);
 
-        for b in member_bindings(m) {
+        for b in member_bindings(m, self.src, self.toks) {
             if !b.value || b.nested || private {
                 continue;
             }
@@ -907,6 +953,77 @@ fn copies_its_name(stmt: &Stmt) -> bool {
     )
 }
 
+/// The parts of a `declare` member: the name it binds, the type text
+/// that follows it, and whether the source spelled it as a function.
+/// `declare class` and `declare extern type` name a type with no value,
+/// so neither is a member and both answer `None`.
+pub(crate) struct DeclareHead {
+    pub name: TokSpan,
+    /// `(params)` of a `declare function`, or the type of `declare x: T`.
+    pub ty: TokSpan,
+    /// The return type of a `declare function`, when it writes one.
+    pub ret: Option<TokSpan>,
+}
+
+pub(crate) fn declare_head(
+    span: TokSpan,
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+) -> Option<DeclareHead> {
+    let text = |i: usize| match toks.get(i) {
+        Some(t) => &src[t.start as usize..t.end as usize],
+
+        None => "",
+    };
+    let first = span.start as usize;
+    let last = span.end as usize;
+
+    if text(first + 1) != "function" {
+        // `declare x: T`.
+        return (text(first + 2) == ":" && first + 3 < last).then(|| DeclareHead {
+            name: TokSpan::new(first + 1, first + 2),
+            ty: TokSpan::new(first + 3, last),
+            ret: None,
+        });
+    }
+
+    let name = TokSpan::new(first + 2, first + 3);
+    // The parameter list ends where the paren depth returns to zero.
+    // The `:` after it opens the return type.
+    let mut depth = 0usize;
+    let mut close = None;
+
+    for i in name.end as usize..last {
+        match text(i) {
+            "(" => depth += 1,
+
+            ")" => {
+                depth -= 1;
+
+                if depth == 0 {
+                    close = Some(i);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let close = close?;
+
+    Some(DeclareHead {
+        name,
+        ty: TokSpan::new(name.end as usize, close + 1),
+        ret: match text(close + 1) == ":" && close + 2 < last {
+            true => Some(TokSpan::new(close + 2, last)),
+
+            false => None,
+        },
+    })
+}
+
 /// One name a namespace member binds.
 pub(crate) struct MemberBinding {
     pub name: TokSpan,
@@ -932,8 +1049,20 @@ fn binds(name: TokSpan, value: bool, ty: bool) -> MemberBinding {
 }
 
 /// Every name a member binds.
-pub(crate) fn member_bindings(m: &NamespaceMember) -> Vec<MemberBinding> {
+pub(crate) fn member_bindings(
+    m: &NamespaceMember,
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+) -> Vec<MemberBinding> {
     match m.stmt.under_default() {
+        // `declare function f(...)` and `declare x: T` in a `.d.aly`
+        // name a member the checker reads. The emit gives each one a
+        // local of its own, the way every other member goes.
+        Stmt::Declare(d) => declare_head(d.span, src, toks)
+            .map(|h| binds(h.name, true, false))
+            .into_iter()
+            .collect(),
+
         Stmt::Function(f) if f.path.len() == 1 => vec![binds(f.path[0], true, false)],
 
         Stmt::LocalFunction(f) => vec![binds(f.name, true, false)],

@@ -378,13 +378,15 @@ pub(crate) fn import_alias_source(src: &str, bound: &str) -> Option<String> {
 /// Whether the file binds a name as a value of its own, `local Point`
 /// or `const Point`. A declaration of that name in another file says
 /// nothing about the binding the caret sits on.
+///
+/// `export` and `global` stand in front of the keyword that binds, so
+/// the test reads every word of the prefix and not the first alone.
 pub(crate) fn binds_a_value(bindings: &[alloy::declarations::Binding], name: &str) -> bool {
     bindings.iter().any(|b| {
         b.name == name
-            && matches!(
-                b.prefix.split_whitespace().next(),
-                Some("local") | Some("const")
-            )
+            && b.prefix
+                .split_whitespace()
+                .any(|word| matches!(word, "local" | "const"))
     })
 }
 
@@ -404,6 +406,11 @@ mod tests {
         // workspace still answers for it.
         assert!(!binds_a_value(&bindings, "Vec2"));
         assert!(!binds_a_value(&bindings, "nothing"));
+
+        // `export local Size = 42` binds `Size` here. Another file's
+        // `export type Size` says nothing about it.
+        let exported = alloy::declarations::bindings("export local Size = 42\n");
+        assert!(binds_a_value(&exported, "Size"));
     }
 }
 

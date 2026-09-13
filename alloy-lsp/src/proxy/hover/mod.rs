@@ -7,7 +7,7 @@ mod members;
 mod modules;
 mod restyle;
 
-pub(crate) use declarations::{case_binding_text, import_alias_source};
+pub(crate) use declarations::{binds_a_value, case_binding_text, import_alias_source};
 pub(crate) use fields::{
     declared_field_hover, declared_parameter_hover, declared_type_parameters_of, field_key,
     foreign_method_hover, function_name_of, remote_parameter_hover, used_field_hover,

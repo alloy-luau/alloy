@@ -374,18 +374,24 @@ impl Server {
             word.to_string()
         };
 
+        // `export local Size = 42` binds the name here. Another file's
+        // `Size` is a declaration of its own and says nothing about the
+        // binding the caret sits on, so the child answers for this one.
+        let bound_here = binds_a_value(&doc.bindings, &key);
         let found = doc
             .decls
             .iter()
             .find(|d| d.name == key)
             .map(|d| (uri.to_string(), doc, d))
             .or_else(|| {
-                st.docs.iter().find_map(|(u, d)| {
-                    d.decls
-                        .iter()
-                        .find(|x| x.name == key)
-                        .map(|x| (u.clone(), d, x))
-                })
+                (!bound_here).then(|| {
+                    st.docs.iter().find_map(|(u, d)| {
+                        d.decls
+                            .iter()
+                            .find(|x| x.name == key)
+                            .map(|x| (u.clone(), d, x))
+                    })
+                })?
             });
 
         let Some((target_uri, target_doc, decl)) = found else {

@@ -70,6 +70,9 @@ pub fn kind_for(message: &str) -> &'static str {
         ),
         (&["attribute", "derive"], "AttributeError"),
         (&["data file"], "DataError"),
+        // A module the importer names that the parser cannot read. The
+        // words of the report name neither `import` nor `module`.
+        (&["does not parse"], "ImportError"),
         (&["import", "export", "require", "module"], "ImportError"),
         // A bound on a generic. Before the trait rule: the report names
         // the trait the bound asks for, and it is about the argument.
@@ -150,6 +153,7 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         (&["variant", "enum"], "3.4"),
         (&["async", "await", "try", "future"], "3.3"),
         (&["data file", ".json", ".toml"], "5.11"),
+        (&["does not parse"], "3.2"),
         (&["import", "export", "require", "module"], "3.2"),
         (&["extension", "foreign", "primitive"], "3.9"),
         (

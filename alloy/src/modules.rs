@@ -1764,6 +1764,10 @@ struct Surface {
     /// time: `export type`, `export interface`. A bare import of one
     /// binds the type alone, so the returned table needs no key for it.
     type_only_names: Vec<String>,
+    /// The module does not parse, so its surface says nothing. A single
+    /// file's check compiles the importer alone and would report
+    /// nothing at all.
+    broken: bool,
 }
 
 impl Surface {
@@ -1772,6 +1776,8 @@ impl Surface {
         let both = returns && exports_values(source);
 
         Surface {
+            broken: alloy_syntax::parse_lenient(source, Default::default())
+                .map_or(true, |p| !p.diagnostics.is_empty()),
             names: exported_names(source),
             attributes: exported_attribute_decls(source)
                 .into_iter()
@@ -2007,7 +2013,31 @@ pub fn import_problems(
             both,
             keys,
             type_only_names,
+            broken,
         } = surface;
+
+        // A module that does not parse exports nothing this file can
+        // read, so every check below would report the whole list of its
+        // names as missing. The file it names is the one to fix.
+        // A `.alx` holds markup, which the plain parser has no reading
+        // for, and a `.d.aly` parses under its own options. The surface
+        // reader takes both apart another way.
+        let plain_alloy = target.as_ref().is_some_and(|t| {
+            let name = t.to_string_lossy();
+
+            name.ends_with(".aly") && !name.ends_with(".d.aly")
+        });
+
+        if broken && alloy_module && plain_alloy {
+            out.push(ImportProblem {
+                start: path_start,
+                end: path_end,
+                kind: "ImportError",
+                message: format!("\"{spec}\" does not parse; check it first"),
+            });
+
+            continue;
+        }
 
         // Luau takes one value from a module, so a `.luau` or `.lua`
         // file with no `return` gives the import nothing. An
@@ -2268,6 +2298,46 @@ mod tests {
             .filter(|p| p.message.contains("already imported"))
             .map(|p| p.message)
             .collect()
+    }
+
+    /// A single file's check compiles the importer alone, so a module
+    /// that does not parse said nothing: its surface reads empty and
+    /// every name it exports goes missing in silence.
+    #[test]
+    fn an_import_of_a_module_that_does_not_parse_says_so() {
+        let dir = std::env::temp_dir().join(format!("alloy-broken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/widget.aly"),
+            "export struct Widget as\n    read label: string\nend\n\nimpl Widget as\n    function new(label: string): Widget\n        return new Widget { label = label\n    end\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let src = "import { Widget } from \"./widget\"\n\nprint(new Widget { label = \"a\" })\n";
+        let problems = import_problems(src, Path::new("src/main.aly"), &from, &[]);
+        let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec!["\"./widget\" does not parse; check it first"]
+        );
+        assert_eq!(problems[0].kind, "ImportError");
+        assert_eq!(crate::docs::kind_for(&problems[0].message), "ImportError");
+
+        // The whole module parses: the import is clean again.
+        std::fs::write(
+            dir.join("src/widget.aly"),
+            "export struct Widget as\n    read label: string\nend\n",
+        )
+        .expect("module");
+        assert!(
+            import_problems(src, Path::new("src/main.aly"), &from, &[]).is_empty(),
+            "{:?}",
+            import_problems(src, Path::new("src/main.aly"), &from, &[])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A `.server` or `.client` file is a script: Roblox runs it, and

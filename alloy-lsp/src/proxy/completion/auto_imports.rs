@@ -329,6 +329,16 @@ impl State {
 /// resolve it: `Unknown type 'Vec2'` and
 /// `Unknown global 'Utils'; consider assigning to it first`.
 fn unresolved_name(message: &str) -> Option<&str> {
+    // `new Widget { }` on a name no import bound: the desugar finds a
+    // type with no struct behind it, so the report names neither an
+    // unknown type nor an unknown global. The name still wants the
+    // import, and a name the file already binds offers nothing.
+    if let Some((_, rest)) = message.split_once('`')
+        && let Some((name, _)) = rest.split_once("` is a type, not a struct")
+    {
+        return Some(name);
+    }
+
     let rest = message
         .split_once("Unknown type '")
         .or_else(|| message.split_once("Unknown global '"))
@@ -351,9 +361,11 @@ mod tests {
             unresolved_name("TypeError: Unknown global 'Utils'; consider assigning to it first"),
             Some("Utils")
         );
+        // `new Vec2 { }` on a name no import bound: the desugar reports
+        // a type with no struct behind it.
         assert_eq!(
             unresolved_name("TypeError: `Vec2` is a type, not a struct"),
-            None
+            Some("Vec2")
         );
         assert_eq!(unresolved_name("unused_variable: `x` is never read"), None);
     }

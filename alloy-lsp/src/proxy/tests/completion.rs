@@ -2176,8 +2176,18 @@ pub(crate) fn an_unresolved_name_offers_the_import_that_binds_it() {
         json!("import { Vec2 } from \"./defs\"\n")
     );
 
+    // `new Vec2 { }` reports a type with no struct behind it; the same
+    // import is the fix.
+    let built = json!({ "message": "TypeError: `Vec2` is a type, not a struct" });
+    let actions = st.import_actions("file:///use.aly", &[built]);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0]["title"],
+        json!("Add `import { Vec2 } from \"./defs\"`")
+    );
+
     // A report that names nothing to import offers nothing.
-    let other = json!({ "message": "TypeError: `Vec2` is a type, not a struct" });
+    let other = json!({ "message": "unused_variable: `x` is never read" });
     assert!(
         st.import_actions("file:///use.aly", &[other]).is_empty(),
         "a report with no unresolved name"

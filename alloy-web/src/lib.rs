@@ -559,8 +559,10 @@ pub fn complete(offset: u32) -> String {
                     items.push(word(name, "type", None, from));
                 }
 
+                let folded = folded_names(source);
+
                 for d in &s.decls {
-                    if !d.name.starts_with(['@', '$']) && d.hover.contains("```alloy\n") && (d.hover.contains("struct ") || d.hover.contains("enum ") || d.hover.contains("interface ") || d.hover.contains("type ")) {
+                    if !d.name.starts_with(['@', '$']) && !d.name.contains('.') && !folded.contains(&d.name) && d.hover.contains("```alloy\n") && (d.hover.contains("struct ") || d.hover.contains("enum ") || d.hover.contains("interface ") || d.hover.contains("type ")) {
                         items.push(word(&d.name, "type", Some(d.hover.clone()), from));
                     }
                 }
@@ -592,12 +594,14 @@ pub fn complete(offset: u32) -> String {
                 // `extends` and the trait of an `impl` want a contract;
                 // `impl X` and the target after `for` want a struct or
                 // an enum. The rest of the list stays, one rank down.
+                let folded = folded_names(source);
+
                 for d in &s.decls {
                     let head = d.hover.lines().nth(1).unwrap_or("");
                     let concrete = head.contains("struct ") || head.contains("enum ");
                     let contract = head.contains("interface ") || head.contains("trait ");
 
-                    if !d.name.starts_with(['@', '$']) && !d.name.contains('.') && (concrete || contract || head.contains("type ")) {
+                    if !d.name.starts_with(['@', '$']) && !d.name.contains('.') && !folded.contains(&d.name) && (concrete || contract || head.contains("type ")) {
                         let ranks = match prefers {
                             context::Prefers::Any => false,
                             context::Prefers::Contract => contract,
@@ -620,6 +624,15 @@ pub fn complete(offset: u32) -> String {
 
                 for name in alloy::roblox_classes::INSTANCE_CLASSES.iter().chain(alloy::roblox_classes::DATATYPES) {
                     items.push(word(name, "class", None, from));
+                }
+
+                // A namespace is no type itself, and `Shapes.Box` is
+                // one. The slot offers the name as the head of that
+                // path, and the accept writes the `.` too.
+                for name in namespace_prefixes(source, &s.decls) {
+                    let mut item = word(&name, "module", Some(format!("```alloy\nnamespace {name}\n```")), from);
+                    item["insert"] = json!(format!("{name}."));
+                    items.push(item);
                 }
             }
 
@@ -1187,6 +1200,51 @@ fn value_scope(source: &str, offset: usize, decls: &[Declaration]) -> Vec<Value>
     items
 }
 
+/// The flat names the emit writes for the members of a namespace:
+/// `Shapes_Box` for `namespace Shapes as export type Box`. The
+/// declaration index holds them so a hover on the artifact reads, and
+/// no list offers one.
+fn folded_names(source: &str) -> Vec<String> {
+    alloy::declarations::namespace_names(source)
+        .into_iter()
+        .map(|(emitted, _)| emitted)
+        .collect()
+}
+
+/// The namespaces a bare type slot offers as the head of a path:
+/// `Shapes` in front of `Shapes.Box`. A namespace of functions alone
+/// reaches no type, so it stays out.
+fn namespace_prefixes(source: &str, decls: &[Declaration]) -> Vec<String> {
+    const TYPE_WORDS: [&str; 5] = ["struct ", "enum ", "trait ", "interface ", "type "];
+
+    let mut out: Vec<String> = Vec::new();
+
+    for (_, path) in alloy::declarations::namespace_names(source) {
+        let Some((head, _)) = path.split_once('.') else {
+            continue;
+        };
+
+        if out.iter().any(|n| n == head) {
+            continue;
+        }
+
+        let holds = decls.iter().any(|d| {
+            d.name == path
+                && d.hover
+                    .lines()
+                    .nth(1)
+                    .is_some_and(|l| TYPE_WORDS.iter().any(|w| l.contains(w)))
+        });
+
+        if holds {
+            out.push(head.to_string());
+        }
+    }
+
+    out.sort();
+    out
+}
+
 fn word_start(source: &str, offset: usize) -> usize {
     let bytes = source.as_bytes();
     let mut start = offset;
@@ -1325,6 +1383,41 @@ mod tests {
             "{names:?}"
         );
         assert!(!names.contains(&"type".to_string()), "{names:?}");
+    }
+
+    /// A type slot offers the namespace as the head of a path, and
+    /// never the flat name the emit writes for a member of it.
+    #[test]
+    fn a_type_slot_takes_a_namespace_and_no_folded_name() {
+        let source = concat!(
+            "namespace Shapes as\n",
+            "    export type Box = { w: number }\n",
+            "end\n",
+            "namespace Funcs as\n",
+            "    export function go() end\n",
+            "end\n",
+            "struct P as\n",
+            "    stor: \n",
+            "end\n",
+        );
+        super::set_source(source);
+
+        let at = source.find("stor: ").expect("the slot") + "stor: ".len();
+        let items: serde_json::Value =
+            serde_json::from_str(&super::complete(at as u32)).expect("items");
+        let rows = items["items"].as_array().expect("a list");
+        let row = |name: &str| rows.iter().find(|i| i["label"] == name).cloned();
+
+        let shapes = row("Shapes").expect("the namespace");
+        assert_eq!(shapes["insert"], "Shapes.");
+        assert_eq!(shapes["kind"], "module");
+
+        // A namespace of functions alone reaches no type.
+        assert!(row("Funcs").is_none());
+        // `Shapes_Box` is the emit's name, and `Shapes.Box` is a path,
+        // not a name the word at the caret filters.
+        assert!(row("Shapes_Box").is_none());
+        assert!(row("Shapes.Box").is_none());
     }
 
     /// A hover on a std member answers with the member's own section,

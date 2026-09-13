@@ -1187,6 +1187,15 @@ mod tests {
             unused("local t = { a = 1 }\nlocal x: typeof(t) = t\nprint(x)\n"),
             Vec::<&str>::new()
         );
+        // Every `local` on one physical line is its own statement.
+        assert_eq!(
+            unused("local used_x = 1  local unused_y = 2\nprint(used_x)\n"),
+            vec!["unused_variable"]
+        );
+        assert_eq!(
+            unused("local a = 1  local b = 2  local c = 3\nprint(b)\n"),
+            vec!["unused_variable", "unused_variable"]
+        );
     }
 
     #[test]

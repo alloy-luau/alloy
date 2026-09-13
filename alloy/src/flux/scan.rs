@@ -109,8 +109,8 @@ impl<'s> Scan<'s> {
         self.st.lines[i.min(self.toks.len() - 1)]
     }
 
-    /// Whether `i` starts a statement: nothing before it on the line, or
-    /// a token that ends one.
+    /// Whether `i` starts a statement: nothing before it on the line, a
+    /// token that ends one, or a keyword that opens one.
     pub(crate) fn statement_start(&self, i: usize) -> bool {
         i == 0
             || self.line_of(i - 1) != self.line_of(i)
@@ -118,6 +118,10 @@ impl<'s> Scan<'s> {
                 self.prev(i),
                 "then" | "do" | "else" | "end" | ";" | "repeat"
             )
+            // `local a = 1  local b = 2` is two statements on one line.
+            // No expression holds a `local` or a `const`, so each one
+            // opens a statement wherever it stands.
+            || matches!(self.t(i), "local" | "const")
     }
 
     /// A name and its `.name` members: `a.b.c`. The end is exclusive.

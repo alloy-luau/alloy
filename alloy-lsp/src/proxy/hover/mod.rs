@@ -481,12 +481,14 @@ pub(crate) fn impl_self_type(doc: &Doc, line: u32) -> Option<String> {
                 .map(str::to_string)
         })
         .last()?;
-    // `impl Shape for Sq` names the struct after `for`.
+    // `impl Shape for Sq` names the struct after `for`; a namespace
+    // member keeps its path, `impl Zoo.Lion`.
     let named = head.split(" for ").last().unwrap_or(&head).trim();
     let name: String = named
         .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
         .collect();
+    let name = name.trim_end_matches('.').to_string();
     let generics = struct_generics(&doc.source, &name);
 
     (!name.is_empty()).then(|| format!("{name}{generics}"))

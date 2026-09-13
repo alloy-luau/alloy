@@ -490,7 +490,12 @@ pub fn impl_target(src: &str, offset: usize) -> Option<String> {
     let head = head.strip_prefix("global ").unwrap_or(head);
     let rest = head.strip_prefix("impl ")?;
     let target = rest.rsplit(" for ").next().unwrap_or(rest).trim();
-    let name: String = target.chars().take_while(|c| is_word(*c)).collect();
+    // A namespace member keeps its path: `impl Zoo.Lion`.
+    let name: String = target
+        .chars()
+        .take_while(|c| is_word(*c) || *c == '.')
+        .collect();
+    let name = name.trim_end_matches('.').to_string();
 
     (!name.is_empty()).then_some(name)
 }
@@ -503,6 +508,9 @@ mod tests {
     fn self_takes_the_type_the_impl_is_for() {
         let one = "impl Msg as\n    function tag(self)\n        match self with\n";
         assert_eq!(impl_target(one, one.len()), Some("Msg".to_string()));
+
+        let ns = "impl Zoo.Lion as\n    function roar(self)\n";
+        assert_eq!(impl_target(ns, ns.len()), Some("Zoo.Lion".to_string()));
 
         let two = "impl Shape for Circle as\n    function area(self)\n";
         assert_eq!(impl_target(two, two.len()), Some("Circle".to_string()));

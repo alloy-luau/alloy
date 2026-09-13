@@ -501,6 +501,33 @@ impl Directives {
             .collect()
     }
 
+    /// Every stale `--@alloy-expect-error`, as a diagnostic of its own:
+    /// the directive's byte range and the message with its reason.
+    /// `hits` are the lines something reported on, so what is left over
+    /// covers a clean line. `alloy flux` adds the checker's hits to the
+    /// compiler's before it asks; a run with no checker asks with the
+    /// compiler's alone.
+    pub fn unmet_diagnostics(&self, src: &str, hits: &[usize]) -> Vec<crate::Diagnostic> {
+        let hits: HashSet<usize> = hits.iter().copied().collect();
+        let mut out: Vec<crate::Diagnostic> = self
+            .unmet(&hits)
+            .into_iter()
+            .map(|(at, col, reason)| {
+                let line_start: usize = src.split_inclusive('\n').take(at).map(str::len).sum();
+                let (_, end) = span_of_line(src, at);
+
+                crate::Diagnostic {
+                    start: (line_start + col.saturating_sub(1)) as u32,
+                    end: end as u32,
+                    message: unmet_message(reason.as_deref()),
+                }
+            })
+            .collect();
+        out.sort_by_key(|d| d.start);
+
+        out
+    }
+
     /// Every directive the scan could not accept, as a line and a
     /// message: an unknown name, and the errors the readers found.
     pub fn problems(&self) -> Vec<(usize, String)> {

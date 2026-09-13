@@ -471,16 +471,20 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         // The type check reads these lines: a module the checker cannot
         // resolve either would say the same thing a second time.
         let mut import_lines: Vec<usize> = Vec::new();
+        // The lines an `--@alloy-expect-error` covers that reported, so
+        // a directive left over is stale. The compile names its own;
+        // every problem below counts too, silenced or not.
+        let mut expect_hits = compiled.expected_hits.clone();
 
         for problem in crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
         {
+            let at = crate::directives::line_of(&source, problem.start as usize);
+            expect_hits.push(at);
+
             // The problem's kind is the name an `--@alloy-ignore-start`
             // may carry, so a region for `UnknownModule` silences that
             // alone.
-            if !silence.allows_named(
-                crate::directives::line_of(&source, problem.start as usize),
-                Some(problem.kind),
-            ) {
+            if !silence.allows_named(at, Some(problem.kind)) {
                 continue;
             }
 
@@ -544,7 +548,21 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         for d in data_diagnostics {
+            expect_hits.push(crate::directives::line_of(&source, d.start as usize));
             report.diagnostics.push((rel.clone(), d));
+        }
+
+        // A stale `--@alloy-expect-error`. `flux` keeps the artifacts
+        // and reports what is left over after the type check, which may
+        // report on the line itself; a run without the checker has the
+        // whole answer here.
+        if !keep {
+            report.diagnostics.extend(
+                silence
+                    .unmet_diagnostics(&source, &expect_hits)
+                    .into_iter()
+                    .map(|d| (rel.clone(), d)),
+            );
         }
 
         if !write {

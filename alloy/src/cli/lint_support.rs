@@ -244,6 +244,11 @@ pub(crate) fn lint_one(
         }
     }
 
+    // A stale `--@alloy-expect-error`. The project's flux reports it
+    // after the checker has had its say; one file has no checker, so
+    // the compiler's own hits answer.
+    out.diagnostics
+        .extend(silence.unmet_diagnostics(&source, &out.expected_hits));
     out.diagnostics.sort_by_key(|d| d.start);
 
     let p = Painter::for_stderr();

@@ -88,6 +88,49 @@ fn the_unmet_message_quotes_the_reason() {
     );
 }
 
+/// A stale `--@alloy-expect-error` is an error of its own, on the
+/// directive. A run with no type check reports it from the compile;
+/// `alloy flux` keeps the artifacts and reports what is left over after
+/// the checker, so the two never both report.
+#[test]
+fn a_stale_expectation_reports_once_per_run() {
+    let dir = std::env::temp_dir().join(format!("alloy-stale-expect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    // The covered line has to come clean, so it draws no lint either.
+    let src = "local function twice(n: number): number\n    --@alloy-expect-error nothing is wrong here\n    return n * 2\nend\n\nreturn twice\n";
+    std::fs::write(dir.join("src/stale.aly"), src).unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::check_project(&dir, &config).unwrap();
+    let messages: Vec<String> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| d.message.clone())
+        .collect();
+
+    assert_eq!(
+        messages,
+        vec![format!("{}: nothing is wrong here", directives::UNMET)]
+    );
+    assert_eq!(
+        directives::line_of(src, report.diagnostics[0].1.start as usize),
+        1,
+        "the report sits on the directive"
+    );
+
+    let flux = alloy::build::flux_project(&dir, &config).unwrap();
+
+    assert!(flux.diagnostics.is_empty(), "{:?}", flux.diagnostics);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_expectation_over_a_real_error_silences_it_and_counts_as_a_hit() {
     let src = NOT_EXHAUSTIVE.replace(

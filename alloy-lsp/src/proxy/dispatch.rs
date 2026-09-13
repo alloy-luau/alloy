@@ -494,6 +494,33 @@ impl Server {
                 }
             }
 
+            // The outline of an Alloy file comes from the source. The
+            // child reads the check artifact, where a struct is a table
+            // and a namespace member is one flat name.
+            Some("textDocument/documentSymbol") => {
+                let uri = text_document_uri(&message).unwrap_or_default();
+
+                if let Some(id) = message.get("id").cloned()
+                    && is_alloy_uri(&uri)
+                {
+                    let symbols = {
+                        let st = self.state.lock().expect("state");
+
+                        st.docs
+                            .get(&uri)
+                            .and_then(|doc| document_symbols(&doc.source))
+                    };
+
+                    if let Some(symbols) = symbols {
+                        self.respond(&id, json!(symbols));
+
+                        return true;
+                    }
+                }
+
+                self.forward_request(message, method.as_deref());
+            }
+
             Some("textDocument/onTypeFormatting") => {
                 if let Some(id) = message.get("id").cloned() {
                     let uri = text_document_uri(&message).unwrap_or_default();

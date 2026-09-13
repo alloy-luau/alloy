@@ -20,6 +20,7 @@ mod hints;
 mod hover;
 mod ingots_bridge;
 mod navigation;
+mod outline;
 mod state;
 mod typing;
 
@@ -67,6 +68,8 @@ use hover::{
 };
 #[allow(unused_imports)]
 use navigation::{data_module_of, import_entries, in_a_dot_directory, service_definition};
+#[allow(unused_imports)]
+use outline::document_symbols;
 #[allow(unused_imports)]
 use typing::{append_initializer, end_follows};
 

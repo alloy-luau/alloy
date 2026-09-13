@@ -101,6 +101,10 @@ pub fn compile_alx(
         output.diagnostics.push(d);
     }
 
+    for d in struct_props_problems(&blanked, &spans, options) {
+        output.diagnostics.push(d);
+    }
+
     for w in compiled.warnings {
         output.diagnostics.push(Diagnostic {
             start: w.offset as u32,
@@ -117,6 +121,89 @@ pub fn compile_alx(
     output.lowered = Some(lowered.clone());
 
     Ok(AlxOutput { output, lowered })
+}
+
+/// A component whose props parameter names a struct. A tag's attributes
+/// lower to a plain table and a struct is nominal, so no tag satisfies
+/// the parameter, whatever it writes. The report sits on the declaration,
+/// which is the place to change.
+///
+/// `blanked` is the source with the markup regions blanked, so it parses
+/// as Alloy and every offset is still the author's own.
+fn struct_props_problems(
+    blanked: &str,
+    spans: &[(usize, usize)],
+    options: &EmitOptions,
+) -> Vec<Diagnostic> {
+    use alloy_syntax::ast::Stmt;
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(blanked, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| span.text_or_empty(blanked, toks);
+    let bytes = |span: alloy_syntax::ast::TokSpan| {
+        let last = (span.end as usize)
+            .saturating_sub(1)
+            .max(span.start as usize);
+
+        match (toks.get(span.start as usize), toks.get(last)) {
+            (Some(first), Some(last)) => Some((first.start as usize, last.end as usize)),
+
+            _ => None,
+        }
+    };
+    // A struct this file declares, or one a module it imports declares.
+    let declares_struct = |name: &str| {
+        crate::declarations::shapes(blanked)
+            .iter()
+            .any(|s| matches!(s, crate::declarations::Shape::Struct { .. }) && s.name() == name)
+            || options.import_struct_fields.iter().any(|(n, _)| n == name)
+    };
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let (name, body, span) = match stmt {
+            Stmt::Function(f) if f.path.len() == 1 => (f.path[0], &f.body, f.span),
+
+            Stmt::LocalFunction(f) => (f.name, &f.body, f.span),
+
+            _ => continue,
+        };
+
+        // A component is a function a tag names, so its name starts with
+        // a capital, and its body builds markup.
+        if !text(name).starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+
+        let Some(ty) = body.params.first().and_then(|p| p.ty) else {
+            continue;
+        };
+        let props = text(ty).trim().trim_start_matches(':').trim().to_string();
+
+        if !declares_struct(&props) {
+            continue;
+        }
+
+        let (Some((from, to)), Some((at, end))) = (bytes(span), bytes(ty)) else {
+            continue;
+        };
+
+        if !spans.iter().any(|(start, _)| (from..to).contains(start)) {
+            continue;
+        }
+
+        out.push(Diagnostic {
+            start: at as u32,
+            end: end as u32,
+            message: format!(
+                "markup: a component's props are a plain table; declare `{props}` as a `type` or an `interface`, not a `struct`"
+            ),
+        });
+    }
+
+    out
 }
 
 /// Whether a markup diagnostic is one of the attribute checks. The
@@ -1005,6 +1092,43 @@ mod tests {
         }
 
         assert!(!names.contains("from"));
+    }
+
+    /// A component whose props parameter names a struct: a tag's
+    /// attributes lower to a plain table, which a nominal struct never
+    /// takes. The report sits on the declaration; a `type` says nothing,
+    /// and a PascalCase function that builds no markup is no component.
+    #[test]
+    fn a_struct_props_parameter_reports_at_the_declaration() {
+        let messages = |src: &str| -> Vec<String> {
+            compile_alx(src, &EmitOptions::default(), luaux::Config::default())
+                .expect("the markup compiles")
+                .output
+                .diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect()
+        };
+        let head = "import * as React from \"react\"\n\n";
+        let body = "export function Card(props: CardProps): any\n    return (<TextLabel Text={props.title} />)\nend\n";
+        let record = format!("{head}export type CardProps = {{ title: string }}\n\n");
+        let declared = format!("{head}export struct CardProps as\n    title: string\nend\n\n");
+
+        assert_eq!(
+            messages(&format!("{declared}{body}")),
+            vec![
+                "markup: a component's props are a plain table; declare `CardProps` as a `type` or an `interface`, not a `struct`"
+            ]
+        );
+
+        let clean = messages(&format!("{record}{body}"));
+        assert!(clean.is_empty(), "{clean:?}");
+
+        // No markup in the body: the function is no component.
+        let plain = messages(&format!(
+            "{declared}export function Make(props: CardProps): any\n    return props.title\nend\n\nlocal function App(): any\n    return (<TextLabel Text=\"a\" />)\nend\nprint(App)\n"
+        ));
+        assert!(plain.is_empty(), "{plain:?}");
     }
 
     /// The props of a component tag: a name it does not take, a

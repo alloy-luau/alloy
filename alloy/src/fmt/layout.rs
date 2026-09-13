@@ -518,7 +518,10 @@ impl<'s> Formatter<'s> {
                 Node::Item(i) => {
                     let it = &self.items[*i];
 
-                    if it.newlines_before > 0 && (!in_group || block_depth > 0 || it.is_comment()) {
+                    if self.forced[*i]
+                        || (it.newlines_before > 0
+                            && (!in_group || block_depth > 0 || it.is_comment()))
+                    {
                         hard[*i] = true;
                     }
 
@@ -533,7 +536,9 @@ impl<'s> Formatter<'s> {
                 } => {
                     let it = &self.items[*open];
 
-                    if it.newlines_before > 0 && (!in_group || block_depth > 0) {
+                    if self.forced[*open]
+                        || (it.newlines_before > 0 && (!in_group || block_depth > 0))
+                    {
                         hard[*open] = true;
                     }
 
@@ -578,6 +583,9 @@ impl<'s> Formatter<'s> {
             self.space_before_item(i);
         }
 
+        // The line this item lands on, for the `if` expression rule: it
+        // reads the width the render came out with.
+        self.at_line[i] = self.lines.len();
         let text = self.items[i].text.clone();
         self.line.push_str(&text);
     }
@@ -674,6 +682,26 @@ impl<'s> Formatter<'s> {
         });
 
         if has_comment {
+            return true;
+        }
+
+        // A branch of an `if` expression the width forced onto its own
+        // line: the group holds a break, so it cannot stay flat.
+        let has_forced = elements.iter().any(|(el, _)| {
+            let mut block_depth = 0i32;
+
+            el.iter().any(|n| match n {
+                Node::Item(i) => {
+                    block_depth += self.block_delta(*i);
+
+                    self.forced[*i] && block_depth <= 0
+                }
+
+                Node::Group { open, .. } => self.forced[*open],
+            })
+        });
+
+        if has_forced {
             return true;
         }
 
@@ -816,6 +844,126 @@ impl<'s> Formatter<'s> {
                         .enclosing_open(p)
                         .is_some_and(|o| self.items[o].is("{")))
         })
+    }
+
+    // --- the `if` expression ------------------------------------------------------
+
+    /// Breaks every `if` expression the last render left on one line past
+    /// `column_width`. True when one broke, so the caller renders again.
+    ///
+    /// The shape is the one a hand-broken `if` expression already takes:
+    /// each branch on its own line one level in, with `else` and `elseif`
+    /// opening a line of their own. The two forms then read the same, and
+    /// a second run changes nothing.
+    pub(crate) fn force_long_expr_ifs(&mut self) -> bool {
+        let mut changed = false;
+
+        for i in 0..self.items.len() {
+            if !self.items[i].is("if") || self.starts_block(i) {
+                continue;
+            }
+
+            let breaks = self.expr_if_breaks(i);
+
+            if breaks.is_empty() || breaks.iter().any(|b| self.forced[*b]) {
+                continue;
+            }
+
+            // One line holds the whole expression, and it is too long.
+            let line = self.at_line[i];
+
+            if breaks.iter().any(|b| self.at_line[*b] != line) {
+                continue;
+            }
+
+            let width = self.lines.get(line).map_or(0, |l| l.chars().count());
+
+            if width <= self.options.column_width {
+                continue;
+            }
+
+            for b in breaks {
+                self.forced[b] = true;
+                self.items[b].newlines_before = self.items[b].newlines_before.max(1);
+            }
+
+            changed = true;
+        }
+
+        changed
+    }
+
+    /// The items an `if` expression breaks before: the value after each
+    /// `then`, and each `else` or `elseif` with the value after `else`.
+    /// Empty for an expression this rule leaves alone, which is one that
+    /// holds another `if` expression.
+    fn expr_if_breaks(&self, start: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut depth = 0i32;
+        let mut i = start + 1;
+
+        while i < self.items.len() {
+            let it = &self.items[i];
+
+            if it.is_comment() {
+                i += 1;
+
+                continue;
+            }
+
+            let text = it.text.as_str();
+            let prev = self.prev_code(i).map(|p| self.items[p].text.as_str());
+            // A `then`, `else`, or `elseif` that opens a line continues
+            // the expression, and so does the value after one of them.
+            let continues = matches!(text, "then" | "else" | "elseif")
+                || matches!(prev, Some("then") | Some("else"));
+
+            if depth == 0 && it.newlines_before > 0 && !continues {
+                break;
+            }
+
+            if opens(text) {
+                depth += 1;
+            } else if closes(text) {
+                if depth == 0 {
+                    break;
+                }
+
+                depth -= 1;
+            } else if depth == 0 {
+                match text {
+                    "then" => match self.next_code(i) {
+                        Some(n) => out.push(n),
+
+                        None => break,
+                    },
+
+                    "elseif" => out.push(i),
+
+                    "else" => {
+                        out.push(i);
+
+                        match self.next_code(i) {
+                            Some(n) => out.push(n),
+
+                            None => break,
+                        }
+                    }
+
+                    // Another `if` expression: the shape has no room for
+                    // one, so this expression keeps its line.
+                    "if" => return Vec::new(),
+
+                    "," | ";" | "end" | "do" | "return" => break,
+
+                    _ => {}
+                }
+            }
+
+            i += 1;
+        }
+
+        out
     }
 
     /// The opener of the group that holds item `i`, or none at the top.

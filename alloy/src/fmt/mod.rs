@@ -236,17 +236,38 @@ pub fn format_with(src: &str, options: &FmtConfig) -> Result<String, String> {
         depths: Vec::new(),
         generic: Vec::new(),
         signature: Vec::new(),
+        forced: Vec::new(),
+        at_line: Vec::new(),
     };
     f.rewrite_tokens();
     f.sort_requires();
     f.collapse_simple_statements();
     f.break_call_chains();
-    f.depths = f.block_depths();
-    f.generic = f.generic_brackets();
-    let tree = f.tree();
-    let hard = f.hard_breaks(&tree);
-    f.render_nodes(&tree, &hard, 0);
-    f.flush();
+    // The rewrites are done, so the item count is final.
+    f.forced = vec![false; f.items.len()];
+    f.at_line = vec![0; f.items.len()];
+    f.measure_lines();
+
+    // An `if` expression is no bracket group, so the width alone cannot
+    // break it. The render says which ones came out past the column, the
+    // next pass breaks those, and a pass that breaks nothing is the
+    // last. Three cover an `if` expression inside another.
+    for _ in 0..3 {
+        let tree = f.tree();
+        let hard = f.hard_breaks(&tree);
+        f.render_nodes(&tree, &hard, 0);
+        f.flush();
+
+        if !f.force_long_expr_ifs() {
+            break;
+        }
+
+        f.lines.clear();
+        f.line.clear();
+        f.line_level = 0;
+        f.measure_lines();
+    }
+
     let mut text = f.finish();
 
     // The source keeps its own endings unless an option names one: a
@@ -382,6 +403,11 @@ struct Formatter<'s> {
     generic: Vec<bool>,
     /// The `function` items inside a trait that have no body.
     signature: Vec<bool>,
+    /// Items the layout breaks before whatever the source wrote: the
+    /// branches of an `if` expression that ran past the column.
+    forced: Vec<bool>,
+    /// The output line each item landed on in the last render.
+    at_line: Vec<usize>,
 }
 
 /// Openers of bracket groups, as token text.
@@ -410,6 +436,14 @@ pub mod alx;
 pub mod structure;
 
 impl<'s> Formatter<'s> {
+    /// The block depths and the type brackets, both read from the
+    /// newlines the items carry. A forced break changes them, so they
+    /// are read again before every render.
+    fn measure_lines(&mut self) {
+        self.depths = self.block_depths();
+        self.generic = self.generic_brackets();
+    }
+
     fn prev_code(&self, i: usize) -> Option<usize> {
         (0..i).rev().find(|j| !self.items[*j].is_comment())
     }
@@ -725,6 +759,41 @@ mod tests {
         let want = "local x = if a > 0 then\n    \"big\"\n    else\n    \"small\"\n";
         assert_eq!(fmt(src), want);
         assert_eq!(fmt(want), want);
+    }
+
+    /// An `if` expression past `column_width` breaks the way a
+    /// hand-broken one reads: each branch on its own line, with `else`
+    /// opening a line. The rule reaches the three places one sits in,
+    /// and a second run changes nothing.
+    #[test]
+    fn a_long_if_expression_breaks_its_branches() {
+        let a = "1111111111111111111111111111111111111111111111111";
+        let b = "2222222222222222222222222222222222222222222222222222";
+        let branches = format!("if flag then\n        {a}\n        else\n        {b}");
+
+        let cases = [
+            (
+                format!("local function g(): number\n    return if flag then {a} else {b}\nend\n"),
+                format!("local function g(): number\n    return {branches}\nend\n"),
+            ),
+            (
+                format!("local t = {{ value = if flag then {a} else {b} }}\n"),
+                format!("local t = {{\n    value = {branches},\n}}\n"),
+            ),
+            (
+                format!("f(if flag then {a} else {b})\n"),
+                format!("f(\n    {branches}\n)\n"),
+            ),
+        ];
+
+        for (src, want) in cases {
+            assert_eq!(fmt(&src), want);
+            assert_eq!(fmt(&want), want);
+        }
+
+        // One that fits keeps its line.
+        let short = "local x = if flag then 1 else 2\n";
+        assert_eq!(fmt(short), short);
     }
 
     #[test]

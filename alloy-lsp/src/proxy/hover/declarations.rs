@@ -79,7 +79,15 @@ impl Server {
         // for the export, and the declaration sits under the name the
         // module wrote. Without this the child answers instead, and it
         // prints the constructor table of a solver variable.
-        let found = found.or_else(|| lookup(&import_alias_source(&doc.source, &key)?));
+        let found = found.or_else(|| {
+            // A macro or an attribute carries its sigil in the name the
+            // module wrote, so `$log` for `logit as log` reads `$logit`.
+            let source = import_alias_source(&doc.source, key.trim_start_matches(['$', '@']))?;
+
+            [source.clone(), format!("${source}"), format!("@{source}")]
+                .iter()
+                .find_map(|k| lookup(k))
+        });
         // `import * as Dir from "./m"`: `Dir.Name` names the module's
         // own export, so the declaration sits under the bare name. A
         // value reads better through its module, `function Dir.make(...)`,

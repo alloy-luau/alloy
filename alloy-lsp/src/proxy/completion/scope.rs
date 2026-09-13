@@ -142,6 +142,51 @@ impl State {
         items
     }
 
+    /// The macros an import list binds under another name, each with the
+    /// file's own word for it. A macro's declaration carries its sigil and
+    /// the name the module wrote, `$logit`, so `import { logit as log }`
+    /// reaches it under no name the scope walk knows.
+    pub(crate) fn aliased_macros(
+        &self,
+        uri: &str,
+    ) -> Vec<(String, &alloy::declarations::Declaration)> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+
+        for entry in import_entries(&doc.source) {
+            if entry.bound == entry.name {
+                continue;
+            }
+
+            let key = format!("${}", entry.name);
+            // Two modules may export one macro name, so the module the
+            // entry's spec resolves to answers first.
+            let target = self
+                .resolve_spec(uri, &entry.spec)
+                .map(|p| imports::module_path(&p));
+            let named = target.and_then(|t| {
+                self.docs
+                    .iter()
+                    .find(|(u, _)| uri_to_path(u).is_some_and(|p| imports::module_path(&p) == t))
+                    .map(|(_, d)| d)
+            });
+            let found = named
+                .into_iter()
+                .flat_map(|d| d.decls.iter())
+                .chain(doc.import_decls.iter())
+                .chain(self.docs.values().flat_map(|d| d.decls.iter()))
+                .find(|d| d.name == key);
+
+            if let Some(decl) = found {
+                out.push((entry.bound.clone(), decl));
+            }
+        }
+
+        out
+    }
+
     /// The declarations a file sees: its own, and the exports of the
     /// modules it imports, under the names the `import` binds. A name no
     /// import brought in is not in scope, so a list never offers a type

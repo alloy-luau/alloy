@@ -178,6 +178,24 @@ impl State {
                         items.push(item);
                     }
                 }
+
+                // `import { logit as log }`: the alias is the only name
+                // this file can write for the macro.
+                for (bound, d) in self.aliased_macros(uri) {
+                    let label = format!("${bound}");
+
+                    if !seen.insert(label.clone()) {
+                        continue;
+                    }
+
+                    let mut item = word(&label, 3, Some(d.hover.clone()), *sigil);
+
+                    if let Some(detail) = declaration_detail(&d.hover) {
+                        item["detail"] = json!(detail);
+                    }
+
+                    items.push(item);
+                }
             }
 
             Context::DeriveArg { prefix } => {

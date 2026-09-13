@@ -2280,3 +2280,37 @@ fn a_static_never_follows_self() {
 
     assert_eq!(whole, json!([{ "label": "zero" }]));
 }
+
+/// `import { logit as log }`: a macro's declaration carries its sigil and
+/// the name the module wrote, `$logit`, so the alias reached it under no
+/// name. The hover was empty and the `$` list left it out.
+#[test]
+fn an_aliased_macro_reads_under_the_name_the_file_writes() {
+    let use_src =
+        "import { logit as log } from \"./m\"\nimport { tag as tb } from \"./b\"\n\n$log(\"hi\")\n";
+    let st = files(&[
+        (
+            "file:///m.aly",
+            "export macro logit(x)\n    print(x)\nend\n",
+        ),
+        (
+            "file:///b.aly",
+            "export macro tag(x)\n    print(\"B\", x)\nend\n",
+        ),
+        ("file:///use.aly", use_src),
+    ]);
+    let found = st.aliased_macros("file:///use.aly");
+    let names: Vec<(&str, &str)> = found
+        .iter()
+        .map(|(bound, d)| (bound.as_str(), d.name.as_str()))
+        .collect();
+
+    assert_eq!(names, vec![("log", "$logit"), ("tb", "$tag")]);
+    assert!(found[1].1.hover.contains("B"), "{}", found[1].1.hover);
+
+    // The hover of `$log` reads the export's sigil name the same way.
+    assert_eq!(
+        import_alias_source(use_src, "log"),
+        Some("logit".to_string())
+    );
+}

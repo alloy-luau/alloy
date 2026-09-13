@@ -225,7 +225,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "satisfies",
-        "```alloy\nexpr satisfies T\n```\nChecks the literal against `T` under contextual typing and reports a key `T` does not name. The type is `T`.",
+        "```alloy\nexpr satisfies T\n```\nChecks the literal against `T` and reports a key of `T` the literal leaves out. The type is `T`.\n\nThe check artifact passes the literal to a function that takes `T`, so the checker reads it the way an annotated `local` does. A key the literal carries and `T` does not name stays quiet: Luau reads a wider table as a subtype of a narrower one, and no solver reports the extra key. Write the annotation on the binding when the shape has to be exact.",
     ),
     (
         "private",

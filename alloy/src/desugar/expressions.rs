@@ -184,8 +184,21 @@ impl<'s> Desugar<'s> {
 
             Expr::Satisfies { expr, ty, .. } => {
                 let inner = self.render_to_string(expr);
-                let ty = self.text_of(*ty).to_string();
-                self.generate(anchor, &format!("({inner} :: {ty})"));
+                // `number[]` and a namespace type are Alloy's spellings,
+                // so the type goes through the same copy a declaration
+                // does.
+                let ty = self.copy_type_to_string(*ty).trim().to_string();
+                // `::` allows a cast in either direction, so it lets a
+                // literal through that the type does not cover. A call
+                // checks the argument against the parameter, which is
+                // what `satisfies` means. The ship artifact keeps the
+                // cast: it runs, and the check is the checker's.
+                let text = match self.options.check {
+                    true => format!("((function(value: {ty}): {ty} return value end)({inner}))"),
+
+                    false => format!("({inner} :: {ty})"),
+                };
+                self.generate(anchor, &text);
             }
 
             Expr::Array { items, span } => {
@@ -314,7 +327,7 @@ impl<'s> Desugar<'s> {
                 let mname = self.text_of(*name).to_string();
 
                 if let Some(m) = self.macros.get(&mname).cloned() {
-                    let text = self.expand_macro(&m, args, *span);
+                    let text = self.expand_macro(&m, &mname, args, *span);
                     self.generate(anchor, &text);
                 } else {
                     let text = self.intrinsic(*name, args, *span);

@@ -1017,6 +1017,32 @@ pub fn import_shapes_for_file(path: &Path, source: &str) -> Vec<crate::declarati
     import_shapes(source, &from, &aliases)
 }
 
+impl crate::EmitOptions {
+    /// Everything the emit reads from the modules a source imports:
+    /// types, enums, private fields, attributes, macros, plain modules,
+    /// async Results, and trait defaults. Every producer of options
+    /// goes through here, so one new index reaches all of them.
+    pub fn imports(mut self, source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Self {
+        self.import_types = import_types(source, from, aliases);
+        self.import_enums = import_enums(source, from, aliases);
+        self.import_privates = import_privates(source, from, aliases);
+        self.import_attributes = import_attributes(source, from, aliases);
+        self.macros = import_macros(source, from, aliases);
+        self.plain_modules = plain_modules(source, from, aliases);
+        self.import_result_asyncs = import_result_asyncs(source, from, aliases);
+        self.import_trait_defaults = import_trait_defaults(source, from, aliases);
+
+        self
+    }
+
+    /// `imports`, with the project read from the nearest `alloy.toml`.
+    pub fn imports_for_file(self, path: &Path, source: &str) -> Self {
+        let (from, aliases) = file_context(path);
+
+        self.imports(source, &from, &aliases)
+    }
+}
+
 /// The absolute path of a file and the aliases of its project.
 fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
     let dir = path.parent().unwrap_or(Path::new("."));

@@ -373,23 +373,9 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             std_require,
             ship_std_require,
             ambient_names: ambient_names.clone(),
-            import_types: crate::modules::import_types(&source, &path, &module_aliases),
-            import_enums: crate::modules::import_enums(&source, &path, &module_aliases),
-            import_privates: crate::modules::import_privates(&source, &path, &module_aliases),
-            import_attributes: crate::modules::import_attributes(&source, &path, &module_aliases),
-            macros: crate::modules::import_macros(&source, &path, &module_aliases),
-            plain_modules: crate::modules::plain_modules(&source, &path, &module_aliases),
-            import_result_asyncs: crate::modules::import_result_asyncs(
-                &source,
-                &path,
-                &module_aliases,
-            ),
-            import_trait_defaults: crate::modules::import_trait_defaults(
-                &source,
-                &path,
-                &module_aliases,
-            ),
-            ..base_options.clone()
+            ..base_options
+                .clone()
+                .imports(&source, &path, &module_aliases)
         };
 
         // `--@alloy-lint alx.<name>=<level>` sets a markup lint for

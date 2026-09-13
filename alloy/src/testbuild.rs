@@ -497,14 +497,7 @@ fn write_modules(
             std_require: relative_require(&source_rel, &runtime),
             wait_timeout: config.emit.wait_timeout,
             extensions: extensions.to_vec(),
-            import_types: crate::modules::import_types(&source, &path, &aliases),
-            import_enums: crate::modules::import_enums(&source, &path, &aliases),
-            import_privates: crate::modules::import_privates(&source, &path, &aliases),
-            import_attributes: crate::modules::import_attributes(&source, &path, &aliases),
-            plain_modules: crate::modules::plain_modules(&source, &path, &aliases),
-            import_result_asyncs: crate::modules::import_result_asyncs(&source, &path, &aliases),
-            import_trait_defaults: crate::modules::import_trait_defaults(&source, &path, &aliases),
-            ..EmitOptions::default()
+            ..EmitOptions::default().imports(&source, &path, &aliases)
         };
         let compiled = crate::compile_file(
             &source_rel.to_string_lossy(),
@@ -655,26 +648,7 @@ pub fn spec(
         tests: true,
         wait_timeout: config.emit.wait_timeout,
         extensions: extensions.to_vec(),
-        import_types: crate::modules::import_types(source, &root.join(source_rel), &aliases),
-        import_enums: crate::modules::import_enums(source, &root.join(source_rel), &aliases),
-        import_privates: crate::modules::import_privates(source, &root.join(source_rel), &aliases),
-        import_attributes: crate::modules::import_attributes(
-            source,
-            &root.join(source_rel),
-            &aliases,
-        ),
-        plain_modules: crate::modules::plain_modules(source, &root.join(source_rel), &aliases),
-        import_result_asyncs: crate::modules::import_result_asyncs(
-            source,
-            &root.join(source_rel),
-            &aliases,
-        ),
-        import_trait_defaults: crate::modules::import_trait_defaults(
-            source,
-            &root.join(source_rel),
-            &aliases,
-        ),
-        ..EmitOptions::default()
+        ..EmitOptions::default().imports(source, &root.join(source_rel), &aliases)
     };
     let out = crate::compile_file(
         &source_rel.to_string_lossy(),

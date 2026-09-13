@@ -19,3 +19,4 @@ std/.lest/
 
 # The agent harness keeps worktrees here
 .claude/
+target-*/

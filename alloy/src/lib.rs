@@ -268,7 +268,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         options.definitions,
         options.ingot_rewrite,
         &options.thresholds,
-        &options.import_privates,
+        &options.privates(),
     );
     lints.extend(rendered.lints);
 

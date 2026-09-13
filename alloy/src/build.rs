@@ -274,6 +274,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     // Extensions are project wide: a call by an extension name routes
     // through the dispatcher in every file, so the set comes first.
     let mut base_options = base_options;
+    let mut alloy_sources: Vec<String> = Vec::new();
 
     for path in &sources {
         if path.extension().is_some_and(|e| e == "aly")
@@ -282,14 +283,17 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             base_options
                 .extensions
                 .extend(crate::extensions::collect(&source));
-            // An `impl` on a struct another file declares attaches at
-            // run time through the require. The declaring file's check
-            // artifact declares the methods, so the type follows.
-            base_options
-                .foreign_impls
-                .extend(crate::extensions::struct_impls(&source));
+            alloy_sources.push(source);
         }
     }
+
+    // An `impl` on a struct another file declares attaches at run time
+    // through the require. The declaring file's check artifact declares
+    // the methods, so the type follows, and the privacy lint reads which
+    // of them the impl keeps to itself.
+    let project = crate::extensions::project_impls(&alloy_sources);
+    base_options.foreign_impls = project.methods;
+    base_options.foreign_privates = project.privates;
 
     // A `.d.aly` declares a name with no module behind it, so a check
     // that asks whether a name exists reads the list.

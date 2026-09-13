@@ -44,7 +44,7 @@ pub fn is_primitive(name: &str) -> bool {
 /// Every extension the source declares. A struct or enum declared in the
 /// file is never foreign, whatever its name.
 pub fn collect(src: &str) -> Vec<Extension> {
-    impls(src, false)
+    impls(src, false).0
 }
 
 /// Every `impl X as` the source writes on a struct or an enum another
@@ -52,14 +52,55 @@ pub fn collect(src: &str) -> Vec<Extension> {
 /// require brought in; the declaring file's check artifact declares
 /// them, so every file reads the same shape.
 pub fn struct_impls(src: &str) -> Vec<Extension> {
-    impls(src, true)
+    impls(src, true).0
 }
 
-/// The methods of the `impl` blocks of one file. `own` picks which
-/// targets count: a type of the project, or a foreign one.
-fn impls(src: &str, own: bool) -> Vec<Extension> {
+/// What the other files of a project put on a struct or an enum one
+/// file declares.
+#[derive(Debug, Default)]
+pub struct ProjectImpls {
+    /// Every method, for the declaring file's check artifact.
+    pub methods: Vec<Extension>,
+    /// Per target, the methods its impls declare private. A private
+    /// method still reaches the check artifact, because the impl's own
+    /// file calls it through the struct's table; the `private_access`
+    /// lint reads this list, so a call from a file that holds no impl
+    /// of the struct reports.
+    pub privates: Vec<(String, Vec<String>)>,
+}
+
+/// The `impl` blocks every source of a project writes on a struct or an
+/// enum another file declares. One walk per file answers both readers:
+/// the check artifact and the privacy lint.
+pub fn project_impls(sources: &[String]) -> ProjectImpls {
+    let mut out = ProjectImpls::default();
+
+    for src in sources {
+        let (methods, privates) = impls(src, true);
+        out.methods.extend(methods);
+
+        for (target, name) in privates {
+            match out.privates.iter_mut().find(|(t, _)| *t == target) {
+                Some((_, list)) => {
+                    if !list.contains(&name) {
+                        list.push(name);
+                    }
+                }
+
+                None => out.privates.push((target, vec![name])),
+            }
+        }
+    }
+
+    out
+}
+
+/// The methods of the `impl` blocks of one file, and the ones the impl
+/// declares private as `(target, method)`. `own` picks which targets
+/// count: a type of the project, or a foreign one.
+fn impls(src: &str, own: bool) -> (Vec<Extension>, Vec<(String, String)>) {
     let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
 
     let toks = &parsed.lexed.toks;
@@ -83,6 +124,7 @@ fn impls(src: &str, own: bool) -> Vec<Extension> {
     }
 
     let mut out = Vec::new();
+    let mut privates = Vec::new();
 
     for stmt in stmts {
         let Stmt::Impl(i) = stmt else {
@@ -128,6 +170,10 @@ fn impls(src: &str, own: bool) -> Vec<Extension> {
                 }
             }
 
+            if m.visibility.is_some_and(|v| text(v) == "private") {
+                privates.push((target.to_string(), text(*first).to_string()));
+            }
+
             out.push(Extension {
                 target: target.to_string(),
                 name: text(*first).to_string(),
@@ -142,7 +188,7 @@ fn impls(src: &str, own: bool) -> Vec<Extension> {
         }
     }
 
-    out
+    (out, privates)
 }
 
 /// A definitions file with the extensions injected, written under
@@ -398,6 +444,23 @@ mod tests {
         // file has not got, so they stay here.
         let generic = "import { Bag } from \"./bag\"\n\nimpl Bag<T> as\n    function first(self): T\n        return self.items[1]\n    end\nend\n";
         assert!(struct_impls(generic).is_empty());
+    }
+
+    /// An `impl` in another file keeps its private methods private. The
+    /// project index names them, so the `private_access` lint reports a
+    /// call from a file that holds no impl of the struct. The check
+    /// artifact still declares them: the impl's own file calls them
+    /// through the struct's table.
+    #[test]
+    fn a_private_method_of_a_cross_file_impl_travels() {
+        let src = "import { Cat } from \"./animal\"\n\nimpl Cat as\n    private function purr(self): string\n        return self.label\n    end\n\n    function speak(self): string\n        return self:purr()\n    end\nend\n";
+        let project = project_impls(&[src.to_string()]);
+
+        assert_eq!(
+            project.privates,
+            vec![("Cat".to_string(), vec!["purr".to_string()])]
+        );
+        assert_eq!(project.methods.len(), 2, "{:?}", project.methods);
     }
 
     #[test]

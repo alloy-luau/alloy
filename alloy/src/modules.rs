@@ -1049,6 +1049,30 @@ impl crate::EmitOptions {
 
         self.imports(source, &from, &aliases)
     }
+
+    /// Every private member of a struct this file does not declare: the
+    /// private fields an imported shape carries, and the private methods
+    /// of an `impl` of the struct anywhere in the project. The
+    /// `private_access` lint reads one list, so the two merge here.
+    pub fn privates(&self) -> Vec<(String, Vec<String>)> {
+        let mut out = self.import_privates.clone();
+
+        for (target, names) in &self.foreign_privates {
+            match out.iter_mut().find(|(t, _)| t == target) {
+                Some((_, list)) => {
+                    for name in names {
+                        if !list.contains(name) {
+                            list.push(name.clone());
+                        }
+                    }
+                }
+
+                None => out.push((target.clone(), names.clone())),
+            }
+        }
+
+        out
+    }
 }
 
 /// The absolute path of a file and the aliases of its project.

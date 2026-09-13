@@ -91,6 +91,11 @@ pub struct EmitOptions {
     /// class table, so the type carries what the runtime attaches. See
     /// `crate::extensions::struct_impls`.
     pub foreign_impls: Vec<crate::extensions::Extension>,
+    /// Per struct of the project, the methods an `impl` of it in any
+    /// file declares private, so `private_access` reports a call from a
+    /// file that holds no impl of the struct. See
+    /// `crate::extensions::project_impls`.
+    pub foreign_privates: Vec<(String, Vec<String>)>,
     /// The limits of the complexity lints.
     pub thresholds: crate::lint::Thresholds,
     /// Render the test artifact: a `@test` function stays in the output
@@ -253,6 +258,7 @@ impl Default for EmitOptions {
             check: false,
             extensions: Vec::new(),
             foreign_impls: Vec::new(),
+            foreign_privates: Vec::new(),
             thresholds: crate::lint::Thresholds::default(),
             tests: false,
             import_types: Vec::new(),

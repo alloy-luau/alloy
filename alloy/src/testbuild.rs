@@ -991,4 +991,30 @@ mod tests {
         assert!(text.contains("__alloy.await(later())"), "{text}");
         assert!(!text.contains("__alloy.test("), "{text}");
     }
+
+    /// `$assert` lowers to the Luau `assert`, so the body needs nothing
+    /// of the runtime. The spec still calls `__alloy.set_testing`.
+    #[test]
+    fn a_spec_requires_the_runtime_it_calls() {
+        let src = "@test
+local function only_assert()
+    $assert(1 == 1)
+end
+";
+        let (text, _, count) = spec(
+            &Config::default(),
+            Path::new("/none"),
+            Path::new("src/m.aly"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(
+            text.contains("local __alloy = require(\"./.modules/alloy\")"),
+            "{text}"
+        );
+    }
 }

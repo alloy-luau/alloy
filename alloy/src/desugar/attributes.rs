@@ -1322,6 +1322,10 @@ impl<'s> Desugar<'s> {
                 if !self.options.tests {
                     let std = self.std();
                     tail.push_str(&format!(" {std}.test({}, {f})", luau_string(f)));
+                } else {
+                    // The spec calls `__alloy.set_testing`, so the spec
+                    // requires the runtime even when the body does not.
+                    self.std();
                 }
             }
 

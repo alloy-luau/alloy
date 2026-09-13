@@ -148,6 +148,12 @@ pub enum Context {
     /// The member column of a `trait` body, which takes no visibility:
     /// every method a trait declares is public.
     TraitMemberStart { prefix: String },
+    /// A line of an attribute contract, `requires public function each
+    /// lifecycles`. `words` is exactly what fits at the caret: the
+    /// clause words the grammar takes there, or the list parameters the
+    /// attribute declares, after `each`. No position in the body takes a
+    /// name from the scope, so an empty list is an answer of its own.
+    ContractClause { prefix: String, words: Vec<String> },
     /// `new Stats { |`: a field of the struct the literal fills.
     StructField { prefix: String, target: String },
     /// The variant column of an `enum` body: a new name, and the `end`.
@@ -779,6 +785,25 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             });
         }
 
+        Some(Body::Attribute) => {
+            if prefix == "end" {
+                return Some(Context::Nothing);
+            }
+
+            // `attribute p(...) on impl as |`: the body opens on this
+            // line, so the caret is at the clause column of it.
+            let clause = match opener.is_some() {
+                true => "",
+
+                false => head,
+            };
+
+            return Some(Context::ContractClause {
+                prefix: prefix.to_string(),
+                words: bodies::contract_words(src, line_start, clause),
+            });
+        }
+
         Some(Body::Impl | Body::Trait) => {}
 
         None => {}
@@ -890,6 +915,84 @@ mod tests {
     fn at(src: &str) -> Option<Context> {
         let offset = src.find('|').unwrap();
         detect(&src.replace('|', ""), offset)
+    }
+
+    /*
+    The body of an `attribute ... as` takes the words of a contract
+    clause and nothing else. Every position of it answered with the
+    whole global scope, or with nothing at all.
+    */
+    #[test]
+    fn an_attribute_body_takes_the_words_of_a_contract_clause() {
+        const HEAD: &str = "attribute p(items: string[], name: string) on impl as\n";
+        let words = |line: &str| match at(&format!("{HEAD}{line}")) {
+            Some(Context::ContractClause { words, .. }) => words,
+
+            other => panic!("`{line}` reads as {other:?}"),
+        };
+
+        // The body opens on the `as` of the header, so the clause column
+        // starts there.
+        assert_eq!(
+            at("attribute p(items: string[]) on impl as |"),
+            Some(Context::ContractClause {
+                prefix: String::new(),
+                words: vec!["requires".to_string(), "end".to_string()],
+            })
+        );
+        assert_eq!(words("    |"), ["requires", "end"]);
+        assert_eq!(words("    req|"), ["requires", "end"]);
+        assert_eq!(
+            words("    requires |"),
+            ["public", "private", "function", "field"]
+        );
+        assert_eq!(words("    requires public |"), ["function", "field"]);
+        assert_eq!(words("    requires private |"), ["function", "field"]);
+        // `each` reads a list parameter, and this attribute declares one.
+        assert_eq!(words("    requires function |"), ["each"]);
+        assert_eq!(words("    requires private field |"), ["each"]);
+        assert_eq!(words("    requires function each |"), ["items"]);
+        // A member name the author is typing sits in that same slot, so
+        // `each` is still what the list holds; the editor filters it by
+        // the prefix.
+        assert_eq!(words("    requires function Sta|"), ["each"]);
+        // A shape names the parameters of the member, which are the
+        // author's own, so no word reaches the slot.
+        for line in [
+            "    requires function Start(|",
+            "    requires function each items (|",
+        ] {
+            let held = match at(&format!("{HEAD}{line}")) {
+                Some(Context::ContractClause { words, .. }) => words,
+
+                // The parameter rule answers first, and it answers with
+                // no list either.
+                Some(Context::Nothing) => Vec::new(),
+
+                other => panic!("`{line}` reads as {other:?}"),
+            };
+            assert!(held.is_empty(), "`{line}` offers {held:?}");
+        }
+
+        // `end` closes the body, so the words of a clause leave the line.
+        assert_eq!(at(&format!("{HEAD}    end|")), Some(Context::Nothing));
+
+        // An attribute with no list parameter offers no `each`.
+        let plain = "attribute q(name: string) on impl as\n    requires function |";
+        assert_eq!(
+            at(plain),
+            Some(Context::ContractClause {
+                prefix: String::new(),
+                words: Vec::new(),
+            })
+        );
+
+        // The short form opens no body: `attribute skip on field` is one
+        // line, and the line below it is ordinary code.
+        assert!(!matches!(
+            at("attribute skip on field\nlocal x = |"),
+            Some(Context::ContractClause { .. })
+        ));
     }
 
     /// Where an expression may start, and where it may not.

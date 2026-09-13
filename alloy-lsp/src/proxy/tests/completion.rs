@@ -1993,3 +1993,152 @@ pub(crate) fn a_dotted_value_path_never_falls_through_to_the_scope() {
         assert!(!labels(&found).contains(&name.to_string()), "{name}");
     }
 }
+
+/// A flat `Enum*` name comes from the definitions file, where it names
+/// the item type of one engine enum. luau-lsp keeps it out of the type
+/// scope, so `local a: EnumUserInputType` does not compile.
+/// `Enum.UserInputType` is the spelling a type slot takes, and the
+/// dotted list is where those names belong.
+#[test]
+pub(crate) fn a_type_slot_takes_the_dotted_spelling_of_an_engine_enum() {
+    const SRC: &str = "local a: EnumUs\nlocal b: Enum.\n";
+    let (st, uri) = one_file(SRC);
+    let bare = type_slot_labels(&st, uri, SRC, "local a: ");
+
+    for flat in ["EnumUserInputType", "EnumKeyCode", "EnumKeyCode_INTERNAL"] {
+        assert!(!bare.contains(&flat.to_string()), "`{flat}` is offered");
+    }
+
+    // The three datatypes that carry the prefix and are types of their
+    // own stay in the list.
+    for name in ["Enum", "EnumItem", "Enums"] {
+        assert!(bare.contains(&name.to_string()), "`{name}` is missing");
+    }
+
+    let dotted = type_slot_labels(&st, uri, SRC, "local b: Enum.");
+    assert!(dotted.contains(&"UserInputType".to_string()));
+    assert!(dotted.contains(&"KeyCode".to_string()));
+    // The dotted list holds the enums and nothing else: no primitive,
+    // no std type, no class.
+    for other in [
+        "string",
+        "HashMap",
+        "Part",
+        "Enum",
+        "UserInputType_INTERNAL",
+    ] {
+        assert!(!dotted.contains(&other.to_string()), "`{other}` is offered");
+    }
+}
+
+/// Luau's type functions reached no type slot: `export type K = ke`
+/// offered every name of the workspace and no `keyof`. Each one inserts
+/// its brackets and leaves the caret inside them.
+#[test]
+pub(crate) fn a_type_slot_offers_the_luau_type_functions() {
+    const SRC: &str = concat!(
+        "local a: ty\n",
+        "export type K = ke\n",
+        "struct S as\n",
+        "    x: ind\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(SRC);
+
+    for at in ["local a: ", "export type K = ", "    x: "] {
+        let labels = type_slot_labels(&st, uri, SRC, at);
+
+        for name in [
+            "typeof",
+            "keyof",
+            "rawkeyof",
+            "index",
+            "rawget",
+            "setmetatable",
+            "getmetatable",
+        ] {
+            assert!(labels.contains(&name.to_string()), "`{name}` at `{at}`");
+        }
+
+        // `union` and `intersect` are no type functions: the checker
+        // reports `Unknown type 'union'`.
+        for name in ["union", "intersect"] {
+            assert!(!labels.contains(&name.to_string()), "`{name}` at `{at}`");
+        }
+    }
+
+    let offset = SRC.find("local a: ").expect("the slot") + "local a: ".len();
+    let ctx = context::detect(SRC, offset).expect("a type slot");
+    let items = st.context_items(uri, offset, &ctx);
+    let insert = |label: &str| -> String {
+        items
+            .iter()
+            .find(|i| i["label"] == json!(label))
+            .and_then(|i| i["textEdit"]["newText"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    // No snippet support in the test state, so the pair goes in empty.
+    assert_eq!(insert("typeof"), "typeof()");
+    assert_eq!(insert("keyof"), "keyof<>");
+}
+
+/// The body of an `attribute ... as` offered the whole global scope
+/// after `requires`, and nothing at all after the kind word. The list is
+/// the words of a contract clause, and the scope reaches no position of
+/// the body.
+#[test]
+pub(crate) fn an_attribute_contract_lists_its_own_words() {
+    const SRC: &str = concat!(
+        "attribute p(items: string[], name: string) on impl as\n",
+        "    requires \n",
+        "    requires private function \n",
+        "    requires private function each \n",
+        "    \n",
+        "end\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let labels = |at: &str| -> Vec<String> {
+        let offset = SRC.find(at).expect(at) + at.len();
+        let ctx = context::detect(SRC, offset).expect("a context");
+
+        st.context_items(uri, offset, &ctx)
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        labels("    requires "),
+        ["public", "private", "function", "field"]
+    );
+    assert_eq!(labels("    requires private function "), ["each"]);
+    assert_eq!(labels("    requires private function each "), ["items"]);
+    assert_eq!(labels("\n    \n"), ["requires", "end"]);
+
+    // No position of the body reaches the scope. `print` and `game` are
+    // the two the whole global list opened with.
+    for at in [
+        "    requires ",
+        "    requires private function ",
+        "    requires private function each ",
+        "\n    \n",
+    ] {
+        let held = labels(at);
+
+        for name in ["print", "game", "string", "HashMap"] {
+            assert!(!held.contains(&name.to_string()), "`{name}` at `{at}`");
+        }
+    }
+
+    // `requires private function |` answered with nothing at all: the
+    // word before the caret is `function`, which the name rule read as a
+    // declaration of its own.
+    let offset = SRC
+        .find("    requires private function ")
+        .expect("the slot")
+        + "    requires private function ".len();
+    assert!(!declares_a_name_at(SRC, offset));
+    // A `function` that does declare a name still does.
+    assert!(declares_a_name_at("local function |", 15));
+}

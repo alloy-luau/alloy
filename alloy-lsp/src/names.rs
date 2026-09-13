@@ -116,6 +116,13 @@ pub(crate) fn declares_a_name_at(source: &str, offset: usize) -> bool {
             && source[word_end..].trim_start().starts_with("from");
     }
 
+    // A clause of an attribute contract names a member the declaration
+    // must carry, not a new name: `requires private function |` takes
+    // `each`, which the contract list answers with.
+    if statement.starts_with("requires ") {
+        return false;
+    }
+
     let mut end = start;
 
     while end > 0 && bytes[end - 1] == b' ' {

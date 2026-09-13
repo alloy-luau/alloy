@@ -742,6 +742,16 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            // A line of an attribute contract. The context holds
+            // exactly the words that fit, so the list is that alone.
+            Context::ContractClause { prefix, words } => {
+                let from = offset - prefix.len();
+
+                for w in words {
+                    items.push(word(w, "keyword", None, from));
+                }
+            }
+
             // A trait declares a contract; every method in it is public.
             Context::TraitMemberStart { prefix } => {
                 let from = offset - prefix.len();

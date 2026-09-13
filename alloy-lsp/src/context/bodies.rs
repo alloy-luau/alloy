@@ -12,6 +12,9 @@ pub(crate) enum Body {
     Enum,
     Impl,
     Trait,
+    /// The contract of an `attribute ... as ... end`: `requires` clauses
+    /// and nothing else.
+    Attribute,
 }
 
 /// The declaration body around `line_start`: the nearest line at the
@@ -51,6 +54,7 @@ pub(crate) fn enclosing_body(src: &str, line_start: usize) -> Option<Body> {
                 Some(Body::Struct)
             }
             Some("enum") if decl.contains(" as") => Some(Body::Enum),
+            Some("attribute") if decl.contains(" as") => Some(Body::Attribute),
             // A negative depth means a method opened a block the walk
             // never closed: the caret sits in that method's body, which
             // is ordinary code, not the member column.
@@ -90,8 +94,137 @@ pub(crate) fn opens_a_body(head: &str) -> Option<Body> {
 
         Some("trait") => Some(Body::Trait),
 
+        Some("attribute") => Some(Body::Attribute),
+
         _ => None,
     }
+}
+
+/*
+The words an attribute contract takes at the caret. The grammar of one
+clause is
+
+    requires <visibility>? <kind> (<name> | each <param>) <shape>?
+
+so the words already on the line say which slot the caret is in. A
+member name and a shape are the author's own text, and no position in
+the body takes a name from the scope.
+
+`head` is the line up to the word being typed, and `src[..line_start]`
+the lines above, where the declaration states its parameters.
+*/
+pub(crate) fn contract_words(src: &str, line_start: usize, head: &str) -> Vec<String> {
+    let words: Vec<&str> = head.split_whitespace().collect();
+    let fixed = |list: &[&str]| list.iter().map(|w| w.to_string()).collect();
+
+    match words.as_slice() {
+        // The clause column, where `end` closes the body too.
+        [] => fixed(&["requires", "end"]),
+
+        ["requires"] => fixed(&["public", "private", "function", "field"]),
+
+        ["requires", "public" | "private"] => fixed(&["function", "field"]),
+
+        // Past the kind word the member name is the author's own.
+        // `each` stands in its place, and only where a list parameter
+        // can name the members.
+        ["requires", "function" | "field"]
+        | ["requires", "public" | "private", "function" | "field"] => {
+            match list_parameters(src, line_start).is_empty() {
+                true => Vec::new(),
+
+                false => fixed(&["each"]),
+            }
+        }
+
+        ["requires", .., "each"] => list_parameters(src, line_start),
+
+        _ => Vec::new(),
+    }
+}
+
+/// The parameters of the `attribute` declaration above the caret that
+/// `each` can read: a list, or one with no type, which says nothing
+/// either way.
+fn list_parameters(src: &str, line_start: usize) -> Vec<String> {
+    let Some(line) = src[..line_start]
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty() && !l.starts_with(char::is_whitespace))
+    else {
+        return Vec::new();
+    };
+    let decl = line.trim_start();
+    let decl = decl.strip_prefix("export ").unwrap_or(decl);
+
+    if !decl.starts_with("attribute ") {
+        return Vec::new();
+    }
+
+    // `attribute name(params) on targets as`: the target list follows
+    // the parameters, so the parentheses of the head are the ones
+    // before ` on `.
+    let head = decl.split(" on ").next().unwrap_or(decl);
+    let (Some(open), Some(close)) = (head.find('('), head.rfind(')')) else {
+        return Vec::new();
+    };
+
+    if close < open {
+        return Vec::new();
+    }
+
+    let params = &head[open + 1..close];
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut entries: Vec<&str> = Vec::new();
+
+    for (i, c) in params.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+
+            ')' | ']' | '}' => depth -= 1,
+
+            ',' if depth == 0 => {
+                entries.push(&params[start..i]);
+                start = i + 1;
+            }
+
+            _ => {}
+        }
+    }
+
+    entries.push(&params[start..]);
+    let mut out = Vec::new();
+
+    for entry in entries {
+        let (name, ty) = match entry.split_once(':') {
+            Some((n, t)) => (n.trim(), Some(t.trim())),
+
+            None => (entry.trim(), None),
+        };
+
+        if name.is_empty() || !name.chars().all(is_word) {
+            continue;
+        }
+
+        if ty.is_none_or(is_a_list) {
+            out.push(name.to_string());
+        }
+    }
+
+    out
+}
+
+/// Whether a type text spells a list: `string[]`, `Array<T>`, or a
+/// table type with no key. This is the reading
+/// `alloy::desugar::contracts` checks an `each` against, so the two
+/// stay in step.
+fn is_a_list(ty: &str) -> bool {
+    let ty = ty.trim();
+
+    ty.ends_with("[]")
+        || ty.starts_with("Array<")
+        || (ty.starts_with('{') && ty.ends_with('}') && !ty.contains(':'))
 }
 
 /// Whether the cursor sits inside the parentheses of a variant, on a

@@ -316,12 +316,88 @@ impl State {
         for name in alloy::roblox_classes::INSTANCE_CLASSES
             .iter()
             .chain(alloy::roblox_classes::DATATYPES)
+            .filter(|name| !is_flat_enum(name))
         {
             push(name, 7, "roblox", None);
         }
 
+        // Luau's type functions. `typeof` reads an expression in
+        // parentheses; every other one takes type arguments in angle
+        // brackets, `keyof<T>`.
+        for (name, what) in TYPE_FUNCTIONS {
+            if !seen.insert(name.to_string()) {
+                continue;
+            }
+
+            let (open, close) = match name {
+                "typeof" => ('(', ')'),
+
+                _ => ('<', '>'),
+            };
+            let mut item = json!({
+                "label": name,
+                "kind": 3,
+                "detail": "Luau type function",
+                "documentation": { "kind": "markdown", "value": what },
+            });
+
+            // The accept writes the brackets and leaves the caret
+            // between them: the argument is what the author writes next.
+            match self.snippets {
+                true => {
+                    item["insertText"] = json!(format!("{name}{open}$1{close}"));
+                    item["insertTextFormat"] = json!(2);
+                }
+
+                false => item["insertText"] = json!(format!("{name}{open}{close}")),
+            }
+
+            items.push(item);
+        }
+
         items
     }
+}
+
+/// The type functions Luau's solver holds, with what each one reads.
+/// `union` and `intersect` are not among them: the checker reports
+/// `Unknown type 'union'`.
+pub(crate) const TYPE_FUNCTIONS: [(&str, &str); 7] = [
+    ("typeof", "The type of an expression."),
+    ("keyof", "The keys of a table type, as a union of strings."),
+    ("rawkeyof", "The keys of a table type, metatable aside."),
+    ("index", "The type one key of a table type holds."),
+    ("rawget", "The type one key holds, metatable aside."),
+    ("setmetatable", "A table type with a metatable on it."),
+    ("getmetatable", "The metatable of a type."),
+];
+
+/// Whether the name is the definitions file's own spelling of a Roblox
+/// enum, `EnumUserInputType`. luau-lsp keeps those out of the type
+/// scope, so the flat name never compiles; `Enum.UserInputType` is the
+/// only spelling a type slot takes. `Enum`, `EnumItem`, and `Enums` are
+/// datatypes of their own and stay.
+pub(crate) fn is_flat_enum(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("Enum") else {
+        return false;
+    };
+    // The definitions file writes the table of one enum's items as
+    // `EnumUserInputType_INTERNAL`, which is no type either.
+    let rest = rest.strip_suffix("_INTERNAL").unwrap_or(rest);
+
+    !rest.is_empty() && rest != "Item" && rest != "s"
+}
+
+/// The Roblox enum names, as `Enum.UserInputType` spells them. The
+/// definitions file names each one `EnumUserInputType`, so the list
+/// comes from the datatypes with that prefix off.
+pub(crate) fn roblox_enum_names() -> Vec<&'static str> {
+    alloy::roblox_classes::DATATYPES
+        .iter()
+        .copied()
+        .filter(|name| is_flat_enum(name) && !name.ends_with("_INTERNAL"))
+        .filter_map(|name| name.strip_prefix("Enum"))
+        .collect()
 }
 
 /// The std type a member position reads, with whether the receiver is

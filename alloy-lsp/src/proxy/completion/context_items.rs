@@ -491,6 +491,18 @@ impl State {
                         items.push(item);
                     }
 
+                    // `local b: Enum.|`: the engine's enums. That path
+                    // is the only spelling a type slot takes for one,
+                    // and the definitions file holds no namespace the
+                    // walk above could follow.
+                    if path == "Enum" && items.is_empty() {
+                        for name in roblox_enum_names() {
+                            let mut item = word(name, 13, None, from);
+                            item["detail"] = json!(format!("enum Enum.{name}"));
+                            items.push(item);
+                        }
+                    }
+
                     return items;
                 }
 
@@ -500,9 +512,22 @@ impl State {
                     let doc_text = item["documentation"]["value"].as_str().map(str::to_string);
                     let detail = item["detail"].clone();
                     let rank = type_rank(*prefers, detail.as_str().unwrap_or(""));
+                    // A type function inserts its brackets, so the text
+                    // the accept writes rides along with the label.
+                    let insert = item["insertText"].as_str().map(str::to_string);
+                    let format = item["insertTextFormat"].clone();
                     item = word(&label, kind, doc_text, from);
                     item["detail"] = detail;
                     item["sortText"] = json!(format!("{rank}{label}"));
+
+                    if let Some(insert) = insert {
+                        item["textEdit"]["newText"] = json!(insert);
+
+                        if !format.is_null() {
+                            item["insertTextFormat"] = format;
+                        }
+                    }
+
                     items.push(item);
                 }
 
@@ -785,6 +810,39 @@ impl State {
                     ("end", "Closes the body."),
                 ] {
                     items.push(word(name, 14, Some(what.to_string()), from));
+                }
+            }
+
+            /*
+            A line of an attribute contract. The context already holds
+            exactly the words that fit, so the list is that and nothing
+            else: the whole scope here named no member of a contract,
+            and the child sees an emit that holds no attribute at all.
+            */
+            Context::ContractClause { prefix, words } => {
+                let from = offset - prefix.len();
+
+                for w in words {
+                    let what = match w.as_str() {
+                        "requires" => "What the thing the attribute sits on must carry.",
+
+                        "public" => "The member must be public.",
+
+                        "private" => "The member must be private.",
+
+                        "function" => "The member is a method.",
+
+                        "field" => "The member is a field.",
+
+                        "each" => "One clause per entry of a list parameter.",
+
+                        "end" => "Closes the body.",
+
+                        // A parameter of this attribute, which is what
+                        // `each` reads.
+                        _ => "A list parameter; `each` writes one clause per entry.",
+                    };
+                    items.push(word(w, 14, Some(what.to_string()), from));
                 }
             }
 

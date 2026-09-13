@@ -1317,11 +1317,18 @@ impl<'s> Desugar<'s> {
 
         if let Some(f) = &fname {
             if is_test {
-                self.test_names.push((f.clone(), body.is_async.is_some()));
+                // A namespace member renders under its own name, and the
+                // namespace table carries it: the test is `Suite.ns_case`
+                // to the reader and to the spec, `Suite_ns_case` to the
+                // line that registers it.
+                let rendered = name.map_or_else(|| f.clone(), |n| self.decl_name(n));
+                let path = self.display_name(&rendered);
+                self.test_names
+                    .push((path.clone(), body.is_async.is_some()));
 
                 if !self.options.tests {
                     let std = self.std();
-                    tail.push_str(&format!(" {std}.test({}, {f})", luau_string(f)));
+                    tail.push_str(&format!(" {std}.test({}, {rendered})", luau_string(&path)));
                 } else {
                     // The spec calls `__alloy.set_testing`, so the spec
                     // requires the runtime even when the body does not.

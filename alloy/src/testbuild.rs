@@ -100,6 +100,26 @@ fn head_name(src: &str, toks: &[Tok], e: &Expr) -> Option<(String, bool)> {
     Some((first.text(src).to_string(), plain))
 }
 
+/// Whether a namespace holds a `@test`, at any depth. Such a namespace
+/// is a test of the file: the emit puts each member on the table, so the
+/// spec calls the test by its path.
+fn namespace_has_test(src: &str, toks: &[Tok], ns: &alloy_syntax::ast::NamespaceDecl) -> bool {
+    let tested = |attrs: &[alloy_syntax::ast::Attr]| {
+        attrs.iter().any(|a| {
+            a.name
+                .is_some_and(|n| toks[n.start as usize].text(src) == "test")
+        })
+    };
+
+    ns.members.iter().any(|m| match &m.stmt {
+        Stmt::Function(f) => tested(&f.attrs),
+        Stmt::LocalFunction(f) => tested(&f.attrs),
+        Stmt::Namespace(inner) => namespace_has_test(src, toks, inner),
+
+        _ => false,
+    })
+}
+
 fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
     let span = stmt.span();
     let start = toks[span.start as usize].start as usize;
@@ -196,6 +216,11 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
                 }
             }
         },
+
+        Stmt::Namespace(ns) => {
+            declares.push(name_of(src, toks, ns.name));
+            is_test = namespace_has_test(src, toks, ns);
+        }
 
         Stmt::Struct(s) => declares.push(name_of(src, toks, s.name)),
         Stmt::Enum(e) => declares.push(name_of(src, toks, e.name)),
@@ -990,6 +1015,29 @@ mod tests {
         assert!(text.contains("__lest.it(\"plain\", plain)"), "{text}");
         assert!(text.contains("__alloy.await(later())"), "{text}");
         assert!(!text.contains("__alloy.test("), "{text}");
+    }
+
+    /// A namespace member renders under its own name and the table
+    /// carries it, so the spec calls the test by its path.
+    #[test]
+    fn a_test_inside_a_namespace_registers_by_its_path() {
+        let src = "namespace Suite as\n    @test\n    function ns_case()\n        $assert(1 == 1)\n    end\nend\n";
+        let (text, _, count) = spec(
+            &Config::default(),
+            Path::new("/none"),
+            Path::new("src/m.aly"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(
+            text.contains("__lest.it(\"Suite.ns_case\", Suite.ns_case)"),
+            "{text}"
+        );
+        assert!(text.contains("Suite.ns_case = Suite_ns_case"), "{text}");
     }
 
     /// `$assert` lowers to the Luau `assert`, so the body needs nothing

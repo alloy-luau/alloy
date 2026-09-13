@@ -233,7 +233,14 @@ impl<'s> Desugar<'s> {
                     && let Some(table) = init.as_deref()
                 {
                     self.check_new(name, args.as_ref(), Some(table), *span);
-                    let n = self.render_to_string(name);
+                    // The struct's declared name, not the name the
+                    // source wrote: a namespace member renders under
+                    // `Zoo_Lion`, and that is the table that carries
+                    // the raw constructor. Reading `Zoo.Lion` instead
+                    // found the `new` a user impl writes.
+                    let n = self
+                        .constructed_struct(name)
+                        .map_or_else(|| self.render_to_string(name), |(_, n)| n);
                     // Inside the struct's own impl the instance carries the
                     // full view, so `self.count` in `new` type checks.
                     let full_view = self.impl_target.as_deref() == Some(n.as_str())

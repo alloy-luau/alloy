@@ -1243,11 +1243,11 @@ impl<'s> Desugar<'s> {
         args: Option<&CallArgs>,
         init: Option<&Expr>,
     ) -> bool {
-        let Expr::Name(n) = name else {
-            return false;
-        };
-
-        args.is_none() && init.is_some() && self.structs.contains(self.text_of(*n))
+        args.is_none()
+            && init.is_some()
+            && self
+                .constructed_struct(name)
+                .is_some_and(|(_, n)| self.structs.contains(&n))
     }
 
     /// `new Name()` where the constructor itself writes it: the raw

@@ -894,3 +894,21 @@ fn the_field_checks_reach_a_namespace_struct_by_its_path() {
         "{private:?}"
     );
 }
+
+/// A method named `new` in a namespace struct's own impl is the user's
+/// function. `new Zoo.Lion { }` builds the struct, so it calls the raw
+/// constructor the declaration writes. The emit read the written name,
+/// `Zoo.Lion`, which no index of a struct holds, so the construction
+/// fell through to `Zoo.Lion.new` and the checker typed it against the
+/// user's signature.
+#[test]
+fn a_construction_reads_the_raw_constructor_not_a_user_new() {
+    let src = "namespace Zoo as\n    struct Lion as\n        name: string\n    end\n\n    impl Lion as\n        function new(name: string): Lion\n            return new Zoo.Lion { name = name }\n        end\n    end\nend\n\nprint(Zoo)\n";
+    let (ship, check, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(
+        check.contains("return Zoo_Lion.__new({ name = name })"),
+        "{check}"
+    );
+    assert!(ship.contains("return Zoo_Lion({ name = name })"), "{ship}");
+}

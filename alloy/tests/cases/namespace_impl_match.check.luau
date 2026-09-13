@@ -23,6 +23,6 @@ local Shapes = {}
     end Shapes.name_of = Shapes_name_of
 
 
-local c = Shapes.Circle.new({ r = 2 })
+local c = Shapes_Circle.__new({ r = 2 })
 
 print(c:area(), Shapes.name_of(Shapes.Kind.Round))

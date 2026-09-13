@@ -23,6 +23,6 @@ local Shapes = {}
     end Shapes.name_of = Shapes_name_of
 
 
-local c = __alloy.construct(Shapes.Circle, { r = 2 })
+local c = Shapes_Circle({ r = 2 })
 
 print(c:area(), Shapes.name_of(Shapes.Kind.Round))

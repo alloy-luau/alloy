@@ -1464,6 +1464,37 @@ pub fn fold_private_views(text: &str) -> String {
         out.replace_range(start..brace + len, &name);
     }
 
+    // `Cat & Cat__private` with no table after it is the view an impl
+    // in another file reads, and `Cat__all` is the emit's name for it.
+    for suffix in ["__private", "__all"] {
+        let mut from = 0;
+
+        while let Some(at) = out[from..].find(suffix).map(|i| from + i) {
+            let end = at + suffix.len();
+            let joined = out[end..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+
+            if joined || out[end..].starts_with('.') {
+                from = end;
+
+                continue;
+            }
+
+            let name_start = out[..at]
+                .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map(|n| n + 1)
+                .unwrap_or(0);
+            let name = out[name_start..at].to_string();
+            let head = format!("{name} & ");
+            let start = match out[..name_start].ends_with(&head) {
+                true => name_start - head.len(),
+
+                false => name_start,
+            };
+            out.replace_range(start..end, &name);
+            from = start + name.len();
+        }
+    }
+
     out.replace("__private.", ".")
 }
 
@@ -2089,6 +2120,14 @@ mod tests {
             tables: Vec::new(),
         };
         assert_eq!(fold(text, &known), ": Swinger");
+
+        // The view an impl in another file reads carries no table.
+        let text = "function Cat:helper(self: Cat & Cat__private): string";
+        assert_eq!(
+            fold(text, &Known::default()),
+            "function Cat:helper(self: Cat): string"
+        );
+        assert_eq!(fold("local c: Cat__all", &Known::default()), "local c: Cat");
     }
 
     #[test]

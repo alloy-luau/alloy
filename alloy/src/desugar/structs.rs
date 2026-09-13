@@ -70,10 +70,14 @@ impl<'s> Desugar<'s> {
 
         // The header carries no type slot into the emit, so a name that
         // is nowhere reads as a Luau global inside the body, or says
-        // nothing at all when the body is empty.
-        if !self.knows_type(&target_name) {
+        // nothing at all when the body is empty. Either spelling
+        // answers: a namespace member renders under a name only the
+        // declaring file binds, and `Zoo.Lion` reads the import.
+        let written = self.text_of(i.target).to_string();
+
+        if !self.knows_type(&target_name) && !self.knows_type(&written) {
             let message = format!(
-                "nothing declares `{target_name}`; an `impl` targets a struct, an enum, or a foreign type"
+                "nothing declares `{written}`; an `impl` targets a struct, an enum, or a foreign type"
             );
             self.diagnose(i.target, &message);
         }
@@ -92,11 +96,6 @@ impl<'s> Desugar<'s> {
         // A foreign target gets a registry table instead of its metatable.
         let foreign = self.is_foreign(&target_name);
         self.ext_hit |= foreign;
-        let target = if foreign {
-            "__impl".to_string()
-        } else {
-            target_name.clone()
-        };
 
         // A struct with private members: a private method lands on
         // `Target__private` in the check artifact, and a public method
@@ -106,6 +105,17 @@ impl<'s> Desugar<'s> {
         // methods on the class table, as the ship artifact does.
         let declares_target =
             self.structs.contains(&target_name) || self.enums.contains_key(&target_name);
+        // The table each method lands on. A namespace member renders
+        // under `Zoo_Lion`, which the declaring file binds as a local;
+        // a file that imports the namespace binds the path alone, so
+        // there the methods land on `Zoo.Lion`.
+        let target = match (foreign, declares_target) {
+            (true, _) => "__impl".to_string(),
+
+            (false, true) => target_name.clone(),
+
+            (false, false) => written.clone(),
+        };
         let split = !foreign && declares_target && self.has_private_view(&target_name);
         // An impl of a struct another file declares: its private methods
         // go on the class table, and `self` reads the full view the

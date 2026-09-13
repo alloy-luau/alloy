@@ -150,35 +150,75 @@ pub fn private_views(src: &str) -> Vec<String> {
 
     let toks = &parsed.lexed.toks;
     let text = |span: TokSpan| span.text_or_empty(src, toks);
-    let stmts = &parsed.chunk.block.stmts;
-    let mut plain: HashSet<&str> = HashSet::new();
+    let stmts = flat_stmts(&parsed.chunk.block.stmts, &text);
+    let mut plain: HashSet<String> = HashSet::new();
 
-    for stmt in stmts {
+    for (prefix, stmt) in &stmts {
         if let Stmt::Struct(d) = stmt
             && d.generics.is_none()
         {
-            plain.insert(text(d.name));
+            plain.insert(format!("{prefix}{}", text(d.name)));
         }
     }
 
     let private = |v: Option<TokSpan>| v.is_some_and(|v| text(v) == "private");
     let mut out: Vec<String> = Vec::new();
 
-    for stmt in stmts {
+    for (prefix, stmt) in &stmts {
         let name = match stmt {
-            Stmt::Struct(d) if d.fields.iter().any(|f| private(f.visibility)) => text(d.name),
+            Stmt::Struct(d) if d.fields.iter().any(|f| private(f.visibility)) => {
+                format!("{prefix}{}", text(d.name))
+            }
 
-            Stmt::Impl(i) if i.methods.iter().any(|m| private(m.visibility)) => text(i.target),
+            Stmt::Impl(i) if i.methods.iter().any(|m| private(m.visibility)) => {
+                rendered_target(prefix, text(i.target))
+            }
 
             _ => continue,
         };
 
-        if plain.contains(name) && !out.iter().any(|n| n == name) {
-            out.push(name.to_string());
+        if plain.contains(&name) && !out.contains(&name) {
+            out.push(name);
         }
     }
 
     out
+}
+
+/// Every statement of a file with the prefix the emit puts on the names
+/// it declares: the empty string at the top level, and `Zoo_` inside
+/// `namespace Zoo`, nesting and all. A namespace has no Luau form, so a
+/// struct of one is `Zoo_Lion` everywhere the project names it.
+fn flat_stmts<'a>(
+    stmts: &'a [Stmt],
+    text: &impl Fn(TokSpan) -> &'a str,
+) -> Vec<(String, &'a Stmt)> {
+    let mut out: Vec<(String, &'a Stmt)> = Vec::new();
+    let mut stack: Vec<(String, &'a Stmt)> =
+        stmts.iter().rev().map(|s| (String::new(), s)).collect();
+
+    while let Some((prefix, stmt)) = stack.pop() {
+        if let Stmt::Namespace(ns) = stmt {
+            let head = format!("{prefix}{}_", text(ns.name));
+
+            for m in ns.members.iter().rev() {
+                stack.push((head.clone(), &m.stmt));
+            }
+
+            continue;
+        }
+
+        out.push((prefix, stmt));
+    }
+
+    out
+}
+
+/// The name an `impl` target renders under: the prefix of the namespace
+/// the block sits in, and the dots of a path joined the way the emit
+/// joins them. `impl Zoo.Lion` targets `Zoo_Lion`.
+fn rendered_target(prefix: &str, written: &str) -> String {
+    format!("{prefix}{}", written.replace('.', "_"))
 }
 
 /// The `impl` blocks of one file, the methods they keep private, and the
@@ -192,17 +232,17 @@ fn impls(src: &str, own: bool) -> FileImpls {
     let toks = &parsed.lexed.toks;
     let text = |span: TokSpan| span.text_or_empty(src, toks);
 
-    let stmts = &parsed.chunk.block.stmts;
-    let mut local: HashSet<&str> = HashSet::new();
+    let stmts = flat_stmts(&parsed.chunk.block.stmts, &text);
+    let mut local: HashSet<String> = HashSet::new();
 
-    for stmt in stmts {
+    for (prefix, stmt) in &stmts {
         match stmt {
             Stmt::Struct(d) => {
-                local.insert(text(d.name));
+                local.insert(format!("{prefix}{}", text(d.name)));
             }
 
             Stmt::Enum(d) => {
-                local.insert(text(d.name));
+                local.insert(format!("{prefix}{}", text(d.name)));
             }
 
             _ => {}
@@ -241,7 +281,7 @@ fn impls(src: &str, own: bool) -> FileImpls {
         (!t.is_empty()).then_some(t)
     };
 
-    for stmt in stmts {
+    for (prefix, stmt) in &stmts {
         if let Stmt::Trait(t) = stmt {
             for m in &t.methods {
                 // A method with no body is abstract: the impl writes it.
@@ -251,7 +291,7 @@ fn impls(src: &str, own: bool) -> FileImpls {
 
                 let (has_self, params) = signature(&m.params);
                 out.defaults.push(Extension {
-                    target: text(t.name).to_string(),
+                    target: format!("{prefix}{}", text(t.name)),
                     name: text(m.name).to_string(),
                     is_static: !has_self,
                     params,
@@ -264,7 +304,8 @@ fn impls(src: &str, own: bool) -> FileImpls {
             continue;
         };
 
-        let target = text(i.target);
+        let target = rendered_target(prefix, text(i.target));
+        let target = target.as_str();
 
         if local.contains(target) {
             // The declaring file's own impl: its methods travel nowhere,
@@ -293,7 +334,7 @@ fn impls(src: &str, own: bool) -> FileImpls {
         // file has not got, so they do not travel to it. A trait impl
         // writes its methods on the same table a plain impl does, so
         // those travel the way a plain impl's do.
-        if own && (i.generics.is_some() || target.contains('.')) {
+        if own && i.generics.is_some() {
             continue;
         }
 

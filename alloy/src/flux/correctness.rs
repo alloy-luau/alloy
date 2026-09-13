@@ -1348,6 +1348,29 @@ mod tests {
         assert_eq!(names(bare), vec!["private_access"]);
     }
 
+    /// `impl Zoo.Lion` is the struct's own impl: the owner of a private
+    /// member is the member the path names, not the namespace. The lint
+    /// read the first name after `impl` and fired inside the impl.
+    #[test]
+    fn private_access_reads_a_namespace_path_as_its_last_name() {
+        let src = "namespace Zoo as\n    struct Lion as\n        read name: string\n        private roar_power: number = 10\n    end\nend\n\nimpl Zoo.Lion as\n    function roar(self): number\n        return self.roar_power\n    end\nend\nprint(Zoo)\n";
+        assert_eq!(names(src), Vec::<&str>::new());
+
+        // From outside the impl it still fires, and it names the struct.
+        let outside =
+            format!("{src}local l = new Zoo.Lion {{ name = \"Leo\" }}\nprint(l.roar_power)\n");
+        let hits: Vec<String> = lints(&outside)
+            .into_iter()
+            .filter(|l| l.name == "private_access")
+            .map(|l| l.message)
+            .collect();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].contains("`roar_power` is private to `Lion`"),
+            "{hits:?}"
+        );
+    }
+
     /// A private field with a default need not be set, so a `new`
     /// outside the impl that names it reaches past the visibility.
     #[test]

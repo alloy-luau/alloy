@@ -318,19 +318,28 @@ impl<'s> Desugar<'s> {
     /// namespace is `A_B_S`. `None` when the head names no namespace,
     /// or the path runs off its members.
     pub(crate) fn ns_path_name(&self, path: &str) -> Option<String> {
-        let mut parts = path.split('.').map(str::trim);
-        let mut key = parts.next()?.to_string();
+        let parts: Vec<&str> = path.split('.').map(str::trim).collect();
+        let (head, rest) = parts.split_first()?;
+        let mut key = (*head).to_string();
         let mut info = self.namespaces.get(&key)?;
+        let mut at = 0;
 
-        for part in parts {
-            let m = info.member(part)?;
+        while at < rest.len() {
+            // An imported namespace flattens its nesting into one member
+            // name, `B_S`, because that is the type the module exports.
+            if let Some(m) = info.member(&rest[at..].join("_")) {
+                return Some(m.rendered.clone());
+            }
+
+            let m = info.member(rest[at])?;
 
             if !m.nested {
                 return Some(m.rendered.clone());
             }
 
-            key = key_of(Some(&key), part);
+            key = key_of(Some(&key), rest[at]);
             info = self.namespaces.get(&key)?;
+            at += 1;
         }
 
         None
@@ -341,7 +350,13 @@ impl<'s> Desugar<'s> {
     pub(crate) fn impl_target_name(&self, span: TokSpan) -> String {
         let name = self.text_of(span).to_string();
 
-        match self.ns_member_name(&name) {
+        // `impl Zoo.Lion` targets the member the path names. The struct
+        // renders as `Zoo_Lion`, and every index a struct's impl reads
+        // is keyed by that name.
+        match self
+            .ns_member_name(&name)
+            .or_else(|| self.ns_path_name(&name))
+        {
             Some(r) => r,
 
             None => name,

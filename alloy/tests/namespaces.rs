@@ -743,3 +743,99 @@ fn a_definitions_namespace_declares_itself_and_keeps_its_members() {
         out.check
     );
 }
+
+// --- an impl of a namespace member -------------------------------------------
+
+const ZOO: &str = "export namespace Zoo as\n    struct Lion as\n        read name: string\n        private roar_power: number = 10\n    end\nend\n\nimpl Zoo.Lion as\n    function roar(self): string\n        return self.name\n    end\n\n    private function secret(self): number\n        return self.roar_power\n    end\nend\n";
+
+/// A struct of a namespace renders under one name, and its impl reads
+/// that name: `self` takes the struct's type, and a private method lands
+/// on the private table. `self` used to be unknown, so every read of a
+/// field through it failed to type.
+#[test]
+fn an_impl_of_a_namespace_struct_types_self_by_the_rendered_name() {
+    let options = alloy::EmitOptions {
+        check: true,
+        file_name: "t.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with(ZOO, &options).unwrap();
+
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.check.contains("function Zoo_Lion.roar(self: Zoo_Lion)"),
+        "{}",
+        out.check
+    );
+    assert!(
+        out.check
+            .contains("function Zoo_Lion__private.secret(self: Zoo_Lion__all)"),
+        "{}",
+        out.check
+    );
+
+    // The ship artifact writes on the class table the file binds.
+    assert!(
+        ship(ZOO).contains("function Zoo_Lion.roar("),
+        "{}",
+        ship(ZOO)
+    );
+}
+
+/// The indexes a cross-file impl travels through are keyed by the
+/// rendered name. A dotted target used to travel nowhere, so the
+/// declaring file's check artifact never declared the method and the
+/// checker called the write an added property.
+#[test]
+fn a_cross_file_impl_of_a_namespace_struct_reaches_the_class_table() {
+    let ext = "import { Zoo } from \"./ns\"\n\nimpl Zoo.Lion as\n    function roar_louder(self): number\n        return self.roar_power * 2\n    end\nend\n";
+    let project = alloy::extensions::project_impls(&[ZOO.to_string(), ext.to_string()]);
+    let travelled: Vec<&str> = project
+        .methods
+        .iter()
+        .filter(|m| m.target == "Zoo_Lion")
+        .map(|m| m.name.as_str())
+        .collect();
+
+    assert_eq!(travelled, vec!["roar_louder"]);
+
+    // The full view travels under the same name, so the impl types
+    // `self` as it and reaches the private field.
+    assert!(
+        alloy::extensions::private_views(ZOO).contains(&"Zoo_Lion".to_string()),
+        "{:?}",
+        alloy::extensions::private_views(ZOO)
+    );
+
+    // The declaring file's own impl stays its own: only its private
+    // method travels, for the privacy lint.
+    assert_eq!(
+        project.privates,
+        vec![("Zoo_Lion".to_string(), vec!["secret".to_string()])]
+    );
+}
+
+/// A namespace inside a namespace joins both names. The impl of a member
+/// two levels down reads the same rendered name, `A_B_S`.
+#[test]
+fn an_impl_two_namespaces_deep_reads_one_name() {
+    let src = "export namespace A as\n    namespace B as\n        struct S as\n            read tag: string\n            private hidden: number = 1\n        end\n    end\nend\n\nimpl A.B.S as\n    function show(self): string\n        return self.tag\n    end\nend\n";
+    let options = alloy::EmitOptions {
+        check: true,
+        file_name: "t.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with(src, &options).unwrap();
+
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.check.contains("function A_B_S.show(self: A_B_S)"),
+        "{}",
+        out.check
+    );
+    assert!(
+        alloy::extensions::private_views(src).contains(&"A_B_S".to_string()),
+        "{:?}",
+        alloy::extensions::private_views(src)
+    );
+}

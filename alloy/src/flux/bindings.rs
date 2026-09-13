@@ -87,9 +87,9 @@ impl<'s> Scan<'s> {
             }
 
             let name = if self.at(i, "impl") && self.is_name(i + 1) && self.at(i + 2, "for") {
-                self.t(i + 3)
+                self.last_segment(i + 3)
             } else {
-                self.t(i + 1)
+                self.last_segment(i + 1)
             };
 
             if best.is_none_or(|(b, _)| i > b) {
@@ -98,6 +98,19 @@ impl<'s> Scan<'s> {
         }
 
         best.map(|(_, n)| n)
+    }
+
+    /// The last name of a dotted path that starts at `i`: `Zoo.Lion` is
+    /// `Lion`. An `impl` may target a namespace member, and the struct
+    /// that declares a private member is the member itself.
+    fn last_segment(&self, i: usize) -> &'s str {
+        let mut at = i;
+
+        while self.at(at + 1, ".") && self.is_name(at + 2) {
+            at += 2;
+        }
+
+        self.t(at)
     }
 
     /// The type a name carries in this file: a parameter or a local
@@ -122,7 +135,7 @@ impl<'s> Scan<'s> {
                 // tokens alone; the `(` after the name says it is a
                 // method call, not an annotation.
                 if self.is_name(j) && !self.at(j + 1, "(") {
-                    return Some(self.t(j));
+                    return Some(self.last_segment(j));
                 }
             }
 
@@ -131,7 +144,7 @@ impl<'s> Scan<'s> {
                 && self.at(i + 2, "new")
                 && self.is_name(i + 3)
             {
-                return Some(self.t(i + 3));
+                return Some(self.last_segment(i + 3));
             }
         }
 

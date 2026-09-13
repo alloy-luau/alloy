@@ -81,7 +81,7 @@ impl<'s> Desugar<'s> {
     /// exports `namespace Math` exports its types as `Math_Vec2`, and
     /// the file that imports the namespace needs one alias each.
     pub(crate) fn namespace_type_aliases(
-        &self,
+        &mut self,
         quoted: &str,
         name: &str,
         local: &str,
@@ -110,6 +110,14 @@ impl<'s> Desugar<'s> {
             out.push(format!(
                 "type {local}_{rest}{args} = {temp}.{full}{type_args}"
             ));
+
+            // A member with private members keeps a full view the
+            // declaring file exports. An `impl` of it here types `self`
+            // as the view, the way an impl of a plain struct does.
+            if self.options.check && self.module_private_view(quoted, full) {
+                out.push(format!("type {local}_{rest}__all = {temp}.{full}__all"));
+                self.private_view_names.insert(format!("{local}_{rest}"));
+            }
         }
 
         out

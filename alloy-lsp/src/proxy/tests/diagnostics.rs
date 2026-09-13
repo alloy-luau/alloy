@@ -617,3 +617,50 @@ pub(crate) fn an_unused_type_import_loses_its_whole_line() {
         }])
     );
 }
+/// An `import` whose keyword stands alone on its line: the statement
+/// runs over three lines, and the child's cut of it takes the `import`
+/// with one name and leaves the rest without a keyword.
+#[test]
+pub(crate) fn a_three_line_import_cuts_the_dead_name_alone() {
+    let cut = |src: &str| {
+        let (st, uri) = one_file(src);
+        let child = json!({
+            "title": "Remove all unused code",
+            "edit": { "changes": { uri: [{
+                "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 1, "character": 6 } },
+                "newText": "",
+            }] } },
+        });
+        let mut actions = vec![child];
+        st.unused_import_actions(uri, ((0, 0), (0, 0)), &mut actions);
+
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        actions[0]["edit"]["changes"][uri].clone()
+    };
+    const HEAD: &str = "import\n    D,\n    { a } from \"./mod8\"\n\n";
+
+    // The default is dead: the cut leaves `import` with the list.
+    assert_eq!(
+        cut(&format!("{HEAD}print(a)\n")),
+        json!([{
+            "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 2, "character": 4 } },
+            "newText": "",
+        }])
+    );
+    // `a` is dead: the cut leaves `import` with the default.
+    assert_eq!(
+        cut(&format!("{HEAD}print(D)\n")),
+        json!([{
+            "range": { "start": { "line": 1, "character": 5 }, "end": { "line": 2, "character": 9 } },
+            "newText": "",
+        }])
+    );
+    // Both are dead: the statement goes whole.
+    assert_eq!(
+        cut(&format!("{HEAD}print(1)\n")),
+        json!([{
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 3, "character": 0 } },
+            "newText": "",
+        }])
+    );
+}

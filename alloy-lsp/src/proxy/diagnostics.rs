@@ -1522,9 +1522,18 @@ fn import_lines(src: &str) -> Vec<ImportLine> {
         let here = at;
         at += line.len();
 
-        if !line.trim_start().starts_with("import ") {
+        // The keyword may stand alone on its line, with the names under
+        // it, so any space after it opens a statement.
+        let lead = line.len() - line.trim_start().len();
+        let Some(rest) = line[lead..].strip_prefix("import") else {
+            continue;
+        };
+
+        if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
             continue;
         }
+
+        let word = here + lead;
 
         let Some(from) = src[here..].find(" from ").map(|i| here + i) else {
             continue;
@@ -1542,19 +1551,14 @@ fn import_lines(src: &str) -> Vec<ImportLine> {
             });
         let mut list_cut = None;
 
-        if let Some(name) = head_name(src, here, from) {
+        if let Some(name) = head_name(src, word, from) {
             // `import * as M, { a }`: the head half runs from the `*` or
             // the default name to the `{`, and cutting it leaves
             // `import { a }`. The list itself goes back to the head
             // name, which leaves `import * as M`.
-            let head_at = src[here..from]
-                .strip_prefix("import ")
-                .map(|rest| here + "import ".len() + (rest.len() - rest.trim_start().len()));
-            let cut = match (head_at, list) {
-                (Some(at), Some((open, _))) => Some((at, open)),
-
-                _ => None,
-            };
+            let after = &src[word + "import".len()..from];
+            let head_at = word + "import".len() + (after.len() - after.trim_start().len());
+            let cut = list.map(|(open, _)| (head_at, open));
             list_cut = list.map(|(_, close)| (name.1, close + 1));
             names.push(Bound {
                 name,
@@ -1583,8 +1587,13 @@ fn import_lines(src: &str) -> Vec<ImportLine> {
 /// `* as M`, or a default binding. `None` when the head opens the list.
 fn head_name(src: &str, start: usize, end: usize) -> Option<(usize, usize)> {
     let head = src.get(start..end)?;
-    let after = head.strip_prefix("import ")?;
-    let lead = "import ".len() + (after.len() - after.trim_start().len());
+    let after = head.strip_prefix("import")?;
+
+    if !after.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let lead = "import".len() + (after.len() - after.trim_start().len());
     let rest = after.trim_start();
 
     if rest.starts_with('{') || rest.starts_with("type") {
@@ -1702,7 +1711,7 @@ impl State {
 
         let ((from_line, _), (to_line, _)) = range;
         let mut mine: Vec<Value> = Vec::new();
-        let mut covered: Vec<u32> = Vec::new();
+        let mut covered: Vec<(u32, u32)> = Vec::new();
 
         for line in import_lines(&doc.source) {
             let dead = |b: &Bound| unused.iter().any(|&(s, e)| (s, e) == b.name);
@@ -1732,7 +1741,7 @@ impl State {
                 continue;
             }
 
-            covered.push(sl);
+            covered.push((sl, el));
             let edits: Vec<Value> = cuts
                 .iter()
                 .map(|&(s, e)| {
@@ -1775,7 +1784,9 @@ impl State {
 
         // The child reads the emit and cuts the whole `require` line,
         // which takes the names the file still uses. Ours is the edit
-        // for that statement, so the child's goes.
+        // for that statement, so the child's goes. A statement may run
+        // over several lines, and a cut that touches any of them is the
+        // child's cut of that statement.
         actions.retain(|a| {
             let Some(edits) = a
                 .get("edit")
@@ -1787,11 +1798,14 @@ impl State {
             };
 
             !edits.iter().any(|e| {
+                let line = |key: &str| e.pointer(key).and_then(Value::as_u64).map(|l| l as u32);
+                let Some(first) = line("/range/start/line") else {
+                    return false;
+                };
+                let last = line("/range/end/line").unwrap_or(first);
+
                 e.get("newText").and_then(Value::as_str) == Some("")
-                    && e.pointer("/range/start/character").and_then(Value::as_u64) == Some(0)
-                    && e.pointer("/range/start/line")
-                        .and_then(Value::as_u64)
-                        .is_some_and(|l| covered.contains(&(l as u32)))
+                    && covered.iter().any(|&(sl, el)| first <= el && last >= sl)
             })
         });
         actions.extend(mine);

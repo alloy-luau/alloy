@@ -52,6 +52,76 @@ impl State {
             .collect()
     }
 
+    /// The members a dotted value path reaches, for a path the child
+    /// could not follow. `import M from "./m"` on a module with an
+    /// export table binds the `default` field, and the child has no
+    /// type for that name: it answers with the scope of an expression
+    /// instead, a list of globals under a `.`.
+    ///
+    /// The walk over the imports and the namespaces says what the path
+    /// holds, and that list stands alone. A path the child did follow
+    /// keeps the child's answer: its types come from the solver, which
+    /// reads more than the source text.
+    pub(crate) fn value_path_members(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &Value,
+    ) -> Option<Vec<Value>> {
+        let doc = self.docs.get(uri)?;
+
+        if member_position(doc, line, character) != Some('.') {
+            return None;
+        }
+
+        if !answered_the_scope(result) {
+            return None;
+        }
+
+        let offset = offset_of(&doc.source, line, character)?;
+        let path = namespace_before(&doc.source, offset)?;
+        let segments: Vec<&str> = path.split('.').collect();
+        let head = segments.first().copied()?;
+
+        // Only a path Alloy owns. A name the source binds some other
+        // way is the child's to answer, and a list built here would
+        // stand in for an answer it may yet give.
+        if !components::containers(&doc.source)
+            .iter()
+            .any(|m| m.name == head && m.detail != "table")
+        {
+            return None;
+        }
+
+        let load = |spec: &str| self.module_source(uri, spec);
+        let found = components::members(&doc.source, &segments, &load);
+        let mut items = Vec::new();
+
+        for m in &found {
+            let mut item = json!({
+                "label": m.name,
+                "kind": m.kind,
+                "detail": format!("{} {path}.{}", m.detail, m.name),
+                "sortText": m.sort_key(),
+            });
+
+            if let Some(text) = &m.signature {
+                item["documentation"] = json!({
+                    "kind": "markdown",
+                    "value": format!("```alloy\n{text}\n```"),
+                });
+            }
+
+            items.push(item);
+        }
+
+        // The walk reaching nothing is an answer too: the path names
+        // no member, and the scope of the file is not what stands
+        // under a `.`.
+        Some(items)
+    }
+
     /// Narrows a remote's member list to what the file may reach. The
     /// emit types one surface for both sides, so `Toast.fire` is in the
     /// list of a `.client.aly` file that cannot reach it; the
@@ -124,6 +194,27 @@ impl State {
                 .is_none_or(|label| spec.holds(label, side))
         });
     }
+}
+
+/// Whether a completion answer is the scope of an expression and not a
+/// member list. The child offers `nil`, `true`, and `if` where an
+/// expression may start and never after a `.`, so one of those words in
+/// the list says it could not type the receiver and answered with the
+/// scope of the file instead.
+fn answered_the_scope(result: &Value) -> bool {
+    let items = result
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| result.as_array());
+
+    items.is_some_and(|items| {
+        items.iter().any(|i| {
+            matches!(
+                i.get("label").and_then(Value::as_str),
+                Some("nil" | "true" | "false" | "if" | "function" | "not")
+            )
+        })
+    })
 }
 
 /// Gives an item the call its signature describes, when it carries no

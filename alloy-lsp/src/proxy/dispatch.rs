@@ -1487,6 +1487,15 @@ impl Server {
                         && let Some((line, character)) = position
                         && trigger.as_deref() != Some("\n")
                     {
+                        // A dotted value path the child could not
+                        // follow answered with the scope of the file.
+                        // The walk over the imports and the namespaces
+                        // says what the path holds, and every pass
+                        // below reads that list instead.
+                        if let Some(items) = st.value_path_members(uri, line, character, result) {
+                            *result = json!(items);
+                        }
+
                         st.mark_enum_members(uri, line, character, result);
                         st.mark_declarations(uri, result);
                         st.mark_namespaces(uri, line, character, result);

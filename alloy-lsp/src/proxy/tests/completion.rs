@@ -1886,3 +1886,110 @@ pub(crate) fn an_import_list_offers_the_module_and_marks_its_attributes() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `local w = Shapes.` answered the whole global scope: the child had no
+/// table for the name, so it fell back to the scope of an expression and
+/// put 450 globals under a `.`. The walk over the namespaces and the
+/// imports says what the path holds, and that list stands alone.
+#[test]
+pub(crate) fn a_dotted_value_path_never_falls_through_to_the_scope() {
+    const SRC: &str = concat!(
+        "import * as Star from \"./scribe\"\n",
+        "namespace Shapes as\n",
+        "    public function go() end\n",
+        "end\n",
+        "namespace Types as\n",
+        "    type Box = { w: number }\n",
+        "end\n",
+        "local t = { a = 1 }\n",
+        "local w = Shapes.\n",
+        "local x = Star.\n",
+        "local y = Types.\n",
+        "local z = t.\n",
+    );
+    let st = files(&[
+        ("file:///t.aly", SRC),
+        (
+            "file:///scribe.aly",
+            "export type Store = { id: number }\nexport function open(n: string) end\n",
+        ),
+    ]);
+    let uri = "file:///t.aly";
+    // What the child answers when it cannot type the receiver: the
+    // scope of an expression, keywords and globals together.
+    let scope = || {
+        json!([
+            { "label": "nil", "kind": 6 },
+            { "label": "print", "kind": 3 },
+            { "label": "version", "kind": 3 },
+        ])
+    };
+    let labels = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+    let line =
+        |text: &str| -> u32 { SRC[..SRC.find(text).expect(text)].matches('\n').count() as u32 };
+    let column = |text: &str| text.chars().count() as u32;
+
+    // `local w = Shapes.`: the namespace holds one function.
+    let found = st
+        .value_path_members(
+            uri,
+            line("local w ="),
+            column("local w = Shapes."),
+            &scope(),
+        )
+        .expect("the namespace answers");
+    assert_eq!(labels(&found), ["go"]);
+    assert_eq!(found[0]["detail"], json!("function Shapes.go"));
+
+    // `local x = Star.`: the module the import binds.
+    let found = st
+        .value_path_members(uri, line("local x ="), column("local x = Star."), &scope())
+        .expect("the module answers");
+    assert_eq!(labels(&found), ["open"]);
+
+    // A namespace of types alone holds no value. Nothing is the answer;
+    // the scope of the file is not.
+    let found = st
+        .value_path_members(uri, line("local y ="), column("local y = Types."), &scope())
+        .expect("the namespace answers");
+    assert!(found.is_empty(), "{found:?}");
+
+    // A plain table is the child's to answer: it types the local and
+    // this list would stand in for an answer the child gives.
+    assert!(
+        st.value_path_members(uri, line("local z ="), column("local z = t."), &scope())
+            .is_none()
+    );
+
+    // The child answered with members, so its own list stands: the
+    // types come from the solver, which reads more than the source.
+    let members = json!([{ "label": "go", "kind": 3, "detail": "() -> ()" }]);
+    assert!(
+        st.value_path_members(
+            uri,
+            line("local w ="),
+            column("local w = Shapes."),
+            &members
+        )
+        .is_none()
+    );
+
+    // No emit-only name reaches a label.
+    for name in ["Shapes_go", "_m1", "__alloy"] {
+        let found = st
+            .value_path_members(
+                uri,
+                line("local w ="),
+                column("local w = Shapes."),
+                &scope(),
+            )
+            .expect("the namespace answers");
+
+        assert!(!labels(&found).contains(&name.to_string()), "{name}");
+    }
+}

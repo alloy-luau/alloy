@@ -584,3 +584,37 @@ fn a_namespace_import_takes_a_name_list_too() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `export type` and `export interface` have no value at run time. A
+/// bare import of one binds the type alone; a `local` would read a
+/// key the module's table lacks, and the checker would report it.
+#[test]
+fn a_bare_import_of_a_type_only_export_binds_no_value() {
+    let dir = scratch("type-only");
+    std::fs::write(
+        dir.join("types.aly"),
+        "export type Size = { w: number }\nexport interface Shape as\n    w: number\nend\nexport struct Box as\n    w: number\nend\n",
+    )
+    .unwrap();
+    let source = "import { Size, Shape, Box } from \"./types\"\n";
+    let options = alloy::EmitOptions {
+        import_types: alloy::modules::import_types(source, &dir.join("main.aly"), &[]),
+        ..Default::default()
+    };
+    let out = alloy::compile_with(source, &options).unwrap();
+    let line = out.check.lines().next().unwrap();
+
+    assert!(line.contains("local Box = _m1.Box"), "{line}");
+    assert!(line.contains("type Size = _m1.Size"), "{line}");
+    assert!(line.contains("type Shape = _m1.Shape"), "{line}");
+    assert!(
+        !line.contains("Size, ") && !line.contains("Shape, "),
+        "{line}"
+    );
+    assert!(
+        !line.contains("local Size") && !line.contains("local Shape"),
+        "{line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

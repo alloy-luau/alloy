@@ -18,14 +18,30 @@ impl<'s> Desugar<'s> {
     /// Whether the module a quoted spec names exports a type by this
     /// name, from the index the caller built.
     pub(crate) fn module_exports_type(&self, quoted: &str, name: &str) -> bool {
+        self.module_type_entry(quoted, name).is_some()
+    }
+
+    /// Whether the module exports this name as a type with no value:
+    /// `export type`, `export interface`. A bare import of one binds
+    /// the type alone; a `local` would read a key the table lacks.
+    pub(crate) fn module_exports_type_only(&self, quoted: &str, name: &str) -> bool {
+        self.module_type_entry(quoted, name)
+            .is_some_and(crate::modules::type_only)
+    }
+
+    fn module_type_entry(&self, quoted: &str, name: &str) -> Option<&str> {
         let spec = quoted
             .strip_prefix(['"', '\''])
             .and_then(|s| s.strip_suffix(['"', '\'']))
             .unwrap_or(quoted);
 
-        self.options.import_types.iter().any(|(s, types)| {
-            s == spec && types.iter().any(|t| crate::modules::type_head(t) == name)
-        })
+        self.options
+            .import_types
+            .iter()
+            .filter(|(s, _)| s == spec)
+            .flat_map(|(_, types)| types.iter())
+            .find(|t| crate::modules::type_head(t) == name)
+            .map(String::as_str)
     }
 
     /// The parameter list an imported type declares, `<T>`. A type
@@ -42,7 +58,7 @@ impl<'s> Desugar<'s> {
             .filter(|(s, _)| s == spec)
             .flat_map(|(_, types)| types.iter())
             .find(|t| crate::modules::type_head(t) == name)
-            .map(|t| t[name.len()..].to_string())
+            .map(|t| crate::modules::type_args(t).to_string())
             .unwrap_or_default()
     }
 
@@ -74,7 +90,7 @@ impl<'s> Desugar<'s> {
             let Some(rest) = full.strip_prefix(&head) else {
                 continue;
             };
-            let args = entry[full.len()..].to_string();
+            let args = crate::modules::type_args(entry).to_string();
             let type_args = type_arguments(&args);
             out.push(format!(
                 "type {local}_{rest}{args} = {temp}.{full}{type_args}"
@@ -232,7 +248,7 @@ impl<'s> Desugar<'s> {
             let args = self.module_type_params(path, &name);
             let type_args = type_arguments(&args);
 
-            if sp.is_type {
+            if sp.is_type || self.module_exports_type_only(path, &name) {
                 types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
             } else {
                 // A struct or an enum is a value and a type; the type

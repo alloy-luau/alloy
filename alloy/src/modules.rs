@@ -54,7 +54,17 @@ pub fn exported_types(source: &str) -> Vec<String> {
             continue;
         }
 
-        out.push(format!("{name}{}", type_params(&after[name.len()..])));
+        // A `type` or an `interface` has no value at run time. The entry
+        // ends with `=` so a bare import of it binds the type alone.
+        let marker = match kind.as_str() {
+            "type" | "interface" => "=",
+
+            _ => "",
+        };
+        out.push(format!(
+            "{name}{}{marker}",
+            type_params(&after[name.len()..])
+        ));
     }
 
     out
@@ -182,7 +192,21 @@ pub fn type_params(text: &str) -> String {
 
 /// The name a type entry carries, without its parameter list.
 pub fn type_head(entry: &str) -> &str {
-    entry.split('<').next().unwrap_or(entry)
+    entry
+        .split('<')
+        .next()
+        .unwrap_or(entry)
+        .trim_end_matches('=')
+}
+
+/// The parameter list a type entry carries, `<T>`, or nothing.
+pub fn type_args(entry: &str) -> &str {
+    entry[type_head(entry).len()..].trim_end_matches('=')
+}
+
+/// Whether a type entry names a type with no value at run time.
+pub fn type_only(entry: &str) -> bool {
+    entry.ends_with('=')
 }
 
 /// The traits a source exports with their default methods, the ones
@@ -1874,7 +1898,10 @@ mod tests {
         let src = "export struct A as\nend\nexport enum B as C end\nexport interface D as\nend\nexport trait E as\nend\nexport type F<T> = { T }\nexport function g() end\nexport const H = 1\nlocal exported = 1\nexport { exported }\n";
         // A generic alias carries its parameter list, so a re-export
         // passes the parameters on.
-        assert_eq!(exported_types(src), vec!["A", "B", "D", "E", "F<T>"]);
+        assert_eq!(exported_types(src), vec!["A", "B", "D=", "E", "F<T>="]);
+        assert_eq!(type_head("F<T>="), "F");
+        assert_eq!(type_args("F<T>="), "<T>");
+        assert!(type_only("D=") && !type_only("E"));
     }
 
     #[test]
@@ -1915,7 +1942,7 @@ mod tests {
             types,
             vec![
                 ("@shared/types".to_string(), vec!["Zone".to_string()]),
-                ("./plain".to_string(), vec!["P".to_string()]),
+                ("./plain".to_string(), vec!["P=".to_string()]),
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);

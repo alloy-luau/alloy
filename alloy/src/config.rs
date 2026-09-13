@@ -629,6 +629,24 @@ impl std::ops::DerefMut for Rules {
     }
 }
 
+/// The report for a lint level that names no lint. The nearest name
+/// answers a typo; the list answers the rest.
+pub fn unknown_rule_message(key: &str) -> String {
+    let near = crate::lint::LINTS
+        .iter()
+        .map(|l| l.name)
+        .chain(crate::lint::Group::ALL.iter().map(|g| g.name()))
+        .map(|n| (crate::typecheck::edit_distance(n, key), n))
+        .filter(|(d, _)| *d > 0 && *d <= 3 && *d < key.len())
+        .min();
+
+    match near {
+        Some((_, n)) => format!("`{key}` is not a lint; did you mean `{n}`?"),
+
+        None => format!("`{key}` is not a lint; `alloy lint --list` has them"),
+    }
+}
+
 impl<'de> Deserialize<'de> for Rules {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         fn walk<E: serde::de::Error>(
@@ -643,6 +661,7 @@ impl<'de> Deserialize<'de> for Rules {
                             "`{prefix} = \"{text}\"` is not one of allow, warn, deny"
                         ))
                     })?;
+
                     out.insert(prefix.to_string(), level);
 
                     Ok(())
@@ -1004,6 +1023,17 @@ impl Config {
         out
     }
 
+    /// Every lint level that names no lint: the `[lint.rules]` keys and
+    /// the deprecated lists. An ingot's `<ingot>/<lint>` stands, since
+    /// the ingot registers it after this file is read.
+    pub fn unknown_rules(&self) -> Vec<String> {
+        crate::lint::unknown_names(&self.lint)
+            .iter()
+            .filter(|name| !name.contains('/'))
+            .map(|name| unknown_rule_message(name))
+            .collect()
+    }
+
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text =
             std::fs::read_to_string(path).map_err(|e| ConfigError::Read(path.to_path_buf(), e))?;
@@ -1103,6 +1133,43 @@ mod tests {
     #[test]
     fn an_unknown_key_is_an_error() {
         assert!(Config::parse("[build]\noutput = \"dist\"\n", Path::new("alloy.toml")).is_err());
+    }
+
+    /// `[lint.rules]` takes a lint, a group, `alx.<name>`, one of the
+    /// checker's, or an ingot's `<ingot>/<lint>`. Anything else is a
+    /// report, next to the deprecations every run prints.
+    #[test]
+    fn an_unknown_lint_rule_reports() {
+        let parse = |text: &str| Config::parse(text, Path::new("alloy.toml")).expect("the config");
+        let c = parse("[lint.rules]\ntotally_unknown_lint_name = \"deny\"\n");
+        let rules = c.unknown_rules();
+
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        assert!(
+            rules[0].contains("`totally_unknown_lint_name` is not a lint"),
+            "{}",
+            rules[0]
+        );
+        assert!(rules[0].contains("alloy lint --list"), "{}", rules[0]);
+
+        // A typo names the lint it is near.
+        let near = parse("[lint.rules]\nunused_variabl = \"deny\"\n").unknown_rules();
+
+        assert_eq!(
+            near,
+            vec!["`unused_variabl` is not a lint; did you mean `unused_variable`?"]
+        );
+
+        // The names that stand, an ingot's among them.
+        let known = parse(
+            "[lint.rules]\nunused_variable = \"deny\"\nstyle = \"allow\"\nluau = \"warn\"\nLocalUnused = \"allow\"\n\"enamel/no_effect\" = \"deny\"\n\n[lint.rules.alx]\nstatic_conditional_child = \"warn\"\n",
+        );
+
+        assert!(
+            known.unknown_rules().is_empty(),
+            "{:?}",
+            known.unknown_rules()
+        );
     }
 
     #[test]

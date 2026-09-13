@@ -143,7 +143,11 @@ pub(crate) fn project(args: &[String]) -> Result<(PathBuf, Config), String> {
             };
             let config = Config::load(&path).map_err(|e| e.to_string())?;
 
-            for line in config.deprecations() {
+            for line in config
+                .deprecations()
+                .into_iter()
+                .chain(config.unknown_rules())
+            {
                 eprintln!("{}", Painter::for_stderr().warn(&line));
             }
 

@@ -88,13 +88,15 @@ pub(crate) fn lint_config_for(
         lint_config.rules.insert(name.clone(), *level);
     }
 
-    for name in lint::unknown_names(&lint_config) {
-        eprintln!(
-            "{}",
-            Painter::for_stderr().warn(&format!(
-                "`{name}` is neither a lint nor a group; `alloy lint --list` has them"
-            ))
-        );
+    // The project's own names report where the config loads, next to
+    // its deprecations; a level flag names a lint of its own.
+    for (_, name) in flags {
+        if !lint::is_known_name(name) && !name.contains('/') {
+            eprintln!(
+                "{}",
+                Painter::for_stderr().warn(&alloy::config::unknown_rule_message(name))
+            );
+        }
     }
 
     lint_config

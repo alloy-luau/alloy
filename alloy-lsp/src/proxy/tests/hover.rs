@@ -931,3 +931,47 @@ pub(crate) fn a_method_of_an_imported_struct_hovers_as_the_source_wrote_it() {
         None
     );
 }
+
+/// `import { Size as VSize } from "./valmod"`: the entry belongs to
+/// `valmod`, and another open file's `export type Size` says nothing
+/// about it.
+#[test]
+pub(crate) fn an_import_entry_reads_the_module_the_spec_names() {
+    let st = super::support::files(&[
+        ("file:///m.aly", "export type Size = number\n"),
+        (
+            "file:///valmod.aly",
+            "export struct Size as\n    n: number\nend\n",
+        ),
+        (
+            "file:///x.aly",
+            "import { Size as TSize } from \"./m\"\nimport { Size as VSize } from \"./valmod\"\n",
+        ),
+    ]);
+    let source = &st.docs["file:///x.aly"].source;
+    let second = source.rfind("Size as VSize").unwrap();
+    let decls = st
+        .import_line_decls("file:///x.aly", source, second)
+        .unwrap();
+    assert!(
+        decls
+            .iter()
+            .any(|d| d.name == "Size" && d.hover.contains("struct")),
+        "{decls:?}"
+    );
+
+    let first = source.find("Size as TSize").unwrap();
+    let decls = st
+        .import_line_decls("file:///x.aly", source, first)
+        .unwrap();
+    assert!(
+        decls
+            .iter()
+            .any(|d| d.name == "Size" && d.hover.contains("type Size")),
+        "{decls:?}"
+    );
+    assert!(
+        st.import_line_decls("file:///x.aly", source, source.len() - 1)
+            .is_none()
+    );
+}

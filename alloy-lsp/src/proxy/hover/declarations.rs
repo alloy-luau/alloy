@@ -53,7 +53,15 @@ impl Server {
         // may declare a `Point` of its own, and that declaration says
         // nothing about the binding the caret sits on.
         let bound_here = binds_a_value(&doc.bindings, &key);
+        // A name inside an import list belongs to the module the spec
+        // names. Another open file may export the same name, and its
+        // declaration says nothing about this entry.
+        let spec_decls = st.import_line_decls(uri, &doc.source, start);
         let lookup = |name: &str| {
+            if let Some(decls) = &spec_decls {
+                return decls.iter().find(|d| d.name == name);
+            }
+
             doc.decls.iter().find(|d| d.name == name).or_else(|| {
                 (!bound_here).then(|| {
                     st.docs
@@ -362,6 +370,29 @@ pub(crate) fn array_element(lines: &[&str], case_line: usize) -> Option<String> 
     }
 
     None
+}
+
+impl State {
+    /// The declarations of the module an import entry names, when the
+    /// caret sits on that entry. The open document first, then the
+    /// disk. `None` off an import list.
+    pub(crate) fn import_line_decls(
+        &self,
+        uri: &str,
+        source: &str,
+        offset: usize,
+    ) -> Option<Vec<alloy::declarations::Declaration>> {
+        let entry = self.import_entry_at(source, offset)?;
+        let target = imports::module_path(&self.resolve_spec(uri, &entry.spec)?);
+        let open = self
+            .docs
+            .iter()
+            .find(|(u, _)| uri_to_path(u).is_some_and(|p| imports::module_path(&p) == target))
+            .map(|(_, d)| d.source.clone());
+        let text = open.or_else(|| std::fs::read_to_string(imports::module_file(&target)?).ok())?;
+
+        Some(alloy::declarations::summaries(&text, false))
+    }
 }
 
 /// The export name a local alias stands for:

@@ -54,7 +54,7 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
 /// The return type a trait method's signature declares. The signature
 /// starts at `(`; the type follows the closing `)` after a `:` or a
 /// `->`.
-pub(crate) fn signature_ret_type(sig: &str) -> Option<&str> {
+pub fn signature_ret_type(sig: &str) -> Option<&str> {
     let mut depth = 0i32;
     let mut after = None;
 

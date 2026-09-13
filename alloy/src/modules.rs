@@ -236,6 +236,76 @@ pub fn exported_trait_defaults(source: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// The traits a source exports with the methods an impl has to write:
+/// the name, the parameter count with `self` counted, and the return
+/// type the signature declares. A method with a body is a default, so
+/// an impl may leave it out and it stays out of this list.
+pub fn exported_trait_methods(source: &str) -> Vec<(String, Vec<(String, usize, Option<String>)>)> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks);
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let alloy_syntax::ast::Stmt::Trait(t) = stmt
+            && t.exported
+        {
+            let required: Vec<(String, usize, Option<String>)> = t
+                .methods
+                .iter()
+                .filter(|m| m.body.is_none())
+                .map(|m| {
+                    (
+                        text(m.name).to_string(),
+                        m.params.len(),
+                        crate::desugar::signature_ret_type(text(m.signature)).map(str::to_string),
+                    )
+                })
+                .collect();
+            out.push((text(t.name).to_string(), required));
+        }
+    }
+
+    out
+}
+
+/// For each import of a source, the methods the traits the module
+/// exports leave to the impl: `(trait, methods)`. An `impl Trait for S`
+/// reads them, so a method the trait declares and the impl skips
+/// reports wherever the trait is declared.
+pub fn import_trait_methods(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<(String, usize, Option<String>)>)> {
+    let mut out: Vec<(String, Vec<(String, usize, Option<String>)>)> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+
+    for spec in import_specs(source) {
+        let Some(path) = resolve(&spec, from, aliases) else {
+            continue;
+        };
+
+        if seen.contains(&path) {
+            continue;
+        }
+
+        seen.push(path.clone());
+
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            for (t, m) in exported_trait_methods(&text) {
+                if !m.is_empty() && !out.iter().any(|(n, _)| *n == t) {
+                    out.push((t, m));
+                }
+            }
+        }
+    }
+
+    out
+}
+
 /// The exported async functions whose declared return type is a
 /// `Result`. A `try await` on one yields the Result itself, so the
 /// emit calls `try_await_result` there.
@@ -1115,6 +1185,7 @@ impl crate::EmitOptions {
         self.plain_modules = plain_modules(source, from, aliases);
         self.import_result_asyncs = import_result_asyncs(source, from, aliases);
         self.import_trait_defaults = import_trait_defaults(source, from, aliases);
+        self.import_trait_methods = import_trait_methods(source, from, aliases);
 
         self
     }

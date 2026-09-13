@@ -308,9 +308,18 @@ impl<'s> Desugar<'s> {
                 }
             }
 
-            // A trait declared in this file is a contract: every method
-            // without a body appears in the impl, with the same arity.
-            if let Some(required) = self.trait_required.get(&trait_name).cloned() {
+            // A trait is a contract: every method without a body appears
+            // in the impl, with the same arity. The trait may sit in
+            // another module, which carries the same list.
+            let required = self.trait_required.get(&trait_name).cloned().or_else(|| {
+                self.options
+                    .import_trait_methods
+                    .iter()
+                    .find(|(t, _)| *t == trait_name)
+                    .map(|(_, m)| m.clone())
+            });
+
+            if let Some(required) = required {
                 for (m, arity, ret) in required {
                     let written = i.methods.iter().find(|f| self.text_of(f.path[0]) == m);
 
@@ -1970,6 +1979,50 @@ mod tests {
         // The same type written with other spacing is the same type.
         let same = "trait Held as\n    function slot(self): Array<number>\nend\nstruct Bag as\n    n: number\nend\nimpl Held for Bag as\n    function slot(self): Array< number >\n        return Array.new()\n    end\nend\nprint(new Bag { n = 1 })\n";
         assert!(messages(same).is_empty(), "{:?}", messages(same));
+    }
+
+    /// A trait is a contract wherever it is declared. The imported
+    /// list carries the methods with no body, so an impl that skips one
+    /// reports at the impl header, and a default method stays optional.
+    #[test]
+    fn an_impl_of_an_imported_trait_writes_every_method_the_trait_declares() {
+        let options = crate::EmitOptions {
+            import_trait_methods: vec![(
+                "Greet".to_string(),
+                vec![("hello".to_string(), 1, Some("string".to_string()))],
+            )],
+            import_trait_defaults: vec![("Greet".to_string(), vec!["wave".to_string()])],
+            ..Default::default()
+        };
+        let run = |src: &str| -> Vec<String> {
+            crate::compile_with(src, &options)
+                .unwrap()
+                .diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect()
+        };
+        let head = "import { Greet } from \"./greet\"\nstruct Beta as\n    n: number\nend\n";
+
+        assert_eq!(
+            run(&format!("{head}impl Greet for Beta as\nend\nprint(Beta)\n")),
+            vec!["`impl Greet for Beta` does not write `hello`; the trait declares it"]
+        );
+
+        // The method written, and the default left out: both are right.
+        let written = run(&format!(
+            "{head}impl Greet for Beta as\n    function hello(self): string\n        return \"b\"\n    end\nend\nprint(Beta)\n"
+        ));
+        assert!(written.is_empty(), "{written:?}");
+
+        // The arity is part of the contract, and Alloy reports it: the
+        // checker sees two unrelated functions.
+        assert_eq!(
+            run(&format!(
+                "{head}impl Greet for Beta as\n    function hello(self, extra: number): string\n        return \"b\"\n    end\nend\nprint(Beta)\n"
+            )),
+            vec!["the trait method `hello` takes 1 parameter in `Greet`, 2 here"]
+        );
     }
 
     /// A struct another module declares is still built whole: the

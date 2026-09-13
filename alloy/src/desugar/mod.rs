@@ -112,6 +112,11 @@ pub struct EmitOptions {
     /// Per imported trait, the names of its default methods, so an
     /// `impl Trait for S` here flattens them in as a local trait's would.
     pub import_trait_defaults: Vec<(String, Vec<String>)>,
+    /// Per imported trait, the methods it leaves to the impl: the name,
+    /// the parameter count with `self` counted, and the return type.
+    /// An `impl Trait for S` has to write each one. See
+    /// `crate::modules::import_trait_methods`.
+    pub import_trait_methods: Vec<(String, Vec<(String, usize, Option<String>)>)>,
     /// The imported async functions declared to return a `Result`: a
     /// `try await f()` on one is the Result itself. See
     /// `crate::modules::import_result_asyncs`.
@@ -200,6 +205,7 @@ pub struct ContractGap {
     pub indent: u32,
 }
 
+pub use attributes::signature_ret_type;
 pub use contracts::{element_type, is_string_union};
 pub use statements::names_a_future;
 
@@ -273,6 +279,7 @@ impl Default for EmitOptions {
             import_types: Vec::new(),
             import_enums: Vec::new(),
             import_trait_defaults: Vec::new(),
+            import_trait_methods: Vec::new(),
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
             import_struct_fields: Vec::new(),

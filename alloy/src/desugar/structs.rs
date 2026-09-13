@@ -335,13 +335,20 @@ impl<'s> Desugar<'s> {
             // A trait is a contract: every method without a body appears
             // in the impl, with the same arity. The trait may sit in
             // another module, which carries the same list.
-            let required = self.trait_required.get(&trait_name).cloned().or_else(|| {
-                self.options
-                    .import_trait_methods
-                    .iter()
-                    .find(|(t, _)| *t == trait_name)
-                    .map(|(_, m)| m.clone())
-            });
+            // The contract keys by the declared name. The source may
+            // write an import alias, `impl G for B`, or a namespace
+            // path, `impl Ns.Greet for C`; both name the same trait.
+            let names = self.name_candidates(&trait_name);
+            let required = names
+                .iter()
+                .find_map(|n| self.trait_required.get(n).cloned())
+                .or_else(|| {
+                    self.options
+                        .import_trait_methods
+                        .iter()
+                        .find(|(t, _)| names.contains(t))
+                        .map(|(_, m)| m.clone())
+                });
 
             if let Some(required) = required {
                 for (m, arity, ret) in required {
@@ -396,13 +403,16 @@ impl<'s> Desugar<'s> {
             // The check artifact assigns without the guard: a conditional
             // assignment would make the property optional to the checker,
             // and the struct would then not satisfy the trait.
-            let defaults = self.traits.get(&trait_name).cloned().or_else(|| {
-                self.options
-                    .import_trait_defaults
-                    .iter()
-                    .find(|(t, _)| *t == trait_name)
-                    .map(|(_, d)| d.clone())
-            });
+            let defaults = names
+                .iter()
+                .find_map(|n| self.traits.get(n).cloned())
+                .or_else(|| {
+                    self.options
+                        .import_trait_defaults
+                        .iter()
+                        .find(|(t, _)| names.contains(t))
+                        .map(|(_, d)| d.clone())
+                });
 
             if let Some(defaults) = defaults {
                 let written: Vec<String> = i
@@ -1721,6 +1731,39 @@ impl<'s> Desugar<'s> {
     /// import alias or a dotted path; every index of a struct is keyed
     /// by the name the declaring file gives it, so the checks read one
     /// name however the source spells it.
+    /// Every name a written type name can stand for: the name itself,
+    /// the declaration an import alias renames, and the name a dotted
+    /// path resolves to, through a star module or a namespace.
+    ///
+    /// A check keyed by the declared name reads one of these, so the
+    /// source may spell the type any way it likes.
+    pub(crate) fn name_candidates(&self, text: &str) -> Vec<String> {
+        let mut out = vec![text.to_string()];
+
+        let Some((head, rest)) = text.split_once('.') else {
+            if let Some(declared) = self.import_renames.get(text) {
+                out.push(declared.clone());
+            }
+
+            return out;
+        };
+
+        if self.star_modules.contains(head.trim()) {
+            out.push(rest.trim().to_string());
+        }
+
+        if let Some(r) = self.ns_path_name(text) {
+            out.push(r);
+        }
+
+        // An imported namespace has no declaration here, so the emitted
+        // form is the name the module's shape carries.
+        out.push(text.replace('.', "_"));
+        out.dedup();
+
+        out
+    }
+
     pub(crate) fn constructed_struct(&self, name: &Expr) -> Option<(TokSpan, String)> {
         let Expr::Name(n) = name else {
             return None;
@@ -2044,6 +2087,59 @@ mod tests {
         // The same type written with other spacing is the same type.
         let same = "trait Held as\n    function slot(self): Array<number>\nend\nstruct Bag as\n    n: number\nend\nimpl Held for Bag as\n    function slot(self): Array< number >\n        return Array.new()\n    end\nend\nprint(new Bag { n = 1 })\n";
         assert!(messages(same).is_empty(), "{:?}", messages(same));
+    }
+
+    /// The contract keys by the declared name. An import alias and a
+    /// namespace path write another name for the same trait, so the
+    /// written name alone found no contract and nothing reported.
+    #[test]
+    fn the_trait_contract_resolves_an_alias_and_a_namespace_path() {
+        let sig = |name: &str| (name.to_string(), 1, Some("string".to_string()));
+        let options = crate::EmitOptions {
+            import_trait_methods: vec![
+                ("Greet".to_string(), vec![sig("hello"), sig("bye")]),
+                ("Ns.Greet".to_string(), vec![sig("hi")]),
+            ],
+            ..Default::default()
+        };
+        let run = |src: &str| -> Vec<String> {
+            crate::compile_with(src, &options)
+                .unwrap()
+                .diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect()
+        };
+
+        // `import { Greet as G }`, then `impl G for B`.
+        let alias = "import { Greet as G } from \"./greet\"\nstruct B as\n    n: number\nend\n\nimpl G for B as\n    function hello(self): string\n        return \"hi\"\n    end\nend\n";
+        assert_eq!(
+            run(alias),
+            vec!["`impl G for B` does not write `bye`; the trait declares it"]
+        );
+
+        // `impl Ns.Greet for C` through an imported namespace.
+        let path = "import { Ns } from \"./greet\"\nstruct C as\n    n: number\nend\n\nimpl Ns.Greet for C as\nend\n";
+        assert_eq!(
+            run(path),
+            vec!["`impl Ns.Greet for C` does not write `hi`; the trait declares it"]
+        );
+
+        // A namespace of this file declares the trait.
+        let same = "namespace Local as\n    trait Greet as\n        function hello(self): string\n        function bye(self): string\n    end\nend\n\nstruct Z as\n    n: number\nend\n\nimpl Local.Greet for Z as\n    function hello(self): string\n        return \"hi\"\n    end\nend\n";
+        assert_eq!(
+            run(same),
+            vec!["`impl Local.Greet for Z` does not write `bye`; the trait declares it"]
+        );
+
+        // A trait a namespace exports reads under its path, so the
+        // index the importing file builds carries that name.
+        let module = "export namespace Ns as\n    public trait Greet as\n        function hi(self): string\n    end\nend\n";
+        let names: Vec<String> = crate::modules::exported_trait_methods(module)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, vec!["Ns.Greet", "Ns_Greet"], "{names:?}");
     }
 
     /// A trait is a contract wherever it is declared. The imported

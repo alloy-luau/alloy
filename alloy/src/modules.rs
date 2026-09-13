@@ -212,28 +212,125 @@ pub fn type_only(entry: &str) -> bool {
 /// The traits a source exports with their default methods, the ones
 /// with a body. An `impl Trait for S` in another file flattens them in.
 pub fn exported_trait_defaults(source: &str) -> Vec<(String, Vec<String>)> {
+    exported_traits(source)
+        .into_iter()
+        .map(|(name, _, defaults)| (name, defaults))
+        .collect()
+}
+
+/// One exported trait, under one of its names: the name, the methods
+/// it leaves to the impl, then its default methods.
+type TraitExport = (String, Vec<TraitMethodSig>, Vec<String>);
+
+/// Every trait a source exports, under each name a module that imports
+/// it writes.
+///
+/// A trait inside an exported namespace reads under its path,
+/// `Ns.Greet`, and under the name the emit gives it, `Ns_Greet`, the
+/// way `declarations` lists a member under both. Without the path an
+/// `impl Ns.Greet for S` has no contract to read.
+fn exported_traits(source: &str) -> Vec<TraitExport> {
     let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
         return Vec::new();
     };
     let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
-        if let alloy_syntax::ast::Stmt::Trait(t) = stmt
-            && t.exported
-        {
-            let defaults: Vec<String> = t
-                .methods
-                .iter()
-                .filter(|m| m.body.is_some())
-                .map(|m| text(m.name))
-                .collect();
-            out.push((text(t.name), defaults));
+        match stmt {
+            alloy_syntax::ast::Stmt::Trait(t) if t.exported => {
+                push_trait_export(source, toks, t, "", &mut out);
+            }
+
+            alloy_syntax::ast::Stmt::Namespace(ns) if ns.exported => {
+                namespace_trait_exports(source, toks, ns, "", &mut out);
+            }
+
+            _ => {}
         }
     }
 
     out
+}
+
+/// The exported traits of one namespace, for `exported_traits`. A
+/// private member leaves the namespace behind, so it is no contract
+/// another module can read.
+fn namespace_trait_exports(
+    source: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    outer: &str,
+    out: &mut Vec<TraitExport>,
+) {
+    let name = ns.name.text(source, toks);
+    let path = match outer.is_empty() {
+        true => name.to_string(),
+
+        false => format!("{outer}.{name}"),
+    };
+
+    for m in &ns.members {
+        if m.is_private(source, toks) {
+            continue;
+        }
+
+        match &m.stmt {
+            alloy_syntax::ast::Stmt::Trait(t) => {
+                push_trait_export(source, toks, t, &path, out);
+            }
+
+            alloy_syntax::ast::Stmt::Namespace(inner) => {
+                namespace_trait_exports(source, toks, inner, &path, out);
+            }
+
+            _ => {}
+        }
+    }
+}
+
+/// One trait's export entries: its own name under `path`, and the
+/// underscore form the emit writes when the path is not empty.
+fn push_trait_export(
+    source: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    t: &alloy_syntax::ast::TraitDecl,
+    path: &str,
+    out: &mut Vec<TraitExport>,
+) {
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
+    let required: Vec<TraitMethodSig> = t
+        .methods
+        .iter()
+        .filter(|m| m.body.is_none())
+        .map(|m| {
+            (
+                text(m.name),
+                m.params.len(),
+                crate::desugar::signature_ret_type(&text(m.signature)).map(str::to_string),
+            )
+        })
+        .collect();
+    let defaults: Vec<String> = t
+        .methods
+        .iter()
+        .filter(|m| m.body.is_some())
+        .map(|m| text(m.name))
+        .collect();
+    let name = text(t.name);
+
+    if path.is_empty() {
+        out.push((name, required, defaults));
+
+        return;
+    }
+
+    out.push((format!("{path}.{name}"), required.clone(), defaults.clone()));
+    out.push((
+        format!("{}_{name}", path.replace('.', "_")),
+        required,
+        defaults,
+    ));
 }
 
 /// One method a trait leaves to the impl: the name, the parameter count
@@ -248,34 +345,10 @@ pub type TraitRequired = Vec<(String, Vec<TraitMethodSig>)>;
 /// type the signature declares. A method with a body is a default, so
 /// an impl may leave it out and it stays out of this list.
 pub fn exported_trait_methods(source: &str) -> TraitRequired {
-    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
-        return Vec::new();
-    };
-    let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks);
-    let mut out = Vec::new();
-
-    for stmt in &parsed.chunk.block.stmts {
-        if let alloy_syntax::ast::Stmt::Trait(t) = stmt
-            && t.exported
-        {
-            let required: Vec<TraitMethodSig> = t
-                .methods
-                .iter()
-                .filter(|m| m.body.is_none())
-                .map(|m| {
-                    (
-                        text(m.name).to_string(),
-                        m.params.len(),
-                        crate::desugar::signature_ret_type(text(m.signature)).map(str::to_string),
-                    )
-                })
-                .collect();
-            out.push((text(t.name).to_string(), required));
-        }
-    }
-
-    out
+    exported_traits(source)
+        .into_iter()
+        .map(|(name, required, _)| (name, required))
+        .collect()
 }
 
 /// For each import of a source, the methods the traits the module

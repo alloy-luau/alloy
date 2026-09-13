@@ -307,7 +307,7 @@ fn parse(text: &str, format: Format) -> Result<Node, String> {
 
                 match e.span() {
                     Some(span) => {
-                        let (line, col) = line_col(text, span.start);
+                        let (line, col) = crate::directives::line_col(text, span.start);
 
                         format!("{message} at line {line} column {col}")
                     }
@@ -316,14 +316,6 @@ fn parse(text: &str, format: Format) -> Result<Node, String> {
                 }
             }),
     }
-}
-
-fn line_col(text: &str, offset: usize) -> (usize, usize) {
-    let before = &text[..offset.min(text.len())];
-    let line = before.matches('\n').count() + 1;
-    let col = before.rsplit('\n').next().map_or(0, str::len) + 1;
-
-    (line, col)
 }
 
 /// Lowers a document to the text of a Luau module: `return { ... }`.

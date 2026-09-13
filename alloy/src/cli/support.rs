@@ -304,13 +304,7 @@ pub(crate) fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy
     }
 }
 
-pub(crate) fn line_col(text: &str, offset: usize) -> (usize, usize) {
-    let upto = &text[..offset.min(text.len())];
-    let line = upto.matches('\n').count() + 1;
-    let col = upto.rfind('\n').map_or(offset, |i| offset - i - 1) + 1;
-
-    (line, col)
-}
+pub(crate) use alloy::directives::line_col;
 
 #[cfg(test)]
 mod tests {

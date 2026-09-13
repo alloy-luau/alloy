@@ -608,8 +608,44 @@ pub fn line_of(src: &str, offset: usize) -> usize {
     src[..offset.min(src.len())].matches('\n').count()
 }
 
+/// A byte order mark: the three bytes a Windows editor writes in front
+/// of a file. The lexer steps over it, so it is not source.
+pub const BOM: &str = "\u{feff}";
+
+/// The one-based line and column of a byte offset, as a report shows
+/// them. Every reporter reads this one, so the CLI, the analyzer, and a
+/// data file all count a position the same way.
+///
+/// A leading byte order mark is no character the editor draws, so a
+/// column on the first line counts from after it.
+pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
+    let before = &src[..offset.min(src.len())];
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().map_or(0, str::len);
+    let mark = match line == 1 && src.starts_with(BOM) {
+        true => BOM.len(),
+
+        false => 0,
+    };
+
+    (line, col.saturating_sub(mark) + 1)
+}
+
 #[cfg(test)]
 mod tests {
+    /// A leading byte order mark is no character the editor draws, so a
+    /// column on the first line counts from after it. The report read
+    /// column 10 where the editor showed 7.
+    #[test]
+    fn a_byte_order_mark_leaves_the_first_column() {
+        let src = "\u{feff}local x = 1\nlocal y = 2\n";
+
+        assert_eq!(super::line_col(src, src.find('x').expect("x")), (1, 7));
+        // A later line counts from its own newline, mark or not.
+        assert_eq!(super::line_col(src, src.find('y').expect("y")), (2, 7));
+        assert_eq!(super::line_col("local x = 1\n", 6), (1, 7));
+    }
+
     use super::*;
 
     #[test]

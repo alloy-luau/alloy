@@ -491,11 +491,16 @@ fn rewrite_note(source: &str, fix: &alloy::lint::Fix) -> String {
             &source[end.min(line_end)..line_end]
         );
 
-        if rebuilt.trim().is_empty() {
+        // The first line may open with a byte order mark, which the
+        // reader's editor never draws; the note shows the line as they
+        // see it.
+        let rebuilt = rebuilt.trim_start_matches(alloy::directives::BOM).trim();
+
+        if rebuilt.is_empty() {
             return "rewrite: delete this line".to_string();
         }
 
-        return format!("rewrite: {}", rebuilt.trim());
+        return format!("rewrite: {rebuilt}");
     }
 
     let one_line = fix

@@ -1055,7 +1055,7 @@ fn map_position(
     }
 
     let src_off = f.map.to_source(out_off as u32) as usize;
-    let (sl, sc) = line_col(&f.source, src_off);
+    let (sl, sc) = crate::directives::line_col(&f.source, src_off);
 
     if sl == line {
         return Some((line, sc));
@@ -1126,14 +1126,6 @@ fn offset_of(text: &str, line: usize, col: usize) -> Option<usize> {
     }
 
     None
-}
-
-fn line_col(text: &str, offset: usize) -> (usize, usize) {
-    let before = &text[..offset.min(text.len())];
-    let line = before.matches('\n').count() + 1;
-    let col = before.rsplit('\n').next().map_or(0, str::len) + 1;
-
-    (line, col)
 }
 
 #[cfg(test)]

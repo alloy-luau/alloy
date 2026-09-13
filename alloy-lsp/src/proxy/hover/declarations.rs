@@ -174,6 +174,12 @@ impl Server {
     }
 }
 
+/// Whether a line opens the `default` arm. The body may stand on the
+/// same line, so the word alone and the word with a body both count.
+fn opens_the_default_arm(text: &str) -> bool {
+    text == "default" || text.starts_with("default ")
+}
+
 /// The hover of a `case` pattern's binding at `line`: the name with the
 /// type the pattern gives it. `None` when the line is in no arm, or the
 /// word is no binding of it.
@@ -188,7 +194,8 @@ pub(crate) fn case_binding_text(
     let mut at = line.min(lines.len().saturating_sub(1));
 
     // The arm the line belongs to: the nearest `case` above it, and no
-    // `end` or `match` head between.
+    // `end`, `default`, or `match` head between. The `default` arm binds
+    // nothing, so a name in it is the outer one and the child answers.
     let case_line = loop {
         let text = lines.get(at)?.trim();
 
@@ -196,7 +203,7 @@ pub(crate) fn case_binding_text(
             break at;
         }
 
-        if text == "end" || text.ends_with(" with") {
+        if text == "end" || text.ends_with(" with") || opens_the_default_arm(text) {
             return None;
         }
 

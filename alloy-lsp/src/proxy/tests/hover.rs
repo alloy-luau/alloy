@@ -340,6 +340,28 @@ pub(crate) fn a_case_binding_reads_its_payload() {
         Some("```alloy\namount: number\n```\nA field of `struct Boost`.".to_string())
     );
 }
+/// The `default` arm binds nothing, so a name in it is not the payload
+/// a sibling `case` bound. The emit gives the arm no shadow, and the
+/// child answers with the outer local.
+#[test]
+pub(crate) fn a_name_in_the_default_arm_is_no_case_binding() {
+    const SRC: &str = "enum Msg as\n    Join(string)\nend\n\nlocal name = \"outer\"\nlocal function s(m: Msg): string\n    match m with\n        case Join(name) then\n            return `shadowed: {name}`\n        default\n            return `outer: {name}`\n    end\nend\nprint(s, name)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let known = st.known_shapes_at(Some(uri));
+    let shadowed = SRC.find("shadowed: {name}").expect("arm") + "shadowed: {".len();
+    let outer = SRC.find("outer: {name}").expect("default") + "outer: {".len();
+    let line_of = |o: usize| position_of(SRC, o).0 as usize;
+
+    assert_eq!(
+        case_binding_text(doc, line_of(shadowed), shadowed, "name", &known),
+        Some("```alloy\nname: string\n```\nA binding of `Msg.Join`.".to_string())
+    );
+    assert_eq!(
+        case_binding_text(doc, line_of(outer), outer, "name", &known),
+        None
+    );
+}
 /// A record field of a `type` body hovers as the line declares it.
 /// The child sees a table key and answers with an unnamed function
 /// type, which says nothing about the field.

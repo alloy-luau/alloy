@@ -288,14 +288,16 @@ held:Reset()
 print(held:Bump(2), held:Peek())
 "#;
 
-fn analyze(src: &str, name: &str) {
+/// The analyzer's `TypeError` and `SyntaxError` lines for one source,
+/// or `None` when luau-lsp or the Roblox definitions are missing.
+fn reports(src: &str, name: &str) -> Option<Vec<String>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("tools/types/globalTypes.d.luau");
 
     if !defs.is_file() {
         eprintln!("skipped: no definitions at {}", defs.display());
 
-        return;
+        return None;
     }
 
     let options = EmitOptions {
@@ -332,19 +334,43 @@ fn analyze(src: &str, name: &str) {
     let Ok(run) = run else {
         eprintln!("skipped: luau-lsp is not installed");
 
-        return;
+        return None;
     };
 
     let text =
         String::from_utf8_lossy(&run.stdout).into_owned() + &String::from_utf8_lossy(&run.stderr);
     // An unresolved require is the alias, not the emit under test.
-    let bad: Vec<&str> = text
-        .lines()
-        .filter(|l| l.contains("TypeError") || l.contains("SyntaxError"))
-        .filter(|l| !l.contains("Unknown require"))
-        .collect();
+    Some(
+        text.lines()
+            .filter(|l| l.contains("TypeError") || l.contains("SyntaxError"))
+            .filter(|l| !l.contains("Unknown require"))
+            .map(str::to_string)
+            .collect(),
+    )
+}
 
-    assert!(bad.is_empty(), "{}\n---\n{}", bad.join("\n"), out.check);
+#[track_caller]
+fn analyze(src: &str, name: &str) {
+    let Some(bad) = reports(src, name) else {
+        return;
+    };
+
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// `unwrap_or` on a mapped Result answered `any`, so a fallback of
+/// another type named neither side.
+#[test]
+fn unwrap_or_after_a_map_names_both_sides() {
+    let src = "local function parse(text: string): Result<number, string>\n    if text == \"\" then\n        return Err(\"bad\")\n    end\n    return Ok(1)\nend\n\nlocal both: nil = parse(\"x\"):map(tostring):unwrap_or(0)\nprint(both)\n";
+    let Some(bad) = reports(src, "unwrap-or-mapped") else {
+        return;
+    };
+    assert!(
+        bad.iter()
+            .any(|l| l.contains("string") && l.contains("number")),
+        "{bad:?}"
+    );
 }
 
 /// The check artifact of every `destroy` and `after` form is Luau the

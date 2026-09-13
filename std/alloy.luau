@@ -120,14 +120,16 @@ export type Result<T, E> = ResultOk<T, E> | ResultErr<T, E>
 -- reached by different routes. The side a map leaves alone reads `any`
 -- from there on.
 --
--- `unwrap_or` answers `any`. Luau matches no generic function against
--- another, however the two are written, unless the one being checked
--- answers `any`; a `T | D` there is what stops the whole shape from
--- fitting `Result<T, E>`.
+-- `unwrap_or` answers `T | D`, the way it does one rung up, so a
+-- fallback of another type still names both sides. `map` and `map_err`
+-- answer `any`: a return that names `Result2` again, or one that leads
+-- back to `Result`, makes the solver read the next callback's parameter
+-- as a free type and report `Expected type table` on code that is
+-- right, which is worse than the `any`.
 export type ResultMethods2<T, E> = {
 	read unwrap: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
 	read expect: (self: { read tag: "Ok" | "Err", read _1: T | E }, message: string) -> T,
-	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> any,
+	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> T | D,
 	read map: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> U) -> any,
 	read map_err: <F>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> F) -> any,
 	read is_ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
@@ -136,6 +138,7 @@ export type ResultMethods2<T, E> = {
 }
 
 export type Result2<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods2<T, E>
+
 
 local Result = {}
 Result.__index = Result

@@ -1445,4 +1445,41 @@ mod tests {
             "the rewrite reaches the playground without the directive"
         );
     }
+    /*
+    The playground compiles through the same path as the CLI, so its
+    problem list is the CLI's.
+
+    A stale wasm build drew five `ReservedWord` errors over
+    `local new = 1` and two more over a mis-scoped `try do`. The page
+    ships a binary, so only a test in this crate says whether the code
+    behind it agrees with the compiler.
+    */
+    #[test]
+    fn the_playground_reports_what_the_compiler_reports() {
+        let names = "local new = 1\nlocal match = 2\nlocal struct = 3\nprint(new, match, struct)\n";
+        let out = super::set_source(names);
+        assert!(!out.contains("reserved word"), "{out}");
+        assert!(out.contains("\"diagnostics\":[]"), "{out}");
+
+        // A `try do` block as a bare statement: one report, the same one
+        // `alloy flux` gives.
+        let try_do = concat!(
+            "local function risky(): number\n",
+            "    return 1\n",
+            "end\n",
+            "\n",
+            "try do\n",
+            "    local v = risky()!\n",
+            "    print(v)\n",
+            "end\n",
+        );
+        let out = super::set_source(try_do);
+        let value: serde_json::Value = serde_json::from_str(&out).expect("json");
+        let diagnostics = value["diagnostics"].as_array().expect("diagnostics");
+        assert_eq!(diagnostics.len(), 1, "{out}");
+        assert_eq!(
+            diagnostics[0]["message"],
+            serde_json::json!("AlloyError: this expression is not a statement")
+        );
+    }
 }

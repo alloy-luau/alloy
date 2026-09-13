@@ -6,8 +6,8 @@
 //! character wide, in the module as often as the using file.
 
 use super::super::navigation::{
-    export_span, impl_method_span, import_entries, module_bindings, module_head_line,
-    trait_method_span,
+    Target, export_span, impl_method_span, import_entries, module_bindings, module_head_line,
+    name_uses, trait_method_span,
 };
 use super::super::*;
 
@@ -432,4 +432,118 @@ pub(crate) fn a_trait_default_method_reaches_the_traits_own_signature() {
     // Outside the trait body, and for a name the trait does not write.
     assert_eq!(trait_method_span(src, 9, "area"), None);
     assert_eq!(trait_method_span(src, 4, "radius"), None);
+}
+
+/*
+A type annotation is a use of the name; `obj:method(...)` is not.
+
+`references` and `rename` walk one list, and it left the annotation of
+`local function describe(v: Vec2)` out: the `:` before the name read as
+the receiver of a method call.
+*/
+#[test]
+pub(crate) fn an_annotation_is_a_use_and_a_method_call_is_not() {
+    let src = concat!(
+        "local a = new Vec2 { x = 1 }\n",
+        "local function describe(v: Vec2): number\n",
+        "    return a:len()\n",
+        "end\n",
+    );
+    let at = |needle: &str| src.find(needle).expect(needle);
+    assert_eq!(
+        name_uses(src, "Vec2"),
+        vec![
+            (at("Vec2 {"), at("Vec2 {") + 4),
+            (at("Vec2):"), at("Vec2):") + 4),
+        ]
+    );
+
+    // The receiver of a call after `:` names a member, not a type.
+    assert_eq!(name_uses(src, "len"), Vec::new());
+}
+
+/// One walk answers a rename and a reference list, so the caret on the
+/// declaration, on the import, and on a use all name the same export,
+/// and the annotation is one of the places the rename writes.
+#[test]
+pub(crate) fn one_target_answers_the_rename_and_the_references() {
+    let module = "export struct Vec2 as\n    x: number\nend\n";
+    let user = concat!(
+        "import { Vec2 } from \"./m2\"\n",
+        "local a = new Vec2 { x = 1 }\n",
+        "local function describe(v: Vec2): number\n",
+        "    return v.x\n",
+        "end\n",
+    );
+    let dir = std::env::temp_dir().join(format!("alloy-nav-target-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+    let mut uris = Vec::new();
+
+    for (rel, src) in [("m2.aly", module), ("u2.aly", user)] {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let uri = format!("file://{}", path.display());
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            in_project: true,
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            uri.clone(),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+        uris.push(uri);
+    }
+
+    let name_of = |uri: &str, offset: usize| match st.name_target(uri, offset) {
+        Some(Target::Export(_, name)) => Some(name),
+
+        _ => None,
+    };
+
+    for (offset, what) in [
+        (user.find("Vec2 }").expect("import"), "import"),
+        (user.find("Vec2 {").expect("construction"), "construction"),
+        (user.find("Vec2):").expect("annotation"), "annotation"),
+    ] {
+        assert_eq!(name_of(&uris[1], offset).as_deref(), Some("Vec2"), "{what}");
+    }
+
+    assert_eq!(
+        name_of(&uris[0], module.find("Vec2").expect("declaration")).as_deref(),
+        Some("Vec2")
+    );
+
+    // The declaration, the `impl`-free module, the import, the
+    // construction, and the annotation: four places in two files.
+    let edit = st
+        .export_rename(&dir.join("src").join("m2.aly"), "Vec2", "Zed")
+        .expect("rename");
+    let count: usize = edit["changes"]
+        .as_object()
+        .expect("changes")
+        .values()
+        .map(|v| v.as_array().map_or(0, Vec::len))
+        .sum();
+    assert_eq!(count, 4, "{edit}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -738,7 +738,8 @@ impl Server {
 
                 if let Some(id) = message.get("id").cloned()
                     && (self.global_references(&uri, &message, &id)
-                        || self.namespace_references(&uri, &message, &id))
+                        || self.namespace_references(&uri, &message, &id)
+                        || self.name_references(&uri, &message, &id))
                 {
                     return true;
                 }

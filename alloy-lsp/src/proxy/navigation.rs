@@ -1,5 +1,7 @@
 //! Navigation: go to definition, across a source file, a data file, and a default import.
 
+use alloy_syntax::lexer::TokKind;
+
 use super::hover::import_spec;
 use super::*;
 
@@ -205,109 +207,83 @@ impl Server {
             return false;
         };
 
-        let Some(entry) = st.import_entry_at(&doc.source, offset) else {
-            // The caret on the name a module exports. The child renamed
-            // the value beside it there, one character wide, and left
-            // every importer as it was.
-            if let Some(file) = uri_to_path(uri)
-                && keywords::is_word_at(&doc.source, offset)
-            {
-                let (s, e) = keywords::word_range(&doc.source, offset);
-                let word = doc.source[s..e].to_string();
-                let declares = export_span(&doc.source, &word) == Some((s, e));
-                let exported = imports::exports_of(&doc.source, uri.ends_with(".alx"))
-                    .iter()
-                    .any(|x| x.name == word);
-
-                if declares
-                    && exported
-                    && let Some(target) = st.export_rename(&file, &word, &new_name)
-                {
-                    drop(st);
-                    self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": target }));
-
-                    return true;
-                }
-
-                // `M.version` under `import * as M`: the module holds
-                // the name, so the rename is the export's.
-                if let Some((file, name)) = st.module_member_at(uri, &doc.source, offset)
-                    && let Some(target) = st.export_rename(&file, &name, &new_name)
-                {
-                    drop(st);
-                    self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": target }));
-
-                    return true;
-                }
-
-                // `import M from "./m"` and `import * as M`: the name is
-                // this file's own, so the rename stops at its edges.
-                if module_bindings(&doc.source)
-                    .iter()
-                    .any(|(bound, _)| *bound == word)
-                    || imports::bound_names(&doc.source).contains(&word)
-                {
-                    let edits: Vec<Value> = name_uses(&doc.source, &word)
-                        .into_iter()
-                        .map(|(s, e)| text_edit(&doc.source, s, e, &new_name))
-                        .collect();
-                    let result = json!({ "changes": { uri: edits } });
-                    drop(st);
-                    self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-
-                    return true;
-                }
-            }
-
-            // An `import` statement holds no other name a rename can
-            // reach: not the keywords, not the module path. The child
-            // would edit a byte the emit wrote, in another file as
-            // often as this one.
-            if on_import_statement(&doc.source, offset) {
-                drop(st);
-                self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": { "changes": {} } }));
-
-                return true;
-            }
-
+        let Some(target) = st.name_target(uri, offset) else {
             return false;
         };
-        let on_alias = entry
-            .alias_at
-            .is_some_and(|(s, e)| (s..=e).contains(&offset));
+        let result = match target {
+            Target::Export(file, name) => match st.export_rename(&file, &name, &new_name) {
+                Some(edit) => edit,
 
-        // The alias is this file's own word. Nothing outside the file
-        // knows it, so nothing outside the file changes.
-        if on_alias
-            || (entry.alias_at.is_some() && !(entry.name_at.0..=entry.name_at.1).contains(&offset))
-        {
-            let Some((s, e)) = entry.alias_at else {
-                return false;
-            };
-            let mut edits = vec![text_edit(&doc.source, s, e, &new_name)];
+                None => return false,
+            },
 
-            for (s, e) in name_uses(&doc.source, &entry.bound) {
-                if (s, e) != (entry.name_at.0, entry.name_at.1) {
-                    edits.push(text_edit(&doc.source, s, e, &new_name));
-                }
+            Target::Local(name) => {
+                let mut edits: Vec<Value> = name_uses(&doc.source, &name)
+                    .into_iter()
+                    .map(|(s, e)| text_edit(&doc.source, s, e, &new_name))
+                    .collect();
+                edits.dedup();
+
+                json!({ "changes": { uri: edits } })
             }
 
-            edits.dedup();
-            let result = json!({ "changes": { uri: edits } });
-            drop(st);
-            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-
-            return true;
-        }
-
-        let Some(file) = st.entry_module(uri, &entry) else {
-            return false;
-        };
-        let Some(target) = st.export_rename(&file, &entry.name, &new_name) else {
-            return false;
+            Target::Nothing => json!({ "changes": {} }),
         };
         drop(st);
-        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": target }));
+        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+        true
+    }
+
+    /// The references of a name a module exports and of a name this
+    /// file alone binds. The rename walks the workspace for the same
+    /// set, so both answers read one walk and cannot disagree.
+    pub(crate) fn name_references(&self, uri: &str, message: &Value, id: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = position_of_message(message) else {
+            return false;
+        };
+
+        let st = self.state.lock().expect("state");
+
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        let Some(target) = st.name_target(uri, offset) else {
+            return false;
+        };
+        let out = match target {
+            Target::Export(file, name) => match st.export_rename(&file, &name, &name) {
+                Some(edit) => locations_of(&edit),
+
+                None => return false,
+            },
+
+            Target::Local(name) => name_uses(&doc.source, &name)
+                .into_iter()
+                .map(|(s, e)| {
+                    json!({
+                        "uri": uri,
+                        "range": range_value(
+                            position_of(&doc.source, s),
+                            position_of(&doc.source, e),
+                        ),
+                    })
+                })
+                .collect(),
+
+            Target::Nothing => Vec::new(),
+        };
+        drop(st);
+        self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": out }));
 
         true
     }
@@ -576,6 +552,63 @@ impl State {
         let word = &source[s..e];
 
         entries.iter().find(|it| it.bound == word).cloned()
+    }
+
+    /*
+    What the caret names, for a rename and for a reference list.
+
+    The name belongs to the module that declares it, so both answers
+    reach the declaration, every import list that names it, every use
+    under an unaliased entry, and every `M.name` under a module
+    binding. An entry with an alias keeps its own name: the alias is
+    this file's word, and it means nothing outside the file.
+    */
+    pub(crate) fn name_target(&self, uri: &str, offset: usize) -> Option<Target> {
+        let doc = self.docs.get(uri)?;
+        let source = &doc.source;
+
+        if let Some(entry) = self.import_entry_at(source, offset) {
+            let on_name = (entry.name_at.0..=entry.name_at.1).contains(&offset);
+
+            if entry.alias_at.is_some() && !on_name {
+                return Some(Target::Local(entry.bound));
+            }
+
+            return Some(Target::Export(self.entry_module(uri, &entry)?, entry.name));
+        }
+
+        if let Some(file) = uri_to_path(uri)
+            && keywords::is_word_at(source, offset)
+        {
+            let (s, e) = keywords::word_range(source, offset);
+            let word = source[s..e].to_string();
+            let declares = export_span(source, &word) == Some((s, e));
+            let exported = imports::exports_of(source, doc.is_alx)
+                .iter()
+                .any(|x| x.name == word);
+
+            if declares && exported {
+                return Some(Target::Export(file, word));
+            }
+
+            // `M.version` under `import * as M`: the module holds the
+            // name, so the answer is the export's.
+            if let Some((file, name)) = self.module_member_at(uri, source, offset) {
+                return Some(Target::Export(file, name));
+            }
+
+            // `import M from "./m"` and `import * as M`: the name is
+            // this file's own, so the answer stops at its edges.
+            if module_bindings(source)
+                .iter()
+                .any(|(bound, _)| *bound == word)
+                || imports::bound_names(source).contains(&word)
+            {
+                return Some(Target::Local(word));
+            }
+        }
+
+        on_import_statement(source, offset).then_some(Target::Nothing)
     }
 
     /// Where the project declares an `impl` method of that name, with
@@ -1117,7 +1150,7 @@ fn whole_word(line: &str, word: &str) -> Option<usize> {
 /// Every use of a name in a source, as byte ranges. The lexer leaves
 /// comments and strings out, and a name after a `.` or a `:` is a
 /// field of something else, not this one.
-fn name_uses(src: &str, name: &str) -> Vec<(usize, usize)> {
+pub(crate) fn name_uses(src: &str, name: &str) -> Vec<(usize, usize)> {
     let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
         return Vec::new();
     };
@@ -1128,11 +1161,20 @@ fn name_uses(src: &str, name: &str) -> Vec<(usize, usize)> {
             continue;
         }
 
-        let after_dot = i
-            .checked_sub(1)
-            .is_some_and(|p| matches!(lexed.toks[p].text(src), "." | ":" | "?." | "?:"));
+        let before = i.checked_sub(1).map(|p| lexed.toks[p].text(src));
+        let after_dot = matches!(before, Some("." | "?."));
+        // `v: Vec2` names the type; `obj:method(...)` names a member of
+        // the receiver. Only a call follows the method, so the token
+        // after the name decides which one this is.
+        let opens_a_call = lexed.toks.get(i + 1).is_some_and(|n| {
+            matches!(
+                n.kind,
+                TokKind::LParen | TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpHead
+            ) || n.text(src) == "{"
+        });
+        let method_call = matches!(before, Some(":" | "?:")) && opens_a_call;
 
-        if !after_dot {
+        if !after_dot && !method_call {
             out.push((t.start as usize, t.end as usize));
         }
     }
@@ -1176,6 +1218,41 @@ fn text_edit(src: &str, start: usize, end: usize, new_text: &str) -> Value {
         "range": range_value(position_of(src, start), position_of(src, end)),
         "newText": new_text,
     })
+}
+
+/*
+What a caret names, for the two answers that have to agree.
+
+`textDocument/rename` and `textDocument/references` ask the same
+question about one byte: which name is this, and where else is it
+written. One walk answers both, so an edit the rename writes always has
+a reference beside it.
+*/
+pub(crate) enum Target {
+    /// A name a module exports, with the file that declares it.
+    Export(PathBuf, String),
+    /// A name this file alone binds: the alias of an import entry, or
+    /// the binding of a whole module.
+    Local(String),
+    /// An `import` statement holds no other name either answer can
+    /// reach: not the keywords, not the module path. The child would
+    /// point at a byte the emit wrote.
+    Nothing,
+}
+
+/// The locations of a workspace edit, for the reference list that
+/// mirrors it.
+fn locations_of(edit: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    let changes = edit.pointer("/changes").and_then(Value::as_object);
+
+    for (uri, edits) in changes.into_iter().flatten() {
+        for e in edits.as_array().into_iter().flatten() {
+            out.push(json!({ "uri": uri, "range": e["range"].clone() }));
+        }
+    }
+
+    out
 }
 
 /// One entry of an `import { ... }` list, with where its parts sit.

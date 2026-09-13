@@ -264,6 +264,69 @@ fn a_body_with_no_end_keeps_the_statements_after_it() {
     }
 }
 
+/// A body that holds members and no `end` reports once, against the
+/// keyword that opened it. The members stay and the file after the body
+/// still parses, so the editor reads `later`.
+#[test]
+fn a_body_with_members_and_no_end_reports_once() {
+    let tail = "\nfunction later(): number\n    return 1\nend\n";
+
+    for (head, opener) in [
+        ("struct S as\n    a: number", "struct"),
+        ("interface I as\n    a: number", "interface"),
+        ("enum E as\n    A\n    B", "enum"),
+        ("trait T as\n    function m(self): number", "trait"),
+        ("impl S as\n    function f(self) end", "impl"),
+        ("namespace N as\n    local q = 1", "namespace"),
+    ] {
+        let src = format!("{head}{tail}");
+        let (_, count) = lenient(&src);
+        assert_eq!(count, 1, "one report for {opener}");
+
+        let lexed = lexer::lex(&src).unwrap();
+        let (chunk, diagnostics) =
+            parser::parse_lenient(&src, &lexed.toks, ParseOptions::default());
+        assert!(
+            chunk
+                .block
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Function(_))),
+            "`later` still reads after {opener}"
+        );
+
+        // `impl` and `namespace` hold statements, so their bodies recover
+        // through the statement path and report at the end of the file.
+        if matches!(opener, "impl" | "namespace") {
+            continue;
+        }
+
+        assert_eq!(
+            diagnostics[0].message,
+            format!("`{opener}` on line 1 needs an `end`"),
+            "the report names the missing `end`"
+        );
+        assert_eq!(diagnostics[0].offset, 0, "the report sits on {opener}");
+    }
+
+    // The members the body held stay in the tree.
+    let src = format!("enum E as\n    A\n    B{tail}");
+    let lexed = lexer::lex(&src).unwrap();
+    let (chunk, _) = parser::parse_lenient(&src, &lexed.toks, ParseOptions::default());
+    let Some(Stmt::Enum(e)) = chunk.block.stmts.first() else {
+        panic!("the enum still reads");
+    };
+    assert_eq!(e.variants.len(), 2, "`A` and `B` stay");
+
+    let src = format!("trait T as\n    function m(self): number{tail}");
+    let lexed = lexer::lex(&src).unwrap();
+    let (chunk, _) = parser::parse_lenient(&src, &lexed.toks, ParseOptions::default());
+    let Some(Stmt::Trait(t)) = chunk.block.stmts.first() else {
+        panic!("the trait still reads");
+    };
+    assert_eq!(t.methods.len(), 1, "the signature stays");
+}
+
 /// The `as` form reports nothing.
 #[test]
 fn a_header_with_as_is_clean() {

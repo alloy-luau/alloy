@@ -15,11 +15,10 @@ impl<'a> Parser<'a> {
                 return Err(self.err("unterminated declaration, expected `end`"));
             }
 
-            // A body with no `end`: a keyword that opens a statement, at
-            // or left of the opener's column, is the file going on and
-            // not a field. The caller reports the missing `end` once,
-            // and the statements after the body still parse.
-            if self.opens_statement() && self.column_at(self.pos) <= self.column_at(open) {
+            // A body with no `end`: the file goes on and this is not a
+            // field. The caller reports the missing `end` once, and the
+            // statements after the body still parse.
+            if self.body_ends_early(open) {
                 break;
             }
 
@@ -249,13 +248,28 @@ impl<'a> Parser<'a> {
 
         self.header_as(head_start);
         let mut methods = Vec::new();
+        // The column of the first signature. A trait body holds
+        // `function` members, so the opener's column alone cannot say
+        // where the body stops: a body with no indent starts at the same
+        // column as the `trait`. A `function` left of the first signature
+        // is the file going on.
+        let mut member_column = None;
 
         while !self.at("end") {
             if self.at_end() {
                 return Err(self.err("unterminated trait, expected `end`"));
             }
 
+            // A body with no `end`: `expect_end` reports it once, the
+            // signatures read so far stay, and the rest of the file parses.
+            let dedents = member_column.is_some_and(|c| self.column_at(self.pos) < c);
+
+            if self.body_ends_early(open) && (dedents || !self.at("function")) {
+                break;
+            }
+
             let m_start = self.pos;
+            member_column.get_or_insert_with(|| self.column_at(m_start));
             self.expect("function")?;
             let mname = self.expect_name()?;
             let sig_start = self.pos;

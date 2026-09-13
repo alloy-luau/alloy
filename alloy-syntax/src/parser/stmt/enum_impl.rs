@@ -17,6 +17,13 @@ impl<'a> Parser<'a> {
                 return Err(self.err("unterminated enum, expected `end`"));
             }
 
+            // A body with no `end`: the file goes on and this is not a
+            // variant. `expect_end` reports the missing `end` once, the
+            // variants read so far stay, and the rest of the file parses.
+            if self.body_ends_early(open) {
+                break;
+            }
+
             let v_start = self.pos;
             let attributes = if self.at("@") {
                 self.attrs()?

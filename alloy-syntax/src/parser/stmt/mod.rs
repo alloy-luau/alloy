@@ -137,6 +137,18 @@ impl<'a> Parser<'a> {
         crate::contextual::after_delay_follows(self.src, self.toks, self.pos)
     }
 
+    /*
+    Reports if the cursor stands outside a body that `open` began.
+
+    A body with no `end` would otherwise read the rest of the file as its
+    own members. A keyword that opens a statement, at or left of the
+    opener's column, is the file going on. The caller breaks out and
+    reports the missing `end` once, through `expect_end`.
+    */
+    fn body_ends_early(&self, open: usize) -> bool {
+        self.opens_statement() && self.column_at(self.pos) <= self.column_at(open)
+    }
+
     /// Reports if the token at the cursor is a keyword that begins a statement.
     fn opens_statement(&self) -> bool {
         matches!(

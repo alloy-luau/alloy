@@ -397,6 +397,27 @@ fn satisfies_reports_a_key_the_literal_leaves_out() {
     );
 }
 
+/// `map` twice collapsed the value side to `any`: the second `map` read
+/// the rung whose own return was `any`.
+#[test]
+fn two_maps_in_a_chain_keep_the_value_type() {
+    let src = "local function parse(text: string): Result<number, string>\n    if text == \"\" then\n        return Err(\"bad\")\n    end\n    return Ok(1)\nend\n\nlocal twice: nil = parse(\"3\"):map(tostring):map(function(s) return #s end)\nprint(twice)\n";
+    let Some(reported) = reports(src, "map-twice") else {
+        return;
+    };
+    // `any` fits `nil`, so a collapsed chain reports nothing at all.
+    assert!(
+        reported.iter().any(|l| l.contains("number")),
+        "{reported:?}"
+    );
+
+    // The chain still fits a declared Result, and one map is unchanged.
+    analyze(
+        "local function parse(text: string): Result<number, string>\n    if text == \"\" then\n        return Err(\"bad\")\n    end\n    return Ok(1)\nend\n\nlocal function lengths(text: string): Result<number, string>\n    return parse(text):map(tostring):map(function(s) return #s end)\nend\n\nprint(lengths)\n",
+        "map-twice-fits",
+    );
+}
+
 /// `unwrap_or` on a mapped Result answered `any`, so a fallback of
 /// another type named neither side.
 #[test]

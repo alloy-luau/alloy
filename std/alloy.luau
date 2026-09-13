@@ -122,11 +122,28 @@ export type Result<T, E> = ResultOk<T, E> | ResultErr<T, E>
 --
 -- `unwrap_or` answers `T | D`, the way it does one rung up, so a
 -- fallback of another type still names both sides. `map` and `map_err`
--- answer `any`: a return that names `Result2` again, or one that leads
--- back to `Result`, makes the solver read the next callback's parameter
--- as a free type and report `Expected type table` on code that is
--- right, which is worse than the `any`.
+-- climb to `Result3`, the last rung, so `r:map(f):map(g)` keeps the
+-- value type.
 export type ResultMethods2<T, E> = {
+	read unwrap: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
+	read expect: (self: { read tag: "Ok" | "Err", read _1: T | E }, message: string) -> T,
+	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> T | D,
+	read map: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> U) -> Result3<U, any>,
+	read map_err: <F>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> F) -> Result3<any, F>,
+	read is_ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
+	read is_err: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
+	read ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T?,
+}
+
+export type Result2<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods2<T, E>
+
+-- The third rung, which `map` on a `Result2` answers, so two maps in a
+-- chain keep the value type. Its own `map` answers `any`: an alias
+-- cannot name itself with other arguments, and a return that leads back
+-- to `Result2` or to `Result` makes the solver read the next callback's
+-- parameter as a free type and report `Expected type table` on code
+-- that is right.
+export type ResultMethods3<T, E> = {
 	read unwrap: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
 	read expect: (self: { read tag: "Ok" | "Err", read _1: T | E }, message: string) -> T,
 	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> T | D,
@@ -137,7 +154,7 @@ export type ResultMethods2<T, E> = {
 	read ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T?,
 }
 
-export type Result2<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods2<T, E>
+export type Result3<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods3<T, E>
 
 
 local Result = {}

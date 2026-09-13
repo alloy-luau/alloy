@@ -36,6 +36,19 @@ describe("Result", function()
 		expect(Ok(1):map_err(string.upper):unwrap()).toBe(1)
 	end)
 
+	it("maps twice down a chain", function()
+		expect(Ok(2):map(function(n)
+			return tostring(n * 2)
+		end):map(function(s)
+			return #s
+		end):unwrap()).toBe(1)
+		expect(Err("e"):map(function(n)
+			return n
+		end):map(function(n)
+			return n
+		end):unwrap_or(7)).toBe(7)
+	end)
+
 	it("reports its side", function()
 		expect(Ok(1):is_ok()).toBe(true)
 		expect(Ok(1):is_err()).toBe(false)

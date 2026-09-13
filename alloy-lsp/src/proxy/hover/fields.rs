@@ -170,19 +170,18 @@ pub(crate) fn foreign_method_hover(doc: &Doc, start: usize, end: usize) -> Optio
     let owner = impl_self_type(doc, line)?;
     let base = owner.split('<').next().unwrap_or(&owner);
     let declared = |name: &str| {
-        doc.shapes
-            .iter()
-            .chain(doc.import_shapes.iter())
-            .any(|s| match s {
-                alloy::declarations::Shape::Struct { name: n, .. }
-                | alloy::declarations::Shape::Enum { name: n, .. } => n == name,
+        doc.shapes.iter().any(|s| match s {
+            alloy::declarations::Shape::Struct { name: n, .. }
+            | alloy::declarations::Shape::Enum { name: n, .. } => n == name,
 
-                _ => false,
-            })
+            _ => false,
+        })
     };
 
-    // A struct or an enum the file declares reads through the child,
-    // which types its methods from the class table.
+    // A struct or an enum this file declares reads through the child,
+    // which types its methods from the class table it builds here. An
+    // imported one carries the module's type, and the methods this file
+    // writes are not in it: the child answers `unknown` there.
     if declared(base) {
         return None;
     }

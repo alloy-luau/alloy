@@ -887,3 +887,47 @@ pub(crate) fn self_reads_as_the_impl_target_at_every_site() {
     assert_eq!(at("self: Point"), None);
     assert_eq!(at("function Point.length(self: Point): number"), None);
 }
+
+/// A method of an `impl` of an imported struct hovered as `unknown`: the
+/// emit writes it on the table the module exports, and that table's type
+/// comes from the module, so the method is not in it.
+#[test]
+pub(crate) fn a_method_of_an_imported_struct_hovers_as_the_source_wrote_it() {
+    let src = concat!(
+        "import { Point } from \"./point\"\n",
+        "\n",
+        "export impl Point as\n",
+        "    function length(self): number\n",
+        "        return self.x\n",
+        "    end\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let start = src.find("length").expect("the name");
+    assert_eq!(
+        foreign_method_hover(doc, start, start + "length".len()).as_deref(),
+        Some("```alloy\nfunction Point.length(self: Point): number\n```")
+    );
+
+    // A struct this file declares reads through the child, which types
+    // its methods from the class table it builds here.
+    let own = concat!(
+        "export struct Point as\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "impl Point as\n",
+        "    function length(self): number\n",
+        "        return self.x\n",
+        "    end\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(own);
+    let doc = st.docs.get(uri).expect("doc");
+    let start = own.find("length").expect("the name");
+    assert_eq!(
+        foreign_method_hover(doc, start, start + "length".len()),
+        None
+    );
+}

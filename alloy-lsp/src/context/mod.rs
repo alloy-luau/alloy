@@ -24,7 +24,7 @@ pub use bodies::impl_target;
 #[allow(unused_imports)]
 pub use declarations::declared;
 #[allow(unused_imports)]
-pub use fields::{Field, instance_class, record_entries};
+pub use fields::{Field, instance_class, record_entries, struct_literal_target};
 #[allow(unused_imports)]
 pub use matches::match_arms;
 #[allow(unused_imports)]

@@ -135,7 +135,7 @@ pub fn instance_class(before: &str) -> Option<String> {
 /// The struct a literal at the caret fills: the name before the `{`
 /// that is still open, as `new Stats { |` writes it, or the type the
 /// binding a bare `{ |` initialises declares.
-pub(crate) fn struct_literal_target(src: &str, offset: usize) -> Option<(String, bool)> {
+pub fn struct_literal_target(src: &str, offset: usize) -> Option<(String, bool)> {
     let head = &src[..offset];
     let mut opens: Vec<usize> = Vec::new();
     let mut quote: Option<char> = None;

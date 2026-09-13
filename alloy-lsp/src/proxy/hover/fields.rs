@@ -490,10 +490,10 @@ pub(crate) fn enclosing_brace(source: &str, at: usize) -> Option<usize> {
     None
 }
 
-/// A field where it is read, `self.secret` or `p.x`. The child answers
-/// with the type alone; the declaration carries `private`, the
-/// modifiers, and the struct that owns it.
-pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) -> Option<String> {
+/// The type that owns a field where it is read, `self.secret` or `p.x`:
+/// the `impl` block around a `self`, else what the receiver's own
+/// declaration says. None when the word sits after no `.`.
+pub(crate) fn used_field_owner(doc: &Doc, start: usize) -> Option<String> {
     // The word sits after a `.`; a `:` names a method and `..` is the
     // concatenation operator.
     let head = doc.source[..start].trim_end();
@@ -511,7 +511,6 @@ pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) 
 
     let (rs, re) = keywords::word_range(&doc.source, receiver_head.len() - 1);
     let receiver = &doc.source[rs..re];
-    let word = &doc.source[start..end];
     // `self` reads the type of the `impl` block around it; any other
     // name reads its annotation or what it starts from.
     let owner = match receiver {
@@ -535,7 +534,16 @@ pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) 
             },
         },
     };
-    let owner = owner.split('<').next().unwrap_or(&owner).to_string();
+
+    Some(owner.split('<').next().unwrap_or(&owner).to_string())
+}
+
+/// A field where it is read, `self.secret` or `p.x`. The child answers
+/// with the type alone; the declaration carries `private`, the
+/// modifiers, and the struct that owns it.
+pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) -> Option<String> {
+    let word = &doc.source[start..end];
+    let owner = used_field_owner(doc, start)?;
     // The declaration of the struct, here or in a module this file
     // imports, and the line inside it that declares the field.
     let (keyword, line) = doc

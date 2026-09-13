@@ -618,3 +618,59 @@ pub(crate) fn a_variant_renames_where_it_is_declared_and_used() {
     assert_eq!(count, 2, "{edit}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A struct field's rename reaches the constructor key and the field's
+/// own declaration line, and leaves another struct's key of that name
+/// alone.
+///
+/// The emit hands the key table to a constructor, where the child reads
+/// a plain record; the field list is generated text, so the child's edit
+/// of the declaration lands on the byte the header came from.
+#[test]
+fn a_field_rename_reaches_the_constructor_and_the_declaration() {
+    const SRC: &str = concat!(
+        "struct Point as\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "struct Other as\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "local p = new Point { x = 1 }\n",
+        "local o = new Other { x = 2 }\n",
+        "\n",
+        "local function read(c: Point): number\n",
+        "    return c.x\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    // What the child answers: the read of `c.x`, and a declaration edit
+    // that mapped onto the `end` of the struct.
+    let mut result = json!({
+        "changes": {
+            uri: [
+                { "range": range_value((12, 13), (12, 14)), "newText": "zz" },
+                { "range": range_value((2, 0), (2, 1)), "newText": "zz" },
+            ],
+        },
+    });
+    st.mend_field_rename(uri, 12, 13, &mut result);
+
+    let edits: Vec<(u64, u64)> = result["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .map(|e| {
+            (
+                e["range"]["start"]["line"].as_u64().expect("line"),
+                e["range"]["start"]["character"].as_u64().expect("column"),
+            )
+        })
+        .collect();
+
+    // The declaration of the field, the constructor key of `Point`, and
+    // the read. `Other`'s key of the same name stays, and so does the
+    // `end` the child pointed at.
+    assert_eq!(edits, [(1, 4), (8, 22), (12, 13)], "{result}");
+}

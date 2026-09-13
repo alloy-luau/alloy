@@ -688,6 +688,104 @@ impl State {
         on_import_statement(source, offset).then_some(Target::Nothing)
     }
 
+    /// The struct a field at the caret belongs to: the receiver's type
+    /// of `c.x`, the name in front of the brace of `new Shape { x = 1 }`
+    /// or of `case Shape { x }`, or the struct whose body declares it.
+    fn field_owner(&self, doc: &Doc, start: usize, end: usize) -> Option<String> {
+        if let Some(owner) = used_field_owner(doc, start) {
+            return Some(owner);
+        }
+
+        if let Some((owner, false)) = context::struct_literal_target(&doc.source, start) {
+            return Some(owner);
+        }
+
+        // `x: number` in a struct body, as the field hover reads it: the
+        // nearest declaration above that still carries fields.
+        declared_field_hover(doc, start, end)?;
+
+        doc.decls
+            .iter()
+            .filter(|d| d.offset < start && declared_field_owner(d).is_some())
+            .max_by_key(|d| d.offset)
+            .map(|d| d.name.clone())
+    }
+
+    /// The two places a rename of a struct field reaches and the child
+    /// does not. `new Shape { x = 1 }` lowers to a table the emit hands
+    /// to a constructor, where the child reads a plain record and ties
+    /// the key to no field; the struct's own field list is generated
+    /// text, so the child's edit of the declaration lands on the byte
+    /// the header came from and rewrites whatever stands there.
+    ///
+    /// The pass runs beside the child's own edits and never alone: an
+    /// answer with no edit names no field, and one place by itself would
+    /// rename half of one.
+    pub(crate) fn mend_field_rename(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let changes = result.pointer("/changes").and_then(Value::as_object);
+        let Some(new_name) = changes
+            .into_iter()
+            .flat_map(Map::values)
+            .filter_map(Value::as_array)
+            .flatten()
+            .find_map(|e| e.get("newText").and_then(Value::as_str))
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
+            return;
+        };
+        let name = doc.source[start..end].to_string();
+        let Some(owner) = self.field_owner(doc, start, end) else {
+            return;
+        };
+        let Some(changes) = result
+            .pointer_mut("/changes")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+
+        for (u, d) in &self.docs {
+            let mut mine: Vec<Value> = constructor_keys(&d.source, &owner, &name)
+                .into_iter()
+                .map(|(s, e)| text_edit(&d.source, s, e, &new_name))
+                .collect();
+
+            if let Some((s, e)) = field_declaration(&d.source, &owner, &name) {
+                mine.push(text_edit(&d.source, s, e, &new_name));
+            }
+
+            let Some(list) = changes.get_mut(u).and_then(Value::as_array_mut) else {
+                if !mine.is_empty() {
+                    mine.sort_by_key(sort_key);
+                    changes.insert(u.clone(), json!(mine));
+                }
+
+                continue;
+            };
+            list.retain(|e| edits_the_word(&d.source, e, &name));
+
+            for edit in mine {
+                if !list.contains(&edit) {
+                    list.push(edit);
+                }
+            }
+
+            list.sort_by_key(sort_key);
+        }
+    }
+
     /// Where the project declares an `impl` method of that name, with
     /// the URI of the file that wrote it. The file at hand answers
     /// first, then the rest of the workspace: a method of an imported
@@ -977,6 +1075,73 @@ pub(crate) fn impl_method_span(src: &str, name: &str) -> Option<(usize, usize)> 
     }
 
     found
+}
+
+/// Where a struct body declares one field, as the byte range of the
+/// name. `None` when the source declares no such struct or no such
+/// field.
+fn field_declaration(src: &str, owner: &str, name: &str) -> Option<(usize, usize)> {
+    let (at, _) = export_span(src, owner)?;
+    let head = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let mut offset = src[head..].find('\n').map_or(src.len(), |i| head + i + 1);
+
+    for line in src[offset..].lines() {
+        if line == "end" {
+            break;
+        }
+
+        if field_key(line) == Some(name)
+            && let Some(col) = whole_word(line, name)
+        {
+            return Some((offset + col, offset + col + name.len()));
+        }
+
+        offset += line.len() + 1;
+    }
+
+    None
+}
+
+/// Whether one edit of the child's stands where the source spells the
+/// name it renames. An edit that maps onto generated text lands on the
+/// byte the construct came from, which says something else.
+fn edits_the_word(src: &str, edit: &Value, name: &str) -> bool {
+    let Some(((sl, sc), (el, ec))) = edit.get("range").and_then(range_of) else {
+        return true;
+    };
+    let Some(start) = offset_of(src, sl, sc) else {
+        return true;
+    };
+    let Some(end) = offset_of(src, el, ec) else {
+        return true;
+    };
+
+    src.get(start..end) == Some(name)
+}
+
+/// Every `name =` key of a constructor of `owner` in a source: the
+/// literal of `new Owner { ... }`, and the one a typed binding takes. A
+/// nested literal reads by the brace it sits in, so an inner struct
+/// keeps its own keys.
+fn constructor_keys(src: &str, owner: &str, name: &str) -> Vec<(usize, usize)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    for (i, t) in lexed.toks.iter().enumerate() {
+        if t.text(src) != name || lexed.toks.get(i + 1).map(|n| n.text(src)) != Some("=") {
+            continue;
+        }
+
+        let at = context::struct_literal_target(src, t.start as usize);
+
+        if matches!(at, Some((ref target, false)) if target == owner) {
+            out.push((t.start as usize, t.end as usize));
+        }
+    }
+
+    out
 }
 
 /// The module file itself, for a binding that holds the whole module.

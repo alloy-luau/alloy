@@ -96,6 +96,9 @@ pub enum Context {
         spec: Option<String>,
         /// A name just ended, so `as` fits.
         after_name: bool,
+        /// The entry opens with `@`, so the list holds the module's
+        /// attributes alone. The prefix carries the sigil.
+        sigil: bool,
     },
     /// `import * |`.
     ImportStar,
@@ -488,6 +491,13 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         return Some(spec);
     }
 
+    // Before the `@` rule: an attribute in an import list is written
+    // `@name` there too, and the list is the module's, not the
+    // project's.
+    if let Some(ctx) = imports::import_context(src, line_start, offset) {
+        return Some(ctx);
+    }
+
     let line_end = src[offset..]
         .find('\n')
         .map(|i| offset + i)
@@ -868,81 +878,6 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         }
 
         return None;
-    }
-
-    if trimmed.starts_with("import")
-        && (trimmed.len() == 6 || !strings::is_word(trimmed.as_bytes()[6] as char))
-    {
-        let rest = head.trim_start()["import".len()..].trim_start();
-        let type_only = rest.starts_with("type ") || rest == "type";
-        let rest = rest
-            .strip_prefix("type")
-            .map(str::trim_start)
-            .unwrap_or(rest);
-
-        if rest.is_empty() {
-            return Some(Context::ImportHead {
-                prefix: prefix.to_string(),
-                type_only,
-                spec: imports::import_path(line),
-            });
-        }
-
-        if let Some(open) = rest.find('{') {
-            if rest[open..].contains('}') {
-                return Some(Context::ImportFrom);
-            }
-
-            let inside = &rest[open + 1..];
-            // The entry the caret sits in: `type` opens a type-only
-            // name, so the list holds the module's types alone.
-            let entry = inside.rsplit(',').next().unwrap_or(inside);
-            let entry_type_only = entry.trim_start().starts_with("type ") || entry.trim() == "type";
-            let type_only = type_only || entry_type_only;
-            let after_name = !entry_type_only
-                && entry
-                    .trim_end()
-                    .chars()
-                    .last()
-                    .is_some_and(strings::is_word)
-                && entry.ends_with(' ')
-                && prefix.is_empty();
-            let spec = imports::import_path(line);
-
-            return Some(Context::ImportNames {
-                prefix: prefix.to_string(),
-                type_only,
-                spec,
-                after_name,
-            });
-        }
-
-        if let Some(after_star) = rest.strip_prefix('*') {
-            let after_star = after_star.trim_start();
-
-            if after_star.is_empty() {
-                return Some(Context::ImportStar);
-            }
-
-            if let Some(named) = after_star.strip_prefix("as")
-                && named.split_whitespace().count() == 1
-                && named.ends_with(' ')
-            {
-                return Some(Context::ImportFrom);
-            }
-
-            return None;
-        }
-
-        // `import Name, |`: the braces follow the default binding.
-        if rest.trim_end().ends_with(',') {
-            return Some(Context::ImportBrace);
-        }
-
-        // `import Name |`: a default import wants `from`.
-        if rest.split_whitespace().count() == 1 && rest.ends_with(' ') {
-            return Some(Context::ImportFrom);
-        }
     }
 
     None
@@ -1793,7 +1728,8 @@ mod tests {
                 prefix: "b".to_string(),
                 type_only: false,
                 spec: Some("./m".to_string()),
-                after_name: false
+                after_name: false,
+                sigil: false
             })
         );
         assert_eq!(
@@ -1802,12 +1738,93 @@ mod tests {
                 prefix: String::new(),
                 type_only: false,
                 spec: None,
-                after_name: true
+                after_name: true,
+                sigil: false
             })
         );
         assert_eq!(at("import * |"), Some(Context::ImportStar));
         assert_eq!(at("import * as M |"), Some(Context::ImportFrom));
         assert_eq!(at("import { a } |"), Some(Context::ImportFrom));
         assert_eq!(at("import Panel |"), Some(Context::ImportFrom));
+    }
+
+    /// An attribute in an import list is written `@name`, so the caret
+    /// after the sigil takes the module's attributes and the prefix
+    /// carries the sigil. Both are what the completion list reads.
+    #[test]
+    fn an_attribute_in_an_import_list_carries_its_sigil() {
+        assert_eq!(
+            at("import { @tag| } from \"./m\""),
+            Some(Context::ImportNames {
+                prefix: "@tag".to_string(),
+                type_only: false,
+                spec: Some("./m".to_string()),
+                after_name: false,
+                sigil: true
+            })
+        );
+        assert_eq!(
+            at("import { a, @| } from \"./m\""),
+            Some(Context::ImportNames {
+                prefix: "@".to_string(),
+                type_only: false,
+                spec: Some("./m".to_string()),
+                after_name: false,
+                sigil: true
+            })
+        );
+        // The sigil sits further back than the caret.
+        match at("import { @ | } from \"./m\"") {
+            Some(Context::ImportNames { sigil, .. }) => assert!(sigil),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A name list spans lines, and the entry the caret sits on is the
+    /// module's either way. The line under an import that was left open
+    /// is the next statement, and the scope there is the file's.
+    #[test]
+    fn a_name_list_over_lines_reads_as_one_statement() {
+        match at("import {\n    a,\n    b|\n} from \"./m\"") {
+            Some(Context::ImportNames { prefix, spec, .. }) => {
+                assert_eq!(prefix, "b");
+                assert_eq!(spec.as_deref(), Some("./m"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match at("import {\n    @tag|\n} from \"./m\"") {
+            Some(Context::ImportNames { prefix, sigil, .. }) => {
+                assert_eq!(prefix, "@tag");
+                assert!(sigil);
+            }
+            other => panic!("{other:?}"),
+        }
+        // The closing brace opens its own line at any column.
+        assert_eq!(at("import {\n    a\n} |"), Some(Context::ImportFrom));
+        // An import left open does not take the statement under it.
+        assert_eq!(at("import { ver\nlocal q = 1\nprint(q|"), None);
+    }
+
+    /// The local name after `as` is the reader's own, and a written
+    /// `from` or path ends the statement. Neither takes a list, and
+    /// neither falls through to the child's global scope.
+    #[test]
+    fn an_import_answers_every_position_it_holds() {
+        assert_eq!(at("import { a as | } from \"./m\""), Some(Context::Nothing));
+        assert_eq!(
+            at("import { a as b| } from \"./m\""),
+            Some(Context::Nothing)
+        );
+        assert_eq!(at("import { a } from |"), Some(Context::Nothing));
+        assert_eq!(at("import * as M from |"), Some(Context::Nothing));
+        assert_eq!(at("import M from |"), Some(Context::Nothing));
+        assert_eq!(at("import * as |"), Some(Context::Nothing));
+        // `import * as M, { a }` takes a list the way `import M, { a }`
+        // does, on both sides of the comma.
+        assert_eq!(at("import * as M, |"), Some(Context::ImportBrace));
+        match at("import * as M, { a| } from \"./m\"") {
+            Some(Context::ImportNames { prefix, .. }) => assert_eq!(prefix, "a"),
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -476,8 +476,14 @@ pub fn complete(offset: u32) -> String {
             // `import { | } from "@game"`: the names in braces are the
             // Roblox services. The playground has one file, so no
             // module answers any other spec.
-            Context::ImportNames { prefix, after_name, spec, type_only } => {
+            Context::ImportNames { prefix, after_name, spec, type_only, sigil } => {
                 let from = offset - prefix.len();
+
+                // `import { @|`: an attribute of the module named, and
+                // the playground names none.
+                if *sigil {
+                    return json!({ "items": items, "luau": false }).to_string();
+                }
 
                 if *after_name {
                     items.push(word("as", "keyword", Some("Renames the import.".to_string()), from));

@@ -1549,3 +1549,83 @@ pub(crate) fn a_contract_offers_the_members_it_requires() {
         )
     );
 }
+
+/*
+The list inside `import { | }` is the module's exports and nothing else.
+An attribute reads `@name` there, `@` alone narrows the list to the
+module's attributes, and the local name after `as` takes no list.
+
+The entries span lines, and a name on the second line answers the same
+way: the statement, not the line, says what the position is.
+*/
+#[test]
+pub(crate) fn an_import_list_offers_the_module_and_marks_its_attributes() {
+    let dir = std::env::temp_dir().join(format!("alloy-import-list-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+    std::fs::write(
+        dir.join("src/lib.aly"),
+        "--- Marks a struct.\nexport attribute tagged(name: string) on struct\n\n--- A count.\nexport const version = 1\n\n--- An id.\nexport type Id = number\n",
+    )
+    .expect("module");
+
+    let src = "import { a, @b, c as d } from \"./lib\"\nimport {\n    e\n} from \"./lib\"\nimport type { f } from \"./lib\"\n";
+    let main = dir.join("src/main.aly");
+    std::fs::write(&main, src).expect("main");
+
+    let uri = format!("file://{}", main.display());
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let options = EmitOptions {
+        file_name: main.to_string_lossy().into_owned(),
+        in_project: true,
+        ..EmitOptions::default()
+    };
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    // The caret replaces the letter the fixture wrote, so each position
+    // reads as a half-typed name.
+    let labels = |mark: &str| -> Vec<String> {
+        let at = src.find(mark).expect(mark) + mark.len();
+        let ctx = context::detect(src, at).expect("a context");
+
+        st.context_items(&uri, at, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // A plain entry: every export, the attribute under its sigil.
+    let names = labels("import { a");
+    assert_eq!(names, ["type", "@tagged", "version", "type Id"]);
+
+    // `@` narrows the list to the attributes, and nothing else.
+    assert_eq!(labels("@b"), ["@tagged"]);
+
+    // The local name after `as` is the reader's own.
+    assert!(labels("c as d").is_empty());
+
+    // The second line of a list that spans lines.
+    assert_eq!(labels("    e"), ["type", "@tagged", "version", "type Id"]);
+
+    // A type-only list holds the types; an attribute is a value.
+    assert_eq!(labels("import type { f"), ["Id"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

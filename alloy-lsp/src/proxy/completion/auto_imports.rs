@@ -137,6 +137,7 @@ impl State {
                         name: name.clone(),
                         is_type: false,
                         is_default: true,
+                        is_attribute: false,
                         kind: 9,
                     },
                 ),

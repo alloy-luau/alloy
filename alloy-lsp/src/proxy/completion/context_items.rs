@@ -306,6 +306,7 @@ impl State {
                 type_only,
                 spec,
                 after_name,
+                sigil,
             } => {
                 let from = offset - prefix.len();
 
@@ -328,7 +329,7 @@ impl State {
                     Some(alloy::game_import::GamePath::Every)
                 );
 
-                if every_service && !*type_only {
+                if every_service && !*type_only && !*sigil {
                     for name in alloy::roblox_services::SERVICES {
                         let mut item = word(
                             name,
@@ -345,8 +346,9 @@ impl State {
 
                 let data_format = spec.as_deref().and_then(alloy::data::Format::of);
 
-                // A data file exports no type.
-                if !*type_only && data_format.is_none() {
+                // A data file exports no type, and `@` already says the
+                // entry names an attribute.
+                if !*type_only && !*sigil && data_format.is_none() {
                     items.push(word(
                         "type",
                         14,
@@ -378,6 +380,7 @@ impl State {
                     if let Some(format) = data_format {
                         if let Some(file) = resolved
                             && !*type_only
+                            && !*sigil
                             && let Ok(text) = std::fs::read_to_string(&file)
                             && let Ok(keys) = alloy::data::keys(&text, format)
                         {
@@ -405,10 +408,19 @@ impl State {
                             continue;
                         }
 
+                        // `@` already written: the module's attributes
+                        // are the whole list. An attribute is a value,
+                        // so a type-only list holds none.
+                        if (*sigil || *type_only) && e.is_attribute != *sigil {
+                            continue;
+                        }
+
                         let label = if e.is_type && !*type_only {
                             format!("type {}", e.name)
                         } else {
-                            e.name.clone()
+                            // An attribute reads `@name` here, the way
+                            // it reads where it is applied.
+                            e.written()
                         };
                         // The module's own declaration says what the
                         // name is, so the list reads `struct Profile`.

@@ -15,8 +15,23 @@ pub struct Export {
     pub is_type: bool,
     /// `export default Name`: imported bare, not in braces.
     pub is_default: bool,
+    /// `export attribute name`: written `@name` in an import list, the
+    /// way it is written where it is applied.
+    pub is_attribute: bool,
     /// The completion item kind.
     pub kind: u64,
+}
+
+impl Export {
+    /// The name as an import list writes it: an attribute carries the
+    /// `@` it is applied with.
+    pub fn written(&self) -> String {
+        match self.is_attribute {
+            true => format!("@{}", self.name),
+
+            false => self.name.clone(),
+        }
+    }
 }
 
 /// The completion kind of a declaration under an `export default`.
@@ -30,6 +45,32 @@ fn default_kind(stmt: &Stmt) -> u64 {
 
         _ => 6,
     }
+}
+
+/// Adds an export to a list, unless the same name is already there
+/// under the same namespace and the same default flag.
+fn push_export(
+    out: &mut Vec<Export>,
+    name: String,
+    is_type: bool,
+    is_default: bool,
+    is_attribute: bool,
+    kind: u64,
+) {
+    if out
+        .iter()
+        .any(|e| e.name == name && e.is_type == is_type && e.is_default == is_default)
+    {
+        return;
+    }
+
+    out.push(Export {
+        name,
+        is_type,
+        is_default,
+        is_attribute,
+        kind,
+    });
 }
 
 /// The exports of one file, from its top-level statements. Markup is
@@ -58,55 +99,48 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
         toks[span.start as usize].text(text).to_string()
     };
     let mut out = Vec::new();
-    let mut push = |name: String, is_type: bool, is_default: bool, kind: u64| {
-        if !out
-            .iter()
-            .any(|e: &Export| e.name == name && e.is_type == is_type && e.is_default == is_default)
-        {
-            out.push(Export {
-                name,
-                is_type,
-                is_default,
-                kind,
-            });
-        }
-    };
+    let mut push =
+        |name: String, is_type: bool, is_default: bool, is_attribute: bool, kind: u64| {
+            push_export(&mut out, name, is_type, is_default, is_attribute, kind);
+        };
 
     for stmt in &parsed.chunk.block.stmts {
         match stmt {
             Stmt::Local(l) if l.exported => {
                 for b in &l.names {
                     if b.destructure.is_none() {
-                        push(name_of(b.name), false, false, 6);
+                        push(name_of(b.name), false, false, false, 6);
                     }
                 }
             }
 
-            Stmt::LocalFunction(f) if f.exported => push(name_of(f.name), false, false, 3),
+            Stmt::LocalFunction(f) if f.exported => push(name_of(f.name), false, false, false, 3),
 
             Stmt::Function(f) if f.exported && f.path.len() == 1 => {
-                push(name_of(f.path[0]), false, false, 3);
+                push(name_of(f.path[0]), false, false, false, 3);
             }
 
-            Stmt::Struct(s) if s.exported => push(name_of(s.name), false, false, 7),
+            Stmt::Struct(s) if s.exported => push(name_of(s.name), false, false, false, 7),
 
-            Stmt::Enum(e) if e.exported => push(name_of(e.name), false, false, 13),
+            Stmt::Enum(e) if e.exported => push(name_of(e.name), false, false, false, 13),
 
-            Stmt::Trait(t) if t.exported => push(name_of(t.name), false, false, 8),
+            Stmt::Trait(t) if t.exported => push(name_of(t.name), false, false, false, 8),
 
-            Stmt::Interface(i) if i.exported => push(name_of(i.name), true, false, 8),
+            Stmt::Interface(i) if i.exported => push(name_of(i.name), true, false, false, 8),
 
-            Stmt::TypeAlias(t) if t.exported => push(name_of(t.name), true, false, 8),
+            Stmt::TypeAlias(t) if t.exported => push(name_of(t.name), true, false, false, 8),
 
-            Stmt::Remote(r) if r.exported => push(name_of(r.name), false, false, 6),
+            Stmt::Remote(r) if r.exported => push(name_of(r.name), false, false, false, 6),
 
-            Stmt::Attribute(a) if a.exported => push(name_of(a.name), false, false, 6),
+            // An attribute is a value the module exports, and the `@`
+            // is how the list writes it.
+            Stmt::Attribute(a) if a.exported => push(name_of(a.name), false, false, true, 6),
 
-            Stmt::Macro(m) if m.exported => push(name_of(m.name), false, false, 3),
+            Stmt::Macro(m) if m.exported => push(name_of(m.name), false, false, false, 3),
 
             // A namespace is a table of members, and markup names one:
             // `import { Widgets }` then `<Widgets.button/>`.
-            Stmt::Namespace(n) if n.exported => push(name_of(n.name), false, false, 9),
+            Stmt::Namespace(n) if n.exported => push(name_of(n.name), false, false, false, 9),
 
             Stmt::ExportList(e) if e.from.is_none() => {
                 for spec in &e.specs {
@@ -114,7 +148,7 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
                         .alias
                         .map(&name_of)
                         .unwrap_or_else(|| name_of(spec.name));
-                    push(name, e.type_only || spec.is_type, false, 6);
+                    push(name, e.type_only || spec.is_type, false, false, 6);
                 }
             }
 
@@ -122,11 +156,13 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
             // name here is what an auto-import writes, and the
             // declaration under one binds it in the module too.
             Stmt::ExportDefault { value, .. } => match value {
-                DefaultExport::Value(Expr::Name(span)) => push(name_of(*span), false, true, 6),
+                DefaultExport::Value(Expr::Name(span)) => {
+                    push(name_of(*span), false, true, false, 6)
+                }
 
                 DefaultExport::Decl(inner) => {
                     if let Some(name) = inner.declared_name() {
-                        push(name_of(name), false, true, default_kind(inner));
+                        push(name_of(name), false, true, false, default_kind(inner));
                     }
                 }
 
@@ -149,7 +185,7 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
                         } else {
                             6
                         };
-                        push(name_of(*name), false, false, kind);
+                        push(name_of(*name), false, false, false, kind);
                     }
                 }
             }
@@ -159,7 +195,7 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
                 let text_at = |i: usize| toks.get(i).map(|t| t.text(text)).unwrap_or("");
 
                 // The name binds the module, so a bare import reads it.
-                push(module.clone(), false, true, 6);
+                push(module.clone(), false, true, false, 6);
 
                 // `local M = { a = 1 }`: the keys the literal opens with.
                 for stmt in &parsed.chunk.block.stmts {
@@ -179,7 +215,7 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
 
                                     _ => 6,
                                 };
-                                push(name_of(*name), false, false, kind);
+                                push(name_of(*name), false, false, false, kind);
                             }
                         }
                     }
@@ -196,7 +232,7 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
                                 .contains('\n'))
                     {
                         let kind = if text_at(i + 4) == "function" { 3 } else { 6 };
-                        push(text_at(i + 2).to_string(), false, false, kind);
+                        push(text_at(i + 2).to_string(), false, false, false, kind);
                     }
 
                     // `function M.key(` and `function M:key(`.
@@ -205,7 +241,7 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
                         && matches!(text_at(i + 2), "." | ":")
                         && toks.get(i + 3).is_some_and(|t| t.kind == TokKind::Ident)
                     {
-                        push(text_at(i + 3).to_string(), false, false, 3);
+                        push(text_at(i + 3).to_string(), false, false, false, 3);
                     }
                 }
             }
@@ -476,7 +512,7 @@ pub fn import_edit(src: &str, spec: &str, export: &Export) -> Value {
     let item = if export.is_type {
         format!("type {}", export.name)
     } else {
-        export.name.clone()
+        export.written()
     };
 
     if !export.is_default {
@@ -637,7 +673,9 @@ pub fn auto_import_items(
             } else if export.is_type {
                 format!("import {{ type {} }} from \"{spec}\"", export.name)
             } else {
-                format!("import {{ {} }} from \"{spec}\"", export.name)
+                // An attribute reads `@name` in the list, so the detail
+                // shows the line the edit writes.
+                format!("import {{ {} }} from \"{spec}\"", export.written())
             };
 
             items.push(json!({
@@ -856,6 +894,7 @@ pub fn service_import_edit(src: &str, service: &str) -> Value {
                 name: service.to_string(),
                 is_type: false,
                 is_default: false,
+                is_attribute: false,
                 kind: 9,
             },
         );
@@ -986,6 +1025,7 @@ namespace Inner as end
             name: "b".into(),
             is_type: false,
             is_default: false,
+            is_attribute: false,
             kind: 6,
         };
         let edit = import_edit(src, "./m", &e);

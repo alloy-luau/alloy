@@ -940,6 +940,13 @@ pub(crate) fn clean_completion(
             continue;
         };
 
+        // An auto-import's detail is the line it writes, not a type.
+        // The list of an attribute holds `@name`, which the type rule
+        // below reads as a metatable.
+        if detail.starts_with("auto-import: ") {
+            continue;
+        }
+
         // `*error-type*` and a printed metatable are the solver's own
         // spellings; a popup that shows them says nothing.
         if !writable_type(&detail) {

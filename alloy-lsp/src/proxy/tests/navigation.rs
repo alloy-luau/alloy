@@ -861,6 +861,72 @@ fn a_declaration_names_a_field_and_a_local_struct() {
     }
 }
 
+/// Every declaration kind the emit rewrites answers from the source.
+/// The child maps its edits for one back onto the byte the header came
+/// from: the `e` of `enum`, the `t` of `trait`, a letter of a variant.
+#[test]
+fn a_local_declaration_of_any_kind_names_a_target() {
+    const SRC: &str = concat!(
+        "enum Suit as\n",
+        "    Hearts\n",
+        "end\n",
+        "\n",
+        "trait Flyer as\n",
+        "    function fly(self): string\n",
+        "end\n",
+        "\n",
+        "interface Sized as\n",
+        "    size: number\n",
+        "end\n",
+        "\n",
+        "type Pair = { a: number }\n",
+        "\n",
+        "attribute tagged(name: string) on struct\n",
+        "\n",
+        "macro twice(n)\n",
+        "    n + n\n",
+        "end\n",
+        "\n",
+        "namespace Geo as\n",
+        "    const PI = 3\n",
+        "end\n",
+        "\n",
+        "local suit = Suit.Hearts\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+
+    for (text, name) in [
+        ("Suit as", "Suit"),
+        ("Flyer as", "Flyer"),
+        ("Sized as", "Sized"),
+        ("Pair =", "Pair"),
+        ("tagged(", "tagged"),
+        ("twice(", "twice"),
+        ("Geo as", "Geo"),
+    ] {
+        let at = SRC.find(text).expect(text);
+
+        assert!(
+            matches!(st.name_target(uri, at), Some(Target::Local(ref n)) if n == name),
+            "{text}"
+        );
+    }
+
+    // The enum and its use, and nothing of the generated text between.
+    let at = SRC.find("Suit as").expect("the enum");
+    let Some(Target::Local(name)) = st.name_target(uri, at) else {
+        panic!("the enum names no target");
+    };
+
+    assert_eq!(
+        name_uses(SRC, &name)
+            .into_iter()
+            .map(|(s, _)| position_of(SRC, s).0 + 1)
+            .collect::<Vec<u32>>(),
+        [1, 25]
+    );
+}
+
 /// A rename onto a name the scope already binds is refused. The edit
 /// set would bind one name twice, and the reader would lose what the
 /// lines below it mean.

@@ -734,11 +734,12 @@ impl State {
                 return Some(Target::Field { owner, name: word });
             }
 
-            // A struct this file keeps to itself. The emit writes the
-            // declaration as generated text, so the child points at a
-            // byte the reader never wrote. No other file reaches the
-            // name, so every use of it here is this struct.
-            if !exported && declares_a_local_struct(source, &word) {
+            // A declaration this file keeps to itself. The emit writes
+            // the header as generated text, so the child points at a
+            // byte the reader never wrote: the `e` of `enum`, the `t`
+            // of `trait`. No other file reaches the name, so every use
+            // of it here is this declaration.
+            if !exported && declares_a_local_shape(source, &word) {
                 return Some(Target::Local(word));
             }
 
@@ -1606,10 +1607,25 @@ fn field_sites(doc: &Doc, owner: &str, name: &str) -> Vec<(usize, usize)> {
     out
 }
 
-/// Whether a source declares a struct of that name. Such a struct is
-/// this file's own unless the line exports it, which the caller reads
-/// for itself.
-fn declares_a_local_struct(src: &str, name: &str) -> bool {
+/// The declaration keywords the emit rewrites: the header becomes
+/// generated text, so the child answers about a byte no author wrote.
+/// A `local`, a `const` and a plain `function` survive the emit, and the
+/// child renames those itself.
+const SHAPES: [&str; 8] = [
+    "struct",
+    "enum",
+    "trait",
+    "interface",
+    "type",
+    "attribute",
+    "macro",
+    "namespace",
+];
+
+/// Whether a source declares one of those shapes by that name. Such a
+/// declaration is this file's own unless the line exports it, which the
+/// caller reads for itself.
+fn declares_a_local_shape(src: &str, name: &str) -> bool {
     let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
         return false;
     };
@@ -1618,7 +1634,7 @@ fn declares_a_local_struct(src: &str, name: &str) -> bool {
     toks.iter().enumerate().any(|(i, t)| {
         let before = i.checked_sub(1).map(|p| toks[p].text(src));
 
-        t.text(src) == name && before == Some("struct")
+        t.text(src) == name && before.is_some_and(|w| SHAPES.contains(&w))
     })
 }
 

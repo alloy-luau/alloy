@@ -53,7 +53,9 @@ fn a_project_builds_into_its_out_tree() {
 #[test]
 fn excludes_and_diagnostics_are_reported() {
     let dir = temp_project("report");
-    fs::write(dir.join("src/keep.aly"), "local = 1\n").unwrap();
+    // The file parses, so the emit is Luau; the diagnostic is about
+    // what the code means.
+    fs::write(dir.join("src/keep.aly"), "const A = 1\nA = 2\nprint(A)\n").unwrap();
     fs::write(dir.join("src/skip.spec.aly"), "local = 1\n").unwrap();
 
     let build = Build {
@@ -64,11 +66,39 @@ fn excludes_and_diagnostics_are_reported() {
 
     assert_eq!(report.skipped, vec![PathBuf::from("skip.spec.aly")]);
     assert_eq!(report.written, vec![PathBuf::from("keep.luau")]);
-    assert_eq!(report.diagnostics.len(), 1, "the broken line is reported");
+    assert_eq!(report.diagnostics.len(), 1, "the reassignment is reported");
     assert!(
         dir.join("build/keep.luau").is_file(),
         "output is written even with diagnostics"
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A file the parser could not read whole writes no output: past the
+/// first error the emit copies the source through, and a `.luau` of
+/// Alloy text is what the next tool would load. `clean` takes the one a
+/// run before this left.
+#[test]
+fn a_file_that_does_not_parse_writes_no_output() {
+    let dir = temp_project("broken");
+    fs::write(dir.join("alloy.toml"), "[build]\nclean = true\n").unwrap();
+    fs::write(dir.join("src/broken.aly"), "this is not alloy !!! @#$\n").unwrap();
+    fs::write(dir.join("src/fine.aly"), "return 1\n").unwrap();
+    fs::create_dir_all(dir.join("build")).unwrap();
+    fs::write(dir.join("build/broken.luau"), "-- an older run\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert!(!report.diagnostics.is_empty(), "the file reports");
+    assert_eq!(report.written, vec![PathBuf::from("fine.luau")]);
+    assert!(
+        !dir.join("build/broken.luau").exists(),
+        "the stale output is gone"
+    );
+    assert_eq!(report.removed, vec![PathBuf::from("broken.luau")]);
+    assert!(dir.join("build/fine.luau").is_file());
 
     let _ = fs::remove_dir_all(&dir);
 }

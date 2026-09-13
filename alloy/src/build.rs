@@ -371,8 +371,6 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         };
 
         let target = out.join(&rel_out);
-        expected.insert(target.clone());
-
         let is_alx = rel.extension().and_then(|e| e.to_str()) == Some("alx");
         let source = std::fs::read_to_string(&path)?;
 
@@ -570,6 +568,16 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
 
             continue;
         }
+
+        // Past its first error the parser invents the tree and the emit
+        // copies the text through, so the output would hold Alloy. The
+        // file produces nothing: `clean` then takes the stale output a
+        // run before this one left.
+        if !compiled.parsed_clean {
+            continue;
+        }
+
+        expected.insert(target.clone());
 
         // Roblox reads no `.luaurc`: an `@alias` require in the ship
         // artifact becomes the `@game/...` instance path.

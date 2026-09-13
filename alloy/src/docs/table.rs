@@ -114,6 +114,10 @@ pub const TABLE: &[(&str, &str)] = &[
         "```alloy\ninterface Name extends Base as\n    field: T\nend\n```\nA structural object shape, sugar over `type`. A known base flattens into one table type; any other base joins with `&`. A field takes no `private` or `public`: an interface is a shape other code sees whole.\n\nThe word is also free as a name. `interface` before a name on the same line declares; `local interface = {}` and `interface.f` read the Luau way.",
     ),
     (
+        "type",
+        "```alloy\ntype Id = number\ntype Pair<T> = { first: T, second: T }\nexport type Size = { w: number }\nimport { type Size } from \"./m\"\nimport type { Size } from \"./m\"\n```\nA name for a type. The alias is Luau's and passes through. `<T>` takes parameters, and every use of the alias passes them on.\n\n`export type` sends the alias out. A type has no value at run time, so the module's table carries no key for it: a bare `import { Size }` binds the type alone, and the emit writes `type Size = _m1.Size`.\n\n`type` in front of one name in an import list marks that name as a type, `import { f, type Size }`. `import type { }` marks the whole list. Both cost nothing at run time, and `erase_type_imports` under `[emit]` drops the `require` of a whole type-only line.\n\nAn `interface` is the same thing with a body; `alloy doc interface` has it.\n\nThe word is also free as a name. `type` before a name and an `=` declares; `type(x)`, `type = f`, and `t.type` read the Luau way, so a local named `type` may hold Luau's `type`.",
+    ),
+    (
         "enum",
         "```alloy\nenum Name as\n    Unit\n    Payload(T)\nend\n```\nVariants with optional payloads. A unit enum is a string union at runtime; a payload enum is a tagged table. `match` takes it apart and `impl Name` adds methods.\n\nThe word is also free as a name. `enum` before a name on the same line declares; `local enum = { Idle = 1 }` and `enum.Idle` read the Luau way.",
     ),

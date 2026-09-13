@@ -500,10 +500,12 @@ fn nothing_names_an_emit_only_name() {
     }
 }
 
-/// The examples the two doc entries show parse as written.
+/// The examples these doc entries show parse as written. A keyword with
+/// no entry fails here: `alloy doc <word>` and the editor hover both
+/// read this table.
 #[test]
 fn the_doc_examples_parse() {
-    for key in ["requires", "each"] {
+    for key in ["requires", "each", "type", "interface"] {
         let text = alloy::docs::lookup(key).unwrap_or_else(|| panic!("no doc for `{key}`"));
         let mut fences = text.split("```");
         // The text opens with the fence, so the first split is empty and

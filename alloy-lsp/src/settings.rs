@@ -183,7 +183,9 @@ pub fn child_flags(options: &Value) -> Vec<String> {
 
     // A printed type must arrive whole: the proxy folds a struct's
     // table back to its name from the complete text, and the default
-    // limit cuts a struct with a few methods to `*TRUNCATED*`.
+    // limit cuts a struct with a few methods to `*TRUNCATED*`. A
+    // Result inside a Result prints its three method rungs at every
+    // depth, which passes a megabyte.
     let overrides = section
         .and_then(|f| f.get("override"))
         .and_then(Value::as_object);
@@ -193,7 +195,7 @@ pub fn child_flags(options: &Value) -> Vec<String> {
         "LuauTableTypeMaximumStringifierLength",
     ] {
         if !overrides.is_some_and(|o| o.contains_key(name)) {
-            flags.push(format!("--flag:{name}=200000"));
+            flags.push(format!("--flag:{name}=4000000"));
         }
     }
 
@@ -228,7 +230,7 @@ mod tests {
             vec![
                 "--no-flags-enabled",
                 "--flag:LuauSolverV2=true",
-                "--flag:LuauTypeMaximumStringifierLength=200000",
+                "--flag:LuauTypeMaximumStringifierLength=4000000",
                 "--flag:LuauTableTypeMaximumStringifierLength=100",
                 "--flag:LuauX=true"
             ]
@@ -237,15 +239,15 @@ mod tests {
             child_flags(&json!({})),
             vec![
                 "--flag:LuauSolverV2=true",
-                "--flag:LuauTypeMaximumStringifierLength=200000",
-                "--flag:LuauTableTypeMaximumStringifierLength=200000"
+                "--flag:LuauTypeMaximumStringifierLength=4000000",
+                "--flag:LuauTableTypeMaximumStringifierLength=4000000"
             ]
         );
         assert_eq!(
             child_flags(&json!({ "fflags": { "enableNewSolver": false } })),
             vec![
-                "--flag:LuauTypeMaximumStringifierLength=200000",
-                "--flag:LuauTableTypeMaximumStringifierLength=200000"
+                "--flag:LuauTypeMaximumStringifierLength=4000000",
+                "--flag:LuauTableTypeMaximumStringifierLength=4000000"
             ]
         );
     }

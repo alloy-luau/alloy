@@ -122,6 +122,10 @@ pub fn rewrite_dot_call(message: &str, line: &str, col: usize) -> Option<String>
 /// that already carries it is the same mistake told again.
 pub const DOT_FOR_COLON: &str = "` is a method; call it with `";
 
+/// The checker's step limit, as `friendly_text` words it. Its other
+/// reports on that line describe a solve it did not finish.
+pub const SOLVER_LIMIT: &str = "the checker reached its limit";
+
 /// The checker's lints Alloy replaces outright: `unused_variable`,
 /// `unused_function`, and `unused_import` cover the same ground, in the
 /// words of what the source wrote.

@@ -809,6 +809,28 @@ pub(crate) fn collapse_diagnostics(items: &mut Vec<Value>) {
             .is_none_or(|r| !nil_lines.contains(&r.0.0))
     });
 
+    // The checker gave up on the line: what else it says there comes
+    // from a solve it did not finish.
+    let limit_lines: Vec<u32> = items
+        .iter()
+        .filter(|d| {
+            d.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains(alloy::typecheck::SOLVER_LIMIT))
+        })
+        .filter_map(|d| Some(d.get("range").and_then(range_of)?.0.0))
+        .collect();
+
+    items.retain(|d| {
+        let message = d.get("message").and_then(Value::as_str).unwrap_or_default();
+
+        message.contains(alloy::typecheck::SOLVER_LIMIT)
+            || !message.starts_with("TypeError")
+            || d.get("range")
+                .and_then(range_of)
+                .is_none_or(|r| !limit_lines.contains(&r.0.0))
+    });
+
     // A `.` where a `:` belongs shifts every argument, so the checker
     // reports the arity and then each mismatch that follows. The one
     // sentence that names the mistake stands alone on its line.

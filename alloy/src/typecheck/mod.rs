@@ -843,6 +843,21 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         !(d.message.starts_with("Key '") && nil_lines.contains(&(d.rel.clone(), d.line)))
     });
 
+    // The checker gave up on the line: what else it says there comes
+    // from a solve it did not finish.
+    let limit_lines: Vec<(PathBuf, usize)> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains(SOLVER_LIMIT))
+        .map(|d| (d.rel.clone(), d.line))
+        .collect();
+
+    analysis.diagnostics.retain(|d| {
+        d.message.contains(SOLVER_LIMIT)
+            || d.kind != "TypeError"
+            || !limit_lines.contains(&(d.rel.clone(), d.line))
+    });
+
     // A `.` where a `:` belongs draws the arity error and then every
     // mismatch that follows from the shifted arguments. The one
     // sentence that names the mistake stands alone.

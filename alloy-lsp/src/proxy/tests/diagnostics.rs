@@ -492,3 +492,28 @@ print(w)
     assert_eq!(item["range"]["end"], json!({ "line": 0, "character": 11 }));
     assert_eq!(item["severity"], json!(1));
 }
+
+/// The checker gave up on the line: what else it says there comes from
+/// a solve it did not finish, and it stays out.
+#[test]
+pub(crate) fn the_checkers_limit_stands_alone_on_its_line() {
+    let limit = json!({
+        "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 24 } },
+        "message": "TypeError: the checker reached its limit on this expression; it says nothing about the code. Name a step in a local, or annotate the result",
+    });
+    let partial = json!({
+        "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 24 } },
+        "message": "TypeError: Expected this to be 'Result<{ read _1: number }>'",
+    });
+    let lint = json!({
+        "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 24 } },
+        "message": "unused_variable: `r` is never read",
+    });
+    let other = json!({
+        "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 3 } },
+        "message": "TypeError: Expected this to be 'number'",
+    });
+    let mut items = vec![limit.clone(), partial, lint.clone(), other.clone()];
+    collapse_diagnostics(&mut items);
+    assert_eq!(items, vec![limit, lint, other]);
+}

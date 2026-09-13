@@ -7,7 +7,7 @@
 use std::process::ExitCode;
 
 use alloy::docs::{self, TABLE};
-use alloy::lint::{Group, LINTS, Level};
+use alloy::lint::{ALX_LINTS, ALX_PREFIX, Group, LINTS, Level};
 
 use crate::highlight::{self, Mode};
 use crate::ui::{self, BOLD, RESET};
@@ -360,7 +360,11 @@ fn index(color: bool) -> String {
     }
 
     out.push_str(&heading("Lints", color));
-    let names: Vec<&str> = LINTS.iter().map(|l| l.name).collect();
+    let names: Vec<String> = LINTS
+        .iter()
+        .map(|l| l.name.to_string())
+        .chain(ALX_LINTS.iter().map(|l| format!("{ALX_PREFIX}{}", l.name)))
+        .collect();
     out.push_str(&wrap(
         &format!("lints  {}", names.join("  ")),
         4,

@@ -515,32 +515,22 @@ fn dedent(text: &str, n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::lint::{Thresholds, apply_fixes};
+    use super::super::helpers::{fixed_by, lints as lints_of, names_of};
+    use crate::lint::Thresholds;
 
-    /// The lints of a source, without the unused ones: the sources
-    /// here bind names to show a shape, not to read them.
+    const UNUSED: &[&str] = &["unused_variable", "unused_function"];
+
+    /// The sources here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        crate::compile(src)
-            .unwrap()
-            .lints
-            .into_iter()
-            .filter(|l| !matches!(l.name, "unused_variable" | "unused_function"))
-            .collect()
+        lints_of(src, UNUSED)
     }
 
     fn fixed(src: &str) -> String {
-        apply_fixes(src, &lints(src)).0
+        fixed_by(src, &lints(src))
     }
 
-    /// The lints at their default level: the pedantic ones stay out.
     fn names(src: &str) -> Vec<&'static str> {
-        let config = crate::config::LintConfig::default().without_strict();
-
-        lints(src)
-            .iter()
-            .map(|l| l.name)
-            .filter(|n| crate::lint::level_of(&config, n) != crate::lint::Level::Allow)
-            .collect()
+        names_of(&lints(src))
     }
 
     fn names_with(src: &str, thresholds: Thresholds) -> Vec<&'static str> {
@@ -548,19 +538,14 @@ mod tests {
             thresholds,
             ..Default::default()
         };
-
-        let config = crate::config::LintConfig::default().without_strict();
-
-        crate::compile_with(src, &options)
+        let lints: Vec<crate::Lint> = crate::compile_with(src, &options)
             .unwrap()
             .lints
-            .iter()
-            .map(|l| l.name)
-            .filter(|n| {
-                crate::lint::level_of(&config, n) != crate::lint::Level::Allow
-                    && !matches!(*n, "unused_variable" | "unused_function")
-            })
-            .collect()
+            .into_iter()
+            .filter(|l| !UNUSED.contains(&l.name))
+            .collect();
+
+        names_of(&lints)
     }
 
     #[test]

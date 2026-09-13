@@ -807,33 +807,49 @@ impl<'s> Scan<'s> {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::lint::apply_fixes;
-
-    /// The lints of a source, without `unused_variable`: the sources
-    /// here bind names to show a shape, not to read them.
-    fn lints(src: &str) -> Vec<crate::Lint> {
+pub(super) mod helpers {
+    /// The lints of a source, without the ones `drop` names.
+    pub(super) fn lints(src: &str, drop: &[&str]) -> Vec<crate::Lint> {
         crate::compile(src)
             .unwrap()
             .lints
             .into_iter()
-            .filter(|l| l.name != "unused_variable")
+            .filter(|l| !drop.contains(&l.name))
             .collect()
     }
 
-    fn fixed(src: &str) -> String {
-        apply_fixes(src, &lints(src)).0
+    /// The source with every fix of `lints` applied.
+    pub(super) fn fixed_by(src: &str, lints: &[crate::Lint]) -> String {
+        crate::lint::apply_fixes(src, lints).0
     }
 
-    /// The lints at their default level: the pedantic ones stay out.
-    fn names(src: &str) -> Vec<&'static str> {
+    /// The lint names at their default level: the pedantic ones stay out.
+    pub(super) fn names_of(lints: &[crate::Lint]) -> Vec<&'static str> {
         let config = crate::config::LintConfig::default().without_strict();
 
-        lints(src)
+        lints
             .iter()
             .map(|l| l.name)
             .filter(|n| crate::lint::level_of(&config, n) != crate::lint::Level::Allow)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::helpers::{fixed_by, lints as lints_of, names_of};
+
+    /// The sources here bind names to show a shape, not to read them.
+    fn lints(src: &str) -> Vec<crate::Lint> {
+        lints_of(src, &["unused_variable"])
+    }
+
+    fn fixed(src: &str) -> String {
+        fixed_by(src, &lints(src))
+    }
+
+    fn names(src: &str) -> Vec<&'static str> {
+        names_of(&lints(src))
     }
 
     #[test]

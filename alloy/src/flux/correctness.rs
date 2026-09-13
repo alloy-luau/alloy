@@ -866,10 +866,9 @@ impl<'s> Scan<'s> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::helpers::{fixed_by, names_of};
     use crate::lint::apply_fixes;
 
-    /// The lints of a source, without the unused ones: the sources
-    /// here bind names to show a shape, not to read them.
     /// The lints of one source, straight from the lint pass.
     ///
     /// These lints read the token stream, so they fire on a source the
@@ -896,18 +895,11 @@ mod tests {
     }
 
     fn fixed(src: &str) -> String {
-        apply_fixes(src, &lints(src)).0
+        fixed_by(src, &lints(src))
     }
 
-    /// The lints at their default level: the pedantic ones stay out.
     fn names(src: &str) -> Vec<&'static str> {
-        let config = crate::config::LintConfig::default().without_strict();
-
-        lints(src)
-            .iter()
-            .map(|l| l.name)
-            .filter(|n| crate::lint::level_of(&config, n) != crate::lint::Level::Allow)
-            .collect()
+        names_of(&lints(src))
     }
 
     /// `!` and `?[` on a name the file types with no `?`: the check

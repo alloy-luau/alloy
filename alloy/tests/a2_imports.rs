@@ -618,3 +618,42 @@ fn a_bare_import_of_a_type_only_export_binds_no_value() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/*
+A name a module exports as a type alone has no value at run time, so a
+bare import of it binds the type and the returned table needs no key.
+The check follows the emit, for a plain Luau module and for an Alloy one.
+*/
+#[test]
+fn a_bare_import_of_a_type_only_export_needs_no_key() {
+    let dir = scratch("type-only-key");
+    std::fs::write(
+        dir.join("luaumod.luau"),
+        "export type P = number\n\nreturn {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("types.aly"), "export type Size = number\n").unwrap();
+    let source = "import { P } from \"./luaumod\"\nimport { Size } from \"./types\"\nlocal x: P = 5\nlocal y: Size = 6\nprint(x, y)\n";
+    let main = dir.join("main.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+
+    assert!(problems.is_empty(), "{messages:?}");
+
+    // A name the module neither returns nor exports as a type is still
+    // a missing key.
+    let bad = "import { Q } from \"./luaumod\"\nprint(Q)\n";
+    std::fs::write(&main, bad).unwrap();
+
+    let problems = alloy::modules::import_problems(bad, Path::new("main.aly"), &main, &[]);
+
+    assert_eq!(problems.len(), 1);
+    assert_eq!(
+        problems[0].message,
+        "the module \"./luaumod\" returns a table with no `Q`; it has nothing"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1346,6 +1346,10 @@ struct Surface {
     /// error: each rule names a different value for the module.
     both: bool,
     keys: Option<Vec<String>>,
+    /// The names the module exports as a type with no value at run
+    /// time: `export type`, `export interface`. A bare import of one
+    /// binds the type alone, so the returned table needs no key for it.
+    type_only_names: Vec<String>,
 }
 
 impl Surface {
@@ -1366,6 +1370,15 @@ impl Surface {
                 true => returned_keys(source),
 
                 false => None,
+            },
+            type_only_names: match returns && !both {
+                true => exported_types(source)
+                    .iter()
+                    .filter(|e| type_only(e))
+                    .map(|e| type_head(e).to_string())
+                    .collect(),
+
+                false => Vec::new(),
             },
         }
     }
@@ -1579,6 +1592,7 @@ pub fn import_problems(
             returns,
             both,
             keys,
+            type_only_names,
         } = surface;
 
         // A module that returns a value names one value, and an
@@ -1674,9 +1688,14 @@ pub fn import_problems(
             let (la, lb) = range(item.alias.unwrap_or(item.name));
 
             // The module returns a table whose keys the compiler can
-            // read: a name in braces takes one key of it.
+            // read: a name in braces takes one key of it. A name the
+            // module exports as a type alone is the exception: it has
+            // no value at run time, so the import binds the type and
+            // the table needs no key. The emit does the same.
             let missing_key = match (returns, &keys, type_only || item.is_type) {
-                (true, Some(keys), false) => !keys.contains(&name),
+                (true, Some(keys), false) => {
+                    !keys.contains(&name) && !type_only_names.contains(&name)
+                }
 
                 _ => false,
             };

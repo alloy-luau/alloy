@@ -611,41 +611,10 @@ fn rewrite_requires(
     spec_rel: &Path,
     text: &str,
 ) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-
-    while let Some(i) = rest.find("require(") {
-        let after = &rest[i + "require(".len()..];
-        let quote = after.chars().next();
-
-        if !matches!(quote, Some('"' | '\'')) {
-            out.push_str(&rest[..i + "require(".len()]);
-            rest = after;
-
-            continue;
-        }
-
-        let q = quote.unwrap_or('"');
-        let body = &after[1..];
-        let Some(end) = body.find(q) else {
-            out.push_str(&rest[..i + "require(".len()]);
-            rest = after;
-
-            continue;
-        };
-        let path = &body[..end];
-        let replaced = target_for(config, tree, root, source_rel, path)
-            .map(|target| relative_require(spec_rel, &target));
-
-        out.push_str(&rest[..i + "require(".len()]);
-        out.push(q);
-        out.push_str(replaced.as_deref().unwrap_or(path));
-        out.push(q);
-        rest = &body[end + 1..];
-    }
-
-    out.push_str(rest);
-    out
+    crate::project::map_requires(text, |path| {
+        target_for(config, tree, root, source_rel, path)
+            .map(|target| relative_require(spec_rel, &target))
+    })
 }
 
 /// The lest spec of one source: the sliced module, then the `describe`

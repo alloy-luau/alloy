@@ -325,6 +325,21 @@ fn normalize(path: &Path) -> PathBuf {
 /// build writes it as `x.luau`. The text keeps its line count: a
 /// replacement holds no newline.
 pub fn rewrite_requires(tree: &Tree, text: &str) -> String {
+    map_requires(text, |path| {
+        let replaced = path.strip_prefix('@').and_then(|p| {
+            let (alias, tail) = p.split_once('/').unwrap_or((p, ""));
+
+            resolve_alias(tree, alias, tail)
+        });
+
+        Some(crate::data::strip_spec(replaced.as_deref().unwrap_or(path)).to_string())
+    })
+}
+
+/// Rewrites the path of every `require("...")` of a text through `f`,
+/// which answers `None` for a path it leaves alone. The text keeps its
+/// line count, so `f` returns no newline.
+pub(crate) fn map_requires(text: &str, f: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
 
@@ -335,6 +350,7 @@ pub fn rewrite_requires(tree: &Tree, text: &str) -> String {
         if !matches!(quote, Some('"' | '\'')) {
             out.push_str(&rest[..i + "require(".len()]);
             rest = after;
+
             continue;
         }
 
@@ -343,23 +359,20 @@ pub fn rewrite_requires(tree: &Tree, text: &str) -> String {
         let Some(end) = body.find(q) else {
             out.push_str(&rest[..i + "require(".len()]);
             rest = after;
+
             continue;
         };
         let path = &body[..end];
-        let replaced = path.strip_prefix('@').and_then(|p| {
-            let (alias, tail) = p.split_once('/').unwrap_or((p, ""));
-
-            resolve_alias(tree, alias, tail)
-        });
 
         out.push_str(&rest[..i + "require(".len()]);
         out.push(q);
-        out.push_str(crate::data::strip_spec(replaced.as_deref().unwrap_or(path)));
+        out.push_str(f(path).as_deref().unwrap_or(path));
         out.push(q);
         rest = &body[end + 1..];
     }
 
     out.push_str(rest);
+
     out
 }
 

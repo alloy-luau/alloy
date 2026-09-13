@@ -1269,6 +1269,10 @@ fn and_list(names: &[String]) -> String {
 #[derive(Debug, Clone, Default)]
 struct Surface {
     names: Vec<String>,
+    /// The names among them that an `export attribute` declares. An
+    /// attribute is written `@name` everywhere it is applied, and the
+    /// import list writes it the same way.
+    attributes: Vec<String>,
     has_default: bool,
     /// The module ends in `return <expr>` and exports no value.
     returns: bool,
@@ -1285,6 +1289,10 @@ impl Surface {
 
         Surface {
             names: exported_names(source),
+            attributes: crate::globals::exported_attribute_decls(source)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect(),
             has_default: exports_default(source),
             returns: returns && !both,
             both,
@@ -1390,7 +1398,7 @@ pub fn import_problems(
             // The name a wrong form wrote, for the message that shows
             // the two forms that work.
             let first = match &node.kind {
-                ImportKind::Namespace(n) | ImportKind::Default(n) | ImportKind::Both(n, _) => {
+                ImportKind::Namespace(n, _) | ImportKind::Default(n) | ImportKind::Both(n, _) => {
                     Some(text(*n))
                 }
 
@@ -1504,6 +1512,7 @@ pub fn import_problems(
         };
         let Surface {
             names,
+            attributes,
             has_default,
             returns,
             both,
@@ -1559,7 +1568,9 @@ pub fn import_problems(
             bound_values.push(local);
         };
         let specs = match &node.kind {
-            ImportKind::Namespace(name) => {
+            // `import * as M`: the alias binds the whole module, so no
+            // export name is read and only the local can clash.
+            ImportKind::Namespace(name, list) => {
                 let local = text(*name).to_string();
 
                 if bound_values.contains(&local) {
@@ -1574,7 +1585,7 @@ pub fn import_problems(
 
                 bound_values.push(local);
 
-                continue;
+                list
             }
 
             ImportKind::Default(name) => {
@@ -1608,6 +1619,19 @@ pub fn import_problems(
                 _ => false,
             };
 
+            // `@name` says the export is an attribute. The sigil is
+            // how an attribute reads where it is applied, so the import
+            // list has to agree with the declaration.
+            let in_type_list = type_only || item.is_type;
+            let is_attribute = alloy_module && attributes.contains(&name);
+            // The `@` belongs to the report when the sigil is the part
+            // that is wrong.
+            let (sa, sb) = match item.is_attribute {
+                true => (a.saturating_sub(1), b),
+
+                false => (a, b),
+            };
+
             if alloy_module && !names.contains(&name) {
                 out.push(ImportProblem {
                     start: a,
@@ -1617,6 +1641,29 @@ pub fn import_problems(
                         "\"{spec}\" does not export `{name}`; it exports {}",
                         and_list(&names)
                     ),
+                });
+            } else if is_attribute && in_type_list {
+                out.push(ImportProblem {
+                    start: sa,
+                    end: sb,
+                    kind: "ImportError",
+                    message: format!(
+                        "`{name}` is an attribute, not a type; import it as `@{name}` in a value list"
+                    ),
+                });
+            } else if is_attribute && !item.is_attribute {
+                out.push(ImportProblem {
+                    start: a,
+                    end: b,
+                    kind: "ImportError",
+                    message: format!("`{name}` is an attribute; import it as `@{name}`"),
+                });
+            } else if item.is_attribute && alloy_module && !is_attribute {
+                out.push(ImportProblem {
+                    start: sa,
+                    end: sb,
+                    kind: "ImportError",
+                    message: format!("`{name}` is not an attribute; import it as `{name}`"),
                 });
             } else if missing_key {
                 out.push(ImportProblem {

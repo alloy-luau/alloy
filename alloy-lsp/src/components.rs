@@ -295,7 +295,12 @@ fn import_bindings(src: &str, toks: &[Tok], kind: &ImportKind) -> Vec<(String, &
     };
 
     match kind {
-        ImportKind::Namespace(alias) => vec![(t(*alias), "module")],
+        ImportKind::Namespace(alias, specs) => {
+            let mut out = vec![(t(*alias), "module")];
+
+            out.extend(picked(specs));
+            out
+        }
 
         ImportKind::Default(name) => vec![(t(*name), "import")],
 
@@ -417,7 +422,7 @@ fn import_members(
     let deeper = !rest.is_empty();
     // `import * as M`: the module itself is the holder, so `M.` lists
     // what it exports and `M.Group.` walks on inside it.
-    let whole = matches!(kind, ImportKind::Namespace(alias) if t(*alias) == head);
+    let whole = matches!(kind, ImportKind::Namespace(alias, _) if t(*alias) == head);
     // `import M from "p"`, and the default half of `import M, { a }`.
     let default_here = match kind {
         ImportKind::Default(name) | ImportKind::Both(name, _) => t(*name) == head,
@@ -450,6 +455,10 @@ fn import_members(
 
     let inner = match kind {
         ImportKind::Named(specs) => named(specs),
+
+        // A name picked beside `* as M` reads off the module, the way
+        // the list of `import M, { a }` does.
+        ImportKind::Namespace(_, specs) => named(specs),
 
         ImportKind::Both(name, specs) => match t(*name) == head {
             true => default_name(&readable(&(read.load)(spec)?)),

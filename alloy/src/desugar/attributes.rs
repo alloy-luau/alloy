@@ -689,11 +689,11 @@ impl<'s> Desugar<'s> {
                 }
 
                 Stmt::Import(i) => match &i.kind {
-                    ImportKind::Namespace(n) | ImportKind::Default(n) => {
+                    ImportKind::Default(n) => {
                         self.imported_names.insert(self.text_of(*n).to_string());
                     }
 
-                    ImportKind::Both(n, specs) => {
+                    ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
                         self.imported_names.insert(self.text_of(*n).to_string());
 
                         for sp in specs {

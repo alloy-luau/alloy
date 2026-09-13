@@ -447,7 +447,9 @@ impl NamespaceMember {
 }
 
 /// `import * as M from "p"`, `import M from "p"`, `import { a, type T,
-/// b as c } from "p"`, `import type { T } from "p"`.
+/// b as c } from "p"`, `import type { T } from "p"`, and the two forms
+/// that take a whole module and names from it: `import M, { a }` and
+/// `import * as M, { a }`. An attribute in braces carries its `@`.
 #[derive(Debug)]
 pub struct Import {
     pub kind: ImportKind,
@@ -458,8 +460,10 @@ pub struct Import {
 
 #[derive(Debug)]
 pub enum ImportKind {
-    /// `* as M`: the whole module, its default under `M.default`.
-    Namespace(TokSpan),
+    /// `* as M`: the whole module, its default under `M.default`. A
+    /// `, { a, b }` after the alias picks names from it too, the way
+    /// `import M, { a }` does.
+    Namespace(TokSpan, Vec<ImportSpec>),
     /// `M`: the module's `export default`, under any name.
     Default(TokSpan),
     /// `M, { a, b as c }`: the default and names picked from the module.
@@ -475,6 +479,10 @@ pub struct ImportSpec {
     pub name: TokSpan,
     pub alias: Option<TokSpan>,
     pub is_type: bool,
+    /// `@name`: the list names an attribute. The `@` is how an
+    /// attribute is written everywhere else, so the import writes it
+    /// too. `name` spans the name alone, without the sigil.
+    pub is_attribute: bool,
 }
 
 /// What `export default` carries: an expression, or a declaration that

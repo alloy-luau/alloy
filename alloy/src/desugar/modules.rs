@@ -1,7 +1,7 @@
 //! Import, export, and module-return lowering.
 
 use alloy_syntax::ast::{
-    Block, DefaultExport, ExportList, Expr, Import, ImportKind, Local, Stmt, TokSpan,
+    Block, DefaultExport, ExportList, Expr, Import, ImportKind, ImportSpec, Local, Stmt, TokSpan,
 };
 
 use super::*;
@@ -120,9 +120,10 @@ impl<'s> Desugar<'s> {
     /// one hides that the name reaches every file. The spec reports.
     fn reject_global_imports(&mut self, i: &Import) {
         let specs = match &i.kind {
-            ImportKind::Both(_, specs) | ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
-                specs.clone()
-            }
+            ImportKind::Namespace(_, specs)
+            | ImportKind::Both(_, specs)
+            | ImportKind::Named(specs)
+            | ImportKind::TypeOnly(specs) => specs.clone(),
 
             _ => Vec::new(),
         };
@@ -161,9 +162,15 @@ impl<'s> Desugar<'s> {
         }
 
         match &i.kind {
-            ImportKind::Namespace(n) => {
+            // `import * as M from "p"`, and `import * as M, { a }`,
+            // which reads the names off `M` itself: the alias already
+            // binds the whole module.
+            ImportKind::Namespace(n, specs) => {
                 let name = self.text_of(*n).to_string();
-                self.generate(anchor, &format!("local {name} = require({path})"));
+                let mut text = format!("local {name} = require({path})");
+                let picked = self.spec_bindings(&path, &name, specs);
+                text.push_str(&picked);
+                self.generate(anchor, &text);
             }
 
             // `import M from "p"`: the module's `export default`, under
@@ -192,99 +199,15 @@ impl<'s> Desugar<'s> {
                         (temp, text)
                     }
                 };
-                let mut names = Vec::new();
-                let mut values = Vec::new();
-                let mut types = Vec::new();
-
-                for sp in specs {
-                    let name = self.text_of(sp.name).to_string();
-                    let local = sp
-                        .alias
-                        .map(|a| self.text_of(a).to_string())
-                        .unwrap_or(name.clone());
-
-                    let args = self.module_type_params(&path, &name);
-                    let type_args = type_arguments(&args);
-
-                    if sp.is_type {
-                        types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
-                    } else {
-                        // A struct or an enum is a value and a type; the
-                        // type comes along when the module exports one.
-                        if self.module_exports_type(&path, &name) {
-                            types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
-                        }
-
-                        types.extend(self.namespace_type_aliases(&path, &name, &local, &temp));
-                        names.push(local);
-                        values.push(format!("{temp}.{name}"));
-                    }
-                }
-
-                if !names.is_empty() {
-                    text.push_str(&format!(
-                        " local {} = {}",
-                        names.join(", "),
-                        values.join(", ")
-                    ));
-                }
-
-                for t in types {
-                    text.push(' ');
-                    text.push_str(&t);
-                }
-
+                let picked = self.spec_bindings(&path, &temp, specs);
+                text.push_str(&picked);
                 self.generate(anchor, &text);
             }
 
             ImportKind::Named(specs) => {
                 let temp = self.hoist_import(&path, anchor);
-                let mut names = Vec::new();
-                let mut values = Vec::new();
-                let mut types = Vec::new();
-
-                for sp in specs {
-                    let name = self.text_of(sp.name).to_string();
-                    let local = sp
-                        .alias
-                        .map(|a| self.text_of(a).to_string())
-                        .unwrap_or(name.clone());
-
-                    let args = self.module_type_params(&path, &name);
-                    let type_args = type_arguments(&args);
-
-                    if sp.is_type {
-                        types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
-                    } else {
-                        if self.module_exports_type(&path, &name) {
-                            types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
-                        }
-
-                        types.extend(self.namespace_type_aliases(&path, &name, &local, &temp));
-                        names.push(local);
-                        values.push(format!("{temp}.{name}"));
-                    }
-                }
-
-                let mut text = String::new();
-
-                if !names.is_empty() {
-                    text.push_str(&format!(
-                        "local {} = {}",
-                        names.join(", "),
-                        values.join(", ")
-                    ));
-                }
-
-                for t in types {
-                    if !text.is_empty() {
-                        text.push(' ');
-                    }
-
-                    text.push_str(&t);
-                }
-
-                self.generate(anchor, &text);
+                let text = self.spec_bindings(&path, &temp, specs);
+                self.generate(anchor, text.trim_start());
             }
 
             ImportKind::TypeOnly(specs) => {
@@ -316,6 +239,64 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /*
+    The bindings a list in braces writes, as one run of Luau, each part
+    with a leading space so it appends to the `local` the form already
+    generated.
+
+    `temp` is the table the names read off: the hoisted `require` for
+    `import { a }`, the alias for `import * as M, { a }`. The three
+    forms that take a list share the body, so a name, a type, and a
+    namespace alias lower the same way in each.
+    */
+    fn spec_bindings(&mut self, path: &str, temp: &str, specs: &[ImportSpec]) -> String {
+        let mut names = Vec::new();
+        let mut values = Vec::new();
+        let mut types = Vec::new();
+
+        for sp in specs {
+            let name = self.text_of(sp.name).to_string();
+            let local = sp
+                .alias
+                .map(|a| self.text_of(a).to_string())
+                .unwrap_or(name.clone());
+
+            let args = self.module_type_params(path, &name);
+            let type_args = type_arguments(&args);
+
+            if sp.is_type {
+                types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
+            } else {
+                // A struct or an enum is a value and a type; the type
+                // comes along when the module exports one.
+                if self.module_exports_type(path, &name) {
+                    types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
+                }
+
+                types.extend(self.namespace_type_aliases(path, &name, &local, temp));
+                names.push(local);
+                values.push(format!("{temp}.{name}"));
+            }
+        }
+
+        let mut text = String::new();
+
+        if !names.is_empty() {
+            text.push_str(&format!(
+                " local {} = {}",
+                names.join(", "),
+                values.join(", ")
+            ));
+        }
+
+        for t in types {
+            text.push(' ');
+            text.push_str(&t);
+        }
+
+        text
+    }
+
     /// `import { Players } from "game"` and `import P from "game:Players"`
     /// both bind `game:GetService`. Every binding lands on the import's
     /// own line, so the line count holds and the analyzer reads the
@@ -342,11 +323,11 @@ impl<'s> Desugar<'s> {
         let mut lines = Vec::new();
 
         match &i.kind {
-            ImportKind::Namespace(n) | ImportKind::Default(n) => {
+            ImportKind::Default(n) => {
                 lines.push(named(self, *n, None));
             }
 
-            ImportKind::Both(n, specs) => {
+            ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
                 lines.push(named(self, *n, None));
 
                 for sp in specs {
@@ -518,9 +499,9 @@ impl<'s> Desugar<'s> {
             Stmt::Attribute(d) => value(values, d.name),
 
             Stmt::Import(i) => match &i.kind {
-                ImportKind::Namespace(n) | ImportKind::Default(n) => value(values, *n),
+                ImportKind::Default(n) => value(values, *n),
 
-                ImportKind::Both(n, specs) => {
+                ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
                     value(values, *n);
 
                     for sp in specs {

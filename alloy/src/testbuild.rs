@@ -180,11 +180,9 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
         }
 
         Stmt::Import(i) => match &i.kind {
-            ImportKind::Namespace(n) | ImportKind::Default(n) => {
-                declares.push(name_of(src, toks, *n))
-            }
+            ImportKind::Default(n) => declares.push(name_of(src, toks, *n)),
 
-            ImportKind::Both(n, specs) => {
+            ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
                 declares.push(name_of(src, toks, *n));
 
                 for s in specs {

@@ -368,9 +368,9 @@ impl<'s> Desugar<'s> {
             }
 
             Stmt::Import(i) => match &i.kind {
-                ImportKind::Namespace(n) | ImportKind::Default(n) => self.declare_name(*n),
+                ImportKind::Default(n) => self.declare_name(*n),
 
-                ImportKind::Both(n, specs) => {
+                ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
                     self.declare_name(*n);
 
                     for sp in specs {

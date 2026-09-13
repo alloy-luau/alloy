@@ -841,9 +841,9 @@ fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
     use alloy_syntax::ast::ImportKind;
 
     match &i.kind {
-        ImportKind::Namespace(n) | ImportKind::Default(n) => vec![*n],
+        ImportKind::Default(n) => vec![*n],
 
-        ImportKind::Both(n, specs) => std::iter::once(*n)
+        ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => std::iter::once(*n)
             .chain(specs.iter().map(|s| s.alias.unwrap_or(s.name)))
             .collect(),
 

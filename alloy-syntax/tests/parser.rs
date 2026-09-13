@@ -238,6 +238,13 @@ const CORPUS: &[&str] = &[
     "import M from './m'",
     "import { a, b as c, type T } from './m'",
     "import type { T, U } from './m'",
+    // An attribute in the list carries the `@` it is applied with.
+    "import { @tagged } from './m'",
+    "import { @tagged as t, other } from './m'",
+    "import {\n\t@tagged,\n\tother,\n} from './m'",
+    // The whole module and names from it, the way a default takes both.
+    "import * as M, { a } from './m'",
+    "import * as M, { @tagged as t } from './m'",
     "export { a, b as c }",
     "export { a } from './m'",
     "export type { T } from './m'",
@@ -1277,4 +1284,73 @@ fn namespace_is_contextual_and_reserved() {
         "{}",
         diagnostics[0].message
     );
+}
+
+/*
+The two spellings an import list rejects: an `@` on the local name after
+`as`, and the name list before the whole-module name. Each error names
+the form that works, so the reader has the fix in the sentence.
+*/
+#[test]
+fn an_import_list_names_the_spelling_that_works() {
+    let message = |src: &str| -> String {
+        let lexed = alloy_syntax::lexer::lex(src).unwrap();
+
+        alloy_syntax::parser::parse(src, &lexed.toks)
+            .unwrap_err()
+            .message
+    };
+
+    assert_eq!(
+        message("import { @tagged as @t } from './m'\n"),
+        "an alias in an import list takes no `@`; write `@tagged as t`"
+    );
+    assert_eq!(
+        message("import { a }, * as M from './m'\n"),
+        "the name for the whole module comes first; write `import * as M, { ... } from`"
+    );
+}
+
+/// `@` marks which export the list names, and the parser records it on
+/// the spec. The name itself spans the word alone.
+#[test]
+fn the_sigil_of_an_import_spec_is_recorded() {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    let src = "import { @tagged as t, version } from './m'\n";
+    let lexed = alloy_syntax::lexer::lex(src).unwrap();
+    let chunk = alloy_syntax::parser::parse(src, &lexed.toks).unwrap();
+    let Some(Stmt::Import(node)) = chunk.block.stmts.first() else {
+        panic!("not an import: {:?}", chunk.block.stmts.first())
+    };
+    let ImportKind::Named(specs) = &node.kind else {
+        panic!("not a name list: {:?}", node.kind)
+    };
+
+    assert_eq!(specs.len(), 2);
+    assert!(specs[0].is_attribute);
+    assert!(!specs[1].is_attribute);
+    let name = lexed.toks[specs[0].name.start as usize];
+    assert_eq!(&src[name.start as usize..name.end as usize], "tagged");
+}
+
+/// `import * as M, { a }` keeps the alias and the list on one statement.
+#[test]
+fn a_namespace_import_carries_a_name_list() {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    let src = "import * as M, { a, @b } from './m'\n";
+    let lexed = alloy_syntax::lexer::lex(src).unwrap();
+    let chunk = alloy_syntax::parser::parse(src, &lexed.toks).unwrap();
+    let Some(Stmt::Import(node)) = chunk.block.stmts.first() else {
+        panic!("not an import")
+    };
+    let ImportKind::Namespace(alias, specs) = &node.kind else {
+        panic!("not a namespace import: {:?}", node.kind)
+    };
+    let tok = lexed.toks[alias.start as usize];
+
+    assert_eq!(&src[tok.start as usize..tok.end as usize], "M");
+    assert_eq!(specs.len(), 2);
+    assert!(specs[1].is_attribute);
 }

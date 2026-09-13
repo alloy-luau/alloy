@@ -28,8 +28,17 @@ impl<'a> Parser<'a> {
 
         let kind = if self.eat("*") {
             self.expect("as")?;
+            let module = self.expect_name()?;
 
-            ImportKind::Namespace(self.expect_name()?)
+            // `import * as M, { a } from`: the whole module and names
+            // from it, the shape `import M, { a }` already reads.
+            if self.at(",") && self.text_at(1) == "{" {
+                self.bump();
+
+                ImportKind::Namespace(module, self.import_specs()?)
+            } else {
+                ImportKind::Namespace(module, Vec::new())
+            }
         } else if self.at("type") && self.text_at(1) == "{" {
             self.bump();
             let mut specs = self.import_specs()?;
@@ -40,7 +49,17 @@ impl<'a> Parser<'a> {
 
             ImportKind::TypeOnly(specs)
         } else if self.at("{") {
-            ImportKind::Named(self.import_specs()?)
+            let specs = self.import_specs()?;
+
+            // `import { a }, * as M`: the module-wide name comes first,
+            // so one written order holds for both forms.
+            if self.at(",") {
+                return Err(self.err(
+                    "the name for the whole module comes first; write `import * as M, { ... } from`",
+                ));
+            }
+
+            ImportKind::Named(specs)
         } else {
             let module = self.expect_name()?;
 
@@ -79,6 +98,10 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
 
+            // `import { @tagged }`: an attribute reads with the `@`
+            // it is applied with. The sigil sits on the exported name;
+            // the local name after `as` is written plain.
+            let is_attribute = self.eat("@");
             let start = self.pos;
             let mut name = self.expect_name()?;
 
@@ -91,6 +114,15 @@ impl<'a> Parser<'a> {
             }
 
             let alias = if self.eat("as") {
+                if self.at("@") {
+                    let written = self.span_text(name);
+
+                    return Err(self.err(&format!(
+                        "an alias in an import list takes no `@`; write `@{written} as {}`",
+                        self.text_at(1)
+                    )));
+                }
+
                 Some(self.expect_name()?)
             } else {
                 None
@@ -99,6 +131,7 @@ impl<'a> Parser<'a> {
                 name,
                 alias,
                 is_type,
+                is_attribute,
             });
 
             if !self.eat(",") {

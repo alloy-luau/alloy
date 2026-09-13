@@ -432,3 +432,97 @@ fn a_module_returns_or_exports_but_not_both() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/*
+An attribute in an import list is written `@name`, the way it is written
+where it is applied. The list reports either spelling that disagrees
+with the declaration, and an attribute is not a type.
+*/
+#[test]
+fn an_attribute_is_imported_with_its_sigil() {
+    let dir = scratch("attribute-sigil");
+    std::fs::write(
+        dir.join("lib.aly"),
+        "export attribute tagged(name: string) on struct\n\nexport const version = 1\n",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let report = |source: &str| -> Vec<String> {
+        std::fs::write(&main, source).unwrap();
+
+        alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[])
+            .into_iter()
+            .map(|p| p.message)
+            .collect()
+    };
+
+    assert_eq!(
+        report("import { @tagged } from \"./lib\"\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        report("import { @tagged as t } from \"./lib\"\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        report("import { tagged } from \"./lib\"\n"),
+        vec!["`tagged` is an attribute; import it as `@tagged`"]
+    );
+    assert_eq!(
+        report("import { @version } from \"./lib\"\n"),
+        vec!["`version` is not an attribute; import it as `version`"]
+    );
+    assert_eq!(
+        report("import type { tagged } from \"./lib\"\n"),
+        vec!["`tagged` is an attribute, not a type; import it as `@tagged` in a value list"]
+    );
+    // A list mixes the two, and each name answers for itself.
+    assert_eq!(
+        report("import { @tagged, version } from \"./lib\"\n"),
+        Vec::<String>::new()
+    );
+
+    // The report on a wrong `@` covers the sigil, which is the part to
+    // delete.
+    let source = "import { @version } from \"./lib\"\n";
+    std::fs::write(&main, source).unwrap();
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    assert_eq!(
+        &source[problems[0].start as usize..problems[0].end as usize],
+        "@version"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `import * as M, { a }` binds the whole module and names from it, the
+/// way `import M, { a }` binds the default and names from it.
+#[test]
+fn a_namespace_import_takes_a_name_list_too() {
+    let dir = scratch("namespace-list");
+    std::fs::write(
+        dir.join("lib.aly"),
+        "export const version = 1\n\nexport function helper(): number\n    return 1\nend\n",
+    )
+    .unwrap();
+    let source = "import * as Lib, { version } from \"./lib\"\nprint(Lib, version)\n";
+    let main = dir.join("main.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+    assert!(problems.is_empty(), "{messages:?}");
+
+    // The alias and a name in braces are both bindings of the file, so
+    // one written twice reports.
+    let source = "import * as version, { version } from \"./lib\"\nprint(version)\n";
+    std::fs::write(&main, source).unwrap();
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    assert_eq!(problems.len(), 1);
+    assert_eq!(
+        problems[0].message,
+        "`version` is already imported in this file"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

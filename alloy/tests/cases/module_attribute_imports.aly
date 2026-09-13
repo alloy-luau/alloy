@@ -1,0 +1,8 @@
+-- An attribute in a name list carries the `@` it is applied with; the
+-- local name after `as` is written plain. `import * as M, { a }` takes
+-- the whole module and names from it, the way a default binding does.
+import { @tagged } from "./theme"
+import { @tagged as tag, swatch } from "./theme"
+import * as All, { swatch as other } from "./theme"
+
+print(tagged, tag, swatch, All, other)

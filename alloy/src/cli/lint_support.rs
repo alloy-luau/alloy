@@ -44,6 +44,25 @@ pub(crate) fn split_level_flags(args: &[String]) -> (Vec<(lint::Level, String)>,
 
 /// The `[lint]` table with `--strict` and the level flags applied. A
 /// flag beats the table: its name leaves the other lists.
+/// The project and the lint levels one `alloy lint` or `alloy flux` run
+/// reads, with the level flags taken out of the arguments. `None` when
+/// no project answers; the message is out already.
+pub(crate) fn lint_context(args: &[String]) -> Option<(Vec<String>, PathBuf, Config, LintConfig)> {
+    let (flags, args) = split_level_flags(args);
+    let (root, config) = match crate::cli::support::project(&args) {
+        Ok(p) => p,
+
+        Err(e) => {
+            crate::fail(&e.to_string());
+
+            return None;
+        }
+    };
+    let lint_config = lint_config_for(&config, &flags, &args);
+
+    Some((args, root, config, lint_config))
+}
+
 pub(crate) fn lint_config_for(
     config: &Config,
     flags: &[(lint::Level, String)],

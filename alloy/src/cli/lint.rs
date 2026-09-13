@@ -5,10 +5,10 @@
 use std::process::ExitCode;
 
 use crate::cli::lint_support::{
-    apply_header_as_fixes, apply_lint_fixes, lint_config_for, lint_one, list_lints, offer_fixes,
-    print_lints, split_level_flags,
+    apply_header_as_fixes, apply_lint_fixes, lint_context, lint_one, list_lints, offer_fixes,
+    print_lints,
 };
-use crate::cli::support::{is_source, positionals, print_diagnostics, project};
+use crate::cli::support::{is_source, positionals, print_diagnostics};
 use crate::ui::{self, Painter};
 use crate::{fail, usage};
 
@@ -17,18 +17,11 @@ pub(crate) fn lint_cmd(args: &[String]) -> ExitCode {
         return list_lints();
     }
 
-    let (flags, args) = split_level_flags(args);
+    let Some((args, root, config, lint_config)) = lint_context(args) else {
+        return ExitCode::FAILURE;
+    };
     let args = &args[..];
     let positional = positionals(args);
-    let (root, config) = match project(args) {
-        Ok(p) => p,
-
-        Err(e) => {
-            fail(&e.to_string());
-            return ExitCode::FAILURE;
-        }
-    };
-    let lint_config = lint_config_for(&config, &flags, args);
 
     if let Some(file) = positional.first() {
         if !is_source(file) {

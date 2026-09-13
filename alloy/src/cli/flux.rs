@@ -11,8 +11,8 @@ use alloy::lint;
 
 use crate::cli::build::{watch_loop, watch_roots};
 use crate::cli::lint_support::{
-    apply_header_as_fixes, apply_lint_fixes, lint_config_for, lint_one, list_lints, offer_fixes,
-    print_lints, split_level_flags,
+    apply_header_as_fixes, apply_lint_fixes, lint_context, lint_one, list_lints, offer_fixes,
+    print_lints,
 };
 use crate::cli::support::{is_source, option, positionals, print_diagnostics, project};
 use crate::ui::{self, Level, Painter};
@@ -55,18 +55,11 @@ pub(crate) fn flux_cmd(args: &[String]) -> ExitCode {
 
 /// One run of `alloy flux`.
 fn flux_once(args: &[String]) -> ExitCode {
-    let (flags, args) = split_level_flags(args);
+    let Some((args, root, config, lint_config)) = lint_context(args) else {
+        return ExitCode::FAILURE;
+    };
     let args = &args[..];
     let positional = positionals(args);
-    let (root, config) = match project(args) {
-        Ok(p) => p,
-
-        Err(e) => {
-            fail(&e.to_string());
-            return ExitCode::FAILURE;
-        }
-    };
-    let lint_config = lint_config_for(&config, &flags, args);
 
     // One file named on the command line: the whole project still
     // compiles, since the type check needs every module the file

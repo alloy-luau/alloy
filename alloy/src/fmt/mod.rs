@@ -638,39 +638,42 @@ fn is_keyword(text: &str) -> bool {
     )
 }
 
-/// Tokens after which an `if` or a `function` is an expression.
+/// Tokens after which an `if` or a `function` is an expression. The
+/// head of an interpolated string ends with the `{` of its hole, so a
+/// token that ends with `{` opens an expression like a plain `{` does.
 fn expression_context(prev: &str) -> bool {
-    matches!(
-        prev,
-        "=" | "("
-            | ","
-            | "["
-            | "{"
-            | "return"
-            | "and"
-            | "or"
-            | "not"
-            | "+"
-            | "-"
-            | "*"
-            | "/"
-            | "//"
-            | "%"
-            | "^"
-            | ".."
-            | "=="
-            | "~="
-            | "<"
-            | ">"
-            | "<="
-            | ">="
-            | "??"
-            | "?"
-            | ":"
-            | "in"
-            | "?("
-            | "?["
-    )
+    prev.ends_with('{')
+        || matches!(
+            prev,
+            "=" | "("
+                | ","
+                | "["
+                | "{"
+                | "return"
+                | "and"
+                | "or"
+                | "not"
+                | "+"
+                | "-"
+                | "*"
+                | "/"
+                | "//"
+                | "%"
+                | "^"
+                | ".."
+                | "=="
+                | "~="
+                | "<"
+                | ">"
+                | "<="
+                | ">="
+                | "??"
+                | "?"
+                | ":"
+                | "in"
+                | "?("
+                | "?["
+        )
 }
 
 /// Tokens that continue the expression of the line before, when they
@@ -794,6 +797,31 @@ mod tests {
         // One that fits keeps its line.
         let short = "local x = if flag then 1 else 2\n";
         assert_eq!(fmt(short), short);
+    }
+
+    /// An `if` inside an interpolation hole is an expression, so it
+    /// opens no block and the `end` of the function stays at column 0.
+    /// A long one breaks inside the hole. Luau reads that form: the
+    /// newline lands between two tokens of the hole, never inside a
+    /// segment of the string.
+    #[test]
+    fn an_if_expression_in_an_interpolation_hole_opens_no_block() {
+        let short = "function f(flag: boolean): string\n    return `x {if flag then \"a\" else \"b\"} y`\nend\n";
+        assert_eq!(fmt(short), short);
+        // The `end` of a file the old rule indented comes back.
+        assert_eq!(fmt(&short.replace("\nend\n", "\n    end\n")), short);
+
+        let t = "\"longvalueherefortrueandthenmore\"";
+        let f = "\"longvaluehereforfalsealternativevalue\"";
+        let long = format!(
+            "function g(flag: boolean): string\n    return `prefix {{if flag then {t} else {f}}} suffix`\nend\n"
+        );
+        let want = format!(
+            "function g(flag: boolean): string\n    return `prefix {{if flag then\n        {t}\n        else\n        {f}}} suffix`\nend\n"
+        );
+        assert!(long.lines().any(|l| l.chars().count() > 100));
+        assert_eq!(fmt(&long), want);
+        assert_eq!(fmt(&want), want);
     }
 
     #[test]

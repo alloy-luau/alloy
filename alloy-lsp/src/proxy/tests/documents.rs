@@ -460,11 +460,16 @@ pub(crate) fn a_mirrored_sourcemap_points_at_luau() {
 pub(crate) fn capabilities_lose_formatting_and_gain_renames() {
     let mut m = json!({ "result": { "capabilities": {
             "documentFormattingProvider": true,
+            "documentRangeFormattingProvider": true,
             "semanticTokensProvider": { "legend": {}, "full": { "delta": true }, "range": true }
         } } });
     edit_capabilities(&mut m);
     let caps = &m["result"]["capabilities"];
     assert_eq!(caps["documentFormattingProvider"], true);
+
+    // `alloy fmt` reads a whole file, so the editor offers no
+    // "Format Selection" over a range it cannot hold.
+    assert!(caps.get("documentRangeFormattingProvider").is_none());
     assert_eq!(caps["semanticTokensProvider"]["full"], true);
     assert!(caps["semanticTokensProvider"].get("range").is_none());
     assert!(caps["workspace"]["fileOperations"]["didRename"].is_object());

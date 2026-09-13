@@ -43,6 +43,13 @@ pub(crate) fn edit_capabilities(message: &mut Value) {
     // The proxy formats `.aly` itself, with `alloy fmt`.
     caps.insert("documentFormattingProvider".into(), Value::Bool(true));
 
+    // No range formatting. `alloy fmt` reads a whole file and rewraps to
+    // `[fmt] column_width`, so it can move text across the edge of a
+    // selection: an edit set cut to the range would either drop that
+    // rewrap or write outside what the editor asked for. The capability
+    // stays off, so no editor offers "Format Selection", and
+    // `textDocument/formatting` does the work.
+
     // On-type formatting writes the `end` of a block after Enter: the
     // newline first, then whatever the child asked for, so a trigger of
     // its own still arrives.

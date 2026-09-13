@@ -98,8 +98,15 @@ fn statement_at(src: &str, line_start: usize, offset: usize) -> Option<usize> {
             let text = &src[start..offset];
             let open = text.matches('{').count() > text.matches('}').count();
 
-            if !open && text.contains("from") {
-                return None;
+            // With the list closed ahead of the caret, the statement
+            // ends on the line that closed it: `} from "./m"` is still
+            // the import, and the line under it is the next statement.
+            if !open {
+                let close = text.rfind('}')?;
+
+                if text[close..].contains('\n') {
+                    return None;
+                }
             }
 
             return continues_list(src, start, line_start, offset).then_some(start);

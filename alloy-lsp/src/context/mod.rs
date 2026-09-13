@@ -1801,6 +1801,15 @@ mod tests {
         }
         // The closing brace opens its own line at any column.
         assert_eq!(at("import {\n    a\n} |"), Some(Context::ImportFrom));
+        // The statement runs to the end of the line that closed the
+        // list, so `from` and the path there are still the import.
+        assert_eq!(
+            at("import {\n    a\n} fr|om \"./m\""),
+            Some(Context::ImportFrom)
+        );
+        assert_eq!(at("import {\n    a\n} from |"), Some(Context::Nothing));
+        // The line under that one is the next statement.
+        assert_eq!(at("import {\n    a\n} from \"./m\"\nprint(q|"), None);
         // An import left open does not take the statement under it.
         assert_eq!(at("import { ver\nlocal q = 1\nprint(q|"), None);
     }

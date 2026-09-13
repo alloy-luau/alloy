@@ -2069,18 +2069,24 @@ pub(crate) fn a_type_slot_offers_the_luau_type_functions() {
 
     let offset = SRC.find("local a: ").expect("the slot") + "local a: ".len();
     let ctx = context::detect(SRC, offset).expect("a type slot");
-    let items = st.context_items(uri, offset, &ctx);
-    let insert = |label: &str| -> String {
-        items
+    let insert = |st: &State, label: &str| -> String {
+        st.context_items(uri, offset, &ctx)
             .iter()
             .find(|i| i["label"] == json!(label))
             .and_then(|i| i["textEdit"]["newText"].as_str())
             .unwrap_or_default()
             .to_string()
     };
-    // No snippet support in the test state, so the pair goes in empty.
-    assert_eq!(insert("typeof"), "typeof()");
-    assert_eq!(insert("keyof"), "keyof<>");
+    // The accept writes the brackets and puts the caret between them.
+    assert_eq!(insert(&st, "typeof"), "typeof($1)");
+    assert_eq!(insert(&st, "keyof"), "keyof<$1>");
+
+    // With no snippet support the placeholder would land as literal
+    // text, so the pair goes in empty.
+    let mut plain = st;
+    plain.snippets = false;
+    assert_eq!(insert(&plain, "typeof"), "typeof()");
+    assert_eq!(insert(&plain, "keyof"), "keyof<>");
 }
 
 /// The body of an `attribute ... as` offered the whole global scope

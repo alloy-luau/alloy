@@ -359,56 +359,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        self.expect("(")?;
-        let mut params = Vec::new();
-
-        if !self.at(")") {
-            loop {
-                if self.at("@") {
-                    self.attrs()?;
-                }
-
-                if self.at("...") {
-                    let i = self.bump();
-                    let ty = if self.eat(":") {
-                        Some(self.type_()?)
-                    } else {
-                        None
-                    };
-
-                    params.push(Param {
-                        name: TokSpan::new(i, i + 1),
-                        is_vararg: true,
-                        ty,
-                        default: None,
-                        destructure: None,
-                    });
-
-                    break;
-                }
-
-                let b = self.binding()?;
-                let default = if self.eat("=") {
-                    Some(self.expr()?)
-                } else {
-                    None
-                };
-
-                params.push(Param {
-                    name: b.name,
-                    is_vararg: false,
-                    ty: b.ty,
-                    default,
-                    destructure: b.destructure,
-                });
-
-                if !self.eat(",") {
-                    break;
-                }
-            }
-        }
-
-        self.expect(")")?;
+        let params = self.param_list()?;
         let (ret_type, ret_arrow) = if self.eat(":") {
             (Some(self.type_ret()?), None)
         } else if self.at("->") {

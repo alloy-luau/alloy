@@ -32,7 +32,9 @@ pub use members::{
     Access, guarded_member_column, index_at, index_key_at, member_at, member_column,
 };
 #[allow(unused_imports)]
-pub use scope::{Local, LocalKind, locals_in_scope};
+pub use scope::{Local, LocalKind, locals_in_scope, value_openers};
+#[allow(unused_imports)]
+pub use strings::block_closers;
 
 /// What the cursor sits in, from the text of its line.
 #[derive(Debug, Clone, PartialEq, Eq)]

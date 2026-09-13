@@ -79,7 +79,7 @@ fn words_at(text: &str) -> Vec<(usize, &str)> {
 /// The blocks a line opens, for the walk that tracks which names are
 /// still in scope. An `if` expression is left out: it closes with its
 /// `else`, not with an `end`.
-fn value_openers(text: &str) -> i32 {
+pub fn value_openers(text: &str) -> i32 {
     let mut count = 0;
     // A `for` or a `while` head owns the `do` that ends it.
     let mut head_open = false;

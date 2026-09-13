@@ -1029,3 +1029,28 @@ pub(crate) fn a_const_used_above_its_line_hovers_as_the_const() {
         "type count = *error-type*"
     );
 }
+/// A `default` arm of a `match` nested inside a `case` arm: the outer
+/// arm still binds the name, and the inner arm is no sibling of it. The
+/// walk crosses the inner `match` and the block that closed above.
+#[test]
+pub(crate) fn a_name_in_a_nested_default_arm_reads_the_outer_binding() {
+    const SRC: &str = "enum Shape as\n    Circle(number)\nend\n\nlocal function d(s: Shape, n: number): string\n    return match s with\n        case Circle(x) then\n            match n with\n                case 1 then \"one\"\n                default\n                    `circle: {x}`\n            end\n        default\n            \"other\"\n    end\nend\nprint(d)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let known = st.known_shapes_at(Some(uri));
+    let inner = SRC.find("circle: {x}").expect("arm") + "circle: {".len();
+    let bound = SRC.find("case Circle(x)").expect("case") + "case Circle(".len();
+    let line_of = |o: usize| position_of(SRC, o).0 as usize;
+
+    assert_eq!(
+        case_binding_text(doc, line_of(inner), inner, "x", &known),
+        Some("```alloy\nx: number\n```\nA binding of `Shape.Circle`.".to_string())
+    );
+    assert_eq!(
+        case_binding_span(doc, line_of(inner), "x", &known),
+        Some((bound, bound + 1))
+    );
+    // The outer `default` is a sibling of the arm, so it binds nothing.
+    let other = SRC.find("\"other\"").expect("default");
+    assert_eq!(case_binding_span(doc, line_of(other), "x", &known), None);
+}

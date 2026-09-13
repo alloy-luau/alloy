@@ -106,7 +106,7 @@ pub(crate) fn block_openers(text: &str) -> i32 {
             * i32::from(text.contains("while ") || text.contains("for "))
 }
 
-pub(crate) fn block_closers(text: &str) -> i32 {
+pub fn block_closers(text: &str) -> i32 {
     text.split(|c: char| !is_word(c))
         .filter(|w| matches!(*w, "end" | "until"))
         .count() as i32

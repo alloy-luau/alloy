@@ -180,6 +180,63 @@ fn opens_the_default_arm(text: &str) -> bool {
     text == "default" || text.starts_with("default ")
 }
 
+/// The line of the `case` arm that holds `line`: the nearest `case`
+/// above it at the depth of the line's own `match`. A block that closed
+/// above the line is crossed whole, and so is the `match` of a
+/// `default` arm: that arm binds nothing, so the name comes from the
+/// arm the match itself sits in.
+pub(crate) fn case_binding_line(lines: &[&str], line: usize) -> Option<usize> {
+    let mut at = line.min(lines.len().saturating_sub(1));
+    // The blocks the walk entered from below and has yet to leave.
+    let mut inside = 0i32;
+
+    loop {
+        let text = lines.get(at)?.trim();
+
+        if inside > 0 {
+            inside = (inside + crate::context::block_closers(text)
+                - crate::context::value_openers(text))
+            .max(0);
+        } else if text.starts_with("case ") {
+            break Some(at);
+        } else if opens_the_default_arm(text) {
+            inside = 1;
+        } else if text.ends_with(" with") {
+            return None;
+        } else {
+            inside = crate::context::block_closers(text);
+        }
+
+        at = at.checked_sub(1)?;
+    }
+}
+
+/// Where the `case` arm that holds `line` binds `word`: the byte range
+/// of the name in the arm's own pattern. A match lowers to one
+/// expression, so the binding has no local of its own and the child,
+/// which reads the emit, has nothing to point at.
+pub(crate) fn case_binding_span(
+    doc: &Doc,
+    line: usize,
+    word: &str,
+    known: &crate::shapes::Known,
+) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = doc.source.lines().collect();
+    let case_line = case_binding_line(&lines, line)?;
+    let pattern = case_pattern(lines[case_line])?;
+
+    if !pattern_bindings(&pattern, known, || array_element(&lines, case_line))
+        .iter()
+        .any(|(name, _, _)| name == word)
+    {
+        return None;
+    }
+
+    let at = offset_of(&doc.source, case_line as u32, 0)? + whole_word(lines[case_line], word)?;
+
+    Some((at, at + word.len()))
+}
+
 /// The hover of a `case` pattern's binding at `line`: the name with the
 /// type the pattern gives it. `None` when the line is in no arm, or the
 /// word is no binding of it.
@@ -191,24 +248,7 @@ pub(crate) fn case_binding_text(
     known: &crate::shapes::Known,
 ) -> Option<String> {
     let lines: Vec<&str> = doc.source.lines().collect();
-    let mut at = line.min(lines.len().saturating_sub(1));
-
-    // The arm the line belongs to: the nearest `case` above it, and no
-    // `end`, `default`, or `match` head between. The `default` arm binds
-    // nothing, so a name in it is the outer one and the child answers.
-    let case_line = loop {
-        let text = lines.get(at)?.trim();
-
-        if text.starts_with("case ") {
-            break at;
-        }
-
-        if text == "end" || text.ends_with(" with") || opens_the_default_arm(text) {
-            return None;
-        }
-
-        at = at.checked_sub(1)?;
-    };
+    let case_line = case_binding_line(&lines, line)?;
     let pattern = case_pattern(lines[case_line])?;
     let bindings = pattern_bindings(&pattern, known, || array_element(&lines, case_line));
 

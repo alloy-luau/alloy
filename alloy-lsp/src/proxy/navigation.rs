@@ -374,6 +374,22 @@ impl Server {
             word.to_string()
         };
 
+        // A `case` binding: the arm's pattern is where the name comes
+        // from, and the match lowers to one expression, so the emit
+        // writes no local for the child to point at.
+        if key == word
+            && let Some((a, b)) =
+                case_binding_span(doc, line as usize, word, &st.known_shapes_at(Some(uri)))
+        {
+            let s = position_of(&doc.source, a);
+            let e = position_of(&doc.source, b);
+            let result = json!([{ "uri": uri, "range": range_value(s, e) }]);
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         // `export local Size = 42` binds the name here. Another file's
         // `Size` is a declaration of its own and says nothing about the
         // binding the caret sits on, so the child answers for this one.
@@ -1195,7 +1211,7 @@ pub(crate) fn service_definition(source: &str, uri: &str, word: &str) -> Option<
 
 /// Where a word sits in a line on its own, not inside a longer name:
 /// `Run` in `{ RunService as Run }` is the second match, not the first.
-fn whole_word(line: &str, word: &str) -> Option<usize> {
+pub(crate) fn whole_word(line: &str, word: &str) -> Option<usize> {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
 
     line.match_indices(word)

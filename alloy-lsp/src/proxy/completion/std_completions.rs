@@ -210,8 +210,9 @@ impl State {
     pub(crate) fn type_completions(&self, uri: &str, labels: &[&str]) -> Vec<Value> {
         let mut items = Vec::new();
         let mut seen: HashSet<String> = labels.iter().map(|l| l.to_string()).collect();
+        let folded = self.folded_names();
         let mut push = |name: &str, kind: u64, detail: &str, doc_text: Option<String>| {
-            if !is_internal_name(name) && seen.insert(name.to_string()) {
+            if !is_internal_name(name) && !folded.contains(name) && seen.insert(name.to_string()) {
                 let mut item = json!({ "label": name, "kind": kind, "detail": detail });
 
                 if let Some(d) = doc_text {

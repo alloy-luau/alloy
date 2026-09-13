@@ -659,6 +659,20 @@ pub(crate) fn strip_import_temps(value: &mut Value, shadow: &str) {
     walk(value, &temps);
 }
 
+impl State {
+    /// The flat names the emit writes for the members of a namespace.
+    /// `namespace Shapes as export type Box` emits `Shapes_Box`, since
+    /// Luau has no `Shapes.Box` type path. The declaration index holds
+    /// that name so a hover on the artifact finds the member; no
+    /// source writes it, so no list offers it.
+    pub(crate) fn folded_names(&self) -> HashSet<&str> {
+        self.docs
+            .values()
+            .flat_map(|d| d.namespaces.iter().map(|(emitted, _)| emitted.as_str()))
+            .collect()
+    }
+}
+
 /// A name the emit made: `__alloy`, `__alloy_string`, `_m1`, `_g1`,
 /// `_gs`, `_1`, `Name__private`, `Name__all`, `__new`, and the mapped
 /// type functions.

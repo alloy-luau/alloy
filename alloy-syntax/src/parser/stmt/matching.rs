@@ -3,6 +3,9 @@
 use super::super::*;
 
 const CASE_AFTER_DEFAULT: &str = "a `case` arm cannot follow `default`; move `default` last";
+const TWO_DEFAULTS: &str =
+    "a `default` arm cannot follow `default`; a `match` takes one `default` arm";
+const DEFAULT_ALONE: &str = "a `match` needs a `case` arm before `default`";
 
 impl<'a> Parser<'a> {
     // --- match -------------------------------------------------------------
@@ -34,7 +37,7 @@ impl<'a> Parser<'a> {
 
             if self.at("case") {
                 if default.is_some() {
-                    self.case_after_default()?;
+                    self.bad_arm(CASE_AFTER_DEFAULT)?;
                 }
 
                 let arm_start = self.bump();
@@ -52,6 +55,12 @@ impl<'a> Parser<'a> {
             }
 
             if self.at("default") {
+                if default.is_some() {
+                    self.bad_arm(TWO_DEFAULTS)?;
+                } else if arms.is_empty() {
+                    self.bad_arm(DEFAULT_ALONE)?;
+                }
+
                 self.bump();
                 default = Some(self.match_block()?);
 
@@ -89,17 +98,19 @@ impl<'a> Parser<'a> {
         Ok((patterns, guard))
     }
 
-    /// `default` ends the arm list. The emit reads the arms in order, so
-    /// an arm after `default` leaks its source into the output. A lenient
-    /// parse reports it and reads the arm, which keeps the rest of the file.
-    fn case_after_default(&mut self) -> Result<(), ParseError> {
+    /// Reports an arm list the emit cannot read: `default` ends the list
+    /// and comes once, after at least one `case`. The emit reads the arms
+    /// in order, so any other shape leaks its source into the output. A
+    /// lenient parse reports it and reads the arm, which keeps the rest
+    /// of the file.
+    fn bad_arm(&mut self, message: &'static str) -> Result<(), ParseError> {
         if self.lenient {
-            self.report(CASE_AFTER_DEFAULT);
+            self.report(message);
 
             return Ok(());
         }
 
-        Err(self.err(CASE_AFTER_DEFAULT))
+        Err(self.err(message))
     }
 
     /// A block that ends at the next `case`, `default`, or `end`.
@@ -133,7 +144,7 @@ impl<'a> Parser<'a> {
 
             if self.at("case") {
                 if default.is_some() {
-                    self.case_after_default()?;
+                    self.bad_arm(CASE_AFTER_DEFAULT)?;
                 }
 
                 let arm_start = self.bump();
@@ -151,6 +162,12 @@ impl<'a> Parser<'a> {
             }
 
             if self.at("default") {
+                if default.is_some() {
+                    self.bad_arm(TWO_DEFAULTS)?;
+                } else if arms.is_empty() {
+                    self.bad_arm(DEFAULT_ALONE)?;
+                }
+
                 self.bump();
                 default = Some(Box::new(self.expr()?));
 

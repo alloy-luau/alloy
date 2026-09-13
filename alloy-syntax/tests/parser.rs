@@ -486,8 +486,8 @@ fn a_match_arm_stops_at_the_next_case() {
 fn a_case_arm_after_default_is_an_error() {
     // The emit reads the arms in order, so an arm after `default` leaks
     // its source into the output.
-    let stmt = "match n with default a() case 1 then b() end\n";
-    let expr = "local v = match n with default 0 case 1 then 1 end\n";
+    let stmt = "match n with case 0 then z() default a() case 1 then b() end\n";
+    let expr = "local v = match n with case 0 then 0 default 1 case 1 then 1 end\n";
     rejects(stmt);
     rejects(expr);
 
@@ -505,6 +505,50 @@ fn a_case_arm_after_default_is_an_error() {
             "got {}",
             diagnostics[0].message
         );
+    }
+}
+
+#[test]
+fn the_default_arm_comes_once_and_after_a_case() {
+    // The emit reads the arms in order. A second `default` left the first
+    // one in the output, and a `match` with only `default` emitted the
+    // head of a `case` that the source never wrote.
+    let cases = [
+        (
+            "match n with case 1 then a() default b() default c() end\n",
+            "takes one `default` arm",
+        ),
+        (
+            "local v = match n with case 1 then 1 default 2 default 3 end\n",
+            "takes one `default` arm",
+        ),
+        (
+            "match n with default b() end\n",
+            "needs a `case` arm before `default`",
+        ),
+        (
+            "local v = match n with default 2 end\n",
+            "needs a `case` arm before `default`",
+        ),
+    ];
+
+    for (src, wanted) in cases {
+        rejects(src);
+
+        // A lenient parse reports it once and still reads the whole file.
+        let lexed = alloy_syntax::lexer::lex(src).unwrap();
+        let (chunk, diagnostics) = alloy_syntax::parser::parse_lenient(
+            src,
+            &lexed.toks,
+            alloy_syntax::parser::ParseOptions::default(),
+        );
+        assert_eq!(diagnostics.len(), 1, "one report for:\n{src}");
+        assert!(
+            diagnostics[0].message.contains(wanted),
+            "got {}",
+            diagnostics[0].message
+        );
+        assert_eq!(chunk.block.stmts.len(), 1, "the match still reads:\n{src}");
     }
 }
 

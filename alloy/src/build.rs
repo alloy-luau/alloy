@@ -294,6 +294,10 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     // A `.d.aly` declares a name with no module behind it, so a check
     // that asks whether a name exists reads the list.
     let mut ambient_names: Vec<String> = Vec::new();
+    // The file each name came from. A second declaration of one name
+    // wins silently, and the reader then meets the wrong type at a
+    // call, so the build reports the clash at the second declaration.
+    let mut ambient_from: HashMap<String, PathBuf> = HashMap::new();
 
     for path in &sources {
         let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
@@ -303,11 +307,27 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         if let Ok(text) = std::fs::read_to_string(path) {
-            ambient_names.extend(
-                crate::declarations::summaries(&text, true)
-                    .into_iter()
-                    .map(|d| d.name),
-            );
+            for d in crate::declarations::summaries(&text, true) {
+                if let Some(first) = ambient_from.get(&d.name) {
+                    report.diagnostics.push((
+                        rel.clone(),
+                        Diagnostic {
+                            start: d.offset as u32,
+                            end: (d.offset + d.name.len()) as u32,
+                            message: format!(
+                                "`{}` is already declared in {}; a declare name is global, so one name declares once",
+                                d.name,
+                                first.display()
+                            ),
+                        },
+                    ));
+
+                    continue;
+                }
+
+                ambient_from.insert(d.name.clone(), rel.clone());
+                ambient_names.push(d.name);
+            }
         }
     }
 

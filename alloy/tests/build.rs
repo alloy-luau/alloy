@@ -107,3 +107,38 @@ fn two_sources_that_build_one_module_are_a_diagnostic() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Two `.d.aly` files that declare one name: the second declaration
+/// wins at run time, so the build reports it once and names the file
+/// the first declaration sits in.
+#[test]
+fn one_ambient_name_declared_twice_is_an_error() {
+    let dir = temp_project("ambient");
+    fs::write(
+        dir.join("src/globals.d.aly"),
+        "declare function helperFn(x: number): number\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/other.d.aly"),
+        "declare function helperFn(y: string): string\n",
+    )
+    .unwrap();
+
+    let report = alloy::build::run(&dir, &Build::default(), &Emit::default()).unwrap();
+    let clashes: Vec<&(PathBuf, alloy::Diagnostic)> = report
+        .diagnostics
+        .iter()
+        .filter(|(_, d)| d.message.contains("already declared"))
+        .collect();
+
+    assert_eq!(clashes.len(), 1, "{report:?}");
+    assert_eq!(clashes[0].0, PathBuf::from("other.d.aly"));
+    assert!(
+        clashes[0].1.message.contains("globals.d.aly"),
+        "{}",
+        clashes[0].1.message
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

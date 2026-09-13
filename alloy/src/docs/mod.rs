@@ -35,6 +35,7 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["returns nothing to import"], "UnknownModule"),
         (&["ingot `"], "IngotError"),
         (&["reserved word"], "ReservedWord"),
+        (&["is already declared in"], "DeclareError"),
         (&["in macro expansion"], "MacroError"),
         (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),
         // The `impl` header names a struct and an enum in one sentence;
@@ -112,6 +113,8 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         (&["result"], "4.1"),
         (&["a `const`"], "6.1"),
         (&["reserved word"], "6.1"),
+        // The `declare` keyword page documents an ambient declaration.
+        (&["is already declared in"], "6.1"),
         (&["markup"], "3.13"),
         (&["@test", "test "], "3.14"),
         (&["@cfg"], "3.11"),

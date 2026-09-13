@@ -592,6 +592,43 @@ pub fn import_types(
     out
 }
 
+/// Per import spec, the structs the module declares whose check
+/// artifact keeps a private view. An `impl` of one of them types `self`
+/// as the view, so its methods reach the private members wherever the
+/// impl sits. See `crate::extensions::private_views`.
+pub fn import_private_views(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
+
+    for spec in import_specs(source) {
+        if out.iter().any(|(s, _)| *s == spec) {
+            continue;
+        }
+
+        let Some(path) = resolve(&spec, from, aliases) else {
+            continue;
+        };
+        let views = cache
+            .entry(path.clone())
+            .or_insert_with(|| {
+                std::fs::read_to_string(&path)
+                    .map(|t| crate::extensions::private_views(&t))
+                    .unwrap_or_default()
+            })
+            .clone();
+
+        if !views.is_empty() {
+            out.push((spec, views));
+        }
+    }
+
+    out
+}
+
 /// The struct and enum shapes of every module the source imports, for
 /// a hover that names an imported struct by its fields.
 pub fn import_shapes(
@@ -1072,6 +1109,7 @@ impl crate::EmitOptions {
         self.import_enums = import_enums(source, from, aliases);
         self.import_privates = import_privates(source, from, aliases);
         self.import_struct_fields = import_struct_fields(source, from, aliases);
+        self.import_private_views = import_private_views(source, from, aliases);
         self.import_attributes = import_attributes(source, from, aliases);
         self.macros = import_macros(source, from, aliases);
         self.plain_modules = plain_modules(source, from, aliases);

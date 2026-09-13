@@ -138,6 +138,49 @@ struct FileImpls {
     defaults: Vec<Extension>,
 }
 
+/// The structs a source declares whose check artifact keeps a private
+/// view, `Name__all`: a struct with a private field, or one an `impl`
+/// here gives a private method. A generic struct keeps one view. The
+/// declaring file exports the view, so an `impl` of the struct in
+/// another file types `self` as it and reaches the private members.
+pub fn private_views(src: &str) -> Vec<String> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+
+    let toks = &parsed.lexed.toks;
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
+    let stmts = &parsed.chunk.block.stmts;
+    let mut plain: HashSet<&str> = HashSet::new();
+
+    for stmt in stmts {
+        if let Stmt::Struct(d) = stmt
+            && d.generics.is_none()
+        {
+            plain.insert(text(d.name));
+        }
+    }
+
+    let private = |v: Option<TokSpan>| v.is_some_and(|v| text(v) == "private");
+    let mut out: Vec<String> = Vec::new();
+
+    for stmt in stmts {
+        let name = match stmt {
+            Stmt::Struct(d) if d.fields.iter().any(|f| private(f.visibility)) => text(d.name),
+
+            Stmt::Impl(i) if i.methods.iter().any(|m| private(m.visibility)) => text(i.target),
+
+            _ => continue,
+        };
+
+        if plain.contains(name) && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+
+    out
+}
+
 /// The `impl` blocks of one file, the methods they keep private, and the
 /// traits they name. `own` picks which targets count: a type of the
 /// project, or a foreign one.
@@ -223,7 +266,26 @@ fn impls(src: &str, own: bool) -> FileImpls {
 
         let target = text(i.target);
 
-        if local.contains(target) || is_foreign(target) == own {
+        if local.contains(target) {
+            // The declaring file's own impl: its methods travel nowhere,
+            // the file declares them. The private ones still do, because
+            // `private_access` reads the project's list, and a call from
+            // another file has to report.
+            for m in &i.methods {
+                let Some(first) = m.path.first() else {
+                    continue;
+                };
+
+                if m.visibility.is_some_and(|v| text(v) == "private") {
+                    out.privates
+                        .push((target.to_string(), text(*first).to_string()));
+                }
+            }
+
+            continue;
+        }
+
+        if is_foreign(target) == own {
             continue;
         }
 

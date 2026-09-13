@@ -124,6 +124,11 @@ pub struct EmitOptions {
     /// it carries a default, so `new Box { }` here reports the fields it
     /// leaves unset. See `crate::modules::import_struct_fields`.
     pub import_struct_fields: Vec<(String, Vec<(String, bool)>)>,
+    /// Per import spec, the structs the module keeps a private view of,
+    /// `Name__all`. An `impl` of one here types `self` as the view, so
+    /// it reaches the struct's private members. See
+    /// `crate::modules::import_private_views`.
+    pub import_private_views: Vec<(String, Vec<String>)>,
     /// The specs that name a module Alloy does not compile: a `.luau`
     /// or `.lua` file, or a data file. Such a module has no export
     /// table, so `import X from` binds the value it returns, not
@@ -271,6 +276,7 @@ impl Default for EmitOptions {
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
             import_struct_fields: Vec::new(),
+            import_private_views: Vec::new(),
             plain_modules: Vec::new(),
             ambient_names: Vec::new(),
             import_attributes: Vec::new(),
@@ -424,6 +430,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         )]),
         attr_decls: HashMap::new(),
         imported_names: HashSet::new(),
+        private_view_names: HashSet::new(),
         ret_types: Vec::new(),
         try_targets: Vec::new(),
         result_aliases: HashSet::new(),
@@ -850,6 +857,9 @@ struct Desugar<'s> {
     /// Names an `import` brings in. An attribute of an imported name is
     /// not checked here; this file cannot see its targets.
     imported_names: HashSet<String>,
+    /// Imported structs whose full view this file aliases as
+    /// `Name__all`. An `impl` of one types `self` as the view.
+    private_view_names: HashSet<String>,
     /// The declared return type of each function body under render,
     /// innermost last. `try` reads it: it compiles only inside a function
     /// that returns a Result.

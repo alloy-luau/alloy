@@ -107,6 +107,10 @@ impl<'s> Desugar<'s> {
         let declares_target =
             self.structs.contains(&target_name) || self.enums.contains_key(&target_name);
         let split = !foreign && declares_target && self.has_private_view(&target_name);
+        // An impl of a struct another file declares: its private methods
+        // go on the class table, and `self` reads the full view the
+        // import aliased, so a call of a private member still types.
+        let imported_view = !foreign && !declares_target && self.reads_private_view(&target_name);
 
         if foreign {
             let std = self.std();
@@ -193,7 +197,7 @@ impl<'s> Desugar<'s> {
                 .first()
                 .is_some_and(|p| self.text_of(p.name) == "self");
 
-            if split && !is_private && has_self {
+            if ((split && !is_private) || imported_view) && has_self {
                 self.self_prologue =
                     Some(format!("local self = (self :: any) :: {target_name}__all"));
             }
@@ -256,7 +260,12 @@ impl<'s> Desugar<'s> {
             let rest = TokSpan::new(name_span.end as usize, m.span.end as usize);
             let _ = after_name;
 
-            if function_needs_rewrite(&m.body) || self.self_type.is_some() {
+            // The prologue sits on the header line, so a method that
+            // carries one takes the header path too.
+            if function_needs_rewrite(&m.body)
+                || self.self_type.is_some()
+                || self.self_prologue.is_some()
+            {
                 self.function_with_header(rest, &m.body);
             } else {
                 let children = function_children(&m.body);
@@ -554,7 +563,7 @@ impl<'s> Desugar<'s> {
             };
 
             format!(
-                "{export}type {name} = typeof(setmetatable({{}} :: {{ {} }}, {name})) type {name}__all = {name}{hidden} & typeof({name}__private)",
+                "{export}type {name} = typeof(setmetatable({{}} :: {{ {} }}, {name})) {export}type {name}__all = {name}{hidden} & typeof({name}__private)",
                 public_types.join(", ")
             )
         } else if let Some(members) = self.generic_alias_members(&name, &generics, &field_types) {
@@ -1458,6 +1467,12 @@ impl<'s> Desugar<'s> {
 
     /// Whether the check artifact splits a struct into a public view and
     /// a full one: it has a private member and no type parameters.
+    /// Whether this file aliased the full view of an imported struct,
+    /// `Name__all`. Only the check artifact carries the view.
+    pub(crate) fn reads_private_view(&self, name: &str) -> bool {
+        self.options.check && self.private_view_names.contains(name)
+    }
+
     pub(crate) fn has_private_view(&self, name: &str) -> bool {
         self.options.check
             && self.private_types.contains(name)

@@ -29,6 +29,21 @@ impl<'s> Desugar<'s> {
             .is_some_and(crate::modules::type_only)
     }
 
+    /// Whether the module keeps a private view of this struct, which
+    /// its check artifact exports as `Name__all`.
+    pub(crate) fn module_private_view(&self, quoted: &str, name: &str) -> bool {
+        let spec = quoted
+            .strip_prefix(['"', '\''])
+            .and_then(|s| s.strip_suffix(['"', '\'']))
+            .unwrap_or(quoted);
+
+        self.options
+            .import_private_views
+            .iter()
+            .filter(|(s, _)| s == spec)
+            .any(|(_, views)| views.iter().any(|v| v == name))
+    }
+
     fn module_type_entry(&self, quoted: &str, name: &str) -> Option<&str> {
         let spec = quoted
             .strip_prefix(['"', '\''])
@@ -263,6 +278,16 @@ impl<'s> Desugar<'s> {
                 // comes along when the module exports one.
                 if self.module_exports_type(path, &name) {
                     types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
+                }
+
+                // The declaring file's check artifact exports the full
+                // view of a struct with private members. An `impl` of it
+                // here types `self` as the view, so its methods reach
+                // them; the `private_access` lint guards a call outside
+                // any impl.
+                if self.options.check && self.module_private_view(path, &name) {
+                    types.push(format!("type {local}__all = {temp}.{name}__all"));
+                    self.private_view_names.insert(local.clone());
                 }
 
                 types.extend(self.namespace_type_aliases(path, &name, &local, temp));

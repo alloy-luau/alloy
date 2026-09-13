@@ -810,10 +810,19 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
     });
 
-    // `private_access` already names the field and says who reaches it,
+    // `private_access` already names the member and says who reaches it,
     // and it carries the line the source wrote. One report per mistake.
+    // The checker reads a private member as missing, because the
+    // struct's own file keeps it out of the public view, so the three
+    // shapes of that report answer to the lint as well.
+    let reads_as_missing = |m: &str| {
+        m.contains("is private to")
+            || m.contains("has no method")
+            || m.contains("not found in table")
+    };
+
     analysis.diagnostics.retain(|d| {
-        !d.message.contains("is private to")
+        !reads_as_missing(&d.message)
             || !files.iter().any(|f| {
                 f.rel == d.rel
                     && f.lint_lines

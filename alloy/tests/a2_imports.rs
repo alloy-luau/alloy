@@ -687,6 +687,54 @@ fn a_bare_import_of_a_type_only_export_needs_no_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An `impl` of an imported struct reaches the struct's private
+/// members: the declaring file's check artifact exports the full view,
+/// and the import aliases it. A call from outside any impl still
+/// reports, because the project index names the private method.
+#[test]
+fn an_impl_of_an_imported_struct_reaches_its_private_members() {
+    let dir = scratch("private-view");
+    let cat = "export struct Cat as\n    name: string\nend\n\nimpl Cat as\n    private function helper(self): string\n        return \"x\"\n    end\nend\n";
+    std::fs::write(dir.join("cat.aly"), cat).unwrap();
+    let source = "import { Cat } from \"./cat\"\n\nimpl Cat as\n    public function greet(self): string\n        return self:helper()\n    end\nend\n";
+    let main = dir.join("other.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let declaring = alloy::compile_with(cat, &alloy::EmitOptions::default()).unwrap();
+
+    assert!(
+        declaring.check.contains("export type Cat__all ="),
+        "{}",
+        declaring.check
+    );
+
+    let options = alloy::EmitOptions::default().imports(source, &main, &[]);
+    let out = alloy::compile_with(source, &options).unwrap();
+
+    assert!(
+        out.check.contains("type Cat__all = _m1.Cat__all"),
+        "{}",
+        out.check
+    );
+    assert!(
+        out.check.contains("local self = (self :: any) :: Cat__all"),
+        "{}",
+        out.check
+    );
+    // The ship artifact has one view: the private method sits on the
+    // class table there.
+    assert!(!out.ship.contains("Cat__all"), "{}", out.ship);
+
+    let project = alloy::extensions::project_impls(&[cat.to_string()]);
+
+    assert_eq!(
+        project.privates,
+        vec![("Cat".to_string(), vec!["helper".to_string()])]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /*
 An `export macro` travels as source. `import { name }` brings the
 definition in, `$name(...)` expands it here, and the module's table

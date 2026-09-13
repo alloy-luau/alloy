@@ -778,3 +778,50 @@ fn an_import_alias_reads_the_export_s_declaration() {
     assert!(hover.contains("export struct Thing as"), "{hover}");
     assert!(!hover.contains(" where "), "{hover}");
 }
+
+/*
+`local function add(a, b)`: the solver names one type parameter per
+untyped parameter, and the letters say nothing. The signature reads as
+the source wrote it, the parameter hover drops the letter, and the
+gutter holds no hint at all.
+*/
+#[test]
+fn an_untyped_parameter_drops_the_solver_s_letter() {
+    let src = "local function add(a, b)\n    return a + b\nend\n";
+    let (st, uri) = super::support::one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed = "```luau\nlocal function add<a, b>(a: a, b: b): add<a, b>\n```";
+    assert_eq!(
+        declared_signature(printed, doc, 0, 15).as_deref(),
+        Some("```luau\nlocal function add(a, b)\n```")
+    );
+
+    // The child prints `a` for `b` too; neither letter reaches the
+    // reader.
+    assert_eq!(
+        unlocal_parameter("```luau\nlocal b: a\n```", doc, 0, 22).as_deref(),
+        Some("```luau\nb\n```")
+    );
+
+    let mut hints = vec![
+        json!({ "kind": 1, "label": ": a", "position": { "line": 0, "character": 23 } }),
+        json!({ "kind": 1, "label": ": add<a, b>", "position": { "line": 0, "character": 24 } }),
+        json!({ "kind": 1, "label": ": number", "position": { "line": 0, "character": 24 } }),
+    ];
+    clean_hints(&mut hints, doc);
+
+    // A type the solver did name stays.
+    assert_eq!(hints.len(), 1, "{hints:?}");
+    assert_eq!(hint_label(&hints[0]), ": number");
+}
+
+/// A type the source declares keeps its own letter: `<T>` is the
+/// author's word, not the solver's.
+#[test]
+fn a_declared_generic_keeps_its_signature() {
+    let src = "local function first<T>(xs: { T }): T\n    return xs[1]\nend\n";
+    let (st, uri) = super::support::one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed = "```luau\nlocal function first<T>(xs: { T }): T\n```";
+    assert_eq!(declared_signature(printed, doc, 0, 21), None);
+}

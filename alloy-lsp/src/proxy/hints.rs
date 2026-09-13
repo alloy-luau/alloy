@@ -26,7 +26,7 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
 
     let parameters = declared_type_parameters(&doc.source);
 
-    for h in hints.iter_mut() {
+    hints.retain_mut(|h| {
         // The label and the edit are one text.
         if let Some(text) = h
             .pointer("/textEdits/0/newText")
@@ -40,7 +40,7 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
         let label = hint_label(h);
 
         if !label.starts_with(": ") {
-            continue;
+            return true;
         }
 
         // `@checked` is an emit attribute; a written type carries none.
@@ -63,11 +63,17 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
 
             (false, None) if named => label,
 
+            // The print is a name the solver invented, `a` for an
+            // untyped parameter or `add<a, b>` for what it returns. It
+            // annotates nothing and it tells the reader nothing, so the
+            // gutter stays empty.
+            (false, None) if undeclared_variable(annotation, &parameters) => return false,
+
             (false, None) => {
                 h.as_object_mut().map(|o| o.remove("textEdits"));
                 truncate_hint(h, &label);
 
-                continue;
+                return true;
             }
         };
 
@@ -79,13 +85,13 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
         if generic_struct(doc, label[2..].trim()) {
             h.as_object_mut().map(|o| o.remove("textEdits"));
 
-            continue;
+            return true;
         }
 
         if truncate_hint(h, &label) {
             h.as_object_mut().map(|o| o.remove("textEdits"));
 
-            continue;
+            return true;
         }
 
         if let Some(position) = h.get("position").cloned() {
@@ -94,7 +100,9 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
                 "newText": label,
             }]);
         }
-    }
+
+        true
+    });
 }
 
 /// Whether a printed type names a struct that takes type parameters

@@ -1019,15 +1019,31 @@ pub(crate) fn declared_signature(
     // function of the same name.
     let src_params = parameter_names(&source[src.params.0..src.params.1]);
     let child_params = parameter_names(&body[child.params.0..child.params.1]);
+    // The solver names one type parameter per untyped parameter and
+    // gives the letters no meaning: `add<a, b>(a: a, b: b): add<a, b>`
+    // says no more than the header the source wrote, and it reads as if
+    // the function returned a call to itself. Those letters annotate
+    // nothing, so the print drops them with the types they stand in for.
+    let scope = declared_type_parameters(&doc.source);
+    let invented = child.generics.is_some_and(|(a, b)| {
+        let names: Vec<&str> = body[a..b]
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .split(',')
+            .map(str::trim)
+            .collect();
+
+        !names.is_empty() && names.iter().all(|n| n.len() <= 2 && !scope.contains(*n))
+    });
     let same = src_params.len() == child_params.len()
         && src_params
             .iter()
             .zip(&child_params)
-            .all(|(a, b)| a.0 == b.0 && a.1);
+            .all(|(a, b)| a.0 == b.0 && (a.1 || invented));
     let generics = match (same, src.generics, child.generics) {
         (true, Some((a, b)), _) => Some(&source[a..b]),
 
-        (_, _, Some((a, b))) => Some(&body[a..b]),
+        (_, _, Some((a, b))) if !invented => Some(&body[a..b]),
 
         _ => None,
     };
@@ -1055,7 +1071,11 @@ pub(crate) fn declared_signature(
                 false => text.to_string(),
             }
         })
-        .or_else(|| child.ret.map(|(a, b)| body[a..b].trim().to_string()));
+        .or_else(|| match invented {
+            true => None,
+
+            false => child.ret.map(|(a, b)| body[a..b].trim().to_string()),
+        });
 
     if let Some(ret) = ret {
         out.push_str(": ");
@@ -1076,7 +1096,10 @@ pub(crate) fn name_end_in(body: &str, word: &str) -> Option<usize> {
         let end = at + word.len();
         let bounded = at == 0 || !keywords::is_word_at(body, at - 1);
 
-        if bounded && matches!(body[end..].chars().next(), Some('<' | '(')) {
+        // A parameter list has to follow, or the word names something
+        // else: `add<a, b>` in the return of `add<a, b>(a: a, b: b)`
+        // matches the name and opens no header.
+        if bounded && head_spans(body, end).is_some() {
             found = Some(end);
         }
 
@@ -1314,6 +1337,17 @@ pub(crate) fn unlocal_parameter(
         return None;
     }
 
+    // The child prints a solver variable where the source wrote no
+    // type: `b: a` names nothing a reader can write, and the letter does
+    // not even agree with the one the signature gives `b`. The parameter
+    // then reads as the source wrote it.
+    let scope = declared_type_parameters(&doc.source);
+    let text = match named.split_once(": ") {
+        Some((name, ty)) if undeclared_variable(ty, &scope) => name,
+
+        _ => named,
+    };
+
     doc.source
         .lines()
         .filter_map(|l| {
@@ -1322,7 +1356,7 @@ pub(crate) fn unlocal_parameter(
             function_name_of(&l[..open]).map(|_| l[open..].to_string())
         })
         .any(|list| parameter_names(&list).iter().any(|(n, _)| n == word))
-        .then(|| format!("{fence}\n{named}\n```{tail}"))
+        .then(|| format!("{fence}\n{text}\n```{tail}"))
 }
 
 /// `local rows = checked(ids)`: the child prints a solver variable for

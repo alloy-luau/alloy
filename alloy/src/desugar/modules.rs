@@ -811,7 +811,7 @@ impl<'s> Desugar<'s> {
 /// The argument list a parameter list names: `<T = nil, U: Bound>`
 /// declares, `<T, U>` refers. A default or a bound belongs on the
 /// declaring side alone.
-fn type_arguments(params: &str) -> String {
+pub(crate) fn type_arguments(params: &str) -> String {
     let Some(inner) = params.strip_prefix('<').and_then(|p| p.strip_suffix('>')) else {
         return params.to_string();
     };

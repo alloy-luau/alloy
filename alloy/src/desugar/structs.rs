@@ -12,6 +12,7 @@ use alloy_syntax::lexer::TokKind;
 use crate::render::Renderer;
 
 use super::enums::same_type_text;
+use super::modules::type_arguments;
 use super::remotes::WIRE_WIDTHS;
 use super::types::{generic_head, names_other_args, strip_bounds};
 use super::*;
@@ -609,7 +610,9 @@ impl<'s> Desugar<'s> {
                 "{export}type {name} = typeof(setmetatable({{}} :: {{ {} }}, {name})) {export}type {name}__all = {name}{hidden} & typeof({name}__private)",
                 public_types.join(", ")
             )
-        } else if let Some(members) = self.generic_alias_members(&name, &generics, &field_types) {
+        } else if let Some(members) =
+            self.generic_alias_members(&name, &type_arguments(&generics), &field_types)
+        {
             format!(
                 "{export}type {name}{generics} = {{ {} }}",
                 members.join(", ")
@@ -649,10 +652,13 @@ impl<'s> Desugar<'s> {
         // A generic struct types its constructor too: the parameters go
         // on the function, so the field types and the result name them.
         let typed = self.options.check && (generics.is_empty() || !split);
+        // A default belongs to the `type` alias alone. A function's
+        // generic list and an instantiation of the struct take the
+        // parameter names, the way a Luau alias refers to its own.
         let fn_generics = if generics.is_empty() {
             String::new()
         } else {
-            generics.clone()
+            type_arguments(&generics)
         };
         let (param, ret) = if typed {
             (
@@ -2462,6 +2468,31 @@ mod tests {
             "{}",
             out.check
         );
+    }
+
+    /// A default type parameter belongs to the `type` alias. On a
+    /// function's generic list and on an instantiation it is a Luau
+    /// syntax error, so the check artifact writes the names alone.
+    #[test]
+    fn a_generic_default_stays_on_the_type_alias() {
+        let out = crate::compile(
+            "struct Pair<A, B = number> as\n    first: A\n    second: B\nend\nlocal p: Pair<string> = new Pair { first = \"x\", second = 1 }\nprint(p)\n",
+        )
+        .unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("function Pair.__new<A, B>(f: { first: A, second: B }): Pair<A, B>"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("type Pair<A, B = number> ="),
+            "{}",
+            out.check
+        );
+        assert!(!out.check.contains("<A, B = number>("), "{}", out.check);
     }
 
     /// `async function load(self)` in an impl wrote `async function

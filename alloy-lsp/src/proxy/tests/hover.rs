@@ -975,3 +975,35 @@ pub(crate) fn an_import_entry_reads_the_module_the_spec_names() {
             .is_none()
     );
 }
+
+/// `print(limit)` above `const limit = 100`: the checker has no type for
+/// the name there and prints an error type, so the hover was dropped.
+#[test]
+pub(crate) fn a_const_used_above_its_line_hovers_as_the_const() {
+    let src = "local function show()\n    print(limit)\n end\n\nconst limit = 100\n\nshow()\n";
+    assert_eq!(
+        hover_of(src, 1, 10, "type limit = *error-type*"),
+        "const limit: number"
+    );
+
+    // An annotation names the type outright, and a value no literal
+    // names reads as the line the author wrote.
+    let annotated = "print(scale)\n\nexport const scale: Vector3 = build()\n";
+    assert_eq!(
+        hover_of(annotated, 0, 6, "type scale = *error-type*"),
+        "export const scale: Vector3"
+    );
+
+    let called = "print(seed)\n\nconst seed = os.time()\n";
+    assert_eq!(
+        hover_of(called, 0, 6, "type seed = *error-type*"),
+        "const seed = os.time()"
+    );
+
+    // A plain `local` below its use is a different name: the global.
+    let local = "print(count)\n\nlocal count = 1\n";
+    assert_eq!(
+        hover_of(local, 0, 6, "type count = *error-type*"),
+        "type count = *error-type*"
+    );
+}

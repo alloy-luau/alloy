@@ -1014,7 +1014,11 @@ fn forward_declaration(
         return None;
     }
 
-    let (source, is_async) = declaration_head(doc, word)?;
+    // A `const` declared below its use: no function head names it, and
+    // the line the author wrote says what the name is.
+    let Some((source, is_async)) = declaration_head(doc, word) else {
+        return forward_constant(doc, word).map(|out| format!("{fence}\n{out}\n```{tail}"));
+    };
     let spans = head_spans(source, word.len())?;
     let mut out = format!("function {}", &source[..spans.params.1]);
 
@@ -1030,6 +1034,77 @@ fn forward_declaration(
     }
 
     Some(format!("{fence}\n{out}\n```{tail}"))
+}
+
+/// The `const` a name below its use declares: the keyword with the type
+/// the annotation or the literal names, `const limit: number`. A value no
+/// literal names reads as the line the author wrote.
+///
+/// A plain `local` is left out: a name used above its `local` line is the
+/// global of that name, so the local below says nothing about it.
+fn forward_constant(doc: &Doc, word: &str) -> Option<String> {
+    let mut found: Option<(&str, &str)> = None;
+
+    for line in doc.source.lines() {
+        let text = line.trim();
+        let bare = text.strip_prefix("export ").unwrap_or(text);
+        let bare = bare.strip_prefix("global ").unwrap_or(bare);
+        let Some(after) = bare
+            .strip_prefix("const ")
+            .and_then(|r| r.strip_prefix(word))
+        else {
+            continue;
+        };
+
+        if after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+
+        // One name declared twice says nothing about which one this is.
+        if found.is_some() {
+            return None;
+        }
+
+        found = Some((text, after));
+    }
+
+    let (text, after) = found?;
+    let keyword = text[..text.find(word)?].trim();
+    let after = after.trim_start();
+
+    // `const limit: number = 100` names the type outright.
+    if let Some(annotated) = after.strip_prefix(':') {
+        let ty = annotated.split('=').next().unwrap_or(annotated).trim();
+
+        return Some(format!("{keyword} {word}: {ty}"));
+    }
+
+    match after.strip_prefix('=').and_then(|v| literal_type(v)) {
+        Some(ty) => Some(format!("{keyword} {word}: {ty}")),
+
+        None => Some(text.to_string()),
+    }
+}
+
+/// The type a literal names outright: a string, a boolean, or a number.
+fn literal_type(value: &str) -> Option<&'static str> {
+    let value = value.trim();
+
+    if value.starts_with(['"', '\'']) || value.starts_with("[[") {
+        return Some("string");
+    }
+
+    if matches!(value, "true" | "false") {
+        return Some("boolean");
+    }
+
+    let number = value.strip_prefix('-').unwrap_or(value).trim_start();
+
+    (number.starts_with(|c: char| c.is_ascii_digit())
+        && number
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_'))
+    .then_some("number")
 }
 
 /// The byte past the last occurrence of a function's name in a printed

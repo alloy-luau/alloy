@@ -991,6 +991,10 @@ impl State {
 
         export_span(&text, name)?;
 
+        // A definitions file writes no import: an ambient declaration
+        // stands in scope everywhere, so a type name it spells is this
+        // one. Only a type reaches one, so a value skips those files.
+        let is_type = declares_a_type(&text, name);
         let mut changes: Map<String, Value> = Map::new();
         let mut here: Vec<Value> = name_uses(&text, name)
             .into_iter()
@@ -1019,8 +1023,10 @@ impl State {
             let mut edits: Vec<Value> = Vec::new();
 
             // An entry with no alias binds the name itself, so every
-            // use of it in the file is this name.
-            let plain = mine.iter().any(|it| it.alias_at.is_none());
+            // use of it in the file is this name. An ambient file names
+            // the type with no entry at all.
+            let plain =
+                mine.iter().any(|it| it.alias_at.is_none()) || (is_type && u.ends_with(".d.aly"));
 
             for it in &mine {
                 edits.push(text_edit(&d.source, it.name_at.0, it.name_at.1, new_name));
@@ -1961,6 +1967,24 @@ pub(crate) fn export_span(src: &str, name: &str) -> Option<(usize, usize)> {
 
         (t.text(src) == name && DECLARES.contains(&before))
             .then_some((t.start as usize, t.end as usize))
+    })
+}
+
+/// Whether a module declares a name as a type: a `struct`, an `enum`, a
+/// `trait`, an `interface`, a `class`, or a `type` alias. A definitions
+/// file names one of those and never a value.
+fn declares_a_type(src: &str, name: &str) -> bool {
+    const TYPES: [&str; 6] = ["type", "struct", "enum", "trait", "interface", "class"];
+
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return false;
+    };
+    let toks = &lexed.toks;
+
+    toks.iter().enumerate().any(|(i, t)| {
+        let before = i.checked_sub(1).map(|p| toks[p].text(src));
+
+        t.text(src) == name && before.is_some_and(|w| TYPES.contains(&w))
     })
 }
 

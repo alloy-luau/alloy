@@ -770,3 +770,45 @@ fn a_trait_method_renames_the_trait_every_impl_and_the_calls() {
         "{edit}"
     );
 }
+
+/// A definitions file names a type with no import of it, so the rename
+/// walk, which reads the import lists, left it behind. An ambient
+/// declaration stands in scope everywhere, and only a type reaches one:
+/// a renamed value leaves those files alone.
+#[test]
+fn a_type_rename_reaches_a_definitions_file() {
+    const MODULE: &str = concat!(
+        "export enum Kind as\n",
+        "    Good\n",
+        "end\n",
+        "\n",
+        "export const limit = 3\n",
+    );
+    const AMBIENT: &str = concat!(
+        "declare function useKind(v: Kind): ()\n",
+        "declare limit: number\n",
+    );
+    let st = super::support::files(&[("file:///m.aly", MODULE), ("file:///a.d.aly", AMBIENT)]);
+    let file = PathBuf::from("/m.aly");
+    let edit = st.export_rename(&file, "Kind", "Sort").expect("edit");
+    let at = |edit: &Value, uri: &str| -> Vec<u64> {
+        edit["changes"][uri]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| e["range"]["start"]["character"].as_u64().expect("column"))
+            .collect()
+    };
+
+    assert_eq!(
+        at(&edit, "file:///a.d.aly"),
+        [AMBIENT.rfind("Kind").expect("the use") as u64],
+        "{edit}"
+    );
+
+    // `limit` is a value. An ambient file cannot read one from a
+    // module, so its own `limit` is another name.
+    let edit = st.export_rename(&file, "limit", "cap").expect("edit");
+    assert!(at(&edit, "file:///a.d.aly").is_empty(), "{edit}");
+}

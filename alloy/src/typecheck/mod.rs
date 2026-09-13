@@ -545,6 +545,22 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
             continue;
         };
 
+        // A definitions report carries no position: the checker names
+        // the file alone. The name the message quotes sits in the
+        // artifact, so the report lands on the line that writes it and
+        // the map takes that back to the source.
+        let (line_no, col) = if line_no == 0 {
+            if quoted_after(message, "Unknown type '")
+                .is_some_and(|name| alloy_knows_the_type(name, files))
+            {
+                continue;
+            }
+
+            quoted_place(&f.check, message).unwrap_or((1, 1))
+        } else {
+            (line_no, col)
+        };
+
         let silence = directives
             .entry(f.rel.clone())
             .or_insert_with(|| crate::directives::scan(&f.source));
@@ -935,6 +951,10 @@ struct Line<'a> {
 
 /// `path(line,col): Kind: message`; `None` for any other line.
 fn parse_line(line: &str) -> Option<Line<'_>> {
+    if let Some(d) = definitions_line(line) {
+        return Some(d);
+    }
+
     let open = line.find('(')?;
     let close = line[open..].find(')')? + open;
     let (l, c) = line[open + 1..close].split_once(',')?;
@@ -952,6 +972,53 @@ fn parse_line(line: &str) -> Option<Line<'_>> {
         kind,
         message,
     })
+}
+
+/// A report about a definitions file. The checker names the file and
+/// nothing else, as `<path>: Kind: message`, so the position comes back
+/// zero and the caller finds the place in the artifact.
+fn definitions_line(line: &str) -> Option<Line<'_>> {
+    let (path, rest) = line.split_once(": ")?;
+
+    if !path.ends_with(".d.luau") {
+        return None;
+    }
+
+    let (kind, message) = rest.split_once(": ")?;
+
+    if !kind.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+
+    Some(Line {
+        path,
+        line: 0,
+        col: 0,
+        kind,
+        message,
+    })
+}
+
+/// Whether Alloy knows the name is a type, where the checker cannot. A
+/// definitions file reaches the checker on its own: it requires
+/// nothing, so the Alloy std is out of its reach, and the load order
+/// puts a sibling definitions file's types out of reach too. A report
+/// about one of those names the checker's blind spot.
+fn alloy_knows_the_type(name: &str, files: &[CheckSource]) -> bool {
+    crate::desugar::AMBIENT_TYPES.contains(&name)
+        || files.iter().any(|f| {
+            crate::modules::exported_types(&f.source)
+                .iter()
+                .any(|entry| crate::modules::type_head(entry) == name)
+        })
+}
+
+/// The place a report with no position names: the one-based line of the
+/// artifact that writes the name the message quotes, and its column.
+fn quoted_place(text: &str, message: &str) -> Option<(usize, usize)> {
+    text.lines()
+        .enumerate()
+        .find_map(|(i, text)| named_column(text, message).map(|col| (i + 1, col)))
 }
 
 /// The source position of an output position: the same line, the
@@ -1081,6 +1148,52 @@ mod tests {
         assert_eq!(d.kind, "TypeError");
         assert!(d.message.starts_with("Expected"));
         assert!(parse_line("[INFO] Loading definitions file").is_none());
+
+        // A report about a definitions file carries no position; the
+        // name the message quotes says where it belongs.
+        let d = parse_line("/m/build/junk.d.luau: TypeError: Unknown type 'Nope'").unwrap();
+        assert_eq!(d.path, "/m/build/junk.d.luau");
+        assert_eq!((d.line, d.col), (0, 0));
+        assert_eq!(d.kind, "TypeError");
+        assert!(parse_line("[INFO] Loading definitions file: @roblox - a.d.luau").is_none());
+    }
+
+    /// A `.d.aly` reaches the checker as definitions, and a report on
+    /// one of those carries no position. The name the message quotes
+    /// says where it belongs, and the names Alloy knows are types stay
+    /// out: the checker reads a definitions file on its own.
+    #[test]
+    fn a_definitions_report_lands_on_the_name_it_quotes() {
+        let src = "declare function f(v: Nope): ()\n";
+        let out = crate::compile_with(
+            src,
+            &crate::EmitOptions {
+                check: true,
+                file_name: "junk.d.aly".to_string(),
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            quoted_place(&out.check, "Unknown type 'Nope'"),
+            Some((1, 23))
+        );
+
+        let f = CheckSource {
+            rel: PathBuf::from("k.d.aly"),
+            source: "export type Kind = \"a\" | \"b\"\n".to_string(),
+            check: out.check.clone(),
+            map: out.map,
+            lint_lines: Vec::new(),
+            error_lines: Vec::new(),
+            parsed_clean: true,
+            expected_hits: Vec::new(),
+        };
+        // The Alloy std and a sibling's exported type are types the
+        // checker cannot see from inside a definitions file.
+        assert!(alloy_knows_the_type("Result", &[]));
+        assert!(alloy_knows_the_type("Kind", std::slice::from_ref(&f)));
+        assert!(!alloy_knows_the_type("Nope", std::slice::from_ref(&f)));
     }
 
     #[test]

@@ -211,7 +211,7 @@ pub fn rewrite_emitted_name(
 }
 
 /// The text between `opener` and the next quote.
-fn quoted_after<'a>(message: &'a str, opener: &str) -> Option<&'a str> {
+pub(crate) fn quoted_after<'a>(message: &'a str, opener: &str) -> Option<&'a str> {
     let at = message.find(opener)? + opener.len();
 
     message[at..].find('\'').map(|end| &message[at..at + end])

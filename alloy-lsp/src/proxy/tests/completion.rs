@@ -2183,3 +2183,58 @@ pub(crate) fn an_unresolved_name_offers_the_import_that_binds_it() {
         "a report with no unresolved name"
     );
 }
+
+/// `self.` inside an `impl` of an imported struct listed the fields
+/// alone: the emit writes the methods on the module's table, and the
+/// checker types that table from the module.
+#[test]
+fn an_impl_of_an_imported_struct_lists_its_own_methods() {
+    let point = "export struct Point as\n    x: number\n    y: number\nend\n";
+    let block = concat!(
+        "import { Point } from \"./point\"\n",
+        "\n",
+        "export impl Point as\n",
+        "    function length(self): number\n",
+        "        return self.x\n",
+        "    end\n",
+        "\n",
+        "    private function scaled(self, factor: number): Point\n",
+        "        return self\n",
+        "    end\n",
+        "\n",
+        "    function of(x: number): Point\n",
+        "        return new Point { x = x, y = 0 }\n",
+        "    end\n",
+        "end\n",
+    );
+    let st = files(&[
+        ("file:///point.aly", point),
+        ("file:///point_impl.aly", block),
+    ]);
+    let fields = json!([{ "label": "x" }, { "label": "y" }]);
+    let items = st.impl_self_members("file:///point_impl.aly", 4, 20, &fields);
+    let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+
+    // A private method is the impl's own, and it sits in this file.
+    // `of` takes no receiver, so no `self.` reaches it.
+    assert_eq!(labels, ["length", "scaled"], "{items:?}");
+    assert_eq!(items[0]["detail"], json!("(self) -> number"));
+
+    // A field the child already listed comes once.
+    assert!(
+        st.impl_self_members(
+            "file:///point_impl.aly",
+            4,
+            20,
+            &json!([{ "label": "length" }])
+        )
+        .iter()
+        .all(|i| i["label"] != json!("length"))
+    );
+
+    // Outside an impl nothing is added.
+    assert!(
+        st.impl_self_members("file:///point.aly", 1, 6, &fields)
+            .is_empty()
+    );
+}

@@ -11,19 +11,7 @@ impl State {
         let Some(offset) = offset_of(&doc.source, line, character) else {
             return Vec::new();
         };
-        let head = doc.source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
-
-        if !head.ends_with(['.', ':']) {
-            return Vec::new();
-        }
-
-        let sigil = head.len() - 1;
-        let from = head[..sigil]
-            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map(|i| i + 1)
-            .unwrap_or(0);
-
-        if &head[from..sigil] != "self" {
+        if !takes_a_self_member(&doc.source, offset) {
             return Vec::new();
         }
 
@@ -50,6 +38,81 @@ impl State {
                 item
             })
             .collect()
+    }
+
+    /// The methods of every `impl` of the struct `self` stands for.
+    ///
+    /// `impl Point` in a file that imports `Point` writes the methods on
+    /// the table the module exports, and the checker types that table
+    /// from the module alone: the child then lists the fields and no
+    /// method. The source says which methods the struct has.
+    pub(crate) fn impl_self_members(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &Value,
+    ) -> Vec<Value> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return Vec::new();
+        };
+
+        if !takes_a_self_member(&doc.source, offset) {
+            return Vec::new();
+        }
+
+        let Some(target) = context::impl_target(&doc.source, offset) else {
+            return Vec::new();
+        };
+        // A private method belongs to the impl alone, so it comes from
+        // this file and no other.
+        let mut methods = impl_methods(&doc.source, &target, true);
+
+        // Another file's `impl` of the same struct writes on the same
+        // table, and an exported one reaches every file.
+        for (u, other) in &self.docs {
+            if u != uri {
+                methods.extend(impl_methods(&other.source, &target, false));
+            }
+        }
+
+        let mut taken: Vec<String> = result
+            .get("items")
+            .and_then(Value::as_array)
+            .or_else(|| result.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|i| i["label"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut items = Vec::new();
+
+        for (label, detail) in methods {
+            if taken.contains(&label) {
+                continue;
+            }
+
+            let mut item = json!({
+                "label": label,
+                "kind": 2,
+                "detail": detail,
+                "sortText": format!("0{label}"),
+                "documentation": {
+                    "kind": "markdown",
+                    "value": format!("A method of `impl {target}`."),
+                },
+            });
+            set_call(&mut item, &label, &detail, self.snippets);
+            taken.push(label);
+            items.push(item);
+        }
+
+        items
     }
 
     /// The members a dotted value path reaches, for a path the child
@@ -817,4 +880,113 @@ pub(crate) fn enclosing_trait(source: &str, line: u32) -> Option<(String, Vec<(S
     }
 
     (!methods.is_empty()).then_some((name, methods))
+}
+
+/// Whether the caret takes a member of `self`, after a `.` or a `:`.
+fn takes_a_self_member(source: &str, offset: usize) -> bool {
+    let head = source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+
+    if !head.ends_with(['.', ':']) {
+        return false;
+    }
+
+    let sigil = head.len() - 1;
+    let from = head[..sigil]
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    &head[from..sigil] == "self"
+}
+
+/// The methods every `impl` of a struct writes, each as its label and
+/// the signature the source wrote. A method with no receiver is a
+/// static, which no `self.` reaches.
+fn impl_methods(source: &str, target: &str, private_too: bool) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut inside = false;
+
+    for line in source.lines() {
+        let text = line.trim();
+        let head = text.strip_prefix("export ").unwrap_or(text);
+        let head = head.strip_prefix("global ").unwrap_or(head);
+
+        if let Some(rest) = head.strip_prefix("impl ") {
+            // `impl Shape for Sq` writes on the type after `for`.
+            let named = rest.split(" for ").last().unwrap_or(rest).trim();
+            inside = named
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .eq(target.chars());
+
+            continue;
+        }
+
+        // An impl body is indented; a line at the margin closes it. A
+        // blank line has no margin and closes nothing.
+        if !text.is_empty() && !line.starts_with([' ', '\t']) && text != "end" {
+            inside = false;
+        }
+
+        if !inside {
+            continue;
+        }
+
+        let private = text.starts_with("private ");
+        let body = text.strip_prefix("private ").unwrap_or(text);
+        let body = body.strip_prefix("public ").unwrap_or(body);
+        let Some(rest) = body.strip_prefix("function ") else {
+            continue;
+        };
+        let label: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        if label.is_empty() || !rest[label.len()..].starts_with(['(', '<']) {
+            continue;
+        }
+
+        let signature = &rest[label.len()..];
+
+        if (private && !private_too) || !signature.contains("(self") {
+            continue;
+        }
+
+        out.push((label, as_type(signature)));
+    }
+
+    out
+}
+
+/// A header the source wrote, as the type of the function it declares:
+/// `(self, n: number): T` reads `(self, n: number) -> T`.
+fn as_type(signature: &str) -> String {
+    let mut depth = 0i32;
+
+    for (at, c) in signature.char_indices() {
+        match c {
+            '(' => depth += 1,
+
+            ')' => {
+                depth -= 1;
+
+                if depth > 0 {
+                    continue;
+                }
+
+                let tail = signature[at + 1..].trim_start();
+
+                return match tail.strip_prefix(':') {
+                    Some(ret) => format!("{}) -> {}", &signature[..at], ret.trim()),
+
+                    None => signature[..=at].to_string(),
+                };
+            }
+
+            _ => {}
+        }
+    }
+
+    signature.to_string()
 }

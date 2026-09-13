@@ -1585,6 +1585,11 @@ impl Server {
                             // child answers nothing for `self` inside a
                             // default method.
                             extra.extend(st.trait_self_members(uri, line, character));
+                            // An `impl` of a struct another file declares
+                            // writes its methods on the imported table,
+                            // and the child types that table from the
+                            // module alone.
+                            extra.extend(st.impl_self_members(uri, line, character, result));
                         }
 
                         let (from_ingots, incomplete) =

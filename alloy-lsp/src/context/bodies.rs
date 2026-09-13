@@ -484,7 +484,11 @@ pub fn impl_target(src: &str, offset: usize) -> Option<String> {
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty() && !l.starts_with(char::is_whitespace))?;
-    let rest = line.trim().strip_prefix("impl ")?;
+    // A foreign impl is exported, so it works project wide.
+    let head = line.trim();
+    let head = head.strip_prefix("export ").unwrap_or(head);
+    let head = head.strip_prefix("global ").unwrap_or(head);
+    let rest = head.strip_prefix("impl ")?;
     let target = rest.rsplit(" for ").next().unwrap_or(rest).trim();
     let name: String = target.chars().take_while(|c| is_word(*c)).collect();
 
@@ -502,6 +506,10 @@ mod tests {
 
         let two = "impl Shape for Circle as\n    function area(self)\n";
         assert_eq!(impl_target(two, two.len()), Some("Circle".to_string()));
+
+        // An exported impl names its type the same way.
+        let out = "export impl Point as\n    function length(self)\n        return self.\n";
+        assert_eq!(impl_target(out, out.len()), Some("Point".to_string()));
 
         let none = "local function f()\n    match self with\n";
         assert_eq!(impl_target(none, none.len()), None);

@@ -860,3 +860,52 @@ fn a_declaration_names_a_field_and_a_local_struct() {
         );
     }
 }
+
+/// A rename onto a name the scope already binds is refused. The edit
+/// set would bind one name twice, and the reader would lose what the
+/// lines below it mean.
+#[test]
+fn a_rename_onto_a_bound_name_is_refused() {
+    const SRC: &str = concat!(
+        "local a = 1\n",
+        "local b = 2\n",
+        "local _c = a + b\n",
+        "\n",
+        "export struct Point as\n",
+        "    x: number\n",
+        "    y: number\n",
+        "end\n",
+        "\n",
+        "export function foo(): number\n",
+        "    return 1\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let at = |text: &str| SRC.find(text).expect(text);
+
+    // The child renames a local, and the clash is still the reader's.
+    assert_eq!(
+        st.rename_clash(uri, at("a = 1"), None, "b").as_deref(),
+        Some("`b` is already a local on line 2")
+    );
+    assert_eq!(st.rename_clash(uri, at("a = 1"), None, "z"), None);
+
+    // A field of the same struct.
+    let field = st.name_target(uri, at("x: number"));
+
+    assert_eq!(
+        st.rename_clash(uri, at("x: number"), field.as_ref(), "y")
+            .as_deref(),
+        Some("`y` is already a field on line 7")
+    );
+
+    // An export, against a name its own module declares.
+    let export = st.name_target(uri, at("foo("));
+
+    assert!(matches!(export, Some(Target::Export(..))));
+    assert_eq!(
+        st.rename_clash(uri, at("foo("), export.as_ref(), "Point")
+            .as_deref(),
+        Some("`Point` is already a struct on line 5")
+    );
+}

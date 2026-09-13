@@ -152,7 +152,23 @@ impl Server {
             return false;
         };
 
-        let Some(target) = st.name_target(uri, offset) else {
+        let target = st.name_target(uri, offset);
+
+        // The new name already stands where the rename writes. The edit
+        // set would bind one name twice and change what the file means,
+        // so the request gets the error the child answers with.
+        if let Some(clash) = st.rename_clash(uri, offset, target.as_ref(), &new_name) {
+            drop(st);
+            self.to_client(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32803, "message": clash },
+            }));
+
+            return true;
+        }
+
+        let Some(target) = target else {
             return false;
         };
         let result = match target {
@@ -968,6 +984,121 @@ impl State {
         }
     }
 
+    /*
+    The clash a rename would make, as the message that refuses it.
+
+    The scan reads the places the edit set writes and no more: the file
+    for a name the file binds, the module for an export, the struct for
+    a field, the enum for a variant, and the trait with every impl of it
+    for a method. One file is one scope here, so a name another block
+    binds counts too; the walks the rename reads are file wide as well.
+
+    A name the caret does not point at belongs to the child, which knows
+    its own scopes. A local is the one exception: the child renames it,
+    and the reader still loses the meaning of the line.
+    */
+    pub(crate) fn rename_clash(
+        &self,
+        uri: &str,
+        offset: usize,
+        target: Option<&Target>,
+        new_name: &str,
+    ) -> Option<String> {
+        let doc = self.docs.get(uri)?;
+        let says = |kind: &str, src: &str, at: usize| {
+            let article = match kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                true => "an",
+
+                false => "a",
+            };
+            let line = position_of(src, at).0 + 1;
+
+            Some(format!(
+                "`{new_name}` is already {article} {kind} on line {line}"
+            ))
+        };
+
+        let at_word = keywords::is_word_at(&doc.source, offset)
+            .then(|| keywords::word_range(&doc.source, offset));
+
+        // A rename onto the name the caret already carries writes
+        // nothing, and the site it finds is that name's own.
+        if at_word.is_some_and(|(s, e)| doc.source[s..e] == *new_name) {
+            return None;
+        }
+
+        match target {
+            // A name this file alone binds, and a struct with no
+            // export: the file is the whole scope.
+            Some(Target::Local(_)) => {
+                let (kind, at) = bound_at(&doc.source, new_name)?;
+
+                says(&kind, &doc.source, at)
+            }
+
+            Some(Target::Export(file, _)) => {
+                let text = self.module_text(file)?;
+                let (kind, at) = bound_at(&text, new_name)?;
+
+                says(&kind, &text, at)
+            }
+
+            Some(Target::Field { owner, .. }) => self.docs.values().find_map(|d| {
+                let (at, _) = field_declaration(&d.source, owner, new_name)?;
+
+                says("field", &d.source, at)
+            }),
+
+            Some(Target::Variant { file, owner, .. }) => {
+                let text = self.module_text(file)?;
+                let (at, _) = enum_variants(&text)
+                    .into_iter()
+                    .find(|(o, v, _)| o == owner && v == new_name)
+                    .map(|(_, _, at)| at)?;
+
+                says("variant", &text, at)
+            }
+
+            Some(Target::Method { trait_name, .. }) => self.docs.values().find_map(|d| {
+                let site = trait_method_sites(&d.source)
+                    .into_iter()
+                    .find(|s| s.trait_name.as_deref() == Some(trait_name) && s.name == *new_name)?;
+
+                says("method", &d.source, site.at.0)
+            }),
+
+            Some(Target::Nothing) => None,
+
+            // The child writes this rename. A local of the file is
+            // still the reader's own name, so the clash is one the
+            // proxy has to name; a method lives on its struct instead,
+            // and the file says nothing about it.
+            None => {
+                let (s, e) = at_word?;
+                let word = &doc.source[s..e];
+                let head = doc.source[..s].trim_end();
+                // A word after a dot is a member of another value, and a
+                // method lives on its own struct. Neither reads the
+                // names of the file.
+                let member = (head.ends_with('.') && !head.ends_with(".."))
+                    || trait_method_sites(&doc.source)
+                        .iter()
+                        .any(|site| site.name == word);
+                let mine = bound_at(&doc.source, word).is_some_and(|(kind, _)| {
+                    matches!(kind.as_str(), "local" | "const" | "function")
+                });
+
+                if member || !mine {
+                    return None;
+                }
+
+                let (kind, at) = bound_at(&doc.source, new_name)?;
+
+                says(&kind, &doc.source, at)
+            }
+        }
+    }
+
     /// The whole rename of one struct field, as a workspace edit. The
     /// caret sits where the struct body declares the field, and the
     /// child answers nothing at all there, so this walk writes every
@@ -1432,6 +1563,23 @@ fn field_declaration(src: &str, owner: &str, name: &str) -> Option<(usize, usize
     }
 
     None
+}
+
+/// Where a source already binds a name: the keyword that declares it,
+/// and the byte the name starts at. An import list binds a name too,
+/// and its keyword sits on another line, so the entry answers as one.
+fn bound_at(src: &str, name: &str) -> Option<(String, usize)> {
+    if let Some((at, _)) = export_span(src, name) {
+        let head = src[..at].trim_end();
+        let (ks, ke) = keywords::word_range(src, head.len().checked_sub(1)?);
+
+        return Some((src[ks..ke].to_string(), at));
+    }
+
+    import_entries(src)
+        .into_iter()
+        .find(|it| it.bound == name)
+        .map(|it| ("import".to_string(), it.alias_at.unwrap_or(it.name_at).0))
 }
 
 /// Every place one source writes a field of a struct: the declaration

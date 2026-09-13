@@ -508,11 +508,32 @@ impl<'s> Scan<'s> {
     }
 
     /// Whether the name at `n` appears again after token `from`.
+    ///
+    /// A member after `.` or `:` belongs to the value on its left, so
+    /// `t.origin` is not a read of a local named `origin`.
     fn read_after(&self, n: usize, from: usize) -> bool {
         let name = self.t(n);
 
-        (from..self.toks.len())
-            .any(|j| j != n && self.toks[j].kind == TokKind::Ident && self.t(j) == name)
+        (from..self.toks.len()).any(|j| {
+            j != n && self.toks[j].kind == TokKind::Ident && self.t(j) == name && !self.is_member(j)
+        })
+    }
+
+    /// Whether the name at `j` is a member of the value before it:
+    /// `t.name`, or `t:name(...)`. A name after `:` that no argument
+    /// follows is a type annotation, which does read the name.
+    fn is_member(&self, j: usize) -> bool {
+        match self.prev(j) {
+            "." | "?." => true,
+
+            ":" | "?:" => {
+                let arg = self.t(j + 1);
+
+                arg == "(" || arg == "{" || arg.starts_with(['"', '\'', '`'])
+            }
+
+            _ => false,
+        }
     }
 
     /// A local or a loop variable that nothing reads after it, as

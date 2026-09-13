@@ -1155,6 +1155,22 @@ mod tests {
             unused("local async function f() end\nf()\n"),
             Vec::<&str>::new()
         );
+        // A field of another value spelled the same counted as a read.
+        assert_eq!(
+            unused("local t = { origin = 1 }\nlocal origin = 5\nprint(t.origin)\n"),
+            vec!["unused_variable"]
+        );
+        assert_eq!(
+            unused(
+                "local t = { origin = function() end }\nlocal origin = 5\nt:origin()\nprint(t)\n"
+            ),
+            vec!["unused_variable"]
+        );
+        // A type annotation still reads the name it writes.
+        assert_eq!(
+            unused("local t = { a = 1 }\nlocal x: typeof(t) = t\nprint(x)\n"),
+            Vec::<&str>::new()
+        );
     }
 
     #[test]

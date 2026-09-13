@@ -1934,9 +1934,9 @@ pub fn import_problems(
                 _ => false,
             };
 
-            // `@name` says the export is an attribute. The sigil is
-            // how an attribute reads where it is applied, so the import
-            // list has to agree with the declaration.
+            // An attribute imports by its bare name, or under the `@`
+            // it is applied with. A `@` on a name that is no attribute
+            // is the part that is wrong.
             let in_type_list = type_only || item.is_type;
             let is_attribute = alloy_module && attributes.contains(&name);
             // The `@` belongs to the report when the sigil is the part
@@ -1965,13 +1965,6 @@ pub fn import_problems(
                     message: format!(
                         "`{name}` is an attribute, not a type; import it as `@{name}` in a value list"
                     ),
-                });
-            } else if is_attribute && !item.is_attribute {
-                out.push(ImportProblem {
-                    start: a,
-                    end: b,
-                    kind: "ImportError",
-                    message: format!("`{name}` is an attribute; import it as `@{name}`"),
                 });
             } else if item.is_attribute && alloy_module && !is_attribute {
                 out.push(ImportProblem {

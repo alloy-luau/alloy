@@ -550,9 +550,10 @@ fn an_attribute_is_imported_with_its_sigil() {
         report("import { @tagged as t } from \"./lib\"\n"),
         Vec::<String>::new()
     );
+    // The bare name imports the attribute too.
     assert_eq!(
         report("import { tagged } from \"./lib\"\n"),
-        vec!["`tagged` is an attribute; import it as `@tagged`"]
+        Vec::<String>::new()
     );
     assert_eq!(
         report("import { @version } from \"./lib\"\n"),

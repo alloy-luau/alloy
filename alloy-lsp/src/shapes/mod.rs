@@ -614,8 +614,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     // `Array<number[] | number[]>` is one array once the union folds.
     fold_array_alias(&mut out);
     fold_read_arrays(&mut out);
-    fold_deletable(&mut out);
-    fold_destroyable(&mut out);
+    fold_named_unions(&mut out);
     fold_iter_shapes(&mut out);
     out = fold_call_receivers(&out);
     fold_hidden_fields(&mut out);
@@ -779,24 +778,27 @@ fn fold_quoted_types(text: &mut String, known: &Known) {
     }
 }
 
-/// `delete` takes a value with a `Destroy`, a `Disconnect`, or their
-/// lower-case pair. The union of the four reads as the name the doc
-/// gives it.
-fn fold_deletable(text: &mut String) {
-    const UNION: &str = "{ read Destroy: (any) -> () } | { read Disconnect: (any) -> () } | { read destroy: (any) -> () } | { read disconnect: (any) -> () }";
+/// The unions the doc gives a name. `delete` takes a value with a
+/// `Destroy`, a `Disconnect`, or their lower-case pair; `destroy` takes
+/// an Instance or a value with a destroy method.
+const NAMED_UNIONS: &[(&str, &str)] = &[
+    (
+        "{ read Destroy: (any) -> () } | { read Disconnect: (any) -> () } | { read destroy: (any) -> () } | { read disconnect: (any) -> () }",
+        "Deletable",
+    ),
+    (
+        "Instance | { read Destroy: (any) -> () } | { read destroy: (any) -> () }",
+        "Destroyable",
+    ),
+];
 
-    while let Some(at) = text.find(UNION) {
-        text.replace_range(at..at + UNION.len(), "Deletable");
-    }
-}
-
-/// `destroy` takes an Instance or a value with a destroy method. The
-/// union of the three reads as the name the doc gives it.
-fn fold_destroyable(text: &mut String) {
-    const UNION: &str = "Instance | { read Destroy: (any) -> () } | { read destroy: (any) -> () }";
-
-    while let Some(at) = text.find(UNION) {
-        text.replace_range(at..at + UNION.len(), "Destroyable");
+/// Each named union reads as its name. The `contains` guard keeps a
+/// hover that holds no union from a copy of the text.
+fn fold_named_unions(text: &mut String) {
+    for (union, name) in NAMED_UNIONS {
+        if text.contains(union) {
+            *text = text.replace(union, name);
+        }
     }
 }
 

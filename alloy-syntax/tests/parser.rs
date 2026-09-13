@@ -483,6 +483,32 @@ fn a_match_arm_stops_at_the_next_case() {
 }
 
 #[test]
+fn a_case_arm_after_default_is_an_error() {
+    // The emit reads the arms in order, so an arm after `default` leaks
+    // its source into the output.
+    let stmt = "match n with default a() case 1 then b() end\n";
+    let expr = "local v = match n with default 0 case 1 then 1 end\n";
+    rejects(stmt);
+    rejects(expr);
+
+    // A lenient parse reports it once and still reads the whole file.
+    for src in [stmt, expr] {
+        let lexed = alloy_syntax::lexer::lex(src).unwrap();
+        let (_, diagnostics) = alloy_syntax::parser::parse_lenient(
+            src,
+            &lexed.toks,
+            alloy_syntax::parser::ParseOptions::default(),
+        );
+        assert_eq!(diagnostics.len(), 1, "one report for:\n{src}");
+        assert!(
+            diagnostics[0].message.contains("cannot follow `default`"),
+            "got {}",
+            diagnostics[0].message
+        );
+    }
+}
+
+#[test]
 fn corpus_round_trips() {
     for src in CORPUS {
         round_trip(src);

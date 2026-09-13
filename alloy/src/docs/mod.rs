@@ -72,7 +72,14 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["field", "sealed", "struct"], "StructError"),
         (&["variant", "enum"], "EnumError"),
         (
-            &["expected", "unexpected", "unterminated", "needs a", "found"],
+            &[
+                "expected",
+                "unexpected",
+                "unterminated",
+                "needs a",
+                "found",
+                "cannot follow",
+            ],
             "SyntaxError",
         ),
     ];

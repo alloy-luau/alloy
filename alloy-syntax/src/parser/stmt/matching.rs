@@ -2,6 +2,8 @@
 
 use super::super::*;
 
+const CASE_AFTER_DEFAULT: &str = "a `case` arm cannot follow `default`; move `default` last";
+
 impl<'a> Parser<'a> {
     // --- match -------------------------------------------------------------
 
@@ -31,6 +33,10 @@ impl<'a> Parser<'a> {
             }
 
             if self.at("case") {
+                if default.is_some() {
+                    self.case_after_default()?;
+                }
+
                 let arm_start = self.bump();
                 let (patterns, guard) = self.arm_head()?;
                 self.expect("then")?;
@@ -83,6 +89,19 @@ impl<'a> Parser<'a> {
         Ok((patterns, guard))
     }
 
+    /// `default` ends the arm list. The emit reads the arms in order, so
+    /// an arm after `default` leaks its source into the output. A lenient
+    /// parse reports it and reads the arm, which keeps the rest of the file.
+    fn case_after_default(&mut self) -> Result<(), ParseError> {
+        if self.lenient {
+            self.report(CASE_AFTER_DEFAULT);
+
+            return Ok(());
+        }
+
+        Err(self.err(CASE_AFTER_DEFAULT))
+    }
+
     /// A block that ends at the next `case`, `default`, or `end`.
     fn match_block(&mut self) -> Result<Block, ParseError> {
         self.in_match_arm += 1;
@@ -113,6 +132,10 @@ impl<'a> Parser<'a> {
             }
 
             if self.at("case") {
+                if default.is_some() {
+                    self.case_after_default()?;
+                }
+
                 let arm_start = self.bump();
                 let (patterns, guard) = self.arm_head()?;
                 self.expect("then")?;

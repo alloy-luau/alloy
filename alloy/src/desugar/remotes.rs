@@ -103,9 +103,21 @@ impl Wire {
     }
 }
 
-/// The part of a remote parameter that cannot cross the wire: the field
-/// path that holds it when the type is a record, the type, and why.
-pub(crate) fn wire_offender(ty: &str) -> Option<(Option<String>, String, &'static str)> {
+/// The name and type of one field, as the wire walk reads it.
+type Field = (String, String);
+
+/// What one remote parameter cannot carry: the field path that holds it,
+/// the type, and why.
+type Offender = (Option<String>, String, &'static str);
+
+/// The part of a remote parameter that cannot cross the wire.
+/// `fields_of` gives the fields of a struct the file names, since a
+/// struct packs down to any depth.
+fn offender(
+    ty: &str,
+    fields_of: &dyn Fn(&str) -> Option<Vec<Field>>,
+    depth: usize,
+) -> Option<Offender> {
     let mut trimmed = ty.trim();
 
     while let Some(t) = trimmed
@@ -115,34 +127,51 @@ pub(crate) fn wire_offender(ty: &str) -> Option<(Option<String>, String, &'stati
         trimmed = t.trim();
     }
 
-    if let Some(inner) = trimmed.strip_prefix('{').and_then(|t| t.strip_suffix('}')) {
-        for part in split_top_level(inner, ',') {
-            let part = part.trim();
-            let Some((name, value)) = part.split_once(':') else {
-                continue;
-            };
-            let Some((deeper, bad, why)) = wire_offender(value) else {
-                continue;
-            };
-            let name = name
-                .trim()
-                .strip_prefix("read ")
-                .or_else(|| name.trim().strip_prefix("write "))
-                .unwrap_or(name.trim())
-                .trim();
-            let path = match deeper {
-                Some(d) => format!("{name}.{d}"),
-
-                None => name.to_string(),
-            };
-
-            return Some((Some(path), bad, why));
-        }
-
+    // A struct that holds itself, straight or through another, would
+    // walk forever.
+    if depth > 6 {
         return None;
     }
 
-    not_wire_type(trimmed).map(|why| (None, trimmed.to_string(), why))
+    let named = match trimmed.strip_prefix('{').and_then(|t| t.strip_suffix('}')) {
+        Some(inner) => split_top_level(inner, ',')
+            .iter()
+            .filter_map(|part| {
+                let (name, value) = part.trim().split_once(':')?;
+                let name = name.trim();
+                let name = name
+                    .strip_prefix("read ")
+                    .or_else(|| name.strip_prefix("write "))
+                    .unwrap_or(name)
+                    .trim();
+
+                Some((name.to_string(), value.to_string()))
+            })
+            .collect(),
+
+        None => match fields_of(trimmed) {
+            Some(fields) => fields,
+
+            // Not a record and no struct the file names: the type
+            // itself is the answer.
+            None => return not_wire_type(trimmed).map(|why| (None, trimmed.to_string(), why)),
+        },
+    };
+
+    for (name, value) in named {
+        let Some((deeper, bad, why)) = offender(&value, fields_of, depth + 1) else {
+            continue;
+        };
+        let path = match deeper {
+            Some(d) => format!("{name}.{d}"),
+
+            None => name,
+        };
+
+        return Some((Some(path), bad, why));
+    }
+
+    None
 }
 
 pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
@@ -171,6 +200,31 @@ pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
 }
 
 impl<'s> Desugar<'s> {
+    /// `wire_offender` with the structs of this file, so a parameter
+    /// that names one reports the field that cannot cross the wire.
+    fn offender_of(&self, ty: &str) -> Option<Offender> {
+        offender(
+            ty,
+            &|name| {
+                let declared = self.struct_wire.get(name).cloned().or_else(|| {
+                    self.options
+                        .shapes
+                        .iter()
+                        .find(|sh| sh.name == name)
+                        .map(|sh| sh.fields.clone())
+                })?;
+
+                Some(
+                    declared
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect(),
+                )
+            },
+            0,
+        )
+    }
+
     pub(crate) fn remote_decl(&mut self, r: &RemoteDecl) {
         let name = self.decl_name(r.name);
         let start = self.byte_start(r.span);
@@ -186,7 +240,7 @@ impl<'s> Desugar<'s> {
             let Some(ty) = p.ty else { continue };
             let text = self.text_of(ty).to_string();
 
-            if let Some((field, bad, why)) = wire_offender(&text) {
+            if let Some((field, bad, why)) = self.offender_of(&text) {
                 let pname = self.text_of(p.name).to_string();
                 let what = match field {
                     Some(f) => format!("parameter `{pname}` has field `{f}` of type `{bad}`"),
@@ -204,7 +258,7 @@ impl<'s> Desugar<'s> {
         if let Some(ty) = r.ret_type {
             let text = self.text_of(ty).to_string();
 
-            if let Some((field, bad, why)) = wire_offender(&text) {
+            if let Some((field, bad, why)) = self.offender_of(&text) {
                 let what = match field {
                     Some(f) => format!("returns a value whose field `{f}` is `{bad}`"),
 
@@ -578,7 +632,12 @@ impl<'s> Desugar<'s> {
                     _ => pick(client_call, server_call),
                 };
                 members.push(format!("fire: {ty}"));
-                members.push(format!("call: {call}"));
+
+                // `call` asks and waits for an answer, so only a
+                // `remote function` carries it.
+                if r.is_function {
+                    members.push(format!("call: {call}"));
+                }
             }
         }
 
@@ -681,6 +740,72 @@ remote function Read() -> HashMap<string, number> from client
             )
             .is_empty()
         );
+    }
+
+    /// A struct packs down to any depth, so the wire check reads the
+    /// fields of a struct a parameter names, not the name alone.
+    #[test]
+    fn a_struct_field_that_cannot_cross_a_remote_reports() {
+        let src = "struct HasMethod as
+    go: () -> ()
+end
+
+struct Wrapper as
+    inner: HasMethod
+end
+
+remote TableWithFn(payload: HasMethod) from client
+remote Nested(payload: Wrapper) from client
+";
+        let got = messages(src);
+        assert!(
+            got.iter().any(|m| m
+                == "remote `TableWithFn`: parameter `payload` has field `go` of type `() -> ()`, which is a function type; a remote carries only data"),
+            "{got:?}"
+        );
+        assert!(
+            got.iter().any(|m| m
+                == "remote `Nested`: parameter `payload` has field `inner.go` of type `() -> ()`, which is a function type; a remote carries only data"),
+            "{got:?}"
+        );
+        // A struct of data still crosses, and a struct that holds itself
+        // does not walk forever.
+        assert!(
+            messages(
+                "struct Point as
+    x: number
+end
+
+struct Node as
+    value: number
+    next: Node?
+end
+
+remote Move(p: Point) from client
+remote Chain(n: Node) from client
+"
+            )
+            .is_empty()
+        );
+    }
+
+    /// `call` asks and waits for an answer, so a plain remote does not
+    /// carry it. The surface named it anyway.
+    #[test]
+    fn only_a_remote_function_carries_call() {
+        let plain = crate::compile(
+            "export remote Chat(text: string) from client
+",
+        )
+        .unwrap();
+        assert!(!plain.check.contains("call:"), "{}", plain.check);
+        assert!(plain.check.contains("fire:"), "{}", plain.check);
+        let asked = crate::compile(
+            "export remote function Ask(): number from client
+",
+        )
+        .unwrap();
+        assert!(asked.check.contains("call:"), "{}", asked.check);
     }
 
     /// The surface types what the editor reads: `wait` settles with the

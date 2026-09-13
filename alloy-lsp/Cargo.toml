@@ -16,7 +16,6 @@ path = "src/main.rs"
 [dependencies]
 alloy = { package = "alloy-luau", version = "0.1.0-rc.4", path = "../alloy" }
 alloy-syntax = { version = "0.1.0-rc.4", path = "../alloy-syntax" }
-globset = "0.4"
 serde_json = "1"
 
 [lints]

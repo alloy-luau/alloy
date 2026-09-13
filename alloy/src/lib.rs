@@ -55,6 +55,10 @@ pub use render::SpanMap;
 /// The markup compiler `.alx` files run through first; see crates/luaux.
 pub use luaux;
 
+/// The glob matcher `build::globs` answers with, so a caller holds the
+/// set without the dependency of its own.
+pub use globset;
+
 /// The crate version, as set in `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -197,7 +197,7 @@ const DEFAULT_IGNORE_GLOBS: [&str; 1] = ["**/_Index/**"];
 /// an `_Index` folder is a package's own store, not a module the author
 /// writes, and `luau-lsp.completion.imports.ignoreGlobs` names more.
 pub(crate) struct Ignored {
-    globs: globset::GlobSet,
+    globs: alloy::globset::GlobSet,
 }
 
 impl Ignored {
@@ -247,7 +247,8 @@ impl State {
         };
 
         Ignored {
-            globs: alloy::build::globs(&patterns).unwrap_or_else(|_| globset::GlobSet::empty()),
+            globs: alloy::build::globs(&patterns)
+                .unwrap_or_else(|_| alloy::globset::GlobSet::empty()),
         }
     }
 }

@@ -743,3 +743,38 @@ pub(crate) fn self_inside_a_trait_default_method_names_the_trait() {
         "local self: Circle"
     );
 }
+
+/// `import { Thing as ThingAlias }`: the hover on the alias reads the
+/// struct the module declares, not the constructor table the child
+/// prints under a solver variable.
+#[test]
+fn an_import_alias_reads_the_export_s_declaration() {
+    let st = super::support::files(&[
+        (
+            "file:///defs.aly",
+            "export struct Thing as\n    n: number\nend\n",
+        ),
+        (
+            "file:///use.aly",
+            "import { Thing as ThingAlias } from \"./defs\"\nlocal x: ThingAlias = new ThingAlias { n = 1 }\n",
+        ),
+    ]);
+    let doc = st.docs.get("file:///use.aly").expect("doc");
+    assert_eq!(
+        import_alias_source(&doc.source, "ThingAlias").as_deref(),
+        Some("Thing")
+    );
+
+    // A name imported under its own spelling keeps to the plain lookup.
+    assert_eq!(import_alias_source(&doc.source, "Thing"), None);
+
+    let hover = st
+        .docs
+        .values()
+        .flat_map(|d| d.decls.iter())
+        .find(|d| d.name == "Thing")
+        .map(|d| d.hover.clone())
+        .expect("Thing");
+    assert!(hover.contains("export struct Thing as"), "{hover}");
+    assert!(!hover.contains(" where "), "{hover}");
+}

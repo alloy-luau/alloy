@@ -67,6 +67,11 @@ impl Server {
             })
         };
         let found = lookup(&key).or_else(|| sigils.iter().find_map(|k| lookup(k)));
+        // `import { Thing as ThingAlias }`: the alias is this file's word
+        // for the export, and the declaration sits under the name the
+        // module wrote. Without this the child answers instead, and it
+        // prints the constructor table of a solver variable.
+        let found = found.or_else(|| lookup(&import_alias_source(&doc.source, &key)?));
 
         let Some(decl) = found else {
             return false;
@@ -357,6 +362,17 @@ pub(crate) fn array_element(lines: &[&str], case_line: usize) -> Option<String> 
     }
 
     None
+}
+
+/// The export name a local alias stands for:
+/// `import { Thing as ThingAlias }` answers `Thing` for `ThingAlias`.
+/// A name the file imports under its own spelling answers nothing, so a
+/// caller keeps its own lookup.
+pub(crate) fn import_alias_source(src: &str, bound: &str) -> Option<String> {
+    import_entries(src)
+        .into_iter()
+        .find(|e| e.bound == bound && e.name != bound)
+        .map(|e| e.name)
 }
 
 /// Whether the file binds a name as a value of its own, `local Point`

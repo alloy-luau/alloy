@@ -467,6 +467,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         generic_types: HashSet::new(),
         struct_methods: HashMap::new(),
         impl_generics: HashMap::new(),
+        fn_bounds: HashMap::new(),
+        impl_traits: HashMap::new(),
         trait_impl_targets: HashSet::new(),
         elem_bounds: Vec::new(),
         ext_methods: HashSet::new(),
@@ -542,6 +544,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             d.copy(insert_at, first_start);
             d.top_scope = d.scope_depth();
             d.block(&chunk.block);
+            d.check_bound_calls(&chunk.block);
             let last = toks[toks.len() - 1].end;
             d.return_at = Some(d.r.out_len());
             d.module_return(last, &chunk.block);
@@ -970,6 +973,12 @@ struct Desugar<'s> {
     struct_methods: HashMap<String, Vec<MethodSig>>,
     /// The generic list each `impl` block declares, by target.
     impl_generics: HashMap<String, String>,
+    /// The trait each parameter of a bounded function asks of its
+    /// argument, by the function's name and the parameter's place.
+    /// `largest<T: Ord>(xs: { T })` asks `Ord` of its first argument.
+    fn_bounds: HashMap<String, Vec<Option<String>>>,
+    /// The traits every `impl Trait for X` of this file meets, by target.
+    impl_traits: HashMap<String, Vec<String>>,
     /// Structs a `impl Trait for` block targets. Their methods come from
     /// the trait too, so the alias cannot list them all.
     trait_impl_targets: HashSet<String>,

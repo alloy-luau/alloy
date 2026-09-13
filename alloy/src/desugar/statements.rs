@@ -1,6 +1,6 @@
 //! Statement lowering: blocks, assignment, locals, functions, and loops.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{
     After, Assign, Block, CallArgs, Cond, Destructure, Expr, Function, FunctionBody, GenericFor,
@@ -698,6 +698,162 @@ impl<'s> Desugar<'s> {
                 .values()
                 .flatten()
                 .any(|m| text.contains(m.as_str()))
+    }
+
+    /*
+    Every call of a bounded function in the block, against the type of
+    each argument: `largest<T: Ord>` asks `Ord` of the value it takes,
+    and a struct with no `impl Ord` never has the method.
+
+    The check reads what this file says: a struct it declares, a trait it
+    declares, and an argument that is a `new` or a name with an
+    annotation. A type from another module, or one only the solver knows,
+    is the checker's business.
+    */
+    pub(crate) fn check_bound_calls(&mut self, block: &Block) {
+        if self.fn_bounds.is_empty() {
+            return;
+        }
+
+        // The annotations this block writes, by name. The file's flat map
+        // gives up a name two bindings spell differently, and a parameter
+        // of the bounded function often carries the argument's name.
+        let mut annotated: HashMap<String, String> = HashMap::new();
+
+        for stmt in &block.stmts {
+            if let Stmt::Local(l) = stmt.under_default() {
+                for b in &l.names {
+                    if let Some(ty) = b.ty {
+                        let text = self.text_of(ty).trim().trim_start_matches(':').trim();
+                        annotated.insert(self.text_of(b.name).to_string(), text.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+        self.bound_calls_in_block(block, &annotated, &mut hits);
+
+        for (span, message) in hits {
+            self.diagnose(span, &message);
+        }
+    }
+
+    fn bound_calls_in_block(
+        &self,
+        block: &Block,
+        annotated: &HashMap<String, String>,
+        hits: &mut Vec<(TokSpan, String)>,
+    ) {
+        for stmt in &block.stmts {
+            self.bound_calls_in(stmt_children(stmt), annotated, hits);
+        }
+    }
+
+    fn bound_calls_in(
+        &self,
+        children: Vec<Child<'_>>,
+        annotated: &HashMap<String, String>,
+        hits: &mut Vec<(TokSpan, String)>,
+    ) {
+        for child in children {
+            match child {
+                Child::Block(b) => self.bound_calls_in_block(b, annotated, hits),
+
+                Child::Function(f) => self.bound_calls_in_block(&f.block, annotated, hits),
+
+                Child::Expr(e) => {
+                    self.bound_call(e, annotated, hits);
+                    self.bound_calls_in(super::expr_children(e), annotated, hits);
+                }
+            }
+        }
+    }
+
+    /// One call: an argument whose struct this file declares and whose
+    /// impls miss the trait the parameter asks for.
+    fn bound_call(
+        &self,
+        e: &Expr,
+        annotated: &HashMap<String, String>,
+        hits: &mut Vec<(TokSpan, String)>,
+    ) {
+        let Expr::Call {
+            func,
+            method: None,
+            args: CallArgs::Paren(list),
+            ..
+        } = e
+        else {
+            return;
+        };
+        let Expr::Name(n) = &**func else {
+            return;
+        };
+        let name = self.text_of(*n).to_string();
+        let Some(asks) = self.fn_bounds.get(&name) else {
+            return;
+        };
+
+        for (i, arg) in list.iter().enumerate() {
+            let Some(Some(bound)) = asks.get(i) else {
+                continue;
+            };
+            let Some(target) = self.argument_struct(arg, annotated) else {
+                continue;
+            };
+
+            if !self.structs.contains(&target) {
+                continue;
+            }
+
+            for part in bound.split('&') {
+                let want = part.trim();
+
+                // A std shape resolves to the runtime's type, which a
+                // struct meets by its shape; a trait this file declares
+                // is the one an `impl` has to name.
+                if want.is_empty() || !self.traits.contains_key(want) {
+                    continue;
+                }
+
+                let met = self
+                    .impl_traits
+                    .get(&target)
+                    .is_some_and(|ts| ts.iter().any(|t| t == want));
+
+                if !met {
+                    hits.push((
+                        arg.span(),
+                        format!("`{target}` does not implement `{want}`; `{name}` asks for it"),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// The struct an argument carries: `new S { }` names it, and a name
+    /// takes the annotation its binding wrote, `S`, `{ S }`, or `S[]`.
+    fn argument_struct(&self, arg: &Expr, annotated: &HashMap<String, String>) -> Option<String> {
+        match arg {
+            Expr::Paren { inner, .. } => self.argument_struct(inner, annotated),
+
+            Expr::New { name, .. } => match &**name {
+                Expr::Name(n) => Some(self.text_of(*n).to_string()),
+
+                _ => None,
+            },
+
+            Expr::Name(n) => {
+                let ty = annotated.get(self.text_of(*n))?;
+                let head = array_element(ty).unwrap_or(ty);
+                let head = head.trim().trim_end_matches('?');
+
+                (!head.is_empty()).then(|| head.to_string())
+            }
+
+            _ => None,
+        }
     }
 
     /// A bound `<T: Shape>` names a trait, and the emit erases the
@@ -2534,6 +2690,50 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    /// `{ T }` is Luau's array form, so a bounded `{ T }` parameter
+    /// reads its elements back as `(T & Bound)`. Without that the body
+    /// calls a method the checker cannot find on `T`.
+    #[test]
+    fn a_bounded_brace_array_carries_the_bound_into_the_body() {
+        let src = "trait Ord as\n    function compare(self, other: Ord): number\nend\n\nfunction largest<T: Ord>(xs: { T }): T\n    local best = xs[1]\n    if xs[2]:compare(best) > 0 then\n        best = xs[2]\n    end\n    return best\nend\nprint(largest)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("(xs[2] :: (T & Ord)):compare(best)"),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A bound asks the argument for the trait's methods. A struct this
+    /// file declares with no `impl` of the trait never has them, and the
+    /// erased bound left the call unchecked.
+    #[test]
+    fn a_call_that_breaks_a_bound_names_the_trait() {
+        let head = "trait Ord as\n    function compare(self, other: Ord): number\nend\n\nfunction largest<T: Ord>(xs: { T }): T\n    return xs[1]\nend\n\nstruct NotOrd as\n    v: number\nend\n\n";
+        let src = format!(
+            "{head}local xs: {{ NotOrd }} = {{ new NotOrd {{ v = 1 }} }}\nlocal top = largest(xs)\nprint(top)\n"
+        );
+        assert_eq!(
+            messages(&src),
+            vec!["`NotOrd` does not implement `Ord`; `largest` asks for it"]
+        );
+        assert_eq!(
+            crate::docs::kind_for(&messages(&src)[0]),
+            "BoundError",
+            "{:?}",
+            messages(&src)
+        );
+
+        // The same struct with the impl passes, and so does a bound the
+        // std owns, which a shape meets without an `impl`.
+        let good = format!(
+            "{head}impl Ord for NotOrd as\n    function compare(self, other: Ord): number\n        return 0\n    end\nend\n\nlocal xs: {{ NotOrd }} = {{ new NotOrd {{ v = 1 }} }}\nlocal top = largest(xs)\nprint(top)\n"
+        );
+        assert_eq!(messages(&good), Vec::<String>::new());
     }
 
     /// The four shapes a `destroy` lowers to: the plain call, Debris for

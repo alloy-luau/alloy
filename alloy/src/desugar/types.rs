@@ -179,9 +179,15 @@ pub(crate) fn array_element(ty: &str) -> Option<&str> {
         return Some(inner.trim());
     }
 
-    ty.strip_prefix("Array<")
-        .and_then(|t| t.strip_suffix('>'))
-        .map(str::trim)
+    if let Some(inner) = ty.strip_prefix("Array<").and_then(|t| t.strip_suffix('>')) {
+        return Some(inner.trim());
+    }
+
+    // `{ T }` is Luau's array form. `{ x: number }` and `{ [K]: V }`
+    // are records, and a comma makes a tuple of fields.
+    let inner = ty.strip_prefix('{')?.strip_suffix('}')?.trim();
+
+    (!inner.is_empty() && !inner.contains([':', ',', '['])).then_some(inner)
 }
 
 /// One type with `T[]` written as `Array<T>`, at every depth. The

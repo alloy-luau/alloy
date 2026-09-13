@@ -633,6 +633,36 @@ impl<'s> Desugar<'s> {
                 self.fn_ret_types.insert(key, ty.to_string());
             }
 
+            // `<T: Ord>`: the trait each parameter asks of its argument.
+            // A call reads it back and names an argument that has no
+            // `impl` of that trait.
+            if let Some((name, body)) = signature
+                && body.has_bounds
+                && let Some(g) = body.generics
+            {
+                let bounds = super::types::generic_bounds(self.text_of(g));
+                let asks: Vec<Option<String>> = body
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let ty = p.ty.map(|t| self.text_of(t)).unwrap_or_default();
+                        let ty = ty.trim().trim_start_matches(':').trim();
+                        let head = super::types::array_element(ty).unwrap_or(ty);
+                        let head = head.trim().trim_end_matches('?');
+
+                        bounds
+                            .iter()
+                            .find(|(n, _)| n == head)
+                            .map(|(_, b)| b.clone())
+                    })
+                    .collect();
+
+                if asks.iter().any(Option::is_some) {
+                    let key = self.decl_name(name);
+                    self.fn_bounds.insert(key, asks);
+                }
+            }
+
             if let Stmt::TypeAlias(t) = stmt
                 && let Some((_, value)) = self.text_of(t.span).split_once('=')
                 && value.trim_start().starts_with("Result")
@@ -756,6 +786,14 @@ impl<'s> Desugar<'s> {
                     // A generic struct's alias lists its methods, so the
                     // solver names the type argument. A trait impl adds
                     // methods this scan cannot see, and closes that door.
+                    if let Some(t) = i.trait_name {
+                        let met = self.text_of(t).to_string();
+                        self.impl_traits
+                            .entry(target.clone())
+                            .or_default()
+                            .push(met);
+                    }
+
                     if i.trait_name.is_some() {
                         self.trait_impl_targets.insert(target.clone());
                     } else {

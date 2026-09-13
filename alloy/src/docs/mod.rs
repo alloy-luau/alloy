@@ -71,6 +71,9 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["attribute", "derive"], "AttributeError"),
         (&["data file"], "DataError"),
         (&["import", "export", "require", "module"], "ImportError"),
+        // A bound on a generic. Before the trait rule: the report names
+        // the trait the bound asks for, and it is about the argument.
+        (&["does not implement"], "BoundError"),
         (
             &["does not write", "parameters in", "trait"],
             "TraitContract",

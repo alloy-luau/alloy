@@ -1522,31 +1522,118 @@ pub fn shapes(src: &str) -> Vec<Shape> {
     out
 }
 
+/// One struct under one of its names: the name, then each field with
+/// whether it carries a default and whether it is private.
+type StructFields = (String, Vec<(String, bool, bool)>);
+
+/// Every struct a source declares, under each name a module that
+/// imports it writes, with each field's default and its visibility.
+///
+/// A struct inside a namespace reads under its path, `Zoo.Box`, and
+/// under the name the emit gives it, `Zoo_Box`, the way `declarations`
+/// lists a member under both. Without the path the field checks of an
+/// imported namespace member have no shape to read.
+fn struct_fields_by_name(src: &str) -> Vec<StructFields> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        struct_fields_of(src, toks, stmt, "", &mut out);
+    }
+
+    out
+}
+
+/// One statement's structs, for `struct_fields_by_name`: a `struct`
+/// under `path`, or the members of a `namespace` under the path it
+/// extends.
+fn struct_fields_of(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    stmt: &Stmt,
+    path: &str,
+    out: &mut Vec<StructFields>,
+) {
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
+
+    match stmt.under_default() {
+        Stmt::Struct(s) => {
+            let fields: Vec<(String, bool, bool)> = s
+                .fields
+                .iter()
+                .map(|f| {
+                    (
+                        text(f.name),
+                        f.default.is_some(),
+                        f.visibility.is_some_and(|v| text(v) == "private"),
+                    )
+                })
+                .collect();
+            let name = text(s.name);
+
+            if path.is_empty() {
+                out.push((name, fields));
+
+                return;
+            }
+
+            out.push((format!("{path}.{name}"), fields.clone()));
+            out.push((format!("{}_{name}", path.replace('.', "_")), fields));
+        }
+
+        Stmt::Namespace(ns) => {
+            let inner = match path.is_empty() {
+                true => text(ns.name),
+
+                false => format!("{path}.{}", text(ns.name)),
+            };
+
+            for m in &ns.members {
+                struct_fields_of(src, toks, &m.stmt, &inner, out);
+            }
+        }
+
+        _ => {}
+    }
+}
+
 /// Every struct a source declares, with each field and whether it
 /// carries a default. `new Name { }` needs a value for every field
 /// without one, so the check of a construction of a struct another
 /// module declares reads this.
 pub fn struct_field_defaults(src: &str) -> Vec<(String, Vec<(String, bool)>)> {
-    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
-        return Vec::new();
-    };
-    let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
-    let mut out = Vec::new();
+    struct_fields_by_name(src)
+        .into_iter()
+        .map(|(name, fields)| {
+            let fields = fields
+                .into_iter()
+                .map(|(f, default, _)| (f, default))
+                .collect();
 
-    for stmt in &parsed.chunk.block.stmts {
-        if let Stmt::Struct(s) = stmt {
-            out.push((
-                text(s.name),
-                s.fields
-                    .iter()
-                    .map(|f| (text(f.name), f.default.is_some()))
-                    .collect(),
-            ));
-        }
-    }
+            (name, fields)
+        })
+        .collect()
+}
 
-    out
+/// Every struct a source declares that has a private field, with those
+/// field names. The `private_access` lint reads one of an imported
+/// struct through it.
+pub fn struct_privates(src: &str) -> Vec<(String, Vec<String>)> {
+    struct_fields_by_name(src)
+        .into_iter()
+        .filter_map(|(name, fields)| {
+            let private: Vec<String> = fields
+                .into_iter()
+                .filter(|(_, _, p)| *p)
+                .map(|(f, _, _)| f)
+                .collect();
+
+            (!private.is_empty()).then_some((name, private))
+        })
+        .collect()
 }
 
 /// `Readonly<Profile>`, `Partial<Profile>`, or `Sink<Profile>`.

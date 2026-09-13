@@ -839,3 +839,58 @@ fn an_impl_two_namespaces_deep_reads_one_name() {
         alloy::extensions::private_views(src)
     );
 }
+
+/// A struct inside a namespace is checked through every path that
+/// names it. The unknown-field report and the `private_access` lint
+/// read one shape, and an importing module writes `Zoo.Box`, so the
+/// shape has to carry that name beside the emitted `Zoo_Box`.
+#[test]
+fn the_field_checks_reach_a_namespace_struct_by_its_path() {
+    let dir = temp_project("ns-fields");
+    fs::write(
+        dir.join("src/zoo.aly"),
+        "export namespace Zoo as\n    struct Box as\n        x: number\n        private secret: number = 0\n    end\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/imported.aly"),
+        "import { Zoo } from \"./zoo\"\n\nlocal _b = new Zoo.Box { x = 1, bad = 2, secret = 5 }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/samefile.aly"),
+        "namespace Zoo as\n    struct Box as\n        x: number\n        private secret: number = 0\n    end\nend\n\nlocal _b = new Zoo.Box { x = 1, secret = 5 }\n",
+    )
+    .unwrap();
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::check_project(&dir, &config).unwrap();
+    let errors: Vec<String> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| d.message.clone())
+        .collect();
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|m| m.contains("no field `bad`"))
+            .count(),
+        1,
+        "{errors:?}"
+    );
+
+    let private: Vec<(String, String)> = report
+        .lints
+        .iter()
+        .filter(|(_, l)| l.name == "private_access")
+        .map(|(p, l)| (p.display().to_string(), l.message.clone()))
+        .collect();
+    assert_eq!(private.len(), 2, "{private:?}");
+    assert!(
+        private.iter().any(|(p, _)| p.contains("imported")),
+        "{private:?}"
+    );
+    assert!(
+        private.iter().any(|(p, _)| p.contains("samefile")),
+        "{private:?}"
+    );
+}

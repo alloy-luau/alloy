@@ -1735,10 +1735,20 @@ impl<'s> Desugar<'s> {
         // `Box`. `new Zoo.Lion` on a namespace member: the emit renders
         // it as `Zoo_Lion`, nesting and all.
         if let Some((head, rest)) = text.split_once('.') {
-            let resolved = match self.star_modules.contains(head.trim()) {
+            let path = match self.star_modules.contains(head.trim()) {
                 true => rest.trim().to_string(),
 
-                false => self.ns_path_name(&text)?,
+                false => text.clone(),
+            };
+
+            // A namespace this file declares renders under one name.
+            // An imported one has no declaration here, so the path is
+            // the name its shape carries; `struct_privates` and
+            // `struct_field_defaults` list a member under both.
+            let resolved = match self.ns_path_name(&path) {
+                Some(r) => r,
+
+                None => self.imported_shape_name(&path)?,
             };
 
             return Some((*n, resolved));
@@ -1829,6 +1839,20 @@ impl<'s> Desugar<'s> {
             && self
                 .declared_fields(sname)
                 .is_some_and(|fields| fields.iter().any(|(d, default)| d == fname && *default))
+    }
+
+    /// A dotted path a module this file imports declares a struct for,
+    /// `Zoo.Box` through `import { Zoo }`. The shape lists a namespace
+    /// member under its path, so the name the source writes answers.
+    fn imported_shape_name(&self, path: &str) -> Option<String> {
+        let known = self
+            .options
+            .import_struct_fields
+            .iter()
+            .any(|(s, _)| s == path)
+            || self.options.import_privates.iter().any(|(s, _)| s == path);
+
+        known.then(|| path.to_string())
     }
 
     /// The fields of a struct with whether each carries a default: this

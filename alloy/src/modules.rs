@@ -782,18 +782,29 @@ pub fn import_privates(
 ) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
 
-    for shape in import_shapes(source, from, aliases) {
-        let crate::declarations::Shape::Struct { name, fields, .. } = shape else {
+    let mut seen: Vec<PathBuf> = Vec::new();
+
+    for spec in import_specs(source) {
+        let Some(path) = resolve(&spec, from, aliases) else {
             continue;
         };
-        let private: Vec<String> = fields
-            .into_iter()
-            .filter(|(_, p)| *p)
-            .map(|(n, _)| n)
-            .collect();
 
-        if !private.is_empty() && !out.iter().any(|(n, _)| *n == name) {
-            out.push((name, private));
+        if seen.contains(&path) {
+            continue;
+        }
+
+        seen.push(path.clone());
+
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+
+        // `struct_privates` names a namespace member under its path as
+        // well, so `new Zoo.Box { secret = 1 }` finds the shape.
+        for (name, private) in crate::declarations::struct_privates(&text) {
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((name, private));
+            }
         }
     }
 

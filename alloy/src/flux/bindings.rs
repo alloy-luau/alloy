@@ -104,13 +104,11 @@ impl<'s> Scan<'s> {
     /// `Lion`. An `impl` may target a namespace member, and the struct
     /// that declares a private member is the member itself.
     fn last_segment(&self, i: usize) -> &'s str {
-        let mut at = i;
+        match self.path_end(i) {
+            Some(end) => self.t(end - 1),
 
-        while self.at(at + 1, ".") && self.is_name(at + 2) {
-            at += 2;
+            None => self.t(i),
         }
-
-        self.t(at)
     }
 
     /// The type a name carries in this file: a parameter or a local
@@ -237,7 +235,10 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            let owner = self.t(i + 1);
+            // `new Zoo.Box { }`: the struct is the member the path
+            // names, which is how `private_members` keys it.
+            let after = self.path_end(i + 1).unwrap_or(i + 2);
+            let owner = self.t(after - 1);
 
             if self.enclosing_owner(i) == Some(owner) {
                 continue;
@@ -245,7 +246,7 @@ impl<'s> Scan<'s> {
 
             // `new Name<<T>> { }` and `new Name(args) { }`: the table
             // comes after the group the head carries.
-            let mut j = i + 2;
+            let mut j = after;
 
             while matches!(self.t(j), "(" | "<") {
                 match self.matching(j) {

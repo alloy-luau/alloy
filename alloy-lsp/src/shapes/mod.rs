@@ -409,6 +409,7 @@ pub fn fold_value(value: &mut Value, known: &Known) {
                 || s.contains("ResultOk")
                 || s.contains("ResultErr")
                 || s.contains("Result2<")
+                || s.contains("Result3<")
             {
                 *s = fold(s, known);
             }
@@ -790,11 +791,24 @@ const NAMED_UNIONS: &[(&str, &str)] = &[
         "Instance | { read Destroy: (any) -> () } | { read destroy: (any) -> () }",
         "Destroyable",
     ),
+    // The operand of `in`, which the std spells `Container`. The
+    // typecheck reads that name and writes the sentence the terminal
+    // prints; a report the sentence does not cover names the type. The
+    // child prints an open table as `{  }`, and a later pass closes the
+    // gap, so both spellings are here.
+    ("string | {}", "Container"),
 ];
 
 /// Each named union reads as its name. The `contains` guard keeps a
 /// hover that holds no union from a copy of the text.
 fn fold_named_unions(text: &mut String) {
+    // The child prints an open table as `{ }` or `{  }`, and a pass
+    // below closes the gap. The keys hold the closed spelling, so the
+    // gap closes here first.
+    if text.contains("{ ") {
+        *text = text.replace("{  }", "{}").replace("{ }", "{}");
+    }
+
     for (union, name) in NAMED_UNIONS {
         if text.contains(union) {
             *text = text.replace(union, name);
@@ -1282,8 +1296,16 @@ fn fold_name_parens(text: &mut String) {
         // A `?` or a `[]` after the group is what the parentheses were
         // for; anywhere else they may be a parameter list.
         let suffix = matches!(text[open + len..].chars().next(), Some('?') | Some('['));
+        // A group right after a `: ` that holds one name and stands in
+        // front of no arrow is a type and nothing else. The Result
+        // folds leave `local r: (Result<number, any>)`, where the
+        // parentheses held the two arms the pair folded. A parameter
+        // list, `(n: number) -> ()`, keeps both of its marks.
+        let annotated = text[..open].ends_with(": ")
+            && !outside_angles(&inner, ':')
+            && !text[open + len..].trim_start().starts_with("->");
 
-        if plain && suffix {
+        if plain && (suffix || annotated) {
             text.replace_range(open..open + len, &inner);
             from = open + inner.len();
 
@@ -2238,6 +2260,24 @@ mod tests {
     fn an_unknown_shape_keeps_its_clause() {
         let text = "local q: t1 where t1 = { weird: (self: t1) -> number }";
         assert_eq!(fold(text, &known()), text);
+    }
+
+    /// The operand of `in` is `string | {}`, which the std names
+    /// `Container`. The typecheck reads that name and writes the
+    /// sentence the terminal prints, so the editor's report agrees with
+    /// the terminal's; a report the sentence does not cover names the
+    /// type instead of the union.
+    #[test]
+    fn the_container_union_reads_by_name() {
+        for printed in ["string | {}", "string | { }", "string | {  }"] {
+            assert_eq!(
+                fold(
+                    &format!("Expected this to be '{printed}', but got 'number'"),
+                    &Known::default()
+                ),
+                "Expected this to be 'Container', but got 'number'"
+            );
+        }
     }
 }
 

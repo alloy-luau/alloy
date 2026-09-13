@@ -281,7 +281,9 @@ pub(crate) fn fold_result_aliases(text: &mut String) {
         "ResultOk<",
         "ResultErr<",
         "Result2<",
+        "Result3<",
         "ResultMethods2<",
+        "ResultMethods3<",
         "ResultMethods<",
     ] {
         let mut from = 0;
@@ -640,6 +642,22 @@ mod tests {
 
         for emit in ["_1", "__err", "__ok", "tag:", "trace"] {
             assert!(!out.contains(emit), "{emit} reached the hover: {out}");
+        }
+    }
+
+    // The std splits a Result into three rungs so `r:map(f):map(g)`
+    // keeps its value type. `Result3` and `ResultMethods3` are names no
+    // source writes, and neither may reach a reader.
+    #[test]
+    fn the_third_result_rung_reads_by_name() {
+        for text in [
+            "local r: Result3<number, any>",
+            "local r: (Result3<number, any>)",
+            "local r: ResultMethods3<number, any>",
+        ] {
+            let out = fold(text, &Known::default());
+
+            assert_eq!(out, "local r: Result<number, any>", "{text}");
         }
     }
 }

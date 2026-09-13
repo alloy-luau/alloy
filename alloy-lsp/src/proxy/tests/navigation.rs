@@ -812,3 +812,51 @@ fn a_type_rename_reaches_a_definitions_file() {
     let edit = st.export_rename(&file, "limit", "cap").expect("edit");
     assert!(at(&edit, "file:///a.d.aly").is_empty(), "{edit}");
 }
+
+/// A caret in a struct body names the field, and a caret on a struct
+/// the file keeps to itself names the struct. The emit rewrites the
+/// field list and a declaration with no export, so the child finds no
+/// symbol at either place.
+#[test]
+fn a_declaration_names_a_field_and_a_local_struct() {
+    const SRC: &str = concat!(
+        "struct Widget as\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "local w = new Widget { x = 1 }\n",
+        "local function read(v: Widget): number\n",
+        "    return v.x\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let at = SRC.find("x: number").expect("the field");
+    let Some(Target::Field { owner, name }) = st.name_target(uri, at) else {
+        panic!("the field names no target");
+    };
+
+    assert_eq!((owner.as_str(), name.as_str()), ("Widget", "x"));
+
+    // The declaration, the constructor key, and the read.
+    assert_eq!(
+        rows(
+            &st.field_edits("Widget", "x", "zz")
+                .expect("the field edits")
+        ),
+        [
+            "t.aly 1:4-5 -> zz",
+            "t.aly 4:23-24 -> zz",
+            "t.aly 6:13-14 -> zz"
+        ]
+    );
+
+    // The struct: its own line, the constructor, and the annotation.
+    for text in ["Widget as", "Widget {", "Widget)"] {
+        let at = SRC.find(text).expect(text);
+
+        assert!(
+            matches!(st.name_target(uri, at), Some(Target::Local(ref n)) if n == "Widget"),
+            "{text}"
+        );
+    }
+}

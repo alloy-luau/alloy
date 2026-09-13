@@ -188,6 +188,12 @@ impl Server {
                 }
             }
 
+            Target::Field { owner, name } => match st.field_edits(&owner, &name, &new_name) {
+                Some(edit) => edit,
+
+                None => return false,
+            },
+
             Target::Nothing => json!({ "changes": {} }),
         };
         drop(st);
@@ -256,6 +262,12 @@ impl Server {
                     None => return false,
                 }
             }
+
+            Target::Field { owner, name } => match st.field_edits(&owner, &name, &name) {
+                Some(edit) => locations_of(&edit),
+
+                None => return false,
+            },
 
             Target::Nothing => Vec::new(),
         };
@@ -696,6 +708,24 @@ impl State {
                 }
             }
 
+            // A field, where the struct body declares it. The emit
+            // rewrites the field list, so the child finds no name to
+            // rename there. A constructor key is text the child reads,
+            // and the mend pass finishes that one.
+            if declared_field_hover(doc, s, e).is_some()
+                && let Some(owner) = self.field_owner(doc, s, e)
+            {
+                return Some(Target::Field { owner, name: word });
+            }
+
+            // A struct this file keeps to itself. The emit writes the
+            // declaration as generated text, so the child points at a
+            // byte the reader never wrote. No other file reaches the
+            // name, so every use of it here is this struct.
+            if !exported && declares_a_local_struct(source, &word) {
+                return Some(Target::Local(word));
+            }
+
             // `import M from "./m"` and `import * as M`: the name is
             // this file's own, so the answer stops at its edges.
             if module_bindings(source)
@@ -913,14 +943,10 @@ impl State {
         };
 
         for (u, d) in &self.docs {
-            let mut mine: Vec<Value> = constructor_keys(&d.source, &owner, &name)
+            let mut mine: Vec<Value> = field_sites(d, &owner, &name)
                 .into_iter()
                 .map(|(s, e)| text_edit(&d.source, s, e, &new_name))
                 .collect();
-
-            if let Some((s, e)) = field_declaration(&d.source, &owner, &name) {
-                mine.push(text_edit(&d.source, s, e, &new_name));
-            }
 
             let Some(list) = changes.get_mut(u).and_then(Value::as_array_mut) else {
                 if !mine.is_empty() {
@@ -940,6 +966,27 @@ impl State {
 
             list.sort_by_key(sort_key);
         }
+    }
+
+    /// The whole rename of one struct field, as a workspace edit. The
+    /// caret sits where the struct body declares the field, and the
+    /// child answers nothing at all there, so this walk writes every
+    /// place by itself.
+    pub(crate) fn field_edits(&self, owner: &str, name: &str, new_name: &str) -> Option<Value> {
+        let mut changes: Map<String, Value> = Map::new();
+
+        for (u, d) in &self.docs {
+            let edits: Vec<Value> = field_sites(d, owner, name)
+                .into_iter()
+                .map(|(s, e)| text_edit(&d.source, s, e, new_name))
+                .collect();
+
+            if !edits.is_empty() {
+                changes.insert(u.clone(), json!(edits));
+            }
+        }
+
+        (!changes.is_empty()).then(|| json!({ "changes": changes }))
     }
 
     /// Where the project declares an `impl` method of that name, with
@@ -1387,6 +1434,46 @@ fn field_declaration(src: &str, owner: &str, name: &str) -> Option<(usize, usize
     None
 }
 
+/// Every place one source writes a field of a struct: the declaration
+/// in the struct body, each key of a constructor, and each read off a
+/// receiver of that type. A receiver whose type the source does not
+/// say names no struct, so it stays as it is.
+fn field_sites(doc: &Doc, owner: &str, name: &str) -> Vec<(usize, usize)> {
+    let mut out = constructor_keys(&doc.source, owner, name);
+    out.extend(field_declaration(&doc.source, owner, name));
+
+    if let Ok(lexed) = alloy_syntax::lexer::lex(&doc.source) {
+        out.extend(
+            lexed
+                .toks
+                .iter()
+                .filter(|t| t.text(&doc.source) == name)
+                .filter(|t| used_field_owner(doc, t.start as usize).as_deref() == Some(owner))
+                .map(|t| (t.start as usize, t.end as usize)),
+        );
+    }
+
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Whether a source declares a struct of that name. Such a struct is
+/// this file's own unless the line exports it, which the caller reads
+/// for itself.
+fn declares_a_local_struct(src: &str, name: &str) -> bool {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return false;
+    };
+    let toks = &lexed.toks;
+
+    toks.iter().enumerate().any(|(i, t)| {
+        let before = i.checked_sub(1).map(|p| toks[p].text(src));
+
+        t.text(src) == name && before == Some("struct")
+    })
+}
+
 /// Whether one edit of the child's stands where the source spells the
 /// name it renames. An edit that maps onto generated text lands on the
 /// byte the construct came from, which says something else.
@@ -1769,6 +1856,10 @@ pub(crate) enum Target {
         owner: String,
         name: String,
     },
+    /// A field of a struct, with the struct's own name. The emit
+    /// rewrites the field list and hands a constructor a plain record,
+    /// so the child ties neither place to a field.
+    Field { owner: String, name: String },
     /// A method a trait declares. The trait writes it once, every
     /// `impl Trait for S` writes it again, and a call reads it off a
     /// value; the emit types the receiver as `any`, so the child ties

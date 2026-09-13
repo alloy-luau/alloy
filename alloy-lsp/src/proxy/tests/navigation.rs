@@ -861,6 +861,38 @@ fn a_declaration_names_a_field_and_a_local_struct() {
     }
 }
 
+/// The caret on an alias reads the entry the alias belongs to, wherever
+/// that entry sits in the list. A later entry is another name and
+/// another export, and the alias is this file's own word.
+#[test]
+fn an_alias_beside_another_entry_reads_its_own_entry() {
+    for src in [
+        "import { version as ver, make } from \"./m\"\nprint(ver, make)\n",
+        "import { make, version as ver } from \"./m\"\nprint(ver, make)\n",
+    ] {
+        let (st, uri) = super::support::one_file(src);
+        let entry = import_entries(src)
+            .into_iter()
+            .find(|e| e.bound == "ver")
+            .expect("the alias entry");
+        let (start, end) = entry.alias_at.expect("the alias range");
+
+        assert_eq!(&src[start..end], "ver");
+        assert_eq!(entry.name, "version");
+
+        // The caret on the alias, and the caret right behind it.
+        for offset in [start, end] {
+            let found = st.import_entry_at(src, offset).expect("an entry");
+
+            assert_eq!(found.name, "version", "{src} at {offset}");
+            assert!(
+                matches!(st.name_target(uri, offset), Some(Target::Local(ref n)) if n == "ver"),
+                "{src} at {offset}"
+            );
+        }
+    }
+}
+
 /// Every declaration kind the emit rewrites answers from the source.
 /// The child maps its edits for one back onto the byte the header came
 /// from: the `e` of `enum`, the `t` of `trait`, a letter of a variant.

@@ -1,34 +1,48 @@
 //! Low-level group and member scanning shared by more than one fold in
 //! `shapes`: balanced brackets, a type's length, and a table's members.
 
-/// The members of a union at depth zero of `text`; one member when the
-/// text holds no such union. An arrow's `>` closes no bracket.
-pub(crate) fn split_union(text: &str) -> Vec<&str> {
+/// The parts of `text` at each `sep` of depth zero; one part when the
+/// text holds no such separator. The parts keep their own spacing, so a
+/// caller that wants them bare trims them itself.
+///
+/// `angles` counts `<` and `>` as a bracket pair, where an arrow's `>`
+/// closes nothing. An intersection of types inside a generic reads as
+/// one list, so its splitter leaves the angles alone.
+pub(crate) fn split_at_depth<'t>(text: &'t str, sep: &str, angles: bool) -> Vec<&'t str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut from = 0;
     let bytes = text.as_bytes();
+    let mut i = 0;
 
-    for i in 0..bytes.len() {
+    while i < bytes.len() {
         match bytes[i] {
-            b'<' | b'(' | b'{' | b'[' => depth += 1,
-            b'>' if i > 0 && bytes[i - 1] == b'-' => {}
-            b'>' | b')' | b'}' | b']' => depth -= 1,
-            b'|' if depth == 0
-                && i > 0
-                && bytes[i - 1] == b' '
-                && bytes.get(i + 1) == Some(&b' ') =>
-            {
-                out.push(&text[from..i - 1]);
-                from = i + 2;
+            b'<' if angles => depth += 1,
+            b'>' if angles && (i == 0 || bytes[i - 1] != b'-') => depth -= 1,
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' => depth -= 1,
+            _ if depth == 0 && text[i..].starts_with(sep) => {
+                out.push(&text[from..i]);
+                i += sep.len();
+                from = i;
+
+                continue;
             }
             _ => {}
         }
+
+        i += 1;
     }
 
     out.push(&text[from..]);
 
     out
+}
+
+/// The members of a union at depth zero of `text`; one member when the
+/// text holds no such union.
+pub(crate) fn split_union(text: &str) -> Vec<&str> {
+    split_at_depth(text, " | ", true)
 }
 
 /// The length of the group `open ... close` that starts the text.

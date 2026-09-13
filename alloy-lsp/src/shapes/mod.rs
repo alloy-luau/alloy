@@ -30,7 +30,7 @@ use results::{
 };
 use strings::{
     balanced_len, group_len, head_of, match_loose, member_len, member_parts, members,
-    outside_angles, split_union,
+    outside_angles, split_at_depth, split_union,
 };
 
 // `alloy-web`'s wasm build `#[path]`-includes this file too, and it
@@ -383,25 +383,10 @@ mod intersection_tests {
 
 /// The members of an intersection at depth zero.
 fn split_intersection(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut start = 0;
-
-    for (k, c) in text.char_indices() {
-        match c {
-            '{' | '(' | '[' => depth += 1,
-            '}' | ')' | ']' => depth -= 1,
-            '&' if depth == 0 && text[..k].ends_with(' ') && text[k + 1..].starts_with(' ') => {
-                out.push(text[start..k].trim());
-                start = k + 1;
-            }
-            _ => {}
-        }
-    }
-
-    out.push(text[start..].trim());
-
-    out
+    split_at_depth(text, " & ", false)
+        .into_iter()
+        .map(str::trim)
+        .collect()
 }
 
 /// Folds every string of a JSON value, in place.
@@ -897,26 +882,7 @@ fn dedupe_type(text: &str) -> String {
 /// The inside of a group: parts at the commas of depth zero, each a
 /// type or a `name: type`, with its own spacing kept.
 fn dedupe_list(text: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    let mut depth = 0i32;
-    let mut from = 0;
-    let bytes = text.as_bytes();
-
-    for i in 0..bytes.len() {
-        match bytes[i] {
-            b'<' | b'(' | b'{' | b'[' => depth += 1,
-            b'>' if i > 0 && bytes[i - 1] == b'-' => {}
-            b'>' | b')' | b'}' | b']' => depth -= 1,
-            b',' if depth == 0 => {
-                parts.push(&text[from..i]);
-                from = i + 1;
-            }
-            _ => {}
-        }
-    }
-
-    parts.push(&text[from..]);
-
+    let parts = split_at_depth(text, ",", true);
     let mut out = Vec::with_capacity(parts.len());
 
     for part in parts {
@@ -1048,25 +1014,10 @@ fn fold_negated_members(text: &mut String) {
 
 /// The parts of a comma separated list at depth zero.
 fn split_list(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut start = 0;
-
-    for (k, c) in text.char_indices() {
-        match c {
-            '(' | '{' | '[' | '<' => depth += 1,
-            ')' | '}' | ']' | '>' => depth -= 1,
-            ',' if depth == 0 => {
-                out.push(text[start..k].trim());
-                start = k + 1;
-            }
-            _ => {}
-        }
-    }
-
-    out.push(text[start..].trim());
-
-    out
+    split_at_depth(text, ",", true)
+        .into_iter()
+        .map(str::trim)
+        .collect()
 }
 
 fn parse_bindings(text: &str) -> (Vec<Binding>, usize) {

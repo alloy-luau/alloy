@@ -699,7 +699,7 @@ impl State {
     }
 
     /// A module's text: the open document first, then the disk.
-    fn module_text(&self, file: &Path) -> Option<String> {
+    pub(crate) fn module_text(&self, file: &Path) -> Option<String> {
         let uri = path_to_uri(file);
 
         match self.docs.get(&uri) {

@@ -79,6 +79,27 @@ pub(crate) fn enum_of_variant(table: &str, known: &Known) -> Option<String> {
     })
 }
 
+/// The enum a printed table declares: `{ Up: Direction, Down: Direction,
+/// is: (v: unknown) -> boolean }`. The keys, less the `is` guard the
+/// emit adds, are the enum's variants.
+fn enum_table_name(m: &[(String, String)], known: &Known) -> Option<String> {
+    let keys: Vec<&String> = m.iter().map(|(k, _)| k).filter(|k| *k != "is").collect();
+
+    if keys.is_empty() {
+        return None;
+    }
+
+    known.shapes.iter().find_map(|s| match s {
+        Shape::Enum { name, variants } => {
+            let names: Vec<String> = variants.iter().map(|(v, _)| v.clone()).collect();
+
+            same_set(&names, &keys).then(|| name.clone())
+        }
+
+        _ => None,
+    })
+}
+
 /// The enum a unit variant belongs to, by the name it prints as.
 fn enum_of_unit(unit: &str, known: &Known) -> Option<String> {
     known.shapes.iter().find_map(|s| match s {
@@ -262,6 +283,12 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
     let m = members(trimmed);
     let has = |key: &str| m.iter().any(|(k, _)| k == key);
     let get = |key: &str| m.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+
+    // An enum's own table, reached through a module's export table: one
+    // member per variant and the `is` guard the emit adds.
+    if let Some(name) = enum_table_name(&m, known) {
+        return Some(name);
+    }
 
     // The object a `remote` declaration binds.
     // The surface a side sees is a subset, so no one member is always

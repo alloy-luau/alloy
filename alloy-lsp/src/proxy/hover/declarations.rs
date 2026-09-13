@@ -80,6 +80,25 @@ impl Server {
         // module wrote. Without this the child answers instead, and it
         // prints the constructor table of a solver variable.
         let found = found.or_else(|| lookup(&import_alias_source(&doc.source, &key)?));
+        // `import * as Dir from "./m"`: `Dir.Name` names the module's
+        // own export, so the declaration sits under the bare name. A
+        // value reads better through its module, `function Dir.make(...)`,
+        // so only a type declaration takes this path.
+        let module_decls = found.is_none().then(|| {
+            let (file, name) = st.module_member_at(uri, &doc.source, start)?;
+
+            Some((
+                alloy::declarations::summaries(&st.module_text(&file)?, false),
+                name,
+            ))
+        });
+        let found = found.or_else(|| {
+            let (decls, name) = module_decls.as_ref()?.as_ref()?;
+
+            decls
+                .iter()
+                .find(|d| d.name == *name && declares_a_type(&d.hover))
+        });
 
         let Some(decl) = found else {
             return false;
@@ -393,6 +412,19 @@ impl State {
 
         Some(alloy::declarations::summaries(&text, false))
     }
+}
+
+/// Whether a declaration's hover writes a type block. A value keeps its
+/// own hover, which names the module it came through.
+fn declares_a_type(hover: &str) -> bool {
+    let Some(line) = hover.lines().nth(1) else {
+        return false;
+    };
+    let line = line.trim_start().trim_start_matches("export ");
+
+    ["struct ", "enum ", "trait ", "interface ", "type "]
+        .iter()
+        .any(|k| line.starts_with(k))
 }
 
 /// The export name a local alias stands for:

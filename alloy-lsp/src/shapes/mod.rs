@@ -532,6 +532,21 @@ pub fn fold(text: &str, known: &Known) -> String {
             }
         }
 
+        // A binding no fold could name still must not reach the reader:
+        // `tN` is the checker's own spelling and no source can write
+        // it. The body prints in place of the variable and the clause
+        // goes. A body that names its own variable is the one print the
+        // clause exists for, so that one keeps it.
+        if !all && let Some(inlined) = inline_bindings(&new_head, &bindings, &resolved) {
+            let parsed_end = tail_start + tail_end;
+            let clause_end = out[tail_start..]
+                .find("\n```")
+                .map_or(parsed_end, |k| (tail_start + k).max(parsed_end));
+            out.replace_range(head_start..clause_end, &inlined);
+
+            continue;
+        }
+
         if !all {
             // The head keeps the clause; the bindings it needs still
             // read by name where they can.
@@ -1113,6 +1128,45 @@ fn binding_len(text: &str) -> Option<usize> {
             return Some(at);
         }
     }
+}
+
+/// The head with every unnamed binding's body written in place of its
+/// variable. `None` when a body names its own variable, or a variable
+/// the clause never bound, since then no inline print is faithful.
+fn inline_bindings(
+    head: &str,
+    bindings: &[Binding],
+    resolved: &[(String, String)],
+) -> Option<String> {
+    let mut out = head.to_string();
+
+    for _ in 0..bindings.len() {
+        let Some(b) = bindings
+            .iter()
+            .find(|b| !resolved.iter().any(|(v, _)| *v == b.var) && mentions(&out, &b.var))
+        else {
+            break;
+        };
+        let mut body = b.body.clone();
+
+        for (v, name) in resolved {
+            body = replace_var(&body, v, name);
+        }
+
+        if mentions(&body, &b.var) {
+            return None;
+        }
+
+        out = replace_var(&out, &b.var, &body);
+    }
+
+    (!holds_a_solver_variable(&out)).then_some(out)
+}
+
+/// Whether the text still names a solver variable, `t1`.
+fn holds_a_solver_variable(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|w| w.len() >= 2 && w.starts_with('t') && w[1..].chars().all(|c| c.is_ascii_digit()))
 }
 
 fn mentions(text: &str, var: &str) -> bool {
@@ -1973,6 +2027,25 @@ mod tests {
         assert_eq!(
             fold(text, &known()),
             "```luau\nlocal M: {\n    Box: Saber\n}\n```"
+        );
+    }
+
+    /// `import * as Dir from "./m"` on a module that exports an enum:
+    /// the export table reaches the enum's own table through a field,
+    /// and the variants with the `is` guard name the enum. A binding no
+    /// fold can name prints its body in place of `tN`.
+    #[test]
+    fn an_enum_table_reads_as_the_enum() {
+        let text = "```luau\nlocal Dir: {\n    Rarity: t1\n} where t1 = {\n    Common: Rarity,\n    Rare: Rarity,\n    is: (v: unknown) -> boolean\n}\n```";
+        assert_eq!(
+            fold(text, &known()),
+            "```luau\nlocal Dir: {\n    Rarity: Rarity\n}\n```"
+        );
+
+        let text = "```luau\nlocal U: {\n    Util: t1\n} where t1 = {\n    double: (x: number) -> number\n}\n```";
+        assert_eq!(
+            fold(text, &known()),
+            "```luau\nlocal U: {\n    Util: {\n    double: (x: number) -> number\n}\n}\n```"
         );
     }
 

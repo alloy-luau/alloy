@@ -77,8 +77,27 @@ pub(crate) fn fold_inline_result_methods(text: &mut String) {
         keys.dedup();
 
         if keys == KEYS {
-            text.replace_range(at..open + len, "");
-            from = at;
+            let close = open + len;
+            // The group keeps one table now, and one type needs no
+            // parentheses. Left in place they print the arms of a
+            // Result as `({ ... }) | ({ ... })`, which the pair folds
+            // do not read.
+            let paren = open_of(&text[..at])
+                .filter(|b| text[..*b].ends_with('(') && text[close..].starts_with(')'));
+
+            match paren {
+                Some(b) => {
+                    text.replace_range(close..close + 1, "");
+                    text.replace_range(at..close, "");
+                    text.replace_range(b - 1..b, "");
+                    from = b - 1;
+                }
+
+                None => {
+                    text.replace_range(at..close, "");
+                    from = at;
+                }
+            }
 
             continue;
         }
@@ -600,5 +619,27 @@ mod tests {
             fold(&outer, &Known::default()),
             "Result<Result<number, any>, any>"
         );
+    }
+
+    // An inferred `local outer = nested()` where `nested` returns
+    // `Result<Result<number, string>, string>`. The alias does not
+    // reach that print: each arm meets its methods in place, inside
+    // parentheses of its own.
+    #[test]
+    fn a_result_inside_a_result_folds_with_the_methods_in_place() {
+        let methods = "{ read expect: any, read is_err: any, read is_ok: any, read map: any, read map_err: any, read ok: any, read unwrap: any, read unwrap_or: any }";
+        let inner = format!(
+            "({{ read _1: number, read __err: string, read __ok: number, tag: \"Ok\", read trace: string? }} & {methods}) | ({{ read _1: string, read __err: string, read __ok: number, tag: \"Err\", read trace: string? }} & {methods})"
+        );
+        let outer = format!(
+            "local outer: ({{ read _1: {inner}, read __err: string, read __ok: {inner}, tag: \"Ok\", read trace: string? }} & {methods}) | ({{ read _1: string, read __err: string, read __ok: {inner}, tag: \"Err\", read trace: string? }} & {methods})"
+        );
+        let out = fold(&outer, &Known::default());
+
+        assert_eq!(out, "local outer: Result<Result<number, string>, string>");
+
+        for emit in ["_1", "__err", "__ok", "tag:", "trace"] {
+            assert!(!out.contains(emit), "{emit} reached the hover: {out}");
+        }
     }
 }

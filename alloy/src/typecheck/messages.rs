@@ -489,7 +489,11 @@ fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
         return None;
     }
 
-    let at = line.find(&format!(".{key}"))?;
+    // `Chat.call(...)` is the form the docs write, and `Chat:call(...)`
+    // is the mistake a reader makes; both name the same member.
+    let at = line
+        .find(&format!(".{key}"))
+        .or_else(|| line.find(&format!(":{key}")))?;
     let receiver: String = line[..at]
         .chars()
         .rev()
@@ -856,7 +860,43 @@ pub fn resite_report(
         .or_else(|| unmet_bound_report(message, source, text, line, col))
         .or_else(|| covered_arm_report(message, text, line))
         .or_else(|| destroy_report(message, text))
+        .or_else(|| contains_report(message, text))
         .or_else(|| after_report(message, text))
+}
+
+/// `x in t` on a value the std cannot search. The emit calls `contains`,
+/// whose parameter names the shapes it dispatches on; the reader wrote
+/// `in`, so the sentence names the word and the operand.
+fn contains_report(message: &str, text: &str) -> Option<Resited> {
+    // `Container` once the fold names the union; the union itself until
+    // then.
+    if !matches!(
+        quoted_after(message, "Expected this to be '")?,
+        "Container" | "string | {}"
+    ) {
+        return None;
+    }
+
+    let got = quoted_after(message.split_once("but got ")?.1, "'")?;
+    // The right side of the last `in` on the line. A line with two is
+    // rare, and the operand is what the reader has to change.
+    let rest = text.rsplit_once(" in ")?.1.trim_start();
+    let operand: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+
+    if operand.is_empty() {
+        return None;
+    }
+
+    Some(Resited {
+        kind: "TypeError",
+        message: format!(
+            "`in` needs an Array, a Set, a HashMap, or a string; `{operand}` is a {got}"
+        ),
+        at: None,
+    })
 }
 
 /// The seconds of `after`. The emit hands them to `task.delay` or to
@@ -1387,6 +1427,60 @@ mod tests {
     /// `destroy` and `after` each report in their own words: the
     /// checker names the std's union and the optional the timer takes,
     /// and neither is what the source wrote.
+    /// `in` on a value the std cannot search read the union the
+    /// parameter names. The reader wrote `in`.
+    #[test]
+    fn in_on_a_value_that_holds_nothing_reports_in_its_own_words() {
+        let src = "local n = 5\nlocal found = 1 in n\nprint(found)\n";
+
+        for shape in ["string | {}", "Container"] {
+            let got = resited(
+                &format!("Expected this to be '{shape}', but got 'number'"),
+                src,
+                2,
+                14,
+            );
+
+            assert_eq!(got.kind, "TypeError");
+            assert_eq!(
+                got.message,
+                "`in` needs an Array, a Set, a HashMap, or a string; `n` is a number"
+            );
+            assert_eq!(got.at, None);
+        }
+
+        // A dotted right side names the path the reader wrote.
+        let src = "local found = 1 in state.count\nprint(found)\n";
+        let got = resited(
+            "Expected this to be 'Container', but got 'number'",
+            src,
+            1,
+            15,
+        );
+
+        assert_eq!(
+            got.message,
+            "`in` needs an Array, a Set, a HashMap, or a string; `state.count` is a number"
+        );
+    }
+
+    /// `Chat:call(...)` with a colon is the mistake a reader makes; the
+    /// report named `Remote`, the emit's own name for the surface.
+    #[test]
+    fn a_remote_member_reports_through_either_separator() {
+        let table = "{ fire: (string) -> (), instance: Instance?, on: (any) -> RBXScriptConnection, spec: any }";
+        let message = format!("Key 'call' not found in table '{table}'");
+
+        assert_eq!(
+            rewrite_remote_key(&message, "    Chat.call(\"hi\")"),
+            Some("remote `Chat` has no `call`".to_string())
+        );
+        assert_eq!(
+            rewrite_remote_key(&message, "    Chat:call(\"hi\")"),
+            Some("remote `Chat` has no `call`".to_string())
+        );
+    }
+
     #[test]
     fn destroy_and_after_report_in_their_own_words() {
         let src = "local count = 3\ndestroy count\n";

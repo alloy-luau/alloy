@@ -1691,7 +1691,7 @@ impl<'s> Desugar<'s> {
             return;
         };
         let sname = self.text_of(*n).to_string();
-        let Some(declared) = self.struct_fields.get(&sname).cloned() else {
+        let Some(declared) = self.declared_fields(&sname) else {
             return;
         };
         let Expr::Table { fields, .. } = table else {
@@ -1714,6 +1714,16 @@ impl<'s> Desugar<'s> {
                                 list_names(&known)
                             ),
                         );
+                    } else if self.sets_imported_private(&sname, &fname) {
+                        self.lints.push(crate::lint::Lint {
+                            name: "private_access",
+                            start: self.byte_start(*name),
+                            end: self.byte_end(*name),
+                            message: format!(
+                                "`{fname}` is private to `{sname}`; only its impl sets it"
+                            ),
+                            fix: None,
+                        });
                     }
 
                     given.push(fname);
@@ -1728,6 +1738,28 @@ impl<'s> Desugar<'s> {
         }
 
         self.check_missing_fields(*n, &sname, &given, "fields");
+    }
+
+    /// A private field of an imported struct, named in a `new` outside
+    /// the struct's impl. A private field without a default has to be
+    /// set, so that one stays. `private_access` reads a struct this file
+    /// declares from its own tokens; an imported one has none here, so
+    /// the import index answers instead.
+    fn sets_imported_private(&self, sname: &str, fname: &str) -> bool {
+        if self.struct_fields.contains_key(sname) || self.impl_target.as_deref() == Some(sname) {
+            return false;
+        }
+
+        let private = self
+            .options
+            .import_privates
+            .iter()
+            .any(|(s, fields)| s == sname && fields.iter().any(|f| f == fname));
+
+        private
+            && self
+                .declared_fields(sname)
+                .is_some_and(|fields| fields.iter().any(|(d, default)| d == fname && *default))
     }
 
     /// The fields of a struct with whether each carries a default: this
@@ -1817,32 +1849,14 @@ impl<'s> Desugar<'s> {
         }
 
         if !self.structs.contains(&text) {
-            // A struct another module declares. The fields form still
-            // names every field without a default, and the imported
-            // shape carries them; every check below reads this file's
-            // own declaration, so the imported case ends here.
+            // A struct another module declares. The imported shape
+            // carries its fields, so the fields form reads the same
+            // checks; every check below reads this file's own
+            // declaration, so the imported case ends here.
             if args.is_none()
-                && let Some(Expr::Table { fields, .. }) = init
+                && let Some(table @ Expr::Table { .. }) = init
             {
-                let mut given = Vec::new();
-                let mut open = false;
-
-                for f in fields {
-                    match f {
-                        TableField::Named { name, .. } => {
-                            given.push(self.text_of(*name).to_string())
-                        }
-
-                        // A spread or a computed key turns the check
-                        // off: the table's keys are then not in the
-                        // source.
-                        _ => open = true,
-                    }
-                }
-
-                if !open {
-                    self.check_missing_fields(*n, &text, &given, "fields");
-                }
+                self.check_struct_fields(name, table);
             }
 
             return;
@@ -1949,6 +1963,47 @@ mod tests {
 
         let whole = messages("import { Box } from \"./box\"\n\nprint(new Box { label = \"a\" })\n");
         assert!(whole.is_empty(), "{whole:?}");
+    }
+
+    /// The fields form on an imported struct reads every check the
+    /// struct's own file gets: a field the struct lacks, and a private
+    /// field with a default that only its impl sets.
+    #[test]
+    fn a_construction_of_an_imported_struct_names_an_unknown_and_a_private_field() {
+        let options = crate::EmitOptions {
+            import_struct_fields: vec![(
+                "Box".to_string(),
+                vec![("id".to_string(), false), ("secret".to_string(), true)],
+            )],
+            import_privates: vec![("Box".to_string(), vec!["secret".to_string()])],
+            ..Default::default()
+        };
+        let out = crate::compile_with(
+            "import { Box } from \"./box\"\n\nprint(new Box { id = 1, gone = 2 })\n",
+            &options,
+        )
+        .unwrap();
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec!["`Box` has no field `gone`; its fields are `id` and `secret`"]
+        );
+
+        let private = crate::compile_with(
+            "import { Box } from \"./box\"\n\nprint(new Box { id = 1, secret = 5 })\n",
+            &options,
+        )
+        .unwrap();
+        let private_lints: Vec<&str> = private
+            .lints
+            .iter()
+            .map(|l| l.name)
+            .filter(|n| *n == "private_access")
+            .collect();
+
+        assert!(private.diagnostics.is_empty(), "{:?}", private.diagnostics);
+        assert_eq!(private_lints, vec!["private_access"]);
     }
 
     #[test]

@@ -634,6 +634,9 @@ pub(crate) fn apply_lint_fixes(
 
         if written > 0 {
             rewrites += written;
+            // The lints the run reported came from the old text; the
+            // rewritten file answers for itself.
+            lint::after_fix(&mut remaining, rel, lints_of(&path, &source));
             eprintln!(
                 "{}",
                 p.wrote(&format!("{}: {written} rewrites", path.display()))

@@ -70,9 +70,7 @@ impl Server {
             .or_else(|| text_document_uri(message))
             .unwrap_or_default();
         let st = self.state.lock().expect("state");
-        let at = message
-            .pointer("/params/position")
-            .and_then(position_of_value);
+        let at = position_of_message(message);
         let name = match st.editor.auto_close_tags && uri.ends_with(".alx") {
             true => at
                 .zip(st.docs.get(&uri))
@@ -106,9 +104,7 @@ impl Server {
             .pointer("/params/ch")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let at = message
-            .pointer("/params/position")
-            .and_then(position_of_value);
+        let at = position_of_message(message);
         let edit = match (st.editor.auto_end, ch, at) {
             (true, "\n", Some((line, character))) => st.end_edit(uri, line, character),
 
@@ -186,13 +182,7 @@ pub(crate) fn append_initializer(
     line: u32,
     character: u32,
 ) -> Option<String> {
-    let offset = offset_of(&doc.source, line, character)?;
-
-    if !keywords::is_word_at(&doc.source, offset) {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(&doc.source, offset);
+    let Caret { offset, start, end } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
     let mut from = 0;
 

@@ -829,9 +829,7 @@ impl Server {
             return;
         }
         let ctx = uri.filter(|u| is_alloy_uri(u));
-        let position = message
-            .pointer("/params/position")
-            .and_then(position_of_value);
+        let position = position_of_message(&message);
         let trigger = message
             .pointer("/params/context/triggerCharacter")
             .and_then(Value::as_str)

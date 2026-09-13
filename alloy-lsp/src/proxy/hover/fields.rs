@@ -9,10 +9,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
 
@@ -22,15 +19,9 @@ impl Server {
             return false;
         };
 
-        let Some(offset) = offset_of(&doc.source, line, character) else {
+        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
             return false;
         };
-
-        if !keywords::is_word_at(&doc.source, offset) {
-            return false;
-        }
-
-        let (start, end) = keywords::word_range(&doc.source, offset);
         let word = &doc.source[start..end];
 
         // A field where it is declared, `read hp: number = 1` in a struct

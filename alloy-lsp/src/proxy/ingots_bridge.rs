@@ -142,10 +142,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
         let st = self.state.lock().expect("state");
@@ -180,10 +177,7 @@ impl Server {
     /// shadow's shape differs for an Alloy declaration, so the source
     /// decides.
     pub(crate) fn names_a_declaration(&self, uri: &str, message: &Value) -> bool {
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
         let st = self.state.lock().expect("state");
@@ -209,10 +203,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
         let st = self.state.lock().expect("state");
@@ -247,10 +238,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
         let trigger = message

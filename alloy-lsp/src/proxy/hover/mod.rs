@@ -49,18 +49,10 @@ impl Server {
             return None;
         }
 
-        let (line, character) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)?;
+        let (line, character) = position_of_message(message)?;
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
-        let offset = offset_of(&doc.source, line, character)?;
-
-        if !keywords::is_word_at(&doc.source, offset) {
-            return None;
-        }
-
-        let (start, end) = keywords::word_range(&doc.source, offset);
+        let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
         let word = &doc.source[start..end];
         let (sl, sc) = doc.to_shadow(line, character);
         let landed = doc
@@ -94,9 +86,7 @@ impl Server {
             return None;
         }
 
-        let (line, character) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)?;
+        let (line, character) = position_of_message(message)?;
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
@@ -154,9 +144,7 @@ impl Server {
             return None;
         }
 
-        let (line, character) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)?;
+        let (line, character) = position_of_message(message)?;
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
@@ -193,9 +181,7 @@ impl Server {
             return None;
         }
 
-        let (line, character) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)?;
+        let (line, character) = position_of_message(message)?;
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
 
@@ -224,10 +210,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
 
@@ -326,10 +309,7 @@ impl Server {
     /// Whether the caret sits in markup the shadow blanked, which
     /// happens when the markup could not lower.
     pub(crate) fn stands_in_blanked_markup(&self, uri: &str, message: &Value) -> bool {
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
         let st = self.state.lock().expect("state");
@@ -348,10 +328,7 @@ impl Server {
         message: &Value,
         id: &Value,
     ) -> bool {
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
         let st = self.state.lock().expect("state");

@@ -132,6 +132,37 @@ pub(crate) fn position_of_value(v: &Value) -> Option<(u32, u32)> {
     Some((line, character))
 }
 
+/// The position a request points at.
+pub(crate) fn position_of_message(message: &Value) -> Option<(u32, u32)> {
+    message
+        .pointer("/params/position")
+        .and_then(position_of_value)
+}
+
+/// The word under the caret: the byte the position names, and the range
+/// of the word around it.
+pub(crate) struct Caret {
+    pub(crate) offset: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+impl Caret {
+    /// None when the position falls outside the source, or when the
+    /// caret sits on no word. A handler that reads a name stops there.
+    pub(crate) fn at(source: &str, line: u32, character: u32) -> Option<Self> {
+        let offset = offset_of(source, line, character)?;
+
+        if !keywords::is_word_at(source, offset) {
+            return None;
+        }
+
+        let (start, end) = keywords::word_range(source, offset);
+
+        Some(Self { offset, start, end })
+    }
+}
+
 pub fn range_of(v: &Value) -> Option<((u32, u32), (u32, u32))> {
     Some((
         position_of_value(v.get("start")?)?,

@@ -153,13 +153,7 @@ fn bare_type_hover(
 
 /// The word the cursor sits on, in the source the author wrote.
 fn word_at(doc: &Doc, line: u32, character: u32) -> Option<&str> {
-    let offset = offset_of(&doc.source, line, character)?;
-
-    if !keywords::is_word_at(&doc.source, offset) {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(&doc.source, offset);
+    let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
 
     Some(&doc.source[start..end])
 }
@@ -476,13 +470,7 @@ pub(crate) fn declared_field_type(source: &str, field: &str) -> Option<String> {
 /// instead of the child's expansion of the array. The annotation comes
 /// from the first `name: T` in the source.
 pub(crate) fn keep_annotation(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
-    let offset = offset_of(&doc.source, line, character)?;
-
-    if !keywords::is_word_at(&doc.source, offset) {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(&doc.source, offset);
+    let Caret { offset, start, end } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
     let (decl_at, annotation) = declared_annotation(&doc.source, word, offset)?;
 
@@ -740,15 +728,9 @@ pub(crate) fn lowers_a_block(text: &str, doc: &Doc, line: u32, character: u32) -
 /// its line. The emit turns such a name into a key, and the child then
 /// answers about the key's own text.
 pub(crate) fn names_a_key(doc: &Doc, line: u32, character: u32) -> bool {
-    let Some(offset) = offset_of(&doc.source, line, character) else {
+    let Some(Caret { start, .. }) = Caret::at(&doc.source, line, character) else {
         return false;
     };
-
-    if !keywords::is_word_at(&doc.source, offset) {
-        return false;
-    }
-
-    let (start, _) = keywords::word_range(&doc.source, offset);
     let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
     let head = &doc.source[line_start..start];
 
@@ -1009,13 +991,7 @@ pub(crate) fn declared_signature(
     line: u32,
     character: u32,
 ) -> Option<String> {
-    let offset = offset_of(&doc.source, line, character)?;
-
-    if !keywords::is_word_at(&doc.source, offset) {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(&doc.source, offset);
+    let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
     let word = doc.source[start..end].to_string();
     let (fence, rest) = value.split_once('\n')?;
     let (body, tail) = rest.split_once("\n```")?;
@@ -1316,13 +1292,7 @@ pub(crate) fn name_trait_method(
     let (fence, rest) = value.split_once('\n')?;
     let (body, tail) = rest.split_once("\n```")?;
     let head = body.strip_prefix("function (")?;
-    let offset = offset_of(&doc.source, line, character)?;
-
-    if !keywords::is_word_at(&doc.source, offset) {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(&doc.source, offset);
+    let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
     let owner = trait_of_method(doc, word)?;
     let rebuilt =
@@ -1342,13 +1312,7 @@ pub(crate) fn unlocal_parameter(
     let (fence, rest) = value.split_once('\n')?;
     let (body, tail) = rest.split_once("\n```")?;
     let named = body.strip_prefix("local ")?;
-    let offset = offset_of(&doc.source, line, character)?;
-
-    if !keywords::is_word_at(&doc.source, offset) {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(&doc.source, offset);
+    let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
 
     if !named.starts_with(word) || !named[word.len()..].starts_with(':') {
@@ -1388,13 +1352,7 @@ pub(crate) fn name_by_declaration(
         return None;
     }
 
-    let offset = offset_of(&doc.source, line, character)?;
-
-    if !keywords::is_word_at(&doc.source, offset) {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(&doc.source, offset);
+    let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
 
     if !head.ends_with(word) {

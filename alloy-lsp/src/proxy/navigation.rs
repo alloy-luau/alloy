@@ -12,10 +12,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
 
@@ -25,15 +22,9 @@ impl Server {
             return false;
         };
 
-        let Some(offset) = offset_of(&doc.source, line, character) else {
+        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
             return false;
         };
-
-        if !keywords::is_word_at(&doc.source, offset) {
-            return false;
-        }
-
-        let (start, end) = keywords::word_range(&doc.source, offset);
         let word = doc.source[start..end].to_string();
 
         // The global this file reaches by that name. A global of the
@@ -77,10 +68,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
 
@@ -90,15 +78,9 @@ impl Server {
             return false;
         };
 
-        let Some(offset) = offset_of(&doc.source, line, character) else {
+        let Some(Caret { offset, start, end }) = Caret::at(&doc.source, line, character) else {
             return false;
         };
-
-        if !keywords::is_word_at(&doc.source, offset) {
-            return false;
-        }
-
-        let (start, end) = keywords::word_range(&doc.source, offset);
         let word = doc.source[start..end].to_string();
         // The namespace this name belongs to: the group itself, or the
         // one that declares a member by this name.
@@ -196,10 +178,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
         // An attribute is written `@tag`, so a reader may type the
@@ -342,10 +321,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
 

@@ -12,10 +12,7 @@ impl Server {
             return false;
         }
 
-        let Some((line, character)) = message
-            .pointer("/params/position")
-            .and_then(position_of_value)
-        else {
+        let Some((line, character)) = position_of_message(message) else {
             return false;
         };
 

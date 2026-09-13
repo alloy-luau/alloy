@@ -617,6 +617,16 @@ pub fn offset_of(text: &str, line: u32, character: u32) -> Option<usize> {
     for (i, l) in text.split('\n').enumerate() {
         if i as u32 == line {
             let mut units = 0u32;
+            // The editor hides a leading byte order mark; column 0 of
+            // line 0 is the first character after it.
+            let l = match i == 0 {
+                true => l
+                    .strip_prefix('\u{feff}')
+                    .inspect(|_| start += 3)
+                    .unwrap_or(l),
+
+                false => l,
+            };
 
             for (b, ch) in l.char_indices() {
                 if units >= character {
@@ -642,10 +652,27 @@ pub fn position_of(text: &str, offset: usize) -> (u32, u32) {
     let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
     let character = text[line_start..offset]
         .chars()
+        .filter(|c| *c != '\u{feff}' || line_start > 0)
         .map(|c| c.len_utf16() as u32)
         .sum();
 
     (line, character)
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+
+    #[test]
+    fn a_leading_byte_order_mark_is_no_column() {
+        let text = "\u{feff}local x = 1\nlocal y = 2\n";
+        assert_eq!(position_of(text, 3 + 6), (0, 6));
+        assert_eq!(offset_of(text, 0, 6), Some(3 + 6));
+        assert_eq!(position_of(text, 3 + 12 + 6), (1, 6));
+        assert_eq!(offset_of(text, 1, 6), Some(3 + 12 + 6));
+        assert_eq!(position_of("local x", 6), (0, 6));
+        assert_eq!(offset_of("local x", 0, 6), Some(6));
+    }
 }
 
 /// The byte bounds of the line holding `offset`, end exclusive of `\n`.

@@ -5,9 +5,8 @@ use super::super::*;
 impl<'a> Parser<'a> {
     // --- struct, trait, interface, remote, attribute, macro ----------------
 
-    /// The fields of a struct or interface, up to `end`. `open` is the
-    /// keyword that opened the body.
-    fn fields(&mut self, open: usize) -> Result<Vec<Field>, ParseError> {
+    /// The fields of a struct or interface, up to `end`.
+    fn fields(&mut self) -> Result<Vec<Field>, ParseError> {
         let mut fields = Vec::new();
 
         while !self.at("end") {
@@ -18,7 +17,7 @@ impl<'a> Parser<'a> {
             // A body with no `end`: the file goes on and this is not a
             // field. The caller reports the missing `end` once, and the
             // statements after the body still parse.
-            if self.body_ends_early(open) {
+            if self.body_ends_early() {
                 break;
             }
 
@@ -150,7 +149,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect("as")?;
-        let fields = self.fields(open)?;
+        let fields = self.fields()?;
         self.expect_end(open)?;
 
         Ok(Stmt::Struct(StructDecl {
@@ -196,7 +195,7 @@ impl<'a> Parser<'a> {
         }
 
         self.expect("as")?;
-        let fields = self.fields(open)?;
+        let fields = self.fields()?;
         self.expect_end(open)?;
 
         // An interface is a shape other code sees whole: a field of it
@@ -264,7 +263,7 @@ impl<'a> Parser<'a> {
             // signatures read so far stay, and the rest of the file parses.
             let dedents = member_column.is_some_and(|c| self.column_at(self.pos) < c);
 
-            if self.body_ends_early(open) && (dedents || !self.at("function")) {
+            if self.body_ends_early() && (dedents || !self.at("function")) {
                 break;
             }
 
@@ -283,7 +282,12 @@ impl<'a> Parser<'a> {
             let _ = ret;
             let signature = TokSpan::new(sig_start, self.pos);
 
-            let has_body = !self.at_end() && !matches!(self.text(), "function" | "end" | "@");
+            // A signature followed by a statement at or left of its own
+            // column is a trait with no `end`, not a default body: a
+            // default body sits one level in from its `function`.
+            let has_body = !self.at_end()
+                && !matches!(self.text(), "function" | "end" | "@")
+                && !(self.body_ends_early() && self.column_at(self.pos) <= self.column_at(m_start));
             let body = if has_body {
                 let b_start = self.pos;
                 let block = self.block()?;

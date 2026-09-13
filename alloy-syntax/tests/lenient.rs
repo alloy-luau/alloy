@@ -327,6 +327,32 @@ fn a_body_with_members_and_no_end_reports_once() {
     assert_eq!(t.methods.len(), 1, "the signature stays");
 }
 
+/// An indented statement after the last member is the file going on, not
+/// a member: the body with no `end` reports once and the tail still parses.
+#[test]
+fn an_indented_tail_after_a_body_with_no_end_reports_once() {
+    for head in [
+        "enum E as\n    A\n    B\n",
+        "struct S as\n    a: number\n",
+        "interface I as\n    a: number\n",
+        "trait T as\n    function m(self): number\n",
+    ] {
+        let src = format!("{head}\n    local x = 1\n    print(x)\n");
+        assert_eq!(lenient(&src), (0, 1), "one report for {head:?}");
+
+        let lexed = lexer::lex(&src).unwrap();
+        let (chunk, _) = parser::parse_lenient(&src, &lexed.toks, ParseOptions::default());
+        assert!(
+            chunk
+                .block
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Local(_))),
+            "`x` still reads after {head:?}"
+        );
+    }
+}
+
 /// The `as` form reports nothing.
 #[test]
 fn a_header_with_as_is_clean() {

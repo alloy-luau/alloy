@@ -20,7 +20,7 @@ impl<'a> Parser<'a> {
             // A body with no `end`: the file goes on and this is not a
             // variant. `expect_end` reports the missing `end` once, the
             // variants read so far stay, and the rest of the file parses.
-            if self.body_ends_early(open) {
+            if self.body_ends_early() {
                 break;
             }
 

@@ -138,15 +138,18 @@ impl<'a> Parser<'a> {
     }
 
     /*
-    Reports if the cursor stands outside a body that `open` began.
+    Reports if the cursor stands outside a body whose `end` is missing.
 
     A body with no `end` would otherwise read the rest of the file as its
-    own members. A keyword that opens a statement, at or left of the
-    opener's column, is the file going on. The caller breaks out and
-    reports the missing `end` once, through `expect_end`.
+    own members. A keyword that opens a statement is the file going on, at
+    any column: a member of an enum, a struct, or an interface never starts
+    with one, so an indented `local` after the last member is a statement,
+    not a member. The caller breaks out and reports the missing `end` once,
+    through `expect_end`. A trait holds `function` members, so its reader
+    adds the column test that tells a member from the file going on.
     */
-    fn body_ends_early(&self, open: usize) -> bool {
-        self.opens_statement() && self.column_at(self.pos) <= self.column_at(open)
+    fn body_ends_early(&self) -> bool {
+        self.opens_statement()
     }
 
     /// Reports if the token at the cursor is a keyword that begins a statement.

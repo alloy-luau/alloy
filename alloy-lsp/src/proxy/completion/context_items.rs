@@ -429,15 +429,13 @@ impl State {
                         // `@` already written: the module's attributes
                         // are the whole list. An attribute is a value,
                         // so a type-only list holds none.
-                        if (*sigil || *type_only) && e.is_attribute != *sigil {
+                        if (*sigil && !e.is_attribute) || (*type_only && e.is_attribute) {
                             continue;
                         }
 
                         let label = if e.is_type && !*type_only {
                             format!("type {}", e.name)
                         } else {
-                            // An attribute reads `@name` here, the way
-                            // it reads where it is applied.
                             e.written()
                         };
                         // The module's own declaration says what the

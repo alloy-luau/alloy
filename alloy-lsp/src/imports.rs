@@ -15,22 +15,18 @@ pub struct Export {
     pub is_type: bool,
     /// `export default Name`: imported bare, not in braces.
     pub is_default: bool,
-    /// `export attribute name`: written `@name` in an import list, the
-    /// way it is written where it is applied.
+    /// `export attribute name`: an import list reads it by its bare
+    /// name, or under the `@` it is applied with.
     pub is_attribute: bool,
     /// The completion item kind.
     pub kind: u64,
 }
 
 impl Export {
-    /// The name as an import list writes it: an attribute carries the
-    /// `@` it is applied with.
+    /// The name as an import list writes it. An attribute reads by its
+    /// bare name there; the `@` it is applied with is accepted too.
     pub fn written(&self) -> String {
-        match self.is_attribute {
-            true => format!("@{}", self.name),
-
-            false => self.name.clone(),
-        }
+        self.name.clone()
     }
 }
 
@@ -671,8 +667,6 @@ pub fn auto_import_items(
             } else if export.is_type {
                 format!("import {{ type {} }} from \"{spec}\"", export.name)
             } else {
-                // An attribute reads `@name` in the list, so the detail
-                // shows the line the edit writes.
                 format!("import {{ {} }} from \"{spec}\"", export.written())
             };
 

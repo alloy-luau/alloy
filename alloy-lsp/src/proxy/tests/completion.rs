@@ -1865,18 +1865,18 @@ pub(crate) fn an_import_list_offers_the_module_and_marks_its_attributes() {
             .collect()
     };
 
-    // A plain entry: every export, the attribute under its sigil.
+    // A plain entry: every export, the attribute by its bare name.
     let names = labels("import { a");
-    assert_eq!(names, ["type", "@tagged", "version", "type Id"]);
+    assert_eq!(names, ["type", "tagged", "version", "type Id"]);
 
     // `@` narrows the list to the attributes, and nothing else.
-    assert_eq!(labels("@b"), ["@tagged"]);
+    assert_eq!(labels("@b"), ["tagged"]);
 
     // The local name after `as` is the reader's own.
     assert!(labels("c as d").is_empty());
 
     // The second line of a list that spans lines.
-    assert_eq!(labels("    e"), ["type", "@tagged", "version", "type Id"]);
+    assert_eq!(labels("    e"), ["type", "tagged", "version", "type Id"]);
 
     // A type-only list holds the types; an attribute is a value.
     assert_eq!(labels("import type { f"), ["Id"]);

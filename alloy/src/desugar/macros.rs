@@ -287,11 +287,12 @@ impl<'s> Desugar<'s> {
         anchor: u32,
         as_expr: bool,
     ) -> String {
-        let macros: Vec<MacroSource> = self
+        let mut macros: Vec<MacroSource> = self
             .macros
             .iter()
             .map(|(name, r)| MacroSource {
                 name: name.clone(),
+                hidden: false,
                 params: r.params.clone(),
                 defaults: r.defaults.clone(),
                 variadic: r.variadic,
@@ -300,7 +301,19 @@ impl<'s> Desugar<'s> {
             })
             .collect();
 
-        if self.options.macros.len() > 16 {
+        // The fragment is the expansion, so a private macro of an
+        // imported module is callable in it. A name this file already
+        // binds keeps its own macro.
+        for m in self.options.macros.iter().filter(|m| m.hidden) {
+            if !macros.iter().any(|had| had.name == m.name) {
+                macros.push(MacroSource {
+                    hidden: false,
+                    ..m.clone()
+                });
+            }
+        }
+
+        if self.options.macros.iter().filter(|m| !m.hidden).count() > 16 {
             self.diagnostics.push(Diagnostic {
                 start: anchor,
                 end: anchor,

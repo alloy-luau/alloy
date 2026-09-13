@@ -871,7 +871,7 @@ pub fn import_macros(
         };
         let found = exports.entry(path.clone()).or_insert_with(|| {
             std::fs::read_to_string(&path)
-                .map(|t| exported_macros(&t))
+                .map(|t| module_macros(&t))
                 .unwrap_or_default()
         });
 
@@ -881,7 +881,7 @@ pub fn import_macros(
             }
 
             let name = text(sp.name);
-            let Some(m) = found.iter().find(|m| m.name == name) else {
+            let Some(m) = found.iter().find(|m| m.name == name && !m.hidden) else {
                 continue;
             };
             let local = sp.alias.map(&text).unwrap_or(name);
@@ -893,14 +893,25 @@ pub fn import_macros(
                 });
             }
         }
+
+        // An exported macro may call a private macro of its own module.
+        // The body expands here, so the private one travels with it,
+        // under its own name and callable from an expansion alone.
+        for m in found.iter().filter(|m| m.hidden) {
+            if !out.iter().any(|had| had.name == m.name) {
+                out.push(m.clone());
+            }
+        }
     }
 
     out
 }
 
-/// The `export macro` declarations of one source, as the text a nested
-/// compile expands.
-pub fn exported_macros(source: &str) -> Vec<crate::MacroSource> {
+/// The `macro` declarations of one source, as the text a nested compile
+/// expands. A macro the module does not export reads as hidden: an
+/// expansion of the module's own macros can call it, the import list
+/// cannot.
+pub fn module_macros(source: &str) -> Vec<crate::MacroSource> {
     use alloy_syntax::ast::Stmt;
 
     let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
@@ -923,14 +934,11 @@ pub fn exported_macros(source: &str) -> Vec<crate::MacroSource> {
             continue;
         };
 
-        if !m.exported {
-            continue;
-        }
-
         let named = || m.params.iter().filter(|p| !p.is_vararg);
 
         out.push(crate::MacroSource {
             name: text(m.name),
+            hidden: !m.exported,
             params: named().map(|p| text(p.name)).collect(),
             defaults: named()
                 .map(|p| p.default.as_ref().map(|d| join(d.span())))

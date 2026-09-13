@@ -691,6 +691,52 @@ An `export macro` travels as source. `import { name }` brings the
 definition in, `$name(...)` expands it here, and the module's table
 carries no key for the name, so the emit binds no local.
 */
+/// An exported macro may call a private macro of its own module. The
+/// body expands in the importing file, so the private one has to travel
+/// with it; the importing file still cannot call it by name.
+#[test]
+fn an_imported_macro_calls_a_private_macro_of_its_module() {
+    let dir = scratch("macro-private");
+    std::fs::write(
+        dir.join("m.aly"),
+        "macro helper(x) print(\"helper:\", x) end\nexport macro wrapper(x) $helper(x) end\n",
+    )
+    .unwrap();
+    let source = "import { wrapper } from \"./m\"\n$wrapper(\"x\")\n";
+    let main = dir.join("m_use.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let macros = alloy::modules::import_macros(source, &main, &[]);
+    let options = alloy::EmitOptions {
+        macros: macros.clone(),
+        ..Default::default()
+    };
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert!(out.diagnostics.is_empty(), "{messages:?}");
+    assert!(out.ship.contains("print ( \"helper:\""), "{}", out.ship);
+
+    // `$helper` is the module's own; a call here is unknown.
+    let direct = alloy::compile_with(
+        "import { wrapper } from \"./m\"\n$helper(\"x\")\n",
+        &options,
+    )
+    .unwrap();
+    let messages: Vec<&str> = direct
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+
+    assert!(
+        messages.iter().any(|m| m.contains("unknown macro")),
+        "{messages:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_imported_macro_expands_where_it_is_called() {
     let dir = scratch("macro-import");
@@ -711,9 +757,15 @@ fn an_imported_macro_expands_where_it_is_called() {
     let macros = alloy::modules::import_macros(source, &main, &[]);
     let names: Vec<&str> = macros.iter().map(|m| m.name.as_str()).collect();
 
-    // The alias renames the macro, and a macro the module keeps to
-    // itself does not travel.
-    assert_eq!(names, vec!["logit", "add"]);
+    // The alias renames the macro. A macro the module keeps to itself
+    // travels hidden: an expansion can call it, this file cannot.
+    assert_eq!(names, vec!["logit", "add", "local_only"]);
+    let hidden: Vec<&str> = macros
+        .iter()
+        .filter(|m| m.hidden)
+        .map(|m| m.name.as_str())
+        .collect();
+    assert_eq!(hidden, vec!["local_only"]);
 
     let options = alloy::EmitOptions {
         macros,

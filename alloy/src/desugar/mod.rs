@@ -227,6 +227,10 @@ pub struct WireField {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MacroSource {
     pub name: String,
+    /// The macro is not callable in this file. A private macro of an
+    /// imported module travels with the module's exported macros, so an
+    /// expansion of one can call it, and the import list cannot.
+    pub hidden: bool,
     pub params: Vec<String>,
     /// The default of each parameter, as source text.
     pub defaults: Vec<Option<String>>,
@@ -465,7 +469,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         d.attr_decls.insert(name.clone(), decl.clone());
     }
 
-    for m in &options.macros {
+    for m in options.macros.iter().filter(|m| !m.hidden) {
         d.macros.insert(
             m.name.clone(),
             MacroRef {

@@ -227,6 +227,20 @@ impl<'s> Desugar<'s> {
             // a copy of it would sit in front of the Luau header.
             let mut cut: Vec<(u32, u32)> = Vec::new();
 
+            // `@test` makes a function local and registers it with the
+            // runner, which calls it by name. A method takes a receiver,
+            // so no runner can call it. Luau has no `@test` either, so
+            // the attribute leaves the emit: a copy of it is a syntax
+            // error in the artifact.
+            for a in &m.attributes {
+                if self.text_of(*a).trim_end() != "@test" {
+                    continue;
+                }
+
+                self.diagnose(*a, "`@test` goes on a function, not a method");
+                cut.push((self.byte_start(*a), self.byte_end(*a)));
+            }
+
             if let Some(v) = m.visibility {
                 cut.push((self.byte_start(v), self.byte_end(v)));
             }
@@ -1974,6 +1988,23 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    /// `@test` registers a free function with the runner, which calls
+    /// it by name; a method takes a receiver. Luau has no `@test`, so a
+    /// copy of the attribute breaks the artifact it lands in.
+    #[test]
+    fn a_test_attribute_on_a_method_reports_and_leaves_the_emit() {
+        let src = "struct Vec2 as\n    x: number\nend\n\nimpl Vec2 as\n    @test\n    function methodTest(self): number\n        return 1\n    end\nend\n";
+        assert_eq!(
+            messages(src),
+            vec!["`@test` goes on a function, not a method"]
+        );
+
+        let out = crate::compile(src).unwrap();
+
+        assert!(!out.ship.contains("@test"), "{}", out.ship);
+        assert!(!out.check.contains("@test"), "{}", out.check);
     }
 
     /// A trait names the return type of every method it declares, so an

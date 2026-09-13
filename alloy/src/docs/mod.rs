@@ -55,6 +55,9 @@ pub fn kind_for(message: &str) -> &'static str {
         // `new Test { ... }`. The `new ` marker is the narrower of the
         // two, so it answers first.
         (&["`new ", "constructor", "construct"], "ConstructorError"),
+        // Before the `@test` rule: `@test` on a method is about where
+        // the attribute goes, not about a test.
+        (&["goes on a function, not a method"], "AttributeError"),
         (&["@test", "test "], "TestError"),
         (&["@cfg"], "AttributeError"),
         (&["macro"], "MacroError"),

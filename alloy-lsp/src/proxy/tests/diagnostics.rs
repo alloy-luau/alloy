@@ -552,6 +552,53 @@ pub(crate) fn a_partly_unused_import_list_loses_the_dead_names_alone() {
     );
 }
 
+/// `import * as M, { a, b }`: the star half and the list each go on
+/// their own, and the half that lives stays whole.
+#[test]
+pub(crate) fn a_mixed_import_cuts_the_half_that_is_dead() {
+    let cut = |src: &str| {
+        let (st, uri) = one_file(src);
+        let mut actions = Vec::new();
+        st.unused_import_actions(uri, ((0, 0), (0, 0)), &mut actions);
+
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        actions[0]["edit"]["changes"][uri].clone()
+    };
+
+    // `M` alone is dead: the cut runs from the `*` to the `{`.
+    assert_eq!(
+        cut("import * as M, { a, b } from \"./mod\"\n\nprint(a, b)\n"),
+        json!([{
+            "range": { "start": { "line": 0, "character": 7 }, "end": { "line": 0, "character": 15 } },
+            "newText": "",
+        }])
+    );
+    // The list is dead and `M` lives: the cut leaves `import * as M`.
+    assert_eq!(
+        cut("import * as M, { a, b } from \"./mod\"\n\nprint(M)\n"),
+        json!([{
+            "range": { "start": { "line": 0, "character": 13 }, "end": { "line": 0, "character": 23 } },
+            "newText": "",
+        }])
+    );
+    // Every name is dead: the statement goes whole.
+    assert_eq!(
+        cut("import * as M, { a, b } from \"./mod\"\n\nprint(1)\n"),
+        json!([{
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 1, "character": 0 } },
+            "newText": "",
+        }])
+    );
+    // A default binding beside a list cuts the same way.
+    assert_eq!(
+        cut("import D, { a } from \"./mod\"\n\nprint(a)\n"),
+        json!([{
+            "range": { "start": { "line": 0, "character": 7 }, "end": { "line": 0, "character": 10 } },
+            "newText": "",
+        }])
+    );
+}
+
 /// `import type { Widget }` unused got no action at all: the child reads
 /// the emit, where a type-only import writes no `require`.
 #[test]

@@ -1490,11 +1490,15 @@ fn declares_a_return(shape: &str) -> bool {
 /// One `import` statement of a source: the whole statement with its
 /// newline, and every name it binds with the bytes to cut to drop that
 /// one name. A name outside the `{ ... }` list, a `* as M` or a default
-/// binding, carries no cut of its own; the statement goes whole or that
-/// name stays.
+/// binding, cuts back to the list; with no list the statement goes
+/// whole.
 struct ImportLine {
     span: (usize, usize),
     names: Vec<Bound>,
+    /// The bytes from the head name to the `}`, which drop the whole
+    /// list and leave `import * as M`. `None` when the statement binds
+    /// no head or no list.
+    list_cut: Option<(usize, usize)>,
 }
 
 /// One name an `import` statement binds: the byte range of the name and
@@ -1502,6 +1506,9 @@ struct ImportLine {
 struct Bound {
     name: (usize, usize),
     cut: Option<(usize, usize)>,
+    /// Whether the name stands outside the `{ ... }` list: the `M` of
+    /// `* as M`, or a default binding.
+    head: bool,
 }
 
 /// The `import` statements of a source. A statement may run over several
@@ -1524,14 +1531,39 @@ fn import_lines(src: &str) -> Vec<ImportLine> {
         };
         let end = src[from..].find('\n').map_or(src.len(), |i| from + i + 1);
         let mut names: Vec<Bound> = Vec::new();
+        let list = src[here..from]
+            .find('{')
+            .map(|i| here + i)
+            .and_then(|open| {
+                src[open..from]
+                    .find('}')
+                    .map(|i| open + i)
+                    .map(|close| (open, close))
+            });
+        let mut list_cut = None;
 
         if let Some(name) = head_name(src, here, from) {
-            names.push(Bound { name, cut: None });
+            // `import * as M, { a }`: the head half runs from the `*` or
+            // the default name to the `{`, and cutting it leaves
+            // `import { a }`. The list itself goes back to the head
+            // name, which leaves `import * as M`.
+            let head_at = src[here..from]
+                .strip_prefix("import ")
+                .map(|rest| here + "import ".len() + (rest.len() - rest.trim_start().len()));
+            let cut = match (head_at, list) {
+                (Some(at), Some((open, _))) => Some((at, open)),
+
+                _ => None,
+            };
+            list_cut = list.map(|(_, close)| (name.1, close + 1));
+            names.push(Bound {
+                name,
+                cut,
+                head: true,
+            });
         }
 
-        if let Some(open) = src[here..from].find('{').map(|i| here + i)
-            && let Some(close) = src[open..from].find('}').map(|i| open + i)
-        {
+        if let Some((open, close)) = list {
             names.extend(list_cuts(src, open, close));
         }
 
@@ -1539,6 +1571,7 @@ fn import_lines(src: &str) -> Vec<ImportLine> {
             out.push(ImportLine {
                 span: (here, end),
                 names,
+                list_cut,
             });
         }
     }
@@ -1620,6 +1653,7 @@ fn list_cuts(src: &str, open: usize, close: usize) -> Vec<Bound> {
                 e,
             ),
             cut: Some(cut),
+            head: false,
         });
     }
 
@@ -1680,12 +1714,18 @@ impl State {
 
             let (sl, _) = position_of(&doc.source, line.span.0);
             let (el, _) = position_of(&doc.source, line.span.1.saturating_sub(1));
-            // Every name gone takes the statement; else each dead entry
-            // goes with the comma that joins it to its neighbour.
-            let cuts: Vec<(usize, usize)> = match dead_names.len() == line.names.len() {
-                true => vec![line.span],
-
-                false => dead_names.iter().filter_map(|b| b.cut).collect(),
+            let list_dead = line.names.iter().filter(|b| !b.head).count() > 0
+                && line.names.iter().all(|b| b.head || dead(b));
+            let head_dead = line.names.iter().any(|b| b.head && dead(b));
+            // Every name gone takes the statement. A dead list under a
+            // live head leaves the head alone; else each dead entry goes
+            // with the comma that joins it to its neighbour.
+            let cuts: Vec<(usize, usize)> = if dead_names.len() == line.names.len() {
+                vec![line.span]
+            } else if list_dead && !head_dead {
+                line.list_cut.into_iter().collect()
+            } else {
+                dead_names.iter().filter_map(|b| b.cut).collect()
             };
 
             if cuts.is_empty() || el < from_line || sl > to_line {

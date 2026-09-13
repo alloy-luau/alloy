@@ -83,6 +83,7 @@ fn main() -> ExitCode {
 
         Some("doc") => cli::doc::run(&args[1..]),
 
+        Some("init") if wants_help(&args) => command_help(help::INIT_TEXT),
         Some("init") => cli::init::init(),
 
         Some("self") => cli::self_cmd::run(&args[1..]),

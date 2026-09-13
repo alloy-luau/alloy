@@ -80,6 +80,16 @@ Options of run:
                   Ask for the completions at a byte offset
 ";
 
+pub const INIT_TEXT: &str = "\
+Usage: alloy init
+
+Writes alloy.toml and one Luau configuration in the current folder. A
+folder with neither .config.luau nor .luaurc gets a .config.luau with
+strict mode and the @alloy alias; a folder that has one keeps it and
+gains only the mode and the alias it lacks. An existing alloy.toml is
+never overwritten.
+";
+
 pub const BUILD_TEXT: &str = "\
 Usage: alloy build [file] [options]
 

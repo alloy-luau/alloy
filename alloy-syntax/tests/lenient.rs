@@ -233,6 +233,37 @@ fn a_generic_trait_header_reports_the_type_parameters() {
     );
 }
 
+/// A body with no `end` stops at the next statement, so the file after
+/// it still parses. The editor needs `later` for hover and completion.
+#[test]
+fn a_body_with_no_end_keeps_the_statements_after_it() {
+    let tail = "\nlocal function later(a: number, b: number): number\n    return a + b\nend\n\nprint(later(1, 2))\n";
+
+    for head in [
+        "struct S as",
+        "interface I as",
+        "enum E as",
+        "trait T as",
+        "impl S as",
+        "namespace N as",
+    ] {
+        let src = format!("{head}{tail}");
+        let (_, diagnostics) = lenient(&src);
+        assert_eq!(diagnostics, 1, "one report for {head:?}");
+
+        let lexed = lexer::lex(&src).unwrap();
+        let (chunk, _) = parser::parse_lenient(&src, &lexed.toks, ParseOptions::default());
+        assert!(
+            chunk
+                .block
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::LocalFunction(_))),
+            "`later` still reads after {head:?}"
+        );
+    }
+}
+
 /// The `as` form reports nothing.
 #[test]
 fn a_header_with_as_is_clean() {

@@ -5,13 +5,22 @@ use super::super::*;
 impl<'a> Parser<'a> {
     // --- struct, trait, interface, remote, attribute, macro ----------------
 
-    /// The fields of a struct or interface, up to `end`.
-    fn fields(&mut self) -> Result<Vec<Field>, ParseError> {
+    /// The fields of a struct or interface, up to `end`. `open` is the
+    /// keyword that opened the body.
+    fn fields(&mut self, open: usize) -> Result<Vec<Field>, ParseError> {
         let mut fields = Vec::new();
 
         while !self.at("end") {
             if self.at_end() {
                 return Err(self.err("unterminated declaration, expected `end`"));
+            }
+
+            // A body with no `end`: a keyword that opens a statement, at
+            // or left of the opener's column, is the file going on and
+            // not a field. The caller reports the missing `end` once,
+            // and the statements after the body still parse.
+            if self.opens_statement() && self.column_at(self.pos) <= self.column_at(open) {
+                break;
             }
 
             let f_start = self.pos;
@@ -142,7 +151,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect("as")?;
-        let fields = self.fields()?;
+        let fields = self.fields(open)?;
         self.expect_end(open)?;
 
         Ok(Stmt::Struct(StructDecl {
@@ -188,7 +197,7 @@ impl<'a> Parser<'a> {
         }
 
         self.expect("as")?;
-        let fields = self.fields()?;
+        let fields = self.fields(open)?;
         self.expect_end(open)?;
 
         // An interface is a shape other code sees whole: a field of it

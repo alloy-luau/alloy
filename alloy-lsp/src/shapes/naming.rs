@@ -384,7 +384,12 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
     // A struct's metatable: `{ __index: t1, __new: (f: { ... }) -> Node,
     // __tostring: (s: Node) -> string }`. The constructor's return names
     // the struct the metatable belongs to.
-    if has("__index")
+    //
+    // A module's export table reaches the same table through a field,
+    // `{ Box: t1 }`, and the print there carries the constructor alone:
+    // `Box.__index = Box` is a cycle the checker leaves out. One member
+    // that builds a struct is that struct's own table.
+    if (has("__index") || m.len() == 1)
         && let Some(sig) = get("__new").or_else(|| get("new"))
         && let Some(arrow) = sig.rfind("-> ")
     {

@@ -1964,6 +1964,18 @@ mod tests {
         assert_eq!(fold(text, &known()), "```luau\nlocal found: Saber?\n```");
     }
 
+    /// `import * as M from "./m"`: the module's export table reaches the
+    /// struct's own table through one field, and the print carries the
+    /// constructor alone. It read `{ Box: t1 } where t1 = { new: ... }`.
+    #[test]
+    fn a_namespace_import_reads_as_the_export_list() {
+        let text = "```luau\nlocal M: {\n    Box: t1\n} where t1 = {\n    new: (f: {\n        id: string,\n        cost: number,\n        color: number[]\n    }) -> Saber\n}\n```";
+        assert_eq!(
+            fold(text, &known()),
+            "```luau\nlocal M: {\n    Box: Saber\n}\n```"
+        );
+    }
+
     #[test]
     fn a_generic_struct_reads_with_its_argument() {
         let known = Known {

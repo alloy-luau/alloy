@@ -463,24 +463,39 @@ pub(crate) fn doc_binds(doc: &Doc, name: &str) -> bool {
 /// The struct a method's `self` belongs to: the nearest `impl` above
 /// the line, with the type parameters the struct declares.
 pub(crate) fn impl_self_type(doc: &Doc, line: u32) -> Option<String> {
-    let head = doc
-        .source
-        .lines()
-        .take(line as usize + 1)
-        .filter_map(|l| {
-            let text = l.trim_start();
-            // A foreign impl is exported, so it works project wide.
-            let text = text.strip_prefix("export ").unwrap_or(text);
-            let text = text.strip_prefix("global ").unwrap_or(text);
+    // The block the caret sits in: the last `impl` or `trait` head
+    // above it that no `end` at the head's own indent has closed.
+    let mut head: Option<(usize, String)> = None;
 
-            // Inside a trait's own default method `self` is whichever
-            // type implements the trait. The trait itself is what the
-            // reader can name there.
-            text.strip_prefix("impl ")
-                .or_else(|| text.strip_prefix("trait "))
-                .map(str::to_string)
-        })
-        .last()?;
+    for l in doc.source.lines().take(line as usize + 1) {
+        let indent = l.len() - l.trim_start().len();
+        let text = l.trim_start();
+
+        if let Some((at, _)) = &head
+            && indent == *at
+            && (text == "end" || text.starts_with("end "))
+        {
+            head = None;
+
+            continue;
+        }
+
+        // A foreign impl is exported, so it works project wide.
+        let text = text.strip_prefix("export ").unwrap_or(text);
+        let text = text.strip_prefix("global ").unwrap_or(text);
+
+        // Inside a trait's own default method `self` is whichever
+        // type implements the trait. The trait itself is what the
+        // reader can name there.
+        if let Some(rest) = text
+            .strip_prefix("impl ")
+            .or_else(|| text.strip_prefix("trait "))
+        {
+            head = Some((indent, rest.to_string()));
+        }
+    }
+
+    let (_, head) = head?;
     // `impl Shape for Sq` names the struct after `for`; a namespace
     // member keeps its path, `impl Zoo.Lion`.
     let named = head.split(" for ").last().unwrap_or(&head).trim();

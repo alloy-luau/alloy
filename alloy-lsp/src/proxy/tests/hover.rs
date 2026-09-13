@@ -1,4 +1,4 @@
-use super::super::hover::{shadow_home, shadows_an_import};
+use super::super::hover::{impl_self_type, shadow_home, shadows_an_import};
 use super::super::*;
 use super::support::one_file;
 
@@ -1123,4 +1123,15 @@ fn a_destructuring_binding_gets_its_type_hints() {
         "{hints:?}"
     );
     assert!(!hints.iter().any(|h| h.get(DESTRUCTURED).is_some()));
+}
+
+/// A function after a closed `trait` block is no member of the trait:
+/// the block's own `end` closes the head the scan found.
+#[test]
+pub(crate) fn a_closed_block_gives_self_no_type_below_it() {
+    let src = "trait Ord as\n    function compare(self, other: Ord): number\nend\n\nfunction largest<T: Ord>(xs: { T }): T\n    return xs[1]\nend\n";
+    let (st, uri) = super::support::one_file(src);
+    let doc = &st.docs[uri];
+    assert_eq!(impl_self_type(doc, 1), Some("Ord".to_string()));
+    assert_eq!(impl_self_type(doc, 5), None);
 }

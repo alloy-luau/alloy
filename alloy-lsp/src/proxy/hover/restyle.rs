@@ -1306,6 +1306,38 @@ pub(crate) fn unlocal_parameter(
         .then(|| format!("{fence}\n{text}\n```{tail}"))
 }
 
+/// `self` inside an `impl`, by the name the `impl` head writes.
+///
+/// The checker reads the receiver off the body, so one file printed
+/// three answers for one name: a read-only view of the fields at
+/// `self.x`, a solver variable at `self:m()`, and nothing at all where
+/// the body says too little. The `impl` names the type once.
+pub(crate) fn name_self_receiver(
+    value: &str,
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
+
+    if &doc.source[start..end] != "self" {
+        return None;
+    }
+
+    let (fence, rest) = value.split_once('\n')?;
+    let (body, tail) = rest.split_once("\n```")?;
+    let head = body.strip_prefix("local ").unwrap_or(body);
+
+    // The receiver's own print, and not a signature that holds it.
+    if head != "self" && !head.starts_with("self:") {
+        return None;
+    }
+
+    let out = format!("self: {}", impl_self_type(doc, line)?);
+
+    (out != body).then(|| format!("{fence}\n{out}\n```{tail}"))
+}
+
 /// `local rows = checked(ids)`: the child prints a solver variable for
 /// the binding. The function the line calls declares what it gives
 /// back, and that is the name the reader wrote.

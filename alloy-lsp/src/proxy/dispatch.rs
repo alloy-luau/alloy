@@ -1129,6 +1129,13 @@ impl Server {
                                 text = named;
                             }
 
+                            // Inside an `impl` the head names `self`; the
+                            // checker reads it off the body and prints a
+                            // different answer at every site.
+                            if let Some(named) = name_self_receiver(&text, doc, line, character) {
+                                text = named;
+                            }
+
                             if let Some(named) = name_solver_variable(&text, doc, line, character) {
                                 text = named;
                             }

@@ -856,3 +856,34 @@ pub(crate) fn a_call_above_its_declaration_hovers_as_the_declaration() {
         "type missing = unknown"
     );
 }
+
+/// `self` inside an `impl` read three ways in one file: a read-only view
+/// of the fields, a solver variable, and no type at all. The `impl` head
+/// names the type once.
+#[test]
+pub(crate) fn self_reads_as_the_impl_target_at_every_site() {
+    let src = concat!(
+        "export struct Point as\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "export impl Point as\n",
+        "    function length(self): number\n",
+        "        return self.x\n",
+        "    end\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let at = |printed: &str| name_self_receiver(&format!("```alloy\n{printed}\n```"), doc, 6, 15);
+    let named = Some("```alloy\nself: Point\n```".to_string());
+    assert_eq!(at("local self: Readonly<Point>"), named);
+    assert_eq!(at("self"), named);
+    assert_eq!(at("local self: t1"), named);
+    assert_eq!(at("local self: {\n    read x: number\n}"), named);
+
+    // The answer the head already writes stays, and a signature that
+    // holds `self` is nobody's receiver.
+    assert_eq!(at("self: Point"), None);
+    assert_eq!(at("function Point.length(self: Point): number"), None);
+}

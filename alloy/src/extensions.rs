@@ -95,10 +95,11 @@ fn impls(src: &str, own: bool) -> Vec<Extension> {
             continue;
         }
 
-        // A trait's own methods come from the trait, and a generic
-        // target's signatures name parameters the declaring file has
-        // not got. Neither travels to the declaring file.
-        if own && (i.trait_name.is_some() || i.generics.is_some() || target.contains('.')) {
+        // A generic target's signatures name parameters the declaring
+        // file has not got, so they do not travel to it. A trait impl
+        // writes its methods on the same table a plain impl does, so
+        // those travel the way a plain impl's do.
+        if own && (i.generics.is_some() || target.contains('.')) {
             continue;
         }
 
@@ -377,6 +378,26 @@ mod tests {
             params: String::new(),
             ret: ret.map(str::to_string),
         }
+    }
+
+    /// An `impl Trait for S` on a struct another file declares writes
+    /// the methods on the same table a plain `impl S` does, so the
+    /// declaring file's check artifact has to declare them too.
+    #[test]
+    fn a_trait_impl_on_an_imported_struct_travels() {
+        let src = "import { Box, Area } from \"./shapes\"\n\nimpl Area for Box as\n    function area(self): number\n        return self.w * self.h\n    end\nend\n";
+        let found = struct_impls(src);
+
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].target, "Box");
+        assert_eq!(found[0].name, "area");
+        assert_eq!(found[0].ret.as_deref(), Some("number"));
+        assert!(!found[0].is_static);
+
+        // A generic target's signatures name parameters the declaring
+        // file has not got, so they stay here.
+        let generic = "import { Bag } from \"./bag\"\n\nimpl Bag<T> as\n    function first(self): T\n        return self.items[1]\n    end\nend\n";
+        assert!(struct_impls(generic).is_empty());
     }
 
     #[test]

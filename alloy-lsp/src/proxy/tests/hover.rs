@@ -1,4 +1,4 @@
-use super::super::hover::shadows_an_import;
+use super::super::hover::{shadow_home, shadows_an_import};
 use super::super::*;
 use super::support::one_file;
 
@@ -824,4 +824,16 @@ fn a_declared_generic_keeps_its_signature() {
     let doc = st.docs.get(uri).expect("doc");
     let printed = "```luau\nlocal function first<T>(xs: { T }): T\n```";
     assert_eq!(declared_signature(printed, doc, 0, 21), None);
+}
+
+/// A local is bound above its use. The emit of an `enum` at the top of
+/// the file binds `v` in a function of its own; the nearest line above
+/// the hover wins over the first line of the file.
+#[test]
+pub(crate) fn a_hover_home_takes_the_nearest_line_above() {
+    let shadow =
+        "function Light.is(v) return v end\nlocal v = Vec2({ x = 1 })\nlocal s = Pair({ a = 1 })\n";
+    assert_eq!(shadow_home(shadow, 2, "v"), Some((1, 6)));
+    assert_eq!(shadow_home(shadow, 0, "s"), Some((2, 6)));
+    assert_eq!(shadow_home(shadow, 2, "zz"), None);
 }

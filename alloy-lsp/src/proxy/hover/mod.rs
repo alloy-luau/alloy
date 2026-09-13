@@ -420,21 +420,21 @@ impl State {
 
 /// Maps positions and ranges in request params into the shadow.
 /// The shadow position of `word` for a hover: the same line first, then
-/// the first line that holds it as a whole word.
+/// the nearest line above that holds it as a whole word, then any line
+/// below. A local is bound above its use; the emit of an `enum` at the
+/// top of the file binds `v` too, and the nearest wins over the first.
 pub(crate) fn shadow_home(shadow: &str, line: u32, word: &str) -> Option<(u32, u32)> {
     let lines: Vec<&str> = shadow.lines().collect();
-    let same = lines.get(line as usize).copied().unwrap_or("");
+    let line = line as usize;
+    let above = (0..=line.min(lines.len().saturating_sub(1))).rev();
+    let below = line + 1..lines.len();
 
-    let (l, text, byte) = keywords::find_word(same, word)
-        .map(|c| (line, same, c))
-        .or_else(|| {
-            lines
-                .iter()
-                .enumerate()
-                .find_map(|(i, l)| keywords::find_word(l, word).map(|c| (i as u32, *l, c)))
-        })?;
+    above.chain(below).find_map(|i| {
+        let text = lines[i];
+        let byte = keywords::find_word(text, word)?;
 
-    Some((l, text[..byte].chars().count() as u32))
+        Some((i as u32, text[..byte].chars().count() as u32))
+    })
 }
 
 /// Whether the file binds the name itself: a declaration, a local, a

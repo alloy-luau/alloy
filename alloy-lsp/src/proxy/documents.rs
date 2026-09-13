@@ -280,15 +280,7 @@ impl Server {
         };
 
         if let Some(path) = uri_to_path(uri) {
-            options.import_types = alloy::modules::import_types_for_file(&path, text);
-            options.import_enums = alloy::modules::import_enums_for_file(&path, text);
-            options.import_privates = alloy::modules::import_privates_for_file(&path, text);
-            options.import_attributes = alloy::modules::import_attributes_for_file(&path, text);
-            options.import_result_asyncs =
-                alloy::modules::import_result_asyncs_for_file(&path, text);
-            options.import_trait_defaults =
-                alloy::modules::import_trait_defaults_for_file(&path, text);
-            options.plain_modules = alloy::modules::plain_modules_for_file(&path, text);
+            options = options.imports_for_file(&path, text);
         }
 
         (options, jsx, ingots)
@@ -465,16 +457,7 @@ impl Server {
         doc.version = version;
 
         if let Some(path) = uri_to_path(uri) {
-            options.import_types = alloy::modules::import_types_for_file(&path, &doc.source);
-            options.import_enums = alloy::modules::import_enums_for_file(&path, &doc.source);
-            options.import_privates = alloy::modules::import_privates_for_file(&path, &doc.source);
-            options.import_attributes =
-                alloy::modules::import_attributes_for_file(&path, &doc.source);
-            options.import_result_asyncs =
-                alloy::modules::import_result_asyncs_for_file(&path, &doc.source);
-            options.import_trait_defaults =
-                alloy::modules::import_trait_defaults_for_file(&path, &doc.source);
-            options.plain_modules = alloy::modules::plain_modules_for_file(&path, &doc.source);
+            options = options.imports_for_file(&path, &doc.source);
         }
 
         let had_exports = export_surface(doc);

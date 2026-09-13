@@ -76,6 +76,34 @@ fn a_plain_luau_module_is_not_checked_for_names() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A `.luau` module with no `return` gives the import nothing, and an
+/// `export type` adds no value there. `alloy check` reports it the way
+/// the Luau checker does, so the two runs agree.
+#[test]
+fn a_luau_module_with_no_return_is_an_error() {
+    let dir = scratch("noreturn");
+    std::fs::write(
+        dir.join("mod2.luau"),
+        "export type Config = { name: string }\n",
+    )
+    .unwrap();
+    let source = "import { Config } from \"./mod2\"\n";
+    let main = dir.join("main.aly");
+    std::fs::write(&main, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("main.aly"), &main, &[]);
+    let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+
+    assert_eq!(problems.len(), 1, "{messages:?}");
+    assert_eq!(problems[0].kind, "UnknownModule");
+    assert_eq!(
+        problems[0].message,
+        "\"./mod2\" returns nothing to import; add a `return`"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_default_import_needs_a_default_export() {
     let dir = scratch("default");

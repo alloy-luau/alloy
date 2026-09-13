@@ -790,8 +790,13 @@ pub const NO_MODULE_RETURN: &str = "Module does not return exactly 1 value";
 
 /// The report for an import of a module that returns nothing. Luau
 /// takes exactly one value from a module, so a file with no `return`
-/// and no `export` gives the import nothing.
-pub fn no_module_return_message(spec: &str) -> String {
+/// and no `export` gives the import nothing. A plain `.luau` file has
+/// no export table, so only a `return` answers there.
+pub fn no_module_return_message(spec: &str, luau: bool) -> String {
+    if luau {
+        return format!("\"{spec}\" returns nothing to import; add a `return`");
+    }
+
     format!("\"{spec}\" returns nothing to import; add a `return` or an `export`")
 }
 

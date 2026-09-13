@@ -664,7 +664,18 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
                 continue;
             };
 
-            ("UnknownModule".to_string(), no_module_return_message(&spec))
+            // A plain `.luau` module has no export table, so its
+            // report asks for a `return` alone; the compiler's own
+            // check words it the same way.
+            let from = root.join(&config.build.input).join(&f.rel);
+            let luau = crate::modules::resolve(&spec, &from, &module_aliases)
+                .and_then(|p| p.extension().map(|e| e == "luau" || e == "lua"))
+                .unwrap_or(false);
+
+            (
+                "UnknownModule".to_string(),
+                no_module_return_message(&spec, luau),
+            )
         } else {
             (kind.to_string(), message.to_string())
         };

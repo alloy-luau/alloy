@@ -1739,6 +1739,26 @@ pub fn import_problems(
             type_only_names,
         } = surface;
 
+        // Luau takes one value from a module, so a `.luau` or `.lua`
+        // file with no `return` gives the import nothing. An
+        // `export type` is not a value there. The Luau checker says
+        // the same, and `alloy check` has to say it too.
+        let plain_luau = target
+            .as_ref()
+            .and_then(|t| t.extension())
+            .is_some_and(|e| e == "luau" || e == "lua");
+
+        if plain_luau && !returns {
+            out.push(ImportProblem {
+                start: path_start,
+                end: path_end,
+                kind: "UnknownModule",
+                message: crate::typecheck::no_module_return_message(&spec, true),
+            });
+
+            continue;
+        }
+
         // A module that returns a value names one value, and an
         // `export` names another. The reader cannot tell which one an
         // import binds, so the module has to pick.

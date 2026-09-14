@@ -962,3 +962,26 @@ pub(crate) fn a_remote_typo_keeps_its_suggestion_and_its_fix() {
         }])
     );
 }
+
+/// A markup error stops the compile, and the stop carried no code:
+/// the editor showed the message with no link to the book section.
+#[test]
+fn a_compile_stop_carries_its_book_code() {
+    let src = "struct RowProps as\n    item: string\nend\n\nlocal function Row(props: RowProps)\n    return (\n        <Row />\n    )\nend\n";
+    let st = super::support::files(&[("file:///t.alx", src)]);
+    let items = st.alloy_diagnostics("file:///t.alx");
+    let item = items
+        .iter()
+        .find(|d| {
+            d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("MarkupError"))
+        })
+        .expect("the markup error");
+    assert_eq!(item["code"], "3.13");
+    assert!(
+        item["codeDescription"]["href"]
+            .as_str()
+            .is_some_and(|h| !h.is_empty())
+    );
+}

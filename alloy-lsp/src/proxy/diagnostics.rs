@@ -90,7 +90,7 @@ impl State {
                     .unwrap_or(character + 1)
                     .max(character + 1)
             });
-            diagnostics.push(json!({
+            let mut item = json!({
                 "range": {
                     "start": { "line": line, "character": character },
                     "end": { "line": line, "character": end },
@@ -98,7 +98,18 @@ impl State {
                 "severity": 1,
                 "source": "Alloy",
                 "message": alloy::docs::labeled(&e.message),
-            }));
+            });
+
+            // The stop of a compile links to its book section the way
+            // a report of a finished compile does.
+            if let Some(code) = alloy::docs::code_for(&e.message)
+                && let Some(url) = alloy::docs::book_url(code)
+            {
+                item["code"] = json!(code);
+                item["codeDescription"] = json!({ "href": url });
+            }
+
+            diagnostics.push(item);
 
             return diagnostics;
         }

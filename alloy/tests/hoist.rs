@@ -81,6 +81,33 @@ fn a_macro_body_reads_the_table_at_each_call() {
     );
 }
 
+/// A `match` inside a function covers an enum declared below it, and
+/// a missing arm still reports.
+#[test]
+fn a_match_covers_an_enum_declared_below_it() {
+    const ENUM: &str = "enum Mood as\n    Happy,\n    Sad,\nend\n\nprint(describe(Mood.Happy))\n";
+    let full = format!(
+        "function describe(m: Mood): string\n    match m with\n        case Mood.Happy then return \"yay\"\n        case Mood.Sad then return \"aw\"\n    end\nend\n\n{ENUM}"
+    );
+    let out = compile(&full);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    let short = format!(
+        "function describe(m: Mood): string\n    match m with\n        case Mood.Happy then return \"yay\"\n    end\nend\n\n{ENUM}"
+    );
+    let messages: Vec<String> = compile(&short)
+        .diagnostics
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "this match is not exhaustive: `Mood` has no arm for `Sad`; add it or a `default` arm"
+        ]
+    );
+}
+
 #[test]
 fn a_top_level_use_above_the_declaration_reports() {
     let src = format!(

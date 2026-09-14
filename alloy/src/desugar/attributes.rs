@@ -812,6 +812,9 @@ impl<'s> Desugar<'s> {
                     }
                 },
 
+                // A function body reads an enum declared below it, and
+                // its `match` covers the variants before the
+                // declaration fills them.
                 Stmt::Enum(e) => {
                     let name = self.decl_name(e.name);
                     let variants: Vec<(String, usize)> = e
@@ -819,6 +822,7 @@ impl<'s> Desugar<'s> {
                         .iter()
                         .map(|v| (self.text_of(v.name).to_string(), v.payload.len()))
                         .collect();
+                    self.enums.insert(name.clone(), variants.clone());
                     self.enum_decls.insert(name, variants);
                 }
 

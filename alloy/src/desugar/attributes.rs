@@ -957,11 +957,18 @@ impl<'s> Desugar<'s> {
                         .iter()
                         .filter(|m| m.body.is_none())
                         .map(|m| {
-                            (
-                                self.text_of(m.name).to_string(),
-                                m.params.len(),
-                                signature_ret_type(self.text_of(m.signature)).map(str::to_string),
-                            )
+                            let ret = signature_ret_type(self.text_of(m.signature));
+                            // `async function f(self): T` answers with
+                            // `Future<T>`, the same as an `async
+                            // function` does, so the contract asks for
+                            // that.
+                            let ret = match (ret, m.is_async.is_some()) {
+                                (Some(t), true) => Some(format!("Future<{}>", t.trim())),
+
+                                (t, _) => t.map(str::to_string),
+                            };
+
+                            (self.text_of(m.name).to_string(), m.params.len(), ret)
                         })
                         .collect();
                     self.traits.insert(name.clone(), defaults);

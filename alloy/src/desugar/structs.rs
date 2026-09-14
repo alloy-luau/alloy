@@ -385,6 +385,16 @@ impl<'s> Desugar<'s> {
                         Some(f) => {
                             if let (Some(want), Some(t)) = (&ret, f.body.ret_type) {
                                 let got = self.text_of(t).trim().to_string();
+                                // An `async` impl of an `async`
+                                // signature settles with the type it
+                                // writes, so it answers `Future<T>`.
+                                let got = match f.body.is_async.is_some()
+                                    && crate::desugar::names_a_future(want)
+                                {
+                                    true => format!("Future<{got}>"),
+
+                                    false => got,
+                                };
 
                                 if !same_type_text(want, &got) {
                                     self.diagnose(
@@ -1197,6 +1207,30 @@ impl<'s> Desugar<'s> {
             })
             .filter(|r| !r.is_empty())
             .unwrap_or("()".to_string());
+        // The signature holds source text: an Alloy spelling such as
+        // `T[]` and an ambient std name both need the Luau form, the
+        // same as a parameter type does.
+        let ret = match ret.as_str() {
+            "()" => ret,
+
+            other => self.lower_type(other),
+        };
+        // `async function f(self): T` answers with `Future<T>`, as
+        // `alloy doc async` says for a function. A signature with no
+        // return type answers with `Future<nil>`.
+        let ret = match m.is_async.is_some() {
+            true => {
+                let inner = match ret.as_str() {
+                    "()" => "nil",
+
+                    other => other,
+                };
+
+                format!("{}.Future<{inner}>", self.std())
+            }
+
+            false => ret,
+        };
 
         format!("{mname}: ({}) -> {ret}", params.join(", "))
     }
@@ -2195,6 +2229,38 @@ mod tests {
         // The same type written with other spacing is the same type.
         let same = "trait Held as\n    function slot(self): Array<number>\nend\nstruct Bag as\n    n: number\nend\nimpl Held for Bag as\n    function slot(self): Array< number >\n        return Array.new()\n    end\nend\nprint(new Bag { n = 1 })\n";
         assert!(messages(same).is_empty(), "{:?}", messages(same));
+    }
+
+    /// `async function` is a trait signature too. The body reader used
+    /// to stop at the `async`, and the trait then wanted an `end`. The
+    /// signature answers with `Future<T>`, so an `async` impl satisfies
+    /// it and a plain one breaks the contract.
+    #[test]
+    fn a_trait_declares_an_async_signature() {
+        let decl = "trait Fetcher as\n    async function fetch(self): string\nend\n";
+
+        assert!(messages(decl).is_empty(), "{:?}", messages(decl));
+
+        let out = crate::compile(decl).unwrap();
+
+        assert!(
+            out.check
+                .contains("type Fetcher = { read fetch: (self: any) -> __alloy.Future<string> }"),
+            "{}",
+            out.check
+        );
+
+        let body = "\nstruct Remote as\n    url: string,\nend\n\nimpl Fetcher for Remote as\n    {}function fetch(self): string\n        return self.url\n    end\nend\n\nprint(new Remote { url = \"a\" })\n";
+        let good = format!("{decl}{}", body.replace("{}", "async "));
+
+        assert!(messages(&good).is_empty(), "{:?}", messages(&good));
+
+        let bad = format!("{decl}{}", body.replace("{}", ""));
+
+        assert_eq!(
+            messages(&bad),
+            vec!["the trait method `fetch` returns Future<string> in `Fetcher`, string here"]
+        );
     }
 
     /// The contract keys by the declared name. An import alias and a

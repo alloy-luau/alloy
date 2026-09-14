@@ -321,6 +321,9 @@ pub struct TraitDecl {
 #[derive(Debug)]
 pub struct TraitMethod {
     pub name: TokSpan,
+    /// The `async` word in front of `function`. The signature then
+    /// declares `Future<T>`, the same as an `async function` does.
+    pub is_async: Option<TokSpan>,
     /// The parameter list and return type, as a span from `(`.
     pub signature: TokSpan,
     pub params: Vec<Param>,

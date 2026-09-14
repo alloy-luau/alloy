@@ -290,12 +290,21 @@ impl<'a> Parser<'a> {
             // signatures read so far stay, and the rest of the file parses.
             let dedents = member_column.is_some_and(|c| self.column_at(self.pos) < c);
 
-            if self.body_ends_early() && (dedents || !self.at("function")) {
+            // `async function f(self): T` is a signature too: the
+            // answer it declares is `Future<T>`.
+            let heads = self.at("function") || (self.at("async") && self.text_at(1) == "function");
+
+            if self.body_ends_early() && (dedents || !heads) {
                 break;
             }
 
             let m_start = self.pos;
             member_column.get_or_insert_with(|| self.column_at(m_start));
+            let is_async = if self.at("async") && self.text_at(1) == "function" {
+                Some(TokSpan::new(self.bump(), self.pos))
+            } else {
+                None
+            };
             self.expect("function")?;
             let mname = self.expect_name()?;
             let sig_start = self.pos;
@@ -321,7 +330,7 @@ impl<'a> Parser<'a> {
                 self.expect_end(m_start)?;
 
                 Some(FunctionBody {
-                    is_async: None,
+                    is_async,
                     generics: None,
                     has_bounds: false,
                     params: Vec::new(),
@@ -336,6 +345,7 @@ impl<'a> Parser<'a> {
 
             methods.push(TraitMethod {
                 name: mname,
+                is_async,
                 signature,
                 params,
                 body,

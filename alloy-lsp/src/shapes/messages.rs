@@ -24,9 +24,9 @@ pub fn names_the_emit_key(message: &str, line: &str) -> bool {
     const OPENERS: [&str; 3] = ["does not have key '", "Key '", "Cannot add property '"];
 
     // `await` reads a Future's payload through `__value`, a key the
-    // type carries and no source writes. The report beside it already
-    // names what the reader wrote.
-    if message.contains("__value") && !holds_word(line, "__value") {
+    // type carries and no source writes. On an `await` line the report
+    // stays, and `rewrite_await` names what the reader wrote.
+    if message.contains("__value") && !holds_word(line, "__value") && !holds_word(line, "await") {
         return true;
     }
 

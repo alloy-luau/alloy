@@ -554,7 +554,14 @@ fn rewrite_await(message: &str, line: &str) -> Option<String> {
 
         tail.contains("the bound `Settled<").then_some(got)
     });
+    // The new solver reports the key alone: `Property '"__value"' does
+    // not exist on type 'number'`.
+    let key_of = message
+        .strip_prefix("Property '\"__value\"' does not exist on type '")
+        .or_else(|| message.strip_prefix("Key '__value' not found in table '"))
+        .and_then(|rest| rest.split('\'').next());
     let wanted = bound.is_some()
+        || key_of.is_some()
         || message.contains("'Awaitable<T>'")
         || message.contains("'Future<T>'")
         || message.contains("'Settled<");
@@ -563,7 +570,7 @@ fn rewrite_await(message: &str, line: &str) -> Option<String> {
         return None;
     }
 
-    let got = match bound {
+    let got = match bound.or(key_of) {
         Some(got) => got,
 
         None => {
@@ -2450,9 +2457,23 @@ end
     /// writes it, so the report beside the bound one goes.
     #[test]
     fn the_value_key_of_a_future_is_no_report() {
-        assert!(crate::shapes::names_the_emit_key(
+        // On an `await` line the report stays and reads as the await's.
+        assert!(!crate::shapes::names_the_emit_key(
             "Property '\"__value\"' does not exist on type 'number'",
             "local nope = await n"
+        ));
+        assert_eq!(
+            friendly_type_message(
+                "Property '\"__value\"' does not exist on type 'number'",
+                &crate::shapes::Known::default(),
+                Some("local nope = await n"),
+                0
+            ),
+            "`await` needs a Future; `number` is not one"
+        );
+        assert!(crate::shapes::names_the_emit_key(
+            "Property '\"__value\"' does not exist on type 'number'",
+            "local nope = n"
         ));
         assert!(!crate::shapes::names_the_emit_key(
             "Property '\"__value\"' does not exist on type 'number'",

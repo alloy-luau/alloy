@@ -1768,16 +1768,27 @@ struct Surface {
     /// file's check compiles the importer alone and would report
     /// nothing at all.
     broken: bool,
+    /// The module does not parse, and no report names an Alloy keyword.
+    /// A plain Luau file may name a local `impl`, which Alloy reserves;
+    /// that file still runs, so it is no broken import.
+    broken_as_luau: bool,
 }
 
 impl Surface {
     fn of(source: &str) -> Self {
         let returns = returns_value(source);
         let both = returns && exports_values(source);
+        // A parse that fails outright says nothing about the source, so
+        // it counts as broken under both readings.
+        let reports: Option<Vec<String>> = alloy_syntax::parse_lenient(source, Default::default())
+            .ok()
+            .map(|p| p.diagnostics.iter().map(|d| d.message.clone()).collect());
 
         Surface {
-            broken: alloy_syntax::parse_lenient(source, Default::default())
-                .map_or(true, |p| !p.diagnostics.is_empty()),
+            broken: reports.as_ref().is_none_or(|r| !r.is_empty()),
+            broken_as_luau: reports
+                .as_ref()
+                .is_none_or(|r| r.iter().any(|m| !m.contains("is a reserved word"))),
             names: exported_names(source),
             attributes: exported_attribute_decls(source)
                 .into_iter()
@@ -2014,21 +2025,34 @@ pub fn import_problems(
             keys,
             type_only_names,
             broken,
+            broken_as_luau,
         } = surface;
+        let name = target
+            .as_ref()
+            .map(|t| t.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // A `.d.aly`, a `.d.luau` and a `.d.lua` parse under their own
+        // options, so the plain parse says nothing about them.
+        let definitions =
+            name.ends_with(".d.aly") || name.ends_with(".d.luau") || name.ends_with(".d.lua");
+        // A `.luau` or `.lua` file that does not parse gives the import
+        // nothing either, and the no-return rule below would name the
+        // missing `return` instead of the real fault.
+        let plain_luau = name.ends_with(".luau") || name.ends_with(".lua");
 
         // A module that does not parse exports nothing this file can
         // read, so every check below would report the whole list of its
         // names as missing. The file it names is the one to fix.
         // A `.alx` holds markup, which the plain parser has no reading
-        // for, and a `.d.aly` parses under its own options. The surface
-        // reader takes both apart another way.
-        let plain_alloy = target.as_ref().is_some_and(|t| {
-            let name = t.to_string_lossy();
+        // for. The surface reader takes it apart another way.
+        let plain_alloy = alloy_module && name.ends_with(".aly") && !definitions;
+        let broken_module = match plain_luau {
+            true => broken_as_luau,
 
-            name.ends_with(".aly") && !name.ends_with(".d.aly")
-        });
+            false => broken && plain_alloy,
+        };
 
-        if broken && alloy_module && plain_alloy {
+        if broken_module && !definitions {
             out.push(ImportProblem {
                 start: path_start,
                 end: path_end,
@@ -2043,11 +2067,6 @@ pub fn import_problems(
         // file with no `return` gives the import nothing. An
         // `export type` is not a value there. The Luau checker says
         // the same, and `alloy check` has to say it too.
-        let plain_luau = target
-            .as_ref()
-            .and_then(|t| t.extension())
-            .is_some_and(|e| e == "luau" || e == "lua");
-
         if plain_luau && !returns {
             out.push(ImportProblem {
                 start: path_start,
@@ -2329,6 +2348,46 @@ mod tests {
         std::fs::write(
             dir.join("src/widget.aly"),
             "export struct Widget as\n    read label: string\nend\n",
+        )
+        .expect("module");
+        assert!(
+            import_problems(src, Path::new("src/main.aly"), &from, &[]).is_empty(),
+            "{:?}",
+            import_problems(src, Path::new("src/main.aly"), &from, &[])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `.luau` module that does not parse reads as one with no
+    /// `return`, since a `return` inside the unclosed body still stands.
+    /// The fault is the parse, and the report names it.
+    #[test]
+    fn an_import_of_a_luau_module_that_does_not_parse_says_so() {
+        let dir = std::env::temp_dir().join(format!("alloy-broken-luau-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/helper.luau"),
+            "local function f(\n    return 1\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let src = "import { f } from \"./helper.luau\"\n\nprint(f())\n";
+        let problems = import_problems(src, Path::new("src/main.aly"), &from, &[]);
+        let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec!["\"./helper.luau\" does not parse; check it first"]
+        );
+        assert_eq!(problems[0].kind, "ImportError");
+
+        // A name Alloy reserves is a name Luau allows, so the module
+        // still runs and the import is clean.
+        std::fs::write(
+            dir.join("src/helper.luau"),
+            "local impl = 1\nreturn { f = function() return impl end }\n",
         )
         .expect("module");
         assert!(

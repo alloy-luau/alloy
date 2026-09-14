@@ -18,6 +18,7 @@ type Pick = fn(&str) -> bool;
 /// The groups of the index, by key shape.
 const GROUPS: &[(&str, Pick)] = &[
     ("Articles", |k| k.starts_with("topic:")),
+    ("Lints", |k| k.starts_with(ALX_PREFIX)),
     ("Keywords", |k| {
         k.chars().all(|c| c.is_ascii_lowercase()) && !k.is_empty()
     }),
@@ -69,6 +70,31 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     }
 }
 
+/// The page of one lint, as Markdown: the name, the group, the level
+/// it starts at, the summary, and the detail. `alloy doc <lint>` renders
+/// it, and `--json` ships the same text.
+fn lint_markdown(l: &alloy::lint::LintInfo) -> String {
+    let level = match (l.default, l.group) {
+        // `print` is ordinary in Luau, so this one sits out of what
+        // `strict` raises.
+        _ if l.name == "print_debug" => "off until `[lint.rules]` names it",
+        (Level::Allow, Group::Pedantic) => {
+            "warn, from `[lint] strict = true`; off when the project turns strict off"
+        }
+        (Level::Allow, _) => "off until `[lint.rules]` names it",
+        (Level::Warn, _) => "warn",
+        (Level::Deny, _) => "deny",
+    };
+
+    format!(
+        "**{}**\nGroup: {}. Default: {level}\n\n{}\n\n{}",
+        l.name,
+        l.group.name(),
+        l.summary,
+        l.detail
+    )
+}
+
 /// Every entry and every lint as JSON, for the docs site.
 fn json() -> String {
     let entries: Vec<serde_json::Value> = TABLE
@@ -95,12 +121,29 @@ fn json() -> String {
 
             serde_json::json!({
                 "key": key,
+                "title": key,
                 "group": group,
                 "markdown": text,
                 "signature": docs::type_signature(key),
                 "members": members,
             })
         })
+        .collect();
+
+    // A lint is a page of its own, the one `alloy doc <lint>` prints.
+    // The table carries the markup lints already, under `alx.`.
+    let entries: Vec<serde_json::Value> = entries
+        .into_iter()
+        .chain(LINTS.iter().map(|l| {
+            serde_json::json!({
+                "key": l.name,
+                "title": l.name,
+                "group": "Lints",
+                "markdown": lint_markdown(l),
+                "signature": serde_json::Value::Null,
+                "members": Vec::<serde_json::Value>::new(),
+            })
+        }))
         .collect();
     let lints: Vec<serde_json::Value> = LINTS
         .iter()
@@ -150,26 +193,7 @@ fn page(topic: &str, color: bool) -> Option<String> {
     }
 
     if let Some(l) = LINTS.iter().find(|l| l.name == topic) {
-        let level = match (l.default, l.group) {
-            // `print` is ordinary in Luau, so this one sits out of what
-            // `strict` raises.
-            _ if l.name == "print_debug" => "off until `[lint.rules]` names it",
-            (Level::Allow, Group::Pedantic) => {
-                "warn, from `[lint] strict = true`; off when the project turns strict off"
-            }
-            (Level::Allow, _) => "off until `[lint.rules]` names it",
-            (Level::Warn, _) => "warn",
-            (Level::Deny, _) => "deny",
-        };
-        let body = format!(
-            "**{}**\nGroup: {}. Default: {level}\n\n{}\n\n{}",
-            l.name,
-            l.group.name(),
-            l.summary,
-            l.detail
-        );
-
-        return Some(render(&body, color));
+        return Some(render(&lint_markdown(l), color));
     }
 
     // An ingot's lint, registered by the nearest project's ingots.
@@ -553,4 +577,54 @@ fn wrap_prose(text: &str, width: usize) -> String {
     out.push_str(&line);
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The docs site reads the JSON, so every lint the CLI lists needs
+    /// a page in it. The table carries the markup lints under `alx.`,
+    /// and `LINTS` carries the rest.
+    #[test]
+    fn the_json_holds_a_page_for_every_lint() {
+        let value: serde_json::Value = serde_json::from_str(&json()).expect("json");
+        let entries = value["entries"].as_array().expect("entries");
+        let keys: Vec<&str> = entries.iter().filter_map(|e| e["key"].as_str()).collect();
+
+        // Every name `alloy lint --list` prints, in the shape it prints
+        // it: a lint of `LINTS` by its name, a markup lint under `alx.`.
+        for l in LINTS {
+            let entry = entries
+                .iter()
+                .find(|e| e["key"] == l.name)
+                .unwrap_or_else(|| panic!("no entry for lint `{}`", l.name));
+
+            assert_eq!(entry["group"], "Lints", "{}", l.name);
+            assert_eq!(entry["title"], l.name, "{}", l.name);
+            assert_eq!(entry["markdown"], lint_markdown(l), "{}", l.name);
+        }
+
+        for l in ALX_LINTS {
+            let key = format!("{ALX_PREFIX}{}", l.name);
+            let entry = entries
+                .iter()
+                .find(|e| e["key"] == key)
+                .unwrap_or_else(|| panic!("no entry for lint `{key}`"));
+
+            assert_eq!(entry["group"], "Lints", "{key}");
+        }
+
+        // No lint is filed under `Other`.
+        assert!(
+            !entries.iter().any(|e| e["group"] == "Other"),
+            "{:?}",
+            entries
+                .iter()
+                .filter(|e| e["group"] == "Other")
+                .map(|e| e["key"].clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(keys.contains(&"unused_variable"), "{keys:?}");
+    }
 }

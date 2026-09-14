@@ -12,13 +12,15 @@ impl State {
     }
 
     /// The mirror path of a real path: the same place under the mirror,
-    /// with an Alloy extension swapped to Luau. A path outside the root
-    /// goes under `_outside`.
+    /// with an Alloy extension swapped to Luau. A path a few folders
+    /// above the root keeps its place above the mirror, so a require
+    /// into another project resolves there; one further out goes under
+    /// `_outside`.
     pub(crate) fn mirror_path(&self, real: &Path) -> PathBuf {
         let real = normalize(real);
         let root = self.root.as_deref().map(normalize);
-        let rel = match root.as_deref().and_then(|r| real.strip_prefix(r).ok()) {
-            Some(rel) => rel.to_path_buf(),
+        let rel = match root.as_deref().and_then(|r| climb(r, &real)) {
+            Some(rel) => rel,
 
             None => {
                 let mut p = PathBuf::from("_outside");
@@ -61,19 +63,25 @@ impl State {
             name
         };
 
-        self.mirror.join(rel.with_file_name(swapped))
+        normalize(&self.mirror.join(rel.with_file_name(swapped)))
     }
 
     /// The real path of a mirror path, for a plain file. An Alloy file
     /// resolves through `shadows` first, since its extension changed.
     pub(crate) fn real_path(&self, mirror: &Path) -> Option<PathBuf> {
-        let rel = mirror.strip_prefix(&self.mirror).ok()?;
-
-        if let Ok(outside) = rel.strip_prefix("_outside") {
+        if let Ok(rel) = mirror.strip_prefix(&self.mirror)
+            && let Ok(outside) = rel.strip_prefix("_outside")
+        {
             return Some(outside_path(outside));
         }
 
-        Some(self.root.as_deref()?.join(rel))
+        if !mirror.starts_with(mirror_base(&self.mirror)) {
+            return None;
+        }
+
+        let rel = climb(&self.mirror, mirror)?;
+
+        Some(normalize(&self.root.as_deref()?.join(rel)))
     }
 
     /// The URI the child sees for a real URI.
@@ -617,6 +625,24 @@ impl Server {
 
         if !input.starts_with(normalize(&root)) && input.is_dir() {
             walk(&input, out.as_deref(), &mut files, &mut plain);
+        }
+
+        // A project an import leads into gets its shadows too: the
+        // importer's require points into it, and the child resolves a
+        // require against the files that are there.
+        // ponytail: the file poll watches the root alone, so an edit of
+        // a dependency on disk waits for the next scan.
+        for dep in config
+            .as_ref()
+            .map(|c| alloy::build::dependency_inputs(&root, c))
+            .unwrap_or_default()
+        {
+            let dep_out = Config::find(&dep).and_then(|p| {
+                let c = Config::load(&p).ok()?;
+
+                Some(p.parent()?.join(&c.build.out))
+            });
+            walk(&dep, dep_out.as_deref(), &mut files, &mut plain);
         }
 
         files.sort();
@@ -1227,8 +1253,50 @@ pub fn root_key(root: Option<&Path>) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// How many folders above the root the mirror keeps: a dependency at
+/// `../../shared` stays inside the mirror's own directory.
+// ponytail: a fixed depth; a project four folders further out falls
+// under `_outside`, where no require reaches it.
+const ABOVE: usize = 4;
+
 pub(crate) fn mirror_dir(root: Option<&Path>) -> PathBuf {
-    std::env::temp_dir().join("alloy-lsp").join(root_key(root))
+    let mut dir = std::env::temp_dir().join("alloy-lsp").join(root_key(root));
+
+    for _ in 0..ABOVE {
+        dir.push("up");
+    }
+
+    dir.join("root")
+}
+
+/// The directory that holds the whole mirror, the folders above the
+/// root included.
+pub(crate) fn mirror_base(mirror: &Path) -> &Path {
+    mirror.ancestors().nth(ABOVE + 1).unwrap_or(mirror)
+}
+
+/// `path` relative to the folder `base`, with at most `ABOVE` leading
+/// `..`; `None` further out, or on another drive.
+fn climb(base: &Path, path: &Path) -> Option<PathBuf> {
+    let base: Vec<_> = base.components().collect();
+    let path: Vec<_> = path.components().collect();
+    let common = base.iter().zip(&path).take_while(|(a, b)| a == b).count();
+
+    if common == 0 || base.len() - common > ABOVE {
+        return None;
+    }
+
+    let mut out = PathBuf::new();
+
+    for _ in common..base.len() {
+        out.push("..");
+    }
+
+    for c in &path[common..] {
+        out.push(c);
+    }
+
+    Some(out)
 }
 
 /// Moves every URI in a message from the workspace into the mirror.
@@ -1478,6 +1546,28 @@ pub(crate) fn strict_config(path: &Path, root: &Path, text: String) -> String {
 
         _ => text,
     }
+}
+
+/// `to` as a require path relative to the folder `from`, both
+/// absolute: `..` for each folder of `from` past the common part, then
+/// the rest of `to`, and `./` when nothing climbs.
+pub(crate) fn relative(from: &Path, to: &Path) -> String {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut out: Vec<String> = vec!["..".to_string(); from.len() - common];
+
+    if out.is_empty() {
+        out.push(".".to_string());
+    }
+
+    out.extend(
+        to[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+
+    out.join("/")
 }
 
 /// The real path a mirror `_outside` folder holds. On Windows the

@@ -48,8 +48,8 @@ use diagnostics::{
 #[allow(unused_imports)]
 use documents::{
     RUNTIME_ALIAS, UPDATE_IMPORTS, config_dir_from, export_surface, map_from_shadow,
-    map_into_shadow, map_uris_into_mirror, mirror_dir, mirror_luau_text, mirrored_sourcemap,
-    mount_alias_settings, normalize, project_aliases,
+    map_into_shadow, map_uris_into_mirror, mirror_base, mirror_dir, mirror_luau_text,
+    mirrored_sourcemap, mount_alias_settings, normalize, project_aliases, relative,
 };
 #[allow(unused_imports)]
 use hints::{

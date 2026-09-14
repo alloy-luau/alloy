@@ -136,7 +136,7 @@ impl Server {
                     });
                 let mut st = self.state.lock().expect("state");
                 st.mirror = mirror_dir(root.as_deref());
-                let _ = std::fs::remove_dir_all(&st.mirror);
+                let _ = std::fs::remove_dir_all(mirror_base(&st.mirror));
                 let _ = std::fs::create_dir_all(&st.mirror);
                 st.root = root;
                 st.initialize_id = message.get("id").map(id_key);

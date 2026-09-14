@@ -633,3 +633,65 @@ fn a_stray_end_leaves_the_rest_of_the_file_to_the_child() {
         out.diagnostics
     );
 }
+
+/// An import into another project: the emit writes the require relative
+/// to the source, so the dependency's shadow sits where that path names
+/// it, above the mirror's root, and the real path reads back from it.
+/// A path too far out still goes under `_outside`.
+#[test]
+fn a_dependency_shadow_sits_where_the_require_names_it() {
+    let dir = std::env::temp_dir().join(format!("alloy-dep-mirror-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = dir.join("ws/app");
+    let shared = dir.join("ws/shared");
+    std::fs::create_dir_all(shared.join("src")).expect("shared");
+    std::fs::write(
+        shared.join("src/util.aly"),
+        "export function double(n: number): number\n    return n * 2\nend\n",
+    )
+    .expect("util");
+
+    let st = State {
+        root: Some(app.clone()),
+        mirror: mirror_dir(Some(&app)),
+        ..State::default()
+    };
+    let main = st.mirror_path(&app.join("src/main.aly"));
+    let util = shared.join("src/util.aly");
+    let lands = normalize(
+        &main
+            .parent()
+            .expect("dir")
+            .join("../../shared/src/util.luau"),
+    );
+
+    assert_eq!(lands, st.mirror_path(&util));
+    assert!(lands.starts_with(mirror_base(&st.mirror)), "{lands:?}");
+    assert_eq!(
+        st.real_path(&lands),
+        Some(normalize(&util.with_extension("luau")))
+    );
+    assert_eq!(
+        st.real_path(&st.mirror_path(&app.join("src/main.aly"))),
+        Some(normalize(&app.join("src/main.luau")))
+    );
+
+    // Five folders up is too far: a root that deep keeps such a file
+    // under `_outside`.
+    let deep = State {
+        root: Some(dir.join("a/b/c/d/e/app")),
+        mirror: mirror_dir(Some(&dir.join("a/b/c/d/e/app"))),
+        ..State::default()
+    };
+    let far = dir.join("x.aly");
+    assert!(
+        deep.mirror_path(&far)
+            .starts_with(deep.mirror.join("_outside"))
+    );
+    assert_eq!(
+        deep.real_path(&deep.mirror_path(&far)),
+        Some(normalize(&far.with_extension("luau")))
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

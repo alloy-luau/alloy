@@ -2293,6 +2293,33 @@ pub(crate) fn an_attribute_contract_lists_its_own_words() {
     assert!(declares_a_name_at("local function |", 15));
 }
 
+/// An enum a file reads as a type and as a value: the report on the
+/// annotation offers the value form, which serves the type too, so one
+/// fix resolves the file.
+#[test]
+fn a_name_read_as_a_member_takes_the_value_import() {
+    let st = super::support::files(&[
+        (
+            "file:///defs.aly",
+            "export enum Status as\n    Ok,\n    Bad(string)\nend\n",
+        ),
+        (
+            "file:///use.aly",
+            "local function st(): Status\n    return Status.Ok\nend\n",
+        ),
+    ]);
+    let report = json!({
+        "message": "TypeError: Unknown type 'Status'",
+        "range": { "start": { "line": 0, "character": 21 }, "end": { "line": 0, "character": 27 } },
+    });
+    let actions = st.import_actions("file:///use.aly", &[report]);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"]["file:///use.aly"][0]["newText"],
+        json!("import { Status } from \"./defs\"\n")
+    );
+}
+
 /// `Unknown type 'Vec2'` where another module exports `Vec2`: the
 /// quick fix writes the import line the completion list would insert.
 #[test]

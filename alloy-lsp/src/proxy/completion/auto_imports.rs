@@ -65,9 +65,10 @@ impl State {
                 continue;
             };
             // A struct is a value and a type. A name an annotation
-            // alone uses imports as a type; a `new Name` in the file
-            // wants the value, which is the type too.
-            let as_type = message.contains("Unknown type '") && !constructs(&doc.source, name);
+            // alone uses imports as a type; a `new Name`, a `Name.`, or
+            // a `Name(` in the file wants the value, which is the type
+            // too, so one fix resolves the file.
+            let as_type = message.contains("Unknown type '") && !uses_as_value(&doc.source, name);
             let offers =
                 imports::auto_import_candidates(&doc.source, &path, &files, name, &bound, &aliases);
 
@@ -347,20 +348,43 @@ fn unresolved_name(message: &str) -> Option<&str> {
     rest.split_once('\'').map(|(name, _)| name)
 }
 
-/// Whether a source writes `new Name`: the name is then a value the
-/// file reads, not a type alone.
-fn constructs(src: &str, name: &str) -> bool {
-    src.match_indices("new ").any(|(i, _)| {
-        let word = |c: char| c.is_alphanumeric() || c == '_';
-        let rest = src[i + "new ".len()..].trim_start();
+/// Whether a source reads `Name` as a value: `new Name`, a member
+/// `Name.x`, or a call `Name(`. A type alone stands in none of them.
+fn uses_as_value(src: &str, name: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
 
-        !src[..i].ends_with(word) && rest.starts_with(name) && !rest[name.len()..].starts_with(word)
+    src.match_indices(name).any(|(i, _)| {
+        let before = &src[..i];
+        let after = &src[i + name.len()..];
+
+        if before.ends_with(word) || after.starts_with(word) {
+            return false;
+        }
+
+        after.starts_with('.') || after.starts_with('(') || {
+            let head = before.trim_end();
+
+            head.ends_with("new") && !head[..head.len() - 3].ends_with(word)
+        }
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::unresolved_name;
+    use super::{unresolved_name, uses_as_value};
+
+    /// A member, a call, and a `new` read the value; an annotation
+    /// alone does not, and a longer name is another name.
+    #[test]
+    fn a_value_use_is_a_member_a_call_or_a_new() {
+        assert!(uses_as_value("return Status.Ok\n", "Status"));
+        assert!(uses_as_value("local s = Status(1)\n", "Status"));
+        assert!(uses_as_value("local p = new Point { x = 1 }\n", "Point"));
+        assert!(!uses_as_value(
+            "local s: Status = x\nlocal t = OtherStatus.Kind\n",
+            "Status"
+        ));
+    }
 
     #[test]
     fn an_unresolved_report_names_what_to_import() {

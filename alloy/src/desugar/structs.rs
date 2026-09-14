@@ -531,7 +531,45 @@ impl<'s> Desugar<'s> {
     the header carries the tables and the `end` line carries the type and
     the derives. A `.d.aly` keeps only the type.
     */
+    /// The wire widths on the fields of a struct. A field packs at one
+    /// width, so a second one went in silence: the report names the
+    /// width already on the field.
+    pub(crate) fn check_field_widths(&mut self, st: &StructDecl) {
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+
+        for f in &st.fields {
+            let widths: Vec<(TokSpan, String)> = f
+                .attributes
+                .iter()
+                .filter_map(|a| {
+                    let name = a.name?;
+                    let word = self.text_of(name).to_string();
+
+                    WIRE_WIDTHS
+                        .contains(&word.as_str())
+                        .then_some((a.span, word))
+                })
+                .collect();
+            let Some((_, first)) = widths.first() else {
+                continue;
+            };
+            let fname = self.text_of(f.name).to_string();
+
+            for (span, _) in widths.iter().skip(1) {
+                hits.push((
+                    *span,
+                    format!("`{fname}` takes one wire width; `@{first}` is already on it"),
+                ));
+            }
+        }
+
+        for (span, message) in hits {
+            self.diagnose(span, &message);
+        }
+    }
+
     pub(crate) fn struct_decl(&mut self, st: &StructDecl) {
+        self.check_field_widths(st);
         let name = self.decl_name(st.name);
         let start = self.byte_start(st.span);
         let end_tok = self.toks[st.span.end as usize - 1];

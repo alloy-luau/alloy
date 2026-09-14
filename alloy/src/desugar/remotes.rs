@@ -8,6 +8,29 @@ use super::*;
 /// The number widths a parameter or a field may carry.
 pub const WIRE_WIDTHS: &[&str] = &["u8", "u16", "u32", "i8", "i16", "i32", "f32", "f64"];
 
+/// Every wire width written in a run of source, each with the byte it
+/// starts at. A remote parameter carries its attributes as text in front
+/// of the name, so `@u8 @u16 x` reads as two widths here.
+fn widths_in(gap: &str) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+
+    while let Some(i) = gap[at..].find('@') {
+        let start = at + i;
+        let word: String = gap[start + 1..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        at = start + 1 + word.len();
+
+        if WIRE_WIDTHS.contains(&word.as_str()) {
+            out.push((start as u32, word));
+        }
+    }
+
+    out
+}
+
 /// One node of a wire layout: how a value packs.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Wire {
@@ -356,6 +379,7 @@ impl<'s> Desugar<'s> {
         let mut from = self.byte_end(r.name);
 
         for p in &r.params {
+            let gap_at = from;
             let gap = self.src[from as usize..self.byte_start(p.name) as usize].to_string();
             from = self.byte_end(p.name);
             let width: Option<String> = gap.find('@').map(|at| {
@@ -364,6 +388,20 @@ impl<'s> Desugar<'s> {
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
                     .collect()
             });
+            // `@u8 @u16 x`: the first width packed and the second went
+            // in silence. One report at each width after the first.
+            let written = widths_in(&gap);
+
+            for (at, w) in written.iter().skip(1) {
+                let pname = self.text_of(p.name).to_string();
+                let first = &written[0].1;
+                let start = gap_at + at;
+                self.diagnostics.push(Diagnostic {
+                    start,
+                    end: start + 1 + w.len() as u32,
+                    message: format!("`{pname}` takes one wire width; `@{first}` is already on it"),
+                });
+            }
             let ty =
                 p.ty.map(|t| self.text_of(t).trim().to_string())
                     .unwrap_or_else(|| "any".to_string());
@@ -709,6 +747,35 @@ remote Take(xs: string[]) from client
         assert!(!out.check.contains("string[]"), "{}", out.check);
         assert!(out.check.contains("__alloy.Array<string>"), "{}", out.check);
         assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
+    /// A parameter and a field pack at one width. Two widths merged in
+    /// silence: the first packed and the second went.
+    #[test]
+    fn one_width_holds_a_parameter_and_a_field() {
+        let src = "remote DoubleWidth(@u8 @u16 x: number) from client\n";
+        assert_eq!(
+            messages(src),
+            vec!["`x` takes one wire width; `@u8` is already on it"]
+        );
+
+        let field = "struct Hit as\n    @u8\n    @u16\n    hp: number\nend\nremote SendHit(h: Hit) from client\n";
+        assert_eq!(
+            messages(field),
+            vec!["`hp` takes one wire width; `@u8` is already on it"]
+        );
+
+        // One width is the form, and the wire keeps it.
+        let one = "remote OneWidth(@u8 x: number) from client\n";
+        assert!(messages(one).is_empty(), "{:?}", messages(one));
+        assert!(
+            crate::compile(one)
+                .unwrap()
+                .ship
+                .contains("wire = { \"u8\" }"),
+            "{}",
+            crate::compile(one).unwrap().ship
+        );
     }
 
     /// A `HashMap` keeps its methods on a metatable, which a remote

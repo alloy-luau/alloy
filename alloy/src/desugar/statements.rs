@@ -207,6 +207,23 @@ impl<'s> Desugar<'s> {
                 self.generate(start, "do ");
             }
 
+            // A plain `function f()` at the top level is a Luau global,
+            // and two files with one name would overwrite each other.
+            // The file owns the name, so it takes `local`; one the
+            // first line declared fills that slot as written.
+            if self.at_top_level()
+                && let Stmt::Function(f) = stmt
+                && f.path.len() == 1
+                && !f.exported
+                && !self.is_hoisted_fn(self.text_of(f.path[0]))
+            {
+                match f.attrs.is_empty() {
+                    true => self.generate(start, "local "),
+
+                    false => self.ns_force_local = true,
+                }
+            }
+
             self.stmt(stmt);
 
             if fenced {
@@ -376,7 +393,9 @@ impl<'s> Desugar<'s> {
 
             Stmt::LocalFunction(f) => self.declare_name(f.name),
 
-            Stmt::Function(f) if f.path.len() == 1 && f.exported => self.declare_name(f.path[0]),
+            Stmt::Function(f) if f.path.len() == 1 && (f.exported || self.at_top_level()) => {
+                self.declare_name(f.path[0]);
+            }
 
             Stmt::Enum(e) => {
                 self.declare_name(e.name);
@@ -695,6 +714,8 @@ impl<'s> Desugar<'s> {
             Stmt::Function(f) if self.table_self_type(f).is_some() => return true,
 
             Stmt::LocalFunction(f) if self.params_have_attrs(&f.body) => return true,
+
+            Stmt::LocalFunction(f) if self.is_hoisted_fn(self.text_of(f.name)) => return true,
 
             _ if self.options.check && self.holds_coalesce_if(s) => return true,
 
@@ -1137,44 +1158,36 @@ impl<'s> Desugar<'s> {
             Stmt::Function(f) if f.exported => {
                 let anchor = self.byte_start(stmt.span());
                 let name = self.text_of(f.path[0]).to_string();
-                self.exports.push((name.clone(), name));
-                // `export function f` becomes `local function f`.
-                let fn_tok = self.toks[stmt.span().start as usize + 1];
-                self.generate(anchor, "local ");
-                let rest = TokSpan::new(stmt.span().start as usize + 1, stmt.span().end as usize);
-                let _ = fn_tok;
+                self.exports.push((name.clone(), name.clone()));
 
-                if function_needs_rewrite(&f.body) {
-                    self.function_with_header(rest, &f.body);
-                } else {
-                    let children = function_children(&f.body);
-                    self.stitch(rest, &children, |d, child| match child {
-                        Child::Expr(e) => d.expr(e),
-
-                        Child::Block(b) => d.block(b),
-
-                        Child::Function(b) => d.function_block(b),
-                    });
+                // `export function f` becomes `local function f`; one
+                // the first line declared fills that slot as written.
+                if !self.is_hoisted_fn(&name) {
+                    self.generate(anchor, "local ");
                 }
+
+                let rest = TokSpan::new(stmt.span().start as usize + 1, stmt.span().end as usize);
+                self.function_rest(rest, &f.body);
             }
 
-            Stmt::LocalFunction(f) if f.exported => {
+            // `export local function f` drops the `export`. One the
+            // first line declared drops the `local` too: a second
+            // slot would leave the first one nil.
+            Stmt::LocalFunction(f)
+                if f.attrs.is_empty()
+                    && (f.exported || self.is_hoisted_fn(self.text_of(f.name))) =>
+            {
                 let name = self.text_of(f.name).to_string();
-                self.exports.push((name.clone(), name));
-                let rest = TokSpan::new(stmt.span().start as usize + 1, stmt.span().end as usize);
+                let hoisted = self.is_hoisted_fn(&name);
 
-                if function_needs_rewrite(&f.body) {
-                    self.function_with_header(rest, &f.body);
-                } else {
-                    let children = function_children(&f.body);
-                    self.stitch(rest, &children, |d, child| match child {
-                        Child::Expr(e) => d.expr(e),
-
-                        Child::Block(b) => d.block(b),
-
-                        Child::Function(b) => d.function_block(b),
-                    });
+                if f.exported {
+                    self.exports.push((name.clone(), name));
                 }
+
+                let skip = usize::from(f.exported) + usize::from(hoisted);
+                let rest =
+                    TokSpan::new(stmt.span().start as usize + skip, stmt.span().end as usize);
+                self.function_rest(rest, &f.body);
             }
 
             Stmt::Assign(a) if self.assign_needs_rewrite(a) => self.assign(a),
@@ -2040,6 +2053,23 @@ impl<'s> Desugar<'s> {
     ...)`, so the function returns a Future and the body runs on its own
     thread.
     */
+    /// A function from `function` on, when the head before it was
+    /// written or dropped already.
+    pub(crate) fn function_rest(&mut self, rest: TokSpan, body: &FunctionBody) {
+        if function_needs_rewrite(body) {
+            self.function_with_header(rest, body);
+        } else {
+            let children = function_children(body);
+            self.stitch(rest, &children, |d, child| match child {
+                Child::Expr(e) => d.expr(e),
+
+                Child::Block(b) => d.block(b),
+
+                Child::Function(b) => d.function_block(b),
+            });
+        }
+    }
+
     pub(crate) fn function_with_header(&mut self, span: TokSpan, body: &FunctionBody) {
         let start = self.byte_start(span);
         let end_tok = self.toks[span.end as usize - 1];

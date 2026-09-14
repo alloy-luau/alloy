@@ -1440,9 +1440,17 @@ impl<'s> Desugar<'s> {
         }
 
         // The declaration starts after the attributes.
-        let first_tok = attrs.last().map(|a| a.span.end).unwrap_or(span.start);
-        let decl_start = self.toks[first_tok as usize].start;
+        let mut first_tok = attrs.last().map(|a| a.span.end).unwrap_or(span.start);
         let fname = name.map(|n| self.text_of(n).to_string());
+        let hoisted = fname.as_deref().is_some_and(|f| self.is_hoisted_fn(f));
+
+        // The first line declared the name: a `local` here would open
+        // a second slot and leave the first one nil.
+        if hoisted && is_local {
+            first_tok += 1 + u32::from(exported);
+        }
+
+        let decl_start = self.toks[first_tok as usize].start;
 
         if is_test && !self.options.tests {
             self.ship_blanks.push((start, self.byte_end(span)));
@@ -1454,7 +1462,9 @@ impl<'s> Desugar<'s> {
             lead.push(' ');
         }
 
-        if ((is_test || exported) && !is_local) || std::mem::take(&mut self.ns_force_local) {
+        let forced = std::mem::take(&mut self.ns_force_local);
+
+        if (((is_test || exported) && !is_local) || forced) && !hoisted {
             lead.push_str("local ");
         }
 

@@ -20,7 +20,7 @@ fn a_function_body_reads_a_table_declared_below_it() {
     for text in [&out.ship, &out.check] {
         let first = text.lines().next().unwrap();
         assert!(
-            first.contains("local Point, Kind, Geo = {}, {}, {} function make(): Point"),
+            first.contains("local Point, Kind, Geo = {}, {}, {} local function make(): Point"),
             "{text}"
         );
         assert!(!text.contains("local Point = {}"), "{text}");
@@ -54,7 +54,7 @@ fn a_macro_body_reads_the_table_at_each_call() {
     let out = compile(&inside);
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
     assert!(
-        out.ship.contains("local Token = {} function build"),
+        out.ship.contains("local Token = {} local function build"),
         "{}",
         out.ship
     );
@@ -151,5 +151,77 @@ fn a_top_level_use_above_the_declaration_reports() {
             "`Kind` is declared below this use; move the enum above it",
             "`Geo` is declared below this use; move the namespace above it",
         ]
+    );
+}
+
+/// A plain `function f()` at the top level is a Luau global, so two
+/// files with one private name would overwrite each other. Each takes
+/// `local`, in both artifacts, with the lines where they were.
+#[test]
+fn a_top_level_function_is_a_local_of_its_file() {
+    let logger = "function tag(): string\n    return \"logger\"\nend\n\nexport function label(): string\n    return tag()\nend\n";
+    let main = "import { label } from \"./logger\"\n\nasync function tag(): string\n    return \"main\"\nend\n\nprint(tag(), label())\n";
+
+    for (src, head) in [
+        (logger, "local function tag(): string\n"),
+        (main, "\nlocal function tag(): "),
+    ] {
+        let out = compile(src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for text in [&out.ship, &out.check] {
+            assert!(text.contains(head), "{text}");
+            assert!(!text.contains("\nfunction tag"), "{text}");
+            assert_eq!(text.lines().count(), src.lines().count(), "{text}");
+        }
+    }
+}
+
+/// A function a body calls above its declaration: the first line
+/// declares the name, and `function f()` fills the slot. A bare
+/// `local f` types from the declaration; `f = function` would not.
+#[test]
+fn a_function_body_calls_a_function_declared_below_it() {
+    let src = "function use(): string\n    return tag(1) .. helper()\nend\n\nfunction tag(a: number): string\n    return `x{a}`\nend\n\nlocal function helper(): string\n    return \"h\"\nend\n\nprint(use())\n";
+    let out = compile(src);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    for text in [&out.ship, &out.check] {
+        let first = text.lines().next().unwrap();
+        assert!(
+            first.starts_with("local tag, helper local function use(): string"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\nfunction tag(a: number): string\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nfunction helper(): string\n"), "{text}");
+        assert!(!text.contains("local function helper"), "{text}");
+        assert_eq!(text.lines().count(), src.lines().count(), "{text}");
+    }
+}
+
+#[test]
+fn a_top_level_call_above_the_function_reports() {
+    let src =
+        "local t = { tag = 1 }\nprint(t, tag())\n\nfunction tag(): string\n    return \"x\"\nend\n";
+    let out = compile(src);
+    let hits: Vec<(usize, String)> = out
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                src[..d.start as usize].matches('\n').count() + 1,
+                d.message.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        hits,
+        vec![(
+            2,
+            "`tag` is declared below this use; move the function above it".to_string()
+        )]
     );
 }

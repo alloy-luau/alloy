@@ -1,6 +1,6 @@
 x ??= 1
 t.a.b ??= c
-t[f()] ??= x
+t[g()] ??= x
 get()[k] ??= v
 local function f()
 	cache[key] ??= compute()

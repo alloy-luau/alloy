@@ -1,6 +1,6 @@
 local __alloy = require("@alloy") -- `@cfg` on a function opens the body with the check.
 
-function save(player: Player)
+local function save(player: Player)
     if not (__alloy.cfg.server()) then error("`save` is @cfg(server) and cannot run here", 2) end print(player)
 end
 

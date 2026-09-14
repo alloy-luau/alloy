@@ -701,10 +701,16 @@ impl<'s> Scan<'s> {
                 _ => continue,
             };
 
+            // A top-level `local function` that a body above it calls:
+            // the emit declares the name on the first line, so the
+            // read counts, as it does for `function f`.
+            let from_start = is_function && !self.inside_any_block(i);
+
             for n in names {
                 let name = self.t(n);
+                let from = if from_start { 0 } else { n + 1 };
 
-                if name.starts_with('_') || self.read_after(n, n + 1) {
+                if name.starts_with('_') || self.read_after(n, from) {
                     continue;
                 }
 
@@ -806,6 +812,14 @@ impl<'s> Scan<'s> {
     }
 
     /// Whether token `j` sits inside a block one of `kinds` opens.
+    fn inside_any_block(&self, j: usize) -> bool {
+        self.st
+            .ends
+            .iter()
+            .enumerate()
+            .any(|(i, e)| e.is_some_and(|e| i < j && j < e))
+    }
+
     fn inside_block(&self, j: usize, kinds: &[&str]) -> bool {
         self.st
             .ends

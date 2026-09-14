@@ -15,7 +15,7 @@ local nested = __alloy.HashMap.new()
 local inferred: __alloy.HashMap<string, __alloy.Array<number>> = __alloy.HashMap.new()
 
 -- 4. a list the return type infers
-function make(): __alloy.HashMap<string, __alloy.Array<number>>
+local function make(): __alloy.HashMap<string, __alloy.Array<number>>
     return __alloy.HashMap.new()
 end
 

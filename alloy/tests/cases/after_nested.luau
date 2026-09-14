@@ -1,6 +1,6 @@
 local __alloy = require("@alloy") local armed = false
 
-function schedule(): __alloy.Future<nil> return (__alloy.future(function()
+local function schedule(): __alloy.Future<nil> return (__alloy.future(function()
     task.delay(1, function()
         task.delay(2, function() if armed then
             print("deep")

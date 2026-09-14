@@ -472,6 +472,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ship_blanks: Vec::new(),
         structs: HashSet::new(),
         hoisted: Vec::new(),
+        hoisted_fns: Vec::new(),
         struct_generics: HashMap::new(),
         structs_with_new: HashMap::new(),
         impl_target: None,
@@ -607,6 +608,14 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     if !d.hoisted.is_empty() {
         let tables = vec!["{}"; d.hoisted.len()].join(", ");
         let line = format!("local {} = {tables} ", d.hoisted.join(", "));
+        d.generate(insert_at, &line);
+    }
+
+    // A function reads the same way, and a bare `local f` is enough:
+    // the checker types the slot from the `function f()` that fills
+    // it, where `f = function` would leave it optional.
+    if !d.hoisted_fns.is_empty() {
+        let line = format!("local {} ", d.hoisted_fns.join(", "));
         d.generate(insert_at, &line);
     }
 
@@ -980,6 +989,9 @@ struct Desugar<'s> {
     /// The struct, enum, and namespace names a use precedes. The first
     /// line declares them, and their declaration assigns in place.
     hoisted: Vec<String>,
+    /// The function names a use precedes. The first line declares
+    /// them, and `function f()` fills the slot the way Luau reads it.
+    hoisted_fns: Vec<String>,
     struct_generics: HashMap<String, String>,
     /// The structs whose `impl` writes a constructor, `new` or `New`, by
     /// its name: they construct through it, and the fields form stays
@@ -1950,9 +1962,9 @@ impl<'s> Desugar<'s> {
         &self.src[self.byte_start(span) as usize..self.byte_end(span) as usize]
     }
 
-    /// The struct, enum, and namespace names a function body reads
-    /// above their declaration. Such a function would call a nil global
-    /// `Point`; the first line opens the table instead, and the
+    /// The struct, enum, namespace, and function names a function body
+    /// reads above their declaration. Such a function would call a nil
+    /// global `Point`; the first line opens the table instead, and the
     /// declaration fills it. A use that runs at the top level before the
     /// declaration reads an empty table, so it reports.
     fn scan_hoisted(&mut self, block: &Block) {
@@ -1991,14 +2003,21 @@ impl<'s> Desugar<'s> {
 
                 Stmt::Namespace(d) => (d.name, d.span, "namespace"),
 
+                Stmt::Function(f) if f.path.len() == 1 => (f.path[0], f.span, "function"),
+
+                Stmt::LocalFunction(f) => (f.name, f.span, "function"),
+
                 _ => continue,
             };
             let name = self.text_of(name);
+            let is_fn = kind == "function";
             let mut deferred = false;
 
             // A field, `x.Point`, and a type, `p: Point`, read no
             // value; the alias is in scope over the whole block. A
             // declaration head of the name is the duplicate check's.
+            // A function name also sits in method calls, `o:tag()`,
+            // in nested heads, and in keys, `{ tag = 1 }`.
             let reads = |k: usize| {
                 let t = self.toks[k];
                 let before = if k > 0 {
@@ -2006,9 +2025,11 @@ impl<'s> Desugar<'s> {
                 } else {
                     ""
                 };
+                let after = self.toks.get(k + 1).map_or("", |t| t.text(self.src));
 
                 t.kind == TokKind::Ident
                     && t.text(self.src) == name
+                    && !(is_fn && (matches!(before, "function" | "local" | ":") || after == "="))
                     && !matches!(
                         before,
                         "." | "struct"
@@ -2023,6 +2044,7 @@ impl<'s> Desugar<'s> {
                             | "attribute"
                             | "remote"
                             | "macro"
+                            | "$"
                     )
                     && !self.type_name_spans.iter().any(|s| s.start as usize == k)
             };
@@ -2058,10 +2080,23 @@ impl<'s> Desugar<'s> {
                 break;
             }
 
-            if deferred {
+            if deferred && is_fn {
+                self.hoisted_fns.push(name.to_string());
+            } else if deferred {
                 self.hoisted.push(name.to_string());
             }
         }
+    }
+
+    /// Whether the first line declared a function of this name.
+    pub(crate) fn is_hoisted_fn(&self, name: &str) -> bool {
+        self.ns_stack.is_empty() && self.hoisted_fns.iter().any(|h| h == name)
+    }
+
+    /// Whether the walk stands at the file's top level, outside any
+    /// namespace: the statements the module owns.
+    pub(crate) fn at_top_level(&self) -> bool {
+        self.scopes.len() == self.top_scope + 1 && self.ns_stack.is_empty()
     }
 
     /// `local Name = {} ` for a declaration, or nothing for one the

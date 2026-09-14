@@ -17,7 +17,7 @@ __alloy.destroy(timer)
 game:GetService("Debris"):AddItem(part, 3)
 task.delay(1.5, function() timer:destroy() end)
 
-function drop(x)
+local function drop(x)
     __alloy.destroy_after(x, 4)
 end
 

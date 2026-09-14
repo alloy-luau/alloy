@@ -62,6 +62,7 @@ impl<'s> Formatter<'s> {
                         Item {
                             text: "as".to_string(),
                             kind: ItemKind::Tok(TokKind::Ident),
+                            start: usize::MAX,
                             newlines_before: 0,
                             space_before: true,
                             name_here: false,

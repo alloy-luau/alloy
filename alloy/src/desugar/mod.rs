@@ -1344,7 +1344,7 @@ fn function_children(body: &FunctionBody) -> Vec<Child<'_>> {
     v
 }
 
-fn expr_children(e: &Expr) -> Vec<Child<'_>> {
+pub(crate) fn expr_children(e: &Expr) -> Vec<Child<'_>> {
     match e {
         Expr::Nil(_)
         | Expr::True(_)

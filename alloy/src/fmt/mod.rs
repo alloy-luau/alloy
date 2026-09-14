@@ -33,6 +33,8 @@ pub const INDENT: usize = 4;
 struct Item {
     text: String,
     kind: ItemKind,
+    /// The byte the item starts at in the source.
+    start: usize,
     /// Newlines in the source between the item before and this one.
     newlines_before: usize,
     /// Whether the source had whitespace right before this item.
@@ -252,6 +254,14 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         return Ok(String::new());
     }
 
+    // `parse_error` has read the file already, so the tree is whole.
+    let options_parse = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let (chunk, _) = alloy_syntax::parser::parse_lenient(src, &toks, options_parse);
+    let annotation = colons::annotation_colons(src, &toks, &chunk);
+
     let mut f = Formatter {
         items,
         options,
@@ -260,6 +270,7 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         line_level: 0,
         depths: Vec::new(),
         generic: Vec::new(),
+        annotation,
         signature: Vec::new(),
         forced: Vec::new(),
         at_line: Vec::new(),
@@ -363,6 +374,7 @@ fn items_of(src: &str, toks: &[Tok], comments: &[(u32, u32)]) -> Vec<Item> {
         out.push(Item {
             text: src[a..b].to_string(),
             kind,
+            start: a,
             newlines_before: between.matches('\n').count(),
             space_before: !between.is_empty(),
             name_here: names.contains(&a),
@@ -428,6 +440,8 @@ struct Formatter<'s> {
     depths: Vec<usize>,
     /// The `<` and `>` of type parameters and arguments, which stay tight.
     generic: Vec<bool>,
+    /// The byte offsets of the `:` items that open a type; see `colons`.
+    annotation: std::collections::HashSet<usize>,
     /// The `function` items inside a trait that have no body.
     signature: Vec<bool>,
     /// Items the layout breaks before whatever the source wrote: the
@@ -455,6 +469,7 @@ fn closer_of(open: &str) -> &'static str {
     }
 }
 
+mod colons;
 mod layout;
 mod rewrite;
 mod spacing;
@@ -510,6 +525,8 @@ fn synthetic(text: &str) -> Item {
         } else {
             TokKind::RParen
         }),
+        // No source byte: the item is no annotation colon.
+        start: usize::MAX,
         newlines_before: 0,
         space_before: false,
         name_here: false,
@@ -779,6 +796,17 @@ mod tests {
         let src = "local function f(x)\nif x then\nreturn 1\nelseif x == 2 then\nreturn 2\nelse\nreturn 3\nend\nend\n";
         let want = "local function f(x)\n    if x then\n        return 1\n    elseif x == 2 then\n        return 2\n    else\n        return 3\n    end\nend\n";
         assert_eq!(fmt(src), want);
+    }
+
+    /// An annotation colon is tight before and breathes after, wherever
+    /// the source put its spaces. A method colon and a ternary's `:`
+    /// keep what the source wrote.
+    #[test]
+    fn an_annotation_colon_takes_one_space_after() {
+        let src = "local x:number = 1\n\nfunction f(a:number, b :number):number\n    return a + b\nend\n\nstruct S as\n    y:number?\n    z : string\nend\n\nlocal function g<T : Show>(a : T) : T\n    return a\nend\n\nlocal m: { [string] : number } = {}\nlocal h : typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i : number = 1, 2 do\n    print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get \"s\", o, h, cb)\n";
+        let want = "local x: number = 1\n\nfunction f(a: number, b: number): number\n    return a + b\nend\n\nstruct S as\n    y: number?\n    z: string\nend\n\nlocal function g<T: Show>(a: T): T\n    return a\nend\n\nlocal m: { [string]: number } = {}\nlocal h: typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i: number = 1, 2 do\n    print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get(\"s\"), o, h, cb)\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
     }
 
     /// A `public struct` inside a namespace opens a body the way an

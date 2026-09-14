@@ -158,14 +158,15 @@ impl<'s> Formatter<'s> {
             return false;
         }
 
-        // A method colon is tight; an annotation colon breathes after.
-        // `a:b()` and `a: b` lex the same, so the source decides.
+        // An annotation colon is tight before and breathes after. A
+        // method colon, `a:b()`, and a ternary's `:` lex the same, and
+        // keep what the source wrote.
         if bt == ":" {
-            return b.space_before;
+            return !self.annotation.contains(&b.start) && b.space_before;
         }
 
         if at == ":" {
-            return b.space_before;
+            return self.annotation.contains(&a.start) || b.space_before;
         }
 
         // The ternary `?` and the optional type `T?`: the source decides.

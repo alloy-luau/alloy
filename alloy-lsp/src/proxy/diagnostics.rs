@@ -291,6 +291,193 @@ impl State {
         actions
     }
 
+    /*
+    The quick fixes for three of the compiler's own reports.
+
+    Each one says what the file is missing, so the edit writes it: the
+    `new` a construction wants, the arms a `match` does not cover, and
+    the variant a misspelling meant. The child reads the emit, where
+    none of the three is left to see.
+    */
+    pub(crate) fn compiler_actions(
+        &self,
+        uri: &str,
+        range: ((u32, u32), (u32, u32)),
+    ) -> Vec<Value> {
+        let mut actions = Vec::new();
+        let Some(doc) = self.docs.get(uri) else {
+            return actions;
+        };
+        let ((from_line, _), (to_line, _)) = range;
+
+        for d in doc
+            .output
+            .as_ref()
+            .map(|o| o.diagnostics.as_slice())
+            .unwrap_or_default()
+        {
+            let start = d.start as usize;
+            let end = d.end.max(d.start) as usize;
+            let (sl, sc) = position_of(&doc.source, start);
+            let (el, ec) = position_of(&doc.source, end);
+
+            if el < from_line || sl > to_line {
+                continue;
+            }
+
+            let at = json!({
+                "start": { "line": sl, "character": sc },
+                "end": { "line": el, "character": ec },
+            });
+            // The fields form with no `new`: the word goes in front of
+            // the name the report points at.
+            let fix = if d.message.starts_with("construct `") {
+                Some((
+                    "Add `new`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": sl, "character": sc } },
+                        "newText": "new ",
+                    }]),
+                ))
+            } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
+                Some(found)
+            } else {
+                nearest_variant_fix(&d.message).map(|name| {
+                    (
+                        format!("Rename to `{name}`"),
+                        json!([{ "range": at, "newText": name }]),
+                    )
+                })
+            };
+            let Some((title, edits)) = fix else {
+                continue;
+            };
+
+            actions.push(json!({
+                "title": title,
+                "kind": "quickfix",
+                "isPreferred": true,
+                "diagnostics": [{
+                    "range": at,
+                    "severity": 1,
+                    "source": "Alloy",
+                    "message": alloy::docs::labeled(&d.message),
+                }],
+                "edit": { "changes": { uri: edits } },
+            }));
+        }
+
+        actions
+    }
+
+    /*
+    The arms a `match` has no case for, as one insert before its `end`.
+
+    The report names the enum and every variant the arms leave out, and
+    the range it points at is the whole statement, so its last three
+    bytes are the `end` the arms go above. A variant with a payload
+    takes one, written `_`.
+    */
+    fn missing_arm_fix(
+        &self,
+        doc: &Doc,
+        message: &str,
+        span: (usize, usize),
+    ) -> Option<(String, Value)> {
+        let (head, tail) = message.split_once(" has no arm for ")?;
+
+        if !head.starts_with("this match is not exhaustive") {
+            return None;
+        }
+
+        let owner = quoted_names(head).pop()?;
+        let missing = quoted_names(tail.split(';').next().unwrap_or(tail));
+
+        if missing.is_empty() {
+            return None;
+        }
+
+        let (start, end) = span;
+        // The `end` of the statement, on a line of its own: an arm
+        // written in front of anything else would run into it.
+        let close = end
+            .checked_sub(3)
+            .filter(|at| doc.source.get(*at..end) == Some("end"))?;
+        let line_start = doc.source[..close].rfind('\n').map_or(0, |i| i + 1);
+        let closing = &doc.source[line_start..close];
+
+        if !closing.trim().is_empty() {
+            return None;
+        }
+
+        // The arms of the match, where it already has one; a match with
+        // none indents its arms one step under the `end`.
+        let arm = doc.source[start..close]
+            .lines()
+            .find(|l| l.trim_start().starts_with("case "))
+            .map(|l| l[..l.len() - l.trim_start().len()].to_string())
+            .unwrap_or_else(|| format!("{closing}    "));
+        let payloads = self.variant_payloads(&owner);
+        let mut text = String::new();
+
+        for name in &missing {
+            let takes = payloads
+                .iter()
+                .find(|(v, _)| v == name)
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+            let holes = match takes {
+                0 => String::new(),
+
+                n => format!("({})", vec!["_"; n].join(", ")),
+            };
+            text.push_str(&format!(
+                "{arm}case {owner}.{name}{holes} then\n{arm}    \n"
+            ));
+        }
+
+        let title = match missing.len() {
+            1 => "Add the missing arm".to_string(),
+
+            _ => "Add the missing arms".to_string(),
+        };
+        let (line, _) = position_of(&doc.source, line_start);
+
+        Some((
+            title,
+            json!([{
+                "range": {
+                    "start": { "line": line, "character": 0 },
+                    "end": { "line": line, "character": 0 },
+                },
+                "newText": text,
+            }]),
+        ))
+    }
+
+    /// Each variant of an enum the workspace declares, with the number
+    /// of payload values it takes. The report names the enum the way
+    /// the source writes it, so a namespace path reads by its last
+    /// word.
+    fn variant_payloads(&self, owner: &str) -> Vec<(String, usize)> {
+        let bare = owner.rsplit('.').next().unwrap_or(owner);
+
+        self.docs
+            .values()
+            .flat_map(|d| d.shapes.iter())
+            .find_map(|s| match s {
+                alloy::declarations::Shape::Enum { name, variants } if name == bare => Some(
+                    variants
+                        .iter()
+                        .map(|(v, payload)| (v.clone(), payload.len()))
+                        .collect(),
+                ),
+
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// The quick fix of the `global` report: the word becomes `export`.
     /// `global` left the language, and the declaration it sits on is an
     /// `export` with one word changed.
@@ -1376,6 +1563,53 @@ pub(crate) fn quoted_after<'a>(message: &'a str, opener: &str) -> Option<&'a str
     let at = message.find(opener)? + opener.len();
 
     message[at..].find('\'').map(|end| &message[at..at + end])
+}
+
+/// The names a message writes in backticks.
+fn quoted_names(text: &str) -> Vec<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The variant a misspelling meant: the one name of the list the report
+/// prints that stands within two edits of the word the file wrote. Two
+/// names that near say nothing about which one, so neither answers.
+fn nearest_variant_fix(message: &str) -> Option<String> {
+    let (head, tail) = message.split_once("; its variants are ")?;
+    let wrote = quoted_names(head.split(" has no variant ").nth(1)?).pop()?;
+    let near: Vec<String> = quoted_names(tail)
+        .into_iter()
+        .filter(|v| edit_distance(v, &wrote) <= 2)
+        .collect();
+
+    match near.as_slice() {
+        [one] => Some(one.clone()),
+
+        _ => None,
+    }
+}
+
+/// The edit distance of two names, for a "did you mean".
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+
+    for (i, ca) in a.iter().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            let next = (row[j] + 1).min(row[j + 1] + 1).min(previous + cost);
+            previous = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+
+    row[b.len()]
 }
 
 /// Whether the line holds the phrase as whole words.

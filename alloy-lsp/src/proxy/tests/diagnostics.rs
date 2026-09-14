@@ -686,3 +686,55 @@ pub(crate) fn a_bad_character_reports_one_character_wide() {
     assert_eq!(range["start"], json!({ "line": 0, "character": 7 }));
     assert_eq!(range["end"], json!({ "line": 0, "character": 9 }));
 }
+#[test]
+pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
+    let whole = ((0, 0), (99, 0));
+    let title = |actions: &[Value]| {
+        actions
+            .first()
+            .and_then(|a| a["title"].as_str())
+            .unwrap_or("none")
+            .to_string()
+    };
+    let edit = |actions: &[Value], uri: &str| actions[0]["edit"]["changes"][uri].clone();
+
+    // A construction with no `new`: the word goes in front of the name.
+    let (st, uri) =
+        one_file("struct P as\n    x: number,\nend\n\nlocal p = P { x = 1 }\nprint(p.x)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Add `new`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 4, "character": 10 }, "end": { "line": 4, "character": 10 } },
+            "newText": "new ",
+        }])
+    );
+
+    // A match with no arm for `Move` and `Quit`: one arm each, above
+    // the `end`, with a hole per payload value.
+    let src = "enum M as\n    Join(string)\n    Move(number, number)\n    Quit\nend\n\nlocal function show(m: M)\n    match m with\n        case M.Join(n) then print(n)\n    end\nend\n\nshow(M.Quit)\n";
+    let (st, uri) = one_file(src);
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Add the missing arms");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 9, "character": 0 }, "end": { "line": 9, "character": 0 } },
+            "newText": "        case M.Move(_, _) then\n            \n        case M.Quit then\n            \n",
+        }])
+    );
+
+    // A variant one edit away from a name the enum has.
+    let (st, uri) = one_file(
+        "enum Color as\n    Red\n    Green\n    Blue\nend\n\nlocal c = Color.Gren\nprint(c)\n",
+    );
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Rename to `Green`");
+
+    // No name stands near `Purple`, so the report gets no rewrite.
+    let (st, uri) = one_file(
+        "enum Color as\n    Red\n    Green\n    Blue\nend\n\nlocal c = Color.Purple\nprint(c)\n",
+    );
+    assert!(st.compiler_actions(uri, whole).is_empty());
+}

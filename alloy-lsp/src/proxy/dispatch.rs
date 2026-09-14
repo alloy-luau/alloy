@@ -1460,6 +1460,7 @@ impl Server {
                         actions.extend(st.contract_actions(uri, range));
                         actions.extend(st.header_as_actions(uri, range));
                         actions.extend(st.global_actions(uri, range));
+                        actions.extend(st.compiler_actions(uri, range));
                         actions.extend(st.lint_actions(uri, range));
                         actions.extend(st.ingot_actions(uri, range));
                         actions.extend(st.import_actions(uri, &reported));

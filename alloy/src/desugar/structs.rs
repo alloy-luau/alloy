@@ -156,8 +156,13 @@ impl<'s> Desugar<'s> {
         if i.generics.is_none()
             && let Some(params) = self.struct_generics.get(&target_name).cloned()
         {
+            let kind = if self.enums.contains_key(&target_name) {
+                "enum"
+            } else {
+                "struct"
+            };
             let message = format!(
-                "the struct `{target_name}` takes `{params}`; write `impl {target_name}{params}` so its methods can name them"
+                "the {kind} `{target_name}` takes `{params}`; write `impl {target_name}{params}` so its methods can name them"
             );
             self.diagnose(i.target, &message);
         }

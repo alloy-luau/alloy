@@ -963,8 +963,8 @@ struct Desugar<'s> {
     ship_blanks: Vec<(u32, u32)>,
     /// Declared struct names, for pattern tests and `is`.
     structs: HashSet<String>,
-    /// A struct's type parameters as the source writes them, `<T>`, for
-    /// the structs that take any.
+    /// The type parameters of a struct or an enum as the source writes
+    /// them, `<T>`, for the ones that take any.
     struct_generics: HashMap<String, String>,
     /// The structs whose `impl` writes a constructor, `new` or `New`, by
     /// its name: they construct through it, and the fields form stays
@@ -996,8 +996,9 @@ struct Desugar<'s> {
     /// Declared struct fields by struct name: field name and whether it
     /// carries a default.
     struct_fields: HashMap<String, Vec<(String, bool)>>,
-    /// Structs declared with type parameters: their alias needs
-    /// arguments, so the check artifact leaves `self` untyped there.
+    /// Structs and enums declared with type parameters: their alias
+    /// needs arguments, so the check artifact leaves `self` untyped
+    /// there and casts no value to the bare name.
     generic_types: HashSet<String>,
     /// The instance methods of each struct an `impl` block writes, and
     /// the generic list of that block. The check artifact spells them

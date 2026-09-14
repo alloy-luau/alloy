@@ -8,6 +8,7 @@ use alloy_syntax::ast::{
     TokSpan, While,
 };
 
+use super::types::{split_generics, strip_bounds};
 use super::*;
 
 /// What a pattern compiles to against one access path.
@@ -50,9 +51,29 @@ impl<'s> Desugar<'s> {
     */
     pub(crate) fn enum_decl(&mut self, e: &EnumDecl) {
         let name = self.decl_name(e.name);
-        // The `as` token follows the name, whether or not `export` leads.
-        let header_end = self.toks[e.name.end as usize].end;
+        // The `as` token follows the name, or the parameter list,
+        // whether or not `export` leads.
+        let header_end = self.toks[e.generics.unwrap_or(e.name).end as usize].end;
         let start = self.byte_start(e.span);
+        // `enum Opt<T>`: the alias keeps the list with its defaults, a
+        // constructor takes the names alone, and a unit variant casts
+        // to the enum of `any` arguments.
+        let alias_generics = e
+            .generics
+            .map(|g| strip_bounds(self.text_of(g)))
+            .unwrap_or_default();
+        let fn_generics = if alias_generics.is_empty() {
+            String::new()
+        } else {
+            super::modules::type_arguments(&alias_generics)
+        };
+        let any_args = if alias_generics.is_empty() {
+            String::new()
+        } else {
+            let anys = vec!["any"; split_generics(&alias_generics).len()];
+
+            format!("<{}>", anys.join(", "))
+        };
 
         // Header line. An attribute line above `enum` keeps its newline.
         self.generate(
@@ -79,7 +100,7 @@ impl<'s> Desugar<'s> {
                 // The checker widens a string field to `string`; the cast
                 // to the enum keeps `Ok(Zone.Spawn)` a `Result<Zone, _>`.
                 let value = if self.options.check {
-                    format!("(\"{vname}\" :: {name})")
+                    format!("(\"{vname}\" :: {name}{any_args})")
                 } else {
                     format!("\"{vname}\"")
                 };
@@ -120,7 +141,9 @@ impl<'s> Desugar<'s> {
                 let value = self.any_cast(&value);
                 self.generate(
                     vs,
-                    &format!("function {name}.{vname}({plist}){ret} return {value} end"),
+                    &format!(
+                        "function {name}.{vname}{fn_generics}({plist}){ret} return {value} end"
+                    ),
                 );
                 types.push(variant_type);
             }
@@ -241,7 +264,7 @@ impl<'s> Desugar<'s> {
         self.generate(
             end_tok.start,
             &format!(
-                "function {name}.is(v) return {test} end{printer} {export}type {name} = {union}"
+                "function {name}.is(v) return {test} end{printer} {export}type {name}{alias_generics} = {union}"
             ),
         );
 
@@ -311,7 +334,7 @@ impl<'s> Desugar<'s> {
                     // A dotted path names the enum itself, so no search
                     // over the variant names has to guess it.
                     Pattern::Variant { name, .. } => match self.pattern_variant(*name) {
-                        (_, Some(e)) => return Some(self.enum_type_name(&e)),
+                        (_, Some(e)) => return self.castable_enum(&e),
 
                         (v, None) => (v, false),
                     },
@@ -326,12 +349,22 @@ impl<'s> Desugar<'s> {
                     .find(|(_, vs)| vs.iter().any(|(v, n)| *v == name && (!unit || *n == 0)));
 
                 if let Some((e, _)) = found {
-                    return Some(self.enum_type_name(e));
+                    return self.castable_enum(e);
                 }
             }
         }
 
         None
+    }
+
+    /// The type name a scrutinee casts to. A generic enum's alias asks
+    /// for arguments the arms do not spell, so the scrutinee keeps the
+    /// type it has.
+    fn castable_enum(&self, e: &str) -> Option<String> {
+        let name = self.enum_type_name(e);
+        let generic = self.generic_types.contains(e) || self.generic_types.contains(&name);
+
+        (!generic).then_some(name)
     }
 
     /// The type name an enum writes. `enum_decls` keys an enum inside a
@@ -1865,6 +1898,165 @@ mod tests {
             .iter()
             .map(|l| l.name)
             .collect()
+    }
+
+    /// `enum Opt<T>`: the alias and each constructor carry the
+    /// parameter, a unit variant casts to the enum of `any`, and the
+    /// ship artifact keeps the tagged table.
+    #[test]
+    fn a_generic_enum_types_its_constructors_and_alias() {
+        let src = "export enum Opt<T> as\n    Some(T)\n    Nil\nend\nlocal a: Opt<number> = Opt.Some(1)\nlocal b: Opt<string> = Opt.Nil\nprint(a, b)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.starts_with(
+                "local __alloy = require(\"@alloy\") local Opt = {} Opt.__index = Opt\n"
+            ),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains(
+                "function Opt.Some<T>(_1: T): typeof(setmetatable({} :: { tag: \"Some\", _1: T }, Opt)) return"
+            ),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("Opt.Nil = (\"Nil\" :: Opt<any>)"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains(
+                "export type Opt<T> = typeof(setmetatable({} :: { tag: \"Some\", _1: T }, Opt)) | \"Nil\""
+            ),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.ship.contains(
+                "function Opt.Some<T>(_1) return setmetatable({ tag = \"Some\", _1 = _1 }, Opt) end"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(out.ship.contains("Opt.Nil = \"Nil\""), "{}", out.ship);
+    }
+
+    /// A default belongs to the alias alone; a constructor names the
+    /// parameters, the way a struct's `__new` does.
+    #[test]
+    fn a_generic_default_stays_on_the_enum_alias() {
+        let src = "enum Either<L, R = string> as\n    Left(L)\n    Right(R)\nend\nlocal e: Either<number> = Either.Left(1)\nprint(e)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("type Either<L, R = string> ="),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("function Either.Left<L, R>(_1: L)"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("function Either.Right<L, R>(_1: R)"),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A generic enum's alias asks for arguments the arms do not spell,
+    /// so the match reads the scrutinee as it is. The arms still cover
+    /// the variants, and one short still reports.
+    #[test]
+    fn a_match_over_a_generic_enum_keeps_the_scrutinee_type() {
+        let src = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nlocal function f(o: Opt<number>): number\n    return match o with\n        case Some(v) then v\n        case Nil then 0\n    end\nend\nprint(f)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.check.contains(":: Opt\n"), "{}", out.check);
+        assert!(!out.check.contains(":: Opt "), "{}", out.check);
+
+        let short = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nlocal function f(o: Opt<number>): number\n    return match o with\n        case Some(v) then v\n    end\nend\nprint(f)\n";
+
+        assert_eq!(
+            messages(short),
+            vec![
+                "this match is not exhaustive: `Opt` has no arm for `Nil`; add it or a `default` arm"
+            ]
+        );
+    }
+
+    /// `impl Opt` on `enum Opt<T>` binds no `T`; the report names the
+    /// enum, not a struct.
+    #[test]
+    fn an_impl_without_the_enum_parameters_reports() {
+        let src = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nimpl Opt as\n    function get(self): T\n        return (self :: any)._1\n    end\nend\nprint(Opt)\n";
+
+        assert_eq!(
+            messages(src),
+            vec!["the enum `Opt` takes `<T>`; write `impl Opt<T>` so its methods can name them"]
+        );
+
+        let with = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nimpl Opt<T> as\n    function get(self, fallback: T): T\n        return match self with\n            case Some(v) then v\n            case Nil then fallback\n        end\n    end\nend\nprint(Opt)\n";
+        let out = crate::compile(with).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("function Opt.get<T>(self: Opt<T>, fallback: T): T"),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A generic enum inside a namespace: the match covers its variants
+    /// and casts nothing to the flat name.
+    #[test]
+    fn a_generic_enum_in_a_namespace_matches() {
+        let src = "namespace A as\n    enum Opt<T> as\n        Some(T)\n        Nil\n    end\nend\nlocal function f(o: A.Opt<number>): number\n    return match o with\n        case A.Opt.Some(v) then v\n        case A.Opt.Nil then 0\n    end\nend\nprint(f)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.check.contains("type A_Opt<T> ="), "{}", out.check);
+        assert!(!out.check.contains(":: A_Opt "), "{}", out.check);
+        assert!(!out.check.contains(":: A_Opt\n"), "{}", out.check);
+    }
+
+    /// An imported `enum Opt<T>` reads as generic through the export
+    /// list, by name and through `import * as M`, so the match casts
+    /// nothing to the bare name and still covers the variants.
+    #[test]
+    fn an_imported_generic_enum_skips_the_cast() {
+        let variants = vec![("Some".to_string(), 1), ("Nil".to_string(), 0)];
+        let types = vec![("./lib".to_string(), vec!["Opt<T>".to_string()])];
+        let src = "import { Opt } from \"./lib\"\nlocal function f(o: Opt<number>): number\n    return match o with\n        case Some(v) then v\n        case Nil then 0\n    end\nend\nprint(f)\n";
+        let options = EmitOptions {
+            import_enums: vec![("Opt".to_string(), variants.clone())],
+            import_types: types.clone(),
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.check.contains(":: Opt\n"), "{}", out.check);
+
+        let star = "import * as M from \"./lib\"\nlocal function f(o: M.Opt<number>): number\n    return match o with\n        case M.Opt.Some(v) then v\n        case M.Opt.Nil then 0\n    end\nend\nprint(f)\n";
+        let options = EmitOptions {
+            import_enums: vec![("M.Opt".to_string(), variants)],
+            import_types: types,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(star, &options).expect("compiles");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.check.contains(":: M_Opt"), "{}", out.check);
+        assert!(!out.check.contains(":: M.Opt"), "{}", out.check);
     }
 
     #[test]

@@ -1051,6 +1051,12 @@ impl<'s> Desugar<'s> {
             if self.imported_names.contains(bound) && !self.enums.contains_key(name) {
                 self.enums.insert(name.clone(), variants.clone());
                 self.enum_decls.insert(name.clone(), variants.clone());
+
+                // An imported `enum Opt<T>` exports as `Opt<T>`; its
+                // alias takes arguments here too.
+                if self.imported_type_is_generic(name) {
+                    self.generic_types.insert(name.clone());
+                }
             }
         }
 
@@ -1062,6 +1068,26 @@ impl<'s> Desugar<'s> {
                 self.enum_decls.insert(name.clone(), variants.clone());
             }
         }
+    }
+
+    /// Whether an imported type carries a parameter list. The import
+    /// index keys an enum by the path this file spells, `M.Geo.Kind`,
+    /// and the export list names it flat, `Geo_Kind<T>`: some tail of
+    /// the path, joined with `_`, is the exported head.
+    fn imported_type_is_generic(&self, name: &str) -> bool {
+        let parts: Vec<&str> = name.split('.').collect();
+        let tails: Vec<String> = (0..parts.len()).map(|i| parts[i..].join("_")).collect();
+
+        self.options
+            .import_types
+            .iter()
+            .flat_map(|(_, types)| types.iter())
+            .any(|t| {
+                !crate::modules::type_args(t).is_empty()
+                    && tails
+                        .iter()
+                        .any(|tail| crate::modules::type_head(t) == tail)
+            })
     }
 
     /// The names one import list binds, with the name each one renames:

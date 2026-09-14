@@ -385,7 +385,17 @@ impl<'s> Desugar<'s> {
                     .iter()
                     .map(|v| (self.text_of(v.name).to_string(), v.payload.len()))
                     .collect();
-                self.enums.insert(self.decl_name(e.name), variants);
+                let name = self.decl_name(e.name);
+
+                // `enum Opt<T>`: the alias needs arguments, the same as a
+                // generic struct's.
+                if let Some(g) = e.generics {
+                    self.struct_generics
+                        .insert(name.clone(), self.text_of(g).trim().to_string());
+                    self.generic_types.insert(name.clone());
+                }
+
+                self.enums.insert(name, variants);
             }
 
             Stmt::Import(i) => match &i.kind {

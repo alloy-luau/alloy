@@ -695,3 +695,39 @@ fn a_dependency_shadow_sits_where_the_require_names_it() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A dependency's declarations join the workspace symbols, under the
+/// path they live at, so the reader sees where the name lives.
+#[test]
+fn a_dependency_declaration_is_a_workspace_symbol_under_its_path() {
+    let dir = std::env::temp_dir().join(format!("alloy-dep-symbol-{}", std::process::id()));
+    let app = dir.join("ws/app");
+    let util = dir.join("ws/shared/src/util.aly");
+    let util_uri = format!("file://{}", util.display());
+    let mut st = State {
+        root: Some(app.clone()),
+        mirror: mirror_dir(Some(&app)),
+        ..State::default()
+    };
+    let options = EmitOptions {
+        file_name: util.to_string_lossy().into_owned(),
+        ..EmitOptions::default()
+    };
+    st.docs.insert(
+        util_uri.clone(),
+        Doc::new(
+            "export function double(n: number): number\n    return n * 2\nend\n".to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    let mut out = Vec::new();
+    crate::proxy::outline::source_symbols(&st, Some("double"), &mut out);
+
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0]["name"], json!("double"));
+    assert_eq!(out[0]["containerName"], json!("../shared/src/util.aly"));
+    assert_eq!(out[0]["location"]["uri"], json!(util_uri));
+}

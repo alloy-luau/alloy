@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use std::path::Path;
 
-use super::{State, range_value, uri_to_path};
+use super::{State, normalize, range_value, relative, uri_to_path};
 use crate::doc::position_of;
 
 // `SymbolKind` of the protocol.
@@ -89,13 +89,28 @@ pub(crate) fn source_symbols(st: &State, query: Option<&str>, out: &mut Vec<Valu
         let Some(items) = document_symbols(&doc.source, &path) else {
             continue;
         };
+        // A file of another project reads under its path, so the
+        // reader sees where the name lives.
+        let container = match st.root.as_deref().map(normalize) {
+            Some(root) if !normalize(&path).starts_with(&root) => relative(&root, &path),
 
-        flatten_symbols(&items, "", uri, &query, out);
+            _ => String::new(),
+        };
+
+        flatten_symbols(&items, "", &container, uri, &query, out);
     }
 }
 
-/// The outline as a flat list, each entry named under its owner.
-fn flatten_symbols(items: &[Value], owner: &str, uri: &str, query: &str, out: &mut Vec<Value>) {
+/// The outline as a flat list, each entry named under its owner; a
+/// top-level entry names `container` as its owner.
+fn flatten_symbols(
+    items: &[Value],
+    owner: &str,
+    container: &str,
+    uri: &str,
+    query: &str,
+    out: &mut Vec<Value>,
+) {
     for item in items {
         let Some(name) = item.get("name").and_then(Value::as_str) else {
             continue;
@@ -110,7 +125,11 @@ fn flatten_symbols(items: &[Value], owner: &str, uri: &str, query: &str, out: &m
             out.push(json!({
                 "name": full,
                 "kind": item.get("kind").cloned().unwrap_or(json!(VARIABLE)),
-                "containerName": owner,
+                "containerName": match owner.is_empty() {
+                    true => container,
+
+                    false => owner,
+                },
                 "location": {
                     "uri": uri,
                     "range": item.get("selectionRange").cloned().unwrap_or_default(),
@@ -119,7 +138,7 @@ fn flatten_symbols(items: &[Value], owner: &str, uri: &str, query: &str, out: &m
         }
 
         if let Some(children) = item.get("children").and_then(Value::as_array) {
-            flatten_symbols(children, &full, uri, query, out);
+            flatten_symbols(children, &full, container, uri, query, out);
         }
     }
 }

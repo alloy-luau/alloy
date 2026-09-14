@@ -94,8 +94,10 @@ pub const BUILD_TEXT: &str = "\
 Usage: alloy build [file] [options]
 
 With no file, builds the project of the nearest alloy.toml. With one,
-compiles that .aly, .d.aly, or .alx file to stdout. A file that reports
-an error is not written; its last output stays.
+compiles that .aly, .d.aly, or .alx file to stdout, or under --out. A
+file that reports an error is not written; its last output stays. The
+build runs no lint; alloy check reports them, and a denied one fails
+that run.
 
 Options:
   -W, --watch           Build again after every change, until ctrl-c

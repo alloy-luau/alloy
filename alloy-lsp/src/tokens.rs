@@ -90,6 +90,11 @@ fn type_index(types: &[String], name: &str) -> Option<u64> {
 /// declaration index holds a namespace member under its path, `Geo.Kind`,
 /// which is what a segment walk asks about.
 fn declared_kind(doc: &Doc, path: &str) -> Option<&'static str> {
+    declared_word(doc, path).filter(|k| matches!(*k, "namespace" | "enum"))
+}
+
+/// The keyword the head line of a declaration's hover opens with.
+fn declared_word(doc: &Doc, path: &str) -> Option<&'static str> {
     doc.decls
         .iter()
         .chain(doc.import_decls.iter())
@@ -101,10 +106,28 @@ fn declared_kind(doc: &Doc, path: &str) -> Option<&'static str> {
                 line = line.strip_prefix(word).unwrap_or(line);
             }
 
-            ["namespace", "enum"]
-                .into_iter()
-                .find(|k| line.starts_with(&format!("{k} ")))
+            [
+                "namespace",
+                "enum",
+                "struct",
+                "interface",
+                "trait",
+                "class",
+                "type",
+            ]
+            .into_iter()
+            .find(|k| line.starts_with(&format!("{k} ")))
         })
+}
+
+/// The legend name a member of a dotted path draws under. A trait is a
+/// contract over methods, which the protocol calls an interface.
+fn member_kind(doc: &Doc, path: &str) -> Option<&'static str> {
+    Some(match declared_word(doc, path)? {
+        "trait" => "interface",
+
+        other => other,
+    })
 }
 
 /// The contract body of an `attribute` declaration, as the token index it
@@ -362,6 +385,15 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
                 // enum in front of it says what the segment is.
                 None if declared_kind(doc, &parent) == Some("enum") => "enumMember",
 
+                // `Ns.T`: the emit writes one flat name, `Ns_T`, so the
+                // child paints nothing on the word the source wrote for
+                // the member. The declaration says what it is.
+                None if k > 0 => match member_kind(doc, &path) {
+                    Some(kind) => kind,
+
+                    None => continue,
+                },
+
                 None => continue,
             };
             push(segment.start, segment.end, name);
@@ -407,6 +439,41 @@ mod tests {
         ]
         .map(str::to_string)
         .to_vec()
+    }
+
+    /// The emit gives a namespace member one flat name, `Ns_T`, so the
+    /// child paints nothing on the word the source wrote for it. The
+    /// declaration says what the member is.
+    #[test]
+    fn a_member_of_a_namespace_draws_under_its_own_kind() {
+        const SRC: &str = "namespace Ns as\n    public struct T as\n        value: number,\n    end\n\n    public trait Show as\n        function show(self): string\n    end\nend\n\nlocal y: Ns.T = new Ns.T { value = 5 }\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let drawn = alloy_tokens(&doc, &types);
+        let named = |name: &str| {
+            let kind = type_index(&types, name).expect("the type");
+
+            drawn
+                .iter()
+                .filter(|t| t.3 == kind)
+                .map(|t| (t.0, t.1, t.2))
+                .collect::<Vec<_>>()
+        };
+        let (line, column) = position_of(SRC, SRC.find("Ns.T").expect("the path"));
+
+        assert!(named("namespace").contains(&(line, column, 2)), "{drawn:?}");
+        assert!(
+            named("struct").contains(&(line, column + 3, 1)),
+            "{drawn:?}"
+        );
+        // A bare name keeps the child's own answer.
+        assert!(named("struct").iter().all(|t| t.0 == line), "{drawn:?}");
     }
 
     /// An Alloy construct is no Luau, so the shadow holds no word where

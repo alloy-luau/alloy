@@ -198,6 +198,16 @@ pub(crate) fn project(args: &[String]) -> Result<(PathBuf, Config), String> {
             };
             let config = Config::load(&path).map_err(|e| e.to_string())?;
 
+            // A source folder that is not there compiles nothing, and
+            // a clean report over no files hides the typo.
+            if !root.join(&config.build.input).is_dir() {
+                return Err(format!(
+                    "`[build] in` names `{}`, which does not exist under {}",
+                    config.build.input.display(),
+                    root.display()
+                ));
+            }
+
             for line in config
                 .deprecations()
                 .into_iter()

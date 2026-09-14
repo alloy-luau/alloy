@@ -50,3 +50,24 @@ fn deny_warnings_fails_the_project_check() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_missing_input_folder_reports_from_every_command() {
+    let root = project(
+        "input",
+        "[build]\nin = \"nosuchdir\"\nout = \"build\"\n",
+        "print(1)\n",
+    );
+
+    for command in ["check", "flux", "build", "lint", "fmt"] {
+        let (code, err) = run(&root, &[command]);
+        assert_eq!(code, 1, "{command}: {err}");
+        assert!(
+            err.contains("`[build] in` names `nosuchdir`, which does not exist under"),
+            "{command}: {err}"
+        );
+        assert_eq!(err.matches("nosuchdir").count(), 1, "{command}: {err}");
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

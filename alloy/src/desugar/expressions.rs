@@ -8,7 +8,7 @@ use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 use super::types::pack_type_args;
 use super::*;
 
-pub(crate) const WORD_OPS: &[&str] = &["band", "bor", "bxor", "shl", "shr", "in"];
+pub(crate) const WORD_OPS: &[&str] = &["band", "bor", "bxor", "shl", "shr", "bnot", "in"];
 
 pub(crate) enum WordOp {
     Bit,
@@ -1410,6 +1410,23 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    /// `bnot a` shipped as written: the text scan that routes a
+    /// statement through the walk knew every word operator but the
+    /// unary one.
+    #[test]
+    fn bnot_lowers_to_bit32_in_both_artifacts() {
+        let src = "local a = 6\nlocal r = bnot a\nlocal t = { v = bnot a }\nprint(r, t.v, (bnot a) + 1)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for text in [&out.ship, &out.check] {
+            assert!(text.contains("local r = bit32.bnot(a)\n"), "{text}");
+            assert!(text.contains("{ v = bit32.bnot(a) }"), "{text}");
+            assert!(text.contains("(bit32.bnot(a)) + 1"), "{text}");
+            assert!(!text.contains("bnot a"), "{text}");
+        }
     }
 
     #[test]

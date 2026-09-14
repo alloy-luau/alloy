@@ -193,6 +193,7 @@ const CORPUS: &[&str] = &[
     "local v = k is Enum.KeyCode",
     "local v = 3 in test",
     "local v = a band b bor c bxor d shl 1 shr 2",
+    "local v = bnot a + (bnot b)",
     "local v = t satisfies Config",
     "local xs: number[] = [ 1, 2, 3 ]",
     "local ys: read string[] = []",

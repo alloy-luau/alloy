@@ -555,6 +555,15 @@ impl Server {
             "method": "textDocument/publishDiagnostics",
             "params": { "uri": uri, "diagnostics": [] }
         }));
+
+        // The disk no longer holds the file. The state forgets what it
+        // read, which drops the project's `impl` index with it, and
+        // every open file that imports the file compiles again: the
+        // import now names no module, and the editor sends no edit.
+        if let Some(path) = uri_to_path(uri).filter(|p| !p.exists()) {
+            self.state.lock().expect("state").forget_disk();
+            self.refresh_importers(&[path]);
+        }
     }
 
     /// The whole pass: the mirror the child reads, then a shadow for
@@ -896,22 +905,27 @@ impl Server {
     /// Resends every document whose imports name one of these files, so
     /// the child reads the module again and the document types against
     /// it. A new module alone leaves the import as it was typed.
+    ///
+    /// The match reads the module path a spec names, not the file the
+    /// spec finds on disk. A deleted file finds nothing, and its
+    /// importers are the documents that have to hear about it.
     pub(crate) fn refresh_importers(&self, changed: &[PathBuf]) {
-        let changed: Vec<PathBuf> = changed.iter().map(|p| normalize(p)).collect();
+        let changed: Vec<PathBuf> = changed
+            .iter()
+            .map(|p| imports::module_path(&normalize(p)))
+            .collect();
         let importers: Vec<String> = {
             let st = self.state.lock().expect("state");
 
             st.docs
                 .iter()
                 .filter(|(uri, doc)| {
-                    let Some(path) = uri_to_path(uri) else {
-                        return false;
-                    };
-
                     child_sees(uri)
-                        && alloy::modules::import_targets_for_file(&path, &doc.source)
-                            .iter()
-                            .any(|t| changed.contains(&normalize(t)))
+                        && imports::imported_specs(&doc.source).iter().any(|spec| {
+                            st.resolve_spec(uri, spec).is_some_and(|target| {
+                                changed.contains(&imports::module_path(&normalize(&target)))
+                            })
+                        })
                 })
                 .map(|(uri, _)| uri.clone())
                 .collect()

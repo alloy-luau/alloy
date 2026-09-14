@@ -540,3 +540,70 @@ pub(crate) fn a_type_the_source_cannot_write() {
     assert!(!writable_type("t1 where t1 = { }"));
     assert!(!writable_type("*error-type*"));
 }
+
+/// A writer the tests read back: what the server sent the editor.
+#[derive(Clone)]
+pub(crate) struct Recorder(pub(crate) Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Recorder {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("the log").extend_from_slice(buf);
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A deleted module refreshes the files that import it. The editor
+/// sends the watched file event and nothing else, so the importer must
+/// hear its diagnostics again on the delete alone.
+#[test]
+pub(crate) fn a_deleted_module_refreshes_its_importers() {
+    let dir = alias_root(
+        "deleted-import",
+        &[
+            ("alloy.toml", "[build]\nin = \"src\"\nout = \"build\"\n"),
+            (
+                "src/shape.aly",
+                "export struct Circle as\n    radius: number\nend\n",
+            ),
+            (
+                "src/main.aly",
+                "import { Circle } from \"./shape\"\n\nlocal c = new Circle { radius = 5 }\nprint(c.radius)\n",
+            ),
+        ],
+    );
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+
+    {
+        let mut st = server.state.lock().expect("state");
+        st.root = Some(dir.clone());
+        st.mirror = dir.join("mirror");
+    }
+
+    let shape_uri = path_to_uri(&dir.join("src/shape.aly"));
+    let main_uri = path_to_uri(&dir.join("src/main.aly"));
+
+    for uri in [&shape_uri, &main_uri] {
+        let text = std::fs::read_to_string(uri_to_path(uri).expect("path")).expect("source");
+        server.open_doc(uri, text, 1, true);
+    }
+
+    log.lock().expect("the log").clear();
+    std::fs::remove_file(dir.join("src/shape.aly")).expect("the delete");
+    server.close_shadow(&shape_uri);
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(sent.contains("UnknownModule"), "{sent}");
+}

@@ -177,7 +177,9 @@ pub fn struct_literal_target(src: &str, offset: usize) -> Option<(String, bool)>
         return None;
     }
 
-    let before = head[..open].trim_end();
+    // `new Pair<<number>> { |`: the type arguments stand between the
+    // head and the table, and the fields are the head's.
+    let before = without_type_arguments(head[..open].trim_end());
     let name: String = {
         let start = before.len() - before.trim_end_matches(is_word).len();
 
@@ -203,9 +205,58 @@ pub fn struct_literal_target(src: &str, offset: usize) -> Option<(String, bool)>
         .then_some((declared, false))
 }
 
+/// The text with a trailing `<<...>>` group cut off, so
+/// `new Pair<<number>>` reads as `new Pair`. The group may hold a `>`
+/// of its own, so the walk counts the brackets.
+fn without_type_arguments(before: &str) -> &str {
+    if !before.ends_with('>') {
+        return before;
+    }
+
+    let mut depth = 0usize;
+
+    for (i, c) in before.char_indices().rev() {
+        match c {
+            '>' => depth += 1,
+
+            '<' => match depth.checked_sub(1) {
+                Some(0) => return before[..i].trim_end(),
+
+                Some(left) => depth = left,
+
+                None => return before,
+            },
+
+            _ => {}
+        }
+    }
+
+    before
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `new Pair<<number>> { |`: the head names the struct, and the
+    /// type arguments stand between it and the table.
+    #[test]
+    fn a_generic_struct_literal_keys_by_its_head() {
+        let src = "local p = new Pair<<number>> { fir\n";
+        let at = src.find("fir").expect("the prefix");
+
+        assert_eq!(
+            struct_literal_target(src, at),
+            Some(("Pair".to_string(), false))
+        );
+        assert_eq!(
+            without_type_arguments("new Map<<string, Pair<<number>>>>"),
+            "new Map"
+        );
+        // A comparison is no type argument.
+        assert_eq!(without_type_arguments("a > b"), "a > b");
+        assert_eq!(without_type_arguments("new Box"), "new Box");
+    }
 
     /// The fields a struct body or a record type declares.
     #[test]

@@ -761,6 +761,45 @@ fn a_field_rename_reaches_the_constructor_and_the_declaration() {
     assert_eq!(edits, [(1, 4), (8, 22), (12, 13)], "{result}");
 }
 
+/// The references answer for a field read gets the same mend: the
+/// child's location on the struct's `end` goes, and the declaration
+/// and the constructor key join the read.
+#[test]
+fn field_references_reach_the_constructor_and_the_declaration() {
+    const SRC: &str = concat!(
+        "struct Point as\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "local p = new Point { x = 1 }\n",
+        "\n",
+        "local function read(c: Point): number\n",
+        "    return c.x\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let mut result = json!([
+        { "uri": uri, "range": range_value((7, 13), (7, 14)) },
+        { "uri": uri, "range": range_value((2, 0), (2, 1)) },
+    ]);
+    st.mend_field_references(uri, 7, 13, &mut result);
+
+    let mut sites: Vec<(u64, u64)> = result
+        .as_array()
+        .expect("locations")
+        .iter()
+        .map(|e| {
+            (
+                e["range"]["start"]["line"].as_u64().expect("line"),
+                e["range"]["start"]["character"].as_u64().expect("column"),
+            )
+        })
+        .collect();
+    sites.sort_unstable();
+
+    assert_eq!(sites, [(1, 4), (4, 22), (7, 13)], "{result}");
+}
+
 /// A trait's method is one name in three places: the trait's own
 /// declaration, every `impl Trait for S`, and a call on a value of such
 /// a struct. A plain `impl` that shares the spelling is another method.

@@ -1256,6 +1256,53 @@ impl State {
         }
     }
 
+    /// The same mend for a references answer: the child's list gets
+    /// every site the proxy knows, and loses a location that points at
+    /// no word of that name, which is where the generated struct
+    /// header sent it.
+    pub(crate) fn mend_field_references(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
+            return;
+        };
+        let name = doc.source[start..end].to_string();
+        let Some(owner) = self.field_owner(doc, start, end) else {
+            return;
+        };
+        let Some(list) = result.as_array_mut() else {
+            return;
+        };
+
+        list.retain(|loc| {
+            let u = loc.get("uri").and_then(Value::as_str).unwrap_or_default();
+
+            self.docs
+                .get(u)
+                .is_none_or(|d| edits_the_word(&d.source, loc, &name))
+        });
+
+        for (u, d) in &self.docs {
+            for (s, e) in field_sites(self, d, &owner, &name) {
+                let loc = json!({
+                    "uri": u,
+                    "range": range_value(position_of(&d.source, s), position_of(&d.source, e)),
+                });
+
+                if !list.contains(&loc) {
+                    list.push(loc);
+                }
+            }
+        }
+    }
+
     /*
     The clash a rename would make, as the message that refuses it.
 

@@ -1513,6 +1513,14 @@ impl Server {
                     }
                 }
 
+                "textDocument/references" => {
+                    if let Some(uri) = &ctx
+                        && let Some((line, character)) = position
+                    {
+                        st.mend_field_references(uri, line, character, result);
+                    }
+                }
+
                 // A link sits on the require the emit wrote, which maps to
                 // the start of the import; it moves to the quoted path of
                 // that source line, and its target leaves the mirror. One

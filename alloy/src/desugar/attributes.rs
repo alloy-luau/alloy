@@ -1231,27 +1231,39 @@ impl<'s> Desugar<'s> {
             targets.join(", "),
             params.join(", ")
         );
-        // The check artifact types the value by its arguments, so
-        // `Attributes.get(S, attr)` reads as `{ min: number, max: number }?`.
+        // The check artifact types the value by its arguments, the way
+        // the runtime reads them: one parameter is that parameter's
+        // type, so `Attributes.get(S, icon)` reads as `string?`;
+        // several are `{ min: number, max: number }`; none is the
+        // `boolean` that marks the attribute as there.
         let value = if self.options.check {
-            let fields: Vec<String> = a
+            let types: Vec<String> = a
                 .params
                 .iter()
-                .map(|p| {
-                    let ty = match p.ty {
-                        Some(t) => self.copy_type_to_string(t),
+                .map(|p| match p.ty {
+                    Some(t) => self.copy_type_to_string(t).trim().to_string(),
 
-                        None => "any".to_string(),
-                    };
-
-                    format!("{}: {}", self.text_of(p.name), ty.trim())
+                    None => "any".to_string(),
                 })
                 .collect();
+            let read = match types.len() {
+                0 => "boolean".to_string(),
 
-            format!(
-                "({value} :: any) :: {std}.Attribute<{{ {} }}>",
-                fields.join(", ")
-            )
+                1 => types[0].clone(),
+
+                _ => {
+                    let fields: Vec<String> = a
+                        .params
+                        .iter()
+                        .zip(&types)
+                        .map(|(p, ty)| format!("{}: {ty}", self.text_of(p.name)))
+                        .collect();
+
+                    format!("{{ {} }}", fields.join(", "))
+                }
+            };
+
+            format!("({value} :: any) :: {std}.Attribute<{read}>")
         } else {
             value
         };
@@ -1698,6 +1710,30 @@ print(a)
     fn an_enum_method_and_the_is_test_are_not_variants() {
         let src = "enum Shape as\n    Circle(number)\nend\nimpl Shape as\n    function area(self): number\n        return 1\n    end\nend\nprint(Shape.is(1), Shape.area)\n";
         assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
+    /// The check artifact types the attribute the way the runtime
+    /// reads it: one parameter bare, several as a named table, none
+    /// as the `boolean` that marks its presence.
+    #[test]
+    fn an_attribute_takes_the_type_its_parameters_read_as() {
+        let src = "attribute icon(asset: string) on struct\nattribute range(min: number, max: number) on field\nattribute server_only on function\nprint(icon, range, server_only)\n";
+        let out = crate::compile_with(
+            src,
+            &crate::EmitOptions {
+                check: true,
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(out.check.contains("Attribute<string>"), "{}", out.check);
+        assert!(
+            out.check
+                .contains("Attribute<{ min: number, max: number }>"),
+            "{}",
+            out.check
+        );
+        assert!(out.check.contains("Attribute<boolean>"), "{}", out.check);
     }
 
     #[test]

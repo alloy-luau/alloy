@@ -7,6 +7,7 @@ local Attributes = alloy.Attributes
 describe("Attributes", function()
 	local icon = alloy.attribute("icon", { "struct" }, { "asset" })
 	local range = alloy.attribute("range", { "field" }, { "min", "max" })
+	local sealed = alloy.attribute("sealed", { "struct" }, {})
 
 	it("declares a frozen attribute", function()
 		expect(icon.name).toBe("icon")
@@ -18,7 +19,7 @@ describe("Attributes", function()
 			own = { icon = { "rbxassetid://1" } },
 			fields = { count = { range = { 0, 99 } }, name = {} },
 		})
-		expect(Attributes.get(Item, icon)).toEqual({ asset = "rbxassetid://1" })
+		expect(Attributes.get(Item, icon)).toBe("rbxassetid://1")
 		expect(Attributes.get(Item, range)).toBeNil()
 		expect(Attributes.field(Item, "count", range)).toEqual({ min = 0, max = 99 })
 		expect(Attributes.field(Item, "name", range)).toBeNil()
@@ -32,13 +33,25 @@ describe("Attributes", function()
 
 	it("reads a variant's attributes", function()
 		local Msg = alloy.attrs({}, { variants = { Quit = { icon = { "x" } } } })
-		expect(Attributes.variant(Msg, "Quit", icon)).toEqual({ asset = "x" })
+		expect(Attributes.variant(Msg, "Quit", icon)).toBe("x")
 		expect(Attributes.variant(Msg, "Move", icon)).toBeNil()
+	end)
+
+	-- One parameter reads as the bare value, several as a table that
+	-- names them, none as `true`.
+	it("reads one parameter bare and none as true", function()
+		local Item = alloy.attrs({}, {
+			own = { icon = { "rbxassetid://2" }, sealed = {} },
+			fields = { count = { range = { 1, 2 } } },
+		})
+		expect(Attributes.get(Item, icon)).toBe("rbxassetid://2")
+		expect(Attributes.get(Item, sealed)).toBe(true)
+		expect(Attributes.field(Item, "count", range)).toEqual({ min = 1, max = 2 })
 	end)
 
 	it("attaches to a function value", function()
 		local f = alloy.attach(function() end, { icon = { "f" } })
-		expect(Attributes.get(f, icon)).toEqual({ asset = "f" })
+		expect(Attributes.get(f, icon)).toBe("f")
 		expect(Attributes.of(f)).toEqual({ icon = { "f" } })
 		expect(Attributes.of(function() end)).toEqual({})
 		expect(Attributes.get({}, icon)).toBeNil()

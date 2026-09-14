@@ -493,7 +493,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Attributes",
-        "```alloy\nattribute icon(asset: string) on struct, variant\n\n@icon(\"rbxassetid://1\")\nstruct Sword as ... end\n\nlocal asset = Attributes.get(Sword, icon)\n```\nDeclared metadata, readable at runtime. An `attribute` declaration binds its name to an `Attribute<T>` value, so the `attr` of each static is the name as written, not a string.\n\nAn attribute with one parameter reads as that value; with several, as a table of them in order.",
+        "```alloy\nattribute icon(asset: string) on struct, variant\n\n@icon(\"rbxassetid://1\")\nstruct Sword as ... end\n\nlocal asset = Attributes.get(Sword, icon)\n```\nDeclared metadata, readable at runtime. An `attribute` declaration binds its name to an `Attribute<T>` value, so the `attr` of each static is the name as written, not a string.\n\nAn attribute with one parameter reads as that value, several as a table that names them, and none as `true`.",
     ),
     (
         "@sealed",

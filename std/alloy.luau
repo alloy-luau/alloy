@@ -2259,8 +2259,9 @@ end
 
 local Attributes = {}
 
--- The emit stores the arguments in declaration order; the attribute
--- value names them, so a reader sees `{ min = 0, max = 100 }`.
+-- The emit stores the arguments in declaration order. One parameter
+-- reads as that value, several read as a table that names them, and
+-- none reads as `true`, the mark that the attribute is there.
 local function lookup(data, attr)
 	if data == nil then
 		return nil
@@ -2268,6 +2269,12 @@ local function lookup(data, attr)
 	local value = data[attr.name]
 	if type(value) ~= "table" or type(attr.params) ~= "table" then
 		return value
+	end
+	if #attr.params == 0 then
+		return true
+	end
+	if #attr.params == 1 then
+		return value[1]
 	end
 	local named = {}
 	for i, param in ipairs(attr.params) do

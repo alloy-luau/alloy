@@ -295,12 +295,25 @@ impl<'s> Desugar<'s> {
                     .find(|(_, vs)| vs.iter().any(|(v, n)| v == name && (!unit || *n == 0)));
 
                 if let Some((e, _)) = found {
-                    return Some(e.clone());
+                    return Some(self.enum_type_name(e));
                 }
             }
         }
 
         None
+    }
+
+    /// The type name an enum writes. `enum_decls` keys an enum inside a
+    /// namespace by its written path, `A.Kind`, but the emit renders the
+    /// member under one flat name, `A_Kind`, and that is the only name
+    /// Luau knows.
+    pub(crate) fn enum_type_name(&self, name: &str) -> String {
+        if !name.contains('.') {
+            return name.to_string();
+        }
+
+        self.ns_path_name(name)
+            .unwrap_or_else(|| name.replace('.', "_"))
     }
 
     /// A fresh local for a match scrutinee in the check artifact, cast
@@ -1724,6 +1737,33 @@ mod tests {
                 "this match is not exhaustive: `Outer.Inner.Kind` has no arm for `Square`; add it or a `default` arm"
             ]
         );
+    }
+
+    /// The check artifact casts a match scrutinee to the enum. An enum
+    /// inside an imported namespace reads under its path, `Geo.Kind`,
+    /// which is no Luau type, so the cast wrote `:: Geo.Kind` and the
+    /// Luau checker reported `Unknown type`. The emit renders the member
+    /// under one flat name, and the cast now writes that name.
+    #[test]
+    fn a_match_casts_an_imported_namespace_enum_to_its_flat_name() {
+        let variants = vec![("Small".to_string(), 0), ("Big".to_string(), 1)];
+        let src = "import { Geo } from \"./lib\"\nlocal function t(k: Geo.Kind): number\n    return match k with\n        case Geo.Kind.Small then 1\n        case Big(n) then n\n    end\nend\nprint(t)\n";
+        let options = EmitOptions {
+            import_enums: vec![("Geo.Kind".to_string(), variants.clone())],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+        assert!(out.check.contains(":: Geo_Kind"), "{}", out.check);
+        assert!(!out.check.contains(":: Geo.Kind"), "{}", out.check);
+
+        // Two levels deep flattens every step.
+        let deep = "import { Outer } from \"./lib\"\nlocal function t(k: Outer.Inner.Kind): number\n    return match k with\n        case Outer.Inner.Kind.Small then 1\n        case Big(n) then n\n    end\nend\nprint(t)\n";
+        let options = EmitOptions {
+            import_enums: vec![("Outer.Inner.Kind".to_string(), variants)],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(deep, &options).expect("compiles");
+        assert!(out.check.contains(":: Outer_Inner_Kind"), "{}", out.check);
     }
 
     /// The shape scan reads a namespace member, so the module that

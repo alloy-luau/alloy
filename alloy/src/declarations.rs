@@ -1194,7 +1194,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// `enum Opt<T>` hovers with its parameter list, and a variant
     /// keeps the payload text that names the parameter.
     #[test]

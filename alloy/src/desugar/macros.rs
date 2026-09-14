@@ -270,6 +270,23 @@ impl<'s> Desugar<'s> {
 
         self.macro_arity(m, name, args.len(), span);
 
+        // The expansion is textual, so a body that calls its own macro
+        // expands without end: `$fact(n - 1)` never reaches `n <= 1`.
+        // A call inside an argument, `$max($max(a, b), c)`, nests too,
+        // so a name check cannot tell the two apart; a depth can.
+        if self.options.macro_depth >= 16 {
+            self.diagnose(
+                span,
+                &format!("macro `{name}` expands itself; a macro cannot recurse"),
+            );
+
+            return if self.macro_stmt {
+                String::new()
+            } else {
+                "nil".to_string()
+            };
+        }
+
         let arg_texts: Vec<String> = args
             .iter()
             .map(|a| self.text_of(a.span()).to_string())
@@ -447,7 +464,11 @@ impl<'s> Desugar<'s> {
         };
 
         // The nested compile sees this file's macros, one level down.
-        self.compile_fragment(&nested_src, anchor, as_expr)
+        self.options.macro_depth += 1;
+        let out = self.compile_fragment(&nested_src, anchor, as_expr);
+        self.options.macro_depth -= 1;
+
+        out
     }
 
     /// The count a macro call has to give. A substitution has no call to
@@ -514,16 +535,6 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        if self.options.macros.iter().filter(|m| !m.hidden).count() > 16 {
-            self.diagnostics.push(Diagnostic {
-                start: anchor,
-                end: anchor,
-                message: "macro expansion nests too deeply".to_string(),
-            });
-
-            return "nil".to_string();
-        }
-
         match crate::compile_with(
             nested_src,
             &EmitOptions {
@@ -562,10 +573,17 @@ impl<'s> Desugar<'s> {
                 }
 
                 for d in out.diagnostics {
+                    // One prefix says where the report comes from. A
+                    // report from a deeper level carries it already.
+                    let message = if d.message.starts_with("in macro expansion: ") {
+                        d.message
+                    } else {
+                        format!("in macro expansion: {}", d.message)
+                    };
                     self.diagnostics.push(Diagnostic {
                         start: anchor,
                         end: anchor,
-                        message: format!("in macro expansion: {}", d.message),
+                        message,
                     });
                 }
 
@@ -883,6 +901,36 @@ mod tests {
                 "in macro expansion: `Own` has no field `z`; its fields are `x`",
             ]
         );
+    }
+
+    /// The expansion is textual, so a macro that calls itself expands
+    /// until the parser gives up on the nesting. The report was one
+    /// `in macro expansion:` per level, about 58 of them, in front of
+    /// the parser's own words.
+    #[test]
+    fn a_macro_that_expands_itself_reports_once() {
+        let src = "macro fact(n) n <= 1 ? 1 : n * $fact(n - 1) end\n\nprint($fact(5))\n";
+
+        assert_eq!(
+            messages(src),
+            vec!["in macro expansion: macro `fact` expands itself; a macro cannot recurse"]
+        );
+
+        // Two macros that call each other are one loop.
+        let src = "macro ping(n) $pong(n) end\nmacro pong(n) $ping(n) end\n\nprint($ping(1))\n";
+
+        assert_eq!(
+            messages(src),
+            vec!["in macro expansion: macro `ping` expands itself; a macro cannot recurse"]
+        );
+
+        // A call inside an argument nests without a loop.
+        let src =
+            "macro twice(n) n * 2\nend\nmacro four(n) $twice($twice(n)) end\n\nprint($four(1))\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.ship.contains("(1 * 2) * 2"), "{}", out.ship);
     }
 
     /// A macro body travels as one line. The join used to put a space

@@ -153,6 +153,10 @@ pub struct EmitOptions {
     /// body compiles as a fragment of its own, and a `match` in it
     /// covers the enums of the file it lands in. See `compile_fragment`.
     pub macro_enums: Vec<(String, Vec<(String, usize)>)>,
+    /// How many macro expansions are open above a fragment. A textual
+    /// expansion of a macro that calls itself has no end, so a depth
+    /// of 16 stops it. See `expand_macro`.
+    pub macro_depth: usize,
     /// An ingot rewrote the source before the compile read it. The
     /// order of the statements is then the ingot's, not the author's,
     /// so `import_order` says nothing about it.
@@ -296,6 +300,7 @@ impl Default for EmitOptions {
             ambient_names: Vec::new(),
             import_attributes: Vec::new(),
             macro_enums: Vec::new(),
+            macro_depth: 0,
             ingot_rewrite: false,
         }
     }

@@ -213,20 +213,72 @@ pub(crate) fn lint_one(
     summary: Option<&str>,
     args: &[String],
 ) -> ExitCode {
-    let Some((source, mut out)) = compile_file(path, args) else {
-        // The compile stopped, so there is one error and no lint. The
-        // run still ends with the summary every other run prints.
-        if let Some(command) = summary {
-            let p = Painter::for_stderr();
-            let counts = p.summary(&[
-                (1, "errors", ui::RED),
-                (0, "warnings", ui::AMBER),
-                (0, "denied", ui::RED),
-            ]);
-            eprintln!("{} {counts}", p.fail(command));
-        }
+    let counts = lint_counts(path, lint_config, summary.unwrap_or("lint"), args);
+    let clean = is_clean(&counts, args);
 
-        return ExitCode::FAILURE;
+    if let Some(command) = summary {
+        let p = Painter::for_stderr();
+        let line = p.summary(&[
+            (counts.errors, "errors", ui::RED),
+            (counts.warnings, "warnings", ui::AMBER),
+            (counts.denied, "denied", ui::RED),
+        ]);
+        eprintln!(
+            "{} {line}",
+            if clean {
+                p.ok(command)
+            } else {
+                p.fail(command)
+            }
+        );
+    }
+
+    if clean {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// What one file's compile and lints counted. A command that names
+/// several files adds these up and prints one summary line.
+#[derive(Default)]
+pub(crate) struct Counts {
+    pub(crate) errors: usize,
+    pub(crate) warnings: usize,
+    pub(crate) denied: usize,
+}
+
+impl std::ops::AddAssign for Counts {
+    fn add_assign(&mut self, other: Self) {
+        self.errors += other.errors;
+        self.warnings += other.warnings;
+        self.denied += other.denied;
+    }
+}
+
+/// Whether a run with these counts passes. `--deny-warnings` makes a
+/// warning fail the run.
+pub(crate) fn is_clean(counts: &Counts, args: &[String]) -> bool {
+    let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
+
+    counts.errors == 0 && counts.denied == 0 && !(deny_warnings && counts.warnings > 0)
+}
+
+/// Lints or checks one file outside a project, printing every report
+/// but the summary. `command` names the run, for the fix offer.
+pub(crate) fn lint_counts(
+    path: &str,
+    lint_config: &LintConfig,
+    command: &str,
+    args: &[String],
+) -> Counts {
+    let Some((source, mut out)) = compile_file(path, args) else {
+        // The compile stopped, so there is one error and no lint.
+        return Counts {
+            errors: 1,
+            ..Default::default()
+        };
     };
 
     // The project build reports these too; a single file names the
@@ -282,37 +334,12 @@ pub(crate) fn lint_one(
         (0, lints.clone())
     };
     let (warnings, denied) = print_lints(Path::new(""), &remaining, lint_config, args);
-    offer_fixes(
-        Path::new(""),
-        &lints,
-        lint_config,
-        fix,
-        summary.unwrap_or("lint"),
-    );
-    let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
+    offer_fixes(Path::new(""), &lints, lint_config, fix, command);
 
-    let clean = out.diagnostics.is_empty() && denied == 0 && !(deny_warnings && warnings > 0);
-
-    if let Some(command) = summary {
-        let counts = p.summary(&[
-            (out.diagnostics.len(), "errors", ui::RED),
-            (warnings, "warnings", ui::AMBER),
-            (denied, "denied", ui::RED),
-        ]);
-        eprintln!(
-            "{} {counts}",
-            if clean {
-                p.ok(command)
-            } else {
-                p.fail(command)
-            }
-        );
-    }
-
-    if clean {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    Counts {
+        errors: out.diagnostics.len(),
+        warnings,
+        denied,
     }
 }
 

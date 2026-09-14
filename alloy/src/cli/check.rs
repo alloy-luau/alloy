@@ -2,20 +2,36 @@
 
 use std::process::ExitCode;
 
-use crate::cli::lint_support::{lint_context, lint_one, print_lints};
+use alloy::config::LintConfig;
+
+use crate::cli::lint_support::{Counts, is_clean, lint_context, lint_counts, print_lints};
 use crate::cli::support::{
     apply_build_options, is_source, positionals, print_diagnostics, project,
 };
 use crate::ui::{self, Painter};
 use crate::{fail, usage};
 
+/// The counts over every file the command line names. A second file
+/// used to be dropped, so its errors never reached the report.
+fn check_files(files: &[String], lint_config: &LintConfig, args: &[String]) -> Counts {
+    let mut counts = Counts::default();
+
+    for file in files {
+        counts += lint_counts(file, lint_config, "check", args);
+    }
+
+    counts
+}
+
 pub(crate) fn check(args: &[String]) -> ExitCode {
     let positional = positionals(args);
 
-    if let Some(file) = positional.first() {
-        if !is_source(file) {
-            fail(&format!("{file} is not an .aly file"));
-            return usage();
+    if !positional.is_empty() {
+        for file in &positional {
+            if !is_source(file) {
+                fail(&format!("{file} is not an .aly file"));
+                return usage();
+            }
         }
 
         // The project's alloy.toml still applies to one file: its lint
@@ -24,8 +40,29 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
         let Some((args, _, _, lint_config)) = lint_context(args) else {
             return ExitCode::FAILURE;
         };
+        let counts = check_files(&positional, &lint_config, &args);
+        let p = Painter::for_stderr();
+        let clean = is_clean(&counts, &args);
+        let line = p.summary(&[
+            (positional.len(), "files", ui::DIM),
+            (counts.errors, "errors", ui::RED),
+            (counts.warnings, "warnings", ui::AMBER),
+            (counts.denied, "denied", ui::RED),
+        ]);
+        eprintln!(
+            "{} {line}",
+            if clean {
+                p.ok("check")
+            } else {
+                p.fail("check")
+            }
+        );
 
-        return lint_one(file, &lint_config, Some("check"), &args);
+        return if clean {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
     }
 
     let (root, mut config) = match project(args) {
@@ -72,5 +109,53 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
         eprintln!("{} {counts}", p.fail("check"));
 
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `alloy check a.aly b.aly` used to compile the first file alone,
+    /// so the second file's errors never reached the report.
+    #[test]
+    fn check_reads_every_file_the_command_line_names() {
+        let dir = std::env::temp_dir().join(format!("alloy-check-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("the folder");
+        std::fs::write(
+            dir.join("alloy.toml"),
+            "[build]\nin = \"src\"\nout = \"build\"\n",
+        )
+        .expect("the file");
+        std::fs::write(dir.join("src/clean.aly"), "print(1)\n").expect("the file");
+        // A struct and an enum of one name: the duplicate check reports.
+        std::fs::write(
+            dir.join("src/bad.aly"),
+            "struct Thing as\n    v: number\nend\nenum Thing as\n    A\nend\nprint(Thing)\n",
+        )
+        .expect("the file");
+
+        let clean = dir.join("src/clean.aly").display().to_string();
+        let bad = dir.join("src/bad.aly").display().to_string();
+        let config = LintConfig::default();
+
+        assert_eq!(
+            check_files(std::slice::from_ref(&clean), &config, &[]).errors,
+            0
+        );
+        assert_eq!(
+            check_files(std::slice::from_ref(&bad), &config, &[]).errors,
+            1
+        );
+
+        // The second file is read, whichever place it takes.
+        assert_eq!(
+            check_files(&[clean.clone(), bad.clone()], &config, &[]).errors,
+            1
+        );
+        assert_eq!(check_files(&[bad, clean], &config, &[]).errors, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

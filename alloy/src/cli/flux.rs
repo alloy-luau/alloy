@@ -74,19 +74,19 @@ fn flux_once(args: &[String]) -> ExitCode {
     let args = &args[..];
     let positional = positionals(args);
 
-    // One file named on the command line: the whole project still
-    // compiles, since the type check needs every module the file
-    // imports, and the report is then cut down to that file.
-    let mut only = None;
+    // The files named on the command line: the whole project still
+    // compiles, since the type check needs every module a file
+    // imports, and the report is then cut down to those files.
+    let mut only: Vec<PathBuf> = Vec::new();
 
-    if let Some(file) = positional.first() {
+    for file in &positional {
         if !is_source(file) {
             fail(&format!("{file} is not an .aly file"));
             return usage();
         }
 
         match relative_to_input(file, &root, &config) {
-            Some(rel) => only = Some(rel),
+            Some(rel) => only.push(rel),
 
             None => {
                 // The lints still say what they can about the file, so
@@ -111,16 +111,17 @@ fn flux_once(args: &[String]) -> ExitCode {
         }
     };
 
-    if let Some(rel) = &only {
-        report.diagnostics.retain(|(r, _)| r == rel);
-        report.failures.retain(|(r, _)| r == rel);
-        report.lints.retain(|(r, _)| r == rel);
-        // `written` holds the emitted `.luau` paths, so the source name
-        // never matches one; the run covered this one file.
-        let output = alloy::build::output_for(rel);
-        report
-            .written
-            .retain(|w| output.as_deref().is_some_and(|o| w == o));
+    if !only.is_empty() {
+        report.diagnostics.retain(|(r, _)| only.contains(r));
+        report.failures.retain(|(r, _)| only.contains(r));
+        report.lints.retain(|(r, _)| only.contains(r));
+        // `written` holds the emitted `.luau` paths, so a source name
+        // never matches one; the run covered these files.
+        let outputs: Vec<PathBuf> = only
+            .iter()
+            .filter_map(|rel| alloy::build::output_for(rel))
+            .collect();
+        report.written.retain(|w| outputs.contains(w));
     }
 
     let report = report;
@@ -152,7 +153,7 @@ fn flux_once(args: &[String]) -> ExitCode {
                 }
 
                 for d in &analysis.diagnostics {
-                    if only.as_ref().is_some_and(|rel| &d.rel != rel) {
+                    if !only.is_empty() && !only.contains(&d.rel) {
                         continue;
                     }
 

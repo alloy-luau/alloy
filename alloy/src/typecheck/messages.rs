@@ -198,6 +198,25 @@ pub fn rewrite_emitted_name(
         if declares_type_only(source, name) {
             return Some((format!("`{name}` is a type, not a value"), None));
         }
+
+        // `T.label()` inside `function show<T: Named>(x: T)`: a type
+        // parameter names no value, so the checker looks for a global.
+        // The tail it adds, `consider assigning to it first`, is advice
+        // that cannot work.
+        if let Some(header) = generic_header(source, line, name) {
+            let on = match param_of_type(header, name) {
+                Some(p) => format!("call the method on `{p}` (a value of type `{name}`)"),
+
+                None => format!("call the method on a value of type `{name}`"),
+            };
+
+            return Some((
+                format!(
+                    "`{name}` is a type parameter, not a value; {on}, or make it a static of the trait's implementor"
+                ),
+                None,
+            ));
+        }
     }
 
     // `new n { }`, where `n` is a value: the emit asks it for `new`.
@@ -273,6 +292,51 @@ fn impl_line_for(source: &str, line: usize, name: &str) -> Option<usize> {
         })
         .map(|(k, _)| k + 1)
         .last()
+}
+
+/// The `function` header above a line that takes the name as a generic
+/// parameter: `function show<T: Named>(x: T)` answers it for `T`. The
+/// nearest header above the line owns the body.
+fn generic_header<'a>(source: &'a str, line: usize, name: &str) -> Option<&'a str> {
+    source
+        .lines()
+        .take(line.saturating_sub(1))
+        .filter(|l| l.contains("function "))
+        .last()
+        .filter(|l| names_generic(l, name))
+}
+
+/// Whether a function header lists the name as a generic parameter. A
+/// `<` after the parameter list opens a type argument, not the list.
+fn names_generic(header: &str, name: &str) -> bool {
+    let Some(open) = header.find('<') else {
+        return false;
+    };
+
+    if header.find('(').is_some_and(|paren| paren < open) {
+        return false;
+    }
+
+    let Some(close) = header[open..].find('>').map(|i| open + i) else {
+        return false;
+    };
+
+    header[open + 1..close]
+        .split(',')
+        .any(|part| part.split(':').next().unwrap_or("").trim() == name)
+}
+
+/// The first parameter a function header types as the generic
+/// parameter: `(x: T)` answers `x` for `T`.
+fn param_of_type(header: &str, name: &str) -> Option<String> {
+    let open = header.find('(')?;
+    let close = header[open..].rfind(')').map(|i| open + i)?;
+
+    header[open + 1..close].split(',').find_map(|p| {
+        let (param, ty) = p.split_once(':')?;
+
+        (ty.trim() == name).then(|| param.trim().to_string())
+    })
 }
 
 /// The std holds a Result's methods in an alias of their own, so the
@@ -2358,6 +2422,31 @@ end
                 "`Alias` is a type, not a struct; `impl` needs one".to_string(),
                 Some(2)
             ))
+        );
+    }
+
+    /// `T.label()` inside `function show<T: Named>(x: T)`: the checker
+    /// looks for a global `T` and advises assigning to it, which cannot
+    /// work. A real unknown global keeps the plain tail.
+    #[test]
+    fn a_type_parameter_read_as_a_value_says_so() {
+        let src = "trait Named as\n    function label(): string\nend\nlocal function show<T: Named>(x: T): string\n    return T.label()\nend\n";
+        assert_eq!(
+            rewrite_emitted_name("Unknown global 'T'; consider assigning to it first", src, 5),
+            Some((
+                "`T` is a type parameter, not a value; call the method on `x` (a value of type `T`), or make it a static of the trait's implementor".to_string(),
+                None
+            ))
+        );
+
+        let plain = "local function show<T>(x: T): string\n    return tostring(nope)\nend\n";
+        assert_eq!(
+            rewrite_emitted_name(
+                "Unknown global 'nope'; consider assigning to it first",
+                plain,
+                2
+            ),
+            None
         );
     }
 

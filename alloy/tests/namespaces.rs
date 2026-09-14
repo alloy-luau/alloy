@@ -313,6 +313,34 @@ fn a_nested_namespace_of_another_file_folds_at_any_depth() {
     );
 }
 
+/// `import * as M` binds the module table, so a namespace of the module
+/// reads one level deeper: `M.Geom.Point`. The module exports the type
+/// as `Geom_Point`, and `M.Geom_Point` is the Luau path a type slot
+/// reads. The star name carries it, so `import * as X` reads
+/// `X.Geom_Point`.
+#[test]
+fn a_star_import_folds_a_namespace_type() {
+    let dir = temp_project("star-namespace");
+    fs::write(
+        dir.join("src/geom.aly"),
+        "export namespace Geom as\n    struct Point as\n        x: number\n    end\n    enum Kind as\n        Flat\n        Round\n    end\n    namespace In as\n        namespace Deep as\n            struct Spot as\n                y: number\n            end\n        end\n    end\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.aly"),
+        "import * as M from \"./geom\"\nimport * as X from \"./geom\"\n\nlocal p: M.Geom.Point = { x = 1 }\nlocal k: M.Geom.Kind = M.Geom.Kind.Flat\nlocal s: M.Geom.In.Deep.Spot = { y = 2 }\nlocal q: X.Geom.Point = p\n\nprint(p, k, s, q)\n",
+    )
+    .unwrap();
+    let report = build(&dir);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+
+    let main = output(&dir, "main.luau");
+    assert!(main.contains("local p: M.Geom_Point"), "{main}");
+    assert!(main.contains("local k: M.Geom_Kind"), "{main}");
+    assert!(main.contains("local s: M.Geom_In_Deep_Spot"), "{main}");
+    assert!(main.contains("local q: X.Geom_Point"), "{main}");
+}
+
 /// `export { Geom }` below the declaration exports the group too.
 #[test]
 fn an_export_list_sends_a_namespace() {

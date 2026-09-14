@@ -1000,6 +1000,18 @@ impl<'s> Desugar<'s> {
                 self.enums.insert(name.clone(), variants.clone());
                 self.enum_decls.insert(name.clone(), variants.clone());
             }
+
+            // `import * as M` binds the module, so the same enum reads
+            // one level deeper here: `M.Ns.Kind` of the module is
+            // `M.M.Ns.Kind`.
+            for module in self.star_modules.clone() {
+                let path = format!("{module}.{name}");
+
+                if !self.enums.contains_key(&path) {
+                    self.enums.insert(path.clone(), variants.clone());
+                    self.enum_decls.insert(path, variants.clone());
+                }
+            }
         }
     }
 

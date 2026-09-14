@@ -145,6 +145,17 @@ impl<'s> Desugar<'s> {
                     v.clone()
                 }
 
+                // `import * as M` binds the whole module, so a namespace
+                // of it reads one level deeper: `M.Ns.Type`. The names in
+                // braces beside it read off the same local.
+                ImportKind::Namespace(n, v) => {
+                    let local = self.text_of(*n).to_string();
+
+                    self.scan_star_namespace(&bare, &local);
+
+                    v.clone()
+                }
+
                 _ => continue,
             };
 
@@ -195,6 +206,49 @@ impl<'s> Desugar<'s> {
                 );
             }
         }
+    }
+
+    /// The namespaces a star import reaches. `import * as M` binds the
+    /// module table, so a namespace of the module reads `M.Ns.Type`, one
+    /// level deeper than `import { Ns }` reads it. The module exports the
+    /// type as `Ns_Type`, and `M.Ns_Type` is a Luau type path, so the
+    /// member renders under the local and asks for no alias.
+    fn scan_star_namespace(&mut self, bare: &str, local: &str) {
+        let members: Vec<NsMember> = self
+            .options
+            .import_types
+            .iter()
+            .filter(|(s, _)| s == bare)
+            .flat_map(|(_, types)| types.iter())
+            .map(|entry| crate::modules::type_head(entry))
+            .filter(|full| full.contains('_'))
+            .map(|full| NsMember {
+                name: full.to_string(),
+                rendered: format!("{local}.{full}"),
+                private: false,
+                value: false,
+                ty: true,
+                nested: false,
+            })
+            .collect();
+
+        if members.is_empty() {
+            return;
+        }
+
+        self.namespaces.insert(
+            local.to_string(),
+            NamespaceInfo {
+                name: local.to_string(),
+                path: local.to_string(),
+                prefix: String::new(),
+                members,
+                parent: None,
+                start: 0,
+                end: 0,
+                exported: false,
+            },
+        );
     }
 
     fn scan_namespaces_in(&mut self, stmts: &[Stmt], parent: Option<&str>) {

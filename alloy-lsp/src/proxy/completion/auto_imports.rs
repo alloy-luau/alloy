@@ -64,6 +64,9 @@ impl State {
             let Some(name) = unresolved_name(message) else {
                 continue;
             };
+            // `Geo.Vec` is a member of a namespace, and a reader reaches
+            // it through the group: the import names `Geo`.
+            let name = name.split('.').next().unwrap_or(name);
             // A struct is a value and a type. A name an annotation
             // alone uses imports as a type; a `new Name`, a `Name.`, or
             // a `Name(` in the file wants the value, which is the type

@@ -2293,6 +2293,32 @@ pub(crate) fn an_attribute_contract_lists_its_own_words() {
     assert!(declares_a_name_at("local function |", 15));
 }
 
+/// `Unknown type 'Geo.Vec'`: a member of a namespace is reached through
+/// its group, so the fix imports `Geo`.
+#[test]
+fn an_unresolved_namespace_member_offers_its_group() {
+    let st = super::support::files(&[
+        (
+            "file:///defs.aly",
+            "export namespace Geo as\n    public struct Vec as\n        x: number\n    end\nend\n",
+        ),
+        (
+            "file:///use.aly",
+            "local function g(): Geo.Vec\n    return new Geo.Vec { x = 1 }\nend\n",
+        ),
+    ]);
+    let report = json!({
+        "message": "TypeError: Unknown type 'Geo.Vec'",
+        "range": { "start": { "line": 0, "character": 20 }, "end": { "line": 0, "character": 27 } },
+    });
+    let actions = st.import_actions("file:///use.aly", &[report]);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"]["file:///use.aly"][0]["newText"],
+        json!("import { Geo } from \"./defs\"\n")
+    );
+}
+
 /// An enum a file reads as a type and as a value: the report on the
 /// annotation offers the value form, which serves the type too, so one
 /// fix resolves the file.

@@ -516,6 +516,24 @@ impl<'s> Desugar<'s> {
         let Some(variants) = self.enum_decls.get(&ename) else {
             return;
         };
+
+        // The methods of an imported enum stay in the module that
+        // declares it: `project_impls` carries only the impls other
+        // files add. The checker reads them off the import's type, so a
+        // member of an imported enum is its report, not this one. A
+        // macro body sees the enums of the file it expands in the same
+        // way, without their impls.
+        let elsewhere = self
+            .options
+            .import_enums
+            .iter()
+            .chain(&self.options.macro_enums)
+            .any(|(n, _)| *n == ename);
+
+        if elsewhere {
+            return;
+        }
+
         let member = self.text_of(*field).to_string();
 
         if BUILT_IN.contains(&member.as_str())

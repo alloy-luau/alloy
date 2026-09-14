@@ -2059,6 +2059,32 @@ mod tests {
         assert!(!out.check.contains(":: M.Opt"), "{}", out.check);
     }
 
+    /// A static call of a method an imported enum's impl writes,
+    /// `Opt.or_else(o, 5)`, is no missing variant: the impl sits in the
+    /// module that declares the enum, and the checker types the call
+    /// off the import. An enum of this file still reports.
+    #[test]
+    fn a_method_of_an_imported_enum_is_no_missing_variant() {
+        let variants = vec![("Some".to_string(), 1), ("Nil".to_string(), 0)];
+        let options = EmitOptions {
+            import_enums: vec![("Opt".to_string(), variants)],
+            import_types: vec![("./lib".to_string(), vec!["Opt<T>".to_string()])],
+            ..EmitOptions::default()
+        };
+        let src = "import { Opt } from \"./lib\"\nlocal o: Opt<number> = Opt.Some(1)\nprint(Opt.or_else(o, 5))\n";
+        let out = crate::compile_with(src, &options).expect("compiles");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        let own = "enum Opt as\n    Some(number)\n    Nil\nend\nlocal o = Opt.Some(1)\nprint(Opt.or_else(o, 5))\n";
+        let got = messages(own);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            got[0],
+            "`Opt` has no variant `or_else`; its variants are `Some` and `Nil`"
+        );
+    }
+
     #[test]
     fn a_match_over_an_imported_enum_is_exhaustive() {
         let src = "import { R } from \"./e1\"\nlocal function t(r: R): number\n    return match r with\n        case R.A then 1\n        case R.B then 2\n    end\nend\nprint(t)\n";

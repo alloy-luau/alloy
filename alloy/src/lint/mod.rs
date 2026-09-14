@@ -1107,6 +1107,61 @@ mod tests {
         );
     }
 
+    /// `--fix` cuts the dead name from the list, and the whole statement
+    /// when every name it binds is dead. The text it leaves parses, and
+    /// a second pass finds nothing to cut.
+    #[test]
+    fn an_unused_import_carries_its_own_cut() {
+        let cut = |src: &str| -> String {
+            let lints = crate::compile(src).unwrap().lints;
+            let mine: Vec<Lint> = lints
+                .into_iter()
+                .filter(|l| l.name == "unused_import")
+                .collect();
+            assert!(mine.iter().all(|l| l.fix.is_some()), "{mine:?}");
+            let (after, n) = apply_fixes(src, &mine);
+            assert!(n > 0, "{mine:?}");
+            // The text still parses, and nothing is left to cut.
+            let again = crate::compile(&after).unwrap().lints;
+            assert!(
+                !again.iter().any(|l| l.name == "unused_import"),
+                "{again:?}"
+            );
+
+            after
+        };
+
+        // One dead name of three: the entry goes with its comma.
+        assert_eq!(
+            cut("import { a, b, c } from \"./m\"\nprint(a, c)\n"),
+            "import { a, c } from \"./m\"\nprint(a, c)\n"
+        );
+        // The last entry goes with the comma before it.
+        assert_eq!(
+            cut("import { a, b, c } from \"./m\"\nprint(a, b)\n"),
+            "import { a, b } from \"./m\"\nprint(a, b)\n"
+        );
+        // Every name dead: the statement goes.
+        assert_eq!(
+            cut("import { a, b } from \"./m\"\nprint(\"hi\")\n"),
+            "print(\"hi\")\n"
+        );
+        assert_eq!(
+            cut("import * as m from \"./m\"\nprint(\"hi\")\n"),
+            "print(\"hi\")\n"
+        );
+        // A dead head under a live list, and a dead list under a live
+        // head: each leaves the other half.
+        assert_eq!(
+            cut("import * as m, { a } from \"./m\"\nprint(a)\n"),
+            "import { a } from \"./m\"\nprint(a)\n"
+        );
+        assert_eq!(
+            cut("import * as m, { a } from \"./m\"\nprint(m.z)\n"),
+            "import * as m from \"./m\"\nprint(m.z)\n"
+        );
+    }
+
     #[test]
     fn strict_carries_the_pedantic_group_and_is_on_by_default() {
         let src = "-- Doc.\nexport function f(x)\n    return x\nend\n";

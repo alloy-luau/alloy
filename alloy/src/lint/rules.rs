@@ -1076,6 +1076,13 @@ pub fn run(
     for stmt in &chunk.block.stmts {
         let Stmt::Import(im) = stmt else { continue };
         let after = toks[im.span.end as usize - 1].end;
+        let head = match &im.kind {
+            ImportKind::Default(n) | ImportKind::Namespace(n, _) | ImportKind::Both(n, _) => {
+                Some(n.start as usize)
+            }
+
+            ImportKind::Named(_) | ImportKind::TypeOnly(_) => None,
+        };
         let bound: Vec<u32> = match &im.kind {
             ImportKind::Default(n) => vec![n.start],
 
@@ -1090,23 +1097,40 @@ pub fn run(
                 .map(|s| s.alias.unwrap_or(s.name).start)
                 .collect(),
         };
+        let dead: Vec<u32> = bound
+            .iter()
+            .copied()
+            .filter(|i| {
+                let name = toks[*i as usize].text(src);
 
-        for tok_index in bound {
-            let n = toks[tok_index as usize];
+                !toks
+                    .iter()
+                    .any(|t| t.start >= after && t.kind == TokKind::Ident && t.text(src) == name)
+            })
+            .collect();
+        let cuts = import_cuts(
+            src,
+            toks,
+            im.span.start as usize..im.span.end as usize,
+            head,
+            &dead,
+            &bound,
+        );
+
+        for tok_index in &dead {
+            let n = toks[*tok_index as usize];
             let name = n.text(src);
-            let used = toks
-                .iter()
-                .any(|t| t.start >= after && t.kind == TokKind::Ident && t.text(src) == name);
 
-            if !used {
-                lints.push(Lint {
-                    name: "unused_import",
-                    start: n.start,
-                    end: n.end,
-                    message: format!("`{name}` is imported and never used"),
-                    fix: None,
-                });
-            }
+            lints.push(Lint {
+                name: "unused_import",
+                start: n.start,
+                end: n.end,
+                message: format!("`{name}` is imported and never used"),
+                fix: cuts
+                    .iter()
+                    .find(|(t, _)| t == tok_index)
+                    .map(|(_, f)| f.clone()),
+            });
         }
     }
 
@@ -1117,6 +1141,121 @@ pub fn run(
     lints.extend(crate::flux::roblox::run(&scan));
     lints.sort_by_key(|l| l.start);
     lints
+}
+
+/// The bytes a statement owns: the space that indents it and the newline
+/// that ends it, so a cut leaves no blank line behind. Code before the
+/// statement on the same line keeps its bytes.
+fn statement_bytes(src: &str, from: u32, to: u32) -> (u32, u32) {
+    let lead = src[..from as usize]
+        .bytes()
+        .rev()
+        .take_while(|b| *b == b' ' || *b == b'\t')
+        .count() as u32;
+    let rest = &src[to as usize..];
+    let tail = match rest.find('\n') {
+        Some(i) if rest[..i].trim().is_empty() => i as u32 + 1,
+
+        _ => 0,
+    };
+
+    (from - lead, to + tail)
+}
+
+/// The rewrite that drops each unused name of one `import`, by the token
+/// index of the name. Every name gone takes the whole statement. A dead
+/// list under a live head drops the list and leaves `import * as M`.
+/// Else each dead entry goes with the comma that joins it to its
+/// neighbour.
+fn import_cuts(
+    src: &str,
+    toks: &[Tok],
+    span: std::ops::Range<usize>,
+    head: Option<usize>,
+    dead: &[u32],
+    bound: &[u32],
+) -> Vec<(u32, Fix)> {
+    if dead.is_empty() {
+        return Vec::new();
+    }
+
+    let text = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or_default();
+
+    if dead.len() == bound.len() {
+        let (a, b) = statement_bytes(src, toks[span.start].start, toks[span.end - 1].end);
+        let fix = Fix::new(src, a, b, "");
+
+        return dead.iter().map(|t| (*t, fix.clone())).collect();
+    }
+
+    let Some(open) = span.clone().find(|i| text(*i) == "{") else {
+        return Vec::new();
+    };
+    let Some(close) = matching(src, toks, open) else {
+        return Vec::new();
+    };
+    // Each entry of the list, as a token range. An entry may read
+    // `type T as U`, and its last token is the name it binds.
+    let mut entries: Vec<(usize, usize)> = Vec::new();
+    let mut start = open + 1;
+
+    for i in open + 1..close {
+        if text(i) == "," {
+            if i > start {
+                entries.push((start, i));
+            }
+
+            start = i + 1;
+        }
+    }
+
+    if close > start {
+        entries.push((start, close));
+    }
+
+    let gone = |i: usize| dead.contains(&(i as u32));
+    let head_dead = head.is_some_and(gone);
+    let mut out = Vec::new();
+
+    // The list is dead whole and the head lives: one cut takes the list
+    // from the head name to the `}`.
+    if let Some(h) = head.filter(|_| !head_dead)
+        && !entries.is_empty()
+        && entries.iter().all(|e| gone(e.1 - 1))
+    {
+        let fix = Fix::new(src, toks[h].end, toks[close].end, "");
+
+        return entries
+            .iter()
+            .map(|e| ((e.1 - 1) as u32, fix.clone()))
+            .collect();
+    }
+
+    if let Some(h) = head.filter(|h| gone(*h)) {
+        // `import * as M, { a }`: the head runs from the `*` or the
+        // default name to the `{`, so the cut leaves `import { a }`.
+        let from = toks[span.start + 1].start;
+
+        out.push((h as u32, Fix::new(src, from, toks[open].start, "")));
+    }
+
+    for (k, (s, e)) in entries.iter().enumerate() {
+        if !gone(e - 1) {
+            continue;
+        }
+
+        let (a, b) = match (entries.get(k + 1), k) {
+            (Some(next), _) => (toks[*s].start, toks[next.0].start),
+
+            (None, 0) => (toks[*s].start, toks[e - 1].end),
+
+            (None, _) => (toks[entries[k - 1].1 - 1].end, toks[e - 1].end),
+        };
+
+        out.push(((e - 1) as u32, Fix::new(src, a, b, "")));
+    }
+
+    out
 }
 
 /// The index of the bracket that closes the one at `open`.

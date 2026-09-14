@@ -106,9 +106,9 @@ Options:
 ";
 
 pub const CHECK_TEXT: &str = "\
-Usage: alloy check [file] [options]
+Usage: alloy check [file...] [options]
 
-Compiles every source, or one file, and writes nothing. Reports the
+Compiles every source, or the files named, and writes nothing. Reports the
 compiler's diagnostics and the lints at the levels [lint.rules] gives
 them; exits with one on any diagnostic or denied lint.
 
@@ -123,9 +123,9 @@ Options:
 ";
 
 pub const LINT_TEXT: &str = "\
-Usage: alloy lint [file] [options]
+Usage: alloy lint [file...] [options]
 
-Runs the lints over the project, or one file, and nothing else. The
+Runs the lints over the project, or the files named, and nothing else. The
 lints are Flux's, in eight groups: correctness, suspicious, style,
 complexity, perf, roblox, pedantic, naming, and the checker's own under
 `luau`. `alloy doc lints` names them all; the [lint.rules] table of

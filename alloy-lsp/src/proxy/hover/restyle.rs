@@ -227,7 +227,9 @@ pub(crate) fn declares_a_struct(doc: &Doc, name: &str) -> bool {
             .is_some_and(|l| l.starts_with("struct "))
     };
     // `new M.Ns.T { }` through `import * as M`: the module declares
-    // the path under `M`.
+    // the path under `M`. `new A.T { }` through `import { Ns as A }`:
+    // the module declares it under `Ns`.
+    let aliased: String;
     let name = match name.split_once('.') {
         Some((module, rest))
             if crate::proxy::navigation::module_bindings(&doc.source)
@@ -235,6 +237,12 @@ pub(crate) fn declares_a_struct(doc: &Doc, name: &str) -> bool {
                 .any(|(m, _)| m == module) =>
         {
             rest
+        }
+
+        Some((alias, rest)) if let Some(source) = import_alias_source(&doc.source, alias) => {
+            aliased = format!("{source}.{rest}");
+
+            &aliased
         }
 
         _ => name,

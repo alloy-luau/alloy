@@ -581,11 +581,15 @@ fn declared_field_line(
     // A namespace member is keyed by the path the source writes,
     // `Ns.T`, and a receiver carries the last word of it alone. A
     // struct of that spelling is the one the reader means, so the walk
-    // takes the path only when no name matches whole.
+    // takes the path only when no name matches whole. The path walk
+    // reads the file and its imports alone: two files can each hold a
+    // `T` in a namespace, and only an imported one is in reach.
     let read = |exact: bool| {
-        doc.decls
-            .iter()
-            .chain(st.docs.values().flat_map(|d| d.decls.iter()))
+        let reach = doc.decls.iter().chain(doc.import_decls.iter());
+        let workspace = st.docs.values().flat_map(|d| d.decls.iter());
+
+        reach
+            .chain(workspace.filter(|_| exact))
             .filter(|d| match exact {
                 true => d.name == owner,
 

@@ -180,9 +180,10 @@ impl State {
         loaded
     }
 
-    /// The shapes of the workspace, with one document's own first: two
-    /// structs of a shape print alike, and the file's own is the one
-    /// its reader means.
+    /// The shapes one document reaches, its own first: two structs of
+    /// a shape print alike, and a fold names one the file declares or
+    /// imports. A struct of a file the document does not import is no
+    /// answer for it. With no document, the whole workspace.
     pub(crate) fn known_shapes_at(&self, uri: Option<&str>) -> crate::shapes::Known {
         let here = uri.and_then(|u| self.docs.get(u));
         let rest = self.docs.iter().filter(|(u, _)| Some(u.as_str()) != uri);
@@ -190,7 +191,7 @@ impl State {
         crate::shapes::Known {
             shapes: here
                 .into_iter()
-                .chain(rest.clone().map(|(_, d)| d))
+                .chain(rest.clone().map(|(_, d)| d).filter(|_| here.is_none()))
                 .flat_map(|d| d.shapes.iter().chain(&d.import_shapes).cloned())
                 .collect(),
             interfaces: here

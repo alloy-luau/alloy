@@ -248,3 +248,62 @@ fn a_constructed_namespace_struct_reads_by_its_path() {
         Some("```luau\nlocal v: M.Ns.T\n```".to_string())
     );
 }
+
+/// A struct of a file the user does not import shares the shape of
+/// `Ns.T`. The fold has no name for the shape in that file, the `new`
+/// on the line names the struct, and a field of it hovers under the
+/// path the import brought in, not under a same named member of a
+/// namespace of another file.
+#[test]
+fn a_namespaced_struct_names_itself_over_a_shape_match() {
+    const USER: &str =
+        "import { Ns } from \"./ns_def\"\n\nlocal v1 = new Ns.T { x = 1, y = 2 }\nprint(v1.x)\n";
+    const ALIAS: &str = "import { Ns as A } from \"./ns_def\"\n\nlocal v2 = new A.T { x = 1, y = 2 }\nprint(v2.x)\n";
+    const NS_DEF: &str = "export namespace Ns as\n    struct T as\n        x: number\n        y: number\n    end\nend\n";
+    const OTHER: &str = "export struct P as\n    x: number\n    y: number\nend\n";
+    const LOCAL: &str =
+        "namespace Local as\n    struct T as\n        x: number\n        y: number\n    end\nend\n";
+    let mut st = files(&[
+        ("file:///user.aly", USER),
+        ("file:///alias.aly", ALIAS),
+        ("file:///other_p.aly", OTHER),
+        ("file:///main_ns.aly", LOCAL),
+    ]);
+    let ns_def = Doc::new(
+        NS_DEF.to_string(),
+        1,
+        &EmitOptions::default(),
+        &alloy::luaux::Config::default(),
+        None,
+    );
+
+    for uri in ["file:///user.aly", "file:///alias.aly"] {
+        st.docs.get_mut(uri).expect("doc").import_decls = ns_def.decls.clone();
+    }
+
+    let known = st.known_shapes_at(Some("file:///user.aly"));
+    let printed = "```luau\nlocal v1: { @metatable t1, { x: number, y: number } }\n```";
+
+    assert!(!crate::shapes::fold(printed, &known).contains("P"));
+
+    let doc = &st.docs["file:///user.aly"];
+
+    assert_eq!(
+        prefer_constructed_struct("```luau\nlocal v1: t1\n```", doc, 2, 6),
+        Some("```luau\nlocal v1: Ns.T\n```".to_string())
+    );
+
+    let at = USER.rfind("v1.x").expect("the field") + 3;
+
+    assert_eq!(
+        used_field_hover(&st, doc, at, at + 1).as_deref(),
+        Some("```alloy\nx: number\n```\nA field of `struct Ns.T`.")
+    );
+
+    let doc = &st.docs["file:///alias.aly"];
+
+    assert_eq!(
+        prefer_constructed_struct("```luau\nlocal v2: t1\n```", doc, 2, 6),
+        Some("```luau\nlocal v2: A.T\n```".to_string())
+    );
+}

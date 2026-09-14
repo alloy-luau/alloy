@@ -35,6 +35,7 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["body is `as ... end`"], "SyntaxError"),
         (&["one name holds one declaration"], "DuplicateError"),
         (&["a comment starts with"], "SyntaxError"),
+        (&["interpolation hole is empty"], "SyntaxError"),
         (&["has no `++`"], "SyntaxError"),
         (&["`declare` takes"], "DeclareError"),
         // A header the parser cannot read. The `trait` rule below would

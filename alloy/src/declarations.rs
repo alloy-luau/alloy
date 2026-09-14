@@ -414,7 +414,15 @@ fn namespace_summaries(
         // shows its header alone; a body says nothing a hover needs.
         let body = text(m.stmt.span());
         let at = start_of(member) - start_of(m.stmt.span());
-        let shown = format!("{}{path}.{}", &body[..at], &body[at..]);
+        // `local` and `const` take a bare name, never a path, so the
+        // word goes and the path stands alone: `Outer.VERSION = 1`.
+        let head = body[..at].trim_end();
+        let head = head
+            .strip_suffix("local")
+            .or_else(|| head.strip_suffix("const"))
+            .map(str::trim_end)
+            .unwrap_or(&body[..at]);
+        let shown = format!("{head}{path}.{}", &body[at..]);
         let shown = match m.stmt.under_default() {
             Stmt::Function(_) | Stmt::LocalFunction(_) => {
                 shown.lines().next().unwrap_or(&shown).to_string()
@@ -1050,6 +1058,24 @@ mod tests {
             coin.hover,
             "```alloy\nDrop.Coin\n```\nA variant of `enum Drop`."
         );
+    }
+
+    #[test]
+    fn a_namespace_local_hovers_as_a_path() {
+        let src = "namespace Outer as\n    public local VERSION = 1\n    const LIMIT = 2\nend\n";
+        let d = summaries(src, false);
+        let v = d
+            .iter()
+            .find(|x| x.name == "Outer.VERSION")
+            .expect("the member");
+        assert!(v.hover.contains("Outer.VERSION = 1"), "{}", v.hover);
+        assert!(!v.hover.contains("local Outer"), "{}", v.hover);
+        let l = d
+            .iter()
+            .find(|x| x.name == "Outer.LIMIT")
+            .expect("the const");
+        assert!(l.hover.contains("Outer.LIMIT = 2"), "{}", l.hover);
+        assert!(!l.hover.contains("const Outer"), "{}", l.hover);
     }
 
     #[test]

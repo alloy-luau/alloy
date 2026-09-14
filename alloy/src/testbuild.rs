@@ -865,23 +865,32 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
         report.written.push(shown);
     }
 
-    if !write {
-        return Ok(report);
-    }
-
-    // A spec whose source lost its tests goes.
+    // A spec whose source lost its tests goes. The removal is a change,
+    // so `--check` counts the orphan as stale and fails on it.
     if out_dir.is_dir() {
         let mut all = Vec::new();
         walk(&out_dir, &mut all)?;
 
         for file in all {
-            if file.to_string_lossy().ends_with(".spec.luau") && !expected.contains(&file) {
-                std::fs::remove_file(&file)?;
-                report
-                    .removed
-                    .push(file.strip_prefix(root).unwrap_or(&file).to_path_buf());
+            if !file.to_string_lossy().ends_with(".spec.luau") || expected.contains(&file) {
+                continue;
             }
+
+            let shown = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
+
+            if !write {
+                report.stale.push(shown);
+
+                continue;
+            }
+
+            std::fs::remove_file(&file)?;
+            report.removed.push(shown);
         }
+    }
+
+    if !write {
+        return Ok(report);
     }
 
     if config.test.lest && !report.written.is_empty() {
@@ -1008,6 +1017,31 @@ mod tests {
         let out = sliced(src).unwrap();
         assert!(out.contains("impl V"));
         assert!(!out.contains("struct W"));
+    }
+
+    /// A spec whose source lost its last `@test` is stale under
+    /// `--check` and goes under `alloy test`.
+    #[test]
+    fn an_orphan_spec_is_stale_under_check() {
+        let dir = std::env::temp_dir().join(format!("alloy-orphan-spec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("the folder");
+        std::fs::create_dir_all(dir.join("tests")).expect("the folder");
+        std::fs::write(dir.join("src/main.aly"), "local x = 1\n").expect("the file");
+        std::fs::write(dir.join("tests/main.spec.luau"), "return {}\n").expect("the file");
+
+        let config = Config::default();
+        let report = run(&dir, &config, false).expect("the check");
+
+        assert_eq!(report.stale, [PathBuf::from("tests/main.spec.luau")]);
+        assert!(!report.is_clean());
+
+        let report = run(&dir, &config, true).expect("the write");
+
+        assert_eq!(report.removed, [PathBuf::from("tests/main.spec.luau")]);
+        assert!(!dir.join("tests/main.spec.luau").is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `alloy test` adds the `@lest` alias to the Luau configuration

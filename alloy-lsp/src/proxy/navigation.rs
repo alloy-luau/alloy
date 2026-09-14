@@ -188,6 +188,16 @@ impl Server {
                 json!({ "changes": { uri: edits } })
             }
 
+            Target::Binding { name, start, end } => {
+                let mut edits: Vec<Value> = uses_in_range(&doc.source, &name, start, end)
+                    .into_iter()
+                    .map(|(s, e)| text_edit(&doc.source, s, e, &new_name))
+                    .collect();
+                edits.dedup();
+
+                json!({ "changes": { uri: edits } })
+            }
+
             Target::Variant { file, owner, name } => {
                 match st.variant_edits(&file, &owner, &name, &new_name) {
                     Some(edit) => edit,
@@ -251,6 +261,19 @@ impl Server {
             },
 
             Target::Local(name) => name_uses(&doc.source, &name)
+                .into_iter()
+                .map(|(s, e)| {
+                    json!({
+                        "uri": uri,
+                        "range": range_value(
+                            position_of(&doc.source, s),
+                            position_of(&doc.source, e),
+                        ),
+                    })
+                })
+                .collect(),
+
+            Target::Binding { name, start, end } => uses_in_range(&doc.source, &name, start, end)
                 .into_iter()
                 .map(|(s, e)| {
                     json!({
@@ -666,12 +689,12 @@ impl State {
         let doc = self.docs.get(uri)?;
         let source = &doc.source;
 
-        // The caret's own binding decides. A parameter, a `local`, a
-        // `for` variable, and a `case` binding each have a scope, and
-        // the child knows where that scope ends; the walks below read
-        // the file by spelling, so they would edit every same-named
-        // name in it. A name this file exports at the caret is the
-        // module's, and those walks answer for it.
+        // The caret's own binding decides. A parameter, a `local`, and a
+        // `for` variable each have a scope, and the child knows where
+        // that scope ends; the walks below read the file by spelling, so
+        // they would edit every same-named name in the file. A name this
+        // file exports at the caret is the module's, and those walks
+        // answer for it.
         if keywords::is_word_at(source, offset) {
             let (s, e) = keywords::word_range(source, offset);
             let word = &source[s..e];
@@ -679,6 +702,20 @@ impl State {
                 && imports::exports_of(source, doc.is_alx)
                     .iter()
                     .any(|x| x.name == *word);
+
+            // A `case` binding is the proxy's own. The match lowers to
+            // one expression, so the child's edits land on generated
+            // text: the `case` keyword and the `end` of the declaration
+            // the arm reads. The arm holds every use of the name.
+            let line = position_of(source, offset).0 as usize;
+
+            if !declares && let Some((start, end)) = case_arm_of_binding(doc, line, word) {
+                return Some(Target::Binding {
+                    name: word.to_string(),
+                    start,
+                    end,
+                });
+            }
 
             if !declares
                 && matches!(
@@ -1055,7 +1092,7 @@ impl State {
         match target {
             // A name this file alone binds, and a struct with no
             // export: the file is the whole scope.
-            Some(Target::Local(_)) => {
+            Some(Target::Local(_) | Target::Binding { .. }) => {
                 let (kind, at) = bound_at(&doc.source, new_name)?;
 
                 says(&kind, &doc.source, at)
@@ -2003,6 +2040,20 @@ pub(crate) fn whole_word(line: &str, word: &str) -> Option<usize> {
 /// Every use of a name in a source, as byte ranges. The lexer leaves
 /// comments and strings out, and a name after a `.` or a `:` is a
 /// field of something else, not this one.
+/// The uses of a name inside one byte range: the arm of a `case`
+/// binding, which is the whole scope of what the pattern binds.
+pub(crate) fn uses_in_range(
+    src: &str,
+    name: &str,
+    start: usize,
+    end: usize,
+) -> Vec<(usize, usize)> {
+    name_uses(src, name)
+        .into_iter()
+        .filter(|(s, _)| *s >= start && *s < end)
+        .collect()
+}
+
 pub(crate) fn name_uses(src: &str, name: &str) -> Vec<(usize, usize)> {
     let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
         return Vec::new();
@@ -2087,6 +2138,14 @@ pub(crate) enum Target {
     /// A name this file alone binds: the alias of an import entry, or
     /// the binding of a whole module.
     Local(String),
+    /// A name a `case` pattern binds, with the byte range of the arm.
+    /// The match lowers to one expression, so the child would edit the
+    /// generated text of it. The arm is the whole scope of the name.
+    Binding {
+        name: String,
+        start: usize,
+        end: usize,
+    },
     /// An enum variant, with the file that declares the enum and the
     /// enum's own name. The emit leaves a variant as a tag inside a
     /// record, so the child has no binding to point at.

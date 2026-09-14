@@ -343,6 +343,87 @@ pub(crate) fn case_binding_span(
     Some((at, at + word.len()))
 }
 
+/// The `match ... with` line the `case` at `case_line` belongs to. The
+/// walk crosses a block that closed above whole, so a nested match of
+/// an arm above the line is not the head.
+fn match_head_line(lines: &[&str], case_line: usize) -> Option<usize> {
+    let mut at = case_line.checked_sub(1)?;
+    // The blocks the walk entered from below and has yet to leave.
+    let mut inside = 0i32;
+
+    loop {
+        let text = lines.get(at)?.trim();
+
+        if inside > 0 {
+            inside = (inside + crate::context::block_closers(text)
+                - crate::context::value_openers(text))
+            .max(0);
+        } else if text.ends_with(" with") {
+            return Some(at);
+        } else {
+            inside = crate::context::block_closers(text);
+        }
+
+        at = at.checked_sub(1)?;
+    }
+}
+
+/// The byte range of the `case` arm that opens at `case_line`: from that
+/// line to the last one before the next `case`, the `default`, or the
+/// `end` of the match. A block the arm opens is crossed whole, so a
+/// nested match stays inside the arm.
+fn case_arm_span(doc: &Doc, case_line: usize, lines: &[&str]) -> Option<(usize, usize)> {
+    let depth_of =
+        |text: &str| crate::context::value_openers(text) - crate::context::block_closers(text);
+    let mut depth = depth_of(lines[case_line]).max(0);
+    let mut last = case_line;
+
+    for (at, raw) in lines.iter().enumerate().skip(case_line + 1) {
+        let text = raw.trim();
+        let leaves = text.starts_with("case ")
+            || opens_the_default_arm(text)
+            || crate::context::block_closers(text) > 0;
+
+        if depth == 0 && leaves {
+            break;
+        }
+
+        depth = (depth + depth_of(text)).max(0);
+        last = at;
+    }
+
+    let start = offset_of(&doc.source, case_line as u32, 0)?;
+    let end = offset_of(&doc.source, last as u32, 0)? + lines[last].len();
+
+    Some((start, end))
+}
+
+/// The arm that binds `word` at `line`, as a byte range: the arm the
+/// line sits in, or one around it, up to the outermost match. The arm is
+/// the whole scope of the name, so a rename and a reference list stop
+/// there. The scope walk reads the same pattern, so the three answers
+/// name one set of bindings.
+pub(crate) fn case_arm_of_binding(doc: &Doc, line: usize, word: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = doc.source.lines().collect();
+    let mut at = line;
+
+    loop {
+        let case_line = case_binding_line(&lines, at)?;
+        let pattern = lines[case_line].trim().strip_prefix("case ")?;
+
+        if crate::context::pattern_names(pattern)
+            .iter()
+            .any(|l| l.name == word)
+        {
+            return case_arm_span(doc, case_line, &lines);
+        }
+
+        // An inner arm binds something else. The name may still come
+        // from the arm the inner match itself stands in.
+        at = match_head_line(&lines, case_line)?.checked_sub(1)?;
+    }
+}
+
 /// The hover of a `case` pattern's binding at `line`: the name with the
 /// type the pattern gives it. `None` when the line is in no arm, or the
 /// word is no binding of it.

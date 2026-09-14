@@ -7,7 +7,7 @@
 
 use super::super::navigation::{
     Target, export_span, impl_method_span, import_entries, module_bindings, module_head_line,
-    name_uses, trait_method_span,
+    name_uses, trait_method_span, uses_in_range,
 };
 use super::super::*;
 
@@ -1087,4 +1087,77 @@ fn a_rename_onto_a_bound_name_is_refused() {
             .as_deref(),
         Some("`Point` is already a struct on line 5")
     );
+}
+
+/// A `case` binding belongs to the proxy. The match lowers to one
+/// expression, so the child's edits land on generated text: the `case`
+/// keyword and the `end` of the enum. The arm is the whole scope, so a
+/// binding of one arm never reads a use of another.
+#[test]
+fn a_case_binding_answers_from_its_own_arm() {
+    const SRC: &str = concat!(
+        "enum Shape as\n",
+        "    Circle(number),\n",
+        "    Rect(number),\n",
+        "end\n",
+        "\n",
+        "struct Point as\n",
+        "    x: number,\n",
+        "end\n",
+        "\n",
+        "local function area(s: Shape, p: Point): number\n",
+        "    match s with\n",
+        "        case Circle(r) then return r * r\n",
+        "        case Rect(r) then\n",
+        "            match p with\n",
+        "                case Point { x } then return x + r\n",
+        "            end\n",
+        "    end\n",
+        "\n",
+        "    return 0\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    // The rename and the reference list read the uses of the arm, each
+    // as a line and a column.
+    let uses = |text: &str| {
+        let at = SRC.find(text).expect(text);
+
+        match st.name_target(uri, at) {
+            Some(Target::Binding { name, start, end }) => uses_in_range(SRC, &name, start, end)
+                .into_iter()
+                .map(|(s, _)| position_of(SRC, s))
+                .collect::<Vec<(u32, u32)>>(),
+
+            _ => panic!("{text} names no arm binding"),
+        }
+    };
+
+    // The payload binding of the first arm, from its pattern and from a
+    // use of it. The `r` of the arm below is another name.
+    assert_eq!(
+        uses("r) then return"),
+        [(11, 20), (11, 35), (11, 39)],
+        "the payload binding"
+    );
+    assert_eq!(uses("r * r"), [(11, 20), (11, 35), (11, 39)], "a use of it");
+
+    // The shorthand of a struct pattern, in an arm of a nested match.
+    assert_eq!(uses("x } then"), [(14, 29), (14, 45)], "the shorthand");
+
+    // The arm of the outer match reaches over the nested one, so the
+    // binding the inner arm reads is still the outer arm's.
+    assert_eq!(
+        uses("r) then\n"),
+        [(12, 18), (14, 49)],
+        "the binding of the outer arm"
+    );
+    assert_eq!(uses("r\n            end"), [(12, 18), (14, 49)], "its use");
+
+    // The parameters keep their scopes with the child.
+    for text in ["s: Shape", "p: Point", "s with", "p with"] {
+        let at = SRC.find(text).expect(text);
+
+        assert!(st.name_target(uri, at).is_none(), "{text}");
+    }
 }

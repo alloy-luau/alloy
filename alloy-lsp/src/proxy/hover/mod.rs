@@ -8,7 +8,7 @@ mod modules;
 mod restyle;
 
 pub(crate) use declarations::{
-    binds_a_value, case_binding_span, case_binding_text, import_alias_source,
+    binds_a_value, case_arm_of_binding, case_binding_span, case_binding_text, import_alias_source,
 };
 pub(crate) use fields::{
     declared_field_hover, declared_field_owner, declared_parameter_hover,

@@ -183,7 +183,7 @@ fn binding_entry(part: &str) -> Option<Local> {
 
 /// The names a `case` pattern binds: what its payload brackets hold.
 /// A bare variant and a literal bind nothing.
-fn pattern_names(rest: &str) -> Vec<Local> {
+pub fn pattern_names(rest: &str) -> Vec<Local> {
     let text = rest.split(" then").next().unwrap_or(rest);
     let Some(open) = text.find(['(', '[', '{']) else {
         return Vec::new();

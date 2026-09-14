@@ -871,6 +871,76 @@ pub fn resite_report(
         .or_else(|| destroy_report(message, text))
         .or_else(|| contains_report(message, text))
         .or_else(|| after_report(message, text))
+        .or_else(|| mixed_return_report(message, source, text, line, col))
+}
+
+/*
+Two `return` statements of different types in a function that writes no
+return type. The checker reads the first `return` as the whole return
+type, so every later one reports against it, and the report names the
+first type as the one the source asked for. It asked for nothing.
+
+The sentence says where the other type came from and what settles it: a
+return type after the parameters, or one `if` expression in place of the
+two returns. A markup component that returns `nil` in one branch is the
+case that reads worst, because the type it reports is `nil`.
+*/
+fn mixed_return_report(
+    message: &str,
+    source: &str,
+    text: &str,
+    line: usize,
+    col: usize,
+) -> Option<Resited> {
+    let want = quoted_after(message, "Expected this to be '")?;
+    let got = quoted_after(message.split_once("but got ")?.1, "'")?;
+    let body = text.trim_start();
+
+    if !names_word(body, "return") || !body.starts_with("return") {
+        return None;
+    }
+
+    // The report sits on the `return` or on the value after it. Anything
+    // else on the line is a mistake inside the value, not the return.
+    let indent = text.len() - body.len();
+
+    if col != indent + 1 && col != indent + "return ".len() + 1 {
+        return None;
+    }
+
+    if !function_without_return_type(source, line) {
+        return None;
+    }
+
+    let advice = match (want, got) {
+        ("nil", other) | (other, "nil") => format!("`): {other}?`"),
+
+        _ => format!("`): {want} | {got}`"),
+    };
+
+    Some(Resited {
+        kind: "TypeError",
+        message: format!(
+            "this `return` gives `{got}`, and an earlier `return` gives `{want}`; the checker reads the first `return` as the whole return type. Write {advice} after the parameters, or return one `if` expression"
+        ),
+        at: None,
+    })
+}
+
+/// Whether the function that holds the line writes no return type. The
+/// header is the nearest line above that names `function`, and a return
+/// type follows the `)` of the parameters.
+fn function_without_return_type(source: &str, line: usize) -> bool {
+    let lines: Vec<&str> = source.lines().collect();
+    let head = (0..line.saturating_sub(1))
+        .rev()
+        .filter_map(|i| lines.get(i))
+        .find(|l| names_word(l, "function"));
+
+    // `):` says a return type follows. A parameter that is itself a
+    // function type with no parameters spells the same two characters,
+    // so the test reads as no rewrite, not as a wrong one.
+    head.is_some_and(|h| !h.contains("):"))
 }
 
 /// `x in t` on a value the std cannot search. The emit calls `contains`,
@@ -1470,6 +1540,67 @@ mod tests {
         assert_eq!(
             got.message,
             "`in` needs an Array, a Set, a HashMap, or a string; `state.count` is a number"
+        );
+    }
+
+    /// The checker reads the first `return` as the whole return type, so
+    /// a function with no return type reports its second `return`
+    /// against the first. The report named the first type as the one the
+    /// source asked for; the source asked for nothing.
+    #[test]
+    fn two_returns_of_different_types_name_the_first_return() {
+        let src = "local function Maybe(show: boolean)\n    if show then\n        return nil\n    end\n    return 1\nend\nprint(Maybe)\n";
+        let got = resited("Expected this to be 'nil', but got 'number'", src, 5, 5);
+
+        assert_eq!(got.kind, "TypeError");
+        assert_eq!(
+            got.message,
+            "this `return` gives `number`, and an earlier `return` gives `nil`; the checker reads the first `return` as the whole return type. Write `): number?` after the parameters, or return one `if` expression"
+        );
+        assert_eq!(got.at, None);
+
+        // The other order reports on the `nil`, and the advice is the
+        // same annotation.
+        let src = "local function Maybe(show: boolean)\n    if show then\n        return 1\n    end\n    return nil\nend\nprint(Maybe)\n";
+        let got = resited("Expected this to be 'number', but got 'nil'", src, 5, 12);
+
+        assert!(got.message.contains("`): number?`"), "{}", got.message);
+
+        // Neither type is `nil`: the advice names the union.
+        let src = "local function Pick(a: boolean)\n    if a then\n        return \"x\"\n    end\n    return 1\nend\nprint(Pick)\n";
+        let got = resited("Expected this to be 'string', but got 'number'", src, 5, 5);
+
+        assert!(
+            got.message.contains("`): string | number`"),
+            "{}",
+            got.message
+        );
+
+        // A function that writes a return type means what it says, and a
+        // report inside the value is about the value.
+        let shapes = Vec::new();
+        let typed = "local function Maybe(show: boolean): number\n    if show then\n        return nil\n    end\n    return 1\nend\nprint(Maybe)\n";
+        assert_eq!(
+            resite_report(
+                "Expected this to be 'number', but got 'nil'",
+                &shapes,
+                typed,
+                3,
+                16
+            ),
+            None
+        );
+
+        let inner = "local function need(n: number): number\n    return n\nend\n\nlocal function caller(s: string)\n    return need(s)\nend\nprint(caller)\n";
+        assert_eq!(
+            resite_report(
+                "Expected this to be 'number', but got 'string'",
+                &shapes,
+                inner,
+                6,
+                17
+            ),
+            None
         );
     }
 

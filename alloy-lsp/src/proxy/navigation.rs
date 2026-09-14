@@ -395,6 +395,18 @@ impl Server {
             return true;
         }
 
+        // `import * as M from "./m"`, and the `M` of `M.Ns.T`: the emit
+        // writes the `local` for the module in generated text, so the
+        // import line is the place the name comes from.
+        if let Some(result) =
+            module_binding_definition(&doc.source, uri, &doc.source[word_start..word_end])
+        {
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         let (start, end) = keywords::word_range(&doc.source, offset);
         let word = &doc.source[start..end];
         let raw_before = &doc.source[..start];
@@ -2224,6 +2236,35 @@ pub(crate) fn service_definition(source: &str, uri: &str, word: &str) -> Option<
         if imports::service_bindings(line)
             .iter()
             .any(|(local, _)| local == word)
+            && let Some(col) = whole_word(line, word)
+        {
+            let s = position_of(source, at + col);
+            let e = position_of(source, at + col + word.len());
+
+            return Some(json!([{ "uri": uri, "range": range_value(s, e) }]));
+        }
+
+        at += line.len() + 1;
+    }
+
+    None
+}
+
+/// Where `import * as M` binds `M`, when the word is such a binding.
+/// The emit writes the module's `local` itself, so the child points at
+/// generated text and the reader means the import line.
+pub(crate) fn module_binding_definition(source: &str, uri: &str, word: &str) -> Option<Value> {
+    if !module_bindings(source)
+        .iter()
+        .any(|(bound, _)| bound == word)
+    {
+        return None;
+    }
+
+    let mut at = 0usize;
+
+    for line in source.lines() {
+        if line.trim_start().starts_with("import ")
             && let Some(col) = whole_word(line, word)
         {
             let s = position_of(source, at + col);

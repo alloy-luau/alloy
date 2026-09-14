@@ -72,7 +72,8 @@ use hover::{
 };
 #[allow(unused_imports)]
 use navigation::{
-    data_module_of, import_entries, in_a_dot_directory, service_definition, whole_word,
+    data_module_of, import_entries, in_a_dot_directory, module_binding_definition,
+    service_definition, whole_word,
 };
 #[allow(unused_imports)]
 use outline::{ambient_symbols, document_symbols, source_symbols};

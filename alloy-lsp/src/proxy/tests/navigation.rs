@@ -316,6 +316,28 @@ pub(crate) fn a_rename_of_an_imported_name_reaches_every_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The emit writes the `local` of a star import itself, so the child
+/// points at generated text. The import line binds the name.
+#[test]
+fn a_star_alias_opens_at_its_import_line() {
+    let src = "import * as M from \"./mod\"\n\nlocal x: M.Ns.T = new M.Ns.T { value = 1 }\n";
+    let uri = "file:///w/src/main.aly";
+    let found = module_binding_definition(src, uri, "M").expect("the binding");
+
+    assert_eq!(
+        found,
+        json!([{
+            "uri": uri,
+            "range": {
+                "start": { "line": 0, "character": 12 },
+                "end": { "line": 0, "character": 13 },
+            },
+        }])
+    );
+    // A name no import binds this way answers nothing.
+    assert_eq!(module_binding_definition(src, uri, "x"), None);
+}
+
 /// `Outer.Inner.T`: the word in front of the group is a group of this
 /// file, not a module binding. The member is the declaring file's own,
 /// so go-to-definition and rename read it like any other member.

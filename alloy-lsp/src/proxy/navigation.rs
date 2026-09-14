@@ -47,6 +47,7 @@ impl Server {
             return false;
         };
         let is_group = owner.path.rsplit('.').next() == Some(word.as_str());
+        let module = uri_to_path(&home).map(|p| imports::module_path(&p));
         let mut out: Vec<Value> = Vec::new();
 
         for (u, d) in &st.docs {
@@ -78,21 +79,21 @@ impl Server {
                 continue;
             }
 
-            // `Math.PI` outside the namespace: the member after the dot.
-            let path = format!("{}.{word}", owner.path);
-            let mut from = 0;
+            // `Math.PI` outside the namespace: the member after the
+            // dot, under every word this file puts the group under.
+            let Some(module) = &module else {
+                continue;
+            };
 
-            while let Some(i) = d.source[from..].find(&path) {
-                let at = from + i;
-                let member = at + owner.path.len() + 1;
+            for (a, b) in member_uses(
+                &d.source,
+                &st.namespace_heads(u, &d.source, module, &owner.path),
+                &word,
+            ) {
                 out.push(json!({
                     "uri": u,
-                    "range": range_value(
-                        position_of(&d.source, member),
-                        position_of(&d.source, member + word.len()),
-                    ),
+                    "range": range_value(position_of(&d.source, a), position_of(&d.source, b)),
                 }));
-                from = at + path.len();
             }
         }
 
@@ -552,10 +553,117 @@ impl State {
         let spec = module_bindings(source)
             .into_iter()
             .find(|(bound, _)| bound == holder)
-            .map(|(_, spec)| spec)?;
+            .map(|(_, spec)| spec);
+
+        let Some(spec) = spec else {
+            // `A.T` under `import { Ns as A }`, and `M.Ns.T` under a
+            // module binding: the holder names the group, and the
+            // module that declares the group declares the member.
+            return self.namespace_member_at(uri, source, hs, holder, &name);
+        };
         let file = imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
 
         Some((file, name))
+    }
+
+    /// The module and the member name a `Ns.T` reads: the group under
+    /// the word an import list binds it to, or under the `M.Ns` of a
+    /// module binding. `None` when the holder names no namespace that
+    /// declares the member.
+    fn namespace_member_at(
+        &self,
+        uri: &str,
+        source: &str,
+        holder_at: usize,
+        holder: &str,
+        name: &str,
+    ) -> Option<(PathBuf, String)> {
+        let by_entry = self
+            .import_entry_at(source, holder_at)
+            .filter(|it| it.bound == holder)
+            .and_then(|it| Some((self.entry_module(uri, &it)?, it.name)));
+        let (file, group) = match by_entry {
+            Some(found) => found,
+
+            // `M.Ns.T`: the word in front of the group holds the module.
+            None => {
+                let before = source[..holder_at].trim_end().strip_suffix('.')?;
+                let at = before.len().checked_sub(1)?;
+
+                if !keywords::is_word_at(source, at) {
+                    return None;
+                }
+
+                let (ms, me) = keywords::word_range(source, at);
+                let spec = module_bindings(source)
+                    .into_iter()
+                    .find(|(bound, _)| *bound == source[ms..me])
+                    .map(|(_, spec)| spec)?;
+                let file =
+                    imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
+
+                (file, holder.to_string())
+            }
+        };
+        let text = self.module_text(&file)?;
+        let holds = alloy::declarations::namespace_ranges(&text)
+            .into_iter()
+            .any(|n| {
+                n.path.rsplit('.').next() == Some(group.as_str())
+                    && n.members.iter().any(|(m, _)| m == name)
+            });
+
+        holds.then(|| (file, name.to_string()))
+    }
+
+    /// The words a file writes in front of a member of one namespace.
+    ///
+    /// The module's own file writes the group's last word, and so does
+    /// a reader under `import * as M`, which spells `M.Ns.T`. An import
+    /// list binds the group to a name of its own, so
+    /// `import { Ns as A }` writes `A.T`. A group inside another keeps
+    /// its own word whatever the reader bound the outer one to.
+    pub(crate) fn namespace_heads(
+        &self,
+        uri: &str,
+        source: &str,
+        module: &Path,
+        path: &str,
+    ) -> Vec<String> {
+        let root = path.split('.').next().unwrap_or(path);
+        let last = path.rsplit('.').next().unwrap_or(path).to_string();
+        let reaches = |spec: &str| {
+            self.resolve_spec(uri, spec)
+                .map(|p| imports::module_path(&p))
+                .is_some_and(|p| p == module)
+        };
+        let bound: Vec<String> = import_entries(source)
+            .into_iter()
+            .filter(|it| it.name == root && reaches(&it.spec))
+            .map(|it| it.bound)
+            .collect();
+        let holds_module = module_bindings(source)
+            .iter()
+            .any(|(_, spec)| reaches(spec));
+        let home = uri_to_path(uri).is_some_and(|p| imports::module_path(&p) == module);
+        let mut heads = Vec::new();
+
+        if home || holds_module || (path.contains('.') && !bound.is_empty()) {
+            heads.push(last);
+        }
+
+        // An alias stands for the group the list names, so it is the
+        // word in front of the member. A group inside another is
+        // reached through its own name and never through the alias.
+        if !path.contains('.') {
+            for name in bound {
+                if !heads.contains(&name) {
+                    heads.push(name);
+                }
+            }
+        }
+
+        heads
     }
 
     /// The import entry a byte offset belongs to: one whose own name or
@@ -754,6 +862,19 @@ impl State {
                 .any(|x| x.name == word);
 
             if declares && exported {
+                return Some(Target::Export(file, word));
+            }
+
+            // A member of a namespace this file declares. Every reader
+            // writes it under the group, so the module's walk answers
+            // for it whether or not the group is exported.
+            if declares
+                && alloy::declarations::namespace_ranges(source)
+                    .iter()
+                    .any(|n| {
+                        (n.start..=n.end).contains(&s) && n.members.iter().any(|(m, _)| *m == word)
+                    })
+            {
                 return Some(Target::Export(file, word));
             }
 
@@ -1294,11 +1415,26 @@ impl State {
         // stands in scope everywhere, so a type name it spells is this
         // one. Only a type reaches one, so a value skips those files.
         let is_type = declares_a_type(&text, name);
+        // A member of a namespace: every reader writes it under the
+        // group, so the walk reads the words each file puts in front
+        // of it.
+        let group = alloy::declarations::namespace_ranges(&text)
+            .into_iter()
+            .find(|n| n.members.iter().any(|(m, _)| m == name))
+            .map(|n| n.path);
         let mut changes: Map<String, Value> = Map::new();
         let mut here: Vec<Value> = name_uses(&text, name)
             .into_iter()
             .map(|(s, e)| text_edit(&text, s, e, new_name))
             .collect();
+
+        if let Some(group) = &group {
+            let heads = self.namespace_heads(&module_uri, &text, &module, group);
+
+            for (s, e) in member_uses(&text, &heads, name) {
+                here.push(text_edit(&text, s, e, new_name));
+            }
+        }
 
         for (u, d) in &self.docs {
             if *u == module_uri {
@@ -1314,11 +1450,16 @@ impl State {
                 .into_iter()
                 .filter(|it| it.name == name && reaches(&it.spec))
                 .collect();
-            let holders: Vec<String> = module_bindings(&d.source)
+            let mut holders: Vec<String> = module_bindings(&d.source)
                 .into_iter()
                 .filter(|(_, spec)| reaches(spec))
                 .map(|(bound, _)| bound)
                 .collect();
+
+            if let Some(group) = &group {
+                holders = self.namespace_heads(u, &d.source, &module, group);
+            }
+
             let mut edits: Vec<Value> = Vec::new();
 
             // An entry with no alias binds the name itself, so every

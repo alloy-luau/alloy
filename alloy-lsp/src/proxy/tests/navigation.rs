@@ -1206,3 +1206,90 @@ fn a_case_binding_answers_from_its_own_arm() {
         assert!(st.name_target(uri, at).is_none(), "{text}");
     }
 }
+
+/// A member of an exported namespace, under every word a reader puts
+/// in front of it: the module's own `Ns.T`, the `Ns` an import list
+/// binds plain, the alias of `import { Ns as A }`, and the `M.Ns` of a
+/// module binding. The emit flattens the group, so the child ties none
+/// of the four to the declaration.
+#[test]
+pub(crate) fn a_rename_of_a_namespace_member_reaches_every_head() {
+    let dir = std::env::temp_dir().join(format!("alloy-nav-ns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let sources = [
+        (
+            "ns.aly",
+            "export namespace Ns as\n    struct T as\n        value: number,\n    end\nend\n\nlocal here = new Ns.T { value = 0 }\nprint(here)\n",
+        ),
+        (
+            "alias.aly",
+            "import { Ns as A } from \"./ns\"\n\nlocal a = new A.T { value = 1 }\nprint(a)\n",
+        ),
+        (
+            "plain.aly",
+            "import { Ns } from \"./ns\"\n\nlocal b = new Ns.T { value = 2 }\nprint(b)\n",
+        ),
+        (
+            "star.aly",
+            "import * as M from \"./ns\"\n\nlocal c = new M.Ns.T { value = 3 }\nprint(c)\n",
+        ),
+    ];
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+
+    for (rel, src) in sources {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            format!("file://{}", path.display()),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+    }
+
+    let file = dir.join("src").join("ns.aly");
+    let edit = st.export_rename(&file, "T", "Item").expect("the member");
+
+    assert_eq!(
+        rows(&edit),
+        [
+            "alias.aly 2:16-17 -> Item",
+            "ns.aly 1:11-12 -> Item",
+            "ns.aly 6:20-21 -> Item",
+            "plain.aly 2:17-18 -> Item",
+            "star.aly 2:19-20 -> Item",
+        ]
+    );
+
+    // A use under an alias names the member, so the rename that starts
+    // there writes the same edits.
+    let uri = format!("file://{}", dir.join("src").join("alias.aly").display());
+    let source = &st.docs[&uri].source;
+    let at = source.find("A.T").expect("the use") + 2;
+
+    assert!(
+        matches!(st.name_target(&uri, at), Some(Target::Export(ref f, ref n)) if *f == file && n == "T")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

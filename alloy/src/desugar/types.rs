@@ -106,21 +106,34 @@ pub(crate) fn apply_bounds(ty: &str, bounds: &[(String, String)]) -> String {
     let bytes = ty.as_bytes();
     let mut i = 0;
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    // Depth inside `{ }` or `< >`: a bound applies to the bare parameter
-    // only. Under a table or a generic, `{ T & Bound }` is invariant and
-    // no concrete argument would satisfy it.
-    let mut depth = 0i32;
+    // The brackets open around the name. A bound reads through a generic
+    // argument, `Box<T & Bound>`, and the caller's `Box<Num>` satisfies
+    // it. Under a table or an `Array` it does not:
+    // `bounded_array_params` casts the element reads instead.
+    let mut open: Vec<u8> = Vec::new();
 
     while i < bytes.len() {
         match bytes[i] {
-            b'{' | b'<' => depth += 1,
-            b'}' => depth -= 1,
+            // `Array<T>` is a table under another name, so it counts as
+            // one: `bounded_array_params` casts the element reads.
+            b'<' => open.push(match word_before(ty, i) {
+                "Array" => b'{',
+
+                _ => b'<',
+            }),
+            b'{' => open.push(b'{'),
+            b'}' => drop(open.pop()),
             // `>` closes a generic; the one in `->` does not.
-            b'>' if i > 0 && bytes[i - 1] != b'-' => depth -= 1,
+            b'>' if i > 0 && bytes[i - 1] != b'-' => drop(open.pop()),
             _ => {}
         }
 
-        if depth <= 0 && is_word(bytes[i]) && (i == 0 || !is_word(bytes[i - 1])) {
+        // A table is invariant, and so is `Array<T>`: `{ T & Bound }`
+        // accepts no concrete argument. A name under one keeps its bound
+        // off, wherever it sits.
+        let bare = !open.contains(&b'{');
+
+        if bare && is_word(bytes[i]) && (i == 0 || !is_word(bytes[i - 1])) {
             let start = i;
 
             while i < bytes.len() && is_word(bytes[i]) {
@@ -144,6 +157,18 @@ pub(crate) fn apply_bounds(ty: &str, bounds: &[(String, String)]) -> String {
     }
 
     out
+}
+
+/// The word that ends at this byte: the head in front of a `<`.
+fn word_before(ty: &str, at: usize) -> &str {
+    let bytes = ty.as_bytes();
+    let mut start = at;
+
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+
+    &ty[start..at]
 }
 
 /// Whether a type text names `name` with arguments other than the ones
@@ -569,6 +594,57 @@ mod tests {
         assert!(
             out.check
                 .contains("Array.new<<__alloy.HashMap<string, number>>>()"),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A bound reaches a `T` inside a generic argument: the check
+    /// artifact types the parameter `Box<(T & Ord)>`, so the body reads
+    /// the bound's members through the struct. An `Array` is invariant,
+    /// so such a parameter keeps the bound off and each element read
+    /// takes the cast.
+    #[test]
+    fn a_bound_reaches_a_generic_argument() {
+        let head = "trait Ord as\n    function cmp(self, other: Num): number\nend\nstruct Num as\n    v: number\nend\nimpl Ord for Num as\n    function cmp(self, other: Num): number\n        return self.v - other.v\n    end\nend\nstruct Box<T: Ord> as\n    v: T\nend\nstruct Pair<T: Ord> as\n    a: T\nend\n";
+        let src = format!(
+            "{head}function maxb<T: Ord>(a: Box<T>, b: Box<T>): number\n    return a.v:cmp(b.v)\nend\nfunction deep<T: Ord>(p: Box<Pair<T>>): number\n    return p.v.a:cmp(p.v.a)\nend\nfunction many<T: Ord>(xs: Box<T>[]): number\n    return xs[1].v:cmp(xs[1].v)\nend\nfunction plain<T: Ord>(xs: T[]): number\n    return xs[1]:cmp(xs[1])\nend\nprint(maxb, deep, many, plain)\n"
+        );
+        let out = crate::compile(&src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("function maxb<T>(a: Box<(T & Ord)>, b: Box<(T & Ord)>)"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("function deep<T>(p: Box<Pair<(T & Ord)>>)"),
+            "{}",
+            out.check
+        );
+        // The array parameter keeps its written type, and the element
+        // read carries the bound.
+        assert!(
+            out.check
+                .contains("function many<T>(xs: __alloy.Array<Box<T>>)"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("(xs[1] :: Box<(T & Ord)>).v:cmp("),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("function plain<T>(xs: __alloy.Array<T>)"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("(xs[1] :: (T & Ord)):cmp("),
             "{}",
             out.check
         );

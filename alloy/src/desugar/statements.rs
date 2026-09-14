@@ -2260,13 +2260,16 @@ impl<'s> Desugar<'s> {
             let Some(elem) = array_element(self.text_of(t)) else {
                 continue;
             };
-            let Some((name, bound)) = bounds.iter().find(|(n, _)| n == elem) else {
+            // The element carries the bound: `T` reads as `(T & Bound)`,
+            // and `Box<T>` as `Box<(T & Bound)>`. An element that names
+            // no bounded parameter comes back unchanged.
+            let bounded = apply_bounds(elem, bounds);
+
+            if bounded == elem {
                 continue;
-            };
-            out.push((
-                self.text_of(p.name).to_string(),
-                format!("({name} & {bound})"),
-            ));
+            }
+
+            out.push((self.text_of(p.name).to_string(), bounded));
         }
 
         out

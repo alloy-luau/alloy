@@ -350,13 +350,19 @@ pub(crate) fn prefer_constructed_struct(
         }
     })?;
 
-    if printed == named {
+    fn bare(n: &str) -> &str {
+        n.split('<').next().unwrap_or(n)
+    }
+
+    // `local plain: Box<number> = new Box { }`: the annotation names
+    // the arguments and the `new` does not. The print keeps them.
+    if printed == named || (bare(printed) == bare(&named) && printed.contains('<')) {
         return None;
     }
 
     // `new Pair<<number, string>>` names the struct with its arguments,
     // and the declaration stands under the name alone.
-    let is_struct = |n: &str| declares_a_struct(doc, n.split('<').next().unwrap_or(n));
+    let is_struct = |n: &str| declares_a_struct(doc, bare(n));
     // A struct the compiler lists nowhere, a member of a namespace,
     // prints as a solver variable with or without its clause: `t1`,
     // or `t2 where t1 = { ... }`. The print names nothing.
@@ -1621,8 +1627,9 @@ pub(crate) fn name_self_receiver(
 }
 
 /// `local rows = checked(ids)`: the child prints a solver variable for
-/// the binding. The function the line calls declares what it gives
-/// back, and that is the name the reader wrote.
+/// the binding, or a generic struct by the name of its metatable,
+/// `Box` for `Box<number>`. The function the line calls declares what
+/// it gives back, and that is the name the reader wrote.
 pub(crate) fn name_by_declaration(
     value: &str,
     doc: &Doc,
@@ -1632,8 +1639,13 @@ pub(crate) fn name_by_declaration(
     let (fence, rest) = value.split_once('\n')?;
     let (body, tail) = rest.split_once("\n```")?;
     let (head, printed) = body.rsplit_once(": ")?;
+    let bare_generic_struct = || {
+        std::iter::once(&doc.source)
+            .chain(doc.import_sources.iter())
+            .any(|src| !struct_generics(src, printed).is_empty())
+    };
 
-    if !holds_solver_variable(printed) {
+    if !holds_solver_variable(printed) && !bare_generic_struct() {
         return None;
     }
 
@@ -1898,5 +1910,46 @@ pub(crate) fn close_item_packs(value: &mut Value, empty: &HashSet<String>) {
         }
 
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc_of(src: &str) -> Doc {
+        Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    }
+
+    /// Luau names a generic struct by its metatable, `Box`. The
+    /// annotation keeps its arguments, nested ones too, a `new` with
+    /// a turbofish names them, and a call names the declared return.
+    #[test]
+    fn a_generic_struct_local_keeps_its_arguments() {
+        let src = "export struct Box<T> as\n    v: T\nend\nlocal plain: Box<number> = new Box { v = 42 }\nlocal bb: Box<Box<number>> = new Box { v = plain }\nlocal b = new Box<<number>> { v = 1 }\nfunction useBox(b: Box<number>): Box<number>\n    return b\nend\nlocal x = useBox(plain)\n";
+        let doc = doc_of(src);
+
+        assert_eq!(
+            prefer_constructed_struct("```luau\nlocal plain: Box<number>\n```", &doc, 3, 6),
+            None
+        );
+        assert_eq!(
+            prefer_constructed_struct("```luau\nlocal bb: Box<Box<number>>\n```", &doc, 4, 6),
+            None
+        );
+        assert_eq!(
+            prefer_constructed_struct("```luau\nlocal b: Box\n```", &doc, 5, 6).as_deref(),
+            Some("```luau\nlocal b: Box<number>\n```")
+        );
+        assert_eq!(
+            name_by_declaration("```luau\nlocal x: Box\n```", &doc, 9, 6).as_deref(),
+            Some("```luau\nlocal x: Box<number>\n```")
+        );
     }
 }

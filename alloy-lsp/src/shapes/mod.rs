@@ -703,8 +703,34 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_empty_metatables(&mut out);
     fold_quoted_types(&mut out, known);
     fold_generic_arity(&mut out);
+    drop_free_clauses(&mut out);
 
     out
+}
+
+/// Drops a `where` clause the head no longer needs. A fold below the
+/// loop may name what the head printed in place: the metatable group of
+/// a struct reads by its name, and the variable the clause bound stands
+/// nowhere in the head after that. The clause then tells the reader
+/// nothing, and every pass that reads the text after the fold had to
+/// parse around it.
+fn drop_free_clauses(text: &mut String) {
+    while let Some(i) = text.rfind(" where ") {
+        let (head_start, head) = head_of(text, i);
+        let head = head.to_string();
+        let tail_start = i + " where ".len();
+        let (bindings, tail_end) = parse_bindings(&text[tail_start..]);
+
+        if bindings.is_empty() || bindings.iter().any(|b| mentions(&head, &b.var)) {
+            break;
+        }
+
+        let parsed_end = tail_start + tail_end;
+        let clause_end = text[tail_start..]
+            .find("\n```")
+            .map_or(parsed_end, |k| (tail_start + k).max(parsed_end));
+        text.replace_range(head_start..clause_end, &head);
+    }
 }
 
 /// A type printed in place, `local r: { fire: ..., on: ... }`, with no

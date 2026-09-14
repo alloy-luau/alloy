@@ -299,7 +299,9 @@ pub(crate) fn prefer_constructed_struct(
         return None;
     }
 
-    let is_struct = |n: &str| declares_a_struct(doc, n);
+    // `new Pair<<number, string>>` names the struct with its arguments,
+    // and the declaration stands under the name alone.
+    let is_struct = |n: &str| declares_a_struct(doc, n.split('<').next().unwrap_or(n));
     let offset = offset_of(&doc.source, line, character)?;
     let (start, end) = keywords::word_range(&doc.source, offset);
     let word = &doc.source[start..end];

@@ -1245,6 +1245,40 @@ fn a_destructuring_binding_gets_its_type_hints() {
     assert!(!hints.iter().any(|h| h.get(DESTRUCTURED).is_some()));
 }
 
+/// `new Pair<<number, string>>` writes the arguments the print drops:
+/// Luau names a struct by its metatable, which carries none.
+#[test]
+fn a_generic_struct_keeps_the_arguments_the_new_wrote() {
+    const SRC: &str = "struct Pair<A, B> as\n    first: A,\n    second: B,\nend\n\nlocal p = new Pair<<number, string>> { first = 1, second = \"one\" }\nprint(p)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let line = position_of(SRC, SRC.find("local p").expect("the binding")).0;
+
+    assert_eq!(
+        crate::proxy::hover::source_type(doc, line, 6),
+        Some("Pair<number, string>".to_string())
+    );
+    assert_eq!(
+        prefer_constructed_struct("```alloy\nlocal p: Pair\n```", doc, line, 6),
+        Some("```alloy\nlocal p: Pair<number, string>\n```".to_string())
+    );
+
+    // The hint on the same binding reads the same way, and its edit
+    // inserts a type the file compiles.
+    let mut hints = vec![json!({
+        "kind": 1,
+        "label": ": Pair",
+        "position": { "line": line, "character": 7 },
+    })];
+    clean_hints(&mut hints, doc);
+
+    assert_eq!(hint_label(&hints[0]), ": Pair<number, string>");
+    assert_eq!(
+        hints[0]["textEdits"][0]["newText"],
+        json!(": Pair<number, string>")
+    );
+}
+
 /// A function after a closed `trait` block is no member of the trait:
 /// the block's own `end` closes the head the scan found.
 #[test]

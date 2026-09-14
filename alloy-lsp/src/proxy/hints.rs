@@ -150,7 +150,18 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
             return false;
         }
 
+        // A generic struct prints by the name of its metatable, which
+        // carries no argument. The `new` on the line wrote them, so the
+        // hint reads them back and its edit inserts a type that
+        // compiles.
+        let restores_arguments = |name: &str| {
+            !annotation.contains('<')
+                && name.contains('<')
+                && name.split('<').next() == Some(annotation)
+        };
         let label = match (named && !on_self, from_source) {
+            (true, Some(name)) if restores_arguments(&name) => format!(": {name}"),
+
             (true, _) => label,
 
             (false, Some(name)) => format!(": {name}"),

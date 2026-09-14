@@ -161,16 +161,21 @@ enum BodyReturn {
     Tail(usize, String),
     /// Every other shape: an early `return`, one with no value, and one
     /// with more than one. Such a body has no value for an expression.
-    /// `last` says whether the body's last statement is the `return`.
-    Other { last: bool },
+    /// `last` is the byte the body's trailing `return` starts at, when
+    /// the body has one.
+    Other { last: Option<usize> },
 }
 
 impl BodyReturn {
-    /// Whether the body's last statement is a `return`. Such a body
+    /// The byte the body's trailing `return` starts at. Such a body
     /// returns from the function around a call in statement position,
     /// so nothing can follow the call in its block.
-    fn returns_last(&self) -> bool {
-        matches!(self, Self::Tail(..) | Self::Other { last: true })
+    fn last_return_at(&self) -> Option<usize> {
+        match self {
+            Self::Tail(at, _) | Self::Other { last: Some(at) } => Some(*at),
+
+            _ => None,
+        }
     }
 }
 
@@ -190,13 +195,13 @@ fn body_return(body: &str) -> BodyReturn {
     }
 
     let Ok(lexed) = alloy_syntax::lexer::lex(body) else {
-        return BodyReturn::Other { last: false };
+        return BodyReturn::Other { last: None };
     };
     let (chunk, errors) =
         alloy_syntax::parser::parse_lenient(body, &lexed.toks, Default::default());
 
     if !errors.is_empty() {
-        return BodyReturn::Other { last: false };
+        return BodyReturn::Other { last: None };
     }
     let last = chunk.block.stmts.last();
 
@@ -209,7 +214,13 @@ fn body_return(body: &str) -> BodyReturn {
         }
 
         _ => BodyReturn::Other {
-            last: matches!(last, Some(alloy_syntax::ast::Stmt::Return(_))),
+            last: match last {
+                Some(alloy_syntax::ast::Stmt::Return(r)) => {
+                    Some(lexed.toks[r.span.start as usize].start as usize)
+                }
+
+                _ => None,
+            },
         },
     }
 }
@@ -288,13 +299,18 @@ impl<'s> Desugar<'s> {
                 // `return` only as the last statement of a block, and
                 // the expansion writes the body where the call stands.
                 true => {
-                    if self.macro_followed && found.returns_last() {
+                    if let Some(at) = found.last_return_at().filter(|_| self.macro_followed) {
                         self.diagnose(
                             span,
                             &format!(
                                 "`{name}` returns from the function; nothing can follow it in the block"
                             ),
                         );
+                        // The report is the whole answer. Keeping the
+                        // `return` would give one block two of them,
+                        // and the checker would say so again over an
+                        // artifact no one wrote.
+                        body = body[..at].trim_end();
                     }
                 }
 
@@ -357,6 +373,14 @@ impl<'s> Desugar<'s> {
 
         let stmts = substitute(body);
         let tail = tail.as_deref().map(substitute);
+
+        // A body that expands to nothing, called as a statement, writes
+        // nothing: `nil` alone is no Luau statement, and the artifact
+        // has to parse. A body whose trailing `return` came off above
+        // lands here.
+        if stmts.is_empty() && tail.is_none() && self.macro_stmt {
+            return String::new();
+        }
 
         let source = match (stmts.is_empty(), &tail) {
             (true, Some(t)) => t.clone(),
@@ -939,5 +963,41 @@ mod tests {
         let quiet = "macro note()\n    print(1)\nend\n\n";
 
         assert!(messages(&format!("{quiet}$note()\nprint(2)\n")).is_empty());
+    }
+
+    /*
+    The report is the whole answer: the artifact still has to parse, so
+    the checker adds nothing over an emit no one wrote.
+
+    The expansion kept the `return`, so the block held two of them and
+    `alloy flux` printed two raw checker syntax errors behind the one
+    report. The `return` now comes off, and the rest of the body stays.
+    */
+    #[test]
+    fn a_reported_macro_return_leaves_the_artifact_parsing() {
+        let decl = "macro give_up()\n    print(\"bye\")\n    return 0\nend\n\n";
+        let src = format!(
+            "{decl}local function work(): number\n    $give_up()\n    return 1\nend\n\nprint(work())\n"
+        );
+        let out = crate::compile(&src).unwrap();
+
+        assert_eq!(
+            out.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<String>>(),
+            vec!["`give_up` returns from the function; nothing can follow it in the block"]
+        );
+        // One `return` in the block, and the body's other statement.
+        assert!(out.check.contains("print(\"bye\")"), "{}", out.check);
+        assert_eq!(out.check.matches("return").count(), 1, "{}", out.check);
+
+        // A body that is the `return` alone writes nothing: `nil` is no
+        // Luau statement.
+        let bare = "macro stop()\n    return\nend\n\n";
+        let out = crate::compile(&format!("{bare}$stop()\nprint(1)\n")).unwrap();
+
+        assert!(!out.check.contains("nil"), "{}", out.check);
+        assert!(!out.check.contains("return"), "{}", out.check);
     }
 }

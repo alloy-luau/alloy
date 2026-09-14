@@ -339,9 +339,19 @@ impl<'a> Parser<'a> {
 
     fn found(&self) -> String {
         if self.at_end() {
-            "end of file".to_string()
-        } else {
-            format!("`{}`", self.text())
+            return "end of file".to_string();
+        }
+
+        // A piece of an interpolated string carries its own delimiters
+        // and the literal text between them. The report quotes the
+        // brace that closed the hole, so the string's closing backtick
+        // stays out of the quotes.
+        match self.kind_at(0) {
+            Some(crate::lexer::TokKind::InterpMid | crate::lexer::TokKind::InterpTail) => {
+                "`}`".to_string()
+            }
+
+            _ => format!("`{}`", self.text()),
         }
     }
 

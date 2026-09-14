@@ -269,6 +269,21 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
             }
 
             b'}' if !holes.is_empty() => {
+                // `{}` names no value. The report lands on the `{` that
+                // opened the hole, not on the piece of string that
+                // follows the `}`, whose text carries the delimiter.
+                if let Some(open) = toks.last().filter(|t| {
+                    matches!(t.kind, TokKind::InterpHead | TokKind::InterpMid)
+                        && b[t.end as usize..i].iter().all(u8::is_ascii_whitespace)
+                }) {
+                    let at = open.end as usize - 1;
+
+                    err!(
+                        at,
+                        "an interpolation hole is empty; write a value inside `{{ }}`"
+                    );
+                }
+
                 holes.pop();
                 let start = i;
 

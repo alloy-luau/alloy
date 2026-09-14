@@ -1426,3 +1426,39 @@ fn a_namespace_import_carries_a_name_list() {
     assert_eq!(specs.len(), 2);
     assert!(specs[1].is_attribute);
 }
+
+/*
+An interpolation hole with nothing in it. The lexer reported nothing, so
+the parser stood on the piece of string that follows the `}` and quoted
+its whole text, closing backtick and all: ``expected a name, found `}` ``
+came out with one backtick too many. The lexer names the empty hole at
+the `{` that opens it, and a report that still quotes a piece of string
+shows the brace alone.
+*/
+#[test]
+fn an_empty_interpolation_hole_reports_at_its_brace() {
+    let message = |src: &str| -> String { alloy_syntax::lexer::lex(src).unwrap_err().message };
+    let empty = "an interpolation hole is empty; write a value inside `{ }`";
+
+    assert_eq!(message("local s = `{}`\n"), empty);
+    assert_eq!(message("local s = `empty {} hole`\n"), empty);
+    assert_eq!(message("local s = `{ }`\n"), empty);
+
+    // The `{` the report lands on, not the `}` after it.
+    let src = "local s = `{}`\n";
+    assert_eq!(
+        alloy_syntax::lexer::lex(src).unwrap_err().offset,
+        src.find('{').unwrap()
+    );
+
+    // A hole the parser cannot read still quotes the brace alone.
+    let src = "local s = `{1 + }` tail\n";
+    let lexed = alloy_syntax::lexer::lex(src).unwrap();
+
+    assert_eq!(
+        alloy_syntax::parser::parse(src, &lexed.toks)
+            .unwrap_err()
+            .message,
+        "expected a name, found `}`"
+    );
+}

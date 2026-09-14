@@ -1673,3 +1673,63 @@ fn a_call_the_desugar_moved_still_finds_its_declaration() {
     );
     assert_eq!(st.declared_definition(uri, 8, 16), None);
 }
+
+/// A function called above its declaration gets a forward `local` on
+/// line 1 of the emit, as generated text anchored at the first byte of
+/// the file. The child lists that site with the real ones; the proxy
+/// drops it from a references list, a rename, and a definition, and
+/// the definition then lands on the declaration.
+#[test]
+fn a_hoisted_function_keeps_its_forward_declaration_out_of_sight() {
+    const SRC: &str = concat!(
+        "function fact(n: number): number\n",
+        "    return n\n",
+        "end\n",
+        "\n",
+        "function isEven(n: number): boolean\n",
+        "    return isOdd(n - 1)\n",
+        "end\n",
+        "\n",
+        "function isOdd(n: number): boolean\n",
+        "    return isEven(n - 1)\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let anchor = range_value((0, 0), (0, 1));
+    let call = range_value((5, 11), (5, 16));
+    let declaration = range_value((8, 9), (8, 14));
+
+    let mut refs = json!([
+        { "uri": uri, "range": anchor },
+        { "uri": uri, "range": call },
+        { "uri": uri, "range": declaration },
+    ]);
+    st.drop_stray_sites(uri, 8, 9, &mut refs);
+    assert_eq!(
+        refs,
+        json!([{ "uri": uri, "range": call }, { "uri": uri, "range": declaration }])
+    );
+
+    let mut rename = json!({ "changes": { uri: [
+        { "range": anchor, "newText": "odd" },
+        { "range": call, "newText": "odd" },
+        { "range": declaration, "newText": "odd" },
+    ] } });
+    st.drop_stray_sites(uri, 8, 9, &mut rename);
+    assert_eq!(
+        rename,
+        json!({ "changes": { uri: [
+            { "range": call, "newText": "odd" },
+            { "range": declaration, "newText": "odd" },
+        ] } })
+    );
+
+    // The child's definition is the forward `local`: gone, and the
+    // declaration answers from the call and from its own name.
+    let mut definition = json!([{ "uri": uri, "range": anchor }]);
+    st.drop_stray_sites(uri, 5, 11, &mut definition);
+    assert_eq!(definition, json!([]));
+    let found = Some(json!([{ "uri": uri, "range": declaration }]));
+    assert_eq!(st.declared_definition(uri, 5, 11), found);
+    assert_eq!(st.declared_definition(uri, 8, 9), found);
+}

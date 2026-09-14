@@ -1454,19 +1454,37 @@ impl Server {
                 }
             }
 
-            match method.as_str() {
-                // The child answered nothing: the desugar moved the
-                // name into generated text, as `try f(x)` does. The
-                // declaration the name reads is what the reader means.
-                "textDocument/definition" | "textDocument/declaration" => {
-                    let empty = result.as_array().is_none_or(Vec::is_empty);
+            // A site in generated text maps to its anchor, which spells
+            // another word: gone from a references list and a rename.
+            if matches!(
+                method.as_str(),
+                "textDocument/references" | "textDocument/rename"
+            ) && let Some(uri) = &ctx
+                && let Some((line, character)) = position
+            {
+                st.drop_stray_sites(uri, line, character, result);
+            }
 
-                    if empty
-                        && let Some(uri) = &ctx
+            match method.as_str() {
+                // The child answered nothing, as for `try f(x)`, whose
+                // desugar moved the name into generated text; or it
+                // answered a site in generated text, the forward `local`
+                // of a hoisted function. The declaration the name reads
+                // is what the reader means. A file with no such
+                // declaration keeps the child's answer: the anchor of a
+                // destructuring binding is its own `local` line.
+                "textDocument/definition" | "textDocument/declaration" => {
+                    if let Some(uri) = &ctx
                         && let Some((line, character)) = position
-                        && let Some(found) = st.declared_definition(uri, line, character)
                     {
-                        *result = found;
+                        let child = result.clone();
+                        st.drop_stray_sites(uri, line, character, result);
+
+                        if result.as_array().is_none_or(Vec::is_empty) {
+                            *result = st
+                                .declared_definition(uri, line, character)
+                                .unwrap_or(child);
+                        }
                     }
                 }
 

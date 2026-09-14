@@ -1297,6 +1297,53 @@ impl State {
         }
     }
 
+    /// Drops every site the child answered that does not spell the name
+    /// under the caret. A function called above its declaration gets a
+    /// forward `local` on line 1 as generated text, and the map sends
+    /// that site to its anchor: the first byte of the file, which is a
+    /// word of its own. A definition, a references list, and a rename
+    /// each carry it, and each loses it here.
+    pub(crate) fn drop_stray_sites(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
+            return;
+        };
+        let name = &doc.source[start..end];
+        let spells = |u: &str, site: &Value| {
+            self.docs
+                .get(u)
+                .is_none_or(|d| edits_the_word(&d.source, site, name))
+        };
+
+        if let Some(list) = result.as_array_mut() {
+            list.retain(|loc| {
+                spells(
+                    loc.get("uri").and_then(Value::as_str).unwrap_or_default(),
+                    loc,
+                )
+            });
+        }
+
+        if let Some(changes) = result
+            .pointer_mut("/changes")
+            .and_then(Value::as_object_mut)
+        {
+            for (u, edits) in changes.iter_mut() {
+                if let Some(list) = edits.as_array_mut() {
+                    list.retain(|e| spells(u, e));
+                }
+            }
+        }
+    }
+
     /// The same mend for a references answer: the child's list gets
     /// every site the proxy knows, and loses a location that points at
     /// no word of that name, which is where the generated struct

@@ -218,7 +218,8 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
             Stmt::Enum(d) => {
                 let name = text(d.name);
-                let mut lines = vec![format!("{}enum {name} as", export(d.exported))];
+                let generics = d.generics.map(text).unwrap_or("");
+                let mut lines = vec![format!("{}enum {name}{generics} as", export(d.exported))];
                 lines.extend(d.variants.iter().map(|v| format!("    {}", text(v.span))));
                 lines.push("end".to_string());
 
@@ -750,7 +751,11 @@ fn member_signature(
             d.generics.map(text).unwrap_or("")
         ),
 
-        Stmt::Enum(d) => format!("enum {}", text(d.name)),
+        Stmt::Enum(d) => format!(
+            "enum {}{}",
+            text(d.name),
+            d.generics.map(text).unwrap_or("")
+        ),
 
         Stmt::Trait(d) => format!("trait {}", text(d.name)),
 
@@ -1186,6 +1191,23 @@ mod tests {
         assert!(
             d[1].hover
                 .contains("interface Entity extends Named, Positioned as\n    id: number\nend")
+        );
+    }
+
+    #[test]
+    /// `enum Opt<T>` hovers with its parameter list, and a variant
+    /// keeps the payload text that names the parameter.
+    #[test]
+    fn a_generic_enum_hovers_with_its_parameters() {
+        let src = "export enum Opt<T> as\n    Some(T)\n    Nil\nend\n";
+        let d = summaries(src, false);
+        let opt = d.iter().find(|x| x.name == "Opt").unwrap();
+
+        assert!(
+            opt.hover
+                .contains("export enum Opt<T> as\n    Some(T)\n    Nil\nend"),
+            "{}",
+            opt.hover
         );
     }
 

@@ -139,7 +139,7 @@ fn collect_namespace_types(
         let (name, generics) = match m.stmt.under_default() {
             Stmt::Struct(d) => (text(d.name), d.generics.map(text)),
 
-            Stmt::Enum(d) => (text(d.name), None),
+            Stmt::Enum(d) => (text(d.name), d.generics.map(text)),
 
             Stmt::Trait(d) => (text(d.name), None),
 

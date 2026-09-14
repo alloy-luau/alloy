@@ -489,6 +489,16 @@ impl<'s> Desugar<'s> {
     pub(crate) fn lower_type_name(&mut self, text: &str) -> String {
         let name = text.trim();
 
+        // A namespace's type renders under a name of its own. An
+        // annotation reaches that name through the type edits. A
+        // type-argument list is text, so the path resolves here.
+        if let Some(rendered) = self
+            .ns_member_name(name)
+            .or_else(|| self.ns_path_name(name))
+        {
+            return rendered;
+        }
+
         if !AMBIENT_TYPES.contains(&name)
             || self.is_local(name)
             || self.declared_types.contains(name)
@@ -672,6 +682,17 @@ mod tests {
             out.check
         );
         assert!(!out.check.contains("[]"), "{}", out.check);
+    }
+
+    #[test]
+    fn a_namespace_type_lowers_inside_a_type_argument_list() {
+        // A type-argument list is text, not an annotation, so the
+        // namespace path resolves in the lowering, not in the edits.
+        let src = "namespace Ns as\n    enum Kind as\n        A\n        B\n    end\nend\nfunction generic<T>(x: T): T\n    return x\nend\nprint(generic<<Ns.Kind>>(Ns.Kind.A))\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.check.contains("generic<<Ns_Kind>>("), "{}", out.check);
+        assert!(!out.check.contains("<<Ns.Kind>>"), "{}", out.check);
     }
 
     #[test]

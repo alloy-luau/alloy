@@ -107,6 +107,37 @@ fn declared_kind(doc: &Doc, path: &str) -> Option<&'static str> {
         })
 }
 
+/// The contract body of an `attribute` declaration, as the token index it
+/// opens at and the one past its `end`. `from` is the token after the
+/// name and the parameter list, so the walk reads the rest of the head:
+/// an `as` there opens the body. `None` when the declaration has none.
+fn contract_body(
+    toks: &[alloy_syntax::lexer::Tok],
+    src: &str,
+    from: usize,
+) -> Option<(usize, usize)> {
+    let head = position_of(src, toks.get(from)?.start as usize).0;
+    let mut at = from;
+
+    while toks
+        .get(at)
+        .is_some_and(|t| t.text(src) != "as" && position_of(src, t.start as usize).0 == head)
+    {
+        at += 1;
+    }
+
+    if toks.get(at)?.text(src) != "as" {
+        return None;
+    }
+
+    let first = at + 1;
+    let past = (first..toks.len())
+        .find(|k| toks[*k].text(src) == "end")
+        .map_or(toks.len(), |k| k + 1);
+
+    Some((first, past))
+}
+
 /// The tokens the proxy draws from the source itself.
 fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
     if types.is_empty() {
@@ -227,6 +258,74 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
                         break;
                     }
                 }
+            }
+
+            // `attribute service on impl as ... end`: the contract body
+            // holds the clauses of the members an `impl` has to write.
+            // The emit keeps no attribute, so the child draws nothing on
+            // them either.
+            if text == "attribute"
+                && let Some((first, past)) = contract_body(toks, src, i)
+            {
+                // A legend without `modifier` still paints the
+                // visibility: the word is a keyword of the clause.
+                let visibility = match type_index(types, "modifier") {
+                    Some(_) => "modifier",
+
+                    None => "keyword",
+                };
+                let mut depth = 0i32;
+
+                for k in first..past {
+                    let t = toks[k];
+                    let word = t.text(src);
+                    let after = |w: &str| toks[k - 1].text(src) == w;
+
+                    match t.kind {
+                        TokKind::LParen => depth += 1,
+
+                        TokKind::RParen => depth -= 1,
+
+                        // The name of the member, and the list parameter
+                        // an `each` clause writes one member per entry
+                        // of.
+                        TokKind::Ident if after("function") || after("field") || after("each") => {
+                            let name = if word == "each" {
+                                "keyword"
+                            } else if after("each") {
+                                "parameter"
+                            } else if after("field") {
+                                "property"
+                            } else {
+                                "method"
+                            };
+
+                            push(t.start, t.end, name);
+                        }
+
+                        TokKind::Ident if depth > 0 && (after("(") || after(",")) => {
+                            push(t.start, t.end, "parameter");
+                        }
+
+                        TokKind::Ident if matches!(word, "requires" | "each") => {
+                            push(t.start, t.end, "keyword");
+                        }
+
+                        TokKind::Ident if matches!(word, "public" | "private") => {
+                            push(t.start, t.end, visibility);
+                        }
+
+                        TokKind::Ident if matches!(word, "function" | "field") => {
+                            push(t.start, t.end, "keyword");
+                        }
+
+                        _ => {}
+                    }
+                }
+
+                i = past;
+
+                continue;
             }
 
             continue;
@@ -424,6 +523,62 @@ mod tests {
         let (line, _) = position_of(SRC, SRC.find("local macro").expect("the local"));
 
         assert!(!drawn.iter().any(|t| t.0 == line), "{drawn:?}");
+    }
+
+    /// The contract body of an `attribute` declaration carries its own
+    /// tokens. The emit keeps no attribute, so the child drew nothing on
+    /// the clauses: the name and the uses painted, and the body between
+    /// them read as plain text.
+    #[test]
+    fn an_attribute_contract_carries_its_clauses() {
+        const SRC: &str = concat!(
+            "enum Lifecycle as\n",
+            "    Init,\n",
+            "end\n",
+            "\n",
+            "attribute provider(lifecycles: Lifecycle[]) on impl as\n",
+            "    requires public function Start(self)\n",
+            "    requires private field state: number\n",
+            "    requires function each lifecycles (self)\n",
+            "end\n",
+            "\n",
+            "attribute plain on function\n",
+        );
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let drawn = alloy_tokens(&doc, &types);
+        let at = |needle: &str| {
+            let (line, column) = position_of(SRC, SRC.find(needle).expect(needle));
+
+            drawn
+                .iter()
+                .find(|t| (t.0, t.1) == (line, column))
+                .map(|t| types[t.3 as usize].as_str())
+        };
+
+        assert_eq!(at("requires public"), Some("keyword"), "{drawn:?}");
+        assert_eq!(at("public function"), Some("modifier"), "{drawn:?}");
+        assert_eq!(at("function Start"), Some("keyword"), "{drawn:?}");
+        assert_eq!(at("Start(self)"), Some("method"), "{drawn:?}");
+        assert_eq!(at("self)\n    requires private"), Some("parameter"));
+
+        // A `field` clause names a property, and an `each` clause names
+        // the list parameter that writes one member per entry.
+        assert_eq!(at("private field"), Some("modifier"), "{drawn:?}");
+        assert_eq!(at("field state"), Some("keyword"), "{drawn:?}");
+        assert_eq!(at("state: number"), Some("property"), "{drawn:?}");
+        assert_eq!(at("each lifecycles ("), Some("keyword"), "{drawn:?}");
+        assert_eq!(at("lifecycles (self)"), Some("parameter"), "{drawn:?}");
+
+        // `attribute plain on function` opens no body, so the `function`
+        // of its target line stays a word of the grammar.
+        assert_eq!(at("function\n"), None, "{drawn:?}");
     }
 
     #[test]

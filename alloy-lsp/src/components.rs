@@ -502,11 +502,11 @@ fn import_members(
         _ => false,
     };
 
-    if types && (whole || default_here) {
+    if types && default_here {
         // A default import binds the module whole only when the
         // module returns one value; otherwise it binds the `default`
         // field, which carries no type.
-        let bound = whole || (read.plain)(spec);
+        let bound = (read.plain)(spec);
 
         return Some(match bound && !deeper {
             true => exported_members(&readable(&(read.load)(spec)?), Want::ImportedTypes),
@@ -515,6 +515,10 @@ fn import_members(
         });
     }
 
+    // `import * as M`: the module is the holder, and Alloy writes a
+    // member of a namespace it exports as `M.Ns.T`, so the walk goes
+    // on through the group. Luau stops a type path at `M.T`; the
+    // source here is Alloy's.
     if whole {
         let next = readable(&(read.load)(spec)?);
 
@@ -1226,19 +1230,25 @@ mod tests {
         let src = "import * as Star from \"./scribe\"\n";
         let found = types(src, &["Star"], &scribe_load, &scribe_plain);
 
-        assert_eq!(names(&found), ["Card", "Entry", "Mode", "Store"]);
+        // A namespace with a type under it is a step of the path, so
+        // it stands in the list beside the types themselves.
+        assert_eq!(names(&found), ["Card", "Deep", "Entry", "Mode", "Store"]);
     }
 
-    /// Luau writes a type off a module binding as `M.T`; `M.Group.T`
-    /// is a syntax error. So a namespace of the module leads nowhere
-    /// and stays out of the list, and a second `.` offers nothing.
+    /// Alloy writes a member of a namespace a module exports as
+    /// `M.Ns.T`, and the emit flattens it to `M.Ns_T`, so the path
+    /// walks on through the group. A group with no type under it
+    /// leads nowhere.
     #[test]
-    fn a_type_path_through_an_import_stops_at_one_name() {
+    fn a_type_path_through_an_import_walks_on_through_a_namespace() {
         let src = "import * as Star from \"./scribe\"\n";
         let found = types(src, &["Star"], &scribe_load, &scribe_plain);
 
-        assert!(!names(&found).contains(&"Deep"));
-        assert!(types(src, &["Star", "Deep"], &scribe_load, &scribe_plain).is_empty());
+        assert!(names(&found).contains(&"Deep"));
+        assert_eq!(
+            names(&types(src, &["Star", "Deep"], &scribe_load, &scribe_plain)),
+            ["Inner"]
+        );
         assert!(types(src, &["Star", "Only"], &scribe_load, &scribe_plain).is_empty());
     }
 

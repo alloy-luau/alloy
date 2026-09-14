@@ -539,19 +539,22 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
             context::Declared::Annotation(t) => alloy::docs::type_head(&t)?,
 
             // `local s = new S { ... }`: the constructor names the type.
+            // A namespace member reads `new Ns.S { ... }`, where the
+            // type is the last word of the path.
             context::Declared::Init(v) => match v.trim().strip_prefix("new ") {
                 Some(rest) => rest
                     .trim_start()
                     .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
                     .collect(),
 
                 None => alloy::docs::value_head(&v)?,
             },
         },
     };
+    let owner = owner.split('<').next().unwrap_or(&owner);
 
-    Some(owner.split('<').next().unwrap_or(&owner).to_string())
+    Some(owner.rsplit('.').next().unwrap_or(owner).to_string())
 }
 
 /// The line a struct body writes for one field, with the keyword of

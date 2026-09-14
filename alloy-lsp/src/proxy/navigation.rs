@@ -968,11 +968,19 @@ impl State {
         // nearest declaration above that still carries fields.
         declared_field_hover(doc, start, end)?;
 
+        // The name the source writes at the header, not the one the
+        // declaration is keyed by: a namespace member answers to its
+        // path and to the name the emit gives it, and the walks below
+        // read the file for the word `struct` stands in front of.
         doc.decls
             .iter()
             .filter(|d| d.offset < start && declared_field_owner(d).is_some())
             .max_by_key(|d| d.offset)
-            .map(|d| d.name.clone())
+            .map(|d| {
+                let (s, e) = keywords::word_range(&doc.source, d.offset);
+
+                doc.source[s..e].to_string()
+            })
     }
 
     /// The two places a rename of a struct field reaches and the child

@@ -813,6 +813,51 @@ fn a_type_rename_reaches_a_definitions_file() {
     assert!(at(&edit, "file:///a.d.aly").is_empty(), "{edit}");
 }
 
+/// A field of a struct a namespace holds. The declaration answers to
+/// its path and to the name the emit gives it, and neither is the word
+/// the source writes in front of the body.
+#[test]
+fn a_field_of_a_namespace_member_names_the_member() {
+    const SRC: &str = concat!(
+        "namespace Ns as
+",
+        "    struct T as
+",
+        "        amount: number,
+",
+        "    end
+",
+        "end
+",
+        "
+",
+        "local t = new Ns.T { amount = 1 }
+",
+        "print(t.amount)
+",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let at = SRC.find("amount: number").expect("the field");
+    let Some(Target::Field { owner, name }) = st.name_target(uri, at) else {
+        panic!("the field names no target");
+    };
+
+    assert_eq!((owner.as_str(), name.as_str()), ("T", "amount"));
+
+    // The declaration, the constructor key, and the read.
+    assert_eq!(
+        rows(
+            &st.field_edits("T", "amount", "qty")
+                .expect("the field edits")
+        ),
+        [
+            "t.aly 2:8-14 -> qty",
+            "t.aly 6:21-27 -> qty",
+            "t.aly 7:8-14 -> qty"
+        ]
+    );
+}
+
 /// A caret in a struct body names the field, and a caret on a struct
 /// the file keeps to itself names the struct. The emit rewrites the
 /// field list and a declaration with no export, so the child finds no

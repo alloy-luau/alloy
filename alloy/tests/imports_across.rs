@@ -54,10 +54,22 @@ fn a_build_requires_the_output_of_the_other_project() {
         fs::read_to_string(dir.join("main/build/main.luau")).unwrap(),
         "local _m1 = require(\"../../shared/build/util\") local double = _m1.double\n\nprint(double(21))\n"
     );
-    // The dependency built under its own `out`, runtime and all.
+    // The dependency built under its own `out`, runtime and all. The
+    // project's counts leave those files out, so a note carries them.
     assert!(dir.join("shared/build/util.luau").is_file());
     assert!(dir.join("shared/build/alloy.luau").is_file());
     assert!(!dir.join("main/build/util.luau").exists());
+    assert_eq!(
+        report.notes,
+        vec!["dependency ../shared: 1 written, 0 up to date".to_string()]
+    );
+
+    let again = build(&dir.join("main"));
+
+    assert_eq!(
+        again.notes,
+        vec!["dependency ../shared: 0 written, 1 up to date".to_string()]
+    );
 
     // `check` follows the same route and writes nothing.
     let _ = fs::remove_dir_all(dir.join("shared/build"));

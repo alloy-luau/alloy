@@ -694,6 +694,11 @@ fn run_inner(
 
     report.lints.extend(circular_imports(&imports));
     report.dep_artifacts = deps.artifacts.clone();
+
+    // The run that started the build reports every dependency it wrote.
+    if deps.stack.len() == 1 {
+        report.notes.append(&mut deps.notes);
+    }
     report
         .diagnostics
         .sort_by(|a, b| (&a.0, a.1.start).cmp(&(&b.0, b.1.start)));
@@ -784,6 +789,9 @@ pub struct Deps {
     /// The check artifacts of every project built, by absolute output
     /// path, for the checker's mirror.
     artifacts: Vec<(PathBuf, String)>,
+    /// One line per project a build wrote, for the summary: the
+    /// counts of its own `out`, which the project's counts leave out.
+    notes: Vec<String>,
 }
 
 /// One project a build depends on: its `[build] in` and `out`,
@@ -980,6 +988,16 @@ impl Deps {
 
         if let Some((rel, message)) = report.failures.first() {
             return Err(format!("{}: {message}", shown(rel)));
+        }
+
+        if write {
+            let top = self.stack.first().cloned().unwrap_or_default();
+            self.notes.push(format!(
+                "dependency {}: {} written, {} up to date",
+                relative(&top, root),
+                report.written.len(),
+                report.up_to_date.len()
+            ));
         }
 
         for c in report.checks {

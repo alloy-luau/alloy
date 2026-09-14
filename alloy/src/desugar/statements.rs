@@ -722,10 +722,26 @@ impl<'s> Desugar<'s> {
 
         for stmt in &block.stmts {
             if let Stmt::Local(l) = stmt.under_default() {
-                for b in &l.names {
-                    if let Some(ty) = b.ty {
-                        let text = self.text_of(ty).trim().trim_start_matches(':').trim();
-                        annotated.insert(self.text_of(b.name).to_string(), text.to_string());
+                for (i, b) in l.names.iter().enumerate() {
+                    // An annotation names the type. Without one,
+                    // `local x = new S { }` names the struct as exactly,
+                    // and that is the form most calls hand a bounded
+                    // parameter.
+                    let ty = match b.ty {
+                        Some(ty) => {
+                            let text = self.text_of(ty).trim().trim_start_matches(':').trim();
+
+                            Some(text.to_string())
+                        }
+
+                        None => l
+                            .values
+                            .get(i)
+                            .and_then(|v| self.argument_struct(v, &annotated)),
+                    };
+
+                    if let Some(ty) = ty {
+                        annotated.insert(self.text_of(b.name).to_string(), ty);
                     }
                 }
             }
@@ -827,6 +843,10 @@ impl<'s> Desugar<'s> {
                         arg.span(),
                         format!("`{target}` does not implement `{want}`; `{name}` asks for it"),
                     ));
+
+                    // One argument reports one bound. `T: A & B` with
+                    // neither impl says the same thing twice otherwise.
+                    break;
                 }
             }
         }
@@ -2734,6 +2754,39 @@ mod tests {
             "{head}impl Ord for NotOrd as\n    function compare(self, other: Ord): number\n        return 0\n    end\nend\n\nlocal xs: {{ NotOrd }} = {{ new NotOrd {{ v = 1 }} }}\nlocal top = largest(xs)\nprint(top)\n"
         );
         assert_eq!(messages(&good), Vec::<String>::new());
+    }
+
+    /// `local x = new S { }` names its struct as exactly as an
+    /// annotation does, and that is the form a call hands a bounded
+    /// parameter. The scan read annotations only, so the argument
+    /// carried no type and every such call went unchecked.
+    #[test]
+    fn a_bound_reads_the_struct_an_unannotated_local_constructs() {
+        let head = "trait Alpha as\n    function a(self): number\nend\n\ntrait Beta as\n    function b(self): number\nend\n\nstruct OnlyAlpha as\n    v: number\nend\n\nimpl Alpha for OnlyAlpha as\n    function a(self): number\n        return self.v\n    end\nend\n\nfunction sum_both<T: Alpha & Beta>(x: T): number\n    return x:a() + x:b()\nend\n\n";
+        let src = format!("{head}local only = new OnlyAlpha {{ v = 2 }}\nprint(sum_both(only))\n");
+
+        // The second trait of the `&` bound is the unmet one, and the
+        // argument reports it once.
+        assert_eq!(
+            messages(&src),
+            vec!["`OnlyAlpha` does not implement `Beta`; `sum_both` asks for it"]
+        );
+
+        // A struct with neither impl reports the first unmet trait only.
+        let neither = format!(
+            "{head}struct Plain as\n    v: number\nend\n\nlocal p = new Plain {{ v = 1 }}\nprint(sum_both(p))\n"
+        );
+        assert_eq!(
+            messages(&neither),
+            vec!["`Plain` does not implement `Alpha`; `sum_both` asks for it"]
+        );
+
+        // Both impls present: the call passes and the body types the
+        // parameter as `T`, which the bound widens.
+        let both = format!(
+            "{head}struct Both as\n    v: number\nend\n\nimpl Alpha for Both as\n    function a(self): number\n        return self.v\n    end\nend\n\nimpl Beta for Both as\n    function b(self): number\n        return self.v\n    end\nend\n\nlocal b = new Both {{ v = 1 }}\nprint(sum_both(b))\n"
+        );
+        assert_eq!(messages(&both), Vec::<String>::new());
     }
 
     /// The four shapes a `destroy` lowers to: the plain call, Debris for

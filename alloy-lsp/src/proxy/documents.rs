@@ -19,7 +19,13 @@ impl State {
     pub(crate) fn mirror_path(&self, real: &Path) -> PathBuf {
         let real = normalize(real);
         let root = self.root.as_deref().map(normalize);
-        let rel = match root.as_deref().and_then(|r| climb(r, &real)) {
+        // A climb that leaves the mirror's own directory is no place
+        // for a file: a mirror set by hand has no folders above it.
+        let climbed = root
+            .as_deref()
+            .and_then(|r| climb(r, &real))
+            .filter(|rel| normalize(&self.mirror.join(rel)).starts_with(mirror_base(&self.mirror)));
+        let rel = match climbed {
             Some(rel) => rel,
 
             None => {

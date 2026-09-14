@@ -191,12 +191,20 @@ impl Desugar<'_> {
                 return;
             }
 
-            Expr::Await { span, .. } if !spot.allows_a_yield() => {
+            Expr::Await { span, operand } => {
                 // The keyword alone, not the operand: the word is what
                 // moves, and the operand can run for lines.
                 let word = TokSpan::new(span.start as usize, span.start as usize + 1);
-                let report = spot.report();
-                self.diagnose(word, &report);
+
+                // `await delayed()` of a plain function: the value is no
+                // Future, and the runtime raises at the `await`.
+                if let Some(name) = self.plain_callee(operand) {
+                    let report = format!("`{name}` is not async; `await` takes a Future");
+                    self.diagnose(word, &report);
+                } else if !spot.allows_a_yield() {
+                    let report = spot.report();
+                    self.diagnose(word, &report);
+                }
             }
 
             _ => {}
@@ -205,6 +213,24 @@ impl Desugar<'_> {
         for c in expr_children(e) {
             self.awaits_in_child(c, spot);
         }
+    }
+
+    /// The plain function of this file the operand calls, when its
+    /// declared return type is one this file knows is no Future.
+    fn plain_callee(&self, operand: &Expr) -> Option<String> {
+        let Expr::Call {
+            func, method: None, ..
+        } = operand
+        else {
+            return None;
+        };
+        let Expr::Name(n) = &**func else {
+            return None;
+        };
+        let name = self.text_of(*n);
+        let ty = self.fn_ret_types.get(name)?.trim();
+
+        (self.plain_fns.contains(name) && self.known_type(ty)).then(|| name.to_string())
     }
 
     /// The name a `function` declaration writes, `V.new` and `V:len`

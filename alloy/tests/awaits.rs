@@ -203,3 +203,21 @@ fn the_report_is_an_async_error_of_section_3_3() {
     assert_eq!(alloy::docs::kind_for(&got), "AsyncError");
     assert_eq!(alloy::docs::code_for(&got), Some("3.3"));
 }
+
+/// `await` of a call to a plain function takes a value, not a Future:
+/// the runtime raises `cannot await a number`. The compiler names the
+/// function, and a plain function that returns a `Future` still awaits.
+#[test]
+fn an_await_of_a_plain_function_names_it() {
+    let got = only(
+        "m.aly",
+        "local function delayed(): number\n    return 7\nend\n\nasync function go()\n    local v = await delayed()\n    print(v)\nend\nprint(go)\n",
+    );
+
+    assert_eq!(got, "`delayed` is not async; `await` takes a Future");
+
+    clean(
+        "m.aly",
+        "local function later(): Future<number>\n    return Future.resolve(7)\nend\n\nasync function go()\n    print(await later())\nend\nprint(go)\n",
+    );
+}

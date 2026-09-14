@@ -519,15 +519,17 @@ impl<'s> Desugar<'s> {
             return None;
         }
 
-        // Only a type this file can name for certain. A generic
-        // parameter, an alias, or an imported name types elsewhere.
-        let known = PRIMITIVES.contains(&ty)
+        self.known_type(ty).then(|| ty.to_string())
+    }
+
+    /// Whether a written type is one this file can name for certain. A
+    /// generic parameter, an alias, or an imported name types elsewhere.
+    pub(crate) fn known_type(&self, ty: &str) -> bool {
+        PRIMITIVES.contains(&ty)
             || self.structs.contains(ty)
             || self.enum_decls.contains_key(ty)
             || ty == "nil"
-            || ty == "()";
-
-        known.then(|| ty.to_string())
+            || ty == "()"
     }
 
     /// The dotted name of a callee, `Future.resolve` for an `Index`

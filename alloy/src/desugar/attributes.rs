@@ -689,6 +689,11 @@ impl<'s> Desugar<'s> {
             {
                 let ty = self.text_of(rt).trim().trim_start_matches(':').trim();
                 let key = self.decl_name(name);
+
+                if body.is_async.is_none() {
+                    self.plain_fns.insert(key.clone());
+                }
+
                 self.fn_ret_types.insert(key, ty.to_string());
             }
 

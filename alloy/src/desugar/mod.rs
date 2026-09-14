@@ -455,6 +455,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         try_targets: Vec::new(),
         result_aliases: HashSet::new(),
         fn_ret_types: HashMap::new(),
+        plain_fns: HashSet::new(),
         binding_types: HashMap::new(),
         enum_decls: HashMap::new(),
         impl_methods: HashMap::new(),
@@ -918,6 +919,9 @@ struct Desugar<'s> {
     /// `try` reads it: an operand whose type is no Result is an error
     /// at the `try`, not at the `return` under it.
     fn_ret_types: HashMap<String, String>,
+    /// The top-level functions of this file that are not `async`. An
+    /// `await` of a call to one reads its type in `fn_ret_types`.
+    plain_fns: HashSet<String>,
     /// The type each annotated binding of this file declares, by name.
     /// `try await` reads it: a `Future<Result<...>>` settles with the
     /// Result itself. The map is flat, the way `fn_ret_types` is; a

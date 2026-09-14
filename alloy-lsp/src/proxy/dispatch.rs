@@ -1046,6 +1046,16 @@ impl Server {
         if is_init {
             st.initialize_id = None;
             edit_capabilities(&mut message);
+            st.token_types = message
+                .pointer("/result/capabilities/semanticTokensProvider/legend/tokenTypes")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
         }
 
         let (method, ctx, position, trigger, range, reported, query) = match pending {
@@ -1302,7 +1312,7 @@ impl Server {
                     "textDocument/semanticTokens/full" => {
                         if let Some(data) = result.get("data").and_then(Value::as_array) {
                             let raw: Vec<u64> = data.iter().filter_map(Value::as_u64).collect();
-                            let mapped = tokens::remap(&raw, doc);
+                            let mapped = tokens::remap(&raw, doc, &st.token_types);
                             log::debug(&format!(
                                 "semantic tokens: {} in, {} out",
                                 raw.len() / 5,

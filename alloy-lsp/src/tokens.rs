@@ -1,20 +1,33 @@
-//! Semantic tokens from the shadow, moved to the source.
+//! Semantic tokens from the shadow, moved to the source, and the ones
+//! the proxy draws itself.
 //!
 //! The child encodes tokens as deltas over the shadow text. A token that
 //! sits wholly in copied text keeps its length and moves to its source
 //! column; a token in generated text describes a temp or a helper the
-//! author never wrote, so it goes. The result re-encodes in source order.
+//! author never wrote, so it goes.
+//!
+//! An Alloy construct is no Luau, so the shadow holds no word where the
+//! author wrote one: an attribute, a macro call, a namespace segment, an
+//! enum with its variant, and the name inside an interpolation hole. The
+//! proxy draws those from the source. The result re-encodes in source
+//! order, which is what the delta encoding requires.
 
-use crate::doc::{Doc, offset_of};
+use alloy_syntax::lexer::TokKind;
 
-pub fn remap(data: &[u64], doc: &Doc) -> Vec<u64> {
+use crate::doc::{Doc, offset_of, position_of};
+
+/// One token in source coordinates: line, column, length, type, and
+/// modifiers.
+type Token = (u32, u32, u64, u64, u64);
+
+pub fn remap(data: &[u64], doc: &Doc, types: &[String]) -> Vec<u64> {
     let Some(out) = doc.mapping() else {
         return data.to_vec();
     };
 
     let mut line = 0u64;
     let mut start = 0u64;
-    let mut tokens: Vec<(u32, u32, u64, u64, u64)> = Vec::new();
+    let mut tokens: Vec<Token> = Vec::new();
 
     for t in data.chunks_exact(5) {
         let (dl, ds, len, kind, mods) = (t[0], t[1], t[2], t[3], t[4]);
@@ -46,6 +59,9 @@ pub fn remap(data: &[u64], doc: &Doc) -> Vec<u64> {
         tokens.push((sl, sc, len, kind, mods));
     }
 
+    // The child's tokens stand first, so a word both of them describe
+    // keeps the child's reading.
+    tokens.extend(alloy_tokens(doc, types));
     tokens.sort_by_key(|t| (t.0, t.1));
     tokens.dedup_by_key(|t| (t.0, t.1));
 
@@ -63,10 +79,260 @@ pub fn remap(data: &[u64], doc: &Doc) -> Vec<u64> {
     encoded
 }
 
+/// The index of a token type in the child's legend. The proxy paints
+/// with the child's own numbers, so nothing here fixes an order; a name
+/// the legend leaves out draws nothing.
+fn type_index(types: &[String], name: &str) -> Option<u64> {
+    types.iter().position(|t| t == name).map(|i| i as u64)
+}
+
+/// What a name in reach declares, from the head line of its hover. The
+/// declaration index holds a namespace member under its path, `Geo.Kind`,
+/// which is what a segment walk asks about.
+fn declared_kind(doc: &Doc, path: &str) -> Option<&'static str> {
+    doc.decls
+        .iter()
+        .chain(doc.import_decls.iter())
+        .filter(|d| d.name == path)
+        .find_map(|d| {
+            let mut line = d.hover.lines().nth(1)?.trim_start();
+
+            for word in ["export ", "global ", "public ", "private "] {
+                line = line.strip_prefix(word).unwrap_or(line);
+            }
+
+            ["namespace", "enum"]
+                .into_iter()
+                .find(|k| line.starts_with(&format!("{k} ")))
+        })
+}
+
+/// The tokens the proxy draws from the source itself.
+fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
+    if types.is_empty() {
+        return Vec::new();
+    }
+
+    // A source the lexer cannot read is mid-edit; the child's tokens are
+    // the whole answer until it parses again.
+    let Ok(lexed) = alloy_syntax::lexer::lex(&doc.source) else {
+        return Vec::new();
+    };
+    let src = &doc.source;
+    let toks = &lexed.toks;
+    let mut out: Vec<Token> = Vec::new();
+    let mut push = |start: u32, end: u32, name: &str| {
+        let Some(kind) = type_index(types, name) else {
+            return;
+        };
+        let (line, column) = position_of(src, start as usize);
+        let width = src[start as usize..end as usize].encode_utf16().count() as u64;
+        out.push((line, column, width, kind, 0));
+    };
+    // Whether the walk stands inside a hole of an interpolated string:
+    // the head and each middle piece open one, and the tail closes it.
+    let mut in_hole = false;
+    let mut i = 0;
+
+    while i < toks.len() {
+        let tok = toks[i];
+        let text = tok.text(src);
+
+        match tok.kind {
+            TokKind::InterpHead | TokKind::InterpMid => in_hole = true,
+
+            TokKind::InterpTail => in_hole = false,
+
+            _ => {}
+        }
+
+        // `@Contracted` and `$triple`: the sigil and the name are one
+        // word to the reader.
+        if tok.kind == TokKind::Symbol && matches!(text, "@" | "$") {
+            let name = match toks.get(i + 1) {
+                Some(n) if n.kind == TokKind::Ident && n.start == tok.end => *n,
+
+                _ => {
+                    i += 1;
+
+                    continue;
+                }
+            };
+            push(
+                tok.start,
+                name.end,
+                if text == "@" { "decorator" } else { "macro" },
+            );
+            i += 2;
+
+            continue;
+        }
+
+        if tok.kind != TokKind::Ident {
+            i += 1;
+
+            continue;
+        }
+
+        // The name a hole reads. The child sees the same bytes, and it
+        // draws nothing inside a string.
+        if in_hole && matches!(toks[i - 1].kind, TokKind::InterpHead | TokKind::InterpMid) {
+            push(tok.start, tok.end, "variable");
+            i += 1;
+
+            continue;
+        }
+
+        // A dotted path, from a segment no `.` stands in front of: each
+        // prefix of it may name a declaration.
+        let mut segments = vec![tok];
+        let mut j = i;
+
+        while toks.get(j + 1).is_some_and(|t| t.kind == TokKind::Dot)
+            && let Some(next) = toks.get(j + 2)
+            && next.kind == TokKind::Ident
+        {
+            segments.push(*next);
+            j += 2;
+        }
+
+        let mut path = String::new();
+
+        for (k, segment) in segments.iter().enumerate() {
+            let parent = path.clone();
+
+            if k > 0 {
+                path.push('.');
+            }
+
+            path.push_str(segment.text(src));
+
+            let name = match declared_kind(doc, &path) {
+                Some(kind) => kind,
+
+                // A variant stands under no keyword of its own; the
+                // enum in front of it says what the segment is.
+                None if declared_kind(doc, &parent) == Some("enum") => "enumMember",
+
+                None => continue,
+            };
+            push(segment.start, segment.end, name);
+        }
+
+        i = j + 1;
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::EmitOptions;
+
+    /// The legend the child sends, in the order the protocol lists.
+    fn legend() -> Vec<String> {
+        [
+            "namespace",
+            "type",
+            "class",
+            "enum",
+            "interface",
+            "struct",
+            "typeParameter",
+            "parameter",
+            "variable",
+            "property",
+            "enumMember",
+            "event",
+            "function",
+            "method",
+            "macro",
+            "keyword",
+            "modifier",
+            "comment",
+            "string",
+            "number",
+            "regexp",
+            "operator",
+            "decorator",
+        ]
+        .map(str::to_string)
+        .to_vec()
+    }
+
+    /// An Alloy construct is no Luau, so the shadow holds no word where
+    /// the author wrote one. The proxy draws those itself, in source
+    /// positions, and the merge keeps the delta encoding valid.
+    #[test]
+    fn the_proxy_draws_the_alloy_constructs_itself() {
+        const SRC: &str = "attribute Contracted on function\nmacro triple(x)\n    x * 3\nend\n\nnamespace Geo as\n    public enum Kind as\n        Round\n    end\nend\n\n@Contracted\nfunction f(): number\n    return $triple(2)\nend\n\nlocal k: Geo.Kind = Geo.Kind.Round\nmatch k with\n    case Geo.Kind.Round then\n        print(`hello {k}!`)\nend\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let drawn = alloy_tokens(&doc, &types);
+        let named = |name: &str| {
+            let kind = type_index(&types, name).expect("the type");
+
+            drawn
+                .iter()
+                .filter(|t| t.3 == kind)
+                .map(|t| (t.0, t.1, t.2))
+                .collect::<Vec<_>>()
+        };
+        let line_of = |needle: &str| position_of(SRC, SRC.find(needle).expect(needle));
+
+        // `@Contracted` and `$triple(2)`, sigil and name as one word.
+        assert!(named("decorator").contains(&{
+            let (l, c) = line_of("@Contracted");
+
+            (l, c, 11)
+        }));
+        assert!(named("macro").contains(&{
+            let (l, c) = line_of("$triple(2)");
+
+            (l, c, 7)
+        }));
+
+        // `case Geo.Kind.Round then`: the namespace, the enum, and the
+        // variant, each at the column the author wrote.
+        let (line, column) = line_of("case Geo.Kind.Round");
+        let at = column + "case ".len() as u32;
+
+        assert!(named("namespace").contains(&(line, at, 3)), "{drawn:?}");
+        assert!(named("enum").contains(&(line, at + 4, 4)), "{drawn:?}");
+        assert!(
+            named("enumMember").contains(&(line, at + 9, 5)),
+            "{drawn:?}"
+        );
+
+        // The name inside an interpolation hole.
+        let (line, column) = line_of("{k}!");
+
+        assert!(
+            named("variable").contains(&(line, column + 1, 1)),
+            "{drawn:?}"
+        );
+
+        // The merge sorts by line then column, so the deltas hold.
+        let out = remap(&[], &doc, &types);
+        let mut place = (0u64, 0u64);
+
+        for chunk in out.chunks_exact(5) {
+            if chunk[0] > 0 {
+                place = (place.0 + chunk[0], chunk[1]);
+            } else {
+                place = (place.0, place.1 + chunk[1]);
+            }
+        }
+
+        assert!(place.0 > 0 && !out.is_empty());
+    }
 
     #[test]
     fn tokens_in_generated_text_go_and_the_rest_move() {
@@ -82,7 +348,7 @@ mod tests {
         // Tokens: `local` (0,0,5), `nil` inside the generated text (0,18,3),
         // `print` (1,0,5).
         let data = [0, 0, 5, 1, 0, 0, 18, 3, 2, 0, 1, 0, 5, 3, 0];
-        let out = remap(&data, &doc);
+        let out = remap(&data, &doc, &[]);
         assert_eq!(out, vec![0, 0, 5, 1, 0, 1, 0, 5, 3, 0]);
     }
 
@@ -102,7 +368,7 @@ mod tests {
         let col = line.find("self").unwrap() as u64;
         // `self` on the return line, then `x` right after the dot.
         let data = [5, col, 4, 9, 0, 0, 5, 1, 9, 0];
-        let out = remap(&data, &doc);
+        let out = remap(&data, &doc, &[]);
         assert_eq!(out.len(), 5, "{out:?}");
         let source_line = src.lines().nth(5).unwrap();
         let x_col = source_line.find(".x").unwrap() as u64 + 1;
@@ -129,7 +395,10 @@ mod tests {
         let col = src.lines().next().unwrap().find("number").unwrap() as u64;
         // `number` on the first line, then the second `number` after it.
         let data = [0, col, 6, 1, 0, 0, 9, 6, 1, 0];
-        assert_eq!(remap(&data, &doc), vec![0, col, 6, 1, 0, 0, 9, 6, 1, 0]);
+        assert_eq!(
+            remap(&data, &doc, &[]),
+            vec![0, col, 6, 1, 0, 0, 9, 6, 1, 0]
+        );
     }
 
     /// The map crosses the markup lowering byte for byte, so a token of
@@ -154,7 +423,7 @@ mod tests {
         let col = line.find("props").unwrap() as u64;
         let str_col = line.find("\"s\"").unwrap() as u64;
         let data = [1, 6, 5, 8, 0, 1, col, 5, 8, 0, 0, str_col - col, 3, 18, 0];
-        let out = remap(&data, &doc);
+        let out = remap(&data, &doc, &[]);
         // `props` on line 2 stays at 6, `props` on line 3 lands on the
         // hole's `props`, and the string on the `"s"` of the attribute.
         assert_eq!(out.len(), 15, "{out:?}");

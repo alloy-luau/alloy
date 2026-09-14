@@ -64,6 +64,10 @@ pub(crate) struct State {
     /// Questions in flight, by request id.
     pub(crate) asked: HashMap<String, Asked>,
     pub(crate) next_id: u64,
+    /// The semantic token types the child's legend names, in its own
+    /// order. The proxy draws tokens of its own for the Alloy
+    /// constructs, and it paints with the child's numbers.
+    pub(crate) token_types: Vec<String>,
     /// Whether the editor takes snippet text in a completion item.
     pub(crate) snippets: bool,
     /// Whether the editor takes a watcher registration. Without one the

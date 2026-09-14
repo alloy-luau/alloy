@@ -989,10 +989,17 @@ pub fn attribute_params(hover: &str) -> Vec<(String, String)> {
 
 /// `name: T` for a parameter, or `name` alone.
 fn param_text<'a>(p: &alloy_syntax::ast::Param, text: &impl Fn(TokSpan) -> &'a str) -> String {
-    match p.ty {
+    let head = match p.ty {
         Some(t) => format!("{}: {}", text(p.name), text(t)),
 
         None => text(p.name).to_string(),
+    };
+
+    // `b = 2`: the default is part of the signature the reader wrote.
+    match &p.default {
+        Some(d) => format!("{head} = {}", text(d.span())),
+
+        None => head,
     }
 }
 
@@ -1042,6 +1049,21 @@ mod tests {
         assert_eq!(
             coin.hover,
             "```alloy\nDrop.Coin\n```\nA variant of `enum Drop`."
+        );
+    }
+
+    #[test]
+    fn a_macro_hover_keeps_a_parameter_default() {
+        let src = "export macro withDefault(a, b = 2)\n    a + b\nend\n";
+        let d = summaries(src, false);
+        let m = d
+            .iter()
+            .find(|x| x.name == "$withDefault")
+            .expect("the macro");
+        assert!(
+            m.hover.contains("export macro withDefault(a, b = 2)"),
+            "{}",
+            m.hover
         );
     }
 

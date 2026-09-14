@@ -67,6 +67,25 @@ impl<'a> Parser<'a> {
             };
 
             let stmt = match parsed {
+                // `try do ... await f() end`: an `await`, a `try`, or a
+                // `new` stands alone as a statement, so the statement
+                // parser takes it; at the end of a value block it is
+                // the value.
+                Ok(Stmt::Call(e, span))
+                    if value_block
+                        && self.at("end")
+                        && matches!(
+                            e,
+                            Expr::Await { .. } | Expr::Try { .. } | Expr::New { .. }
+                        ) =>
+                {
+                    Stmt::Return(Return {
+                        values: vec![e],
+                        value_only: true,
+                        span,
+                    })
+                }
+
                 Ok(s) => s,
 
                 Err(e) if self.lenient && self.diagnostics.len() < MAX_DIAGNOSTICS => {

@@ -2577,6 +2577,29 @@ mod tests {
     statement` at the `x`. It now reads the expression after any
     statement, a block that ends in `end` included.
     */
+    /// `await f()` stands alone as a statement, so the statement parser
+    /// takes it; at the end of a value block it is still the value.
+    #[test]
+    fn a_trailing_await_is_the_value_of_the_block() {
+        let src = "async function slow(): number
+    return 9
+end
+
+async function main()
+    local c = try do
+        await (slow())
+    end
+    print(c)
+end
+main()
+";
+        let out = crate::compile_with(src, &EmitOptions::default())
+            .unwrap()
+            .ship;
+
+        assert!(out.contains("return __alloy.await((slow()))"), "{out}");
+    }
+
     #[test]
     fn a_value_block_takes_its_trailing_expression_after_any_statement() {
         let ship = |src: &str| -> String {

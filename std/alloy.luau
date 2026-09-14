@@ -341,22 +341,66 @@ local function raise(err: any, trace: string?)
 	error(setmetatable({ err = err, trace = trace }, TryFail), 0)
 end
 
+-- The first type of a pack, or `unknown` for an empty one.
+type function __pack_head(pack)
+	local head = pack.head
+
+	if head == nil or #head == 0 then
+		return types.unknown
+	end
+
+	return head[1]
+end
+
+-- The value the closure of a `try do` block gives back.
+type function __try_ret(F)
+	local fn: any = F
+
+	if not fn:is("function") then
+		return types.unknown
+	end
+
+	return __pack_head(fn:returns())
+end
+
+-- The error type the closure's `fail` takes: the first parameter of
+-- its first parameter.
+type function __try_fail(F)
+	local fn: any = F
+
+	if not fn:is("function") then
+		return types.unknown
+	end
+
+	local fail: any = __pack_head(fn:parameters())
+
+	if not fail:is("function") then
+		return types.unknown
+	end
+
+	return __pack_head(fail:parameters())
+end
+
 --- `try do ... end`: the block's value as a Result. A plain value becomes
 --- Ok, a Result passes through as is, and a throw becomes Err with the
 --- traceback from the throw site.
 ---
 --- The closure takes the block's `fail`, which a `try` inside the block
---- calls on Err. The call carries the error type, so `E` solves from
---- what the block can fail with; the call leaves the block, so the
---- block's own `return` alone decides `T`. Luau reads a closure's
+--- calls on Err. The call carries the error type, so the error solves
+--- from what the block can fail with; the call leaves the block, so the
+--- block's own `return` alone decides the value. Luau reads a closure's
 --- return type off its first `return` and checks the rest against it,
 --- so an Err returned there would take the place of the value.
 ---
---- The return type reads `...T` so a block that returns nothing still
---- solves; `T` is free then, and `__try_ok` answers `any`.
-function alloy.try_block<T, E>(
-	f: (fail: (E, string?) -> never) -> ...T
-): Result<__try_ok<T>, __try_err<T, E>>
+--- `F` binds the whole closure type, and the type functions read the
+--- value and the error off it. A generic in the closure's return, `(fail)
+--- -> ...T`, lands on `unknown` when the return is a type function
+--- that is still pending, as the result of `await` is; the value of a
+--- block around an `await` then read `any`. A block that returns
+--- nothing leaves the value `unknown`, and `__try_ok` answers `any`.
+function alloy.try_block<F>(
+	f: F
+): Result<__try_ok<__try_ret<F>>, __try_err<__try_ret<F>, __try_fail<F>>>
 	local packed = table.pack(xpcall(f :: any, function(e)
 		if type(e) == "table" and getmetatable(e) == TryFail then
 			return e

@@ -476,6 +476,44 @@ fn a_reject_and_a_hand_written_awaitable_analyze() {
     analyze(REJECTED, "rejected");
 }
 
+/// A `try do` block around an `await` carries the awaited type: the
+/// two blocks read `Result<number, any>`, so both annotations report.
+/// The result of `await` is an `index<A, "__value">` type function,
+/// and a generic bound off the closure's return landed on `unknown`
+/// while it was pending, so the block read `Result<any, any>`.
+#[test]
+fn a_try_block_around_an_await_keeps_the_payload_type() {
+    let src = "async function slow(): number
+    return 9
+end
+
+async function main()
+    local b: Result<string, any> = try do
+        local r = await (slow())
+        r
+    end
+    local c: Result<string, any> = try do
+        await (slow())
+    end
+    print(b, c)
+end
+main()
+";
+    let Some(bad) = reports(src, "try-await-payload") else {
+        return;
+    };
+
+    // An `any` payload fits the annotation, so a report on each
+    // binding line is the proof. The `but got` half sits on a second
+    // line, which the harness drops.
+    assert_eq!(bad.len(), 2, "{}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(6,") && bad[1].contains("(10,"),
+        "{}",
+        bad.join("\n")
+    );
+}
+
 /// A `try await` of a Future that settles with a Result yields that
 /// Result, not an Ok around it. The typed form said otherwise, and the
 /// nested print named the emit's own keys: `_1`, `__ok`, `__err`.

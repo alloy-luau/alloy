@@ -1382,3 +1382,72 @@ pub(crate) fn an_attribute_parameter_hovers_at_its_declaration() {
         "```alloy\nasset: string\n```\nA parameter of `attribute icon`."
     );
 }
+
+/// A hint on a `try` of a generic enum: the child cuts each arm of the
+/// Result, `{ read _1: T, ... 4 more ... }`, so no pair fold finds a
+/// `tag`. The method table's arguments name the Result, and no payload
+/// slot reaches the gutter.
+#[test]
+fn a_cut_result_hint_reads_by_the_method_tables_arguments() {
+    let module = "export enum Opt<T> as\n    Some(T),\n    Nil\nend\n";
+    let user = "import { Opt } from \"./opt\"\n\nfunction findFirst(xs: {number}): Opt<number>\n    return Opt.Nil\nend\n\nlocal r = try do\n    return findFirst({1, 2, 30})\nend\n";
+    let dir = std::env::temp_dir().join(format!("alloy-hint-cut-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+    let mut uris = Vec::new();
+
+    for (rel, src) in [("opt.aly", module), ("tryenum.aly", user)] {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let uri = format!("file://{}", path.display());
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            uri.clone(),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+        uris.push(uri);
+    }
+
+    let uri = uris[1].as_str();
+    let doc = st.docs.get(uri).expect("doc");
+    let line = position_of(user, user.find("local r").expect("the binding")).0;
+    let raw = ": (ResultMethods<\"Nil\" | { @metatable t1, { _1: number, tag: \"Some\" } }, any> & { read _1: \"Nil\" | { @metatable t1, { _1: number, tag: \"Some\" } }, ... 4 more ... }) | (ResultMethods<\"Nil\" | { @metatable t1, { _1: number, tag: \"Some\" } }, any> & { read _1: any, read __err: any, read __ok: \"Nil\" | { @metatable t1, { _1: number, tag: \"Some\" } }, ... 2 more ... }) where t1 = { Nil: \"Nil\" | { @metatable t1, { _1: any, tag: \"Some\" } }, ... 4 more ... }";
+    let mut hints = json!([{
+        "kind": 1,
+        "label": raw,
+        "position": { "line": line, "character": 7 },
+        "textEdits": [],
+    }]);
+    crate::shapes::fold_value(&mut hints, &st.known_shapes_at(Some(uri)));
+    let hints = hints.as_array_mut().expect("hints");
+    clean_hints(hints, doc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let label = hint_label(hints.first().expect("the hint stays"));
+
+    assert_eq!(label, ": Result<Opt, any>");
+
+    for slot in ["_1", "__err", "__ok", " more ..."] {
+        assert!(!label.contains(slot), "{label}");
+    }
+}

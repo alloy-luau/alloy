@@ -818,6 +818,8 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_quoted_types(&mut out, known);
     fold_generic_arity(&mut out);
     drop_free_clauses(&mut out);
+    // The two arms of a cut Result read alike once the clause goes.
+    fold_repeated_members(&mut out);
 
     out
 }

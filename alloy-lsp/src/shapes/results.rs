@@ -23,6 +23,23 @@ pub(crate) fn drop_result_methods(text: &str) -> String {
         };
         let end = at + rel + " & ".len();
 
+        // A hint cuts the data half, `{ read _1: T, ... 4 more ... }`,
+        // and the pair folds find no `tag` in it. The method table's
+        // arguments still name the Result whole.
+        if let Some(name) = cut_result_name(&out[at..end], &out[end..]) {
+            let data = end + balanced_len(&out[end..]).unwrap_or(0);
+            let group = out[..at].ends_with('(') && out[data..].starts_with(')');
+            let (start, stop) = match group {
+                true => (at - 1, data + 1),
+
+                false => (at, data),
+            };
+            out.replace_range(start..stop, &name);
+            from = start + name.len();
+
+            continue;
+        }
+
         // `(ResultMethods<T, E> & { ... })` loses its parentheses with
         // the member, since one type needs none.
         if out[..at].ends_with('(') {
@@ -44,6 +61,21 @@ pub(crate) fn drop_result_methods(text: &str) -> String {
     }
 
     out
+}
+
+/// `Result<T, E>` for a `ResultMethods<T, E> & ` head whose data half
+/// the child cut short; `None` when the data half is whole.
+fn cut_result_name(head: &str, data: &str) -> Option<String> {
+    let len = balanced_len(data)?;
+
+    if !data.starts_with('{') || !data[..len].contains(" more ...") {
+        return None;
+    }
+
+    let open = head.find('<')?;
+    let args = &head[open..open + group_len(&head[open..], '<', '>')?];
+
+    Some(format!("Result{args}"))
 }
 
 /// `Result<T, E> & { read expect: ..., read map: ... }`: the method

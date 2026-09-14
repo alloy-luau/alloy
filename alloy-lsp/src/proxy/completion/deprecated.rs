@@ -17,8 +17,13 @@ impl State {
     /// the rows the editor's settings hide. The list holds the child's
     /// rows and the proxy's own by now, so both read alike.
     pub(crate) fn deprecated_pass(&self, uri: &str, result: &mut Value) {
+        // The file's own marks, and those of the modules it imports:
+        // `import { oldFn } from "./dep"` reads the attribute in `dep`.
         let own = match self.docs.get(uri) {
-            Some(doc) => deprecated_names(&doc.source),
+            Some(doc) => std::iter::once(doc.source.as_str())
+                .chain(doc.import_sources.iter().map(String::as_str))
+                .flat_map(deprecated_names)
+                .collect(),
 
             None => HashSet::new(),
         };

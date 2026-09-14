@@ -1769,6 +1769,64 @@ fn the_settings_hide_the_deprecated_rows() {
     );
 }
 
+/// `hideAllDeprecated` read the attribute in the open file alone, so an
+/// imported `@deprecated` function stayed in the list. The modules the
+/// file imports mark their own rows now, namespace members among them.
+#[test]
+pub(crate) fn an_imported_deprecated_name_hides_under_the_setting() {
+    const DEP: &str = concat!(
+        "@deprecated(\"use newFn instead\")\n",
+        "export function oldFn(): number\n",
+        "    return 1\n",
+        "end\n",
+        "\n",
+        "export function newFn(): number\n",
+        "    return 2\n",
+        "end\n",
+        "\n",
+        "export namespace Old as\n",
+        "    @deprecated\n",
+        "    public function f() end\n",
+        "end\n",
+    );
+    const USE: &str = "import { oldFn, newFn, Old } from \"./dep\"\n\nlocal x = old\n";
+    let mut st = super::support::files(&[("file:///dep.aly", DEP), ("file:///use.aly", USE)]);
+    st.docs
+        .get_mut("file:///use.aly")
+        .expect("the file")
+        .import_sources
+        .push(DEP.to_string());
+    let child = || {
+        json!([
+            { "label": "oldFn", "kind": 3 },
+            { "label": "newFn", "kind": 3 },
+            { "label": "f", "kind": 3 },
+        ])
+    };
+    let labels = |result: &Value| -> Vec<String> {
+        result
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+
+    // Without the setting the rows stay, and the imported ones carry
+    // the tag.
+    let mut result = child();
+    st.deprecated_pass("file:///use.aly", &mut result);
+    assert_eq!(labels(&result), ["oldFn", "newFn", "f"]);
+    assert_eq!(result[0]["tags"], json!([1]));
+    assert_eq!(result[1]["tags"], Value::Null);
+    assert_eq!(result[2]["tags"], json!([1]));
+
+    st.editor.hide_all_deprecated = true;
+    let mut result = child();
+    st.deprecated_pass("file:///use.aly", &mut result);
+    assert_eq!(labels(&result), ["newFn"]);
+}
+
 /// The literals an attribute argument takes: the members of a narrowed
 /// union, and the variants of an enum.
 #[test]

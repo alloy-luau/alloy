@@ -607,3 +607,29 @@ pub(crate) fn a_deleted_module_refreshes_its_importers() {
 
     assert!(sent.contains("UnknownModule"), "{sent}");
 }
+
+/// An `end` past the one that closes an `impl` is an error node the
+/// emit copies through, so the child stopped there and nothing below
+/// it answered. The repair blanks the word, and the shadow parses.
+#[test]
+fn a_stray_end_leaves_the_rest_of_the_file_to_the_child() {
+    let src = "impl Something as\n    function m(self)\n    end\nend\nend\nfunction helper3(): number\n    return 44\nend\n";
+    let (st, uri) = one_file(src);
+    let doc = &st.docs[uri];
+    let repair = doc.repair.as_ref().expect("the repair");
+
+    assert!(repair.spots.is_empty());
+    assert_eq!(repair.source.len(), src.len());
+    assert!(repair.output.parsed_clean);
+    assert_eq!(doc.shadow.lines().nth(4), Some("   "), "{}", doc.shadow);
+    assert!(doc.shadow.contains("function helper3(): number"));
+    // The author's own compile still reports the stray `end`.
+    let out = doc.output.as_ref().expect("output");
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| d.message == "unexpected `end`"),
+        "{:?}",
+        out.diagnostics
+    );
+}

@@ -233,16 +233,38 @@ fn follows_a_question(lexed: &alloy_syntax::lexer::Lexed, source: &str, i: usize
         })
 }
 
-/// The source with a placeholder after every dangling access operator,
-/// and where each one went. `None` when the source has none.
+/// The byte offsets of every `end` that closes nothing: the parser
+/// reports one at the top level and keeps the rest of the file. The
+/// emit copies the word through, and the child stops at it.
+fn stray_ends(source: &str) -> Vec<usize> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
+        return Vec::new();
+    };
+
+    parsed
+        .diagnostics
+        .iter()
+        .filter(|d| d.message == "unexpected `end`" && source[d.offset..].starts_with("end"))
+        .map(|d| d.offset)
+        .collect()
+}
+
+/// The source with a placeholder after every dangling access operator
+/// and a stray `end` blanked to its own width, and where each
+/// placeholder went. `None` when the source has neither.
 fn repaired_source(source: &str) -> Option<(String, Vec<(usize, usize)>)> {
     let spots = dangling_members(source);
+    let ends = stray_ends(source);
 
-    if spots.is_empty() {
+    if spots.is_empty() && ends.is_empty() {
         return None;
     }
 
     let mut text = source.to_string();
+
+    for at in ends {
+        text.replace_range(at..at + 3, "   ");
+    }
 
     for (at, fill) in spots.iter().rev() {
         text.insert_str(*at, fill);

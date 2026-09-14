@@ -266,6 +266,28 @@ impl<'s> Desugar<'s> {
             .map(|(e, _)| e.clone())
     }
 
+    /// The variant a pattern name spells, with the enum when a dotted
+    /// path names one: `Kind.Big` answers `("Big", Some("Kind"))`, and
+    /// the bare `Big` answers `("Big", None)` for the caller to find the
+    /// enum by its variant.
+    pub(crate) fn pattern_variant(&self, name: TokSpan) -> (String, Option<String>) {
+        let text = self.text_of(name).to_string();
+
+        if !text.contains('.') {
+            return (text, None);
+        }
+
+        match self.enum_of_path(&text) {
+            Some((e, v)) => (v, Some(e)),
+
+            None => {
+                let last = text.rsplit('.').next().unwrap_or(&text);
+
+                (last.to_string(), None)
+            }
+        }
+    }
+
     /// The enum a scrutinee column names, when this file declares it.
     /// A variant pattern or a unit variant in any arm answers.
     pub(crate) fn column_enum(&self, arms: &[&[Pattern]], col: usize) -> Option<String> {
@@ -283,16 +305,22 @@ impl<'s> Desugar<'s> {
                         continue;
                     }
 
-                    Pattern::Variant { name, .. } => (self.text_of(*name), false),
+                    // A dotted path names the enum itself, so no search
+                    // over the variant names has to guess it.
+                    Pattern::Variant { name, .. } => match self.pattern_variant(*name) {
+                        (_, Some(e)) => return Some(self.enum_type_name(&e)),
 
-                    Pattern::Bind(name) => (self.text_of(*name), true),
+                        (v, None) => (v, false),
+                    },
+
+                    Pattern::Bind(name) => (self.text_of(*name).to_string(), true),
 
                     _ => continue,
                 };
                 let found = self
                     .enum_decls
                     .iter()
-                    .find(|(_, vs)| vs.iter().any(|(v, n)| v == name && (!unit || *n == 0)));
+                    .find(|(_, vs)| vs.iter().any(|(v, n)| *v == name && (!unit || *n == 0)));
 
                 if let Some((e, _)) = found {
                     return Some(self.enum_type_name(e));
@@ -393,7 +421,7 @@ impl<'s> Desugar<'s> {
             }
 
             Pattern::Variant { name, args, .. } => {
-                let vname = self.text_of(*name).to_string();
+                let (vname, _) = self.pattern_variant(*name);
                 out.tests.push(format!(
                     "type({path}) == \"table\" and {path}.tag == \"{vname}\""
                 ));
@@ -560,19 +588,22 @@ impl<'s> Desugar<'s> {
         // The enum of the match: the first variant name a declared enum
         // owns. A name none owns is then a variant that enum lacks.
         let owner = flat.iter().find_map(|(name, _)| {
-            let vname = self.text_of(*name);
+            let (vname, path_enum) = self.pattern_variant(*name);
 
-            self.enums
-                .iter()
-                .find(|(_, vs)| vs.iter().any(|(v, _)| v == vname))
-                .map(|(e, _)| e.clone())
+            path_enum.or_else(|| {
+                self.enums
+                    .iter()
+                    .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                    .map(|(e, _)| e.clone())
+            })
         });
 
         for (name, binds) in flat {
-            let vname = self.text_of(name).to_string();
+            let (vname, path_enum) = self.pattern_variant(name);
             let found = self
                 .enums
                 .iter()
+                .filter(|(e, _)| path_enum.as_ref().is_none_or(|p| p == *e))
                 .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
                 .map(|(e, vs)| {
                     (
@@ -723,12 +754,13 @@ impl<'s> Desugar<'s> {
                     }
 
                     Pattern::Variant { name, .. } => {
-                        let vname = self.text_of(*name).to_string();
-                        let owner = self
-                            .enums
-                            .iter()
-                            .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
-                            .map(|(e, _)| e.clone());
+                        let (vname, path_enum) = self.pattern_variant(*name);
+                        let owner = path_enum.or_else(|| {
+                            self.enums
+                                .iter()
+                                .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                                .map(|(e, _)| e.clone())
+                        });
 
                         if let Some(e) = owner {
                             enum_name.get_or_insert(e);
@@ -853,12 +885,13 @@ impl<'s> Desugar<'s> {
                 }
 
                 Pattern::Variant { name, args, .. } => {
-                    let vname = self.text_of(*name).to_string();
-                    let owner = self
-                        .enums
-                        .iter()
-                        .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
-                        .map(|(e, _)| e.clone());
+                    let (vname, path_enum) = self.pattern_variant(*name);
+                    let owner = path_enum.or_else(|| {
+                        self.enums
+                            .iter()
+                            .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                            .map(|(e, _)| e.clone())
+                    });
 
                     let Some(e) = owner else {
                         return false;
@@ -1846,6 +1879,33 @@ mod tests {
             ),
             "{}",
             out.check
+        );
+    }
+
+    /// `case Kind.Big(n) then`: a dotted path names the variant, so a
+    /// payload list may follow it. The parser stopped at the path and
+    /// reported `expected `then`, found `(``.
+    #[test]
+    fn a_dotted_path_carries_its_payload() {
+        let src = "enum Shape as\n    Circle(number)\n    Empty\nend\nlocal s = Shape.Circle(1)\nmatch s with\n    case Shape.Circle(r) then print(r)\n    case Empty then print(0)\nend\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship
+                .contains("_m1.tag == \"Circle\" then local r = _m1._1"),
+            "{}",
+            out.ship
+        );
+
+        // A nested payload pattern reads the same, and a dotted arm
+        // counts for exhaustiveness: dropping `Empty` reports it.
+        let short = "enum Shape as\n    Circle(number)\n    Empty\nend\nlocal s = Shape.Circle(1)\nmatch s with\n    case Shape.Circle(r) then print(r)\nend\n";
+        let got = messages(short);
+        assert_eq!(
+            got,
+            vec![
+                "this match is not exhaustive: `Shape` has no arm for `Empty`; add it or a `default` arm"
+            ]
         );
     }
 

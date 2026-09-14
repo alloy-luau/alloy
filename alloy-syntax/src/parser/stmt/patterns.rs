@@ -99,34 +99,33 @@ impl<'a> Parser<'a> {
                 Some(TokKind::Ident) if self.at_name() => {
                     let name_start = self.bump();
 
-                    // A dotted path compares by value.
+                    // A dotted path compares by value. The path names one
+                    // variant, so a payload list may follow it:
+                    // `Kind.Big(n)` reads like the bare `Big(n)`.
                     if self.at(".") && self.name_at(1) {
                         while self.at(".") && self.name_at(1) {
                             self.pos += 2;
                         }
 
-                        return Ok(Pattern::Path(TokSpan::new(name_start, self.pos)));
+                        let path = TokSpan::new(name_start, self.pos);
+
+                        if !self.at("(") {
+                            return Ok(Pattern::Path(path));
+                        }
+
+                        let args = self.variant_args()?;
+
+                        return Ok(Pattern::Variant {
+                            name: path,
+                            args,
+                            span: TokSpan::new(start, self.pos),
+                        });
                     }
 
                     let name = TokSpan::new(name_start, name_start + 1);
 
                     if self.at("(") {
-                        self.bump();
-                        let mut args = Vec::new();
-
-                        while !self.at(")") {
-                            if self.at_end() {
-                                return Err(self.err("unterminated variant pattern"));
-                            }
-
-                            args.push(self.pattern()?);
-
-                            if !self.eat(",") {
-                                break;
-                            }
-                        }
-
-                        self.expect(")")?;
+                        let args = self.variant_args()?;
 
                         return Ok(Pattern::Variant {
                             name,
@@ -145,6 +144,29 @@ impl<'a> Parser<'a> {
                 _ => Err(self.err(&format!("expected a pattern, found {}", self.found()))),
             },
         }
+    }
+
+    /// The payload list a variant pattern carries: `(p, q)` after the
+    /// variant name or after the path that names it.
+    fn variant_args(&mut self) -> Result<Vec<Pattern>, ParseError> {
+        self.expect("(")?;
+        let mut args = Vec::new();
+
+        while !self.at(")") {
+            if self.at_end() {
+                return Err(self.err("unterminated variant pattern"));
+            }
+
+            args.push(self.pattern()?);
+
+            if !self.eat(",") {
+                break;
+            }
+        }
+
+        self.expect(")")?;
+
+        Ok(args)
     }
 
     fn struct_pattern(

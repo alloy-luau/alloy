@@ -339,7 +339,7 @@ pub fn rewrite_requires(tree: &Tree, text: &str) -> String {
 /// Rewrites the path of every `require("...")` of a text through `f`,
 /// which answers `None` for a path it leaves alone. The text keeps its
 /// line count, so `f` returns no newline.
-pub(crate) fn map_requires(text: &str, f: impl Fn(&str) -> Option<String>) -> String {
+pub fn map_requires(text: &str, f: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
 

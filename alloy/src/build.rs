@@ -32,6 +32,9 @@ pub struct Report {
     /// The `.json` and `.toml` files a source names, written to `out`
     /// as `.luau` modules; the paths are relative to `out`.
     pub data: Vec<PathBuf>,
+    /// The check artifacts of every project an import leads into, by
+    /// absolute output path, for the checker's mirror.
+    pub dep_artifacts: Vec<(PathBuf, String)>,
 }
 
 impl Report {
@@ -61,24 +64,24 @@ pub fn run(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report> {
         ..Config::default()
     };
 
-    run_with(root, &config, true, false)
+    run_with(root, &config, true, false, &mut Deps::default())
 }
 
 /// The build of a whole config: the tree writes the project files and
 /// routes the requires.
 pub fn run_project(root: &Path, config: &Config) -> std::io::Result<Report> {
-    run_with(root, config, true, false)
+    run_with(root, config, true, false, &mut Deps::default())
 }
 
 /// `check` for a whole config.
 pub fn check_project(root: &Path, config: &Config) -> std::io::Result<Report> {
-    run_with(root, config, false, false)
+    run_with(root, config, false, false, &mut Deps::default())
 }
 
 /// `flux` for a whole config: the check, with the artifacts kept for
 /// the analyzer.
 pub fn flux_project(root: &Path, config: &Config) -> std::io::Result<Report> {
-    run_with(root, config, false, true)
+    run_with(root, config, false, true, &mut Deps::default())
 }
 
 /// The build without the write: every source compiles and the report
@@ -91,7 +94,7 @@ pub fn check(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report>
         ..Config::default()
     };
 
-    run_with(root, &config, false, false)
+    run_with(root, &config, false, false, &mut Deps::default())
 }
 
 /// The structs the sources declare, with each field's type and width,
@@ -148,7 +151,29 @@ pub fn sources(input: &Path, written: &[PathBuf]) -> std::io::Result<Vec<PathBuf
     Ok(list)
 }
 
-fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::Result<Report> {
+/// One project's run, on the dependency stack: an import that leads
+/// back to a project on the stack is a cycle.
+fn run_with(
+    root: &Path,
+    config: &Config,
+    write: bool,
+    keep: bool,
+    deps: &mut Deps,
+) -> std::io::Result<Report> {
+    deps.stack.push(absolute(root));
+    let report = run_inner(root, config, write, keep, deps);
+    deps.stack.pop();
+
+    report
+}
+
+fn run_inner(
+    root: &Path,
+    config: &Config,
+    write: bool,
+    keep: bool,
+    deps: &mut Deps,
+) -> std::io::Result<Report> {
     let build = &config.build;
     let emit = &config.emit;
     let base_options = EmitOptions {
@@ -459,7 +484,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             Some(&ingots),
         );
 
-        let compiled = match compiled {
+        let mut compiled = match compiled {
             Ok(c) => c,
 
             Err(e) => {
@@ -469,6 +494,35 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
                 continue;
             }
         };
+
+        // An import that leaves `in` names another project: it builds
+        // first, and the require here names its output.
+        let outside = deps.outside(
+            &Site {
+                from: &absolute(&path),
+                out_file: &absolute(&target),
+                input: &absolute(&input),
+                root,
+            },
+            &compiled.imports,
+            &compiled.data_refs,
+            write,
+            keep,
+        );
+
+        if !outside.rewrites.is_empty() {
+            let map = |text: &str| {
+                crate::project::map_requires(text, |p| {
+                    outside
+                        .rewrites
+                        .iter()
+                        .find(|(spec, _)| spec == p)
+                        .map(|(_, to)| to.clone())
+                })
+            };
+            compiled.ship = map(&compiled.ship);
+            compiled.check = map(&compiled.check);
+        }
 
         for d in &compiled.diagnostics {
             report.diagnostics.push((rel.clone(), d.clone()));
@@ -493,8 +547,14 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         // every problem below counts too, silenced or not.
         let mut expect_hits = compiled.expected_hits.clone();
 
-        for problem in crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
-        {
+        // An import into another project reports once: the report that
+        // names the project and its first error, over the module scan's.
+        let taken: Vec<u32> = outside.problems.iter().map(|p| p.start).collect();
+        let scanned = crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
+            .into_iter()
+            .filter(|p| !taken.contains(&p.start));
+
+        for problem in outside.problems.into_iter().chain(scanned) {
             let at = crate::directives::line_of(&source, problem.start as usize);
             expect_hits.push(at);
 
@@ -521,6 +581,11 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         let mut data_diagnostics = Vec::new();
 
         for r in &compiled.data_refs {
+            // A data file of another project went with the imports.
+            if outside.data.contains(&r.path) {
+                continue;
+            }
+
             match data_files.module(&r.path, &rel, &source_rel, write) {
                 Ok(out_rel) => {
                     expected.insert(out.join(&out_rel));
@@ -628,6 +693,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     }
 
     report.lints.extend(circular_imports(&imports));
+    report.dep_artifacts = deps.artifacts.clone();
     report
         .diagnostics
         .sort_by(|a, b| (&a.0, a.1.start).cmp(&(&b.0, b.1.start)));
@@ -702,6 +768,372 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     }
 
     Ok(report)
+}
+
+/// The projects one run builds for the imports that leave `[build] in`.
+/// Each builds once, by its own `alloy.toml`, and the importer requires
+/// its output.
+#[derive(Default)]
+pub struct Deps {
+    /// By project root: where its sources and its output sit, or why
+    /// it does not build.
+    done: HashMap<PathBuf, Result<Dep, String>>,
+    /// The roots on the way to the project that builds now. A root met
+    /// twice is a cycle.
+    stack: Vec<PathBuf>,
+    /// The check artifacts of every project built, by absolute output
+    /// path, for the checker's mirror.
+    artifacts: Vec<(PathBuf, String)>,
+}
+
+/// One project a build depends on: its `[build] in` and `out`,
+/// absolute.
+#[derive(Clone)]
+struct Dep {
+    input: PathBuf,
+    out: PathBuf,
+}
+
+/// The file an import sits in, with what its project knows.
+pub struct Site<'a> {
+    /// The source, absolute.
+    pub from: &'a Path,
+    /// The output the build writes for the source, absolute; the
+    /// rewritten require is relative to its folder.
+    pub out_file: &'a Path,
+    /// `[build] in` of the project, absolute.
+    pub input: &'a Path,
+    /// The project root, for the paths a message shows.
+    pub root: &'a Path,
+}
+
+/// What the imports of one source that leave `in` came to.
+#[derive(Default)]
+pub struct Outside {
+    /// The require path each spec becomes in the output.
+    pub rewrites: Vec<(String, String)>,
+    /// The specs of data files another project holds; the build of this
+    /// project leaves them to that one.
+    pub data: Vec<String>,
+    pub problems: Vec<crate::modules::ImportProblem>,
+}
+
+impl Deps {
+    /// The imports of one source that leave `input`: a file of another
+    /// project builds that project first, and a file no project holds
+    /// reports.
+    pub fn outside(
+        &mut self,
+        site: &Site,
+        imports: &[crate::ImportRef],
+        data_refs: &[crate::ImportRef],
+        write: bool,
+        keep: bool,
+    ) -> Outside {
+        let mut out = Outside::default();
+        let base = site.from.parent().unwrap_or(Path::new(""));
+
+        for r in imports.iter().chain(data_refs) {
+            let spec = &r.path;
+            // The emit writes a data require without its extension.
+            let key = crate::data::strip_spec(spec);
+
+            if !(spec.starts_with("./") || spec.starts_with("../"))
+                || out.rewrites.iter().any(|(s, _)| s == key)
+            {
+                continue;
+            }
+
+            let format = crate::data::Format::of(spec);
+            let target = match format {
+                Some(_) => Some(normalize_path(&base.join(spec))).filter(|p| p.is_file()),
+
+                None => crate::modules::resolve(spec, site.from, &[]),
+            };
+
+            // A missing file is `import_problems`' report, and a plain
+            // `.luau` outside `in` stays the developer's own require.
+            let Some(target) = target else {
+                continue;
+            };
+            let alloy = target.extension().is_some_and(|e| e == "aly" || e == "alx");
+
+            if target.starts_with(site.input) || !(alloy || format.is_some()) {
+                continue;
+            }
+
+            let problem = |message: String| crate::modules::ImportProblem {
+                start: r.start,
+                end: r.end,
+                kind: "UnknownModule",
+                message,
+            };
+            let Some(toml) = target.parent().and_then(Config::find) else {
+                out.problems.push(problem(format!(
+                    "\"{spec}\" is outside this project and no alloy.toml holds it; give it a project (`alloy init` there) or move it under [build] in"
+                )));
+
+                continue;
+            };
+            let dep_root = toml.parent().unwrap_or(Path::new("/"));
+            let shown_root = relative(site.root, dep_root);
+            let dep = match self.project(dep_root, write, keep) {
+                Ok(dep) => dep,
+
+                Err(e) => {
+                    out.problems.push(problem(format!(
+                        "\"{spec}\" is in the project at {shown_root}, which does not build: {e}"
+                    )));
+
+                    continue;
+                }
+            };
+            let Ok(rel) = target.strip_prefix(&dep.input) else {
+                out.problems.push(problem(format!(
+                    "\"{spec}\" is in the project at {shown_root} but outside its [build] in; move it under {}",
+                    relative(site.root, &dep.input)
+                )));
+
+                continue;
+            };
+            let out_rel = match format {
+                Some(_) => rel.with_extension("luau"),
+
+                None => output_for(rel).unwrap_or_else(|| rel.to_path_buf()),
+            };
+            let dep_out = dep.out.join(out_rel);
+
+            // The dependency writes a data file only when a source of
+            // its own names it, so the module is written from here.
+            if let Some(format) = format {
+                out.data.push(spec.clone());
+
+                match self.data_module(&target, &dep_out, format, write) {
+                    Ok(()) => {}
+
+                    Err(e) => {
+                        out.problems.push(problem(format!("data file {spec} {e}")));
+
+                        continue;
+                    }
+                }
+            }
+
+            let from_dir = site.out_file.parent().unwrap_or(Path::new("/"));
+            out.rewrites.push((
+                key.to_string(),
+                relative(from_dir, &dep_out.with_extension("")),
+            ));
+        }
+
+        out
+    }
+
+    /// The project at `root`, built once.
+    fn project(&mut self, root: &Path, write: bool, keep: bool) -> Result<Dep, String> {
+        let root = absolute(root);
+
+        if self.stack.contains(&root) {
+            // The two projects, shown from the one the run started in.
+            let top = self.stack.first().cloned().unwrap_or_default();
+            let name = |p: &Path| match p == top {
+                true => "this project".to_string(),
+
+                false => relative(&top, p),
+            };
+            let from = self.stack.last().cloned().unwrap_or_default();
+
+            return Err(format!(
+                "{} and {} import each other; move the shared part into a third project",
+                name(&root),
+                name(&from)
+            ));
+        }
+
+        if let Some(done) = self.done.get(&root) {
+            return done.clone();
+        }
+
+        let result = self.build(&root, write, keep);
+        self.done.insert(root, result.clone());
+
+        result
+    }
+
+    fn build(&mut self, root: &Path, write: bool, keep: bool) -> Result<Dep, String> {
+        let config = Config::load(&root.join(crate::config::FILE_NAME))
+            .map_err(|e| format!("its alloy.toml does not load: {e}"))?;
+        // The importer's root, for the path a message shows.
+        let importer = self.stack.last().cloned().unwrap_or_default();
+        let report = run_with(root, &config, write, keep, self).map_err(|e| e.to_string())?;
+        let input = absolute(&root.join(&config.build.input));
+        let out = absolute(&root.join(&config.build.out));
+        let shown = |rel: &Path| relative(&importer, &input.join(rel));
+
+        // The first error is the one the importer's line names.
+        if let Some((rel, d)) = report.diagnostics.first() {
+            let source = std::fs::read_to_string(input.join(rel)).unwrap_or_default();
+            let (line, col) = crate::directives::line_col(&source, d.start as usize);
+
+            return Err(format!("{}:{line}:{col}: {}", shown(rel), d.message));
+        }
+
+        if let Some((rel, message)) = report.failures.first() {
+            return Err(format!("{}: {message}", shown(rel)));
+        }
+
+        for c in report.checks {
+            if let Some(o) = output_for(&c.rel) {
+                self.artifacts.push((out.join(o), c.check));
+            }
+        }
+
+        self.artifacts
+            .push((out.join("alloy.luau"), crate::RUNTIME.to_string()));
+
+        Ok(Dep { input, out })
+    }
+
+    /// The module of a data file another project holds, written under
+    /// that project's `out`.
+    fn data_module(
+        &mut self,
+        path: &Path,
+        target: &Path,
+        format: crate::data::Format,
+        write: bool,
+    ) -> Result<(), String> {
+        if self.artifacts.iter().any(|(p, _)| p == target) {
+            return Ok(());
+        }
+
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let luau = crate::data::convert(&text, format)
+            .map_err(|e| format!("does not parse as {}: {e}", format.name()))?;
+
+        if write {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+
+            if std::fs::read_to_string(target).ok().as_deref() != Some(luau.as_str()) {
+                std::fs::write(target, &luau).map_err(|e| e.to_string())?;
+            }
+        }
+
+        self.artifacts.push((target.to_path_buf(), luau));
+
+        Ok(())
+    }
+}
+
+/// The imports of one file that leave its project, for `alloy build
+/// <file>` and `alloy check <file>`: the same rules as a project build,
+/// with `out_file` where the output goes, else where the project build
+/// would write it. A file under no `alloy.toml` has no project to leave.
+pub fn file_outside(
+    path: &Path,
+    out_file: Option<&Path>,
+    imports: &[crate::ImportRef],
+    data_refs: &[crate::ImportRef],
+    write: bool,
+) -> Outside {
+    let from = absolute(path);
+    let Some((root, config)) = from
+        .parent()
+        .and_then(Config::find)
+        .and_then(|toml| Some((toml.parent()?.to_path_buf(), Config::load(&toml).ok()?)))
+    else {
+        return Outside::default();
+    };
+    let input = absolute(&root.join(&config.build.input));
+    let out_file = match out_file {
+        Some(o) => absolute(o),
+
+        None => match from.strip_prefix(&input) {
+            Ok(rel) => absolute(&root.join(&config.build.out))
+                .join(output_for(rel).unwrap_or_else(|| rel.to_path_buf())),
+
+            Err(_) => from.with_extension("luau"),
+        },
+    };
+
+    // The file's project starts the stack, as a project build does.
+    let mut deps = Deps::default();
+    deps.stack.push(absolute(&root));
+
+    deps.outside(
+        &Site {
+            from: &from,
+            out_file: &out_file,
+            input: &input,
+            root: &root,
+        },
+        imports,
+        data_refs,
+        write,
+        false,
+    )
+}
+
+/// The `[build] in` of every project a source of this one imports
+/// into, absolute, for watch mode.
+pub fn dependency_inputs(root: &Path, config: &Config) -> Vec<PathBuf> {
+    let input = absolute(&root.join(&config.build.input));
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    for path in sources(&input, &written_dirs(root, config)).unwrap_or_default() {
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+
+        for target in crate::modules::import_targets_for_file(&path, &source) {
+            if target.starts_with(&input) {
+                continue;
+            }
+
+            let dep = target
+                .parent()
+                .and_then(Config::find)
+                .and_then(|toml| Some((toml.parent()?.to_path_buf(), Config::load(&toml).ok()?)))
+                .map(|(dep_root, c)| absolute(&dep_root.join(&c.build.input)));
+
+            if let Some(dep) = dep
+                && !out.contains(&dep)
+            {
+                out.push(dep);
+            }
+        }
+    }
+
+    out
+}
+
+/// A path made absolute against the working directory, with `.` and
+/// `..` folded.
+fn absolute(path: &Path) -> PathBuf {
+    normalize_path(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// `to` as a path relative to the folder `from`, with `/` between the
+/// parts, the way a require spells it: `./x` beside, `../x` above.
+fn relative(from: &Path, to: &Path) -> String {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".to_string(); from.len() - common];
+
+    if parts.is_empty() {
+        parts.push(".".to_string());
+    }
+
+    parts.extend(
+        to[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+
+    parts.join("/")
 }
 
 /// The data files of one build: each converts once, and every source

@@ -959,6 +959,49 @@ fn a_local_declaration_of_any_kind_names_a_target() {
     );
 }
 
+/// The caret's own binding says what a rename touches. One file writes
+/// `format` as a struct, as a parameter, as a `local`, and as a `for`
+/// variable; the child holds the scopes of the last three, so the proxy
+/// answers for the struct alone.
+#[test]
+fn a_value_binding_at_the_caret_stays_with_the_child() {
+    const SRC: &str = concat!(
+        "struct format as\n",
+        "    v: number\n",
+        "end\n",
+        "\n",
+        "function useit(format: string): string\n",
+        "    return format\n",
+        "end\n",
+        "\n",
+        "function loopit()\n",
+        "    local format = 1\n",
+        "    for format = 1, 3 do\n",
+        "        print(format)\n",
+        "    end\n",
+        "    print(format)\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let at = |text: &str| SRC.find(text).expect(text);
+
+    // The struct's name is generated text after the emit, so the proxy
+    // answers with the file's own uses of it.
+    assert!(
+        matches!(st.name_target(uri, at("format as")), Some(Target::Local(ref n)) if n == "format")
+    );
+
+    for text in [
+        "format: string",
+        "format\nend",
+        "format = 1\n",
+        "format = 1,",
+        "format)\n    end",
+    ] {
+        assert!(st.name_target(uri, at(text)).is_none(), "{text}");
+    }
+}
+
 /// A field of a struct and a method of its own `impl` land on one table
 /// after the emit, so either name refuses a rename onto the other. The
 /// child reads the artifact, where the field list is generated text.

@@ -666,6 +666,30 @@ impl State {
         let doc = self.docs.get(uri)?;
         let source = &doc.source;
 
+        // The caret's own binding decides. A parameter, a `local`, a
+        // `for` variable, and a `case` binding each have a scope, and
+        // the child knows where that scope ends; the walks below read
+        // the file by spelling, so they would edit every same-named
+        // name in it. A name this file exports at the caret is the
+        // module's, and those walks answer for it.
+        if keywords::is_word_at(source, offset) {
+            let (s, e) = keywords::word_range(source, offset);
+            let word = &source[s..e];
+            let declares = export_span(source, word) == Some((s, e))
+                && imports::exports_of(source, doc.is_alx)
+                    .iter()
+                    .any(|x| x.name == *word);
+
+            if !declares
+                && matches!(
+                    context::binding_in_scope(source, offset, word).map(|l| l.kind),
+                    Some(context::LocalKind::Parameter | context::LocalKind::Variable)
+                )
+            {
+                return None;
+            }
+        }
+
         if let Some(entry) = self.import_entry_at(source, offset) {
             let on_name = (entry.name_at.0..=entry.name_at.1).contains(&offset);
 

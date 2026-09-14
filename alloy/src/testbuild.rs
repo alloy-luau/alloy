@@ -1116,7 +1116,7 @@ end
         assert!(
             diagnostics
                 .iter()
-                .any(|d| d.message.contains("`namespace` is a reserved word")),
+                .any(|d| d.message.contains("a namespace body is `as ... end`")),
             "{:?}",
             diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
         );

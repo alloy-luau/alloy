@@ -419,3 +419,50 @@ fn a_declaration_declare_does_not_take_reports_once() {
         }
     }
 }
+
+/*
+`enum E {}` writes another language's body. Each of the six keywords
+names the Alloy form, on the `{`, and the brace group goes with the
+report. Only `struct` did, so the other five fell through to a generic
+parse error.
+*/
+#[test]
+fn a_body_in_braces_names_the_as_form() {
+    for (src, message) in [
+        (
+            "struct S {}\n",
+            "a struct body is `as ... end`: `struct S as`",
+        ),
+        ("enum E {}\n", "an enum body is `as ... end`: `enum E as`"),
+        ("trait T {}\n", "a trait body is `as ... end`: `trait T as`"),
+        (
+            "interface I {}\n",
+            "an interface body is `as ... end`: `interface I as`",
+        ),
+        (
+            "namespace N {}\n",
+            "a namespace body is `as ... end`: `namespace N as`",
+        ),
+        ("impl S {}\n", "an impl body is `as ... end`: `impl S as`"),
+        (
+            "enum E {\n    A,\n    B,\n}\n",
+            "an enum body is `as ... end`: `enum E as`",
+        ),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "one report for {src:?}, got {diagnostics:?}"
+        );
+        assert_eq!(diagnostics[0].message, message);
+        assert_eq!(
+            src.as_bytes()[diagnostics[0].offset],
+            b'{',
+            "the report sits on the `{{` for {src:?}"
+        );
+        assert!(printer::coverage_errors(&chunk).is_empty());
+        assert_eq!(printer::print_chunk(src, &lexed.toks, &chunk), src);
+    }
+}

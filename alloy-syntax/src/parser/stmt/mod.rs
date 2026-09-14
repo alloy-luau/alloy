@@ -370,6 +370,34 @@ impl<'a> Parser<'a> {
                 self.attributed_stmt(start, attrs)
             }
 
+            /*
+            `struct S { n: number }` writes another language's body. Alloy
+            opens a body with `as`, and this arm comes before the readers
+            of the same keywords, so each one reports its own form. The
+            brace group goes with the report, so its members draw no
+            second one.
+            */
+            "struct" | "enum" | "trait" | "interface" | "namespace" | "impl"
+                if self.name_at(1) && self.text_at(2) == "{" =>
+            {
+                let word = self.text();
+                let article = match word {
+                    "enum" | "interface" | "impl" => "an",
+
+                    _ => "a",
+                };
+                let message = format!(
+                    "{article} {word} body is `as ... end`: `{word} {} as`",
+                    self.text_at(1)
+                );
+                self.pos += 2;
+                let at = self.toks[self.pos].start as usize;
+                self.report_at(at, &message);
+                self.skip_braces();
+
+                Ok(Stmt::Error(TokSpan::new(start, self.pos)))
+            }
+
             "struct"
                 if self.name_at(1) && self.text_at(2) == "as"
                     || (self.at("struct") && self.name_at(1) && self.text_at(2) == "<") =>
@@ -567,24 +595,6 @@ impl<'a> Parser<'a> {
             report names the form instead of the token.
             */
             "//" => Err(self.err("a comment starts with `--`")),
-
-            /*
-            `struct S { n: number }` writes another language's body. The
-            brace group goes with the report, so its fields draw no
-            second one.
-            */
-            "struct" if self.name_at(1) && self.text_at(2) == "{" => {
-                let name = self.text_at(1).to_string();
-                self.pos += 2;
-                let at = self.toks[self.pos].start as usize;
-                self.report_at(
-                    at,
-                    &format!("a struct body is `as ... end`: `struct {name} as`"),
-                );
-                self.skip_braces();
-
-                Ok(Stmt::Error(TokSpan::new(start, self.pos)))
-            }
 
             /*
             `declare namespace`, `declare enum`, `declare struct`: Luau's

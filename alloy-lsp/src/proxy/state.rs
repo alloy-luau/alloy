@@ -86,9 +86,6 @@ pub(crate) struct State {
     /// asks for it, and a pass over the workspace compiles every file,
     /// so a fresh read for each pair costs the pass minutes.
     pub(crate) configs: std::cell::RefCell<HashMap<PathBuf, Option<Project>>>,
-    /// The project tree of a base folder, remembered for the same
-    /// reason: `Tree::load` walks the whole project from disk.
-    pub(crate) trees: std::cell::RefCell<HashMap<PathBuf, Arc<alloy::project::Tree>>>,
     /// The roots whose `.luaurc` the mirror already holds.
     pub(crate) luau_configs: std::cell::RefCell<HashSet<PathBuf>>,
     /// The Roblox API docs the child was started with, `--docs`. The
@@ -111,7 +108,6 @@ impl State {
     /// file reaches the next compile.
     pub(crate) fn forget_disk(&self) {
         self.configs.borrow_mut().clear();
-        self.trees.borrow_mut().clear();
         self.luau_configs.borrow_mut().clear();
         self.project.borrow_mut().take();
     }

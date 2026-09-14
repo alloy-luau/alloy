@@ -2,7 +2,7 @@
 //! bracket groups, which groups must break, and the rendering of the
 //! tree into lines.
 
-use super::{Formatter, Node, closer_of, closes, expression_context, opens};
+use super::{Formatter, ItemKind, Node, closer_of, closes, expression_context, opens};
 
 impl<'s> Formatter<'s> {
     // --- block depth -------------------------------------------------------------
@@ -576,12 +576,28 @@ impl<'s> Formatter<'s> {
         }
     }
 
-    fn render_item(&mut self, i: usize, hard: &[bool], extra: usize) {
-        if hard[i] {
+    /// Where item `i` starts: a new line, or a space on this one. A
+    /// line comment runs to the end of its line, so an item that would
+    /// land after one breaks whatever the layout asked; the token would
+    /// otherwise sit inside the comment and the file would lose it.
+    fn open_place(&mut self, i: usize, hard: &[bool], extra: usize) {
+        if hard[i] || self.after_line_comment(i) {
             self.newline_before(i, extra);
         } else {
             self.space_before_item(i);
         }
+    }
+
+    /// Whether the item before `i` is a line comment on the line under
+    /// construction.
+    fn after_line_comment(&self, i: usize) -> bool {
+        i > 0
+            && self.items[i - 1].kind == ItemKind::LineComment
+            && self.at_line[i - 1] == self.lines.len()
+    }
+
+    fn render_item(&mut self, i: usize, hard: &[bool], extra: usize) {
+        self.open_place(i, hard, extra);
 
         // The line this item lands on, for the `if` expression rule: it
         // reads the width the render came out with.
@@ -602,11 +618,7 @@ impl<'s> Formatter<'s> {
         };
         let (open, close) = (*open, *close);
 
-        if hard[open] {
-            self.newline_before(open, extra);
-        } else {
-            self.space_before_item(open);
-        }
+        self.open_place(open, hard, extra);
 
         let opener = self.items[open].text.clone();
         let closer = self.items[close].text.clone();
@@ -629,10 +641,32 @@ impl<'s> Formatter<'s> {
                 self.options.trailing_comma && !matches!(opener.as_str(), "(" | "?(" | "<<");
 
             for (k, (el, sep)) in elements.iter().enumerate() {
+                // A comment the source wrote on the separator's line
+                // trails the element before it, so it keeps that line
+                // and the rest of this element starts a new one.
+                let lead = el
+                    .iter()
+                    .take_while(|n| match n {
+                        Node::Item(i) => {
+                            let it = &self.items[*i];
+
+                            it.is_comment() && it.newlines_before == 0
+                        }
+
+                        Node::Group { .. } => false,
+                    })
+                    .count();
+                self.render_nodes(&el[..lead], hard, extra);
+
+                // The element was only a trailing comment.
+                if lead == el.len() {
+                    continue;
+                }
+
                 self.flush();
                 self.line_level = base + 1;
                 self.line = self.indent(base + 1);
-                self.render_nodes(el, hard, extra + 1);
+                self.render_nodes(&el[lead..], hard, extra + 1);
                 let last = k + 1 == elements.len();
 
                 if !last || trailing {

@@ -110,6 +110,10 @@ pub fn format(src: &str) -> Result<String, String> {
 /// cannot read. A caller tells that case from a real failure by it.
 pub const UNPARSED: &str = "does not parse";
 
+/// The report for output the parser cannot read back. The formatter
+/// writes nothing in that case.
+pub const OUTPUT_UNPARSED: &str = "fmt: the output would not parse; the file is unchanged";
+
 /// The tail of the report for an `impl` or a `trait` header without
 /// `as`, for a caller that reads a diagnostic and wants the rewrite.
 pub const NEEDS_AS: &str = alloy_syntax::parser::NEEDS_AS;
@@ -206,10 +210,19 @@ pub fn parse_error(src: &str) -> Option<String> {
 /// `format_with` skips this check, for the fragments an `.alx` hole
 /// holds.
 pub fn format_file(src: &str, options: &FmtConfig) -> Result<String, String> {
-    match parse_error(src) {
-        Some(message) => Err(format!("{UNPARSED}: {message}")),
+    if let Some(message) = parse_error(src) {
+        return Err(format!("{UNPARSED}: {message}"));
+    }
 
-        None => format_with(src, options),
+    let text = format_with(src, options)?;
+
+    // A formatter never writes a file it cannot read back: the input
+    // parsed, so output that does not is a bug here, and the caller
+    // keeps the file it has.
+    match parse_error(&text) {
+        Some(_) => Err(OUTPUT_UNPARSED.to_string()),
+
+        None => Ok(text),
     }
 }
 
@@ -1015,6 +1028,27 @@ mod tests {
     fn long_strings_and_comments_keep_their_text() {
         let src = "local s = [=[\n  keep\n\tthis  \n]=]\nprint(s) -- note\n";
         assert_eq!(fmt(src), src);
+    }
+
+    /// A trailing comment inside a bracket group stays behind the
+    /// element it follows, and the next element opens a new line. The
+    /// tokens after the comment once landed inside it, so the file lost
+    /// them; the output guard now rejects such a run as well.
+    #[test]
+    fn a_comment_inside_an_argument_list_keeps_its_line() {
+        let src = "print(\n    1, -- first\n    2, -- second\n    -- own line\n    3 -- last\n)\n";
+        assert_eq!(fmt(src), src);
+        // The same list written flat breaks the same way.
+        let flat = "print(1, -- first\n2, -- second\n-- own line\n3 -- last\n)\n";
+        assert_eq!(fmt(flat), src);
+    }
+
+    /// The formatter reads its own output back before a caller writes
+    /// it, and the report names the file as unchanged.
+    #[test]
+    fn output_that_does_not_parse_is_refused() {
+        assert!(OUTPUT_UNPARSED.contains("the file is unchanged"));
+        assert!(parse_error("print(\n    1, -- first\n    2\n)\n").is_none());
     }
 
     #[test]

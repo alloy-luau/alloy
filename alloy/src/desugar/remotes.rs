@@ -8,6 +8,15 @@ use super::*;
 /// The number widths a parameter or a field may carry.
 pub const WIRE_WIDTHS: &[&str] = &["u8", "u16", "u32", "i8", "i16", "i32", "f32", "f64"];
 
+/// The type text a wire width cannot pack. A width packs a number, and
+/// `any` crosses as one; a trailing `?` makes no difference. `None` for a
+/// type the width fits.
+pub(crate) fn width_misfit(ty: &str) -> Option<&str> {
+    let base = ty.trim_end_matches('?').trim();
+
+    (base != "number" && base != "any").then_some(base)
+}
+
 /// Every wire width written in a run of source, each with the byte it
 /// starts at. A remote parameter carries its attributes as text in front
 /// of the name, so `@u8 @u16 x` reads as two widths here.
@@ -407,16 +416,14 @@ impl<'s> Desugar<'s> {
                     .unwrap_or_else(|| "any".to_string());
             let width = width.filter(|w| WIRE_WIDTHS.contains(&w.as_str()));
 
-            if let Some(w) = &width {
-                let base = ty.trim_end_matches('?').trim();
-
-                if base != "number" && base != "any" {
-                    let pname = self.text_of(p.name).to_string();
-                    self.diagnose(
-                        p.name,
-                        &format!("`@{w}` packs a `number`; parameter `{pname}` is `{base}`"),
-                    );
-                }
+            if let Some(w) = &width
+                && let Some(base) = width_misfit(&ty)
+            {
+                let pname = self.text_of(p.name).to_string();
+                self.diagnose(
+                    p.name,
+                    &format!("`@{w}` packs a `number`; parameter `{pname}` is `{base}`"),
+                );
             }
 
             let wire = self
@@ -776,6 +783,29 @@ remote Take(xs: string[]) from client
             "{}",
             crate::compile(one).unwrap().ship
         );
+    }
+
+    /// A width packs a number, on a field the way it does on a
+    /// parameter. The wire spec read the field's own type and dropped the
+    /// width, so an array field took one and crossed at 64 bits.
+    #[test]
+    fn a_width_on_an_array_field_reports() {
+        let src = "struct Bag as\n    @u8\n    items: number[]\nend\nremote SyncBag(b: Bag) from client\n";
+        assert_eq!(
+            messages(src),
+            vec!["`@u8` packs a `number`; field `items` is `number[]`"]
+        );
+
+        // The parameter form reads the same way.
+        let param = "remote Bad(@u8 amounts: number[]) from client\n";
+        assert_eq!(
+            messages(param),
+            vec!["`@u8` packs a `number`; parameter `amounts` is `number[]`"]
+        );
+
+        // A number field packs, and so does an optional one.
+        let ok = "struct Ok as\n    @u8\n    hp: number\n    @u16\n    mp: number?\nend\nremote S(o: Ok) from client\n";
+        assert!(messages(ok).is_empty(), "{:?}", messages(ok));
     }
 
     /// A `HashMap` keeps its methods on a metatable, which a remote

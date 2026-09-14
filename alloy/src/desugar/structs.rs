@@ -554,6 +554,15 @@ impl<'s> Desugar<'s> {
                 continue;
             };
             let fname = self.text_of(f.name).to_string();
+            // A width packs a number. The wire spec read the field's own
+            // type and dropped the width, so an array field took one and
+            // crossed at 64 bits.
+            if let Some(base) = super::remotes::width_misfit(self.text_of(f.ty).trim()) {
+                hits.push((
+                    f.name,
+                    format!("`@{first}` packs a `number`; field `{fname}` is `{base}`"),
+                ));
+            }
 
             for (span, _) in widths.iter().skip(1) {
                 hits.push((

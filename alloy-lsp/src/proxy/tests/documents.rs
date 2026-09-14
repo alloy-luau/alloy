@@ -731,3 +731,55 @@ fn a_dependency_declaration_is_a_workspace_symbol_under_its_path() {
     assert_eq!(out[0]["containerName"], json!("../shared/src/util.aly"));
     assert_eq!(out[0]["location"]["uri"], json!(util_uri));
 }
+
+/// `new Vec2 { |` for a struct a dependency project declares: the
+/// fields come from the dependency's source, not the global list.
+#[test]
+fn a_struct_of_a_dependency_completes_its_fields() {
+    let dir = std::env::temp_dir().join(format!("alloy-dep-fields-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = dir.join("ws/app");
+    let shared = dir.join("ws/shared");
+    std::fs::create_dir_all(app.join("src")).expect("app");
+    std::fs::create_dir_all(shared.join("src")).expect("shared");
+    let toml = "[build]\nin = \"src\"\nout = \"build\"\n";
+    std::fs::write(app.join("alloy.toml"), toml).expect("toml");
+    std::fs::write(shared.join("alloy.toml"), toml).expect("toml");
+    std::fs::write(
+        shared.join("src/util.aly"),
+        "export struct Vec2 as\n    x: number,\n    y: number\nend\n",
+    )
+    .expect("util");
+    let main = app.join("src/main.aly");
+    let src = "import { Vec2 } from \"../../shared/src/util\"\n\nlocal v = new Vec2 { \n";
+    std::fs::write(&main, src).expect("main");
+
+    let uri = format!("file://{}", main.display());
+    let mut st = State {
+        root: Some(app.clone()),
+        mirror: mirror_dir(Some(&app)),
+        ..State::default()
+    };
+    let options = EmitOptions {
+        file_name: main.to_string_lossy().into_owned(),
+        ..EmitOptions::default()
+    };
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    let names: Vec<String> = st
+        .struct_fields(&uri, "Vec2", false)
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(names, ["x", "y"]);
+}

@@ -225,3 +225,39 @@ fn a_top_level_call_above_the_function_reports() {
         )]
     );
 }
+
+/// A macro body reads what the macros it calls read, so the hoist
+/// sees a struct through three levels. At the top level the same
+/// chain reports on the call line.
+#[test]
+fn a_macro_chain_reads_the_table_through_every_level() {
+    const MACROS: &str =
+        "macro deep() print(Gadget) end\nmacro inner() $deep() end\nmacro outer() $inner() end\n";
+    let inside = format!(
+        "{MACROS}\nfunction make()\n    $outer()\nend\n\nstruct Gadget as\n    n: number\nend\n\nmake()\n"
+    );
+    let out = compile(&inside);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    let first = out.ship.lines().next().unwrap();
+    assert!(first.contains("local Gadget = {} "), "{}", out.ship);
+
+    let top = format!("{MACROS}\n$outer()\n\nstruct Gadget as\n    n: number\nend\n");
+    let out = compile(&top);
+    let hits: Vec<(usize, String)> = out
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                top[..d.start as usize].matches('\n').count() + 1,
+                d.message.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        hits,
+        vec![(
+            5,
+            "`Gadget` is declared below this use; move the struct above it".to_string()
+        )]
+    );
+}

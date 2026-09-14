@@ -2052,13 +2052,39 @@ impl<'s> Desugar<'s> {
                     )
                     && !self.type_name_spans.iter().any(|s| s.start as usize == k)
             };
+            // A macro that calls another macro expands what that one
+            // reads too, down to the depth the expansion stops at.
             let expands = |k: usize| {
-                k > 0
-                    && self.toks[k - 1].text(self.src) == "$"
-                    && macros.iter().any(|(m, span)| {
-                        *m == self.toks[k].text(self.src)
-                            && (span.start as usize..span.end as usize).any(&reads)
-                    })
+                if k == 0 || self.toks[k - 1].text(self.src) != "$" {
+                    return false;
+                }
+
+                let mut todo = vec![(self.toks[k].text(self.src), 0usize)];
+                let mut seen: Vec<&str> = Vec::new();
+
+                while let Some((called, depth)) = todo.pop() {
+                    if depth >= 16 || seen.contains(&called) {
+                        continue;
+                    }
+
+                    seen.push(called);
+
+                    let Some((_, span)) = macros.iter().find(|(m, _)| *m == called) else {
+                        continue;
+                    };
+
+                    for j in span.start as usize..span.end as usize {
+                        if reads(j) {
+                            return true;
+                        }
+
+                        if j > 0 && self.toks[j - 1].text(self.src) == "$" {
+                            todo.push((self.toks[j].text(self.src), depth + 1));
+                        }
+                    }
+                }
+
+                false
             };
 
             for k in 0..decl.start as usize {

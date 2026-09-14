@@ -126,12 +126,7 @@ fn restyle_with(value: &str, word: &str, binding: &alloy::declarations::Binding)
 /// belongs to inside an `impl`.
 pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String> {
     let text = doc.source.lines().nth(line as usize)?;
-    let declares = |name: &str| {
-        doc.shapes
-            .iter()
-            .chain(doc.import_shapes.iter())
-            .any(|s| matches!(s, alloy::declarations::Shape::Struct { name: n, .. } if n == name))
-    };
+    let declares = |name: &str| declares_a_struct(doc, name);
 
     // `function get(self)` inside `impl Box`: the receiver is the struct.
     let before: String = text.chars().take(character as usize).collect();
@@ -197,7 +192,38 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
         }
     }
 
-    (declares(&name) && rest[name.len()..].starts_with(".new(")).then_some(name)
+    // `local p = Point.new(1, 2)`, and `local v = Geo.Vec2.new(5)` for a
+    // namespace member: the path in front of `.new` names the struct.
+    let path: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+    let target = path.strip_suffix(".new")?;
+
+    (rest[path.len()..].starts_with('(') && declares(target)).then(|| target.to_string())
+}
+
+/// Whether a name in reach declares a struct. `shapes` reads the top
+/// level alone, so a member of a namespace, `Geo.Vec2`, comes from the
+/// declaration index, where it stands under its path.
+pub(crate) fn declares_a_struct(doc: &Doc, name: &str) -> bool {
+    let struct_hover = |hover: &str| {
+        hover
+            .lines()
+            .nth(1)
+            .map(|l| l.trim_start().trim_start_matches("export "))
+            .is_some_and(|l| l.starts_with("struct "))
+    };
+
+    doc.shapes
+        .iter()
+        .chain(doc.import_shapes.iter())
+        .any(|s| matches!(s, alloy::declarations::Shape::Struct { name: n, .. } if n == name))
+        || doc
+            .decls
+            .iter()
+            .chain(doc.import_decls.iter())
+            .any(|d| d.name == name && struct_hover(&d.hover))
 }
 
 /// The child prints a std value's type as its whole shape. The shapes the
@@ -263,7 +289,6 @@ pub(crate) fn prefer_constructed_struct(
     doc: &Doc,
     line: u32,
     character: u32,
-    known: &crate::shapes::Known,
 ) -> Option<String> {
     let (fence, body) = value.split_once('\n')?;
     let inner = body.trim().strip_suffix("```")?.trim();
@@ -274,12 +299,7 @@ pub(crate) fn prefer_constructed_struct(
         return None;
     }
 
-    let is_struct = |n: &str| {
-        known
-            .shapes
-            .iter()
-            .any(|s| matches!(s, alloy::declarations::Shape::Struct { name, .. } if name == n))
-    };
+    let is_struct = |n: &str| declares_a_struct(doc, n);
     let offset = offset_of(&doc.source, line, character)?;
     let (start, end) = keywords::word_range(&doc.source, offset);
     let word = &doc.source[start..end];

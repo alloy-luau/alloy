@@ -125,11 +125,6 @@ impl State {
         loaded
     }
 
-    /// The structs and enums of every open document, for the folds.
-    pub(crate) fn known_shapes(&self) -> crate::shapes::Known {
-        self.known_shapes_at(None)
-    }
-
     /// The shapes of the workspace, with one document's own first: two
     /// structs of a shape print alike, and the file's own is the one
     /// its reader means.

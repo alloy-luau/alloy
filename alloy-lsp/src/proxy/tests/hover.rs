@@ -1135,3 +1135,32 @@ pub(crate) fn a_closed_block_gives_self_no_type_below_it() {
     assert_eq!(impl_self_type(doc, 1), Some("Ord".to_string()));
     assert_eq!(impl_self_type(doc, 5), None);
 }
+
+/// Two structs of one field set print alike, so the child may name
+/// either. The constructor path on the line says which, and a member of
+/// a namespace names itself through its path.
+#[test]
+fn a_namespace_constructor_names_its_own_struct() {
+    const SRC: &str = "struct Point as\n    x: number\n    y: number\nend\n\nnamespace Geo as\n    struct Vec2 as\n        x: number\n        y: number\n    end\n\n    impl Vec2 as\n        function new(x: number): Vec2\n            return new Vec2 { x = x, y = 0 }\n        end\n    end\nend\n\nlocal e = Geo.Vec2.new(5)\nlocal p = Point.new(1, 2)\nprint(e, p)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let line_of = |needle: &str| position_of(SRC, SRC.find(needle).expect(needle)).0;
+    let vec2 = line_of("local e =");
+    let point = line_of("local p =");
+
+    assert_eq!(
+        crate::proxy::hover::source_type(doc, vec2, 6),
+        Some("Geo.Vec2".to_string())
+    );
+    // The print names `Point`, the struct of the same shape the child
+    // met first; the path on the line names the one the reader wrote.
+    assert_eq!(
+        prefer_constructed_struct("```alloy\nlocal e: Point\n```", doc, vec2, 6),
+        Some("```alloy\nlocal e: Geo.Vec2\n```".to_string())
+    );
+    // A top level constructor still names its own struct.
+    assert_eq!(
+        crate::proxy::hover::source_type(doc, point, 6),
+        Some("Point".to_string())
+    );
+}

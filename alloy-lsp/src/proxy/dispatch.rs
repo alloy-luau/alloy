@@ -1148,13 +1148,9 @@ impl Server {
                                 text = named;
                             }
 
-                            if let Some(named) = prefer_constructed_struct(
-                                &text,
-                                doc,
-                                line,
-                                character,
-                                &st.known_shapes(),
-                            ) {
+                            if let Some(named) =
+                                prefer_constructed_struct(&text, doc, line, character)
+                            {
                                 text = named;
                             }
 

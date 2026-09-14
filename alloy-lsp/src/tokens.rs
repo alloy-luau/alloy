@@ -183,6 +183,55 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
             continue;
         }
 
+        // The head of a `macro` or an `attribute` declaration. The emit
+        // keeps neither, so the child draws nothing on the line: the
+        // name reads as its call site does, and the list holds
+        // parameters.
+        if matches!(text, "macro" | "attribute")
+            && toks.get(i + 1).is_some_and(|n| n.kind == TokKind::Ident)
+        {
+            let name = toks[i + 1];
+            push(
+                name.start,
+                name.end,
+                match text {
+                    "macro" => "macro",
+
+                    _ => "decorator",
+                },
+            );
+            i += 2;
+
+            // `(x)` and `(min: number, max: number)`: the name that
+            // opens each entry of the list.
+            if toks.get(i).is_some_and(|t| t.kind == TokKind::LParen) {
+                let mut depth = 0i32;
+
+                while let Some(t) = toks.get(i) {
+                    let opens =
+                        matches!(toks[i - 1].kind, TokKind::LParen) || toks[i - 1].text(src) == ",";
+
+                    match t.kind {
+                        TokKind::LParen => depth += 1,
+
+                        TokKind::RParen => depth -= 1,
+
+                        TokKind::Ident if depth == 1 && opens => push(t.start, t.end, "parameter"),
+
+                        _ => {}
+                    }
+
+                    i += 1;
+
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+
+            continue;
+        }
+
         // A dotted path, from a segment no `.` stands in front of: each
         // prefix of it may name a declaration.
         let mut segments = vec![tok];
@@ -332,6 +381,49 @@ mod tests {
         }
 
         assert!(place.0 > 0 && !out.is_empty());
+    }
+
+    /// A `macro` and an `attribute` declaration carry the name and the
+    /// parameters the author wrote. The emit keeps neither line, so the
+    /// child drew nothing on them: the call site read as a macro while
+    /// its own declaration read as plain text.
+    #[test]
+    fn a_macro_and_an_attribute_declaration_carry_their_names() {
+        const SRC: &str = concat!(
+            "attribute range(min: number, max: number) on field\n",
+            "macro double(x) x * 2 end\n",
+            "local macro = 1\n",
+            "print(macro)\n",
+        );
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let drawn = alloy_tokens(&doc, &types);
+        let at = |name: &str, needle: &str| {
+            let kind = type_index(&types, name).expect("the type");
+            let (line, column) = position_of(SRC, SRC.find(needle).expect(needle));
+
+            drawn
+                .iter()
+                .any(|t| (t.0, t.1, t.3) == (line, column, kind))
+        };
+
+        assert!(at("decorator", "range("), "{drawn:?}");
+        assert!(at("parameter", "min:"), "{drawn:?}");
+        assert!(at("parameter", "max:"), "{drawn:?}");
+        assert!(at("macro", "double("), "{drawn:?}");
+        assert!(at("parameter", "x) x"), "{drawn:?}");
+
+        // `local macro = 1` declares nothing: the word is a name there,
+        // and the child reads it.
+        let (line, _) = position_of(SRC, SRC.find("local macro").expect("the local"));
+
+        assert!(!drawn.iter().any(|t| t.0 == line), "{drawn:?}");
     }
 
     #[test]

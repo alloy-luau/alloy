@@ -182,7 +182,9 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn parse(text: &str) -> Result<Manifest, String> {
-        let mut m: Manifest = toml::from_str(text).map_err(|e| e.message().to_string())?;
+        // The full report names the line and the column, the way
+        // `alloy.toml` reports; `message()` alone drops them.
+        let mut m: Manifest = toml::from_str(text).map_err(|e| e.to_string())?;
 
         for (key, value) in m.options.iter_mut() {
             if let toml::Value::Table(t) = value
@@ -392,6 +394,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("a prop name is a letter"), "{e}");
+    }
+
+    #[test]
+    fn a_syntax_error_names_its_line_and_column() {
+        let e = Manifest::parse("name = \"badingot\napi = 1\n").unwrap_err();
+        assert!(e.contains("TOML parse error at line 1, column"), "{e}");
     }
 
     #[test]

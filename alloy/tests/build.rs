@@ -172,3 +172,72 @@ fn one_ambient_name_declared_twice_is_an_error() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `[emit] erase_type_imports` drops the `require` of a line that binds
+/// types alone. The build never read the key, so no shape was blanked;
+/// and only `import type { }` was blanked, not a `{ type X }` list.
+#[test]
+fn erase_type_imports_drops_a_type_only_require() {
+    let dir = temp_project("erase");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[emit]\nerase_type_imports = true\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/types.aly"), "export type Meters = number\n").unwrap();
+    fs::write(
+        dir.join("src/util.aly"),
+        "export type Feet = number\n\nexport function scale(x: number): number\n    return x * 2\nend\n",
+    )
+    .unwrap();
+    // The whole list is types: `import type { }`, a `type` spec, and a
+    // name the module exports as a type alone.
+    fs::write(
+        dir.join("src/whole.aly"),
+        "import type { Meters } from \"./types\"\n\nexport function a(x: Meters): Meters\n    return x\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/spec.aly"),
+        "import { type Meters } from \"./types\"\n\nexport function b(x: Meters): Meters\n    return x\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/exported.aly"),
+        "import { Meters } from \"./types\"\n\nexport function c(x: Meters): Meters\n    return x\nend\n",
+    )
+    .unwrap();
+    // One value in the list: the require stays and nothing is dropped.
+    fs::write(
+        dir.join("src/mixed.aly"),
+        "import { type Feet, scale } from \"./util\"\n\nexport function d(x: Feet): Feet\n    return scale(x)\nend\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    assert!(report.is_clean(), "{report:?}");
+
+    for name in ["whole", "spec", "exported"] {
+        let out = fs::read_to_string(dir.join(format!("build/{name}.luau"))).unwrap();
+        assert!(!out.contains("require("), "{name}: {out}");
+        assert!(!out.contains("type Meters"), "{name}: {out}");
+    }
+
+    let mixed = fs::read_to_string(dir.join("build/mixed.luau")).unwrap();
+    assert!(mixed.contains("require(\"./util\")"), "{mixed}");
+    assert!(mixed.contains("local scale = "), "{mixed}");
+    assert!(mixed.contains("type Feet = "), "{mixed}");
+
+    // Off by default: the require stays in every shape.
+    let plain = Config {
+        build: Build::default(),
+        emit: Emit::default(),
+        ..config
+    };
+    alloy::build::run(&dir, &plain.build, &plain.emit).unwrap();
+    let out = fs::read_to_string(dir.join("build/spec.luau")).unwrap();
+    assert!(out.contains("require(\"./types\")"), "{out}");
+
+    let _ = fs::remove_dir_all(&dir);
+}

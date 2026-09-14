@@ -29,6 +29,18 @@ impl<'s> Desugar<'s> {
             .is_some_and(crate::modules::type_only)
     }
 
+    /// Whether every name a list binds is a type: the spec says `type`,
+    /// or the module exports the name as a type alone. Such a line costs
+    /// nothing at run time.
+    pub(crate) fn list_is_type_only(&self, quoted: &str, specs: &[ImportSpec]) -> bool {
+        !specs.is_empty()
+            && specs.iter().all(|sp| {
+                let name = self.text_of(sp.name);
+
+                sp.is_type || self.module_exports_type_only(quoted, name)
+            })
+    }
+
     /// Whether the module keeps a private view of this struct, which
     /// its check artifact exports as `Name__all`.
     pub(crate) fn module_private_view(&self, quoted: &str, name: &str) -> bool {
@@ -212,6 +224,16 @@ impl<'s> Desugar<'s> {
             }
 
             ImportKind::Named(specs) => {
+                // `import { type Meters }`, or a list of names the module
+                // exports as types alone, says the same thing an
+                // `import type { }` line says, so the flag drops its
+                // `require` too. A list with one value in it keeps the
+                // require and drops nothing.
+                if self.options.erase_type_imports && self.list_is_type_only(&path, specs) {
+                    self.ship_blanks
+                        .push((self.byte_start(i.span), self.byte_end(i.span)));
+                }
+
                 let temp = self.hoist_import(&path, anchor);
                 let text = self.spec_bindings(&path, &temp, specs);
                 self.generate(anchor, text.trim_start());

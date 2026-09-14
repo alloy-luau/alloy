@@ -154,6 +154,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             .std_require
             .clone()
             .unwrap_or_else(|| "@alloy".to_string()),
+        erase_type_imports: emit.erase_type_imports,
         thresholds: config.flux.thresholds(),
         ..EmitOptions::default()
     };

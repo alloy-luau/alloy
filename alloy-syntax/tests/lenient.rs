@@ -421,6 +421,56 @@ fn a_declaration_declare_does_not_take_reports_once() {
 }
 
 /*
+A `declare` in a file the parser reads as code. `declare` is a plain
+name there, so `declare function f(): number` read as an expression and
+the header reported twice: the expression, and the missing `end`.
+
+The word reports once, and the declaration reader moves past the
+declaration.
+*/
+#[test]
+fn a_declare_in_code_reports_once() {
+    for src in [
+        "declare function f(): number\n\nprint(1)\n",
+        "declare n: number\n\nprint(1)\n",
+        "declare class C\n    x: number\nend\n\nprint(1)\n",
+        "declare extern type E with\n    x: number\nend\n\nprint(1)\n",
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "one report for {src:?}, got {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics[0].message,
+            "`declare` belongs in a `.d.aly` file; move this declaration there"
+        );
+        assert_eq!(diagnostics[0].offset, 0, "the report sits on `declare`");
+        assert_eq!(lenient(src), (1, 1), "{src:?}");
+    }
+
+    // `declare` is still a name. Neither line is a declaration.
+    assert_eq!(
+        lenient("local declare = 1\ndeclare = 2\nprint(declare)\n"),
+        (0, 0)
+    );
+
+    // A definitions file reads every form with no report.
+    let options = ParseOptions {
+        definitions: true,
+        ..ParseOptions::default()
+    };
+    let src = "declare function f(): number\ndeclare n: number\n";
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, options);
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/*
 `enum E {}` writes another language's body. Each of the six keywords
 names the Alloy form, on the `{`, and the brace group goes with the
 report. Only `struct` did, so the other five fell through to a generic

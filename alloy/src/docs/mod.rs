@@ -37,7 +37,7 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["a comment starts with"], "SyntaxError"),
         (&["interpolation hole is empty"], "SyntaxError"),
         (&["has no `++`"], "SyntaxError"),
-        (&["`declare` takes"], "DeclareError"),
+        (&["`declare` takes", "`declare` belongs"], "DeclareError"),
         // A header the parser cannot read. The `trait` rule below would
         // read the word as a contract report.
         (&["takes no type parameters"], "SyntaxError"),

@@ -639,6 +639,34 @@ impl<'a> Parser<'a> {
             }
 
             /*
+            A declaration in a file the parser reads as code. `declare`
+            is a plain name there, so the header read as an expression
+            and its body reported again. One report at the word names
+            the file the declaration belongs in, and the declaration
+            reader moves past it.
+            */
+            "declare"
+                if !self.options.definitions
+                    && (matches!(self.text_at(1), "function" | "class" | "extern")
+                        || (self.name_at(1) && self.text_at(2) == ":")) =>
+            {
+                let message = "`declare` belongs in a `.d.aly` file; move this declaration there";
+                let offset = self.toks[start].start as usize;
+
+                if !self.lenient {
+                    return Err(ParseError {
+                        offset,
+                        message: message.to_string(),
+                    });
+                }
+
+                self.report_at(offset, message);
+                self.declare_stmt(start)?;
+
+                Ok(Stmt::Error(TokSpan::new(start, self.pos)))
+            }
+
+            /*
             `// text` is another language's comment. Luau opens one with
             `--`, and the lexer reads `//` as floor division, so the
             report names the form instead of the token.

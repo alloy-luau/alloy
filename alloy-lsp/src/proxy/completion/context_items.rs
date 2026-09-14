@@ -668,34 +668,48 @@ impl State {
 
                     // A struct matches as one pattern over its fields:
                     // `Vec2 { x, y }`, where a name alone binds the
-                    // field. Nothing else of the scope is an arm.
-                    MatchKind::Struct(name) => {
+                    // field. An interface declares no case of its own:
+                    // the value is one of the structs whose fields
+                    // cover it, so each of those is an arm. Nothing
+                    // else of the scope is one.
+                    MatchKind::Struct(name) | MatchKind::Interface(name) => {
                         let inside = context::impl_target(&doc.source, offset);
-                        let fields = self.struct_fields(uri, name, inside.as_deref() == Some(name));
-                        let slots: Vec<String> = fields
-                            .iter()
-                            .enumerate()
-                            .map(|(i, f)| format!("${{{}:{}}}", i + 1, f.name))
-                            .collect();
-                        let insert = match slots.is_empty() {
-                            true => format!("{name} {{ }}"),
+                        let names = match kind {
+                            MatchKind::Interface(_) => self.structs_satisfying(uri, name),
 
-                            false => format!("{name} {{ {} }}", slots.join(", ")),
+                            _ => vec![name.clone()],
                         };
-                        let listed: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
-                        let detail = match listed.is_empty() {
-                            true => format!("{name} {{ }}"),
 
-                            false => format!("{name} {{ {} }}", listed.join(", ")),
-                        };
-                        items.push(snippet(
-                            &format!("{name} {{ }}"),
-                            &insert,
-                            20,
-                            &detail,
-                            Some(format!("A pattern over the fields of `struct {name}`.")),
-                            from,
-                        ));
+                        for name in names {
+                            let fields =
+                                self.struct_fields(uri, &name, inside.as_deref() == Some(&*name));
+                            let slots: Vec<String> = fields
+                                .iter()
+                                .enumerate()
+                                .map(|(i, f)| format!("${{{}:{}}}", i + 1, f.name))
+                                .collect();
+                            let insert = match slots.is_empty() {
+                                true => format!("{name} {{ }}"),
+
+                                false => format!("{name} {{ {} }}", slots.join(", ")),
+                            };
+                            let listed: Vec<&str> =
+                                fields.iter().map(|f| f.name.as_str()).collect();
+                            let detail = match listed.is_empty() {
+                                true => format!("{name} {{ }}"),
+
+                                false => format!("{name} {{ {} }}", listed.join(", ")),
+                            };
+                            items.push(snippet(
+                                &format!("{name} {{ }}"),
+                                &insert,
+                                20,
+                                &detail,
+                                Some(format!("A pattern over the fields of `struct {name}`.")),
+                                from,
+                            ));
+                        }
+
                         items.push(word(
                             "_",
                             14,
@@ -1403,6 +1417,10 @@ impl State {
             return MatchKind::Struct(name.to_string());
         }
 
+        if head.contains("interface ") {
+            return MatchKind::Interface(name.to_string());
+        }
+
         if head.contains("Result<") {
             return MatchKind::Result;
         }
@@ -1520,6 +1538,46 @@ impl State {
                 self.struct_fields(uri, name, inside)
             }
         }
+    }
+
+    /// Every struct in reach whose fields cover the ones an interface
+    /// declares: the names, and the types where both sides write one.
+    /// A value of the interface holds one of these at run time, so each
+    /// of them is a `case` of a match on it.
+    pub(crate) fn structs_satisfying(&self, uri: &str, interface: &str) -> Vec<String> {
+        let wanted = self.struct_fields(uri, interface, false);
+
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+
+        let mut out: Vec<String> = Vec::new();
+
+        for d in self.decls_in_scope(uri) {
+            if !d
+                .hover
+                .lines()
+                .nth(1)
+                .is_some_and(|head| head.contains("struct "))
+            {
+                continue;
+            }
+
+            let fields = context::record_entries(&d.hover);
+            let covers = wanted.iter().all(|w| {
+                fields.iter().any(|f| {
+                    f.name == w.name
+                        && (w.ty.is_empty() || f.ty.is_empty() || f.ty == w.ty)
+                        && !f.private
+                })
+            });
+
+            if covers && !out.contains(&d.name) {
+                out.push(d.name.clone());
+            }
+        }
+
+        out
     }
 
     pub(crate) fn struct_fields(&self, uri: &str, name: &str, inside: bool) -> Vec<context::Field> {
@@ -1758,6 +1816,9 @@ pub(crate) enum MatchKind {
     Enum(String),
     /// A struct in scope: one pattern over its fields.
     Struct(String),
+    /// An interface in scope: one pattern for every struct that
+    /// satisfies it.
+    Interface(String),
     /// A `Result<T, E>`: `Ok` and `Err`.
     Result,
     /// `T[]` or `Array<T>`: the array patterns.

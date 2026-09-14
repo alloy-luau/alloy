@@ -659,6 +659,51 @@ pub(crate) fn a_struct_scrutinee_takes_a_pattern_over_its_fields() {
         assert_eq!(items[0]["detail"], "Alpha { x, y }");
     }
 }
+/// An interface scrutinee takes one pattern for every struct whose
+/// fields cover it. The list once held the enum variants of the file and
+/// no struct at all.
+#[test]
+pub(crate) fn an_interface_scrutinee_takes_the_structs_that_satisfy_it() {
+    let src = concat!(
+        "interface Shape as\n",
+        "    area: number\n",
+        "end\n",
+        "\n",
+        "struct Circle as\n",
+        "    r: number\n",
+        "    area: number\n",
+        "end\n",
+        "\n",
+        "struct Cat as\n",
+        "    name: string\n",
+        "end\n",
+        "\n",
+        "enum Suit as\n",
+        "    Hearts\n",
+        "end\n",
+        "\n",
+        "function describe(s: Shape): string\n",
+        "    match s with\n",
+        "        case \n",
+        "    end\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let items = case_items(&st, uri, src);
+    let labels: Vec<&str> = items
+        .iter()
+        .map(|i| i["label"].as_str().unwrap_or(""))
+        .collect();
+
+    // `Cat` covers no field of the interface, and `Hearts` is another
+    // type's variant.
+    assert_eq!(labels, ["Circle { }", "_", "default"], "{labels:?}");
+    assert_eq!(
+        items[0]["textEdit"]["newText"],
+        "Circle { ${1:r}, ${2:area} }"
+    );
+    assert_eq!(items[0]["detail"], "Circle { r, area }");
+}
 #[test]
 pub(crate) fn a_result_a_literal_and_an_array_take_their_own_arms() {
     let result = "local r: Result<number, string> = Ok(1)\nmatch r with\n    case \nend\n";

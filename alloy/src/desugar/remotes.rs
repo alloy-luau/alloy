@@ -654,9 +654,12 @@ impl<'s> Desugar<'s> {
         let server_fires = r.from_server && side != Some(crate::directives::Side::Client);
         let client_handles = r.from_server && side != Some(crate::directives::Side::Server);
         let server_handles = r.from_client && side != Some(crate::directives::Side::Client);
+        // `calls` is the testing hook: outside Roblox the runtime records
+        // each fire there instead of sending it, so a `@test` reads it.
         let mut members = vec![
             format!("spec: {std}.RemoteSpec"),
             "instance: Instance?".to_string(),
+            format!("calls: {std}.RemoteCalls"),
         ];
 
         match (client_fires, server_fires) {
@@ -954,6 +957,20 @@ remote Chain(n: Node) from client
                 == "remote `Deep`: parameter `payload` has field `cb` of type `(number) -> ()`, which is a function type; a remote carries only data"),
             "{:?}",
             messages(src)
+        );
+    }
+
+    /// `calls` is the testing hook the runtime fills outside Roblox.
+    /// The check artifact declares it, so `#Damage.calls` in a `@test`
+    /// type-checks on either side.
+    #[test]
+    fn a_remote_declares_its_calls_hook() {
+        let src = "remote Damage(target: string, amount: number) from client\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.check.contains("calls: __alloy.RemoteCalls"),
+            "{}",
+            out.check
         );
     }
 

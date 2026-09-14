@@ -2538,9 +2538,14 @@ export type RemoteSpec = {
 	wire: { any }?,
 }
 
+--- What a remote records outside Roblox: one entry per call, with the
+--- verb's name and the arguments as `table.pack` holds them.
+export type RemoteCalls = { { name: string, args: { n: number, [number]: any } } }
+
 export type Remote = {
 	spec: RemoteSpec,
 	instance: Instance?,
+	calls: RemoteCalls,
 	fire: (...any) -> (),
 	fire_all: (...any) -> (),
 	fire_except: (...any) -> (),

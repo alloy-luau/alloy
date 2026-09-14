@@ -493,6 +493,55 @@ mod tests {
             .collect()
     }
 
+    /// The forms a Luau user writes from another language. Each report
+    /// names the Alloy form, sits on the offending token, and stands
+    /// alone: the reader used to get a generic parse error and a cascade.
+    #[test]
+    fn a_form_from_another_language_names_the_alloy_one() {
+        // A struct body in braces, reported at the `{`.
+        let braces = "struct S {\n    n: number\n}\nprint(S)\n";
+        assert_eq!(
+            messages(braces),
+            vec!["a struct body is `as ... end`: `struct S as`"]
+        );
+        assert_eq!(docs::kind_for(&messages(braces)[0]), "SyntaxError");
+        let at = compile(braces).unwrap().diagnostics[0].start;
+        assert_eq!(&braces[at as usize..at as usize + 1], "{");
+
+        // A comment in slashes.
+        let slashes = "// a note\nlocal x = 1\nprint(x)\n";
+        assert_eq!(messages(slashes), vec!["a comment starts with `--`"]);
+        assert_eq!(docs::kind_for(&messages(slashes)[0]), "SyntaxError");
+
+        // An increment. Luau's own `+=` is valid, so it says nothing.
+        let plus = "local x = 1\nx++\nprint(x)\n";
+        assert_eq!(
+            messages(plus),
+            vec!["Luau has no `++`; write `x = x + 1`".to_string()]
+        );
+        assert!(messages("local x = 1\nx += 1\nprint(x)\n").is_empty());
+
+        // A declaration `declare` does not take, in a definitions file.
+        let options = EmitOptions {
+            definitions: true,
+            ..EmitOptions::default()
+        };
+        let declare = "declare namespace Foo as\n    function bar(): number\n        return 1\n    end\nend\n";
+        let got: Vec<String> = compile_with(declare, &options)
+            .unwrap()
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "`declare` takes a function, a name with a type, an extern type, or a class; a namespace is not declared"
+            ]
+        );
+        assert_eq!(docs::kind_for(&got[0]), "DeclareError");
+    }
+
     /// `alloy doc const` says a reassignment is a compile error. It
     /// used to reach the reader only through `alloy flux`, as a Luau
     /// syntax error.

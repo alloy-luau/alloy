@@ -633,6 +633,17 @@ impl<'a> Parser<'a> {
         }
 
         let first = self.suffixed_expr()?;
+
+        // `x++` is another language's increment. Luau has neither `++`
+        // nor `--`, and its `+=` writes the same thing in one step.
+        if self.at("+") && self.text_at(1) == "+" && self.adjacent(0) {
+            let target = self.span_text(first.span());
+
+            return Err(self.err(&format!(
+                "Luau has no `++`; write `{target} = {target} + 1`"
+            )));
+        }
+
         // This is an assignment, in the plain or the compound form.
         if self.at("=") || self.at(",") || self.compound_op_at().is_some() {
             let mut targets = vec![first];

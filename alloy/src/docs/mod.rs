@@ -29,6 +29,13 @@ pub fn kind_for(message: &str) -> &'static str {
         // below would read as the kind's own family.
         (&["`global` is removed"], "ImportError"),
         (&["needs `as` before its body"], "SyntaxError"),
+        // The forms a Luau user writes from another language. Each names
+        // the Alloy form, and the rules below would read the declaration
+        // word in the sentence as that declaration's own family.
+        (&["body is `as ... end`"], "SyntaxError"),
+        (&["a comment starts with"], "SyntaxError"),
+        (&["has no `++`"], "SyntaxError"),
+        (&["`declare` takes"], "DeclareError"),
         // A header the parser cannot read. The `trait` rule below would
         // read the word as a contract report.
         (&["takes no type parameters"], "SyntaxError"),
@@ -134,6 +141,12 @@ pub fn code_for(message: &str) -> Option<&'static str> {
         (&["reserved word"], "6.1"),
         // The `declare` keyword page documents an ambient declaration.
         (&["is already declared in"], "6.1"),
+        // The forms a Luau user writes from another language: the
+        // keyword page holds the grammar each one gets wrong.
+        (
+            &["a comment starts with", "has no `++`", "`declare` takes"],
+            "6.1",
+        ),
         (&["markup"], "3.13"),
         (&["@test", "test "], "3.14"),
         (&["@cfg"], "3.11"),

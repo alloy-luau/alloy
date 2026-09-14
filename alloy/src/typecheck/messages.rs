@@ -1540,6 +1540,17 @@ fn unknown_type_report(message: &str, source: &str, text: &str, line: usize) -> 
     let at = Some((line, col));
 
     if type_declarations(source, name).is_empty() {
+        // A name another language spells for a Luau primitive. The
+        // checker says the name is unknown; the reader needs the Luau
+        // one.
+        if let Some(tail) = FOREIGN_TYPES.iter().find(|(n, _)| *n == name) {
+            return Some(Resited {
+                kind: "TypeError",
+                message: format!("`{name}` is not a type; {}", tail.1),
+                at,
+            });
+        }
+
         if binds_value(source, name) {
             return Some(Resited {
                 kind: "TypeError",
@@ -1563,6 +1574,17 @@ fn unknown_type_report(message: &str, source: &str, text: &str, line: usize) -> 
         at,
     })
 }
+
+/// The type names a Luau newcomer writes from another language, each
+/// with the Luau type that holds the same values.
+const FOREIGN_TYPES: &[(&str, &str)] = &[
+    ("int", "Luau numbers are `number`"),
+    ("float", "Luau numbers are `number`"),
+    ("bool", "Luau booleans are `boolean`"),
+    ("str", "Luau strings are `string`"),
+    ("String", "Luau strings are `string`"),
+    ("void", "a function that returns nothing writes `()`"),
+];
 
 /// Whether the source binds the name as a value: a local, a `const`, or
 /// a function.
@@ -2002,6 +2024,36 @@ mod tests {
 
         assert_eq!(got.message, "`Item` is already declared, on line 1");
         assert_eq!(got.at, Some((5, 8)));
+    }
+
+    /// `local x: int = 5`: another language's name for a Luau
+    /// primitive. `Unknown type 'int'` left the reader to guess which
+    /// name Luau uses.
+    #[test]
+    fn a_type_name_from_another_language_names_the_luau_one() {
+        let got = resited("Unknown type 'int'", "local x: int = 5\n", 1, 10);
+        assert_eq!(
+            got.message,
+            "`int` is not a type; Luau numbers are `number`"
+        );
+        assert_eq!(got.at, Some((1, 10)));
+
+        for (name, tail) in [
+            ("float", "Luau numbers are `number`"),
+            ("bool", "Luau booleans are `boolean`"),
+            ("str", "Luau strings are `string`"),
+            ("String", "Luau strings are `string`"),
+            ("void", "a function that returns nothing writes `()`"),
+        ] {
+            let source = format!("local x: {name} = nil\n");
+            let got = resited(&format!("Unknown type '{name}'"), &source, 1, 10);
+            assert_eq!(got.message, format!("`{name}` is not a type; {tail}"));
+        }
+
+        // A name the source declares itself keeps the checker's report.
+        let own = "type int = number\nlocal x: int = 5\n";
+        let got = resited("Unknown type 'int'", own, 2, 10);
+        assert_eq!(got.message, "Unknown type 'int'");
     }
 
     #[test]

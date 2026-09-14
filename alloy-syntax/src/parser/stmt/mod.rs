@@ -561,9 +561,89 @@ impl<'a> Parser<'a> {
                 self.declare_stmt(start)
             }
 
+            /*
+            `// text` is another language's comment. Luau opens one with
+            `--`, and the lexer reads `//` as floor division, so the
+            report names the form instead of the token.
+            */
+            "//" => Err(self.err("a comment starts with `--`")),
+
+            /*
+            `struct S { n: number }` writes another language's body. The
+            brace group goes with the report, so its fields draw no
+            second one.
+            */
+            "struct" if self.name_at(1) && self.text_at(2) == "{" => {
+                let name = self.text_at(1).to_string();
+                self.pos += 2;
+                let at = self.toks[self.pos].start as usize;
+                self.report_at(
+                    at,
+                    &format!("a struct body is `as ... end`: `struct {name} as`"),
+                );
+                self.skip_braces();
+
+                Ok(Stmt::Error(TokSpan::new(start, self.pos)))
+            }
+
+            /*
+            `declare namespace`, `declare enum`, `declare struct`: Luau's
+            definition syntax has no form for an Alloy declaration. The
+            keyword that follows is the mistake, and recovery reads the
+            declaration itself, so the report stands alone.
+            */
+            "declare" if self.options.definitions && not_declared(self.text_at(1)).is_some() => {
+                let noun = not_declared(self.text_at(1)).unwrap_or_default();
+                self.bump();
+
+                Err(self.err(&format!(
+                    "`declare` takes a function, a name with a type, an extern type, or a class; {noun} is not declared"
+                )))
+            }
+
             _ => self.expr_stmt(start),
         }
     }
+
+    /// Moves past the brace group at the cursor, balanced.
+    fn skip_braces(&mut self) {
+        let mut depth = 0usize;
+
+        while !self.at_end() {
+            match self.text() {
+                "{" => depth += 1,
+
+                "}" => depth -= 1,
+
+                _ => {}
+            }
+
+            self.bump();
+
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+}
+
+/// The noun for a declaration word `declare` does not take. Luau's
+/// definition syntax holds a function, a name with a type, an extern
+/// type, and a class, and nothing else.
+fn not_declared(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "namespace" => "a namespace",
+
+        "enum" => "an enum",
+
+        "struct" => "a struct",
+
+        "trait" => "a trait",
+
+        "interface" => "an interface",
+
+        _ => return None,
+    })
 }
 
 impl<'a> Parser<'a> {

@@ -141,6 +141,30 @@ fn an_impl_inside_a_namespace_targets_the_member() {
     assert!(out.contains("function M_P.get(self)"), "{out}");
 }
 
+/// `impl Greeter for Widget` inside the namespace that declares the
+/// trait reads the contract under the namespace's name, and a default
+/// method flattens in from the table the file binds.
+#[test]
+fn an_impl_of_a_sibling_trait_reads_its_contract() {
+    let src = "namespace Group as\n    trait Greeter as\n        function hello(self): string\n        function wave(self): string\n            return \"wave\"\n        end\n    end\n\n    struct Widget as\n        n: number\n    end\n\n    impl Greeter for Widget as\n        function hello(self): string\n            return \"hi\"\n        end\n    end\nend\n";
+    let out = clean(src);
+    assert!(
+        out.contains("Group_Widget.wave = Group_Greeter.wave"),
+        "{out}"
+    );
+
+    // The contract still holds: a method the impl skips reports.
+    let hits = messages(&src.replace(
+        "        function hello(self): string\n            return \"hi\"\n        end\n",
+        "",
+    ));
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].contains("`impl Group.Greeter for Group.Widget` does not write `hello`"),
+        "{hits:?}"
+    );
+}
+
 /// An `impl` on a type from outside the namespace keeps its own name.
 #[test]
 fn an_impl_on_a_foreign_target_keeps_its_name() {

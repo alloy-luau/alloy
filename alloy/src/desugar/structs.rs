@@ -83,14 +83,26 @@ impl<'s> Desugar<'s> {
             self.diagnose(i.target, &message);
         }
 
+        // A trait of the namespace this `impl` sits in is keyed under
+        // the namespace's prefix, `Group_Greeter`; the source writes
+        // `Greeter`. The resolved name reads the contract, and the emit
+        // reads the default methods off the table the file binds.
+        let trait_name = i.trait_name.map(|t| {
+            let resolved = self.impl_target_name(t);
+
+            match self.traits.contains_key(&resolved) {
+                true => resolved,
+
+                false => self.text_of(t).to_string(),
+            }
+        });
+
         if let Some(t) = i.trait_name
-            && !super::attributes::BUILTIN_BOUNDS.contains(&self.text_of(t))
-            && !OPERATOR_TRAITS
-                .iter()
-                .any(|(n, _, _)| *n == self.text_of(t))
-            && !self.knows_type(self.text_of(t))
+            && let Some(name) = trait_name.as_deref()
+            && !super::attributes::BUILTIN_BOUNDS.contains(&name)
+            && !OPERATOR_TRAITS.iter().any(|(n, _, _)| *n == name)
+            && !self.knows_type(name)
         {
-            let name = self.text_of(t).to_string();
             self.diagnose(t, &format!("nothing declares the trait `{name}`"));
         }
 
@@ -322,9 +334,7 @@ impl<'s> Desugar<'s> {
         // Operator traits.
         let mut tail = String::new();
 
-        if let Some(t) = i.trait_name {
-            let trait_name = self.text_of(t).to_string();
-
+        if let (Some(t), Some(trait_name)) = (i.trait_name, trait_name) {
             for (tr, method, meta) in OPERATOR_TRAITS {
                 if trait_name == *tr {
                     // `delete` takes a `Deletable`, whose `Destroy` is
@@ -345,6 +355,7 @@ impl<'s> Desugar<'s> {
             // write an import alias, `impl G for B`, or a namespace
             // path, `impl Ns.Greet for C`; both name the same trait.
             let names = self.name_candidates(&trait_name);
+            let shown = self.display_name(&trait_name);
             let required = names
                 .iter()
                 .find_map(|n| self.trait_required.get(n).cloned())
@@ -364,7 +375,8 @@ impl<'s> Desugar<'s> {
                         None => self.diagnose(
                             t,
                             &format!(
-                                "`impl {trait_name} for {target_name}` does not write `{m}`; the trait declares it"
+                                "`impl {shown} for {}` does not write `{m}`; the trait declares it",
+                                self.display_name(&target_name)
                             ),
                         ),
 
@@ -375,7 +387,7 @@ impl<'s> Desugar<'s> {
                             self.diagnose(
                                 f.path[0],
                                 &format!(
-                                    "the trait method `{m}` takes {} parameter{} in `{trait_name}`, {} here",
+                                    "the trait method `{m}` takes {} parameter{} in `{shown}`, {} here",
                                     arity,
                                     if arity == 1 { "" } else { "s" },
                                     f.body.params.len()
@@ -405,7 +417,7 @@ impl<'s> Desugar<'s> {
                                     self.diagnose(
                                         t,
                                         &format!(
-                                            "the trait method `{m}` returns {want} in `{trait_name}`, {got} here"
+                                            "the trait method `{m}` returns {want} in `{shown}`, {got} here"
                                         ),
                                     );
                                 }

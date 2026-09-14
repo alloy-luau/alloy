@@ -1090,6 +1090,21 @@ mod tests {
         );
     }
 
+    /// A `class` block parses and stops the compile. The layout read
+    /// only `declare class` as a block, so the body lost its indent.
+    #[test]
+    fn a_class_body_indents_as_a_block() {
+        let src = "class Critter\npublic hp: number\nfunction heal(self) end\nend\n";
+        let want = "class Critter\n    public hp: number\n    function heal(self) end\nend\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+        // The word is still a name where the parser reads one.
+        assert_eq!(
+            fmt("local class = 1\nprint(class)\n"),
+            "local class = 1\nprint(class)\n"
+        );
+    }
+
     #[test]
     fn match_arms_indent_once_and_bodies_twice() {
         let src = "match m with\ncase Ok(v) then\nprint(v)\ncase Err(e) then print(e)\ndefault\nprint(0)\nend\n";

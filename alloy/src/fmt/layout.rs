@@ -63,7 +63,20 @@ impl<'s> Formatter<'s> {
                     || matches!(prev, Some("export" | "global" | "public" | "private"))
             }
 
-            "class" => prev == Some("declare"),
+            // `class Name` opens a body, as the structure pass reads
+            // it; a class used as a name, `class = 1`, opens nothing.
+            "class" => {
+                prev == Some("declare")
+                    || self.next_code(i).is_some_and(|n| {
+                        self.items[n].is_ident()
+                            && !self.next_code(n).is_some_and(|m| {
+                                matches!(
+                                    self.items[m].text.as_str(),
+                                    "=" | "(" | "." | ":" | "[" | ","
+                                )
+                            })
+                    })
+            }
 
             "with" => self.line_has_before(i, "declare"),
 

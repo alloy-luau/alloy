@@ -831,39 +831,20 @@ impl<'s> Desugar<'s> {
     is the checker's business.
     */
     pub(crate) fn check_bound_calls(&mut self, block: &Block) {
-        if self.fn_bounds.is_empty() && self.method_bounds.is_empty() {
+        if self.fn_bounds.is_empty()
+            && self.method_bounds.is_empty()
+            && !self.impl_methods.keys().any(|t| self.is_unit_enum(t))
+        {
             return;
         }
 
-        // The annotations this block writes, by name. The file's flat map
-        // gives up a name two bindings spell differently, and a parameter
-        // of the bounded function often carries the argument's name.
+        // The annotations the top level writes, by name, before the
+        // walk: a function above a local still reads it.
         let mut annotated: HashMap<String, String> = HashMap::new();
 
         for stmt in &block.stmts {
             if let Stmt::Local(l) = stmt.under_default() {
-                for (i, b) in l.names.iter().enumerate() {
-                    // An annotation names the type. Without one,
-                    // `local x = new S { }` names the struct as exactly,
-                    // and that is the form most calls hand a bounded
-                    // parameter.
-                    let ty = match b.ty {
-                        Some(ty) => {
-                            let text = self.text_of(ty).trim().trim_start_matches(':').trim();
-
-                            Some(text.to_string())
-                        }
-
-                        None => l
-                            .values
-                            .get(i)
-                            .and_then(|v| self.argument_struct(v, &annotated)),
-                    };
-
-                    if let Some(ty) = ty {
-                        annotated.insert(self.text_of(b.name).to_string(), ty);
-                    }
-                }
+                self.note_annotations(l, &mut annotated);
             }
         }
 
@@ -875,14 +856,58 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The types a `local` binds, by name. An annotation names the type.
+    /// Without one, `local x = new S { }` names the struct as exactly,
+    /// and that is the form most calls hand a bounded parameter.
+    fn note_annotations(&self, l: &Local, annotated: &mut HashMap<String, String>) {
+        for (i, b) in l.names.iter().enumerate() {
+            let ty = match b.ty {
+                Some(ty) => Some(self.annotation_text(ty)),
+
+                None => l
+                    .values
+                    .get(i)
+                    .and_then(|v| self.argument_struct(v, annotated)),
+            };
+
+            if let Some(ty) = ty {
+                annotated.insert(self.text_of(b.name).to_string(), ty);
+            }
+        }
+    }
+
+    /// The type an annotation span names, without its `:`.
+    fn annotation_text(&self, ty: TokSpan) -> String {
+        self.text_of(ty)
+            .trim()
+            .trim_start_matches(':')
+            .trim()
+            .to_string()
+    }
+
+    /// Whether this file declares `name` as an enum with no payload: a
+    /// string union at runtime.
+    fn is_unit_enum(&self, name: &str) -> bool {
+        self.enum_decls
+            .get(name)
+            .is_some_and(|vs| vs.iter().all(|(_, n)| *n == 0))
+    }
+
     fn bound_calls_in_block(
         &self,
         block: &Block,
         annotated: &HashMap<String, String>,
         hits: &mut Vec<(TokSpan, String)>,
     ) {
+        // A local of the block is known to the statements below it.
+        let mut annotated = annotated.clone();
+
         for stmt in &block.stmts {
-            self.bound_calls_in(stmt_children(stmt), annotated, hits);
+            if let Stmt::Local(l) = stmt.under_default() {
+                self.note_annotations(l, &mut annotated);
+            }
+
+            self.bound_calls_in(stmt_children(stmt), &annotated, hits);
         }
     }
 
@@ -896,7 +921,22 @@ impl<'s> Desugar<'s> {
             match child {
                 Child::Block(b) => self.bound_calls_in_block(b, annotated, hits),
 
-                Child::Function(f) => self.bound_calls_in_block(&f.block, annotated, hits),
+                // A parameter's annotation is known to the body.
+                Child::Function(f) => {
+                    let mut inner = annotated.clone();
+
+                    for p in &f.params {
+                        if let Some(ty) = p.ty
+                            && !p.is_vararg
+                            && p.destructure.is_none()
+                        {
+                            inner
+                                .insert(self.text_of(p.name).to_string(), self.annotation_text(ty));
+                        }
+                    }
+
+                    self.bound_calls_in_block(&f.block, &inner, hits);
+                }
 
                 Child::Expr(e) => {
                     self.bound_call(e, annotated, hits);
@@ -907,7 +947,8 @@ impl<'s> Desugar<'s> {
     }
 
     /// One call: an argument whose struct this file declares and whose
-    /// impls miss the trait the parameter asks for.
+    /// impls miss the trait the parameter asks for, or a `:` call of a
+    /// unit enum's method.
     fn bound_call(
         &self,
         e: &Expr,
@@ -923,6 +964,30 @@ impl<'s> Desugar<'s> {
         else {
             return;
         };
+
+        // A unit enum is a string at runtime, and a string carries no
+        // metatable of its own, so `s:m()` finds no method. The impl
+        // writes `Status.m`, and the static form reaches it.
+        if let (Some(m), Expr::Name(n)) = (method, &**func)
+            && let Some(ty) = annotated.get(self.text_of(*n))
+            && let target = ty.trim_end_matches('?')
+            && self.is_unit_enum(target)
+            && self
+                .impl_methods
+                .get(target)
+                .is_some_and(|ms| ms.contains(self.text_of(*m)))
+        {
+            let (m, recv) = (self.text_of(*m), self.text_of(*n));
+            hits.push((
+                e.span(),
+                format!(
+                    "`{target}` is a unit enum, a string at runtime; call `{target}.{m}({recv})`"
+                ),
+            ));
+
+            return;
+        }
+
         let Some((name, asks, skip)) = self.call_bounds(func, *method, annotated) else {
             return;
         };
@@ -3166,6 +3231,44 @@ mod tests {
             "{head}struct Two as\n    v: number\nend\n\nimpl Alpha for Two as\n    function a(self): number\n        return self.v\n    end\nend\n\nimpl Beta for Two as\n    function b(self): number\n        return self.v\n    end\nend\n\nprint(h:sum_both(new Two {{ v = 1 }}))\n"
         );
         assert_eq!(messages(&both), Vec::<String>::new());
+    }
+
+    /// A unit enum is a string at runtime, so `s:describe()` finds no
+    /// method. The report names the static form, which the impl writes
+    /// and the check artifact types. A payload enum is a table with a
+    /// metatable, so its `:` call stays.
+    #[test]
+    fn a_colon_call_of_a_unit_enum_method_names_the_static_form() {
+        let head = "enum Status as\n    Ready\n    Pending\nend\n\nimpl Status as\n    function describe(self): string\n        return \"status\"\n    end\nend\n\n";
+        let want = vec!["`Status` is a unit enum, a string at runtime; call `Status.describe(s)`"];
+
+        let param = format!(
+            "{head}function classify(s: Status): string\n    return s:describe()\nend\nprint(classify(Status.Ready))\n"
+        );
+        assert_eq!(messages(&param), want);
+
+        let local = format!(
+            "{head}function classify(): string\n    local s: Status = Status.Ready\n    return s:describe()\nend\nprint(classify())\n"
+        );
+        assert_eq!(messages(&local), want);
+
+        let top = format!("{head}local s: Status = Status.Ready\nprint(s:describe())\n");
+        assert_eq!(messages(&top), want);
+
+        // The static form is the one that runs.
+        let dot = format!(
+            "{head}function classify(s: Status): string\n    return Status.describe(s)\nend\nprint(classify(Status.Ready))\n"
+        );
+        assert_eq!(messages(&dot), Vec::<String>::new());
+
+        // A string method is the string's own.
+        let upper = format!(
+            "{head}function classify(s: Status): string\n    return s:upper()\nend\nprint(classify(Status.Ready))\n"
+        );
+        assert_eq!(messages(&upper), Vec::<String>::new());
+
+        let payload = "enum Shape as\n    Circle(number)\n    Square(number)\nend\n\nimpl Shape as\n    function area(self): number\n        return 1\n    end\nend\n\nfunction measure(s: Shape): number\n    return s:area()\nend\nprint(measure(Shape.Circle(2)))\n";
+        assert_eq!(messages(payload), Vec::<String>::new());
     }
 
     /// The four shapes a `destroy` lowers to: the plain call, Debris for

@@ -301,6 +301,48 @@ pub(crate) fn print_diagnostics(
     }
 }
 
+/// The data files one source imports, read and parsed the way the
+/// project build reads them, so `alloy check <file>` reports the
+/// document a project build would refuse. A document that does not
+/// parse is a diagnostic on its import literal.
+///
+/// A missing file is `unknown_module`, which the import scan already
+/// reports, and an `@alias/x.json` spec needs the project's mounts, so
+/// both pass here.
+fn data_problems(path: &Path, source: &str) -> Vec<alloy::Diagnostic> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+
+    for r in alloy::data::references(source) {
+        let Some(format) = alloy::data::Format::of(&r.path) else {
+            continue;
+        };
+
+        if !(r.path.starts_with("./") || r.path.starts_with("../")) {
+            continue;
+        }
+
+        let file = dir.join(r.path.trim_start_matches("./"));
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+
+        if let Err(e) = alloy::data::convert(&text, format) {
+            out.push(alloy::Diagnostic {
+                start: r.start,
+                end: r.end,
+                message: format!(
+                    "data file {} does not parse as {}: {e}",
+                    file.display().to_string().replace('\\', "/"),
+                    format.name()
+                ),
+            });
+        }
+    }
+
+    out
+}
+
 /// Compiles one file the way `alloy build <file>` does.
 pub(crate) fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> {
     let source = match std::fs::read_to_string(path) {
@@ -347,7 +389,13 @@ pub(crate) fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy
     let out = alloy::compile_file(path, &source, &options, jsx.as_ref(), ingots.as_ref());
 
     match out {
-        Ok(out) => Some((source, out)),
+        Ok(mut out) => {
+            out.diagnostics
+                .extend(data_problems(Path::new(path), &source));
+            out.diagnostics.sort_by_key(|d| d.start);
+
+            Some((source, out))
+        }
 
         Err(err) => {
             // A compile that stopped reads as every other diagnostic:
@@ -399,6 +447,36 @@ mod tests {
         );
         assert_eq!(search_dir(&[], cwd), cwd);
         assert_eq!(search_dir(&["no-such-file.aly".to_string()], cwd), cwd);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A data import of one file is read, not only of a project: a
+    /// document that does not parse is a diagnostic on its literal.
+    #[test]
+    fn a_bad_data_file_reports_for_one_file() {
+        let dir = std::env::temp_dir().join(format!("alloy-data-one-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("the folder");
+        std::fs::write(dir.join("src/bad.json"), "{ \"a\": 1, }\n").expect("the file");
+        std::fs::write(dir.join("src/good.toml"), "a = 1\n").expect("the file");
+
+        let source =
+            "import bad from \"./bad.json\"\nimport good from \"./good.toml\"\nprint(bad, good)\n";
+        let problems = data_problems(&dir.join("src/use.aly"), source);
+
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0]
+                .message
+                .contains("bad.json does not parse as JSON: "),
+            "{}",
+            problems[0].message
+        );
+        assert_eq!(
+            &source[problems[0].start as usize..problems[0].end as usize],
+            "\"./bad.json\""
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -972,7 +972,8 @@ pub fn import_enums(
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, Vec<(String, usize)>)> {
     let mut seen: Vec<PathBuf> = Vec::new();
-    let mut out = Vec::new();
+    let mut out: Vec<(String, Vec<(String, usize)>)> = Vec::new();
+    let renames = renamed_specs(source, from, aliases);
 
     for spec in import_specs(source) {
         let Some(path) = resolve(&spec, from, aliases) else {
@@ -993,12 +994,22 @@ pub fn import_enums(
             let crate::declarations::Shape::Enum { name, variants } = shape else {
                 continue;
             };
+            let variants: Vec<(String, usize)> =
+                variants.into_iter().map(|(v, p)| (v, p.len())).collect();
+
+            // An alias keys an entry of its own, so `State as S1` and
+            // `State as S2` each read their own module.
+            for (_, _, local) in renames
+                .iter()
+                .filter(|(p, declared, _)| *p == path && *declared == name)
+            {
+                if !out.iter().any(|(n, _)| n == local) {
+                    out.push((local.clone(), variants.clone()));
+                }
+            }
 
             if !out.iter().any(|(n, _)| *n == name) {
-                out.push((
-                    name,
-                    variants.into_iter().map(|(v, p)| (v, p.len())).collect(),
-                ));
+                out.push((name, variants));
             }
         }
     }
@@ -2498,6 +2509,71 @@ mod tests {
             vec![
                 "`new PointA { ... }` leaves `x` unset; a field without a default needs a value",
                 "`PointA` has no field `name`; its fields are `x`",
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two modules each declare a `State`, and the file imports both
+    /// under aliases. The enum index keys the local name too, so each
+    /// match proves its own variants.
+    #[test]
+    fn two_modules_of_one_enum_name_stay_apart() {
+        let dir = std::env::temp_dir().join(format!("alloy-two-states-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/a.aly"),
+            "export enum State as\n    On\n    Off\nend\n",
+        )
+        .expect("module");
+        std::fs::write(
+            dir.join("src/b.aly"),
+            "export enum State as\n    Up(number)\n    Down\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let src = "import { State as S1 } from \"./a\"\nimport { State as S2 } from \"./b\"\n";
+        let enums = import_enums(src, &from, &[]);
+
+        assert_eq!(
+            enums
+                .iter()
+                .find(|(n, _)| n == "S1")
+                .map(|(_, v)| v.clone()),
+            Some(vec![("On".to_string(), 0), ("Off".to_string(), 0)])
+        );
+        assert_eq!(
+            enums
+                .iter()
+                .find(|(n, _)| n == "S2")
+                .map(|(_, v)| v.clone()),
+            Some(vec![("Up".to_string(), 1), ("Down".to_string(), 0)])
+        );
+
+        // A nested match over both covers every variant, so neither
+        // arm reports.
+        let main = format!(
+            "{src}\nfunction useBoth(a: S1, b: S2): number\n    match a with\n        case S1.On then\n            match b with\n                case S2.Up(n) then return n\n                case S2.Down then return 2\n            end\n        case S1.Off then return 0\n    end\nend\nprint(useBoth(S1.On, S2.Down))\n"
+        );
+        let options = crate::EmitOptions::default().imports(&main, &from, &[]);
+        let out = crate::compile_with(&main, &options).expect("compile");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        // A missing variant of the aliased enum still reports.
+        let short = format!(
+            "{src}\nfunction one(b: S2): number\n    match b with\n        case S2.Down then return 2\n    end\nend\nprint(one(S2.Down))\n"
+        );
+        let options = crate::EmitOptions::default().imports(&short, &from, &[]);
+        let out = crate::compile_with(&short, &options).expect("compile");
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "this match is not exhaustive: `S2` has no arm for `Up`; add it or a `default` arm"
             ]
         );
 

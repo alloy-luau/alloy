@@ -48,7 +48,10 @@ pub fn kind_for(message: &str) -> &'static str {
         (&["ingot `"], "IngotError"),
         (&["reserved word"], "ReservedWord"),
         (&["is already declared in"], "DeclareError"),
-        (&["in macro expansion"], "MacroError"),
+        (
+            &["in macro expansion", "returns from the function"],
+            "MacroError",
+        ),
         (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),
         // The `impl` header names a struct and an enum in one sentence;
         // the enum rule below would take it.

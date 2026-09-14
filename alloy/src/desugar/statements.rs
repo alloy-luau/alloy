@@ -195,7 +195,13 @@ impl<'s> Desugar<'s> {
             // last statement of a block. `do ... end` around one that is
             // not last keeps the meaning and parses. `unreachable_code`
             // already names the statements under it.
-            let fenced = is_early_exit(stmt) && has_live_stmt(&block.stmts[i + 1..]);
+            let followed = has_live_stmt(&block.stmts[i + 1..]);
+            let fenced = is_early_exit(stmt) && followed;
+
+            // A macro body that ends in `return` returns from the
+            // function, so the expansion has to be the last statement
+            // of its block. The expansion reads this and reports.
+            self.macro_followed = followed;
 
             if fenced {
                 self.generate(start, "do ");

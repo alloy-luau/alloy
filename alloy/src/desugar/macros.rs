@@ -161,7 +161,17 @@ enum BodyReturn {
     Tail(usize, String),
     /// Every other shape: an early `return`, one with no value, and one
     /// with more than one. Such a body has no value for an expression.
-    Other,
+    /// `last` says whether the body's last statement is the `return`.
+    Other { last: bool },
+}
+
+impl BodyReturn {
+    /// Whether the body's last statement is a `return`. Such a body
+    /// returns from the function around a call in statement position,
+    /// so nothing can follow the call in its block.
+    fn returns_last(&self) -> bool {
+        matches!(self, Self::Tail(..) | Self::Other { last: true })
+    }
 }
 
 /// Reads a macro body for the `return` that gives it a value.
@@ -180,16 +190,17 @@ fn body_return(body: &str) -> BodyReturn {
     }
 
     let Ok(lexed) = alloy_syntax::lexer::lex(body) else {
-        return BodyReturn::Other;
+        return BodyReturn::Other { last: false };
     };
     let (chunk, errors) =
         alloy_syntax::parser::parse_lenient(body, &lexed.toks, Default::default());
 
     if !errors.is_empty() {
-        return BodyReturn::Other;
+        return BodyReturn::Other { last: false };
     }
+    let last = chunk.block.stmts.last();
 
-    match chunk.block.stmts.last() {
+    match last {
         // One `return`, last, with one value: the value of the body.
         Some(alloy_syntax::ast::Stmt::Return(r)) if returns == 1 && r.values.len() == 1 => {
             let at = lexed.toks[r.span.start as usize].start as usize;
@@ -197,7 +208,9 @@ fn body_return(body: &str) -> BodyReturn {
             BodyReturn::Tail(at, r.values[0].span().text(body, &lexed.toks).to_string())
         }
 
-        _ => BodyReturn::Other,
+        _ => BodyReturn::Other {
+            last: matches!(last, Some(alloy_syntax::ast::Stmt::Return(_))),
+        },
     }
 }
 
@@ -265,21 +278,41 @@ impl<'s> Desugar<'s> {
         let mut body = m.body.as_str();
         let mut tail = m.tail.clone();
 
-        if !self.macro_stmt && tail.is_none() {
-            match body_return(body) {
-                BodyReturn::Tail(at, value) => {
-                    body = body[..at].trim_end();
-                    tail = Some(value);
+        if tail.is_none() {
+            let found = body_return(body);
+
+            match self.macro_stmt {
+                // In statement position the body's statements stay
+                // statements, so a `return` that ends the body returns
+                // from the function the call sits in. Luau takes
+                // `return` only as the last statement of a block, and
+                // the expansion writes the body where the call stands.
+                true => {
+                    if self.macro_followed && found.returns_last() {
+                        self.diagnose(
+                            span,
+                            &format!(
+                                "`{name}` returns from the function; nothing can follow it in the block"
+                            ),
+                        );
+                    }
                 }
 
-                BodyReturn::Other => self.diagnose(
-                    span,
-                    &format!(
-                        "the macro `{name}` returns a statement; in an expression its body must end in a value"
-                    ),
-                ),
+                false => match found {
+                    BodyReturn::Tail(at, value) => {
+                        body = body[..at].trim_end();
+                        tail = Some(value);
+                    }
 
-                BodyReturn::None => {}
+                    BodyReturn::Other { .. } => self.diagnose(
+                        span,
+                        &format!(
+                            "the macro `{name}` returns a statement; in an expression its body must end in a value"
+                        ),
+                    ),
+
+                    BodyReturn::None => {}
+                },
             }
         }
 
@@ -863,5 +896,48 @@ mod tests {
 
         assert!(out.contains("return 2 + 1"), "{out}");
         assert!(out.contains("print(2)"), "{out}");
+    }
+
+    /*
+    A macro body that ends in `return`, called as a statement with more
+    of the block behind it. The expansion wrote the `return` where the
+    call stood, so one block held two `return` statements and Luau
+    rejected the output.
+
+    Such a body returns from the function the call sits in, so the call
+    has to be the last statement of its block.
+    */
+    #[test]
+    fn a_macro_that_returns_reports_when_a_statement_follows_it() {
+        let decl = "macro give_up()\n    return 0\nend\n\n";
+        let call = |after: &str| {
+            format!(
+                "{decl}local function work(): number\n    $give_up()\n{after}end\nprint(work())\n"
+            )
+        };
+
+        assert_eq!(
+            messages(&call("    return 1\n")),
+            vec!["`give_up` returns from the function; nothing can follow it in the block"]
+        );
+
+        // Last in its block: the body's `return` is the function's.
+        let out = crate::compile(&call("")).unwrap().ship;
+
+        assert!(out.contains("return 0"), "{out}");
+        assert!(messages(&call("")).is_empty());
+
+        // A body whose last statement is a bare `return` reports too.
+        let bare = "macro stop()\n    return\nend\n\n";
+
+        assert_eq!(
+            messages(&format!("{bare}$stop()\nprint(1)\n")),
+            vec!["`stop` returns from the function; nothing can follow it in the block"]
+        );
+
+        // A body with no `return` at its end takes any block position.
+        let quiet = "macro note()\n    print(1)\nend\n\n";
+
+        assert!(messages(&format!("{quiet}$note()\nprint(2)\n")).is_empty());
     }
 }

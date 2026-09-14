@@ -487,6 +487,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         test_names: Vec::new(),
         macro_serial: 0,
         macro_stmt: false,
+        macro_followed: false,
         structs_with_to_string: HashSet::new(),
         private_types: HashSet::new(),
         self_prologue: None,
@@ -1031,6 +1032,9 @@ struct Desugar<'s> {
     /// expands. Its body's statements stay statements, so a `return`
     /// in the body returns from the function around the call.
     macro_stmt: bool,
+    /// Whether a live statement follows the statement the block walk
+    /// renders. A macro body that ends in `return` has to be last.
+    macro_followed: bool,
     /// Structs whose impl writes `to_string`: they print through it, so
     /// the default printer stays out.
     structs_with_to_string: HashSet<String>,

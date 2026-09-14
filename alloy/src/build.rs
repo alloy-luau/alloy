@@ -12,6 +12,9 @@ use crate::{Diagnostic, EmitOptions, Lint};
 #[derive(Debug, Default)]
 pub struct Report {
     pub written: Vec<PathBuf>,
+    /// The outputs the build left alone: the file already held the
+    /// bytes the compile produced, so nothing was written.
+    pub up_to_date: Vec<PathBuf>,
     pub skipped: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
     /// Diagnostics per source, with the source path.
@@ -594,11 +597,16 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         // Skip the write when nothing changed, so rojo does not resync.
-        if std::fs::read_to_string(&target).ok().as_deref() != Some(text.as_str()) {
-            std::fs::write(&target, text)?;
-        }
+        // The count follows the bytes: a file the build leaves alone is
+        // up to date, not written.
+        match std::fs::read_to_string(&target).ok().as_deref() == Some(text.as_str()) {
+            true => report.up_to_date.push(rel_out),
 
-        report.written.push(rel_out);
+            false => {
+                std::fs::write(&target, text)?;
+                report.written.push(rel_out);
+            }
+        }
     }
 
     report.lints.extend(circular_imports(&imports));

@@ -50,6 +50,53 @@ fn a_project_builds_into_its_out_tree() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/*
+The build skips the write when the output already holds the bytes the
+compile produced, so rojo does not resync. `written` counted every
+output it walked, so a second build reported files it never touched.
+
+`written` now counts a file the build creates or changes, and
+`up_to_date` counts the rest.
+*/
+#[test]
+fn a_second_build_counts_an_unchanged_output_as_up_to_date() {
+    let dir = temp_project("uptodate");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(dir.join("src/one.aly"), "print(1)\n").unwrap();
+    fs::write(dir.join("src/two.aly"), "print(2)\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let build = || alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+
+    // The first build creates both outputs.
+    let first = build();
+
+    assert_eq!(first.written.len(), 2, "{first:?}");
+    assert!(first.up_to_date.is_empty(), "{first:?}");
+
+    // Nothing changed: both outputs stand as they are.
+    let second = build();
+
+    assert!(second.written.is_empty(), "{second:?}");
+    assert_eq!(second.up_to_date.len(), 2, "{second:?}");
+
+    // One source changes: one output is written, the other stands.
+    fs::write(dir.join("src/one.aly"), "print(3)\n").unwrap();
+    let third = build();
+
+    assert_eq!(third.written, vec![PathBuf::from("one.luau")]);
+    assert_eq!(third.up_to_date, vec![PathBuf::from("two.luau")]);
+
+    // The check path writes nothing, so it counts every output it
+    // would write.
+    let dry = alloy::build::check(&dir, &config.build, &config.emit).unwrap();
+
+    assert_eq!(dry.written.len(), 2, "{dry:?}");
+    assert!(dry.up_to_date.is_empty(), "{dry:?}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn excludes_and_diagnostics_are_reported() {
     let dir = temp_project("report");

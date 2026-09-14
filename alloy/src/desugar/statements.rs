@@ -711,7 +711,7 @@ impl<'s> Desugar<'s> {
     is the checker's business.
     */
     pub(crate) fn check_bound_calls(&mut self, block: &Block) {
-        if self.fn_bounds.is_empty() {
+        if self.fn_bounds.is_empty() && self.method_bounds.is_empty() {
             return;
         }
 
@@ -796,23 +796,19 @@ impl<'s> Desugar<'s> {
     ) {
         let Expr::Call {
             func,
-            method: None,
+            method,
             args: CallArgs::Paren(list),
             ..
         } = e
         else {
             return;
         };
-        let Expr::Name(n) = &**func else {
-            return;
-        };
-        let name = self.text_of(*n).to_string();
-        let Some(asks) = self.fn_bounds.get(&name) else {
+        let Some((name, asks, skip)) = self.call_bounds(func, *method, annotated) else {
             return;
         };
 
         for (i, arg) in list.iter().enumerate() {
-            let Some(Some(bound)) = asks.get(i) else {
+            let Some(Some(bound)) = asks.get(i + skip) else {
                 continue;
             };
             let Some(target) = self.argument_struct(arg, annotated) else {
@@ -849,6 +845,54 @@ impl<'s> Desugar<'s> {
                     break;
                 }
             }
+        }
+    }
+
+    /// What the callee of a call asks of its arguments: the name to
+    /// report, the bound at each parameter's place, and the places the
+    /// arguments start past. A `:` call fills `self` with the receiver,
+    /// so its first argument takes the second place; `T.m(x, ...)`
+    /// writes `self` out and starts at the first.
+    fn call_bounds(
+        &self,
+        func: &Expr,
+        method: Option<TokSpan>,
+        annotated: &HashMap<String, String>,
+    ) -> Option<(String, &Vec<Option<String>>, usize)> {
+        // `x:m(...)`: the receiver names the impl the method sits in.
+        if let Some(m) = method {
+            let name = self.text_of(m).to_string();
+            let target = self.argument_struct(func, annotated)?;
+            let asks = self.method_bounds.get(&(target, name.clone()))?;
+
+            return Some((name, asks, 1));
+        }
+
+        match func {
+            Expr::Name(n) => {
+                let name = self.text_of(*n).to_string();
+                let asks = self.fn_bounds.get(&name)?;
+
+                Some((name, asks, 0))
+            }
+
+            // `T.m(self, ...)`, the method by the name of its impl.
+            Expr::Index {
+                object,
+                key: IndexKey::Field(k),
+                ..
+            } => {
+                let Expr::Name(t) = &**object else {
+                    return None;
+                };
+                let target = self.text_of(*t).to_string();
+                let name = self.text_of(*k).to_string();
+                let asks = self.method_bounds.get(&(target, name.clone()))?;
+
+                Some((name, asks, 0))
+            }
+
+            _ => None,
         }
     }
 
@@ -2785,6 +2829,36 @@ mod tests {
         // parameter as `T`, which the bound widens.
         let both = format!(
             "{head}struct Both as\n    v: number\nend\n\nimpl Alpha for Both as\n    function a(self): number\n        return self.v\n    end\nend\n\nimpl Beta for Both as\n    function b(self): number\n        return self.v\n    end\nend\n\nlocal b = new Both {{ v = 1 }}\nprint(sum_both(b))\n"
+        );
+        assert_eq!(messages(&both), Vec::<String>::new());
+    }
+
+    /// A bound on a method's own generic asks the same of its argument
+    /// as a bound on a free function. Both call forms read it: `x:m(...)`
+    /// where the receiver fills `self`, and `T.m(self, ...)` where the
+    /// source writes `self` out.
+    #[test]
+    fn a_bound_on_a_method_of_an_impl_reads_at_the_call() {
+        let head = "trait Alpha as\n    function a(self): number\nend\n\ntrait Beta as\n    function b(self): number\nend\n\nstruct OnlyAlpha as\n    v: number\nend\n\nimpl Alpha for OnlyAlpha as\n    function a(self): number\n        return self.v\n    end\nend\n\nstruct Holder as\n    v: number\nend\n\nimpl Holder as\n    function sum_both<T: Alpha & Beta>(self, x: T): number\n        return x:a() + x:b()\n    end\nend\n\nlocal h = new Holder { v = 0 }\n";
+        let colon = format!("{head}print(h:sum_both(new OnlyAlpha {{ v = 2 }}))\n");
+
+        assert_eq!(
+            messages(&colon),
+            vec!["`OnlyAlpha` does not implement `Beta`; `sum_both` asks for it"]
+        );
+
+        // `Holder.sum_both(h, x)` writes `self` out, so the argument
+        // sits one place further along.
+        let dot = format!("{head}print(Holder.sum_both(h, new OnlyAlpha {{ v = 2 }}))\n");
+        assert_eq!(
+            messages(&dot),
+            vec!["`OnlyAlpha` does not implement `Beta`; `sum_both` asks for it"]
+        );
+
+        // A struct with both impls passes, and the receiver itself is no
+        // argument of the bound.
+        let both = format!(
+            "{head}struct Two as\n    v: number\nend\n\nimpl Alpha for Two as\n    function a(self): number\n        return self.v\n    end\nend\n\nimpl Beta for Two as\n    function b(self): number\n        return self.v\n    end\nend\n\nprint(h:sum_both(new Two {{ v = 1 }}))\n"
         );
         assert_eq!(messages(&both), Vec::<String>::new());
     }

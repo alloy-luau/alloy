@@ -14,6 +14,7 @@ pub fn section_of(kind: &str) -> Option<&'static str> {
         "UnknownModule" => Some("3.2"),
         "DirectiveError" => Some("4.4"),
         "StructError" => Some("3.6"),
+        "BoundError" => Some("3.6"),
         "EnumError" => Some("3.4"),
         "ExhaustiveMatch" => Some("4.2"),
         _ => None,
@@ -1130,10 +1131,26 @@ fn unmet_bound_report(
     let rest = text.get(col.saturating_sub(1)..)?;
     let open = rest.find('(')?;
     let lead = rest[open + 1..].len() - rest[open + 1..].trim_start().len();
+    // The callee the line names, `needsBoth` of `h:needsBoth(...)`. The
+    // check raises the same report by itself when it can read the
+    // argument's type, and both have to say one thing.
+    let asks: String = rest[..open]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let tail = match asks.is_empty() {
+        true => String::new(),
+
+        false => format!("; `{asks}` asks for it"),
+    };
 
     Some(Resited {
-        kind: "TypeError",
-        message: format!("`{got}` does not satisfy the bound `{want}`"),
+        kind: "BoundError",
+        message: format!("`{got}` does not implement `{want}`{tail}"),
         at: Some((line, col + open + 1 + lead)),
     })
 }
@@ -1927,7 +1944,11 @@ end
         let source = "trait Named as\n    function name(self): string\nend\n\nstruct Plain as\n    n: number\nend\n\nprint(announce(new Plain { n = 1 }))\n";
         let got = resited("Expected this to be 'Named', but got 'Plain'", source, 9, 7);
 
-        assert_eq!(got.message, "`Plain` does not satisfy the bound `Named`");
+        assert_eq!(
+            got.message,
+            "`Plain` does not implement `Named`; `announce` asks for it"
+        );
+        assert_eq!(got.kind, "BoundError");
         assert_eq!(got.at, Some((9, 16)));
     }
 

@@ -570,6 +570,35 @@ impl<'s> Desugar<'s> {
         self.prescan_stmts(&stmts);
     }
 
+    /// The trait each parameter of a bounded signature asks of its
+    /// argument, by the parameter's place. `largest<T: Ord>(xs: { T })`
+    /// asks `Ord` at its first place. `None` when the signature writes
+    /// no bound, or no parameter takes the bounded type.
+    fn param_bounds(&self, body: &FunctionBody) -> Option<Vec<Option<String>>> {
+        if !body.has_bounds {
+            return None;
+        }
+
+        let bounds = super::types::generic_bounds(self.text_of(body.generics?));
+        let asks: Vec<Option<String>> = body
+            .params
+            .iter()
+            .map(|p| {
+                let ty = p.ty.map(|t| self.text_of(t)).unwrap_or_default();
+                let ty = ty.trim().trim_start_matches(':').trim();
+                let head = super::types::array_element(ty).unwrap_or(ty);
+                let head = head.trim().trim_end_matches('?');
+
+                bounds
+                    .iter()
+                    .find(|(n, _)| n == head)
+                    .map(|(_, b)| b.clone())
+            })
+            .collect();
+
+        asks.iter().any(Option::is_some).then_some(asks)
+    }
+
     /// The body of the prescan, over a list of statements. A namespace
     /// runs it again over its members, under the namespace's scope, so
     /// a member is indexed by the name the emit gives it.
@@ -637,30 +666,10 @@ impl<'s> Desugar<'s> {
             // A call reads it back and names an argument that has no
             // `impl` of that trait.
             if let Some((name, body)) = signature
-                && body.has_bounds
-                && let Some(g) = body.generics
+                && let Some(asks) = self.param_bounds(body)
             {
-                let bounds = super::types::generic_bounds(self.text_of(g));
-                let asks: Vec<Option<String>> = body
-                    .params
-                    .iter()
-                    .map(|p| {
-                        let ty = p.ty.map(|t| self.text_of(t)).unwrap_or_default();
-                        let ty = ty.trim().trim_start_matches(':').trim();
-                        let head = super::types::array_element(ty).unwrap_or(ty);
-                        let head = head.trim().trim_end_matches('?');
-
-                        bounds
-                            .iter()
-                            .find(|(n, _)| n == head)
-                            .map(|(_, b)| b.clone())
-                    })
-                    .collect();
-
-                if asks.iter().any(Option::is_some) {
-                    let key = self.decl_name(name);
-                    self.fn_bounds.insert(key, asks);
-                }
+                let key = self.decl_name(name);
+                self.fn_bounds.insert(key, asks);
             }
 
             if let Stmt::TypeAlias(t) = stmt
@@ -752,6 +761,20 @@ impl<'s> Desugar<'s> {
 
                 Stmt::Impl(i) => {
                     let target = self.impl_target_name(i.target);
+
+                    // A bound on a method's own generic asks the same of
+                    // its argument as a bound on a free function. The
+                    // target and the name key it, so a method of another
+                    // impl with the same name stays its own.
+                    for m in &i.methods {
+                        if let Some(name) = m.path.first()
+                            && let Some(asks) = self.param_bounds(&m.body)
+                        {
+                            let key = (target.clone(), self.text_of(*name).to_string());
+                            self.method_bounds.insert(key, asks);
+                        }
+                    }
+
                     let names: HashSet<String> = i
                         .methods
                         .iter()

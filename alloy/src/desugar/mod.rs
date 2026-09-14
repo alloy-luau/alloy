@@ -468,6 +468,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         struct_methods: HashMap::new(),
         impl_generics: HashMap::new(),
         fn_bounds: HashMap::new(),
+        method_bounds: HashMap::new(),
         impl_traits: HashMap::new(),
         trait_impl_targets: HashSet::new(),
         elem_bounds: Vec::new(),
@@ -977,6 +978,10 @@ struct Desugar<'s> {
     /// argument, by the function's name and the parameter's place.
     /// `largest<T: Ord>(xs: { T })` asks `Ord` of its first argument.
     fn_bounds: HashMap<String, Vec<Option<String>>>,
+    /// The same, for a method an `impl` block writes, by the target and
+    /// the method's name. `impl Holder as function needsBoth<T: A & B>`
+    /// asks `A & B` of the parameter typed `T`.
+    method_bounds: HashMap<(String, String), Vec<Option<String>>>,
     /// The traits every `impl Trait for X` of this file meets, by target.
     impl_traits: HashMap<String, Vec<String>>,
     /// Structs a `impl Trait for` block targets. Their methods come from

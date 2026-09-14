@@ -74,6 +74,7 @@ impl TypeDiag {
                 | "UnknownModule"
                 | "DirectiveError"
                 | "StructError"
+                | "BoundError"
                 | "EnumError"
                 | "ExhaustiveMatch"
         )

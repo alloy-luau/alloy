@@ -1161,7 +1161,9 @@ impl State {
         }
 
         if let Some((owner, false)) = context::struct_literal_target(&doc.source, start) {
-            return Some(owner);
+            // The walks below read the word the file writes in front of
+            // the body, so a namespace member answers by its own name.
+            return Some(owner.rsplit('.').next().unwrap_or(&owner).to_string());
         }
 
         // `x: number` in a struct body, as the field hover reads it: the
@@ -2012,7 +2014,7 @@ fn constructor_keys(src: &str, owner: &str, name: &str) -> Vec<(usize, usize)> {
 
         let at = context::struct_literal_target(src, t.start as usize);
 
-        if matches!(at, Some((ref target, false)) if target == owner) {
+        if matches!(at, Some((ref target, false)) if target.rsplit('.').next() == Some(owner)) {
             out.push((t.start as usize, t.end as usize));
         }
     }

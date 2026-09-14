@@ -180,13 +180,25 @@ pub fn struct_literal_target(src: &str, offset: usize) -> Option<(String, bool)>
     // `new Pair<<number>> { |`: the type arguments stand between the
     // head and the table, and the fields are the head's.
     let before = without_type_arguments(head[..open].trim_end());
+    // `new Ns.T { |`: the path in front of the name is part of it. The
+    // declaration index keys a namespace member by its path, the way
+    // `impl Ns.T` writes it.
     let name: String = {
-        let start = before.len() - before.trim_end_matches(is_word).len();
+        let start = before.len()
+            - before
+                .trim_end_matches(|c: char| is_word(c) || c == '.')
+                .len();
 
-        before[before.len() - start..].to_string()
+        before[before.len() - start..].trim_matches('.').to_string()
     };
 
-    if !name.is_empty() && name.starts_with(|c: char| c.is_uppercase()) {
+    // The last step of the path is the struct; the rest is where it
+    // lives, and a lowercase step there is still a namespace.
+    if name
+        .rsplit('.')
+        .next()
+        .is_some_and(|last| last.starts_with(|c: char| c.is_uppercase()))
+    {
         return Some((name, false));
     }
 
@@ -256,6 +268,33 @@ mod tests {
         // A comparison is no type argument.
         assert_eq!(without_type_arguments("a > b"), "a > b");
         assert_eq!(without_type_arguments("new Box"), "new Box");
+    }
+
+    /// `new Ns.T { |` and `new Outer.Inner.Deep.T { |`: the head keeps
+    /// the namespace path, which is the name the index holds.
+    #[test]
+    fn a_namespaced_struct_literal_keeps_its_path() {
+        let src = "local v = new Ns.T { \n";
+        let at = src.find("{ ").expect("the brace") + 2;
+
+        assert_eq!(
+            struct_literal_target(src, at),
+            Some(("Ns.T".to_string(), false))
+        );
+
+        let deep = "local v = new Outer.Inner.Deep.T { \n";
+        let at = deep.find("{ ").expect("the brace") + 2;
+
+        assert_eq!(
+            struct_literal_target(deep, at),
+            Some(("Outer.Inner.Deep.T".to_string(), false))
+        );
+
+        // A lowercase last step names no struct.
+        let lower = "local v = ns.thing { \n";
+        let at = lower.find("{ ").expect("the brace") + 2;
+
+        assert_eq!(struct_literal_target(lower, at), None);
     }
 
     /// The fields a struct body or a record type declares.

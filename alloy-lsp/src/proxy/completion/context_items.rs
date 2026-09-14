@@ -1580,15 +1580,35 @@ impl State {
         out
     }
 
+    /// The fields of a struct, by the name a literal writes in front of
+    /// its table. A namespace member is keyed by its path, and a `*`
+    /// import or a module binding puts its own name in front of that,
+    /// so each leading step drops until one key matches.
     pub(crate) fn struct_fields(&self, uri: &str, name: &str, inside: bool) -> Vec<context::Field> {
-        self.decls_in_scope(uri)
-            .into_iter()
-            .find(|d| d.name == name)
-            .map(|d| context::record_entries(&d.hover))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|f| inside || !f.private)
-            .collect()
+        let decls = self.decls_in_scope(uri);
+        // `import * as M` binds the whole module, so no name of it is
+        // in scope on its own. What the file imports carries it.
+        let imported = self
+            .docs
+            .get(uri)
+            .map(|d| d.import_decls.as_slice())
+            .unwrap_or_default();
+
+        std::iter::successors(Some(name), |path| {
+            path.split_once('.').map(|(_, rest)| rest)
+        })
+        .find_map(|path| {
+            decls
+                .iter()
+                .copied()
+                .chain(imported)
+                .find(|d| d.name == path)
+        })
+        .map(|d| context::record_entries(&d.hover))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| inside || !f.private)
+        .collect()
     }
 
     /// The type a name has at a position: its annotation, the type its

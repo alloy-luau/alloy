@@ -2458,3 +2458,59 @@ fn a_macro_and_an_unclosed_call_answer_from_the_declaration() {
     let (st3, uri3) = super::support::one_file("local w = 1\nprint(w:combine(\n");
     assert!(st3.declared_signature_help(uri3, 1, 16).is_none());
 }
+
+/// A struct inside a namespace answers by its path, at one level and
+/// at three. A `*` import puts the module's own name in front of the
+/// path, and the fields the list offers are still the struct's.
+#[test]
+fn a_namespaced_struct_literal_lists_its_fields() {
+    let dir = super::documents::alias_root(
+        "namespace-literal",
+        &[(
+            "src/lib.aly",
+            "export namespace Ns as\n    struct T as\n        n: number\n    end\nend\n",
+        )],
+    );
+    let src = concat!(
+        "import * as M from \"./lib\"\n",
+        "\n",
+        "namespace One as\n",
+        "    struct Pair as\n",
+        "        left: number\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "namespace Outer as\n",
+        "    namespace Inner as\n",
+        "        namespace Deep as\n",
+        "            struct Deep as\n",
+        "                q: number\n",
+        "            end\n",
+        "        end\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "local a = new One.Pair { \n",
+        "local b = new Outer.Inner.Deep.Deep { \n",
+        "local c = new M.Ns.T { \n",
+    );
+    let uri = path_to_uri(&dir.join("src/main.aly"));
+    let st = files(&[(uri.as_str(), src)]);
+    let labels = |head: &str| -> Vec<String> {
+        let at = src.find(head).expect("the literal") + head.len();
+        let ctx = context::detect(src, at).expect("a context");
+
+        st.context_items(&uri, at, &ctx)
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    let one = labels("new One.Pair { ");
+    let three = labels("new Outer.Inner.Deep.Deep { ");
+    let star = labels("new M.Ns.T { ");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(one, ["left"]);
+    assert_eq!(three, ["q"]);
+    assert_eq!(star, ["n"]);
+}

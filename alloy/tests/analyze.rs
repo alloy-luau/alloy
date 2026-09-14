@@ -718,3 +718,79 @@ fn a_self_construct_returns_the_struct() {
 fn a_table_method_self_type_settles() {
     analyze(TABLE_SELF, "table-self");
 }
+
+/// `alloy doc private` promises a type error on a private member read
+/// from outside the impl. The check artifact keeps the member out of
+/// the struct's public type, and the report stands beside the
+/// `private_access` lint, which says the same thing without a checker.
+#[test]
+fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+
+    if !root.join("tools/types/globalTypes.d.luau").is_file() {
+        eprintln!("skipped: no definitions");
+
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("alloy-private-flux-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    // The doc's own example, plus a read and a call from outside.
+    let src = "struct Counter as\n    read name: string,\n    private count: number = 0,\nend\n\nimpl Counter as\n    function bump(self): number\n        self.count += 1\n        return self.count\n    end\n\n    private function reset(self)\n        self.count = 0\n    end\nend\n\nfunction useIt()\n    local c = new Counter { name = \"hits\" }\n    c:reset()\n    print(c.count)\nend\n";
+    std::fs::write(dir.join("src/c.aly"), src).unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    // The private field and the private method stay out of the public
+    // type; `Counter__all` holds them for the impl.
+    let check = &report.checks[0].check;
+
+    assert!(
+        check.contains("type Counter = typeof(setmetatable({} :: { read name: string }, Counter))"),
+        "{check}"
+    );
+    assert!(
+        check.contains("type Counter__all = Counter & { count: number }"),
+        "{check}"
+    );
+
+    let lints: Vec<&str> = report
+        .lints
+        .iter()
+        .map(|(_, l)| l.name)
+        .filter(|n| *n == "private_access")
+        .collect();
+
+    assert_eq!(lints, vec!["private_access", "private_access"]);
+
+    let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks) else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{}:{} {}", d.line, d.col, d.message))
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec![
+            "19:7 `reset` is private to `Counter`; only its impl reaches it".to_string(),
+            "20:13 `count` is private to `Counter`; only its impl reaches it".to_string(),
+        ]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

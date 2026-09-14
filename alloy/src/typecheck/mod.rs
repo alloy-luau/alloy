@@ -837,16 +837,14 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
     });
 
-    // `private_access` already names the member and says who reaches it,
-    // and it carries the line the source wrote. One report per mistake.
     // The checker reads a private member as missing, because the
-    // struct's own file keeps it out of the public view, so the three
-    // shapes of that report answer to the lint as well.
-    let reads_as_missing = |m: &str| {
-        m.contains("is private to")
-            || m.contains("has no method")
-            || m.contains("not found in table")
-    };
+    // struct's own file keeps it out of the public view. `alloy doc
+    // private` promises a type error there, so the report that names
+    // the member as private stands beside `private_access`. The other
+    // two shapes of the same cause name no private member and would
+    // send the reader after a member that is there, so they go.
+    let reads_as_missing =
+        |m: &str| m.contains("has no method") || m.contains("not found in table");
 
     analysis.diagnostics.retain(|d| {
         !reads_as_missing(&d.message)

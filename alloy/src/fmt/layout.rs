@@ -60,8 +60,7 @@ impl<'s> Formatter<'s> {
             "struct" | "enum" | "trait" | "impl" | "interface" | "macro" | "namespace" => {
                 self.items[i].newlines_before > 0
                     || i == 0
-                    || prev == Some("export")
-                    || prev == Some("global")
+                    || matches!(prev, Some("export" | "global" | "public" | "private"))
             }
 
             "class" => prev == Some("declare"),

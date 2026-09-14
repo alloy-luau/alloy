@@ -169,8 +169,9 @@ pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
 }
 
 /// Whether the `impl` or `trait` token at `i` opens a declaration: it
-/// starts a line, follows `export`, or opens the file. The same rule
-/// the formatter's `starts_block` uses, over raw tokens.
+/// starts a line, follows `export` or a visibility word, or opens the
+/// file. The same rule the formatter's `starts_block` uses, over raw
+/// tokens.
 fn opens_a_header(src: &str, toks: &[Tok], i: usize) -> bool {
     if i == 0 {
         return true;
@@ -178,7 +179,7 @@ fn opens_a_header(src: &str, toks: &[Tok], i: usize) -> bool {
 
     let prev = &toks[i - 1];
 
-    matches!(prev.text(src), "export" | "global")
+    matches!(prev.text(src), "export" | "global" | "public" | "private")
         || src[prev.end as usize..toks[i].start as usize].contains('\n')
 }
 
@@ -778,6 +779,34 @@ mod tests {
         let src = "local function f(x)\nif x then\nreturn 1\nelseif x == 2 then\nreturn 2\nelse\nreturn 3\nend\nend\n";
         let want = "local function f(x)\n    if x then\n        return 1\n    elseif x == 2 then\n        return 2\n    else\n        return 3\n    end\nend\n";
         assert_eq!(fmt(src), want);
+    }
+
+    /// A `public struct` inside a namespace opens a body the way an
+    /// exported one does. The formatter opened one only behind `export`,
+    /// so the fields and every `end` fell to column 0, and a second
+    /// pass called that stable.
+    #[test]
+    fn a_visibility_word_opens_a_declaration_body() {
+        let decls = [
+            "public struct T as\n        x: number\n    end",
+            "private struct T as\n        x: number\n    end",
+            "public enum E as\n        A\n        B\n    end",
+            "public function f()\n        return 1\n    end",
+            "private const K = 1",
+        ];
+
+        for decl in decls {
+            let want = format!("export namespace Ns as\n    {decl}\nend\n");
+            let flat: String = want
+                .lines()
+                .map(str::trim_start)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+
+            assert_eq!(fmt(&want), want);
+            assert_eq!(fmt(&flat), want);
+        }
     }
 
     /// A multi-line `if` expression indents every line that continues

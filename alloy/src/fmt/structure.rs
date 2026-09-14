@@ -286,12 +286,13 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
 
                 "repeat" => push(&mut stack, Kind::Block, 1, &mut opens, &mut closes),
 
-                // A declaration opens at the start of a statement; the
-                // same words inside `attribute ... on struct, enum` do not.
+                // A declaration opens at the start of a statement, or
+                // behind the word that exports it or gives it a
+                // visibility in a namespace; the same words inside
+                // `attribute ... on struct, enum` do not.
                 "struct" | "enum" | "trait" | "impl" | "interface" | "macro" | "namespace"
                     if first_on_line(src, toks, i)
-                        || prev == Some("export")
-                        || prev == Some("global") =>
+                        || matches!(prev, Some("export" | "global" | "public" | "private")) =>
                 {
                     push(&mut stack, Kind::Block, 1, &mut opens, &mut closes);
                 }

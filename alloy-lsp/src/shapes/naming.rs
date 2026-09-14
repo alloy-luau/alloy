@@ -100,6 +100,38 @@ fn enum_table_name(m: &[(String, String)], known: &Known) -> Option<String> {
     })
 }
 
+/// The namespace a printed table declares: one member per member of
+/// the group. The emit lowers a group to a table of what it holds, so
+/// the checker prints that table wherever the source wrote the group.
+fn namespace_table_name(m: &[(String, String)], known: &Known) -> Option<String> {
+    if m.is_empty() {
+        return None;
+    }
+
+    let keys: Vec<&String> = m.iter().map(|(k, _)| k).collect();
+    let mut groups: Vec<&str> = known
+        .namespaces
+        .iter()
+        .filter_map(|(_, path)| path.rsplit_once('.').map(|(group, _)| group))
+        .collect();
+    groups.sort();
+    groups.dedup();
+
+    groups.into_iter().find_map(|group| {
+        let members: Vec<String> = known
+            .namespaces
+            .iter()
+            .filter_map(|(_, path)| path.rsplit_once('.'))
+            .filter(|(g, _)| *g == group)
+            .map(|(_, name)| name.to_string())
+            .collect();
+
+        // The reader writes the group's last word; an inner group
+        // stands under its own name.
+        same_set(&members, &keys).then(|| group.rsplit('.').next().unwrap_or(group).to_string())
+    })
+}
+
 /// The enum a unit variant belongs to, by the name it prints as.
 fn enum_of_unit(unit: &str, known: &Known) -> Option<String> {
     known.shapes.iter().find_map(|s| match s {
@@ -287,6 +319,11 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
     // An enum's own table, reached through a module's export table: one
     // member per variant and the `is` guard the emit adds.
     if let Some(name) = enum_table_name(&m, known) {
+        return Some(name);
+    }
+
+    // A namespace's own table: one member per member of the group.
+    if let Some(name) = namespace_table_name(&m, known) {
         return Some(name);
     }
 

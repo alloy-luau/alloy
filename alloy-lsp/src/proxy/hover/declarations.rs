@@ -658,15 +658,26 @@ impl State {
 
 /// Whether a declaration's hover writes a type block. A value keeps its
 /// own hover, which names the module it came through.
+///
+/// A namespace is a group of types, and the emit flattens it, so the
+/// child prints the table of tables the group lowers to. The group's
+/// own block is what the source wrote.
 fn declares_a_type(hover: &str) -> bool {
     let Some(line) = hover.lines().nth(1) else {
         return false;
     };
     let line = line.trim_start().trim_start_matches("export ");
 
-    ["struct ", "enum ", "trait ", "interface ", "type "]
-        .iter()
-        .any(|k| line.starts_with(k))
+    [
+        "struct ",
+        "enum ",
+        "trait ",
+        "interface ",
+        "type ",
+        "namespace ",
+    ]
+    .iter()
+    .any(|k| line.starts_with(k))
 }
 
 /// The export name a local alias stands for:
@@ -890,7 +901,7 @@ fn each_arguments(source: &str, at: usize, param: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod contract_tests {
-    use super::{each_arguments, each_clause, expand_each};
+    use super::{declares_a_type, each_arguments, each_clause, expand_each};
 
     #[test]
     fn a_clause_line_splits_into_its_parts() {
@@ -954,5 +965,16 @@ mod contract_tests {
         let decl = "attribute provider(lifecycles: Lifecycle[]) on impl as\nend\n";
         let at = decl.find("provider").expect("the name");
         assert_eq!(expand_each(hover, decl, at), hover);
+    }
+
+    /// The emit flattens a namespace into a table of its members, so
+    /// the child prints that table for `M.Ns`. The group's own block is
+    /// the declaration the source wrote.
+    #[test]
+    fn a_namespace_hover_declares_a_type() {
+        assert!(declares_a_type(
+            "```alloy\nexport namespace Ns as\n    public struct T\nend\n```"
+        ));
+        assert!(!declares_a_type("```alloy\nfunction make(): number\n```"));
     }
 }

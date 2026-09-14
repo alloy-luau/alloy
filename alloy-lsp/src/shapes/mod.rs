@@ -587,6 +587,16 @@ pub fn fold(text: &str, known: &Known) -> String {
             }
         }
 
+        // A member of the head may be a table that names a shape of
+        // its own, and the variable then stands inside what the name
+        // replaced whole. The clause is for that variable alone, so it
+        // goes with it.
+        if !all {
+            fold_heads(&mut new_head, known);
+
+            all = !bindings.iter().any(|b| mentions(&new_head, &b.var));
+        }
+
         // A binding no fold could name still must not reach the reader:
         // `tN` is the checker's own spelling and no source can write
         // it. The body prints in place of the variable and the clause
@@ -2169,6 +2179,24 @@ mod tests {
         assert_eq!(
             fold(text, &known()),
             "```luau\nlocal M: {\n    Box: Saber\n}\n```"
+        );
+    }
+
+    /// `import * as M from "./geo"` on a module that exports a
+    /// namespace: the group lowers to a table of its members, so the
+    /// checker prints that table. The group's own name reads there, and
+    /// the clause of the member it held goes with it.
+    #[test]
+    fn a_namespace_table_reads_as_the_group() {
+        let known = Known {
+            namespaces: vec![("Ns_T".into(), "Ns.T".into())],
+            ..known()
+        };
+        let text = "```luau\nlocal M: {\n    Ns: {\n        T: t1\n    }\n} where t1 = {\n    new: (f: { value: number }) -> { @metatable t1, { value: number } }\n}\n```";
+
+        assert_eq!(
+            fold(text, &known),
+            "```luau\nlocal M: {\n    Ns: Ns\n}\n```"
         );
     }
 

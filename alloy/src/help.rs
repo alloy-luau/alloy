@@ -207,8 +207,9 @@ pub const DOC_TEXT: &str = "\
 Usage: alloy doc [topic] [options]
 
 Prints one entry: a keyword, an operator, an intrinsic, an attribute, a
-std name, a lint, or an article such as `strict`. With no topic, lists
-them all.
+std name, a lint, or an article such as `strict`. A section number or
+an error kind, `3.6` or `StructError`, opens the section a diagnostic
+names. With no topic, lists them all.
 
 Options:
   --json                Print every entry and lint as JSON

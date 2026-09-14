@@ -456,8 +456,11 @@ pub(crate) fn attribute_target(
             return match declaration_word(line) {
                 Some("struct") | Some("interface") => (Some("field"), false),
                 Some("enum") => (Some("variant"), false),
-                // A member of an `impl` or a `trait` is a function.
-                Some("impl") | Some("trait") => (Some("function"), false),
+                // A member of an `impl` or a `trait` is a method. Every
+                // attribute of a function reads on one, `@test` apart:
+                // it registers a name with the runner, and a method
+                // takes a receiver no runner can give it.
+                Some("impl") | Some("trait") => (Some("method"), false),
                 _ => (None, false),
             };
         }

@@ -1769,6 +1769,12 @@ mod tests {
             target_of("enum E as\n    @|\n    A\nend\n"),
             Some("variant")
         );
+        // A member of an `impl` or a `trait` is a method, and `@test`
+        // goes on a function alone.
+        assert_eq!(
+            target_of("impl W as\n    @|\n    function grow(self) end\nend\n"),
+            Some("method")
+        );
         assert_eq!(target_of("struct V as\nend\n    @|\n"), None);
         assert_eq!(target_of("@|\n"), None);
     }

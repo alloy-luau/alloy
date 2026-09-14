@@ -500,6 +500,30 @@ pub(crate) fn an_attribute_list_follows_the_declaration_under_it() {
     assert!(!field.contains(&"@derive".to_string()), "{field:?}");
 }
 
+/// A method takes what a function takes, `@test` apart: the runner
+/// calls a test by name, and a method takes a receiver.
+#[test]
+pub(crate) fn an_attribute_on_a_method_leaves_test_out() {
+    let method = attribute_labels(
+        "struct W as\n    x: number\nend\nimpl W as\n    @\n    function grow(self): number\n        return self.x\n    end\nend\n",
+    );
+
+    assert!(method.contains(&"@native".to_string()), "{method:?}");
+    assert!(method.contains(&"@inline".to_string()), "{method:?}");
+    assert!(!method.contains(&"@test".to_string()), "{method:?}");
+
+    // A declared attribute writes `on function`, which covers a method.
+    let declared = attribute_labels(
+        "attribute audited(why: string) on function\nstruct W as\n    x: number\nend\nimpl W as\n    @\n    function grow(self): number\n        return self.x\n    end\nend\n",
+    );
+
+    assert!(declared.contains(&"@audited".to_string()), "{declared:?}");
+
+    // A plain function still takes `@test`.
+    let function = attribute_labels("@\nfunction go()\nend\n");
+
+    assert!(function.contains(&"@test".to_string()), "{function:?}");
+}
 /// Nothing under the caret to carry the attribute: the file ends, or
 /// blank lines run to the end of it, or the line below starts no
 /// declaration. Only the attributes that go anywhere read there; every

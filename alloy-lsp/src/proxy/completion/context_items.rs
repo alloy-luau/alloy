@@ -64,7 +64,11 @@ impl State {
                 // names. With nothing under the caret to carry one, the
                 // list holds the attributes that go anywhere: every
                 // other one names a target the reader has not written.
+                // `attribute X on function` covers a method too, so a
+                // method position takes what a function takes.
                 let fits = |targets: &[&str]| match target {
+                    Some("method") => targets.contains(&"method") || targets.contains(&"function"),
+
                     Some(t) => targets.contains(t),
 
                     None if *bare => targets.is_empty(),
@@ -75,6 +79,11 @@ impl State {
                 for key in keywords::keys_with_prefix("@") {
                     let ok = match (target, *bare) {
                         (None, true) => OPEN_ATTRIBUTES.contains(&key),
+
+                        // The compiler reports `@test` on a method:
+                        // the runner calls a test by name, and a method
+                        // takes a receiver.
+                        (Some("method"), _) if key == "@test" => false,
 
                         _ => fits(builtin_attribute_targets(key)),
                     };

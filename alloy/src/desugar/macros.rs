@@ -1030,6 +1030,26 @@ mod tests {
     the word drops out. A body with any other `return` shape has no
     value for an expression, and the call reports.
     */
+    /// A body that is one if-expression is the value; a body that is
+    /// an if-statement stays a statement.
+    #[test]
+    fn a_macro_body_that_is_an_if_expression_is_its_value() {
+        let src = "macro pick(c, a, b)\n    if c then a else b\nend\n\nmacro either(c)\n    if c then print(\"a\") else print(\"b\") end\nend\n\nlocal p = $pick(true, 1, 2)\n$either(false)\nprint(p)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("local p = if true then 1 else 2"),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.ship
+                .contains("if false then print(\"a\") else print(\"b\") end"),
+            "{}",
+            out.ship
+        );
+    }
+
     #[test]
     fn a_macro_body_that_returns_a_value_gives_it_to_an_expression() {
         let decl = "macro sum(a, b = 2)\n    return a + b\nend\n\n";

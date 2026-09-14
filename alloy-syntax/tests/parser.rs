@@ -322,6 +322,8 @@ const CORPUS: &[&str] = &[
     "macro square(x)\n\tlocal v = x\n\tv * v\nend",
     "macro log(level, ...) print(level, ...) end",
     "export macro retry_count(n = 3) n end",
+    "export macro pick(c, a, b)\n\tif c then a else b\nend",
+    "macro either(c)\n\tif c then print(\"a\") else print(\"b\") end\nend",
     "type Partial<T> = { [K in keyof T]: T[K]? }",
     "type Readonly<T> = { [K in keyof T]: read T[K] }",
     "local struct = 1\nlocal trait = 2\nlocal remote = struct + trait",

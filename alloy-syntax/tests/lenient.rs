@@ -59,6 +59,24 @@ fn a_broken_statement_becomes_one_error_node() {
     assert!(matches!(chunk.block.stmts[2], Stmt::Call(..)));
 }
 
+/// A macro body the statement parser recovers inside reports once:
+/// an if-expression is the tail, and a body that is neither a statement
+/// nor a tail is one error node up to the macro's `end`.
+#[test]
+fn a_macro_body_reports_once() {
+    let (errors, diagnostics) =
+        lenient("export macro pick(c, a, b)\n    if c then a else b\nend\n");
+    assert_eq!((errors, diagnostics), (0, 0));
+
+    let (errors, diagnostics) =
+        lenient("macro bad(n)\n    if n < 0 then 0 else n\n    print(n)\nend\n\nlocal x = 1\n");
+    assert_eq!((errors, diagnostics), (1, 1));
+
+    let (errors, diagnostics) =
+        lenient("macro bad2(n)\n    if n < 0 then 0 end\nend\n\nlocal x = 1\n");
+    assert_eq!((errors, diagnostics), (1, 1));
+}
+
 #[test]
 fn a_stray_end_at_the_top_level_is_an_error_node() {
     let (errors, diagnostics) = lenient("local x = 1\nend\nlocal y = 2\n");

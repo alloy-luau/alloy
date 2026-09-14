@@ -480,20 +480,55 @@ impl<'a> Parser<'a> {
             // A trailing expression: try a statement first; when the
             // statement parser refuses, the rest is the tail.
             let save = self.pos;
+            let reports = self.diagnostics.len();
+            // `if c then a else b` is an if-expression, and the lenient
+            // statement parser reads it as an if-statement: it reports
+            // each branch, recovers, and takes the macro's `end` as its
+            // own. A statement that had to recover is no statement
+            // here; the first report stands for it when the expression
+            // parser refuses too.
+            let parsed = match self.stmt() {
+                Ok(s) if self.diagnostics.len() == reports => Ok(s),
 
-            match self.stmt() {
+                Ok(_) => {
+                    let first = self.diagnostics.remove(reports);
+                    self.diagnostics.truncate(reports);
+
+                    Err(first)
+                }
+
+                Err(e) => Err(e),
+            };
+
+            match parsed {
                 Ok(s) => stmts.push(s),
 
                 Err(e) => {
                     self.pos = save;
 
-                    let t = self.expr().map_err(|_| e)?;
+                    let found = match self.expr() {
+                        Ok(t) if self.at("end") => Ok(t),
 
-                    if !self.at("end") {
-                        return Err(self.err("a macro's trailing expression must be last"));
+                        Ok(_) => Err(self.err("a macro's trailing expression must be last")),
+
+                        Err(_) => Err(e),
+                    };
+
+                    match found {
+                        Ok(t) => tail = Some(t),
+
+                        // The body reports once. Statement recovery would
+                        // read the body again from the top and report
+                        // each line of it.
+                        Err(e) if self.lenient => {
+                            self.report_at(e.offset, &e.message);
+                            self.skip_declaration(start)?;
+
+                            return Ok(Stmt::Error(TokSpan::new(start, self.pos)));
+                        }
+
+                        Err(e) => return Err(e),
                     }
-
-                    tail = Some(t);
                 }
             }
         }

@@ -779,21 +779,154 @@ impl<'s> Desugar<'s> {
         let Some(e) = enum_name else {
             return generic;
         };
-        let missing: Vec<&str> = self.enums[&e]
+        let mut missing: Vec<String> = self.enums[&e]
             .iter()
             .filter(|(v, _)| !named.contains(v))
-            .map(|(v, _)| v.as_str())
+            .map(|(v, _)| v.clone())
             .collect();
 
+        // Every variant has an arm, so what is left out sits in a
+        // payload: `Some(Err(_))`. The path names it.
         if missing.is_empty() {
-            return generic;
+            let column: Vec<&Pattern> = arms
+                .iter()
+                .filter_map(|pats| match pats {
+                    [p] => Some(p),
+
+                    _ => None,
+                })
+                .collect();
+
+            if column.len() != arms.len() {
+                return generic;
+            }
+
+            match self.uncovered_case(&column) {
+                Some(path) => missing.push(path),
+
+                None => return generic,
+            }
         }
+
+        let missing: Vec<&str> = missing.iter().map(|v| v.as_str()).collect();
 
         format!(
             "this match is not exhaustive: `{e}` has no arm for {}; add {} or a `default` arm",
             list_names(&missing),
             if missing.len() == 1 { "it" } else { "them" }
         )
+    }
+
+    /// The path of one case the arms leave out, `Some(Err(_))`, read
+    /// off a column of patterns over one value. `None` when the column
+    /// covers, or when no path names what is left.
+    fn uncovered_case(&self, column: &[&Pattern]) -> Option<String> {
+        let mut flat: Vec<&Pattern> = Vec::new();
+        let mut stack: Vec<&Pattern> = column.to_vec();
+
+        while let Some(q) = stack.pop() {
+            match q {
+                Pattern::Or(a, b, _) => {
+                    stack.push(a);
+                    stack.push(b);
+                }
+
+                other => flat.push(other),
+            }
+        }
+
+        let mut enum_name: Option<String> = None;
+        // Variant name -> the payload rows seen for it.
+        let mut rows: Vec<(String, Vec<&Pattern>)> = Vec::new();
+
+        for p in flat {
+            match p {
+                Pattern::Wildcard(_) => return None,
+
+                Pattern::Bind(n) => {
+                    let name = self.text_of(*n).to_string();
+                    let e = self.unit_variant_of(&name)?;
+                    enum_name.get_or_insert(e);
+                    rows.push((name, Vec::new()));
+                }
+
+                Pattern::Path(span) => {
+                    let text = self.text_of(*span).to_string();
+                    let (e, v) = self.enum_of_path(&text)?;
+                    enum_name.get_or_insert(e);
+                    rows.push((v, Vec::new()));
+                }
+
+                Pattern::Variant { name, args, .. } => {
+                    let (vname, path_enum) = self.pattern_variant(*name);
+                    let owner = path_enum.or_else(|| {
+                        self.enums
+                            .iter()
+                            .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                            .map(|(e, _)| e.clone())
+                    })?;
+                    enum_name.get_or_insert(owner);
+                    rows.push((vname, args.iter().collect()));
+                }
+
+                _ => return None,
+            }
+        }
+
+        let e = enum_name?;
+
+        for (v, arity) in self.enums.get(&e)? {
+            let payloads: Vec<&Vec<&Pattern>> = rows
+                .iter()
+                .filter(|(n, _)| n == v)
+                .map(|(_, args)| args)
+                .collect();
+
+            if payloads.is_empty() {
+                return Some(match arity {
+                    0 => v.clone(),
+
+                    n => format!("{v}({})", vec!["_"; *n].join(", ")),
+                });
+            }
+
+            if *arity == 0 || self.payloads_cover(&payloads, *arity) {
+                continue;
+            }
+
+            // The field that refutes: every other one binds in each row,
+            // so its own column says what is left out.
+            for j in 0..*arity {
+                let others_bind = payloads.iter().all(|r| {
+                    r.iter().enumerate().all(|(i, p)| {
+                        i == j || matches!(p, Pattern::Wildcard(_) | Pattern::Bind(_))
+                    })
+                });
+
+                if !others_bind {
+                    continue;
+                }
+
+                let inner: Vec<&Pattern> =
+                    payloads.iter().filter_map(|r| r.get(j).copied()).collect();
+
+                if let Some(path) = self.uncovered_case(&inner) {
+                    let args: Vec<String> = (0..*arity)
+                        .map(|i| match i == j {
+                            true => path.clone(),
+
+                            false => "_".to_string(),
+                        })
+                        .collect();
+
+                    return Some(format!("{v}({})", args.join(", ")));
+                }
+            }
+
+            return None;
+        }
+
+        None
     }
 
     /// Reports if a set of patterns over one value leaves no value out.
@@ -1908,6 +2041,27 @@ mod tests {
             got,
             vec![
                 "this match is not exhaustive: `Shape` has no arm for `Empty`; add it or a `default` arm"
+            ]
+        );
+    }
+
+    /// Every variant has an arm, so what the match leaves out sits in
+    /// a payload. The report names the path, one level and two.
+    #[test]
+    fn a_missing_nested_arm_names_its_path() {
+        let one = "enum Loaded as\n    Some(Result<number, string>)\n    None\nend\nlocal l = Loaded.None\nmatch l with\n    case Some(Ok(v)) then print(v)\n    case Loaded.None then print(0)\nend\n";
+        assert_eq!(
+            messages(one),
+            vec![
+                "this match is not exhaustive: `Loaded` has no arm for `Some(Err(_))`; add it or a `default` arm"
+            ]
+        );
+
+        let two = "enum Loaded as\n    Some(Result<number, string>)\n    None\nend\nenum Box as\n    Hold(Loaded)\n    Empty\nend\nlocal b = Box.Empty\nmatch b with\n    case Hold(Some(Ok(v))) then print(v)\n    case Hold(Loaded.None) then print(0)\n    case Box.Empty then print(1)\nend\n";
+        assert_eq!(
+            messages(two),
+            vec![
+                "this match is not exhaustive: `Box` has no arm for `Hold(Some(Err(_)))`; add it or a `default` arm"
             ]
         );
     }

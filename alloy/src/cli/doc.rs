@@ -362,6 +362,12 @@ fn index(color: bool) -> String {
     let mut taken: Vec<&str> = Vec::new();
 
     for (title, pick) in GROUPS {
+        // The markup lints print once, with the rest of the lints at
+        // the end. The pick stays here for the JSON grouping.
+        if *title == "Lints" {
+            continue;
+        }
+
         let mut keys: Vec<&str> = TABLE
             .iter()
             .map(|(k, _)| *k)
@@ -626,5 +632,24 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(keys.contains(&"unused_variable"), "{keys:?}");
+    }
+
+    /// The index prints one `Lints` heading. The markup lints belong to
+    /// the group for the JSON, and the index lists them with the rest.
+    #[test]
+    fn the_index_holds_one_lints_group() {
+        let index = index(false);
+
+        assert_eq!(
+            index.lines().filter(|l| *l == "Lints").count(),
+            1,
+            "{index}"
+        );
+
+        for l in ALX_LINTS {
+            let key = format!("{ALX_PREFIX}{}", l.name);
+
+            assert_eq!(index.matches(&key).count(), 1, "{key} is listed twice");
+        }
     }
 }

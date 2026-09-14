@@ -250,7 +250,16 @@ pub(crate) fn declared_parameter_hover(doc: &Doc, start: usize, end: usize) -> O
         return None;
     }
 
-    let owner = function_name_of(lead)?;
+    // `attribute icon(asset: string) on struct`: the emit writes the
+    // parameter list, so the child answers about generated text. The
+    // declaration answers for itself, the way a function's does.
+    let head_text = lead.trim();
+    let head_text = head_text.strip_prefix("export ").unwrap_or(head_text);
+    let owner = match head_text.strip_prefix("attribute ") {
+        Some(name) => format!("attribute {}", name.trim()),
+
+        None => function_name_of(lead)?,
+    };
     let to = parameter_end(&doc.source, end, line_end);
     let param = doc.source[open + 1..to].trim();
     let head = match line.starts_with("function ") || line.contains(" function ") {

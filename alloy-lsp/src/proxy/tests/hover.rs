@@ -1350,3 +1350,19 @@ fn a_member_carries_its_doc_comment_to_every_hover() {
         None
     );
 }
+
+/// An attribute's own parameter hovers at its declaration. The emit
+/// writes the parameter list, so the child has no word for the name.
+#[test]
+pub(crate) fn an_attribute_parameter_hovers_at_its_declaration() {
+    let src = "attribute icon(asset: string) on struct\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let start = src.find("asset").expect("asset");
+    let answer = declared_parameter_hover(doc, start, start + "asset".len()).expect("hover");
+
+    assert_eq!(
+        answer,
+        "```alloy\nasset: string\n```\nA parameter of `attribute icon`."
+    );
+}

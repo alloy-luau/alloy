@@ -47,6 +47,21 @@ describe("Future", function()
 		end).toThrow("inside")
 	end)
 
+	-- The stored trace opens with the message, so a rethrow of both
+	-- printed the failure twice and the report read nothing like the
+	-- one a plain call gives.
+	it("rethrows the value alone, with the message once", function()
+		local f = alloy.future(function()
+			error("boom")
+		end)
+		local ok, thrown = pcall(alloy.await, f)
+		expect(ok).toBe(false)
+		expect(thrown).toBe(f.value)
+		expect(type(f.trace)).toBe("string")
+		local _, count = string.gsub(tostring(thrown), "boom", "")
+		expect(count).toBe(1)
+	end)
+
 	it("all collects in order, race and any pick the first", function()
 		local all = Future.all({ Future.resolve(1), Future.resolve(2) })
 		expect(alloy.await(all)).toEqual({ 1, 2 })

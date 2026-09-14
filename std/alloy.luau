@@ -563,7 +563,7 @@ export type Settled<T> = {
 }
 
 --- `await`: a Future, or anything with `andThen`. Yields until settled,
---- returns the value, rethrows a stored error with its trace.
+--- returns the value, rethrows the error it settled with.
 -- The extra values type as `any`: a `wait` on a remote settles with the
 -- whole payload, and `local a, b = await f` is then no error.
 function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
@@ -578,7 +578,13 @@ function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
 		if target.state == RESOLVED then
 			return target.value
 		end
-		error(if target.trace then `{target.value}\n{target.trace}` else target.value, 2)
+		-- The value alone, at level 0. The stored trace opens with the
+		-- same message, so a rethrow of both printed the failure twice
+		-- with the runtime's own frames beside it, and a level would add
+		-- a second place to a message that carries its own.
+		-- `future.trace` still holds the frames for a reader who wants
+		-- them.
+		error(target.value, 0)
 	end
 	if type(target) == "table" and type(target.andThen) == "function" then
 		local thread = coroutine.running()

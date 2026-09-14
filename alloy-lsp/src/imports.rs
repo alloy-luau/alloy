@@ -500,6 +500,30 @@ pub fn import_insertion_line(src: &str) -> u32 {
     last_import.unwrap_or(after_hot)
 }
 
+/// The `import { ... } from "spec"` line of a source: its index and its
+/// text. A list takes one more name; a default or a star import does
+/// not.
+fn list_import_line<'a>(src: &'a str, spec: &str) -> Option<(usize, &'a str)> {
+    src.lines().enumerate().find(|(_, line)| {
+        let t = line.trim();
+
+        t.starts_with("import {")
+            && (t.ends_with(&format!("from \"{spec}\"")) || t.ends_with(&format!("from '{spec}'")))
+    })
+}
+
+/// The import line as the completion detail and the quick fix title
+/// write it.
+pub fn import_shape(spec: &str, export: &Export) -> String {
+    if export.is_default {
+        format!("import {} from \"{spec}\"", export.name)
+    } else if export.is_type {
+        format!("import {{ type {} }} from \"{spec}\"", export.name)
+    } else {
+        format!("import {{ {} }} from \"{spec}\"", export.written())
+    }
+}
+
 /// The edit that imports `export` from `spec` into `src`: a new name in
 /// an existing `import { ... } from "spec"` line, or a new line.
 pub fn import_edit(src: &str, spec: &str, export: &Export) -> Value {
@@ -509,39 +533,28 @@ pub fn import_edit(src: &str, spec: &str, export: &Export) -> Value {
         export.written()
     };
 
-    if !export.is_default {
-        for (i, line) in src.lines().enumerate() {
-            let t = line.trim();
-            let from_spec =
-                t.ends_with(&format!("from \"{spec}\"")) || t.ends_with(&format!("from '{spec}'"));
+    if !export.is_default
+        && let Some((i, line)) = list_import_line(src, spec)
+        && let (Some(open), Some(close)) = (line.find('{'), line.rfind('}'))
+    {
+        let mut names: Vec<String> = line[open + 1..close]
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        names.push(item);
+        let new_line = format!(
+            "{}{{ {} }}{}",
+            &line[..open],
+            names.join(", "),
+            &line[close + 1..]
+        );
+        let len = line.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
 
-            if !t.starts_with("import {") || !from_spec {
-                continue;
-            }
-
-            let (Some(open), Some(close)) = (line.find('{'), line.rfind('}')) else {
-                continue;
-            };
-
-            let mut names: Vec<String> = line[open + 1..close]
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            names.push(item);
-            let new_line = format!(
-                "{}{{ {} }}{}",
-                &line[..open],
-                names.join(", "),
-                &line[close + 1..]
-            );
-            let len = line.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
-
-            return json!({
-                "range": { "start": { "line": i, "character": 0 }, "end": { "line": i, "character": len } },
-                "newText": new_line,
-            });
-        }
+        return json!({
+            "range": { "start": { "line": i, "character": 0 }, "end": { "line": i, "character": len } },
+            "newText": new_line,
+        });
     }
 
     let text = if export.is_default {
@@ -630,17 +643,19 @@ pub fn best_spec(from_dir: &Path, target: &Path, aliases: &[(String, PathBuf)]) 
     Some(best.unwrap_or_else(|| relative_spec(from_dir, target)))
 }
 
-/// Auto-import completion items: every export of another file whose name
-/// starts with the word under the cursor and is not bound here.
-pub fn auto_import_items(
+/// Every export of another file whose name starts with `prefix` and
+/// is not bound here, with the spec that reaches its module. A module
+/// the file already reads offers nothing, unless an `import { ... }`
+/// list of it can take one more name.
+pub fn auto_import_candidates<'a>(
     src: &str,
     current: &Path,
-    files: &[(PathBuf, &[Export])],
+    files: &[(PathBuf, &'a [Export])],
     prefix: &str,
     bound: &HashSet<String>,
     aliases: &[(String, PathBuf)],
-) -> Vec<Value> {
-    let mut items = Vec::new();
+) -> Vec<(String, &'a Export)> {
+    let mut out = Vec::new();
     let from_dir = current.parent().unwrap_or(Path::new("."));
     let taken = imported_specs(src);
 
@@ -653,34 +668,42 @@ pub fn auto_import_items(
             continue;
         };
 
-        if taken.contains(&spec) {
+        if taken.contains(&spec) && list_import_line(src, &spec).is_none() {
             continue;
         }
 
         for export in exports.iter() {
-            if !export.name.starts_with(prefix) || bound.contains(&export.name) {
-                continue;
+            if export.name.starts_with(prefix) && !bound.contains(&export.name) {
+                out.push((spec.clone(), export));
             }
-
-            let shape = if export.is_default {
-                format!("import {} from \"{spec}\"", export.name)
-            } else if export.is_type {
-                format!("import {{ type {} }} from \"{spec}\"", export.name)
-            } else {
-                format!("import {{ {} }} from \"{spec}\"", export.written())
-            };
-
-            items.push(json!({
-                "label": export.name,
-                "kind": export.kind,
-                "detail": format!("auto-import: {shape}"),
-                "sortText": format!("zz{}", export.name),
-                "additionalTextEdits": [import_edit(src, &spec, export)],
-            }));
         }
     }
 
-    items
+    out
+}
+
+/// Auto-import completion items: every export of another file whose name
+/// starts with the word under the cursor and is not bound here.
+pub fn auto_import_items(
+    src: &str,
+    current: &Path,
+    files: &[(PathBuf, &[Export])],
+    prefix: &str,
+    bound: &HashSet<String>,
+    aliases: &[(String, PathBuf)],
+) -> Vec<Value> {
+    auto_import_candidates(src, current, files, prefix, bound, aliases)
+        .into_iter()
+        .map(|(spec, export)| {
+            json!({
+                "label": export.name,
+                "kind": export.kind,
+                "detail": format!("auto-import: {}", import_shape(&spec, export)),
+                "sortText": format!("zz{}", export.name),
+                "additionalTextEdits": [import_edit(src, &spec, export)],
+            })
+        })
+        .collect()
 }
 
 /// The word ending at a byte offset.

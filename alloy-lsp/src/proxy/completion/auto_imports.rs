@@ -58,44 +58,44 @@ impl State {
         let mut seen: Vec<String> = Vec::new();
 
         for report in diagnostics {
-            let Some(name) = report
-                .get("message")
-                .and_then(Value::as_str)
-                .and_then(unresolved_name)
-            else {
+            let Some(message) = report.get("message").and_then(Value::as_str) else {
                 continue;
             };
+            let Some(name) = unresolved_name(message) else {
+                continue;
+            };
+            // A struct is a value and a type. A name an annotation
+            // alone uses imports as a type; a `new Name` in the file
+            // wants the value, which is the type too.
+            let as_type = message.contains("Unknown type '") && !constructs(&doc.source, name);
             let offers =
-                imports::auto_import_items(&doc.source, &path, &files, name, &bound, &aliases);
+                imports::auto_import_candidates(&doc.source, &path, &files, name, &bound, &aliases);
 
-            for item in offers {
+            for (spec, export) in offers {
                 // The prefix walk answers every name that starts with
                 // this one; the report named exactly one.
-                if item["label"].as_str() != Some(name) {
+                if export.name != name {
                     continue;
                 }
 
-                let Some(edit) = item.pointer("/additionalTextEdits/0").cloned() else {
-                    continue;
+                let typed = as_type && !export.is_default && matches!(export.kind, 7 | 8 | 13);
+                let export = imports::Export {
+                    is_type: export.is_type || typed,
+                    ..export.clone()
                 };
-                let Some(shape) = item["detail"]
-                    .as_str()
-                    .and_then(|d| d.strip_prefix("auto-import: "))
-                else {
-                    continue;
-                };
+                let shape = imports::import_shape(&spec, &export);
 
-                if seen.contains(&shape.to_string()) {
+                if seen.contains(&shape) {
                     continue;
                 }
 
-                seen.push(shape.to_string());
+                seen.push(shape.clone());
                 actions.push(json!({
                     "title": format!("Add `{shape}`"),
                     "kind": "quickfix",
                     "isPreferred": true,
                     "diagnostics": [report],
-                    "edit": { "changes": { uri: [edit] } },
+                    "edit": { "changes": { uri: [imports::import_edit(&doc.source, &spec, &export)] } },
                 }));
             }
         }
@@ -345,6 +345,17 @@ fn unresolved_name(message: &str) -> Option<&str> {
         .map(|(_, rest)| rest)?;
 
     rest.split_once('\'').map(|(name, _)| name)
+}
+
+/// Whether a source writes `new Name`: the name is then a value the
+/// file reads, not a type alone.
+fn constructs(src: &str, name: &str) -> bool {
+    src.match_indices("new ").any(|(i, _)| {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let rest = src[i + "new ".len()..].trim_start();
+
+        !src[..i].ends_with(word) && rest.starts_with(name) && !rest[name.len()..].starts_with(word)
+    })
 }
 
 #[cfg(test)]

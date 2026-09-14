@@ -2283,6 +2283,75 @@ pub(crate) fn an_unresolved_name_offers_the_import_that_binds_it() {
     );
 }
 
+/// `Unknown type 'Point'` on an annotation: the quick fix imports the
+/// name as a type, joins an `import { ... }` line the file already has
+/// for the module, and keeps the value form where the file also writes
+/// `new Point`.
+#[test]
+pub(crate) fn an_unresolved_type_name_offers_the_type_import() {
+    let point = "export struct Point as\n    x: number\nend\n\nexport type Pair = { a: number }\n\nexport function other(): number\n    return 1\nend\n";
+    let fix = |src: &str, message: &str| -> Vec<(String, Value)> {
+        let st = super::support::files(&[("file:///point.aly", point), ("file:///use.aly", src)]);
+        let report = json!({ "message": message });
+
+        st.import_actions("file:///use.aly", &[report])
+            .iter()
+            .map(|a| {
+                (
+                    a["title"].as_str().unwrap_or_default().to_string(),
+                    a["edit"]["changes"]["file:///use.aly"][0].clone(),
+                )
+            })
+            .collect()
+    };
+    let unknown = "TypeError: Unknown type 'Point'";
+    let fresh = json!({
+        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+        "newText": "import { type Point } from \"./point\"\n",
+    });
+
+    // A struct an annotation alone names imports as a type, on a fresh
+    // line.
+    assert_eq!(
+        fix("local p: Point = nil\nprint(p)\n", unknown),
+        [(
+            "Add `import { type Point } from \"./point\"`".to_string(),
+            fresh.clone()
+        )]
+    );
+    // The file also constructs it: the value form binds the type too.
+    assert_eq!(
+        fix("local p: Point = new Point { x = 1 }\nprint(p)\n", unknown)[0].0,
+        "Add `import { Point } from \"./point\"`"
+    );
+    // A `new PointList` is another name.
+    assert_eq!(
+        fix(
+            "local p: Point = new PointList { x = 1 }\nprint(p)\n",
+            unknown
+        )[0]
+        .0,
+        "Add `import { type Point } from \"./point\"`"
+    );
+    // The module is imported already: the name joins that line.
+    let src = "import { other } from \"./point\"\n\nlocal p: Point = nil\nprint(p, other)\n";
+    assert_eq!(
+        fix(src, unknown),
+        [(
+            "Add `import { type Point } from \"./point\"`".to_string(),
+            json!({
+                "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 31 } },
+                "newText": "import { other, type Point } from \"./point\"",
+            })
+        )]
+    );
+    // A type alias joins the same way.
+    assert_eq!(
+        fix(src, "TypeError: Unknown type 'Pair'")[0].1["newText"],
+        json!("import { other, type Pair } from \"./point\"")
+    );
+}
+
 /// `self.` inside an `impl` of an imported struct listed the fields
 /// alone: the emit writes the methods on the module's table, and the
 /// checker types that table from the module.

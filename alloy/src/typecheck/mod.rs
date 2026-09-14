@@ -809,14 +809,7 @@ pub fn analyze(
     let per_file: Vec<(PathBuf, Vec<crate::declarations::Shape>)> = files
         .iter()
         .map(|f| {
-            let mut shapes = crate::declarations::shapes(&f.source);
-            let rest: Vec<_> = known
-                .shapes
-                .iter()
-                .filter(|s| !shapes.iter().any(|h| h.name() == s.name()))
-                .cloned()
-                .collect();
-            shapes.extend(rest);
+            let mut shapes = shapes_in_reach(&f.source, &known.shapes);
 
             for shape in &mut shapes {
                 let crate::declarations::Shape::Struct { name, fields, .. } = shape else {
@@ -847,7 +840,19 @@ pub fn analyze(
             .find(|f| f.rel == d.rel)
             .map(|f| f.source.as_str());
         let source = whole.and_then(|s| s.lines().nth(d.line.saturating_sub(1)));
-        d.message = friendly_type_message(&d.message, &known, source, d.col);
+        let shapes = per_file
+            .iter()
+            .find(|(rel, _)| *rel == d.rel)
+            .map_or(known.shapes.as_slice(), |(_, s)| s.as_slice());
+        // Two enums of one variant set print alike; the fold names the
+        // first it knows, so the file's own come first.
+        let reach = crate::shapes::Known {
+            shapes: shapes.to_vec(),
+            interfaces: known.interfaces.clone(),
+            namespaces: known.namespaces.clone(),
+            tables: known.tables.clone(),
+        };
+        d.message = friendly_type_message(&d.message, &reach, source, d.col);
 
         if let Some(text) = whole
             && let Some((message, at)) = rewrite_emitted_name(&d.message, text, d.line)
@@ -861,11 +866,6 @@ pub fn analyze(
 
             continue;
         }
-
-        let shapes = per_file
-            .iter()
-            .find(|(rel, _)| *rel == d.rel)
-            .map_or(known.shapes.as_slice(), |(_, s)| s.as_slice());
 
         if let Some(text) = whole
             && let Some(better) = resite_report(&d.message, shapes, text, d.line, d.col)
@@ -1001,6 +1001,31 @@ pub fn analyze(
     keep_innermost(&mut analysis.diagnostics);
 
     Ok(analysis)
+}
+
+/// The shapes one file reaches, nearest first: the ones it declares,
+/// then the ones its text names, as an import does, then the rest of
+/// the project. Two enums with one variant set print alike, and a fold
+/// names the first it meets.
+fn shapes_in_reach(
+    source: &str,
+    all: &[crate::declarations::Shape],
+) -> Vec<crate::declarations::Shape> {
+    let mut shapes = crate::declarations::shapes(source);
+    let names = |s: &crate::declarations::Shape| !shapes.iter().any(|h| h.name() == s.name());
+    let mut rest: Vec<_> = all.iter().filter(|s| names(s)).cloned().collect();
+    let words: Vec<&str> = source
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .collect();
+    let mentioned = |s: &crate::declarations::Shape| {
+        let last = s.name().rsplit('.').next().unwrap_or(s.name());
+
+        words.contains(&last)
+    };
+    rest.sort_by_key(|s| !mentioned(s));
+    shapes.extend(rest);
+
+    shapes
 }
 
 /// The names the fold may use: every struct, enum, mapped alias, and
@@ -1234,6 +1259,34 @@ mod tests {
         assert_eq!((d.line, d.col), (0, 0));
         assert_eq!(d.kind, "TypeError");
         assert!(parse_line("[INFO] Loading definitions file: @roblox - a.d.luau").is_none());
+    }
+
+    /// Two enums with one variant set print alike. The file imports
+    /// `Opt`, so `Opt` stands before `Ns.Opt2` for the fold, whatever
+    /// the order of the project's files.
+    #[test]
+    fn the_shapes_a_file_names_come_first() {
+        let variants = vec![
+            ("Some".to_string(), vec!["T".to_string()]),
+            ("Nil".to_string(), vec![]),
+        ];
+        let all = vec![
+            crate::declarations::Shape::Enum {
+                name: "Ns.Opt2".into(),
+                generics: vec!["T".into()],
+                variants: variants.clone(),
+            },
+            crate::declarations::Shape::Enum {
+                name: "Opt".into(),
+                generics: vec!["T".into()],
+                variants,
+            },
+        ];
+        let source = "import { Opt } from \"./opt\"\nlocal a = Opt.Some(1)\n";
+        let reach = shapes_in_reach(source, &all);
+        let names: Vec<&str> = reach.iter().map(|s| s.name()).collect();
+
+        assert_eq!(names, ["Opt", "Ns.Opt2"]);
     }
 
     /// A `.d.aly` reaches the checker as definitions, and a report on

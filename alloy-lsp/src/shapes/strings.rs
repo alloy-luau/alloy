@@ -92,6 +92,9 @@ pub(crate) fn balanced_len(text: &str) -> Option<usize> {
                 }
             }
             '\n' | ';' if depth == 0 => return Some(k),
+            // A diagnostic quotes a type; the quote that closes it is
+            // no part of the type.
+            '\'' | '`' if depth == 0 => return Some(k),
             _ => {}
         }
     }
@@ -291,6 +294,9 @@ pub(crate) fn head_of(text: &str, where_at: usize) -> (usize, &str) {
             '(' | '{' | '[' => depth += 1,
             ')' | '}' | ']' => depth -= 1,
             ':' if depth == 0 && line[k + 1..].starts_with(' ') => start = k + 2,
+            // A diagnostic quotes the type on one line with its
+            // sentence: `Expected this to be '{ ... } where ...'`.
+            '\'' | '`' if depth == 0 => start = k + 1,
             _ => {}
         }
     }

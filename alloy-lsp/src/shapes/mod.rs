@@ -2571,6 +2571,29 @@ mod tests {
         );
     }
 
+    /// `alloy flux` prints a report on one line, with the type inside
+    /// quotes. The head of a clause is the quoted type, not the line,
+    /// so the method's clause goes, and the sentence after it stays.
+    #[test]
+    fn a_one_line_report_drops_the_method_clause_of_a_generic_enum() {
+        let known = Known {
+            shapes: vec![Shape::Enum {
+                name: "Opt".into(),
+                generics: vec!["T".into()],
+                variants: vec![("Some".into(), vec!["T".into()]), ("Nil".into(), vec![])],
+            }],
+            ..Default::default()
+        };
+        let clause = "where t1 = <U>({ read _1: *error-type*, read map: t1, read tag: \"Some\" } | { read map: t1, read tag: \"Nil\" }, (any) -> U) -> { read _1: U, read map: t1, read tag: \"Some\" } | { read map: t1, read tag: \"Nil\" }";
+        let text = format!(
+            "Expected this to be '{{ read _1: string, read map: t1, read tag: \"Some\" }} | {{ read map: t1, read tag: \"Nil\" }} {clause}' but got '{{ read _1: number, read map: t1, read tag: \"Some\" }} | {{ read map: t1, read tag: \"Nil\" }} {clause}'; the 1st component of the union is `{{ read _1: number, read map: t1, read tag: \"Some\" }} {clause}`, which is not a subtype of `{{ read _1: string, read map: t1, read tag: \"Some\" }} | {{ read map: t1, read tag: \"Nil\" }} {clause}`"
+        );
+        assert_eq!(
+            fold(&text, &known),
+            "Expected this to be 'Opt<string>' but got 'Opt<number>'; the 1st component of the union is `Opt<number>`, which is not a subtype of `Opt<string>`"
+        );
+    }
+
     /// A generic enum's alias is a plain union: a payload carries its
     /// argument in a slot, and a unit prints as a table with its tag
     /// alone beside the methods. The union reads as the enum with the

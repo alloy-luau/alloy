@@ -107,10 +107,12 @@ pub(crate) fn fold_cut_array(text: &mut String) {
     while let Some(i) = text[from..].find(" where ") {
         let at = from + i;
         let (head_start, head) = head_of(text, at);
-        let Some((var_start, var, optional, quoted)) = solver_head(head_start, head) else {
+        let Some((var_start, var, optional)) = solver_head(head_start, head) else {
             from = at + 1;
             continue;
         };
+        // The head starts after the quote that opens it in a report.
+        let quoted = text[..head_start].ends_with('\'');
         let clause_start = at + " where ".len();
         let Some(mut name) = cut_name(&text[clause_start..], &var) else {
             from = at + 1;
@@ -134,20 +136,12 @@ pub(crate) fn fold_cut_array(text: &mut String) {
 }
 
 /// A `where` clause head that is one solver variable: its offset, the
-/// variable, whether it is optional, and whether a quote opens it.
-/// `None` when the head is anything else.
-fn solver_head(head_start: usize, head: &str) -> Option<(usize, String, bool, bool)> {
+/// variable, and whether it is optional. `None` when the head is
+/// anything else.
+fn solver_head(head_start: usize, head: &str) -> Option<(usize, String, bool)> {
     let lead = head.len() - head.trim_start().len();
-    let mut at = head_start + lead;
-    let mut var = head.trim();
-    let quoted = var.starts_with('\'');
-
-    if quoted {
-        at += 1;
-        var = &var[1..];
-    }
-
-    let var = var.trim_end();
+    let at = head_start + lead;
+    let var = head.trim();
     let optional = var.ends_with('?');
     let var = var.trim_end_matches('?');
 
@@ -155,7 +149,7 @@ fn solver_head(head_start: usize, head: &str) -> Option<(usize, String, bool, bo
         return None;
     }
 
-    Some((at, var.to_string(), optional, quoted))
+    Some((at, var.to_string(), optional))
 }
 
 /// The end of a `where` clause: the parsed length when the bindings are

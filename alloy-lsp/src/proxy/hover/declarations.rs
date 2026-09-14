@@ -19,31 +19,8 @@ impl Server {
         let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
             return false;
         };
-        let word = &doc.source[start..end];
-
-        // A sigil names a macro or an attribute of this project. After a
-        // dot the name is the receiver's: `Msg.Join` finds the variant
-        // through the enum's name; any other field is not ours.
-        let before = doc.source[..start].trim_end();
-        let key = if doc.source[..start].ends_with('$') || before.ends_with("macro") {
-            format!("${word}")
-        } else if doc.source[..start].ends_with('@') || before.ends_with("attribute") {
-            format!("@{word}")
-        } else if let Some(head) = before.strip_suffix('.') {
-            let at = head.len().saturating_sub(1);
-
-            if head.is_empty() || !keywords::is_word_at(&doc.source, at) {
-                return false;
-            }
-
-            let (hs, he) = keywords::word_range(&doc.source, at);
-
-            format!("{}.{word}", &doc.source[hs..he])
-        } else if doc.source[..start].ends_with(':') {
-            // `obj:method`, not the `x: T` of an annotation.
+        let Some(key) = declaration_key(&doc.source, start, end) else {
             return false;
-        } else {
-            word.to_string()
         };
 
         // An attribute or a macro is keyed by its sigil; a bare name that
@@ -258,6 +235,49 @@ fn member_methods(doc: &Doc, ns: &str, name: &str, path: &str) -> Vec<String> {
     }
 
     out
+}
+
+/*
+The name a caret asks the declaration index about: a macro or an
+attribute under its sigil, a member under `Receiver.name`, and every
+other word as itself. `None` where no declaration answers: a method
+call, `obj:m`, or a `.` with no name in front of it.
+
+The receiver stands on the caret's own line. A doc comment that ends in a
+full stop sits right above a declaration, and a read across the line
+break made `--- A round shape.` the receiver of the variant below it.
+*/
+fn declaration_key(source: &str, start: usize, end: usize) -> Option<String> {
+    let word = &source[start..end];
+    let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let before = source[line_start..start].trim_end();
+
+    if source[..start].ends_with('$') || before.ends_with("macro") {
+        return Some(format!("${word}"));
+    }
+
+    if source[..start].ends_with('@') || before.ends_with("attribute") {
+        return Some(format!("@{word}"));
+    }
+
+    if let Some(head) = before.strip_suffix('.') {
+        let at = line_start + head.len().saturating_sub(1);
+
+        if head.is_empty() || !keywords::is_word_at(source, at) {
+            return None;
+        }
+
+        let (hs, he) = keywords::word_range(source, at);
+
+        return Some(format!("{}.{word}", &source[hs..he]));
+    }
+
+    // `obj:method`, not the `x: T` of an annotation.
+    match source[..start].ends_with(':') {
+        true => None,
+
+        false => Some(word.to_string()),
+    }
 }
 
 /// Whether a line opens the `default` arm. The body may stand on the
@@ -638,6 +658,29 @@ mod tests {
         let decl = doc.decls.iter().find(|d| d.name == "P").expect("P");
 
         assert_eq!(with_member_methods(&decl.hover, &doc, "P"), decl.hover);
+    }
+
+    /// A doc comment that ends in a full stop stands right above the
+    /// name the caret is on. The dot of the sentence is no member
+    /// access, so the variant below it still reads as its own.
+    #[test]
+    fn a_doc_comment_s_full_stop_is_no_receiver() {
+        const SRC: &str = "--- A shape.\nenum Shape as\n    --- A round shape.\n    Circle\nend\n";
+        let at = SRC.find("    Circle").expect("the variant") + 4;
+        // The key was `shape.Circle`, the last word of the sentence met
+        // with the name, and no declaration stands under it.
+        assert_eq!(
+            declaration_key(SRC, at, at + "Circle".len()),
+            Some("Circle".to_string())
+        );
+
+        // A receiver on the caret's own line still names the member.
+        let src = "print(Shape.Circle)\n";
+        let at = src.find("Circle").expect("the variant");
+        assert_eq!(
+            declaration_key(src, at, at + "Circle".len()),
+            Some("Shape.Circle".to_string())
+        );
     }
 
     /// `local Point = 1` hovered as another file's `struct Point`.

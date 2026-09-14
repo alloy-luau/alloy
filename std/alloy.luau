@@ -2777,8 +2777,8 @@ function alloy.remote(spec: any): Remote
 	local attrs = spec.attrs or {}
 	-- `@unreliable` picks the event class that may drop or reorder.
 	local class = if is_function then "RemoteFunction" elseif attrs.unreliable then "UnreliableRemoteEvent" else "RemoteEvent"
-	local inst = remote_instance(spec.name, class)
-	local remote = { spec = spec, instance = inst }
+	local inst: any = nil
+	local remote = { spec = spec }
 	local limiter = attrs.ratelimit
 	-- `@validate(fn)`: the server runs it on the sender and the
 	-- arguments; a false drops the event, or answers a call with nil.
@@ -2869,103 +2869,158 @@ function alloy.remote(spec: any): Remote
 		})
 	end
 
-	if run_service():IsServer() then
-		function remote.fire(player, ...)
-			local out = outgoing(...)
-			inst:FireClient(player, table.unpack(out, 1, out.n))
+	-- Nothing the engine owns is touched until the first call. A spec
+	-- requires the module before it calls `alloy.set_testing`, so a
+	-- service lookup at load time broke every test in the file.
+	local bound = false
+
+	local function bind()
+		if bound then
+			return
 		end
-		function remote.fire_all(...)
-			local out = outgoing(...)
-			inst:FireAllClients(table.unpack(out, 1, out.n))
-		end
-		function remote.fire_except(except, ...)
-			local out = outgoing(...)
-			for _, p in game:GetService("Players"):GetPlayers() do
-				if p ~= except then
-					inst:FireClient(p, table.unpack(out, 1, out.n))
+		bound = true
+
+		-- Outside Roblox a remote has nothing to send on. Each call goes
+		-- on `remote.calls` instead, so a test that fires one still runs.
+		if testing or game == nil then
+			local calls = {}
+			remote.calls = calls
+			local function record(name: string)
+				return function(...)
+					table.insert(calls, { name = name, args = table.pack(...) })
+					return nil
 				end
 			end
+			remote.fire = record("fire")
+			remote.fire_all = record("fire_all")
+			remote.fire_except = record("fire_except")
+			remote.on = record("on")
+			remote.once = record("once")
+			remote.on_ratelimited = record("on_ratelimited")
+			local call = record("call")
+			local answer = function(...)
+				call(...)
+				return alloy.future(function()
+					return nil
+				end)
+			end
+			remote.call = answer
+			remote.wait = answer
+
+			return
 		end
-		function remote.on(handler)
-			if is_function then
-				inst.OnServerInvoke = function(player, ...)
-					local args = incoming(...)
-					if not accepted(player, table.unpack(args, 1, args.n)) then
-						return nil
+
+		inst = remote_instance(spec.name, class)
+		remote.instance = inst
+
+		if run_service():IsServer() then
+			function remote.fire(player, ...)
+				local out = outgoing(...)
+				inst:FireClient(player, table.unpack(out, 1, out.n))
+			end
+			function remote.fire_all(...)
+				local out = outgoing(...)
+				inst:FireAllClients(table.unpack(out, 1, out.n))
+			end
+			function remote.fire_except(except, ...)
+				local out = outgoing(...)
+				for _, p in game:GetService("Players"):GetPlayers() do
+					if p ~= except then
+						inst:FireClient(p, table.unpack(out, 1, out.n))
 					end
-					local result = handler(player, table.unpack(args, 1, args.n))
-					if type(result) == "table" and getmetatable(result) == Future then
-						return alloy.await(result)
+				end
+			end
+			function remote.on(handler)
+				if is_function then
+					inst.OnServerInvoke = function(player, ...)
+						local args = incoming(...)
+						if not accepted(player, table.unpack(args, 1, args.n)) then
+							return nil
+						end
+						local result = handler(player, table.unpack(args, 1, args.n))
+						if type(result) == "table" and getmetatable(result) == Future then
+							return alloy.await(result)
+						end
+						return result
 					end
-					return result
+					return
 				end
-				return
-			end
-			return inst.OnServerEvent:Connect(function(player, ...)
-				local args = incoming(...)
-				if accepted(player, table.unpack(args, 1, args.n)) then
-					handler(player, table.unpack(args, 1, args.n))
-				end
-			end)
-		end
-		function remote.on_ratelimited(handler)
-			on_limited = handler
-		end
-		function remote.call(player, ...)
-			local out = outgoing(...)
-			return timed(function()
-				return inst:InvokeClient(player, table.unpack(out, 1, out.n))
-			end)
-		end
-	else
-		function remote.fire(...)
-			local out = outgoing(...)
-			inst:FireServer(table.unpack(out, 1, out.n))
-		end
-		function remote.on(handler)
-			if is_function then
-				inst.OnClientInvoke = function(...)
+				return inst.OnServerEvent:Connect(function(player, ...)
 					local args = incoming(...)
-					return handler(table.unpack(args, 1, args.n))
-				end
-				return
+					if accepted(player, table.unpack(args, 1, args.n)) then
+						handler(player, table.unpack(args, 1, args.n))
+					end
+				end)
 			end
-			return inst.OnClientEvent:Connect(function(...)
-				local args = incoming(...)
-				handler(table.unpack(args, 1, args.n))
-			end)
+			function remote.on_ratelimited(handler)
+				on_limited = handler
+			end
+			function remote.call(player, ...)
+				local out = outgoing(...)
+				return timed(function()
+					return inst:InvokeClient(player, table.unpack(out, 1, out.n))
+				end)
+			end
+		else
+			function remote.fire(...)
+				local out = outgoing(...)
+				inst:FireServer(table.unpack(out, 1, out.n))
+			end
+			function remote.on(handler)
+				if is_function then
+					inst.OnClientInvoke = function(...)
+						local args = incoming(...)
+						return handler(table.unpack(args, 1, args.n))
+					end
+					return
+				end
+				return inst.OnClientEvent:Connect(function(...)
+					local args = incoming(...)
+					handler(table.unpack(args, 1, args.n))
+				end)
+			end
+			function remote.call(...)
+				local out = outgoing(...)
+				return timed(function()
+					return inst:InvokeServer(table.unpack(out, 1, out.n))
+				end)
+			end
 		end
-		function remote.call(...)
-			local out = outgoing(...)
-			return timed(function()
-				return inst:InvokeServer(table.unpack(out, 1, out.n))
+
+		function remote.once(handler)
+			local conn
+			conn = remote.on(function(...)
+				if conn then
+					conn:Disconnect()
+				end
+				handler(...)
+			end)
+			return conn
+		end
+
+		function remote.wait()
+			return alloy.future(function()
+				local thread = coroutine.running()
+				local packed
+				remote.once(function(...)
+					packed = table.pack(...)
+					task_lib.spawn(thread)
+				end)
+				coroutine.yield()
+				return table.unpack(packed, 1, packed.n)
 			end)
 		end
 	end
 
-	function remote.once(handler)
-		local conn
-		conn = remote.on(function(...)
-			if conn then
-				conn:Disconnect()
-			end
-			handler(...)
-		end)
-		return conn
-	end
+	-- A read of any method binds the remote, so the first call is where
+	-- the engine, or the record of the call, comes in.
+	setmetatable(remote, {
+		__index = function(t, key)
+			bind()
 
-	function remote.wait()
-		return alloy.future(function()
-			local thread = coroutine.running()
-			local packed
-			remote.once(function(...)
-				packed = table.pack(...)
-				task_lib.spawn(thread)
-			end)
-			coroutine.yield()
-			return table.unpack(packed, 1, packed.n)
-		end)
-	end
+			return rawget(t, key)
+		end,
+	})
 
 	return (remote :: any) :: Remote
 end

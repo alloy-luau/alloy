@@ -657,6 +657,44 @@ impl State {
                         }
                     }
 
+                    // A struct matches as one pattern over its fields:
+                    // `Vec2 { x, y }`, where a name alone binds the
+                    // field. Nothing else of the scope is an arm.
+                    MatchKind::Struct(name) => {
+                        let inside = context::impl_target(&doc.source, offset);
+                        let fields = self.struct_fields(uri, name, inside.as_deref() == Some(name));
+                        let slots: Vec<String> = fields
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| format!("${{{}:{}}}", i + 1, f.name))
+                            .collect();
+                        let insert = match slots.is_empty() {
+                            true => format!("{name} {{ }}"),
+
+                            false => format!("{name} {{ {} }}", slots.join(", ")),
+                        };
+                        let listed: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                        let detail = match listed.is_empty() {
+                            true => format!("{name} {{ }}"),
+
+                            false => format!("{name} {{ {} }}", listed.join(", ")),
+                        };
+                        items.push(snippet(
+                            &format!("{name} {{ }}"),
+                            &insert,
+                            20,
+                            &detail,
+                            Some(format!("A pattern over the fields of `struct {name}`.")),
+                            from,
+                        ));
+                        items.push(word(
+                            "_",
+                            14,
+                            Some("Matches anything without binding it.".to_string()),
+                            from,
+                        ));
+                    }
+
                     MatchKind::Result => {
                         for (label, insert, what) in [
                             ("Ok", "Ok(${1:v})", "The success case of a `Result`."),
@@ -1352,6 +1390,10 @@ impl State {
             return MatchKind::Enum(name.to_string());
         }
 
+        if head.contains("struct ") {
+            return MatchKind::Struct(name.to_string());
+        }
+
         if head.contains("Result<") {
             return MatchKind::Result;
         }
@@ -1374,6 +1416,17 @@ impl State {
 
         if matches!(head.as_str(), "Ok" | "Err") {
             return MatchKind::Result;
+        }
+
+        // `new Vec2 { ... }`: the constructor names the type.
+        if let Some(rest) = t.strip_prefix("new ") {
+            let named: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+                .collect();
+
+            return self.kind_of_name(uri, &named);
         }
 
         if head.is_empty() || !t[head.len()..].starts_with('.') {
@@ -1694,6 +1747,8 @@ pub(crate) fn type_rank(prefers: context::Prefers, detail: &str) -> u8 {
 pub(crate) enum MatchKind {
     /// An enum in scope: its variants are the arms.
     Enum(String),
+    /// A struct in scope: one pattern over its fields.
+    Struct(String),
     /// A `Result<T, E>`: `Ok` and `Err`.
     Result,
     /// `T[]` or `Array<T>`: the array patterns.

@@ -615,6 +615,26 @@ pub(crate) fn a_case_list_holds_the_arms_of_its_own_match() {
             .contains("A variant of `enum Msg`")
     );
 }
+/// A struct scrutinee matches as one pattern over its fields. The list
+/// once read the enum alone, so a struct got `Ok`, `Err`, and `Enum`.
+#[test]
+pub(crate) fn a_struct_scrutinee_takes_a_pattern_over_its_fields() {
+    for src in [
+        "struct Alpha as\n    x: number\n    y: number\nend\nlocal s: Alpha = new Alpha { x = 1, y = 2 }\nmatch s with\n    case \nend\n",
+        "struct Alpha as\n    x: number\n    y: number\nend\nlocal s = new Alpha { x = 1, y = 2 }\nmatch s with\n    case \nend\n",
+    ] {
+        let (st, uri) = one_file(src);
+        let items = case_items(&st, uri, src);
+        let labels: Vec<&str> = items
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or(""))
+            .collect();
+
+        assert_eq!(labels, ["Alpha { }", "_", "default"], "{src}");
+        assert_eq!(items[0]["textEdit"]["newText"], "Alpha { ${1:x}, ${2:y} }");
+        assert_eq!(items[0]["detail"], "Alpha { x, y }");
+    }
+}
 #[test]
 pub(crate) fn a_result_a_literal_and_an_array_take_their_own_arms() {
     let result = "local r: Result<number, string> = Ok(1)\nmatch r with\n    case \nend\n";

@@ -526,6 +526,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // prescan fills is keyed by that rendered name.
     d.scan_namespaces(&chunk.block);
     d.check_namespaces(&chunk.block);
+    d.check_duplicate_decls(&chunk.block);
     d.check_exports(&chunk.block);
     d.check_import_places(&chunk.block);
 

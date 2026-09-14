@@ -700,6 +700,41 @@ impl<'s> Desugar<'s> {
                 .any(|m| text.contains(m.as_str()))
     }
 
+    /// Two declarations of one name in one file. Each writes a table and
+    /// a type under that name, so the second wins in silence and a use
+    /// of the first reads the other shape. One report at the second name
+    /// says which declaration holds it.
+    pub(crate) fn check_duplicate_decls(&mut self, block: &Block) {
+        let mut seen: Vec<(String, &'static str, usize)> = Vec::new();
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+
+        for stmt in &block.stmts {
+            let Some((span, kind)) = declared_kind(stmt) else {
+                continue;
+            };
+            let name = self.text_of(span).to_string();
+
+            match seen.iter().find(|(n, _, _)| *n == name) {
+                // Two namespaces of one name read their own report; see
+                // `check_namespace_names`.
+                Some((_, first, _)) if *first == kind && kind == "a namespace" => {}
+
+                Some((_, first, line)) => hits.push((
+                    span,
+                    format!(
+                        "`{name}` is already {first} on line {line}; one name holds one declaration"
+                    ),
+                )),
+
+                None => seen.push((name, kind, self.line_of(self.byte_start(span)))),
+            }
+        }
+
+        for (span, message) in hits {
+            self.diagnose(span, &message);
+        }
+    }
+
     /*
     Every call of a bounded function in the block, against the type of
     each argument: `largest<T: Ord>` asks `Ord` of the value it takes,
@@ -2759,6 +2794,68 @@ mod tests {
             .collect()
     }
 
+    /// Two declarations of one name in one file. The second wins in
+    /// silence, so a use of the first reads the other shape. The report
+    /// sits on the second name and says what holds it.
+    #[test]
+    fn one_name_holds_one_declaration() {
+        let pairs = [
+            (
+                "enum Shape as\n    Circle\nend\n",
+                "struct Shape as\n    kind: string\nend\n",
+                "`Shape` is already an enum on line 1; one name holds one declaration",
+            ),
+            (
+                "struct Shape as\n    kind: string\nend\n",
+                "enum Shape as\n    Circle\nend\n",
+                "`Shape` is already a struct on line 1; one name holds one declaration",
+            ),
+            (
+                "trait Shape as\n    function area(self): number\nend\n",
+                "interface Shape as\n    kind: string\nend\n",
+                "`Shape` is already a trait on line 1; one name holds one declaration",
+            ),
+            (
+                "interface Shape as\n    kind: string\nend\n",
+                "namespace Shape as\n    const n = 1\nend\n",
+                "`Shape` is already an interface on line 1; one name holds one declaration",
+            ),
+            (
+                "namespace Shape as\n    const n = 1\nend\n",
+                "enum Shape as\n    Circle\nend\n",
+                "`Shape` is already a namespace on line 1; one name holds one declaration",
+            ),
+            (
+                "attribute Shape on function\n",
+                "struct Shape as\n    kind: string\nend\n",
+                "`Shape` is already an attribute on line 1; one name holds one declaration",
+            ),
+        ];
+
+        for (first, second, want) in pairs {
+            let src = format!("{first}{second}");
+
+            assert!(
+                messages(&src).contains(&want.to_string()),
+                "{:?}",
+                messages(&src)
+            );
+        }
+
+        // Two namespaces of one name keep their own report, so the
+        // message does not come twice.
+        let two =
+            "namespace Shape as\n    const n = 1\nend\nnamespace Shape as\n    const m = 2\nend\n";
+        assert_eq!(
+            messages(two),
+            vec!["`Shape` is declared twice; a namespace has one name here"]
+        );
+
+        // One name per declaration is clean.
+        let ok = "enum Shape as\n    Circle\nend\nstruct Box as\n    kind: string\nend\nprint(Shape, Box)\n";
+        assert!(messages(ok).is_empty(), "{:?}", messages(ok));
+    }
+
     /// `{ T }` is Luau's array form, so a bounded `{ T }` parameter
     /// reads its elements back as `(T & Bound)`. Without that the body
     /// calls a method the checker cannot find on `T`.
@@ -3085,5 +3182,21 @@ mod future_header_tests {
         assert_eq!(settled_type("Future<nil>").as_deref(), Some("nil"));
         assert_eq!(settled_type("Future<number>").as_deref(), Some("number"));
         assert_eq!(settled_type("nil"), None);
+    }
+}
+
+/// The name a top-level declaration owns, with the word the report names
+/// it by. A `local` or a `function` shadows the Luau way, so neither is
+/// a duplicate here.
+fn declared_kind(stmt: &Stmt) -> Option<(TokSpan, &'static str)> {
+    match stmt.under_default() {
+        Stmt::Struct(d) => Some((d.name, "a struct")),
+        Stmt::Enum(d) => Some((d.name, "an enum")),
+        Stmt::Trait(d) => Some((d.name, "a trait")),
+        Stmt::Interface(d) => Some((d.name, "an interface")),
+        Stmt::Namespace(d) => Some((d.name, "a namespace")),
+        Stmt::Attribute(d) => Some((d.name, "an attribute")),
+
+        _ => None,
     }
 }

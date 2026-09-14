@@ -137,35 +137,10 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
 
     // `local root = new Node { ... }`, `local b = new Box<<number>> { }`,
     // and `new Ns.T { }` for a member of a namespace.
-    if let Some(i) = text.find("new ") {
-        let rest = text[i + "new ".len()..].trim_start();
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
-            .collect();
-
-        if declares(&name) {
-            let args = rest[name.len()..]
-                .strip_prefix("<<")
-                .and_then(|a| a.find(">>").map(|e| a[..e].to_string()));
-
-            let printed = match args {
-                Some(a) => format!("{name}<{a}>"),
-
-                None => name,
-            };
-            // `new Pair<<number>>` of `struct Pair<A, B = string>`: the
-            // source names the arguments it has to, and the type
-            // carries the rest.
-            let shapes: Vec<alloy::declarations::Shape> = doc
-                .shapes
-                .iter()
-                .chain(&doc.import_shapes)
-                .cloned()
-                .collect();
-
-            return Some(crate::shapes::fill_generic_defaults(&printed, &shapes));
-        }
+    if let Some(i) = text.find("new ")
+        && let Some(named) = constructed_type(doc, &text[i + "new ".len()..])
+    {
+        return Some(named);
     }
 
     // `local p = Point.new(1, 2)`.
@@ -213,6 +188,40 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
     let target = path.strip_suffix(".new")?;
 
     (rest[path.len()..].starts_with('(') && declares(target)).then(|| target.to_string())
+}
+
+/// The struct a `new` builds, from the text after the keyword: the
+/// name or the path, with the arguments the source wrote. `None` when
+/// no struct in reach has the name.
+pub(crate) fn constructed_type(doc: &Doc, after_new: &str) -> Option<String> {
+    let rest = after_new.trim_start();
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+
+    if !declares_a_struct(doc, &name) {
+        return None;
+    }
+
+    let args = rest[name.len()..]
+        .strip_prefix("<<")
+        .and_then(|a| a.find(">>").map(|e| a[..e].to_string()));
+    let printed = match args {
+        Some(a) => format!("{name}<{a}>"),
+
+        None => name,
+    };
+    // `new Pair<<number>>` of `struct Pair<A, B = string>`: the source
+    // names the arguments it has to, and the type carries the rest.
+    let shapes: Vec<alloy::declarations::Shape> = doc
+        .shapes
+        .iter()
+        .chain(&doc.import_shapes)
+        .cloned()
+        .collect();
+
+    Some(crate::shapes::fill_generic_defaults(&printed, &shapes))
 }
 
 /// Whether a name in reach declares a struct. `shapes` reads the top
@@ -316,7 +325,9 @@ pub(crate) fn fold_std_shapes(value: &str) -> String {
 }
 
 /// Two structs of one shape print alike, so the child may name either.
-/// The struct the line constructs is the one the reader means.
+/// The struct the line constructs is the one the reader means, and a
+/// use of the binding below reads the same `new`: Luau names a generic
+/// struct by its metatable, which carries no argument.
 pub(crate) fn prefer_constructed_struct(
     value: &str,
     doc: &Doc,
@@ -326,7 +337,18 @@ pub(crate) fn prefer_constructed_struct(
     let (fence, body) = value.split_once('\n')?;
     let inner = body.trim().strip_suffix("```")?.trim();
     let (head, printed) = inner.split_once(": ")?;
-    let named = source_type(doc, line, character)?;
+    let offset = offset_of(&doc.source, line, character)?;
+    let (start, end) = keywords::word_range(&doc.source, offset);
+    let word = &doc.source[start..end];
+    let named = source_type(doc, line, character).or_else(|| {
+        match crate::context::declared(&doc.source, start, word)? {
+            crate::context::Declared::Init(init) => {
+                constructed_type(doc, init.strip_prefix("new ")?)
+            }
+
+            crate::context::Declared::Annotation(_) => None,
+        }
+    })?;
 
     if printed == named {
         return None;
@@ -342,9 +364,6 @@ pub(crate) fn prefer_constructed_struct(
         .split_whitespace()
         .next()
         .is_some_and(|w| is_solver_variable(w.trim_end_matches('?')));
-    let offset = offset_of(&doc.source, line, character)?;
-    let (start, end) = keywords::word_range(&doc.source, offset);
-    let word = &doc.source[start..end];
 
     // The cursor is on the binding the line declares.
     (head.ends_with(word)

@@ -1279,6 +1279,22 @@ fn a_generic_struct_keeps_the_arguments_the_new_wrote() {
     );
 }
 
+/// A use of the binding below the `new` reads the same arguments: the
+/// print names the metatable, and the metatable carries none.
+#[test]
+fn a_generic_struct_keeps_its_arguments_where_the_binding_is_used() {
+    const SRC: &str =
+        "struct Box<T> as\n    v: T\nend\n\nlocal b = new Box<<number>> { v = 42 }\nprint(b)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let line = position_of(SRC, SRC.find("print(b)").expect("the use")).0;
+
+    assert_eq!(
+        prefer_constructed_struct("```alloy\nlocal b: Box\n```", doc, line, 6),
+        Some("```alloy\nlocal b: Box<number>\n```".to_string())
+    );
+}
+
 /// A function after a closed `trait` block is no member of the trait:
 /// the block's own `end` closes the head the scan found.
 #[test]

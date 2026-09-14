@@ -42,7 +42,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            let name = self.expect_name()?;
+            let name = self.attribute_name()?;
             let mut args = Vec::new();
 
             // Arguments only when `(` touches the name: `@derive(Eq)`.
@@ -64,6 +64,23 @@ impl<'a> Parser<'a> {
         }
 
         Ok(out)
+    }
+
+    /// The name of an attribute. `@M.icon` reads the module's
+    /// attribute through a path, which the grammar does not have; the
+    /// report at the dot names the import that does.
+    fn attribute_name(&mut self) -> Result<TokSpan, ParseError> {
+        let name = self.expect_name()?;
+
+        if self.at(".") && self.adjacent_prev() && self.name_at(1) {
+            let bare = self.text_at(1);
+
+            return Err(self.err(&format!(
+                "an attribute is used by its bare name; import it with `import {{ {bare} }} from ...`"
+            )));
+        }
+
+        Ok(name)
     }
 
     /// Reports if the token at the cursor touches the one before it.
@@ -112,7 +129,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                 }
             } else {
-                self.expect_name()?;
+                self.attribute_name()?;
             }
 
             out.push(TokSpan::new(start, self.pos));

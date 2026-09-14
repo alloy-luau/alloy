@@ -30,6 +30,21 @@ fn clean(src: &str) {
 
 const LIFECYCLE: &str = "enum Lifecycle as\n    Init\n    Start\nend\n\n";
 
+/// `@M.icon` reads an attribute through a namespace import, which the
+/// grammar does not have. One report, at the dot, names the import
+/// that does; the parser does not go on to read `.icon` as the target.
+#[test]
+fn a_dotted_attribute_names_the_bare_import() {
+    let got = one(
+        "import * as M from \"./defs\"\n\n@M.icon(\"x\")\nstruct NsUse as\n    x: number\nend\n",
+    );
+
+    assert_eq!(
+        got,
+        "an attribute is used by its bare name; import it with `import { icon } from ...`"
+    );
+}
+
 /// Every clause form parses and holds.
 #[test]
 fn a_met_contract_reports_nothing() {

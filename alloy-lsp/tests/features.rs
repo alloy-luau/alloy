@@ -177,9 +177,18 @@ impl Session {
     /// analyzed anything, so the first batch proves little.
     fn diagnostics(&mut self, uri: &str, want: impl Fn(&[String]) -> bool) -> Vec<String> {
         let deadline = Instant::now() + Duration::from_secs(30);
+        // A batch the server sent while a request was in flight is
+        // already in hand: the editor keeps the set it has, and the
+        // server publishes the same one no second time.
+        let held: Vec<Value> = self.seen.clone();
+        let mut from_seen = held.into_iter();
 
         while Instant::now() < deadline {
-            let m = self.next();
+            let m = match from_seen.next() {
+                Some(held) => held,
+
+                None => self.next(),
+            };
 
             if m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri {
                 let messages: Vec<String> = m["params"]["diagnostics"]

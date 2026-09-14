@@ -60,6 +60,22 @@ pub(crate) fn child(line: u32, message: &str, severity: u64) -> Value {
     })
 }
 #[test]
+pub(crate) fn a_set_the_editor_already_holds_is_not_published_again() {
+    // Opening 60 files published four sets each: the workspace pass,
+    // the editor's own open, and the child's answer to both.
+    let mut st = State::default();
+    let uri = "file:///t.aly";
+    let empty: Vec<Value> = Vec::new();
+    let one = vec![child(1, "TypeError: Unknown global", 1)];
+
+    assert!(!st.already_published(uri, &empty));
+    assert!(st.already_published(uri, &empty));
+    assert!(!st.already_published(uri, &one));
+    assert!(st.already_published(uri, &one));
+    // Another file answers for itself.
+    assert!(!st.already_published("file:///other.aly", &one));
+}
+#[test]
 pub(crate) fn a_private_method_call_reads_as_private() {
     // The checker reads a call of a private method from another file
     // as a member the struct has not got; `alloy flux` prints the

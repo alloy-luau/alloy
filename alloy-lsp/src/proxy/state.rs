@@ -42,6 +42,11 @@ pub(crate) struct State {
     pub(crate) initialize_id: Option<String>,
     /// Latest child diagnostics per source URI, already mapped.
     pub(crate) child_diagnostics: HashMap<String, Vec<Value>>,
+    /// The set last published per source URI. A pass over the
+    /// workspace opens every file, the editor opens it again, and the
+    /// child answers each time: the same set again teaches the editor
+    /// nothing, so it stays here and goes no further.
+    pub(crate) published: HashMap<String, Vec<Value>>,
     pub(crate) root: Option<PathBuf>,
     /// Extensions declared anywhere under the root, read at startup.
     pub(crate) extensions: Vec<alloy::extensions::Extension>,

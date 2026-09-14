@@ -708,11 +708,32 @@ impl State {
     }
 }
 
+impl State {
+    /// Whether the editor already holds this set for the file, and
+    /// remembers it when it does not. The editor keeps the set it has
+    /// until the next one, so the same set again is no news: a pass
+    /// over the workspace opens every file, the editor opens it again,
+    /// and the child answers each of them.
+    pub(crate) fn already_published(&mut self, uri: &str, diagnostics: &[Value]) -> bool {
+        if self
+            .published
+            .get(uri)
+            .is_some_and(|held| held == diagnostics)
+        {
+            return true;
+        }
+
+        self.published.insert(uri.to_string(), diagnostics.to_vec());
+
+        false
+    }
+}
+
 impl Server {
     /// Publishes the Alloy diagnostics and the mapped child diagnostics
     /// of one source document.
     pub(crate) fn publish(&self, uri: &str) {
-        let st = self.state.lock().expect("state");
+        let mut st = self.state.lock().expect("state");
 
         if !st.docs.contains_key(uri) {
             return;
@@ -728,6 +749,10 @@ impl Server {
 
         if let Some(doc) = st.docs.get(uri) {
             snap_ranges(&mut diagnostics, &doc.source);
+        }
+
+        if st.already_published(uri, &diagnostics) {
+            return;
         }
 
         let message = json!({

@@ -533,6 +533,7 @@ impl Server {
         let shadow = st.child_uri(uri);
         st.shadows.remove(&shadow);
         st.child_diagnostics.remove(uri);
+        st.published.remove(uri);
 
         if let Some(path) = uri_to_path(uri) {
             st.remove_mirror(&path);

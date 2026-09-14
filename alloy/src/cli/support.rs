@@ -343,8 +343,16 @@ fn data_problems(path: &Path, source: &str) -> Vec<alloy::Diagnostic> {
     out
 }
 
-/// Compiles one file the way `alloy build <file>` does.
-pub(crate) fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy::Output)> {
+/// Compiles one file the way `alloy build <file>` does. `deps` says
+/// what to do with an import into another project: `Some(true)` builds
+/// that project and writes its output, `Some(false)` compiles it
+/// without the write, and `None` leaves such an import alone, as
+/// `alloy lint` does.
+pub(crate) fn compile_file(
+    path: &str,
+    args: &[String],
+    deps: Option<bool>,
+) -> Option<(String, alloy::Output)> {
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
 
@@ -392,6 +400,51 @@ pub(crate) fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy
         Ok(mut out) => {
             out.diagnostics
                 .extend(data_problems(Path::new(path), &source));
+
+            // An import into another project builds that project first,
+            // and the require names its output, as in a project build.
+            if let Some(write) = deps {
+                let name = Path::new(Path::new(path).file_name().unwrap_or_default());
+                let out_file = option(args, "--out").map(|dir| {
+                    Path::new(dir).join(alloy::build::output_for(name).unwrap_or_default())
+                });
+                let outside = alloy::build::file_outside(
+                    Path::new(path),
+                    out_file.as_deref(),
+                    &out.imports,
+                    &out.data_refs,
+                    write,
+                );
+                let silence = alloy::directives::scan(&source);
+
+                for p in outside.problems {
+                    if silence.allows_named(
+                        alloy::directives::line_of(&source, p.start as usize),
+                        Some(p.kind),
+                    ) {
+                        out.diagnostics.push(alloy::Diagnostic {
+                            start: p.start,
+                            end: p.end,
+                            message: p.message,
+                        });
+                    }
+                }
+
+                if !outside.rewrites.is_empty() {
+                    let map = |text: &str| {
+                        alloy::project::map_requires(text, |p| {
+                            outside
+                                .rewrites
+                                .iter()
+                                .find(|(spec, _)| spec == p)
+                                .map(|(_, to)| to.clone())
+                        })
+                    };
+                    out.ship = map(&out.ship);
+                    out.check = map(&out.check);
+                }
+            }
+
             out.diagnostics.sort_by_key(|d| d.start);
 
             Some((source, out))

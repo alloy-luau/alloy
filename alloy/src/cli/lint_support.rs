@@ -323,7 +323,10 @@ pub(crate) fn lint_counts(
     command: &str,
     args: &[String],
 ) -> Counts {
-    let Some((source, mut out)) = compile_file(path, args) else {
+    // `check` follows an import into another project as a project
+    // build does; `lint` reads this file alone.
+    let Some((source, mut out)) = compile_file(path, args, (command == "check").then_some(false))
+    else {
         // The compile stopped, so there is one error and no lint.
         return Counts {
             errors: 1,
@@ -336,6 +339,11 @@ pub(crate) fn lint_counts(
     let silence = alloy::directives::scan(&source);
 
     for problem in alloy::modules::import_problems_for_file(Path::new(path), None, &source) {
+        // An import into another project already reported at this span.
+        if out.diagnostics.iter().any(|d| d.start == problem.start) {
+            continue;
+        }
+
         if silence.allows_named(
             alloy::directives::line_of(&source, problem.start as usize),
             Some(problem.kind),

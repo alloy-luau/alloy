@@ -55,6 +55,9 @@ pub(crate) fn watch_roots(root: &Path, config: &Config) -> Vec<PathBuf> {
     let mut roots = vec![root.join(&config.build.input), root.join(config::FILE_NAME)];
     let tree = alloy::project::Tree::load(root, config);
 
+    // A change in a project an import leads into rebuilds it here.
+    roots.extend(alloy::build::dependency_inputs(root, config));
+
     if let Some(project) = &tree.project {
         roots.push(root.join(&project.file));
     }
@@ -219,7 +222,7 @@ fn build_one(path: &str, args: &[String]) -> ExitCode {
     let want_check = args.iter().any(|a| a == "--check");
     let want_map = args.iter().any(|a| a == "--map");
 
-    let Some((source, out)) = compile_file(path, args) else {
+    let Some((source, out)) = compile_file(path, args, Some(true)) else {
         return ExitCode::FAILURE;
     };
 

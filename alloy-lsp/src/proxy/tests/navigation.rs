@@ -896,6 +896,66 @@ fn a_trait_method_renames_the_trait_every_impl_and_the_calls() {
     );
 }
 
+/// A receiver typed by the trait reaches the method with no impl in
+/// between: a parameter bound `<T: Speaker>`, an annotation `s: Speaker`,
+/// a bound of two traits, and `self` in the trait's own default body. A
+/// call on a namespace the file never binds shares the spelling and
+/// stays as it is.
+#[test]
+fn a_receiver_typed_by_the_trait_is_a_site_of_its_method() {
+    const SRC: &str = concat!(
+        "trait Speaker as\n",
+        "    function speak(self): string\n",
+        "    function twice(self): string\n",
+        "        return self.speak() .. self.speak()\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "trait Loud as\n",
+        "    function shout(self): string\n",
+        "end\n",
+        "\n",
+        "function announce<T: Speaker>(s: T): string\n",
+        "    return s.speak()\n",
+        "end\n",
+        "\n",
+        "function direct(s: Speaker): string\n",
+        "    return s:speak()\n",
+        "end\n",
+        "\n",
+        "function both<U: Loud & Speaker>(s: U): string\n",
+        "    return s.speak()\n",
+        "end\n",
+        "\n",
+        "print(Log.speak(\"x\"))\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let sites: Vec<usize> = SRC.match_indices("speak(").map(|(i, _)| i).collect();
+    // The declaration, the two `self` calls, the bound, the annotation,
+    // and the two-trait bound: `Log.speak` is not one of them.
+    let wanted = &sites[..6];
+    assert_eq!(sites.len(), 7);
+
+    for at in [wanted[0], wanted[3], wanted[4]] {
+        let Some(Target::Method { trait_name, name }) = st.name_target(uri, at) else {
+            panic!("no trait method at {at}");
+        };
+        assert_eq!((trait_name.as_str(), name.as_str()), ("Speaker", "speak"));
+    }
+
+    let edit = st.method_edits("Speaker", "speak", "talk").expect("edit");
+    let got: Vec<usize> = edit["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .map(|e| {
+            let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+            offset_of(SRC, line, column).expect("offset")
+        })
+        .collect();
+    assert_eq!(got, wanted, "{edit}");
+}
+
 /// A definitions file names a type with no import of it, so the rename
 /// walk, which reads the import lists, left it behind. An ambient
 /// declaration stands in scope everywhere, and only a type reaches one:

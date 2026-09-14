@@ -1036,10 +1036,17 @@ impl State {
         }
 
         // `b:hello()`: the struct the receiver holds says which trait,
-        // through its own `impl` of it.
+        // through its own `impl` of it. `s.speak()` reads the same way
+        // where a call follows; `p.x` alone is a field.
         let head = doc.source[..s].trim_end();
+        let colon = head.ends_with(':') && !head.ends_with("::");
+        let dot = head.ends_with('.')
+            && !head.ends_with("..")
+            && doc.source[e..]
+                .trim_start()
+                .starts_with(['(', '{', '"', '\'', '`']);
 
-        if !head.ends_with(':') || head.ends_with("::") {
+        if !colon && !dot {
             return None;
         }
 
@@ -1055,6 +1062,10 @@ impl State {
                 continue;
             };
             let mine = match (&owner, &site.target) {
+                // The receiver is the trait itself, or a type parameter
+                // the trait bounds: `s: Speaker`, `<T: Speaker>`.
+                (Some(o), _) if *o == trait_name || bound_by(&doc.source, o, &trait_name) => true,
+
                 (Some(o), Some(t)) => o == t,
 
                 // A receiver with no type of its own: one trait that
@@ -1129,11 +1140,17 @@ impl State {
                 .map(|(_, s)| text_edit(&d.source, s.at.0, s.at.1, new_name))
                 .collect();
 
-            for (start, end, receiver) in method_calls(&d.source, name) {
+            for (start, end, receiver, dotted) in method_calls(&d.source, name) {
                 let holds = match receiver_type(self, d, receiver) {
-                    Some(ty) => targets.contains(&ty.as_str()),
+                    Some(ty) => {
+                        targets.contains(&ty.as_str())
+                            || ty == trait_name
+                            || bound_by(&d.source, &ty, trait_name)
+                    }
 
-                    None => only_one,
+                    // `Ns.f()` reads a namespace the file never binds;
+                    // only a `:` call with no type still means the trait.
+                    None => only_one && !dotted,
                 };
 
                 if holds {
@@ -1897,9 +1914,32 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
     out
 }
 
-/// Every `recv:name(` call of a source: the byte range of the method's
-/// name, and a byte of the receiver in front of it.
-fn method_calls(src: &str, name: &str) -> Vec<(usize, usize, usize)> {
+/// Whether a source bounds the type parameter `ty` by `trait_name`:
+/// `<T: Trait>` or `<T: A & B>` anywhere in the file.
+///
+/// ponytail: a file-wide scan; two functions that bound one parameter
+/// name by different traits read as both. Walk the enclosing header
+/// if that shows up.
+fn bound_by(src: &str, ty: &str, trait_name: &str) -> bool {
+    src.match_indices('<').any(|(i, _)| {
+        let Some(end) = src[i..].find('>') else {
+            return false;
+        };
+
+        src[i + 1..i + end].split(',').any(|part| {
+            let Some((name, bounds)) = part.split_once(':') else {
+                return false;
+            };
+
+            name.trim() == ty && bounds.split(['&', '+']).any(|b| b.trim() == trait_name)
+        })
+    })
+}
+
+/// Every `recv:name(` and `recv.name(` call of a source: the byte range
+/// of the method's name, a byte of the receiver in front of it, and
+/// whether a `.` joins them.
+fn method_calls(src: &str, name: &str) -> Vec<(usize, usize, usize, bool)> {
     let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
         return Vec::new();
     };
@@ -1911,7 +1951,9 @@ fn method_calls(src: &str, name: &str) -> Vec<(usize, usize, usize)> {
             continue;
         }
 
-        if !matches!(toks[i - 1].text(src), ":" | "?:") {
+        let sep = toks[i - 1].text(src);
+
+        if !matches!(sep, ":" | "?:" | "." | "?.") {
             continue;
         }
 
@@ -1923,7 +1965,12 @@ fn method_calls(src: &str, name: &str) -> Vec<(usize, usize, usize)> {
         });
 
         if opens_a_call {
-            out.push((t.start as usize, t.end as usize, toks[i - 1].start as usize));
+            out.push((
+                t.start as usize,
+                t.end as usize,
+                toks[i - 1].start as usize,
+                sep.ends_with('.'),
+            ));
         }
     }
 

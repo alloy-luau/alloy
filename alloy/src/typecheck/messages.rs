@@ -341,6 +341,20 @@ fn arity_counts(message: &str) -> Option<(usize, usize)> {
     Some((expects, given))
 }
 
+/// The verbs a `remote` declaration writes. Each is a plain field of the
+/// remote's table, and none of them takes `self`.
+const REMOTE_VERBS: &[&str] = &[
+    "fire",
+    "fire_all",
+    "fire_except",
+    "call",
+    "on",
+    "once",
+    "off",
+    "wait",
+    "on_ratelimited",
+];
+
 /// The argument-count message the source earns. A `:` call passes the
 /// receiver as the first argument, which the reader did not write, so
 /// both counts lose it. A `.` call of a method is one argument short
@@ -350,8 +364,33 @@ fn rewrite_arity(message: &str, line: &str, col: usize) -> Option<String> {
         return None;
     }
 
-    let (expects, given) = arity_counts(message)?;
     let (sep, receiver, member) = call_head(line, col)?;
+
+    // A remote's verb takes no `self`, so the colon sends the remote
+    // where the first argument belongs and both counts hold it. The
+    // separator is the whole mistake, at any count, and the lint that
+    // reads a static says it in these words.
+    if sep == ':' && REMOTE_VERBS.contains(&member.as_str()) {
+        // `await Divide:call(...)` hands the whole head over, and the
+        // remote is the path at the end of it. A path that starts
+        // lowercase names a value, and a value takes its `:`.
+        let path: String = receiver
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        if path.starts_with(|c: char| c.is_uppercase()) {
+            return Some(format!(
+                "`{member}` is not a method; call it with `{path}.{member}(...)`, not `{path}:{member}(...)`"
+            ));
+        }
+    }
+
+    let (expects, given) = arity_counts(message)?;
 
     if sep == '.' {
         // `expects 1 to 2 arguments` is a range: the call is short of
@@ -2115,6 +2154,60 @@ end
                 1
             )
             .contains("Function expects 1 to 2")
+        );
+    }
+
+    /// A remote's verb is a field and takes no `self`, so the colon is
+    /// the mistake at every count: zero parameters, two parameters, and
+    /// a remote a namespace path names.
+    #[test]
+    fn a_colon_call_of_a_remote_verb_names_the_dot() {
+        let known = crate::shapes::Known::default();
+        let dot = |message: &str, line: &str, col: usize| {
+            friendly_type_message(message, &known, Some(line), col)
+        };
+
+        assert_eq!(
+            dot(
+                "Argument count mismatch. Function expects 0 arguments, but 1 is specified",
+                "Nudge:fire()",
+                1
+            ),
+            "`fire` is not a method; call it with `Nudge.fire(...)`, not `Nudge:fire(...)`"
+        );
+        assert_eq!(
+            dot(
+                "Argument count mismatch. Function expects 1 argument, but 2 are specified",
+                "Ping:fire(\"hello\")",
+                1
+            ),
+            "`fire` is not a method; call it with `Ping.fire(...)`, not `Ping:fire(...)`"
+        );
+        assert_eq!(
+            dot(
+                "Argument count mismatch. Function expects 2 arguments, but 3 are specified",
+                "    local r = await Divide:call(6, 2)",
+                15
+            ),
+            "`call` is not a method; call it with `Divide.call(...)`, not `Divide:call(...)`"
+        );
+        assert_eq!(
+            dot(
+                "Argument count mismatch. Function expects 1 argument, but 2 are specified",
+                "M.Ns.R:fire(\"hi\")",
+                1
+            ),
+            "`fire` is not a method; call it with `M.Ns.R.fire(...)`, not `M.Ns.R:fire(...)`"
+        );
+        // A lowercase receiver names a value, and a method of a value
+        // takes its `:`. The count rewrite drops the receiver instead.
+        assert_eq!(
+            dot(
+                "Argument count mismatch. Function expects 2 arguments, but 3 are specified",
+                "weapon:fire(target, 2)",
+                1
+            ),
+            "Argument count mismatch. `fire` takes 1 argument, but 2 are specified"
         );
     }
 

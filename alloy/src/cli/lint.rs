@@ -5,7 +5,7 @@
 use std::process::ExitCode;
 
 use crate::cli::lint_support::{
-    apply_header_as_fixes, apply_lint_fixes, lint_context, lint_one, list_lints, offer_fixes,
+    apply_header_as_fixes, apply_lint_fixes, lint_context, lint_files, list_lints, offer_fixes,
     print_lints,
 };
 use crate::cli::support::{is_source, positionals, print_diagnostics};
@@ -23,13 +23,15 @@ pub(crate) fn lint_cmd(args: &[String]) -> ExitCode {
     let args = &args[..];
     let positional = positionals(args);
 
-    if let Some(file) = positional.first() {
-        if !is_source(file) {
-            fail(&format!("{file} is not an .aly file"));
-            return usage();
+    if !positional.is_empty() {
+        for file in &positional {
+            if !is_source(file) {
+                fail(&format!("{file} is not an .aly file"));
+                return usage();
+            }
         }
 
-        return lint_one(file, &lint_config, None, args);
+        return lint_files("lint", &positional, &lint_config, args);
     }
 
     let report = match alloy::build::check_project(&root, &config) {

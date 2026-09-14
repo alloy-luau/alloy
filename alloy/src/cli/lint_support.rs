@@ -240,6 +240,56 @@ pub(crate) fn lint_one(
     }
 }
 
+/// Lints or checks every file the command line names, and prints one
+/// summary line under `command`. A second file used to be dropped, so
+/// its errors never reached the report.
+pub(crate) fn lint_files(
+    command: &str,
+    files: &[String],
+    lint_config: &LintConfig,
+    args: &[String],
+) -> ExitCode {
+    let counts = count_files(command, files, lint_config, args);
+    let p = Painter::for_stderr();
+    let clean = is_clean(&counts, args);
+    let line = p.summary(&[
+        (files.len(), "files", ui::DIM),
+        (counts.errors, "errors", ui::RED),
+        (counts.warnings, "warnings", ui::AMBER),
+        (counts.denied, "denied", ui::RED),
+    ]);
+    eprintln!(
+        "{} {line}",
+        if clean {
+            p.ok(command)
+        } else {
+            p.fail(command)
+        }
+    );
+
+    if clean {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// The counts over every file the command line names.
+pub(crate) fn count_files(
+    command: &str,
+    files: &[String],
+    lint_config: &LintConfig,
+    args: &[String],
+) -> Counts {
+    let mut counts = Counts::default();
+
+    for file in files {
+        counts += lint_counts(file, lint_config, command, args);
+    }
+
+    counts
+}
+
 /// What one file's compile and lints counted. A command that names
 /// several files adds these up and prints one summary line.
 #[derive(Default)]
@@ -701,5 +751,58 @@ pub(crate) fn offer_fixes(
                 "`alloy {command} --fix` applies {n} of these rewrites"
             ))
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `alloy check a.aly b.aly` and `alloy lint a.aly b.aly` used to
+    /// compile the first file alone, so the second file's errors never
+    /// reached the report.
+    #[test]
+    fn a_command_reads_every_file_the_command_line_names() {
+        let dir = std::env::temp_dir().join(format!("alloy-check-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("the folder");
+        std::fs::write(
+            dir.join("alloy.toml"),
+            "[build]\nin = \"src\"\nout = \"build\"\n",
+        )
+        .expect("the file");
+        std::fs::write(dir.join("src/clean.aly"), "print(1)\n").expect("the file");
+        // A struct and an enum of one name: the duplicate check reports.
+        std::fs::write(
+            dir.join("src/bad.aly"),
+            "struct Thing as\n    v: number\nend\nenum Thing as\n    A\nend\nprint(Thing)\n",
+        )
+        .expect("the file");
+
+        let clean = dir.join("src/clean.aly").display().to_string();
+        let bad = dir.join("src/bad.aly").display().to_string();
+        let config = LintConfig::default();
+
+        assert_eq!(
+            count_files("check", std::slice::from_ref(&clean), &config, &[]).errors,
+            0
+        );
+        assert_eq!(
+            count_files("check", std::slice::from_ref(&bad), &config, &[]).errors,
+            1
+        );
+
+        // The second file is read, whichever place it takes.
+        assert_eq!(
+            count_files("check", &[clean.clone(), bad.clone()], &config, &[]).errors,
+            1
+        );
+        assert_eq!(
+            count_files("check", &[bad.clone(), clean.clone()], &config, &[]).errors,
+            1
+        );
+        assert_eq!(count_files("lint", &[clean, bad], &config, &[]).errors, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1251,20 +1251,11 @@ impl<'s> Desugar<'s> {
     /// foreign class has no class call of Alloy's, so `new` stays optional
     /// there.
     pub(crate) fn check_struct_call(&mut self, e: &Expr) {
-        let (base, links) = flatten(e);
-
-        if let Expr::Name(n) = base
-            && self.is_struct_call(e)
-        {
-            let name = self.text_of(*n).to_string();
-            let raw = matches!(
-                links.first(),
-                Some(Link::Plain(Step::Call {
-                    args: CallArgs::Table(_),
-                    ..
-                }))
-            );
-            let ctor = self.structs_with_new.get(&name).cloned();
+        if let Some((at, resolved, raw)) = self.called_struct(e) {
+            // The report names the struct the way the source writes it:
+            // an import alias, or a namespace path of any depth.
+            let name = self.text_of(at).to_string();
+            let ctor = self.structs_with_new.get(&resolved).cloned();
             let message = match (raw, ctor) {
                 (true, Some(_)) => {
                     format!("`{name}` writes a constructor: construct it with `new {name}(...)`")
@@ -1281,11 +1272,49 @@ impl<'s> Desugar<'s> {
                 ),
             };
             self.diagnostics.push(Diagnostic {
-                start: self.byte_start(*n),
-                end: self.byte_end(*n),
+                start: self.byte_start(at),
+                end: self.byte_end(at),
                 message,
             });
         }
+    }
+
+    /// The struct a construction without `new` names: the span the
+    /// report lands on, the name every struct index is keyed by, and
+    /// whether the source wrote the fields form, `Name { ... }`.
+    ///
+    /// The written name may be a bare name, an import alias, or a
+    /// namespace path of any depth, so the whole path in front of the
+    /// call folds into one span and resolves the way `new Ns.T { }`
+    /// does. A name that no struct declares gives `None`, and a call of
+    /// an ordinary function with a table stays a call.
+    pub(crate) fn called_struct(&self, e: &Expr) -> Option<(TokSpan, String, bool)> {
+        let (base, links) = flatten(e);
+        let Expr::Name(n) = base else {
+            return None;
+        };
+        let mut span = *n;
+        let mut rest = links.as_slice();
+
+        // The links read in source order, so every field step in front
+        // of the call is part of the path the source wrote.
+        while let [Link::Plain(Step::Field(f)), tail @ ..] = rest {
+            span = TokSpan::new(span.start as usize, f.end as usize);
+            rest = tail;
+        }
+
+        let Some(Link::Plain(Step::Call {
+            method: None, args, ..
+        })) = rest.first()
+        else {
+            return None;
+        };
+        let raw = matches!(args, CallArgs::Table(_));
+        let (at, name) = self.constructed_struct(&Expr::Name(span))?;
+
+        self.declared_fields(&name)
+            .is_some()
+            .then_some((at, name, raw))
     }
 
     /// `new Name { ... }` with no parentheses on a struct: the table is
@@ -2609,6 +2638,60 @@ mod tests {
         );
         // The header has no Luau form and never reaches the output.
         assert!(!out.ship.contains("impl"), "{}", out.ship);
+    }
+
+    /*
+    A struct constructs through `new` alone, and the report said so only
+    for a bare name this file declares. The check keyed on that name, so
+    an import and a namespace path both went silent and the Luau checker
+    reported the call instead.
+
+    The written path now resolves the way `new` resolves it, and the
+    report names the path the source wrote.
+    */
+    #[test]
+    fn a_construction_without_new_reports_through_an_import_and_a_path() {
+        // A namespace path this file declares, at two depths.
+        let src = "namespace Ns as\n    struct T as\n        v: number,\n    end\n    namespace In as\n        struct D as\n            w: number,\n        end\n    end\nend\nlocal t = Ns.T { v = 1 }\nlocal d = Ns.In.D { w = 2 }\nprint(t, d)\n";
+
+        assert_eq!(
+            messages(src),
+            vec![
+                "construct `Ns.T` with `new Ns.T { ... }`",
+                "construct `Ns.In.D` with `new Ns.In.D { ... }`",
+            ]
+        );
+
+        // An imported struct, bare and under an alias. The fields index
+        // carries both names, the way the import binds them.
+        let options = crate::EmitOptions {
+            import_struct_fields: vec![
+                ("Point".to_string(), vec![("x".to_string(), false)]),
+                ("P".to_string(), vec![("x".to_string(), false)]),
+            ],
+            ..crate::EmitOptions::default()
+        };
+        let src = "import { Point, Point as P } from \"./geo\"\nlocal a = Point { x = 1 }\nlocal b = P { x = 2 }\nprint(a, b)\n";
+        let out = crate::compile_with(src, &options).unwrap();
+        let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            got,
+            vec![
+                "construct `Point` with `new Point { ... }`",
+                "construct `P` with `new P { ... }`",
+            ]
+        );
+
+        // `new` on each of them stays silent.
+        let ok = "namespace Ns as\n    struct T as\n        v: number,\n    end\nend\nlocal t = new Ns.T { v = 1 }\nprint(t)\n";
+
+        assert!(messages(ok).is_empty(), "{:?}", messages(ok));
+
+        // A call of an ordinary function with a table is still a call.
+        let call = "local function style(t: { n: number }): number\n    return t.n\nend\nprint(style { n = 1 })\n";
+
+        assert!(messages(call).is_empty(), "{:?}", messages(call));
     }
 
     #[test]

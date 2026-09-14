@@ -689,8 +689,7 @@ impl<'s> Desugar<'s> {
         AMBIENT.iter().any(|n| text.contains(n))
             || text.contains("import(")
             || text.contains("import<<")
-            || self.structs.iter().any(|name| struct_called(text, name))
-            || self.structs.iter().any(|name| struct_braced(text, name))
+            || self.constructs_struct(text)
             || WORD_OPS.iter().any(|w| text.contains(w))
             || self.ext_methods.iter().any(|m| text.contains(m.as_str()))
             || self
@@ -698,6 +697,29 @@ impl<'s> Desugar<'s> {
                 .values()
                 .flatten()
                 .any(|m| text.contains(m.as_str()))
+    }
+
+    /// Whether a statement's text holds a construction of a struct: the
+    /// name followed by `(` or by `{`.
+    ///
+    /// The source may spell the struct any way it reaches it: the name a
+    /// declaration gives it, the path a namespace member reads under,
+    /// the name an import binds, and that name under the local of a star
+    /// import. Each spelling reads here, so a construction through an
+    /// import or a path reaches the walk and its check.
+    fn constructs_struct(&self, text: &str) -> bool {
+        let hit = |name: &str| struct_called(text, name) || struct_braced(text, name);
+
+        self.structs
+            .iter()
+            .any(|name| hit(name) || hit(&self.display_name(name)))
+            || self.options.import_struct_fields.iter().any(|(name, _)| {
+                hit(name)
+                    || self
+                        .star_modules
+                        .iter()
+                        .any(|m| hit(&format!("{m}.{name}")))
+            })
     }
 
     /// Two declarations of one name in one file. Each writes a table and
@@ -1561,20 +1583,7 @@ impl<'s> Desugar<'s> {
     /// `Name(...)` with a struct's name and no fields table, or the fields
     /// form on a struct that writes `new`, outside its own impl.
     pub(crate) fn is_struct_call(&self, e: &Expr) -> bool {
-        let (base, links) = flatten(e);
-        let Expr::Name(n) = base else {
-            return false;
-        };
-        let name = self.text_of(*n);
-
-        if !self.structs.contains(name) {
-            return false;
-        }
-
-        matches!(
-            links.first(),
-            Some(Link::Plain(Step::Call { method: None, .. }))
-        )
+        self.called_struct(e).is_some()
     }
 
     /// A chain that is a call statement: the guard becomes an `if`.

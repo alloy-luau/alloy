@@ -437,7 +437,7 @@ fn a_declare_in_code_reports_once() {
         "declare extern type E with\n    x: number\nend\n\nprint(1)\n",
     ] {
         let lexed = lexer::lex(src).unwrap();
-        let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
 
         assert_eq!(
             diagnostics.len(),

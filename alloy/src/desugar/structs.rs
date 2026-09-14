@@ -1875,10 +1875,17 @@ impl<'s> Desugar<'s> {
                 .import_renames
                 .get(head.trim())
                 .map_or(head.trim(), String::as_str);
-            let path = match self.star_modules.contains(head) {
+            let dotted = format!("{head}.{}", rest.trim());
+
+            // `import * as B`: the index keys the module's struct under
+            // `B.T`, so two modules' `T` stay apart. The bare name is
+            // the fallback for an index that holds only it.
+            let path = match self.star_modules.contains(head)
+                && self.imported_shape_name(&dotted).is_none()
+            {
                 true => rest.trim().to_string(),
 
-                false => format!("{head}.{}", rest.trim()),
+                false => dotted,
             };
 
             // A namespace this file declares renders under one name.

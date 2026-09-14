@@ -808,10 +808,6 @@ pub fn import_shapes(
     out
 }
 
-/// The fields of every struct a module the source imports declares,
-/// each with whether it carries a default. The construction check reads
-/// them, so `new Box { }` on an imported struct names the fields it
-/// leaves unset.
 /// Every `import { Name }` and `import { Name as Local }` of a source:
 /// the module the name comes from, the name the module declares, and
 /// the name this file binds. Two modules can each declare a `Point`, so
@@ -891,14 +887,16 @@ fn star_locals(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Vec<
     out
 }
 
-pub fn import_struct_fields(
+/// Every declaration of one kind that the modules a source imports
+/// make, module by module, in import order. A module reads once.
+fn module_decls<T>(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
-) -> Vec<(String, Vec<(String, bool)>)> {
+    read: impl Fn(&str) -> Vec<(String, T)>,
+) -> Vec<(PathBuf, Vec<(String, T)>)> {
     let mut seen: Vec<PathBuf> = Vec::new();
-    let mut out: Vec<(String, Vec<(String, bool)>)> = Vec::new();
-    let renames = named_specs(source, from, aliases);
+    let mut out = Vec::new();
 
     for spec in import_specs(source) {
         let Some(path) = resolve(&spec, from, aliases) else {
@@ -915,25 +913,74 @@ pub fn import_struct_fields(
             continue;
         };
 
-        for (name, fields) in crate::declarations::struct_field_defaults(&text) {
-            // An alias keys an entry of its own, so `Point as PointA`
-            // and `Point as PointB` each read their own module.
-            for (_, _, local) in renames
+        out.push((path, read(&text)));
+    }
+
+    out
+}
+
+/// Keys the declarations of the imported modules by every name this
+/// file spells them with. Two modules can each declare a `T`, so an
+/// index keyed by the declared name alone holds one of them.
+///
+/// The names this file binds come first: the local of an
+/// `import { T as U }`, and `<alias>.<name>` for an `import * as A`,
+/// which binds the module table and reads the declaration one level
+/// deeper. Each of those names the module it comes from. The declared
+/// name comes last, for an index that holds only it.
+fn keyed_by_local<T: Clone>(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+    modules: &[(PathBuf, Vec<(String, T)>)],
+) -> Vec<(String, T)> {
+    let named = named_specs(source, from, aliases);
+    let stars = star_locals(source, from, aliases);
+    let mut out: Vec<(String, T)> = Vec::new();
+    let mut push = |key: String, payload: &T| {
+        if !out.iter().any(|(n, _)| *n == key) {
+            out.push((key, payload.clone()));
+        }
+    };
+
+    for (path, decls) in modules {
+        for (name, payload) in decls {
+            for (_, _, local) in named
                 .iter()
-                .filter(|(p, declared, _)| *p == path && *declared == name)
+                .filter(|(p, declared, _)| p == path && declared == name)
             {
-                if !out.iter().any(|(n, _)| n == local) {
-                    out.push((local.clone(), fields.clone()));
-                }
+                push(local.clone(), payload);
             }
 
-            if !out.iter().any(|(n, _)| *n == name) {
-                out.push((name, fields));
+            for (_, local) in stars.iter().filter(|(p, _)| p == path) {
+                push(format!("{local}.{name}"), payload);
             }
         }
     }
 
+    for (_, decls) in modules {
+        for (name, payload) in decls {
+            push(name.clone(), payload);
+        }
+    }
+
     out
+}
+
+/// The fields of every struct a module the source imports declares,
+/// each with whether it carries a default. The construction check reads
+/// them, so `new Box { }` on an imported struct names the fields it
+/// leaves unset.
+pub fn import_struct_fields(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<(String, bool)>)> {
+    let modules = module_decls(source, from, aliases, |text| {
+        crate::declarations::struct_field_defaults(text)
+    });
+
+    keyed_by_local(source, from, aliases, &modules)
 }
 
 /// The private fields of every struct a module the source imports
@@ -944,45 +991,13 @@ pub fn import_privates(
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, Vec<String>)> {
-    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    // `struct_privates` names a namespace member under its path as
+    // well, so `new Zoo.Box { secret = 1 }` finds the shape.
+    let modules = module_decls(source, from, aliases, |text| {
+        crate::declarations::struct_privates(text)
+    });
 
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let renames = named_specs(source, from, aliases);
-
-    for spec in import_specs(source) {
-        let Some(path) = resolve(&spec, from, aliases) else {
-            continue;
-        };
-
-        if seen.contains(&path) {
-            continue;
-        }
-
-        seen.push(path.clone());
-
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-
-        // `struct_privates` names a namespace member under its path as
-        // well, so `new Zoo.Box { secret = 1 }` finds the shape.
-        for (name, private) in crate::declarations::struct_privates(&text) {
-            for (_, _, local) in renames
-                .iter()
-                .filter(|(p, declared, _)| *p == path && *declared == name)
-            {
-                if !out.iter().any(|(n, _)| n == local) {
-                    out.push((local.clone(), private.clone()));
-                }
-            }
-
-            if !out.iter().any(|(n, _)| *n == name) {
-                out.push((name, private));
-            }
-        }
-    }
-
-    out
+    keyed_by_local(source, from, aliases, &modules)
 }
 
 /// The private fields of the imported structs of a file under the
@@ -1001,77 +1016,25 @@ type ImportedEnum = (String, Vec<(String, usize)>);
 /// The enums every module a source imports declares, each with its
 /// variants and how many values they carry. A `match` over an imported
 /// enum reads them to prove it covers every variant.
-pub fn import_enums(
-    source: &str,
-    from: &Path,
-    aliases: &[(String, PathBuf)],
-) -> Vec<(String, Vec<(String, usize)>)> {
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let mut modules: Vec<(PathBuf, Vec<ImportedEnum>)> = Vec::new();
-    let named = named_specs(source, from, aliases);
-    let stars = star_locals(source, from, aliases);
-
-    for spec in import_specs(source) {
-        let Some(path) = resolve(&spec, from, aliases) else {
-            continue;
-        };
-
-        if seen.contains(&path) {
-            continue;
-        }
-
-        seen.push(path.clone());
-
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let enums = crate::declarations::shapes(&text)
+pub fn import_enums(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Vec<ImportedEnum> {
+    let modules = module_decls(source, from, aliases, |text| {
+        crate::declarations::shapes(text)
             .into_iter()
             .filter_map(|shape| match shape {
                 crate::declarations::Shape::Enum { name, variants } => Some((
                     name,
-                    variants.into_iter().map(|(v, p)| (v, p.len())).collect(),
+                    variants
+                        .into_iter()
+                        .map(|(v, p)| (v, p.len()))
+                        .collect::<Vec<_>>(),
                 )),
 
                 _ => None,
             })
-            .collect();
-        modules.push((path, enums));
-    }
-    let mut out: Vec<(String, Vec<(String, usize)>)> = Vec::new();
-    let mut push = |key: String, variants: &Vec<(String, usize)>| {
-        if !out.iter().any(|(n, _)| *n == key) {
-            out.push((key, variants.clone()));
-        }
-    };
+            .collect()
+    });
 
-    // First the names this file binds. Each one names the module it
-    // comes from, so two modules' `State` stay apart: `State as S1` and
-    // `State as S2`, and `import * as A` and `import * as B`, which
-    // bind the module table and read the enum as `A.State`.
-    for (path, enums) in &modules {
-        for (name, variants) in enums {
-            for (_, _, local) in named
-                .iter()
-                .filter(|(p, declared, _)| p == path && declared == name)
-            {
-                push(local.clone(), variants);
-            }
-
-            for (_, local) in stars.iter().filter(|(p, _)| p == path) {
-                push(format!("{local}.{name}"), variants);
-            }
-        }
-    }
-
-    // Then the declared name, for an index that holds only it.
-    for (_, enums) in &modules {
-        for (name, variants) in enums {
-            push(name.clone(), variants);
-        }
-    }
-
-    out
+    keyed_by_local(source, from, aliases, &modules)
 }
 
 /*
@@ -2712,6 +2675,80 @@ mod tests {
             clean(short),
             vec![
                 "this match is not exhaustive: `B.State` has no arm for `On`; add it or a `default` arm"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /*
+    Two star imports of two modules that each declare a struct `T`.
+    The struct index keyed `T` by the declared name alone, so `new B.T`
+    read the first module's fields and every field of the second
+    reported.
+
+    The index keys a star import by `<alias>.<name>`, the way the enum
+    index does, and the construction resolves the alias first.
+    */
+    #[test]
+    fn two_star_aliases_of_one_struct_name_stay_apart() {
+        let dir = std::env::temp_dir().join(format!("alloy-star-structs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/a.aly"),
+            "export struct T as\n    v: number,\n    private key: number = 0,\nend\n",
+        )
+        .expect("module");
+        std::fs::write(
+            dir.join("src/b.aly"),
+            "export struct T as\n    name: string,\n    private tag: number = 0,\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let reports = |src: &str| -> Vec<String> {
+            let options = crate::EmitOptions::default().imports(src, &from, &[]);
+            let out = crate::compile_with(src, &options).expect("compile");
+
+            out.diagnostics
+                .into_iter()
+                .map(|d| d.message)
+                .chain(
+                    out.lints
+                        .into_iter()
+                        .filter(|l| l.name == "private_access")
+                        .map(|l| l.message),
+                )
+                .collect()
+        };
+
+        // Two star aliases. Each construction reads its own module.
+        let src = "import * as A from \"./a\"\nimport * as B from \"./b\"\nlocal a = new A.T { v = 1 }\nlocal b = new B.T { name = \"x\" }\nprint(a.v, b.name)\n";
+        let fields = import_struct_fields(src, &from, &[]);
+
+        assert_eq!(
+            fields
+                .iter()
+                .find(|(n, _)| n == "B.T")
+                .map(|(_, f)| f.clone()),
+            Some(vec![("name".to_string(), false), ("tag".to_string(), true)])
+        );
+        assert!(reports(src).is_empty(), "{:?}", reports(src));
+
+        // One star alias and one name list. The name this file binds
+        // names the module it comes from.
+        let mixed = "import * as A from \"./a\"\nimport { T as BT } from \"./b\"\nlocal a = new A.T { v = 1 }\nlocal b = new BT { name = \"x\" }\nprint(a.v, b.name)\n";
+
+        assert!(reports(mixed).is_empty(), "{:?}", reports(mixed));
+
+        // A private field set through each alias names its own struct.
+        let private = "import * as A from \"./a\"\nimport * as B from \"./b\"\nlocal a = new A.T { v = 1, key = 2 }\nlocal b = new B.T { name = \"x\", tag = 3 }\nprint(a.v, b.name)\n";
+
+        assert_eq!(
+            reports(private),
+            vec![
+                "`key` is private to `A.T`; only its impl sets it",
+                "`tag` is private to `B.T`; only its impl sets it"
             ]
         );
 

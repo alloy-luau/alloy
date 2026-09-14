@@ -1009,6 +1009,59 @@ mod tests {
         );
     }
 
+    /*
+    A Luau reserved word where a field name goes. `end: number` closed
+    the struct body, so the type and every line after it reported
+    against a declaration that had already ended: eight errors for one
+    word.
+
+    The field reader names the word once and reads on to the next field.
+    */
+    #[test]
+    fn a_reserved_word_as_a_field_name_reports_once() {
+        let messages = |src: &str| -> Vec<String> {
+            compile(src)
+                .unwrap()
+                .diagnostics
+                .into_iter()
+                .map(|d| d.message)
+                .collect()
+        };
+
+        // The body goes on: the field after the bad one still reads.
+        let src = "struct Range as\n    end: number,\n    size: number,\nend\nlocal r = new Range { size = 1 }\nprint(r)\n";
+
+        assert_eq!(
+            messages(src),
+            vec!["`end` is a reserved word and cannot name a field"]
+        );
+        assert_eq!(
+            compile(src).unwrap().diagnostics[0].start as usize,
+            src.find("end:").unwrap()
+        );
+        assert_eq!(
+            docs::kind_for("`end` is a reserved word and cannot name a field"),
+            "ReservedWord"
+        );
+
+        // One line, and a word that opens a statement, and a word
+        // behind a visibility modifier: one report each.
+        for (src, word) in [
+            ("struct S as end: number end\n", "end"),
+            ("struct S as\n    for: number,\nend\n", "for"),
+            ("struct S as\n    private end: number,\nend\n", "end"),
+            ("interface I as\n    then: number,\nend\n", "then"),
+        ] {
+            assert_eq!(
+                messages(src),
+                vec![format!(
+                    "`{word}` is a reserved word and cannot name a field"
+                )],
+                "{src:?}"
+            );
+        }
+    }
+
     #[test]
     fn new_on_a_name_without_a_constructor_is_one_diagnostic_over_the_expression() {
         let src = "attribute icon(asset: string) on struct\nenum Msg as\n    Quit\nend\nlocal a = new icon { }\nlocal m = new Msg { }\nprint(a, m)\n";

@@ -5,19 +5,32 @@ use super::super::*;
 impl<'a> Parser<'a> {
     // --- struct, trait, interface, remote, attribute, macro ----------------
 
+    /*
+    A Luau reserved word where a field name goes: the word, then `:`.
+
+    `end: number` closed the body, so the type and every line after it
+    reported against a declaration that had already ended. The word is a
+    field the language cannot spell, and the body reads on to the next
+    one.
+    */
+    fn reserved_field(&self) -> bool {
+        self.at_reserved() && self.text_at(1) == ":"
+    }
+
     /// The fields of a struct or interface, up to `end`.
     fn fields(&mut self) -> Result<Vec<Field>, ParseError> {
         let mut fields = Vec::new();
 
-        while !self.at("end") {
+        while !self.at("end") || self.reserved_field() {
             if self.at_end() {
                 return Err(self.err("unterminated declaration, expected `end`"));
             }
 
             // A body with no `end`: the file goes on and this is not a
             // field. The caller reports the missing `end` once, and the
-            // statements after the body still parse.
-            if self.body_ends_early() {
+            // statements after the body still parse. A reserved word
+            // with a type behind it is a field, not the file going on.
+            if self.body_ends_early() && !self.reserved_field() {
                 break;
             }
 
@@ -97,6 +110,20 @@ impl<'a> Parser<'a> {
         let here = self.toks.get(self.pos).map(|t| t.start as usize);
 
         if !self.name_at(0) {
+            // A word the language keeps, with a type behind it: the
+            // word is the mistake, not the token the parse stopped at.
+            // Without the type it is the `end` of the body, and a
+            // modifier alone keeps its own report.
+            if self.reserved_field() {
+                let tok = self.toks[self.pos];
+                let word = &self.src[tok.start as usize..tok.end as usize];
+
+                return Err((
+                    tok.start as usize,
+                    format!("`{word}` is a reserved word and cannot name a field"),
+                ));
+            }
+
             return Err(match prev {
                 Some((at, word @ ("private" | "public" | "read" | "write"))) => (
                     at,

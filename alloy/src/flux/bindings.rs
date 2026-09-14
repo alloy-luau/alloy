@@ -591,8 +591,16 @@ impl<'s> Scan<'s> {
             let (names, is_function): (Vec<usize>, bool) = match self.t(i) {
                 "local" | "const" if self.statement_start(i) => {
                     let names = self.local_names(i);
+                    let is_function = self.binds_function(i, &names);
 
-                    (names.clone(), self.binds_function(i, &names))
+                    // An attribute hands the function to the runtime or
+                    // the compiler, so `@test local function f` is a
+                    // test the spec calls, as `@test function f` is.
+                    if is_function && self.has_attribute(i) {
+                        continue;
+                    }
+
+                    (names, is_function)
                 }
 
                 "for" if self.statement_start(i) => {

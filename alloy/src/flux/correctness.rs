@@ -1229,6 +1229,18 @@ mod tests {
         );
         assert_eq!(unused("export function f() end\n"), Vec::<&str>::new());
         assert_eq!(unused("@test\nfunction f() end\n"), Vec::<&str>::new());
+        // An attribute exempts the `local function` form too: the spec
+        // calls the test, not the file.
+        assert_eq!(
+            unused("@test\nlocal function f() end\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            unused("@test\nlocal f = function() end\n"),
+            Vec::<&str>::new()
+        );
+        // A `local` with no function keeps its report.
+        assert_eq!(unused("@test\nlocal x = 1\n"), vec!["unused_variable"]);
         assert_eq!(
             unused("@ratelimit(1, 2)\nasync function f() end\n"),
             Vec::<&str>::new()

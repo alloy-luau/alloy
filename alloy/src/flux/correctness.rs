@@ -1166,7 +1166,29 @@ mod tests {
             unused("local function helper() end\nlocal x: number = 1\nprint(x)\n"),
             vec!["unused_function"]
         );
-        assert_eq!(unused("local { a, b } = t\nprint(a)\n"), Vec::<&str>::new());
+        // A destructuring pattern binds its names one by one, so each
+        // unread name is its own report.
+        assert_eq!(
+            unused("local { a, b } = t\nprint(a)\n"),
+            vec!["unused_variable"]
+        );
+        assert_eq!(
+            unused("local [first, second] = arr\nprint(first)\n"),
+            vec!["unused_variable"]
+        );
+        // `{ b = c }` binds `c`; `b` is the field it reads.
+        assert_eq!(
+            unused("local { a = kept, b = gone } = t\nprint(kept)\n"),
+            vec!["unused_variable"]
+        );
+        assert_eq!(
+            unused("local [head, ...rest] = arr\nprint(head)\n"),
+            vec!["unused_variable"]
+        );
+        assert_eq!(
+            unused("local { a, b } = t\nprint(a)\nprint(b)\n"),
+            Vec::<&str>::new()
+        );
         assert_eq!(
             unused("local async function f() end\nf()\n"),
             Vec::<&str>::new()

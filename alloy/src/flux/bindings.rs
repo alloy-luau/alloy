@@ -514,6 +514,12 @@ impl<'s> Scan<'s> {
             return out;
         }
 
+        // `local { a, b = c } = t` and `local [ x, ...rest ] = t` bind
+        // the names the pattern holds, not one name of their own.
+        if matches!(self.t(j), "{" | "[") {
+            return self.pattern_names(j);
+        }
+
         while self.is_name(j) {
             out.push(j);
             j += 1;
@@ -541,6 +547,38 @@ impl<'s> Scan<'s> {
                 j += 1;
             } else {
                 break;
+            }
+        }
+
+        out
+    }
+
+    /// The names a destructuring pattern binds, from the `{` or `[` at
+    /// `open` to the token that closes it.
+    ///
+    /// `{ a, b = c }` binds `a` and `c`: the name on the right of `=`
+    /// is the local, the one on the left is the field it reads. `[ x,
+    /// ...rest ]` binds `x` and `rest`. A nested pattern hands its own
+    /// names up the same way.
+    fn pattern_names(&self, open: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut depth = 0i32;
+
+        for j in open..self.toks.len() {
+            match self.t(j) {
+                "{" | "[" => depth += 1,
+
+                "}" | "]" => {
+                    depth -= 1;
+
+                    if depth == 0 {
+                        break;
+                    }
+                }
+
+                _ if self.is_name(j) && !self.at(j + 1, "=") => out.push(j),
+
+                _ => {}
             }
         }
 

@@ -426,6 +426,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         return_at: None,
         struct_field_types: HashMap::new(),
         struct_wire: HashMap::new(),
+        struct_at: HashMap::new(),
         temp_next: 0,
         declared: Vec::new(),
         no_hoist: 0,
@@ -848,6 +849,9 @@ struct Desugar<'s> {
     /// The fields of each struct declared here with their widths, for
     /// the wire layout of a remote.
     struct_wire: HashMap<String, Vec<WireField>>,
+    /// Where each struct of this file starts. A remote's wire holds the
+    /// struct's table, which a `local` below the remote has not made yet.
+    struct_at: HashMap<String, u32>,
     /// The next temp index inside the statement under render.
     temp_next: u32,
     /// Per open block: the temp indices already declared in it, and in

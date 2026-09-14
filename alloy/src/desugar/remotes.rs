@@ -79,6 +79,25 @@ impl Wire {
         matches!(self, Wire::Scalar { kind, .. } if kind == "any")
     }
 
+    /// Every struct name the layout writes, at any depth.
+    fn structs(&self) -> Vec<String> {
+        match self {
+            Wire::Scalar { .. } => Vec::new(),
+
+            Wire::Table {
+                fields,
+                struct_name,
+                ..
+            } => struct_name
+                .iter()
+                .cloned()
+                .chain(fields.iter().flat_map(|(_, w)| w.structs()))
+                .collect(),
+
+            Wire::Array { item, .. } => item.structs(),
+        }
+    }
+
     fn with_optional(mut self, flag: bool) -> Self {
         match &mut self {
             Wire::Scalar { optional, .. }
@@ -321,6 +340,27 @@ impl<'s> Desugar<'s> {
             .collect();
         let attrs = self.attr_table(&r.attributes);
         let wire = self.wire_layout(r);
+
+        // The layout writes `struct = Shot`, the table the runtime sets as
+        // the metatable of a decoded value. A struct declared below the
+        // remote is a `local` the emit has not reached, so the name reads
+        // as a nil global and the decoded value has no methods.
+        for (p, w) in r.params.iter().zip(&wire) {
+            let below = w
+                .structs()
+                .into_iter()
+                .find(|s| self.struct_at.get(s).is_some_and(|at| *at > start));
+
+            if let Some(s) = below {
+                let pname = self.text_of(p.name).to_string();
+                self.diagnose(
+                    p.name,
+                    &format!(
+                        "parameter `{pname}` of remote `{name}` names struct `{s}`, which is declared below the remote; move the struct above it"
+                    ),
+                );
+            }
+        }
 
         // `@unreliable` rides an UnreliableRemoteEvent, and Roblox drops
         // a payload over 900 bytes. A parameter with no bound, a string

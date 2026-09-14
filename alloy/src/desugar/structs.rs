@@ -1459,6 +1459,8 @@ impl<'s> Desugar<'s> {
             })
             .collect();
         self.struct_wire.insert(name.clone(), wire_fields);
+        self.struct_at
+            .insert(name.clone(), self.byte_start(st.span));
 
         if st.generics.is_some() {
             self.generic_types.insert(name.clone());

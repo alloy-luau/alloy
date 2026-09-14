@@ -654,6 +654,20 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_wire_names_no_struct_declared_below_it() {
+        let below = "remote Hit(h: Shot) from client\nstruct Shot as\n    x: number\nend\n";
+        let got = messages(below);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0].contains("names struct `Shot`, which is declared below the remote"),
+            "{got:?}"
+        );
+
+        let above = "struct Shot as\n    x: number\nend\nremote Hit(h: Shot) from client\n";
+        assert!(messages(above).is_empty());
+    }
+
+    #[test]
     fn a_unit_variant_inside_a_payload_refutes() {
         let src = "enum Inner as A, B end\nenum Wrapper as Wrap(Inner), Plain end\nlocal w: Wrapper = Wrapper.Plain\nmatch w with\n    case Wrap(A) then print(1)\n    case Plain then print(2)\nend\n";
         let got = messages(src);

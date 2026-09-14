@@ -1960,7 +1960,10 @@ impl<'s> Desugar<'s> {
         let Some(declared) = self.declared_fields(&sname) else {
             return;
         };
-        let shown = self.display_name(&sname);
+        // The message quotes the path the source wrote. The index key
+        // is the declared name, `M.Ns_T` through a star alias, and
+        // `display_name` only unfolds a namespace this file declares.
+        let shown = self.text_of(n).to_string();
         let Expr::Table { fields, .. } = table else {
             return;
         };
@@ -2071,7 +2074,7 @@ impl<'s> Desugar<'s> {
         if missing.is_empty() {
             return;
         }
-        let shown = self.display_name(sname);
+        let shown = self.text_of(n).to_string();
         let written = match form {
             "paren" => format!("new {shown}()"),
 
@@ -2501,7 +2504,8 @@ mod tests {
 
     /// The name a `new` writes is not always the name the struct is
     /// declared under: an import alias, a star import, and a namespace
-    /// path all reach the same struct, so each reads the same checks.
+    /// path all reach the same struct, so each reads the same checks,
+    /// and each report quotes the name the source wrote.
     #[test]
     fn a_construction_through_an_alias_a_star_import_or_a_namespace_checks() {
         let options = crate::EmitOptions {
@@ -2530,11 +2534,11 @@ mod tests {
         );
         assert_eq!(
             alias,
-            vec!["`Box` has no field `gone`; its fields are `id` and `secret`"]
+            vec!["`B` has no field `gone`; its fields are `id` and `secret`"]
         );
         assert_eq!(
             alias_lints,
-            vec!["`secret` is private to `Box`; only its impl sets it"]
+            vec!["`secret` is private to `B`; only its impl sets it"]
         );
 
         let (star, star_lints) = run(
@@ -2542,11 +2546,11 @@ mod tests {
         );
         assert_eq!(
             star,
-            vec!["`Box` has no field `gone`; its fields are `id` and `secret`"]
+            vec!["`M.Box` has no field `gone`; its fields are `id` and `secret`"]
         );
         assert_eq!(
             star_lints,
-            vec!["`secret` is private to `Box`; only its impl sets it"]
+            vec!["`secret` is private to `M.Box`; only its impl sets it"]
         );
     }
 
@@ -2585,7 +2589,45 @@ mod tests {
             run("import { M as Mod } from \"./m\"\n\nprint(new Mod.A.S { ok = 1, bad = 2 })\n");
         assert_eq!(
             unknown,
-            vec!["`M.A.S` has no field `bad`; its fields are `ok` and `secret`"]
+            vec!["`Mod.A.S` has no field `bad`; its fields are `ok` and `secret`"]
+        );
+    }
+
+    /// `import * as M` keys the module's namespace struct as `M.Ns_T`,
+    /// the name its shape carries. The report quotes the path the
+    /// source wrote, `M.Ns.T`, not the key.
+    #[test]
+    fn a_report_through_a_star_alias_quotes_the_written_path() {
+        let options = crate::EmitOptions {
+            import_struct_fields: ["M.Ns.T", "M.Ns_T"]
+                .iter()
+                .map(|key| {
+                    (
+                        key.to_string(),
+                        vec![("x".to_string(), false), ("y".to_string(), false)],
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let messages = |src: &str| -> Vec<String> {
+            crate::compile_with(src, &options)
+                .unwrap()
+                .diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect()
+        };
+
+        assert_eq!(
+            messages("import * as M from \"./mod\"\n\nprint(new M.Ns.T { })\n"),
+            vec![
+                "`new M.Ns.T { ... }` leaves `x` and `y` unset; a field without a default needs a value"
+            ]
+        );
+        assert_eq!(
+            messages("import * as M from \"./mod\"\n\nprint(new M.Ns.T { x = 1, y = 2, z = 3 })\n"),
+            vec!["`M.Ns.T` has no field `z`; its fields are `x` and `y`"]
         );
     }
 

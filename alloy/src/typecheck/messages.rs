@@ -2009,6 +2009,35 @@ mod tests {
         );
     }
 
+    /// A private method of an impl in another file reaches the report
+    /// through the shape, the way a private field does: `analyze` puts
+    /// the project's private methods on it. Without that the report
+    /// read `has no field`, and `alloy doc private` promises the
+    /// privacy sentence.
+    #[test]
+    fn a_private_method_of_another_file_reads_as_private() {
+        let source = "import { Counter } from \"./lib\"\n\nlocal c = make()\nc.reset()\n";
+        let shapes = vec![crate::declarations::Shape::Struct {
+            name: "Counter".to_string(),
+            fields: vec![("name".to_string(), false), ("reset".to_string(), true)],
+            generics: Vec::new(),
+            types: vec!["string".to_string()],
+        }];
+        let got = resite_report(
+            "Type 'Counter' does not have key 'reset'",
+            &shapes,
+            source,
+            4,
+            3,
+        )
+        .expect("a rewrite");
+
+        assert_eq!(
+            got.message,
+            "`reset` is private to `Counter`; only its impl reaches it"
+        );
+    }
+
     #[test]
     fn a_method_the_struct_does_not_write_reads_as_a_method() {
         let source = "struct Sq as side: number end\n\nimpl Sq as\n    function area(self): number\n        return 1\n    end\nend\n\nlocal gone = s:perimeter()\n";

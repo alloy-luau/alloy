@@ -745,6 +745,13 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     // A name may be declared in two files. The file a report sits in is
     // the one whose declaration the reader is looking at, so its own
     // shapes answer first.
+    // A private method is not on the struct's public table, so the
+    // checker reads a call of one from outside as a member the struct
+    // has not got. The resite reads a private member off the shape, the
+    // way it reads a private field, so the methods every impl of the
+    // project keeps to itself join the shape here.
+    let sources: Vec<String> = files.iter().map(|f| f.source.clone()).collect();
+    let private_methods = crate::extensions::project_impls(&sources).privates;
     let per_file: Vec<(PathBuf, Vec<crate::declarations::Shape>)> = files
         .iter()
         .map(|f| {
@@ -756,6 +763,21 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
                 .cloned()
                 .collect();
             shapes.extend(rest);
+
+            for shape in &mut shapes {
+                let crate::declarations::Shape::Struct { name, fields, .. } = shape else {
+                    continue;
+                };
+                let Some((_, names)) = private_methods.iter().find(|(t, _)| t == name) else {
+                    continue;
+                };
+
+                for n in names {
+                    if !fields.iter().any(|(f, _)| f == n) {
+                        fields.push((n.clone(), true));
+                    }
+                }
+            }
 
             (f.rel.clone(), shapes)
         })

@@ -4,8 +4,9 @@ use super::*;
 
 impl Server {
     /// `textDocument/formatting`: `alloy fmt` over the open document, as
-    /// one edit that replaces the whole text. An `.alx` file, a file
-    /// that does not lex, and one already formatted get no edits.
+    /// one edit that replaces the whole text. A file already formatted
+    /// gets no edits, and one the parser cannot read keeps its text and
+    /// says why.
     pub(crate) fn format_document(&self, uri: &str, id: &Value) {
         let open = {
             let st = self.state.lock().expect("state");
@@ -18,12 +19,6 @@ impl Server {
             return;
         };
 
-        if uri.ends_with(".alx") {
-            self.respond(id, json!([]));
-
-            return;
-        }
-
         // The project's own `[fmt]` table, so format on save lays a
         // file out the way `alloy fmt` does. Reading none of it made
         // the editor ignore `indent_width` and the rest.
@@ -33,7 +28,7 @@ impl Server {
             (st.ingots.clone(), st.fmt_config(uri))
         };
         let formatted =
-            alloy::fmt::format_file(&source, &options).map(|f| match (&ingots, uri_to_path(uri)) {
+            format_source(uri, &source, &options).map(|f| match (&ingots, uri_to_path(uri)) {
                 (Some(ingots), Some(path)) => ingots.format(&path.to_string_lossy(), &f).0,
 
                 _ => f,
@@ -59,7 +54,25 @@ impl Server {
                 );
             }
 
-            _ => self.respond(id, json!([])),
+            Ok(_) => self.respond(id, json!([])),
+
+            // The formatter failed, and an empty edit list looks like a
+            // file already laid out. The reader hears the reason
+            // instead, the way `alloy fmt` prints it: a file the parser
+            // cannot read is skipped, anything else failed.
+            Err(reason) => {
+                let kind = match reason.starts_with(alloy::fmt::UNPARSED) {
+                    true => 2,
+
+                    false => 1,
+                };
+                self.to_client(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "window/showMessage",
+                    "params": { "type": kind, "message": format!("alloy fmt: {reason}") },
+                }));
+                self.respond(id, json!([]));
+            }
         }
     }
 
@@ -162,6 +175,21 @@ impl State {
             "range": range_value((line, character), (line, character)),
             "newText": format!("\n{indent}end"),
         }]))
+    }
+}
+
+/// The layout of one open document, by the formatter `alloy fmt` reads
+/// for its name: markup lays out by its own rules, so an `.alx` file
+/// takes the markup pass.
+pub(crate) fn format_source(
+    uri: &str,
+    source: &str,
+    options: &alloy::config::FmtConfig,
+) -> Result<String, String> {
+    match uri.ends_with(".alx") {
+        true => alloy::fmt::alx::format_alx_file(source, options),
+
+        false => alloy::fmt::format_file(source, options),
     }
 }
 
@@ -299,4 +327,23 @@ pub(crate) fn matching_brace(text: &str, open: usize) -> Option<usize> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_markup_file_formats_the_way_the_command_does() {
+        let src = "local function Row()\n        local x=1\n    return (\n        <Frame>{x}</Frame>\n    )\nend\n";
+        let options = alloy::config::FmtConfig::default();
+        let formatted = format_source("file:///ui.alx", src, &options).expect("the markup formats");
+        assert_ne!(formatted, src, "an over-indented file wants an edit");
+        assert_eq!(
+            formatted,
+            alloy::fmt::alx::format_alx_file(src, &options).expect("the markup formats")
+        );
+        // The plain pass cannot read markup, so the two differ.
+        assert!(format_source("file:///ui.aly", src, &options).is_err());
+    }
 }

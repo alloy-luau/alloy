@@ -320,8 +320,6 @@ impl<'s> Desugar<'s> {
             })
             .collect();
         let attrs = self.attr_table(&r.attributes);
-        // The layout names locals the check artifact need not resolve,
-        // and the checker types the remote by its declaration.
         let wire = self.wire_layout(r);
 
         // `@unreliable` rides an UnreliableRemoteEvent, and Roblox drops
@@ -345,7 +343,7 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        let wire = if self.options.check || wire.iter().all(Wire::is_any) {
+        let wire = if wire.iter().all(Wire::is_any) {
             String::new()
         } else {
             let kinds: Vec<String> = wire.iter().map(Wire::luau).collect();
@@ -757,6 +755,25 @@ remote Take(xs: string[]) from client
         assert!(!out.check.contains("string[]"), "{}", out.check);
         assert!(out.check.contains("__alloy.Array<string>"), "{}", out.check);
         assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
+    /// The check artifact carries the layout the ship artifact carries.
+    /// It went missing there, and `RemoteSpec.wire` types it, so the two
+    /// artifacts differed by a runtime field and not by a type.
+    #[test]
+    fn the_check_artifact_keeps_the_wire_layout() {
+        let src = "remote Ping(n: number, tag: string) from client\n";
+        let out = crate::compile_with(
+            src,
+            &crate::EmitOptions {
+                check: true,
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        let layout = "attrs = {}, wire = { \"f64\", \"str\" } })";
+        assert!(out.ship.contains(layout), "{}", out.ship);
+        assert!(out.check.contains(layout), "{}", out.check);
     }
 
     /// A parameter and a field pack at one width. Two widths merged in

@@ -1376,15 +1376,11 @@ impl Server {
                 let lint_config = st.lint_config();
                 items.retain(|d| !answers_to_the_private_lint(d, doc, &lint_config));
 
-                // Alloy's own reports travel by push alone: a push
-                // overwrites the set an earlier server left on the file,
-                // and a pull that repeated them would show each twice.
-
-                // A rewrite may move two reports onto one line, the
-                // `impl` an alias names among them; they collapse after
-                // it, not before.
-                collapse_diagnostics(items);
-                snap_ranges(items, &doc.source);
+                // The Alloy reports join the child's the way the push
+                // path lists them. A rewrite may move two reports onto
+                // one line, the `impl` an alias names among them; they
+                // collapse after it, not before.
+                *items = st.full_diagnostics(uri, std::mem::take(items));
             }
 
             // The ingots' colors join the child's `Color3` swatches; they
@@ -1458,9 +1454,6 @@ impl Server {
                 }
             }
 
-            // The Alloy diagnostics travel on the push channel alone, in
-            // `publish`; a pulled report that carried them too showed
-            // each lint twice in an editor that reads both.
             match method.as_str() {
                 // The rewrites of the lints in the range, as quick fixes,
                 // and one action that applies every rewrite of the file.

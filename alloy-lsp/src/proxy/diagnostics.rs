@@ -773,6 +773,24 @@ impl State {
     }
 }
 
+impl State {
+    /// The list one file shows: the Alloy reports, then the child's
+    /// mapped ones, collapsed and snapped. The push and the pull path
+    /// both read it, so a pull-mode client sees every lint and compile
+    /// error a push-mode client sees.
+    pub(crate) fn full_diagnostics(&self, uri: &str, child: Vec<Value>) -> Vec<Value> {
+        let mut diagnostics = self.alloy_diagnostics(uri);
+        diagnostics.extend(child);
+        collapse_diagnostics(&mut diagnostics);
+
+        if let Some(doc) = self.docs.get(uri) {
+            snap_ranges(&mut diagnostics, &doc.source);
+        }
+
+        diagnostics
+    }
+}
+
 impl Server {
     /// Publishes the Alloy diagnostics and the mapped child diagnostics
     /// of one source document.
@@ -783,17 +801,8 @@ impl Server {
             return;
         }
 
-        let mut diagnostics: Vec<Value> = st.alloy_diagnostics(uri);
-
-        if let Some(mapped) = st.child_diagnostics.get(uri) {
-            diagnostics.extend(mapped.iter().cloned());
-        }
-
-        collapse_diagnostics(&mut diagnostics);
-
-        if let Some(doc) = st.docs.get(uri) {
-            snap_ranges(&mut diagnostics, &doc.source);
-        }
+        let child = st.child_diagnostics.get(uri).cloned().unwrap_or_default();
+        let diagnostics = st.full_diagnostics(uri, child);
 
         if st.already_published(uri, &diagnostics) {
             return;

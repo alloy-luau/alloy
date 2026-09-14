@@ -785,6 +785,44 @@ pub(crate) fn a_three_line_import_cuts_the_dead_name_alone() {
         }])
     );
 }
+/// A pulled report used to carry the child's items alone. The pull
+/// path now reads the list the push path publishes: the compile error
+/// and the lint first, then the checker's own, in that order.
+#[test]
+pub(crate) fn a_pull_lists_what_a_push_publishes() {
+    let (st, uri) = one_file(
+        "struct Pt as\n    x: number\nend\nlocal p = new Pt { x = 1, y = 2 }\nlocal n: number = \"s\"\n",
+    );
+    let checker = json!({
+        "message": "TypeError: Expected this to be 'number', but got 'string'",
+        "range": { "start": { "line": 4, "character": 18 }, "end": { "line": 4, "character": 21 } },
+        "severity": 1,
+    });
+    let heads: Vec<String> = st
+        .full_diagnostics(uri, vec![checker])
+        .iter()
+        .map(|d| {
+            d["message"]
+                .as_str()
+                .unwrap_or_default()
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+
+    assert_eq!(
+        heads,
+        [
+            "StructError",
+            "unused_variable",
+            "unused_variable",
+            "TypeError"
+        ]
+    );
+}
+
 #[test]
 pub(crate) fn a_bad_character_reports_one_character_wide() {
     // Two bytes, one UTF-16 unit: the range covers `é` and stops.

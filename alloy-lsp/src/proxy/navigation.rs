@@ -814,8 +814,24 @@ impl State {
             .map(|(_, _, at)| at)?;
         let mut changes: Map<String, Value> = Map::new();
         let mut here = vec![text_edit(&text, start, end, new_name)];
+        // A bare name in a pattern binds unless it names a unit variant,
+        // so `case Nil` is a use of `Nil` alone.
+        let unit = self
+            .docs
+            .values()
+            .flat_map(|d| d.shapes.iter().chain(&d.import_shapes))
+            .any(|s| match s {
+                alloy::declarations::Shape::Enum { name: n, variants } => {
+                    n == owner && variants.iter().any(|(v, p)| v == name && p.is_empty())
+                }
 
-        for (a, b) in member_uses(&text, std::slice::from_ref(&owner.to_string()), name) {
+                _ => false,
+            });
+
+        for (a, b) in member_uses(&text, std::slice::from_ref(&owner.to_string()), name)
+            .into_iter()
+            .chain(pattern_uses(&text, name, unit))
+        {
             here.push(text_edit(&text, a, b, new_name));
         }
 
@@ -844,8 +860,16 @@ impl State {
                 holders.push(owner.to_string());
             }
 
+            // A `case Some(v)` names the variant bare; the file reaches
+            // the enum when it binds the enum's name.
+            let patterns = match holders.is_empty() {
+                true => Vec::new(),
+
+                false => pattern_uses(&d.source, name, unit),
+            };
             let mut edits: Vec<Value> = member_uses(&d.source, &holders, name)
                 .into_iter()
+                .chain(patterns)
                 .map(|(a, b)| text_edit(&d.source, a, b, new_name))
                 .collect();
             edits.sort_by_key(sort_key);
@@ -2763,6 +2787,56 @@ pub(crate) fn module_bindings(src: &str) -> Vec<(String, String)> {
     }
 
     out.retain(|(name, _)| !name.is_empty());
+    out
+}
+
+/// Every `case` pattern that names a variant, as the byte range of the
+/// name: `case Some(v)`, one nested in another's payload, and one inside
+/// a struct pattern. A bare name binds unless it names a unit variant,
+/// so a bare `Nil` counts when `unit` says so. `Opt.Some(v)` is a
+/// member use, and `member_uses` reads it.
+fn pattern_uses(src: &str, name: &str, unit: bool) -> Vec<(usize, usize)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let toks = &lexed.toks;
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < toks.len() {
+        if toks[i].text(src) != "case" {
+            i += 1;
+
+            continue;
+        }
+
+        let mut depth = 0i32;
+        i += 1;
+
+        while i < toks.len() {
+            let text = toks[i].text(src);
+
+            match text {
+                "(" | "{" | "[" => depth += 1,
+                ")" | "}" | "]" => depth -= 1,
+                "then" | "case" | "default" | "end" if depth <= 0 => break,
+                _ => {}
+            }
+
+            let prev = i.checked_sub(1).map(|k| toks[k].text(src));
+            let next = toks.get(i + 1).map(|t| t.text(src));
+            // A key of a struct pattern stands before `=`; a member
+            // after `.` is the holder's.
+            let own = prev != Some(".") && next != Some("=");
+
+            if text == name && own && (next == Some("(") || unit) {
+                out.push((toks[i].start as usize, toks[i].end as usize));
+            }
+
+            i += 1;
+        }
+    }
+
     out
 }
 

@@ -705,6 +705,89 @@ pub(crate) fn a_variant_renames_where_it_is_declared_and_used() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A variant's rename and its reference list reach the `case` patterns
+/// too: bare, dotted, a unit variant alone, one nested in a payload, and
+/// one inside a struct pattern. A local of the same name is no use.
+#[test]
+pub(crate) fn a_variant_rename_reaches_the_match_patterns() {
+    let module = "export enum Opt as\n    Some(number),\n    Nil\nend\n\nexport enum Box as\n    Hold(Opt)\nend\n";
+    let user = concat!(
+        "import { Opt, Box } from \"./m4\"\n",
+        "local function f(o: Opt, b: Box)\n",
+        "    match o with\n",
+        "        case Some(v) then print(v)\n",
+        "        case Opt.Some(v) then print(v)\n",
+        "        case Nil then print(0)\n",
+        "        default print(1)\n",
+        "    end\n",
+        "    match b with\n",
+        "        case Hold(Some(n)) then print(n)\n",
+        "        case Hold(Nil) then print(0)\n",
+        "    end\n",
+        "    match { kind = o } with\n",
+        "        case { kind = Some(x) } then print(x)\n",
+        "        case { kind = Nil } then print(0)\n",
+        "    end\n",
+        "    local Some = 1\n",
+        "    print(Some)\n",
+        "end\n",
+    );
+    let dir = std::env::temp_dir().join(format!("alloy-nav-pattern-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+
+    for (rel, src) in [("m4.aly", module), ("u4.aly", user)] {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            format!("file://{}", path.display()),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+    }
+
+    let module_path = dir.join("src").join("m4.aly");
+    let user_uri = format!("file://{}", dir.join("src").join("u4.aly").display());
+    let edits_of = |name: &str| {
+        let edit = st
+            .variant_edits(&module_path, "Opt", name, "Other")
+            .expect("edit");
+        let count = |uri: &str| edit["changes"][uri].as_array().map_or(0, Vec::len);
+        let module_uri = format!("file://{}", module_path.display());
+
+        (count(&module_uri), count(&user_uri))
+    };
+
+    // The declaration; then `Some(v)`, `Opt.Some(v)`, `Hold(Some(n))`,
+    // and `{ kind = Some(x) }`. The local named `Some` stays.
+    assert_eq!(edits_of("Some"), (1, 4));
+    // The declaration; then `case Nil`, `Hold(Nil)`, and
+    // `{ kind = Nil }`.
+    assert_eq!(edits_of("Nil"), (1, 3));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A struct field's rename reaches the constructor key and the field's
 /// own declaration line, and leaves another struct's key of that name
 /// alone.

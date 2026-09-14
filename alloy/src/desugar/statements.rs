@@ -2856,6 +2856,38 @@ mod tests {
         assert!(messages(ok).is_empty(), "{:?}", messages(ok));
     }
 
+    /// A remote registers one channel under its name, and a macro binds
+    /// one template. A second of either used to win in silence, so the
+    /// wire spec and the expansion both changed with no report.
+    #[test]
+    fn a_remote_and_a_macro_hold_one_name_each() {
+        // Two remotes of one name, with different wire specs.
+        let src = "remote function Ping(id: number): boolean from client\nremote function Ping(id: string): boolean from client\n";
+        assert!(
+            messages(src).contains(
+                &"`Ping` is already a remote on line 1; one name holds one declaration".to_string()
+            ),
+            "{:?}",
+            messages(src)
+        );
+
+        // Two macros of one name. A different arity is no overload, so
+        // the second reports as well.
+        let src = "macro double(x)\n    x + x\nend\nmacro double(x, y)\n    x * y\nend\nprint($double(3))\n";
+        assert!(
+            messages(src).contains(
+                &"`double` is already a macro on line 1; one name holds one declaration"
+                    .to_string()
+            ),
+            "{:?}",
+            messages(src)
+        );
+
+        // One name each is clean, and the report comes once.
+        let ok = "remote function Ping(id: number): boolean from client\nmacro double(x)\n    x + x\nend\nprint($double(3))\n";
+        assert!(messages(ok).is_empty(), "{:?}", messages(ok));
+    }
+
     /// `{ T }` is Luau's array form, so a bounded `{ T }` parameter
     /// reads its elements back as `(T & Bound)`. Without that the body
     /// calls a method the checker cannot find on `T`.
@@ -3196,6 +3228,11 @@ fn declared_kind(stmt: &Stmt) -> Option<(TokSpan, &'static str)> {
         Stmt::Interface(d) => Some((d.name, "an interface")),
         Stmt::Namespace(d) => Some((d.name, "a namespace")),
         Stmt::Attribute(d) => Some((d.name, "an attribute")),
+
+        // A remote registers one channel under its name, and a macro
+        // binds one template. A second of either wins in silence.
+        Stmt::Remote(d) => Some((d.name, "a remote")),
+        Stmt::Macro(d) => Some((d.name, "a macro")),
 
         _ => None,
     }

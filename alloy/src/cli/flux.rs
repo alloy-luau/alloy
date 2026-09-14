@@ -146,7 +146,7 @@ fn flux_once(args: &[String]) -> ExitCode {
             .map(|c| (c.rel.clone(), alloy::directives::scan(&c.source)))
             .collect();
 
-        match alloy::typecheck::analyze(&root, &config, &report.checks) {
+        match alloy::typecheck::analyze(&root, &config, &report.checks, &report.dep_artifacts) {
             Ok(analysis) => {
                 for note in &analysis.notes {
                     eprintln!("{}", p.note(note));

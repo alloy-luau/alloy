@@ -772,7 +772,7 @@ fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
 
     assert_eq!(lints, vec!["private_access", "private_access"]);
 
-    let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks) else {
+    let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
         eprintln!("skipped: luau-lsp is not installed");
 
         return;

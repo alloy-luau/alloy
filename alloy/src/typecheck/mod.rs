@@ -192,18 +192,21 @@ pub fn roblox_definitions(config: &FluxConfig, notes: &mut Vec<String>) -> Optio
 
 /// A mirror of the project for the analyzer: the check artifacts under
 /// `in`, the runtime under `out`, the Luau configuration, and a link to
-/// every other entry of the root.
-fn mirror_dir(root: &Path) -> PathBuf {
+/// every other entry of the root. `above` is how many folders above the
+/// root the mirror holds, so a dependency at `../../x` stays inside it.
+fn mirror_dir(root: &Path, above: usize) -> PathBuf {
     use std::hash::{Hash, Hasher};
 
     let mut h = std::collections::hash_map::DefaultHasher::new();
     root.hash(&mut h);
 
-    // `root` sits one level down, so a `[build] in` of `../x` stays
-    // inside the mirror.
-    std::env::temp_dir()
-        .join(format!("alloy-flux-{:016x}", h.finish()))
-        .join("root")
+    let mut dir = std::env::temp_dir().join(format!("alloy-flux-{:016x}", h.finish()));
+
+    for _ in 1..above {
+        dir.push("up");
+    }
+
+    dir.join("root")
 }
 
 /// A path with `.` and `..` folded, no file system access.
@@ -220,6 +223,25 @@ fn normalize(path: &Path) -> PathBuf {
 
             other => out.push(other),
         }
+    }
+
+    out
+}
+
+/// `path` relative to the folder `root`, both absolute: `..` for each
+/// folder of `root` past the common part, then the rest of `path`.
+fn relative_to(root: &Path, path: &Path) -> PathBuf {
+    let root: Vec<_> = root.components().collect();
+    let path: Vec<_> = path.components().collect();
+    let common = root.iter().zip(&path).take_while(|(a, b)| a == b).count();
+    let mut out = PathBuf::new();
+
+    for _ in common..root.len() {
+        out.push("..");
+    }
+
+    for c in &path[common..] {
+        out.push(c);
     }
 
     out
@@ -242,20 +264,52 @@ fn link_entry(from: &Path, to: &Path) {
 }
 
 /// Runs the analyzer over the check artifacts and maps what it says
-/// onto the sources.
-pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<Analysis, String> {
+/// onto the sources. `deps` holds the artifacts of the projects the
+/// imports lead into, by absolute output path; each lands in the
+/// mirror where it sits beside the root.
+pub fn analyze(
+    root: &Path,
+    config: &Config,
+    files: &[CheckSource],
+    deps: &[(PathBuf, String)],
+) -> Result<Analysis, String> {
     let mut analysis = Analysis::default();
     let Some(binary) = find_luau_lsp(&config.flux) else {
         return Err("luau-lsp is not on the PATH; `[flux] luau_lsp` names the binary, `typecheck = false` skips the check".to_string());
     };
 
-    let mirror = mirror_dir(root);
-
-    if let Some(parent) = mirror.parent() {
-        let _ = std::fs::remove_dir_all(parent);
-    }
-
+    let root_abs = normalize(&std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()));
+    let placed: Vec<(PathBuf, &str)> = deps
+        .iter()
+        .map(|(path, text)| (relative_to(&root_abs, path), text.as_str()))
+        .collect();
+    let above = placed
+        .iter()
+        .map(|(rel, _)| {
+            rel.components()
+                .take_while(|c| *c == std::path::Component::ParentDir)
+                .count()
+        })
+        .max()
+        .unwrap_or(1);
+    let mirror = mirror_dir(root, above);
+    let base = mirror
+        .ancestors()
+        .nth(above.max(1))
+        .unwrap_or(&mirror)
+        .to_path_buf();
+    let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&mirror).map_err(|e| format!("{}: {e}", mirror.display()))?;
+
+    for (rel, text) in &placed {
+        let target = normalize(&mirror.join(rel));
+
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        std::fs::write(&target, text).map_err(|e| e.to_string())?;
+    }
 
     // Everything of the root but the sources and the output, linked, so
     // a package folder and its `.luaurc` resolve.

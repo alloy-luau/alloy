@@ -1058,13 +1058,11 @@ fn a_bare_construction_inside_the_namespace_reads_the_raw_constructor() {
     assert!(ship.contains("return NS_B({ x = 1, y = 2 })"), "{ship}");
 
     // The field check reads the same struct, so a name the struct lacks
-    // reports from the bare form too.
+    // reports from the bare form too, under the name the source wrote.
     let bad = user_new.replace("{ x = x, y = y }", "{ x = x, z = y }");
     let (_, _, messages) = compile(&bad);
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("`NS.B` has no field `z`")),
+        messages.iter().any(|m| m.contains("`B` has no field `z`")),
         "{messages:?}"
     );
 }

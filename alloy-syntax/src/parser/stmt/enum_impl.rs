@@ -9,6 +9,11 @@ impl<'a> Parser<'a> {
         let open = self.pos;
         self.expect("enum")?;
         let name = self.expect_name()?;
+        let generics = if self.at("<") {
+            Some(self.angle_span()?)
+        } else {
+            None
+        };
         self.expect("as")?;
         let mut variants = Vec::new();
 
@@ -92,6 +97,7 @@ impl<'a> Parser<'a> {
             attributes: Vec::new(),
             exported,
             name,
+            generics,
             variants,
             span: TokSpan::new(start, self.pos),
         }))

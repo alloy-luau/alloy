@@ -212,7 +212,7 @@ impl<'a> Parser<'a> {
             || (self.at("destroy") && self.name_at(1))
             || (self.at("after") && self.after_delay_follows())
             || (self.at("import") && self.import_follows())
-            || (self.at("enum") && self.name_at(1) && self.text_at(2) == "as")
+            || (self.at("enum") && self.name_at(1) && matches!(self.text_at(2), "as" | "<"))
             || (self.at("impl") && self.name_at(1))
             || (self.at("match") && self.match_follows())
             || (matches!(
@@ -577,7 +577,9 @@ impl<'a> Parser<'a> {
 
             "import" if self.import_follows() => self.import_stmt(start),
 
-            "enum" if self.name_at(1) && self.text_at(2) == "as" => self.enum_decl(start, false),
+            "enum" if self.name_at(1) && matches!(self.text_at(2), "as" | "<") => {
+                self.enum_decl(start, false)
+            }
 
             "impl" if self.name_at(1) && !self.newline_after(0) => self.impl_decl(start, false),
 

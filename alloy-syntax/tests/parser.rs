@@ -259,6 +259,9 @@ const CORPUS: &[&str] = &[
     "enum Msg as\n\tJoin(Player)\n\tChat(Player, string)\nend",
     "enum E as Foo = 1 Bar = 2 end",
     "export enum Team as Red Blue end",
+    "enum Opt<T> as Some(T), Nil end",
+    "export enum Either<L, R = string> as\n\tLeft(L)\n\tRight(R)\nend",
+    "impl Opt<T> as function get(self) return self._1 end end",
     "impl Msg as\n\tfunction player(self) return 1 end\nend",
     "impl Shape for Circle as\n\tfunction area(self) return 0 end\nend",
     "export impl Shape for BasePart as function area(self) return 0 end end",
@@ -650,6 +653,23 @@ fn truncations_never_panic() {
 }
 
 // --- classes, export by value, and integer literals ----------------------
+
+/// `enum Opt<T>` reads its parameter list the way a struct does: the
+/// span holds the brackets, and a payload may name the parameter.
+#[test]
+fn a_generic_enum_keeps_its_parameter_list() {
+    let src = "enum Either<L, R = string> as\n    Left(L)\n    Right(R)\nend\n";
+    let lexed = lexer::lex(src).unwrap();
+    let chunk = parser::parse(src, &lexed.toks).unwrap();
+    let alloy_syntax::ast::Stmt::Enum(e) = &chunk.block.stmts[0] else {
+        panic!("expected an enum");
+    };
+    let text = |s: alloy_syntax::ast::TokSpan| s.text(src, &lexed.toks);
+
+    assert_eq!(text(e.generics.unwrap()), "<L, R = string>");
+    assert_eq!(text(e.variants[0].payload[0]), "L");
+    assert_eq!(e.variants.len(), 2);
+}
 
 #[test]
 fn a_class_with_fields_and_methods_parses() {

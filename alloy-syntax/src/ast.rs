@@ -517,12 +517,14 @@ pub struct ExportList {
     pub span: TokSpan,
 }
 
-/// `enum Name as Variant(T, U) Other = 1 Unit end`.
+/// `enum Name<T> as Variant(T, U) Other = 1 Unit end`.
 #[derive(Debug)]
 pub struct EnumDecl {
     pub attributes: Vec<Attr>,
     pub exported: bool,
     pub name: TokSpan,
+    /// `enum Opt<T>`: the parameters a payload may name.
+    pub generics: Option<TokSpan>,
     pub variants: Vec<Variant>,
     pub span: TokSpan,
 }

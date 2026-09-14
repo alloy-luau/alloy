@@ -406,6 +406,26 @@ fn turbofish_type_arguments() {
     round_trip("local a = f<<number>>()<<string>>()\n");
 }
 
+/// Inside a list a type is spelled `Box<number>`; a turbofish there
+/// reports once, at the inner `<<`, and names the spelling.
+#[test]
+fn a_turbofish_inside_a_type_argument_list_reports() {
+    let src = "local i1 = identity<<Box<<number>>>>(new Box<<number>> { value = 5 })
+";
+    let lexed = lexer::lex(src).unwrap();
+    let err = parser::parse(src, &lexed.toks).unwrap_err();
+
+    assert_eq!(
+        err.message,
+        "inside a type argument list a type is written `Box<number>`"
+    );
+    assert_eq!(err.offset, src.find("<<number>>>>").unwrap());
+    round_trip(
+        "local i1 = identity<<Box<number>>>(new Box<<number>> { value = 5 })
+",
+    );
+}
+
 /// A single `<` is still a comparison. The parser must not read it as a
 /// turbofish.
 #[test]

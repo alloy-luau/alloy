@@ -90,6 +90,8 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // A header the parser cannot read. The `trait` rule below would
     // read the word as a contract report.
     (&["takes no type parameters"], "SyntaxError"),
+    // A turbofish inside a type argument list; the parser reports it.
+    (&["a type is written"], "SyntaxError"),
     (&["markup:"], "MarkupError"),
     (&["names no module"], "UnknownModule"),
     (&["is a script, not a module"], "UnknownModule"),

@@ -19,6 +19,20 @@ impl<'a> Parser<'a> {
             }
 
             match self.text() {
+                // `Box<<number>>` inside a list is a turbofish where a
+                // type belongs. Luau's parser stops on the second `<`.
+                "<" if self.text_at(1) == "<"
+                    && self.pos > 0
+                    && self.toks[self.pos - 1].kind == TokKind::Ident =>
+                {
+                    let name = self.toks[self.pos - 1].text(self.src);
+                    let arg = self.text_at(2);
+
+                    return Err(self.err(&format!(
+                        "inside a type argument list a type is written `{name}<{arg}>`"
+                    )));
+                }
+
                 "<" => depth += 1,
 
                 ">" => depth -= 1,

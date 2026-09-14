@@ -748,20 +748,33 @@ impl<'s> Desugar<'s> {
         let mut hits: Vec<(TokSpan, String)> = Vec::new();
 
         for stmt in &block.stmts {
-            let Some((span, kind)) = declared_kind(stmt) else {
-                continue;
+            // An import binds its names the way a declaration does; a
+            // struct of the same name below it would replace the import.
+            let names: Vec<(TokSpan, &'static str)> = match stmt {
+                Stmt::Import(i) => super::import_names(i)
+                    .into_iter()
+                    .map(|n| (n, "imported"))
+                    .collect(),
+
+                _ => declared_kind(stmt).into_iter().collect(),
             };
-            let name = self.text_of(span).to_string();
 
-            match seen.iter().find(|(n, _, _)| *n == name) {
-                Some((_, first, line)) => hits.push((
-                    span,
-                    format!(
-                        "`{name}` is already {first} on line {line}; one name holds one declaration"
-                    ),
-                )),
+            for (span, kind) in names {
+                let name = self.text_of(span).to_string();
 
-                None => seen.push((name, kind, self.line_of(self.byte_start(span)))),
+                match seen.iter().find(|(n, _, _)| *n == name) {
+                    // Two imports of one name are the import check's.
+                    Some((_, first, _)) if kind == "imported" && *first == "imported" => {}
+
+                    Some((_, first, line)) => hits.push((
+                        span,
+                        format!(
+                            "`{name}` is already {first} on line {line}; one name holds one declaration"
+                        ),
+                    )),
+
+                    None => seen.push((name, kind, self.line_of(self.byte_start(span)))),
+                }
             }
         }
 

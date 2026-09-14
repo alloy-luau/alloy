@@ -772,7 +772,7 @@ fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
 }
 
 /// Every name an `import` binds.
-fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
+pub(crate) fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
     use alloy_syntax::ast::ImportKind;
 
     match &i.kind {
@@ -1960,12 +1960,24 @@ impl<'s> Desugar<'s> {
         stmts_function_spans(&block.stmts, &mut bodies);
 
         // A macro body expands at each `$name` call, so the call is the
-        // use and the body itself is quiet.
+        // use and the body itself is quiet. An import entry binds a
+        // name and reads none; the duplicate check owns that pair.
         let macros: Vec<(&str, TokSpan)> = block
             .stmts
             .iter()
             .filter_map(|s| match s {
                 Stmt::Macro(m) => Some((self.text_of(m.name), m.span)),
+
+                _ => None,
+            })
+            .collect();
+        let quiet: Vec<TokSpan> = block
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Macro(m) => Some(m.span),
+
+                Stmt::Import(i) => Some(i.span),
 
                 _ => None,
             })
@@ -2024,9 +2036,9 @@ impl<'s> Desugar<'s> {
             };
 
             for k in 0..decl.start as usize {
-                if macros
+                if quiet
                     .iter()
-                    .any(|(_, span)| (span.start as usize..span.end as usize).contains(&k))
+                    .any(|span| (span.start as usize..span.end as usize).contains(&k))
                     || !(reads(k) || expands(k))
                 {
                     continue;

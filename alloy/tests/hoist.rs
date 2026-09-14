@@ -108,6 +108,32 @@ fn a_match_covers_an_enum_declared_below_it() {
     );
 }
 
+/// An import entry binds a name and reads none, so it is not a use
+/// above the declaration. The pair is a duplicate, reported at the
+/// declaration.
+#[test]
+fn an_import_and_a_declaration_of_one_name_is_a_duplicate() {
+    let src = "import { Widget } from \"./k\"\n\nfunction useWidget(): string\n    return new Widget { tag = \"local\" }.tag\nend\n\nstruct Widget as\n    tag: string\nend\n\nprint(useWidget())\n";
+    let out = compile(src);
+    let hits: Vec<(usize, String)> = out
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                src[..d.start as usize].matches('\n').count() + 1,
+                d.message.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        hits,
+        vec![(
+            7,
+            "`Widget` is already imported on line 1; one name holds one declaration".to_string()
+        )]
+    );
+}
+
 #[test]
 fn a_top_level_use_above_the_declaration_reports() {
     let src = format!(

@@ -674,13 +674,16 @@ mod tests {
             Some("Circle".to_string())
         );
 
-        // A receiver on the caret's own line still names the member.
-        let src = "print(Shape.Circle)\n";
-        let at = src.find("Circle").expect("the variant");
-        assert_eq!(
-            declaration_key(src, at, at + "Circle".len()),
-            Some("Shape.Circle".to_string())
-        );
+        // A receiver on the caret's own line still names the member, so
+        // a variant in a `case` pattern reads as the variant and not as
+        // the enum in front of it.
+        for src in ["print(Shape.Circle)\n", "    case Shape.Circle then\n"] {
+            let at = src.find("Circle").expect("the variant");
+            assert_eq!(
+                declaration_key(src, at, at + "Circle".len()),
+                Some("Shape.Circle".to_string())
+            );
+        }
     }
 
     /// `local Point = 1` hovered as another file's `struct Point`.

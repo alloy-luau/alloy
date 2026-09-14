@@ -209,6 +209,7 @@ impl<'a> Parser<'a> {
             "async" if self.text_at(1) == "do" && !self.newline_after(0) => {
                 self.bump();
                 self.bump();
+                self.value_block = true;
                 let block = self.block()?;
                 self.expect("end")?;
                 Expr::AsyncBlock {
@@ -220,6 +221,7 @@ impl<'a> Parser<'a> {
             "try" if self.text_at(1) == "do" && !self.newline_after(0) => {
                 self.bump();
                 self.bump();
+                self.value_block = true;
                 let block = self.block()?;
                 self.expect("end")?;
                 Expr::TryBlock {

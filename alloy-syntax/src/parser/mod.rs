@@ -98,6 +98,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
+        value_block: false,
     };
 
     let block = p.block()?;
@@ -152,6 +153,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
+        value_block: false,
     };
 
     let mut stmts = Vec::new();
@@ -223,6 +225,10 @@ struct Parser<'a> {
     /// Inside the pattern argument of `$matches`, where an array literal
     /// reads as an array pattern and takes a `...rest`.
     pattern_arg: u32,
+    /// Set for the next `block` call, when that block is the body of a
+    /// value block: `try do ... end` or `async do ... end`. Such a block
+    /// may end in an expression, whose value is the block's value.
+    value_block: bool,
 }
 
 impl<'a> Parser<'a> {

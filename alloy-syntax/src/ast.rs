@@ -855,6 +855,10 @@ pub struct Param {
 #[derive(Debug)]
 pub struct Return {
     pub values: Vec<Expr>,
+    /// True for the trailing expression of a value block, `try do ... x
+    /// end`. The source writes no `return`, so the span covers the
+    /// expression alone and the emit writes the word in.
+    pub value_only: bool,
     pub span: TokSpan,
 }
 

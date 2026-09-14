@@ -1680,6 +1680,10 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
     match s {
         Stmt::Namespace(_) => return true,
 
+        // The trailing expression of a `try do` or `async do` block:
+        // the emit writes the `return` the source leaves out.
+        Stmt::Return(r) if r.value_only => return true,
+
         Stmt::Assign(a) if a.op.end - a.op.start == 3 => return true,
 
         Stmt::Local(l) if local_needs_rewrite(l) => return true,
@@ -2532,5 +2536,98 @@ mod tests {
             "{}",
             out.ship
         );
+    }
+
+    /*
+    A value block ends in an expression, whose value is the block's. The
+    reader took it only when no statement stood in front of it, so
+    `try do if c then break end x end` reported `this expression is not a
+    statement` at the `x`. It now reads the expression after any
+    statement, a block that ends in `end` included.
+    */
+    #[test]
+    fn a_value_block_takes_its_trailing_expression_after_any_statement() {
+        let ship = |src: &str| -> String {
+            crate::compile_with(src, &EmitOptions::default())
+                .unwrap()
+                .ship
+        };
+
+        // A `break` in a nested `if`, then the value.
+        let src = "local function scan(xs: number[])
+    for _, x in xs do
+        local r = try do
+            if x > 2 then
+                break
+            end
+            x
+        end
+        print(r)
+    end
+end
+scan([1])
+";
+        let out = ship(src);
+
+        assert!(out.contains("return x"), "{out}");
+
+        // A `continue` and a `return` read the same way, and `async do`
+        // takes a trailing expression too.
+        let src = "local function scan(xs: number[])
+    for _, x in xs do
+        local r = async do
+            if x > 2 then
+                continue
+            end
+            x + 1
+        end
+        print(r)
+    end
+end
+scan([1])
+";
+        let out = ship(src);
+
+        assert!(out.contains("return x + 1"), "{out}");
+
+        // A `do ... end` block in front of the value, and a local.
+        let src = "local function f(n: number)
+    local r = try do
+        local a = n
+        do
+            print(a)
+        end
+        a + 1
+    end
+    print(r)
+end
+f(1)
+";
+        let out = ship(src);
+
+        assert!(out.contains("return a + 1"), "{out}");
+
+        // A nested block takes no trailing expression of its own: the
+        // `n` inside the `if` is still no statement.
+        let src = "local function f(n: number)
+    local r = try do
+        if n > 1 then
+            n
+        end
+        n
+    end
+    print(r)
+end
+f(1)
+";
+
+        let messages: Vec<String> = crate::compile(src)
+            .unwrap()
+            .diagnostics
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+
+        assert_eq!(messages, vec!["this expression is not a statement"]);
     }
 }

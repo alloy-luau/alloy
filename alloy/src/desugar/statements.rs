@@ -1257,6 +1257,21 @@ impl<'s> Desugar<'s> {
                 self.block_err_return_stmt(r);
             }
 
+            // `try do ... x end`: the block's value is its trailing
+            // expression. The source writes no `return`, so the emit
+            // writes it in front of the expression.
+            Stmt::Return(r) if r.value_only => {
+                let anchor = self.byte_start(r.span);
+                self.generate(anchor, "return ");
+                self.stitch(r.span, &stmt_children(stmt), |d, child| match child {
+                    Child::Expr(e) => d.expr(e),
+
+                    Child::Block(b) => d.block(b),
+
+                    Child::Function(b) => d.function_block(b),
+                });
+            }
+
             // `return HashMap.new()` under a declared `HashMap<K, V>`
             // return type: the same rule as the annotated local below.
             Stmt::Return(r) if self.returned_constructor(&r.values).is_some() => {

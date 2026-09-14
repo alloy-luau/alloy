@@ -23,6 +23,9 @@ impl<'a> Parser<'a> {
     pub(super) fn block(&mut self) -> Result<Block, ParseError> {
         self.enter()?;
 
+        // The flag belongs to this block alone: a block nested in a
+        // value block takes no trailing expression of its own.
+        let value_block = std::mem::take(&mut self.value_block);
         let start = self.pos;
         let mut stmts = Vec::new();
 
@@ -37,8 +40,33 @@ impl<'a> Parser<'a> {
                 None
             };
             let stmt_start = self.pos;
+            let parsed = self.stmt();
 
-            let stmt = match self.stmt() {
+            // The last thing in a value block may be an expression, not
+            // a statement: its value is the block's. Any statement may
+            // stand in front of it, a block that ends in `end` included,
+            // so the reader tries the expression wherever the statement
+            // parser refuses.
+            let parsed = match parsed {
+                Err(e) if value_block => {
+                    let after = self.pos;
+                    self.pos = stmt_start;
+
+                    match self.value_tail() {
+                        Some(s) => Ok(s),
+
+                        None => {
+                            self.pos = after;
+
+                            Err(e)
+                        }
+                    }
+                }
+
+                other => other,
+            };
+
+            let stmt = match parsed {
                 Ok(s) => s,
 
                 Err(e) if self.lenient && self.diagnostics.len() < MAX_DIAGNOSTICS => {
@@ -94,6 +122,26 @@ impl<'a> Parser<'a> {
             stmts,
             span: TokSpan::new(start, self.pos),
         })
+    }
+
+    /// The trailing expression of a value block, `try do ... x end`. It
+    /// reads as the `return` the source leaves out, so the rest of the
+    /// compiler sees one shape for the block's value. The expression has
+    /// to be the last thing in the block; anything else is the statement
+    /// error the caller already holds.
+    fn value_tail(&mut self) -> Option<Stmt> {
+        let start = self.pos;
+        let value = self.expr().ok()?;
+
+        if !self.at("end") {
+            return None;
+        }
+
+        Some(Stmt::Return(Return {
+            values: vec![value],
+            value_only: true,
+            span: TokSpan::new(start, self.pos),
+        }))
     }
 
     /*
@@ -343,6 +391,7 @@ impl<'a> Parser<'a> {
 
                 Ok(Stmt::Return(Return {
                     values,
+                    value_only: false,
                     span: TokSpan::new(start, self.pos),
                 }))
             }

@@ -445,6 +445,8 @@ impl Server {
             return;
         };
 
+        let had_impls = impl_surface(&doc.source);
+
         for change in changes {
             let text = change
                 .get("text")
@@ -463,8 +465,16 @@ impl Server {
         let had_exports = export_surface(doc);
         doc.compile(&options, &jsx, ingots.as_deref());
         let fresh_exports = export_surface(doc);
+        let fresh_impls = impl_surface(&doc.source);
+        let source = doc.source.clone();
         let shadow_text = doc.shadow.clone();
         let shadow = st.child_uri(uri);
+
+        // The project's `impl` index holds this file's blocks, so the
+        // next compile of any file reads them again.
+        if had_impls != fresh_impls {
+            st.project.borrow_mut().take();
+        }
 
         if let Some(path) = uri_to_path(uri) {
             st.write_mirror(&path, &shadow_text);
@@ -490,7 +500,31 @@ impl Server {
             self.refresh_importers(&[path]);
         }
 
+        // An `impl` here declares methods on a struct another file
+        // owns. That file's check artifact carries them, so its shadow
+        // follows the edit.
+        if had_impls != fresh_impls
+            && let Some(path) = uri_to_path(uri)
+        {
+            self.refresh_imported(&path, &source);
+        }
+
         self.publish(uri);
+    }
+
+    /// Resends every open document this one imports.
+    pub(crate) fn refresh_imported(&self, path: &Path, source: &str) {
+        for target in alloy::modules::import_targets_for_file(path, source) {
+            let uri = path_to_uri(&normalize(&target));
+
+            if !self.state.lock().expect("state").docs.contains_key(&uri) {
+                continue;
+            }
+
+            self.wait_for_requests();
+            self.resend_doc(&uri);
+            self.publish(&uri);
+        }
     }
 
     pub(crate) fn close_shadow(&self, uri: &str) {
@@ -1489,6 +1523,26 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// the reports of every importer, and the import checks read the module
 /// from disk, so an importer's report stands until something asks for
 /// it again.
+/// What a document adds to the project's `impl` index: the methods its
+/// `impl` blocks put on a struct or an enum another file declares, and
+/// which of them it keeps private. The index is stale when this
+/// changes. A source with no `impl` word adds nothing, and the test
+/// costs a scan, not a parse.
+pub(crate) fn impl_surface(
+    source: &str,
+) -> (
+    Vec<alloy::extensions::Extension>,
+    Vec<(String, Vec<String>)>,
+) {
+    if !source.contains("impl") {
+        return Default::default();
+    }
+
+    let impls = alloy::extensions::project_impls(&[source.to_string()]);
+
+    (impls.methods, impls.privates)
+}
+
 pub(crate) fn export_surface(doc: &Doc) -> Vec<(String, bool)> {
     doc.exports
         .iter()

@@ -36,6 +36,58 @@ pub(crate) fn the_mirror_config_names_the_runtime_and_the_mounts() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+/// An `impl` on a struct another file declares reaches the declaring
+/// file's check artifact, the way the project build feeds it. Without
+/// the index the child reports `Cannot add property` on the impl.
+#[test]
+pub(crate) fn the_project_impl_index_reaches_the_declaring_file() {
+    let dir = std::env::temp_dir().join(format!("alloy-project-impls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    let declaring = "export struct Box as\n    value: number,\n    private secret: number,\nend\n";
+    std::fs::write(dir.join("src/mod_a.aly"), declaring).expect("mod_a.aly");
+    std::fs::write(
+        dir.join("src/main.aly"),
+        "import { Box } from \"./mod_a\"\n\nimpl Box as\n    function getSecret(self): number\n        return self.secret\n    end\nend\n",
+    )
+    .expect("main.aly");
+
+    let st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let index = st.project_impls();
+
+    assert!(
+        index
+            .methods
+            .iter()
+            .any(|m| m.target == "Box" && m.name == "getSecret"),
+        "{:?}",
+        index.methods
+    );
+
+    // The declaring file's shadow declares the method, so the impl in
+    // the other file has a place to land.
+    let (options, jsx) = st.options_for(&path_to_uri(&dir.join("src/mod_a.aly")));
+    let doc = Doc::new(declaring.to_string(), 1, &options, &jsx, None);
+
+    assert!(doc.shadow.contains("getSecret"), "{}", doc.shadow);
+
+    // The index is remembered until the project changes.
+    st.forget_disk();
+    std::fs::write(dir.join("src/main.aly"), "local x = 1\n").expect("main.aly");
+
+    assert!(st.project_impls().methods.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
 /// After Enter on an opener the `end` arrives as one edit at the
 /// caret, so the caret keeps the line the editor indented.
 #[test]

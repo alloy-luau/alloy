@@ -45,6 +45,10 @@ pub(crate) struct State {
     pub(crate) root: Option<PathBuf>,
     /// Extensions declared anywhere under the root, read at startup.
     pub(crate) extensions: Vec<alloy::extensions::Extension>,
+    /// The `impl` blocks the project writes on a struct or an enum
+    /// another file declares, as `alloy build` reads them. The walk
+    /// costs one parse per source, so the answer is remembered.
+    pub(crate) project: std::cell::RefCell<Option<Arc<alloy::extensions::ProjectImpls>>>,
     /// The ingots of the root's alloy.toml, started at workspace open
     /// and again when the file changes.
     pub(crate) ingots: Option<std::sync::Arc<alloy::ingot::Ingots>>,
@@ -104,6 +108,52 @@ impl State {
         self.configs.borrow_mut().clear();
         self.trees.borrow_mut().clear();
         self.luau_configs.borrow_mut().clear();
+        self.project.borrow_mut().take();
+    }
+
+    /// The project's `impl` index, the one `alloy build` feeds every
+    /// file: an `impl` on a struct another file declares reaches the
+    /// declaring file's check artifact, so every file reads one shape.
+    /// A document the editor holds open answers for its own file, the
+    /// rest come from the disk.
+    pub(crate) fn project_impls(&self) -> Arc<alloy::extensions::ProjectImpls> {
+        if let Some(held) = self.project.borrow().as_ref() {
+            return Arc::clone(held);
+        }
+
+        let mut sources: Vec<String> = Vec::new();
+
+        if let Some(root) = self.root.as_deref() {
+            // The output folder holds the build's own Luau, never a
+            // source, and a walk of it would cost the whole tree.
+            let out = self
+                .config_at(root)
+                .map(|c| c.0.parent().unwrap_or(root).join(&c.1.build.out));
+            let mut files = Vec::new();
+            let mut plain = Vec::new();
+            super::documents::walk(root, out.as_deref(), &mut files, &mut plain);
+
+            for path in files {
+                if !path.to_string_lossy().ends_with(".aly") {
+                    continue;
+                }
+
+                match self.docs.get(&path_to_uri(&path)) {
+                    Some(doc) => sources.push(doc.source.clone()),
+
+                    None => {
+                        if let Ok(text) = std::fs::read_to_string(&path) {
+                            sources.push(text);
+                        }
+                    }
+                }
+            }
+        }
+
+        let held = Arc::new(alloy::extensions::project_impls(&sources));
+        *self.project.borrow_mut() = Some(Arc::clone(&held));
+
+        held
     }
 
     /// The `alloy.toml` over a folder, with its path. The climb stops
@@ -342,7 +392,7 @@ impl State {
             .unwrap_or_else(|| alloy::luaux::Config::load(&config_dir).map_err(|e| e.message))
             .unwrap_or_default();
 
-        let options = match config {
+        let mut options = match config {
             Some(found) => {
                 let (config_path, config) = (&found.0, &found.1);
                 let root = normalize(config_path.parent().unwrap_or(Path::new(".")));
@@ -379,6 +429,14 @@ impl State {
                 }
             }
         };
+
+        // An `impl` on a struct another file declares attaches at run
+        // time through the require, and the declaring file's artifact
+        // declares the methods, so the type follows. `alloy build`
+        // feeds every file the same index; the editor now does too.
+        let project = self.project_impls();
+        options.foreign_impls = project.methods.clone();
+        options.foreign_privates = project.privates.clone();
 
         (options, jsx)
     }

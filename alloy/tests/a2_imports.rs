@@ -764,7 +764,12 @@ fn an_imported_macro_calls_a_private_macro_of_its_module() {
     let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
 
     assert!(out.diagnostics.is_empty(), "{messages:?}");
-    assert!(out.ship.contains("print ( \"helper:\""), "{}", out.ship);
+    // The body keeps the spacing the declaration wrote.
+    assert!(
+        out.ship.contains("print(\"helper:\", \"x\")"),
+        "{}",
+        out.ship
+    );
 
     // `$helper` is the module's own; a call here is unknown.
     let direct = alloy::compile_with(
@@ -826,11 +831,7 @@ fn an_imported_macro_expands_where_it_is_called() {
     assert!(out.diagnostics.is_empty(), "{messages:?}");
     assert!(!out.ship.contains('$'), "{}", out.ship);
     assert!(!out.ship.contains("local logit"), "{}", out.ship);
-    assert!(
-        out.ship.contains("print ( tostring ( \"hi\" ) )"),
-        "{}",
-        out.ship
-    );
+    assert!(out.ship.contains("print(tostring(\"hi\"))"), "{}", out.ship);
     // The default of the second parameter fills the argument that is
     // not given.
     assert!(out.ship.contains("1 + 2"), "{}", out.ship);

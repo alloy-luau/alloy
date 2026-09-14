@@ -21,12 +21,36 @@ pub(crate) struct MacroRef {
     pub(crate) tail: Option<String>,
 }
 
+/// The tokens of a one-line macro body, each with the gap in front of
+/// it. The body keeps the spacing the declaration wrote, so a word is
+/// what the lexer says, not what a space separates. A string holds its
+/// own spaces, and a path such as `Choice.Yes` holds none.
+fn body_parts(body: &str) -> Vec<(&str, &str)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(body) else {
+        // A body the lexer refuses still substitutes by whole words.
+        return body
+            .split(' ')
+            .enumerate()
+            .map(|(i, w)| (if i == 0 { "" } else { " " }, w))
+            .collect();
+    };
+    let mut out = Vec::with_capacity(lexed.toks.len());
+    let mut at = 0usize;
+
+    for tok in &lexed.toks {
+        out.push((&body[at..tok.start as usize], tok.text(body)));
+        at = tok.end as usize;
+    }
+
+    out
+}
+
 /// Text that reads the same with or without parentheses around it.
 /// The names a macro body declares: after `local`, the variables of a
 /// `for`, and the parameters of a `function` inside it. The body is one
-/// line of tokens joined by spaces.
+/// line of the tokens the declaration wrote.
 pub(crate) fn body_locals(body: &str) -> Vec<String> {
-    let words: Vec<&str> = body.split(' ').collect();
+    let words: Vec<&str> = body_parts(body).into_iter().map(|(_, w)| w).collect();
     let is_name = |w: &str| {
         w.chars()
             .next()
@@ -185,14 +209,13 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        // Substitute whole words in the one-line body.
+        // Substitute whole tokens in the one-line body, each behind the
+        // gap the declaration wrote.
         let substitute = |text: &str| -> String {
             let mut out = String::new();
 
-            for word in text.split(' ') {
-                if !out.is_empty() {
-                    out.push(' ');
-                }
+            for (gap, word) in body_parts(text) {
+                out.push_str(gap);
 
                 if word == "..." && m.variadic {
                     // Nothing behind the vararg: the comma in front of
@@ -601,8 +624,7 @@ mod tests {
 
     /// A macro body compiles as a fragment of its own, so it needs the
     /// enums of the file it expands in. Without them a `match` over one
-    /// covered nothing and reported. The body travels as tokens joined
-    /// by spaces, so `Choice.Yes` reaches the fragment as `Choice . Yes`.
+    /// covered nothing and reported.
     #[test]
     fn a_match_in_a_macro_body_covers_the_enum_of_the_file() {
         let src = "enum Choice as\n    Yes\n    No\nend\n\nmacro describe(c)\n    local r = match c with\n        case Choice.Yes then \"yes\"\n        case Choice.No then \"no\"\n    end\n    r\nend\n\nlocal function show(x: Choice): string\n    return $describe(x)\nend\n\nprint(show(Choice.Yes))\n";
@@ -616,6 +638,40 @@ mod tests {
                 "in macro expansion: this match is not exhaustive: `Choice` has no arm for `No`; add it or a `default` arm".to_string()
             ]
         );
+    }
+
+    /// A macro body travels as one line. The join used to put a space
+    /// between every pair of tokens, so the expansion wrote
+    /// `Choice . Yes`, `s : upper ( )` and `t [ 1 ]`. The gap the
+    /// declaration wrote now decides the space.
+    #[test]
+    fn a_macro_body_keeps_the_spacing_the_source_wrote() {
+        let decl = "enum Choice as\n    Yes\n    No\nend\n\nmacro pick(c)\n    c == Choice.Yes\nend\n\nmacro shout(s)\n    s:upper()\nend\n\nmacro first(t)\n    t[1]\nend\n\n";
+        let src = format!(
+            "{decl}local c: Choice = Choice.Yes\nprint($pick(c))\nprint($shout(\"hi\"))\nprint($first({{ 1, 2 }}))\n"
+        );
+        let out = crate::compile(&src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.ship.contains("c == Choice.Yes"), "{}", out.ship);
+        assert!(out.ship.contains("(\"hi\"):upper()"), "{}", out.ship);
+        assert!(out.ship.contains("({ 1, 2 })[1]"), "{}", out.ship);
+        assert!(!out.ship.contains(" . "), "{}", out.ship);
+
+        // A parameter the source writes tight still substitutes, since
+        // the split is the lexer's, not the space's.
+        let src = "macro call(f, x)\n    f(x)\nend\n\nprint($call(tostring, 1))\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.ship.contains("tostring(1)"), "{}", out.ship);
+
+        // A name inside a string is no token, so it never substitutes.
+        let src = "macro say(x)\n    print(\"x here\", x)\nend\n\n$say(1)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.ship.contains("print(\"x here\", 1)"), "{}", out.ship);
     }
 
     /// A macro substitutes; there is no call for the checker to count.

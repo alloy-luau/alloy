@@ -1067,15 +1067,21 @@ impl<'s> Desugar<'s> {
     /// The tokens of a span on one line, joined by spaces, comments gone.
     pub(crate) fn join_tokens(&self, span: TokSpan) -> String {
         let mut out = String::new();
+        let mut prev_end = None;
 
         for i in span.start..span.end {
             let tok = self.toks[i as usize];
 
-            if !out.is_empty() {
+            // The gap the source wrote decides the space, so `Choice.Yes`
+            // and `f(x)` keep their shape in the expansion. The text is
+            // one line, and a gap may hold a comment, so any gap at all
+            // becomes one space.
+            if prev_end.is_some_and(|end| end < tok.start) {
                 out.push(' ');
             }
 
             out.push_str(tok.text(self.src));
+            prev_end = Some(tok.end);
         }
 
         out

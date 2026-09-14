@@ -1235,13 +1235,26 @@ pub fn module_macros(source: &str) -> Vec<crate::MacroSource> {
     };
     let toks = &parsed.lexed.toks;
     let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
-    // The body and each default are one line of tokens joined by
-    // spaces, the shape the expander reads; see `Desugar::join_tokens`.
+    // The body and each default are one line of the tokens the
+    // declaration wrote, the shape the expander reads. The gap decides
+    // the space, so `Choice.Yes` and `f(x)` keep their shape; see
+    // `Desugar::join_tokens`.
     let join = |span: alloy_syntax::ast::TokSpan| {
-        (span.start..span.end)
-            .map(|i| toks[i as usize].text(source))
-            .collect::<Vec<&str>>()
-            .join(" ")
+        let mut out = String::new();
+        let mut prev_end = None;
+
+        for i in span.start..span.end {
+            let tok = toks[i as usize];
+
+            if prev_end.is_some_and(|end| end < tok.start) {
+                out.push(' ');
+            }
+
+            out.push_str(tok.text(source));
+            prev_end = Some(tok.end);
+        }
+
+        out
     };
     let mut out = Vec::new();
 

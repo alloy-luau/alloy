@@ -31,9 +31,13 @@ pub(crate) fn fail(message: &str) {
     eprintln!("{}", Painter::for_stderr().fail(message));
 }
 
-/// `alloy <command> --help` prints that command's options.
+/// `alloy <command> --help` prints that command's options. Everything
+/// after `--` goes to another tool, the way `unknown_flag` reads it, so
+/// `alloy test -- --help` asks lest for its help and not ours.
 fn wants_help(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--help" || a == "-h")
+    args.iter()
+        .take_while(|a| *a != "--")
+        .any(|a| a == "--help" || a == "-h")
 }
 
 fn command_help(text: &str) -> ExitCode {
@@ -106,5 +110,24 @@ fn main() -> ExitCode {
             fail(&format!("unknown command `{other}`"));
             usage()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants_help;
+
+    /// `--help` after `--` belongs to the tool the command forwards to.
+    /// `alloy test -- --help` asks lest for its help.
+    #[test]
+    fn help_after_the_double_dash_is_not_ours() {
+        let args =
+            |list: &[&str]| -> Vec<String> { list.iter().map(|a| (*a).to_string()).collect() };
+
+        assert!(wants_help(&args(&["test", "--help"])));
+        assert!(wants_help(&args(&["test", "-h"])));
+        assert!(!wants_help(&args(&["test", "--", "--help"])));
+        assert!(!wants_help(&args(&["test", "--run", "--", "--help"])));
+        assert!(!wants_help(&args(&["build", "--", "-h"])));
     }
 }

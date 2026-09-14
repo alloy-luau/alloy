@@ -281,6 +281,38 @@ fn an_exported_namespace_reaches_another_file() {
     assert!(main.contains("Geom.ORIGIN"), "{main}");
 }
 
+/// A nested namespace of another file names its types at any depth. The
+/// module exports one flat name, `Geom_In_Point`, and every type slot of
+/// the importing file reads that name: a parameter, a return type, a
+/// `local`, and a generic argument.
+#[test]
+fn a_nested_namespace_of_another_file_folds_at_any_depth() {
+    let dir = temp_project("export-nested");
+    fs::write(
+        dir.join("src/geom.aly"),
+        "export namespace Geom as\n    namespace In as\n        struct Point as\n            x: number\n        end\n        namespace Deep as\n            struct Spot as\n                y: number\n            end\n        end\n    end\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.aly"),
+        "import { Geom } from \"./geom\"\n\nfunction near(p: Geom.In.Point): Geom.In.Point\n    local q: Geom.In.Point = p\n    return q\nend\n\nfunction deep(xs: Array<Geom.In.Deep.Spot>): number\n    return #xs\nend\n\nprint(near, deep)\n",
+    )
+    .unwrap();
+    let report = build(&dir);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+
+    let main = output(&dir, "main.luau");
+    assert!(
+        main.contains("function near(p: Geom_In_Point): Geom_In_Point"),
+        "{main}"
+    );
+    assert!(main.contains("local q: Geom_In_Point = p"), "{main}");
+    assert!(
+        main.contains("Array<Geom_In_Deep_Spot>") && !main.contains("Geom.In."),
+        "{main}"
+    );
+}
+
 /// `export { Geom }` below the declaration exports the group too.
 #[test]
 fn an_export_list_sends_a_namespace() {

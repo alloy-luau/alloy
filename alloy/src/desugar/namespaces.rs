@@ -411,32 +411,28 @@ impl<'s> Desugar<'s> {
         if let Some(info) = self.namespaces.get(&name) {
             let mut key = name.clone();
             let mut info = info;
-            let mut at = span.end as usize;
 
-            while self.tok_text(at) == "." {
-                if at + 2 > self.toks.len() {
+            for (at, (member, fe)) in self.dotted_chain(span)?.iter().enumerate() {
+                if *fe > limit {
                     return None;
                 }
 
-                let field = TokSpan::new(at + 1, at + 2);
-                let member = self.text_of(field).to_string();
-                let fe = self.byte_end(field);
-
-                if fe > limit {
-                    return None;
+                // An imported namespace flattens its nesting into one
+                // member name, `Ns_Shape`, because that is the type the
+                // module exports. The longest path a member answers
+                // wins, so `M.Ns.Shape` folds whole.
+                if let Some((end, rendered)) = self.flat_member(info, span, at, limit) {
+                    return Some((s, end, rendered));
                 }
 
-                let m = info.member(&member)?;
+                let m = info.member(member)?;
 
-                if m.nested {
-                    key = key_of(Some(&key), &member);
-                    info = self.namespaces.get(&key)?;
-                    at = field.end as usize;
-
-                    continue;
+                if !m.nested {
+                    return m.ty.then(|| (s, *fe, m.rendered.clone()));
                 }
 
-                return m.ty.then(|| (s, fe, m.rendered.clone()));
+                key = key_of(Some(&key), member);
+                info = self.namespaces.get(&key)?;
             }
 
             return None;
@@ -446,6 +442,61 @@ impl<'s> Desugar<'s> {
         let rendered = self.ns_type_name(&name)?;
 
         Some((s, e, rendered))
+    }
+
+    /// The `.field` steps after a type name, each with the byte its own
+    /// name ends at: `M.Ns.Shape` gives `Ns` and `Shape`. `None` when a
+    /// dot runs off the end of the tokens, as a half-written line does.
+    fn dotted_chain(&self, span: TokSpan) -> Option<Vec<(String, u32)>> {
+        let mut chain = Vec::new();
+        let mut at = span.end as usize;
+
+        while self.tok_text(at) == "." {
+            if at + 2 > self.toks.len() {
+                return None;
+            }
+
+            let field = TokSpan::new(at + 1, at + 2);
+
+            chain.push((self.text_of(field).to_string(), self.byte_end(field)));
+            at = field.end as usize;
+        }
+
+        Some(chain)
+    }
+
+    /// The member a flattened path names, from the step `at` to the end
+    /// of the chain: `Ns_Shape` for `M.Ns.Shape`. The longest path a
+    /// member answers wins. The byte the path ends at comes back with
+    /// the name, and a member that is no type answers nothing.
+    fn flat_member(
+        &self,
+        info: &NamespaceInfo,
+        span: TokSpan,
+        at: usize,
+        limit: u32,
+    ) -> Option<(u32, String)> {
+        let chain = self.dotted_chain(span)?;
+
+        for take in (at + 2..=chain.len()).rev() {
+            let end = chain[take - 1].1;
+
+            if end > limit {
+                continue;
+            }
+
+            let flat = chain[at..take]
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join("_");
+
+            if let Some(m) = info.member(&flat) {
+                return m.ty.then(|| (end, m.rendered.clone()));
+            }
+        }
+
+        None
     }
 
     /// The text of one token, or an empty string past the end. The

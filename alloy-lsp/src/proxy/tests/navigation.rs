@@ -1643,3 +1643,33 @@ pub(crate) fn a_namespace_group_reads_under_every_head() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Go to definition on the call after `try` answered nothing: the
+/// desugar wraps the call, so the child sees generated text there. The
+/// plain call under it lands on the declaration, and so does this one.
+#[test]
+fn a_call_the_desugar_moved_still_finds_its_declaration() {
+    let src = "export function safe_div(a: number, b: number): Result<number, string>\n    if b == 0 then\n        return Err(\"nope\")\n    end\n    return Ok(a / b)\nend\n\nexport function caller(a: number, b: number): Result<number, string>\n    local x = try safe_div(a, b)\n    local y = safe_div(a, b)\n    return Ok(x)\nend\n";
+    let (st, uri) = super::support::one_file(src);
+    let declaration = json!([{
+        "uri": uri,
+        "range": { "start": { "line": 0, "character": 16 }, "end": { "line": 0, "character": 24 } },
+    }]);
+
+    // The `try` site, then the plain call.
+    assert_eq!(
+        st.declared_definition(uri, 8, 22),
+        Some(declaration.clone())
+    );
+    assert_eq!(st.declared_definition(uri, 9, 21), Some(declaration));
+
+    // The argument on the `try` line is the parameter of `caller`.
+    assert_eq!(
+        st.declared_definition(uri, 8, 27),
+        Some(json!([{
+            "uri": uri,
+            "range": { "start": { "line": 7, "character": 23 }, "end": { "line": 7, "character": 24 } },
+        }]))
+    );
+    assert_eq!(st.declared_definition(uri, 8, 16), None);
+}

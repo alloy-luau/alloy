@@ -1552,6 +1552,48 @@ impl State {
         })
     }
 
+    /// Where the project declares the name under the caret, for a use
+    /// the emit moved into generated text: the call after `try` or
+    /// `await`, the body of a `match` arm, the argument of a macro.
+    /// The child sees no token there and answers nothing. This file
+    /// answers first; another file answers for a name it exports.
+    pub(crate) fn declared_definition(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<Value> {
+        let doc = self.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+
+        if !keywords::is_word_at(&doc.source, offset) {
+            return None;
+        }
+
+        let (s, e) = keywords::word_range(&doc.source, offset);
+        let name = &doc.source[s..e];
+        let here = self.docs.get(uri).map(|d| (uri.to_string(), d));
+        let rest = self
+            .docs
+            .iter()
+            .filter(|(u, d)| {
+                u.as_str() != uri
+                    && imports::exports_of(&d.source, d.is_alx)
+                        .iter()
+                        .any(|x| x.name == name)
+            })
+            .map(|(u, d)| (u.clone(), d));
+
+        here.into_iter().chain(rest).find_map(|(u, d)| {
+            let (a, b) = export_span(&d.source, name)
+                .or_else(|| (u == uri).then(|| parameter_span(&d.source, offset, name))?)?;
+            let s = position_of(&d.source, a);
+            let e = position_of(&d.source, b);
+
+            Some(json!([{ "uri": u, "range": range_value(s, e) }]))
+        })
+    }
+
     /// The file an entry's module spec names.
     fn entry_module(&self, uri: &str, entry: &ImportEntry) -> Option<PathBuf> {
         imports::module_file(&imports::module_path(&self.resolve_spec(uri, &entry.spec)?))
@@ -2720,6 +2762,37 @@ const DECLARES: [&str; 13] = [
     "remote",
     "namespace",
 ];
+
+/// Where the function around the caret declares `name` as a parameter,
+/// as the byte range of the name: the nearest `function` header above
+/// the caret whose list holds it.
+// ponytail: a closed sibling function above the caret with the same
+// parameter name answers first; walk the `end`s if that shows up.
+fn parameter_span(src: &str, offset: usize, name: &str) -> Option<(usize, usize)> {
+    let lexed = alloy_syntax::lexer::lex(src).ok()?;
+    let toks = &lexed.toks;
+    let heads = toks
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, t)| (t.start as usize) < offset && t.text(src) == "function");
+
+    for (i, _) in heads {
+        let list = toks[i + 1..]
+            .iter()
+            .take_while(|t| t.text(src) != ")" && (t.start as usize) < offset);
+
+        for (k, t) in list.enumerate() {
+            let before = toks[i + k].text(src);
+
+            if t.text(src) == name && matches!(before, "(" | ",") {
+                return Some((t.start as usize, t.end as usize));
+            }
+        }
+    }
+
+    None
+}
 
 /// Where a module declares a name it exports, as the byte range of the
 /// name. `export default` has an answer of its own, in

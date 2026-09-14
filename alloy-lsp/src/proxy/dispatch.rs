@@ -1455,6 +1455,21 @@ impl Server {
             }
 
             match method.as_str() {
+                // The child answered nothing: the desugar moved the
+                // name into generated text, as `try f(x)` does. The
+                // declaration the name reads is what the reader means.
+                "textDocument/definition" | "textDocument/declaration" => {
+                    let empty = result.as_array().is_none_or(Vec::is_empty);
+
+                    if empty
+                        && let Some(uri) = &ctx
+                        && let Some((line, character)) = position
+                        && let Some(found) = st.declared_definition(uri, line, character)
+                    {
+                        *result = found;
+                    }
+                }
+
                 // The rewrites of the lints in the range, as quick fixes,
                 // and one action that applies every rewrite of the file.
                 "textDocument/codeAction" => {

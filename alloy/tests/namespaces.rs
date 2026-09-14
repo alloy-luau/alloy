@@ -341,6 +341,37 @@ fn a_star_import_folds_a_namespace_type() {
     assert!(main.contains("local q: X.Geom_Point"), "{main}");
 }
 
+/// `import type { A }` of a namespace writes one alias per member. A
+/// namespace is no type of its own: the module exports `A_Shape`, so
+/// `type A = _m1.A` names nothing. A plain type in the same list keeps
+/// its own alias.
+#[test]
+fn a_type_only_import_writes_the_namespace_aliases() {
+    let dir = temp_project("type-only-namespace");
+    fs::write(
+        dir.join("src/decl.aly"),
+        "export namespace A as\n    struct Shape as\n        n: number\n    end\n    namespace B as\n        struct Deep as\n            m: number\n        end\n    end\nend\n\nexport type Meters = number\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.aly"),
+        "import type { A, Meters } from \"./decl\"\n\nlocal function use(s: A.Shape, d: A.B.Deep, m: Meters): number\n    return s.n + d.m + m\nend\n\nprint(use)\n",
+    )
+    .unwrap();
+    let report = build(&dir);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+
+    let main = output(&dir, "main.luau");
+    assert!(main.contains("type A_Shape = _m1.A_Shape"), "{main}");
+    assert!(main.contains("type A_B_Deep = _m1.A_B_Deep"), "{main}");
+    assert!(main.contains("type Meters = _m1.Meters"), "{main}");
+    assert!(!main.contains("type A = _m1.A"), "{main}");
+    assert!(
+        main.contains("function use(s: A_Shape, d: A_B_Deep, m: Meters)"),
+        "{main}"
+    );
+}
+
 /// `export { Geom }` below the declaration exports the group too.
 #[test]
 fn an_export_list_sends_a_namespace() {

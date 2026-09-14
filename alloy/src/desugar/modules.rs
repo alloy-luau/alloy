@@ -248,21 +248,30 @@ impl<'s> Desugar<'s> {
                         .push((self.byte_start(i.span), self.byte_end(i.span)));
                 }
                 let temp = self.hoist_import(&path, anchor);
-                let parts: Vec<String> = specs
-                    .iter()
-                    .map(|sp| {
-                        let name = self.text_of(sp.name).to_string();
-                        let local = sp
-                            .alias
-                            .map(|a| self.text_of(a).to_string())
-                            .unwrap_or(name.clone());
+                let mut parts: Vec<String> = Vec::new();
 
-                        let args = self.module_type_params(&path, &name);
-                        let type_args = type_arguments(&args);
+                for sp in specs {
+                    let name = self.text_of(sp.name).to_string();
+                    let local = sp
+                        .alias
+                        .map(|a| self.text_of(a).to_string())
+                        .unwrap_or(name.clone());
 
-                        format!("type {local}{args} = {temp}.{name}{type_args}")
-                    })
-                    .collect();
+                    let args = self.module_type_params(&path, &name);
+                    let type_args = type_arguments(&args);
+                    // A namespace carries the types, and is none itself:
+                    // the module exports `A_B_Shape`, not `A`. So the
+                    // spec writes one alias per member, and the alias of
+                    // the name alone only when the module exports it.
+                    let aliases = self.namespace_type_aliases(&path, &name, &local, &temp);
+
+                    if aliases.is_empty() || self.module_exports_type(&path, &name) {
+                        parts.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
+                    }
+
+                    parts.extend(aliases);
+                }
+
                 self.generate(anchor, &parts.join(" "));
             }
         }

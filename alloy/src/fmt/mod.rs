@@ -965,6 +965,20 @@ mod tests {
         );
     }
 
+    /// `enum Opt<T> as` keeps its parameter list, and the body indents
+    /// the way a struct's does. A second pass changes nothing.
+    #[test]
+    fn a_generic_enum_formats_like_a_struct() {
+        let src = "enum Either<L, R = string> as\n  Left(L)\n    Right(R)\nend\n";
+        let want = "enum Either<L, R = string> as\n    Left(L)\n    Right(R)\nend\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+        assert_eq!(
+            fmt("enum Opt<T> as Some(T), Nil end\n"),
+            "enum Opt<T> as Some(T), Nil end\n"
+        );
+    }
+
     #[test]
     fn explicit_type_arguments_after_a_dot_stay_tight() {
         let src = "local damaged = Signal.new<<Player, number>>()\n";

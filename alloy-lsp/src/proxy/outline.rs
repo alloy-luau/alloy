@@ -74,6 +74,56 @@ pub(crate) fn ambient_symbols(st: &State, query: Option<&str>, out: &mut Vec<Val
     }
 }
 
+/// Every declaration of the workspace's Alloy sources, as the source
+/// spells it. The child reads the check artifact, where `Ns.T` is
+/// `Ns_T` and carries a `__new` and a `new` the author never wrote, so
+/// an Alloy file answers a workspace query from its own outline. A
+/// member reads under its owner: `Ns.T`, `Box.value`.
+pub(crate) fn source_symbols(st: &State, query: Option<&str>, out: &mut Vec<Value>) {
+    let query = query.unwrap_or_default().to_lowercase();
+
+    for (uri, doc) in &st.docs {
+        let Some(path) = uri_to_path(uri) else {
+            continue;
+        };
+        let Some(items) = document_symbols(&doc.source, &path) else {
+            continue;
+        };
+
+        flatten_symbols(&items, "", uri, &query, out);
+    }
+}
+
+/// The outline as a flat list, each entry named under its owner.
+fn flatten_symbols(items: &[Value], owner: &str, uri: &str, query: &str, out: &mut Vec<Value>) {
+    for item in items {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let full = match owner.is_empty() {
+            true => name.to_string(),
+
+            false => format!("{owner}.{name}"),
+        };
+
+        if full.to_lowercase().contains(query) {
+            out.push(json!({
+                "name": full,
+                "kind": item.get("kind").cloned().unwrap_or(json!(VARIABLE)),
+                "containerName": owner,
+                "location": {
+                    "uri": uri,
+                    "range": item.get("selectionRange").cloned().unwrap_or_default(),
+                },
+            }));
+        }
+
+        if let Some(children) = item.get("children").and_then(Value::as_array) {
+            flatten_symbols(children, &full, uri, query, out);
+        }
+    }
+}
+
 /// Every `declare Name: T` of a source, with the byte range of its name.
 fn ambient_values(src: &str, path: &Path) -> Vec<(String, (usize, usize))> {
     let options = alloy_syntax::parser::ParseOptions::for_path(path);

@@ -75,7 +75,7 @@ use navigation::{
     data_module_of, import_entries, in_a_dot_directory, service_definition, whole_word,
 };
 #[allow(unused_imports)]
-use outline::{ambient_symbols, document_symbols};
+use outline::{ambient_symbols, document_symbols, source_symbols};
 #[allow(unused_imports)]
 use typing::{append_initializer, end_follows};
 

@@ -1577,17 +1577,30 @@ impl Server {
                         let (mirror, root) = (st.mirror.clone(), st.root.clone());
 
                         symbols.retain(|symbol| {
-                            symbol
-                                .pointer("/location/uri")
-                                .and_then(Value::as_str)
-                                .and_then(uri_to_path)
-                                .is_none_or(|path| {
-                                    !in_a_dot_directory(&path, &mirror, root.as_deref())
-                                })
+                            let Some(uri) = symbol.pointer("/location/uri").and_then(Value::as_str)
+                            else {
+                                return true;
+                            };
+
+                            // An Alloy source answers from its own text
+                            // below: the emit spells a namespace member
+                            // `Ns_T` and writes a `__new` beside it.
+                            if st.docs.contains_key(uri) {
+                                return false;
+                            }
+
+                            uri_to_path(uri).is_none_or(|path| {
+                                // The runtime is the compiler's own
+                                // module, written into the build output;
+                                // nothing in it is the reader's.
+                                !in_a_dot_directory(&path, &mirror, root.as_deref())
+                                    && !st.runtimes.borrow().contains(&normalize(&path))
+                            })
                         });
                         // A `declare Name: T` binds no name the child can
                         // point at, so the definitions files answer here.
                         ambient_symbols(&st, query.as_deref(), symbols);
+                        source_symbols(&st, query.as_deref(), symbols);
                     }
                 }
 

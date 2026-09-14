@@ -316,6 +316,40 @@ pub(crate) fn a_rename_of_an_imported_name_reaches_every_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The child indexes the check artifact, where a namespace member is
+/// `Ns_T` and carries a `__new` and a `new` the author never wrote. An
+/// Alloy file answers a workspace query from its own source.
+#[test]
+fn a_workspace_symbol_of_an_alloy_file_reads_the_source() {
+    let st = super::support::files(&[(
+        "file:///w/src/mod.aly",
+        "export namespace Ns as\n    struct T as\n        value: number,\n    end\nend\n",
+    )]);
+    let mut out: Vec<Value> = Vec::new();
+    source_symbols(&st, Some("Ns"), &mut out);
+    let names: Vec<&str> = out
+        .iter()
+        .filter_map(|s| s.get("name").and_then(Value::as_str))
+        .collect();
+
+    assert_eq!(names, vec!["Ns", "Ns.T", "Ns.T.value"]);
+
+    // The query names the member, not the emit.
+    let mut out: Vec<Value> = Vec::new();
+    source_symbols(&st, Some("Ns_T"), &mut out);
+
+    assert!(out.is_empty(), "{out:?}");
+
+    let mut out: Vec<Value> = Vec::new();
+    source_symbols(&st, Some("T"), &mut out);
+    let names: Vec<&str> = out
+        .iter()
+        .filter_map(|s| s.get("name").and_then(Value::as_str))
+        .collect();
+
+    assert_eq!(names, vec!["Ns.T", "Ns.T.value"]);
+}
+
 /// `.ember` holds the packages a require reaches and `.alloy` the
 /// build's sourcemap, so both stand in the mirror the child indexes.
 /// Their modules are no source the reader wrote, and `workspace/symbol`

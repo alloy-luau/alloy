@@ -249,6 +249,9 @@ fn build_one(path: &str, args: &[String]) -> ExitCode {
     let text = if want_check { &out.check } else { &out.ship };
 
     match option(args, "--out") {
+        // A file with an error is not written, as in a project build.
+        Some(_) if !out.diagnostics.is_empty() => {}
+
         Some(dir) => {
             let rel = Path::new(path)
                 .file_name()

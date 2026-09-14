@@ -111,13 +111,48 @@ fn excludes_and_diagnostics_are_reported() {
     };
     let report = alloy::build::run(&dir, &build, &Emit::default()).unwrap();
 
-    assert_eq!(report.skipped, vec![PathBuf::from("skip.spec.aly")]);
-    assert_eq!(report.written, vec![PathBuf::from("keep.luau")]);
+    assert_eq!(
+        report.skipped,
+        vec![PathBuf::from("keep.aly"), PathBuf::from("skip.spec.aly")]
+    );
+    assert!(report.written.is_empty(), "{:?}", report.written);
     assert_eq!(report.diagnostics.len(), 1, "the reassignment is reported");
     assert!(
-        dir.join("build/keep.luau").is_file(),
-        "output is written even with diagnostics"
+        !dir.join("build/keep.luau").exists(),
+        "an error keeps the output unwritten"
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A file with a compile error writes no output: the emit ships the
+/// construct the error names. The output a run before left stays, so
+/// the game keeps running the last good build.
+#[test]
+fn a_file_with_an_error_keeps_its_last_output() {
+    let dir = temp_project("error");
+    fs::write(dir.join("alloy.toml"), "[build]\n").unwrap();
+    fs::write(
+        dir.join("src/bad.aly"),
+        "struct Pt as\n    x: number\nend\n\nlocal p = new Pt { x = 1, z = 9 }\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/fine.aly"), "return 1\n").unwrap();
+    fs::create_dir_all(dir.join("build")).unwrap();
+    fs::write(dir.join("build/bad.luau"), "-- an older run\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert_eq!(report.diagnostics.len(), 1, "{report:?}");
+    assert_eq!(report.written, vec![PathBuf::from("fine.luau")]);
+    assert_eq!(report.skipped, vec![PathBuf::from("bad.aly")]);
+    assert_eq!(
+        fs::read_to_string(dir.join("build/bad.luau")).unwrap(),
+        "-- an older run\n",
+        "the last output stays"
+    );
+    assert!(!report.is_clean());
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -140,6 +175,7 @@ fn a_file_that_does_not_parse_writes_no_output() {
 
     assert!(!report.diagnostics.is_empty(), "the file reports");
     assert_eq!(report.written, vec![PathBuf::from("fine.luau")]);
+    assert_eq!(report.skipped, vec![PathBuf::from("broken.aly")]);
     assert!(
         !dir.join("build/broken.luau").exists(),
         "the stale output is gone"

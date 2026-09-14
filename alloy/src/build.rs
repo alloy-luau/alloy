@@ -383,6 +383,9 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         let Some(rel_out) = output_for(&rel) else {
             continue;
         };
+        // The diagnostics this file adds start here; one is enough to
+        // keep its output unwritten.
+        let errors_before = report.diagnostics.len();
 
         let target = out.join(&rel_out);
         let is_alx = rel.extension().and_then(|e| e.to_str()) == Some("alx");
@@ -442,6 +445,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             (Err(_), false) => None,
 
             (Err(e), true) => {
+                report.skipped.push(rel.clone());
                 report.failures.push((rel, e.clone()));
 
                 continue;
@@ -459,6 +463,7 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
             Ok(c) => c,
 
             Err(e) => {
+                report.skipped.push(rel.clone());
                 report.failures.push((rel, e.located(&source)));
 
                 continue;
@@ -584,10 +589,13 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
         }
 
         // Past its first error the parser invents the tree and the emit
-        // copies the text through, so the output would hold Alloy. The
-        // file produces nothing: `clean` then takes the stale output a
-        // run before this one left.
-        if !compiled.parsed_clean {
+        // copies the text through, so the output would hold Alloy. A
+        // compile error past the parse ships the construct it reported.
+        // The file produces nothing: `clean` then takes the stale output
+        // a run before this one left.
+        if !compiled.parsed_clean || report.diagnostics.len() > errors_before {
+            report.skipped.push(rel);
+
             continue;
         }
 

@@ -349,7 +349,8 @@ fn a_mount_alias_rewrites_in_every_setting_of_the_keys() {
         let dir = mounted_root(&format!("rewrite-{truth}-{alias}"), truth, alias);
         let config = Config::load(&dir.join("alloy.toml")).unwrap();
         let report = alloy::build::run_project(&dir, &config).unwrap();
-        let main = fs::read_to_string(dir.join("build/server/main.server.luau")).unwrap();
+        let main =
+            fs::read_to_string(dir.join("build/server/main.server.luau")).unwrap_or_default();
 
         if alias {
             assert!(report.is_clean(), "{:?}", report.diagnostics);
@@ -363,10 +364,14 @@ fn a_mount_alias_rewrites_in_every_setting_of_the_keys() {
             );
         } else {
             // With the mount aliases off and no `.luaurc`, the spec has
-            // no alias to resolve: the require stays as written, and the
-            // build reports the module it could not find.
-            assert!(main.contains("require(\"@shared/util\")"), "{main}");
+            // no alias to resolve: the build reports the module it could
+            // not find, and a file with an error is not written.
+            assert!(main.is_empty(), "{main}");
             assert_eq!(report.diagnostics.len(), 2, "{:?}", report.diagnostics);
+            assert_eq!(
+                report.skipped,
+                vec![PathBuf::from("server/main.server.aly")]
+            );
         }
 
         let _ = fs::remove_dir_all(&dir);

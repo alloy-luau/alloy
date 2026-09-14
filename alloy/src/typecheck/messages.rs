@@ -1543,7 +1543,10 @@ fn unknown_type_report(message: &str, source: &str, text: &str, line: usize) -> 
         // A name another language spells for a Luau primitive. The
         // checker says the name is unknown; the reader needs the Luau
         // one.
-        if let Some(tail) = FOREIGN_TYPES.iter().find(|(n, _)| *n == name) {
+        if let Some(tail) = FOREIGN_TYPES
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
             return Some(Resited {
                 kind: "TypeError",
                 message: format!("`{name}` is not a type; {}", tail.1),
@@ -1576,14 +1579,20 @@ fn unknown_type_report(message: &str, source: &str, text: &str, line: usize) -> 
 }
 
 /// The type names a Luau newcomer writes from another language, each
-/// with the Luau type that holds the same values.
+/// with the Luau type that holds the same values. The lookup ignores
+/// case, so `Int` and `String` read the same as `int` and `str`.
 const FOREIGN_TYPES: &[(&str, &str)] = &[
     ("int", "Luau numbers are `number`"),
+    ("integer", "Luau numbers are `number`"),
     ("float", "Luau numbers are `number`"),
+    ("double", "Luau numbers are `number`"),
     ("bool", "Luau booleans are `boolean`"),
     ("str", "Luau strings are `string`"),
-    ("String", "Luau strings are `string`"),
+    ("string", "Luau strings are `string`"),
     ("void", "a function that returns nothing writes `()`"),
+    ("null", "Luau writes the absent value as `nil`"),
+    ("none", "Luau writes the absent value as `nil`"),
+    ("nil", "Luau writes the absent value as `nil`"),
 ];
 
 /// Whether the source binds the name as a value: a local, a `const`, or
@@ -2054,6 +2063,30 @@ mod tests {
         let own = "type int = number\nlocal x: int = 5\n";
         let got = resited("Unknown type 'int'", own, 2, 10);
         assert_eq!(got.message, "Unknown type 'int'");
+    }
+
+    /// `local x: Int` is the same mistake as `local x: int`. The table
+    /// keyed on the lowercase spelling alone, so one capital letter left
+    /// the reader with `Unknown type 'Int'`.
+    #[test]
+    fn a_capital_type_name_from_another_language_reads_the_same() {
+        for (name, tail) in [
+            ("Int", "Luau numbers are `number`"),
+            ("Integer", "Luau numbers are `number`"),
+            ("Float", "Luau numbers are `number`"),
+            ("Double", "Luau numbers are `number`"),
+            ("Bool", "Luau booleans are `boolean`"),
+            ("Str", "Luau strings are `string`"),
+            ("String", "Luau strings are `string`"),
+            ("Void", "a function that returns nothing writes `()`"),
+            ("NULL", "Luau writes the absent value as `nil`"),
+            ("None", "Luau writes the absent value as `nil`"),
+        ] {
+            let source = format!("local x: {name} = nil\n");
+            let got = resited(&format!("Unknown type '{name}'"), &source, 1, 10);
+            assert_eq!(got.message, format!("`{name}` is not a type; {tail}"));
+            assert_eq!(got.at, Some((1, 10)));
+        }
     }
 
     #[test]

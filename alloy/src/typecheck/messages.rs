@@ -1362,7 +1362,15 @@ fn struct_field_report(
     let write = quoted_after(message, "Cannot add property '")
         .zip(quoted_after(message, "' to table '"))
         .map(|(key, owner)| (owner, key));
-    let (owner, key) = read.or(write)?;
+    // `S.helper()` reads the struct's class table, not an instance, so
+    // the checker names the table and spells the report another way. A
+    // private static method is missing there, as a private instance
+    // method is missing from the public view.
+    let on_table = quoted_after(message, "Key '")
+        .zip(quoted_after(message, "' not found in table '"))
+        .map(|(key, owner)| (owner, key));
+    let statik = read.or(write).is_none();
+    let (owner, key) = read.or(write).or(on_table)?;
     let fields = shapes.iter().find_map(|s| match s {
         crate::declarations::Shape::Struct { name, fields, .. } if name == owner => Some(fields),
 
@@ -1385,7 +1393,9 @@ fn struct_field_report(
 
     // A member the source does write belongs to a report of its own; a
     // list of the others would not help.
-    if methods.iter().any(|(n, _)| n == key) {
+    // A key the class table has not got keeps the checker's own report:
+    // it names the table the reader wrote.
+    if statik || methods.iter().any(|(n, _)| n == key) {
         return None;
     }
 
@@ -2006,6 +2016,24 @@ mod tests {
         assert_eq!(
             resited("Type 'Cooldown' does not have key 'stamp'", source, 12, 1).message,
             "`stamp` is private to `Cooldown`; only its impl reaches it"
+        );
+    }
+
+    /// A private static method sits on the struct's class table, which
+    /// the checker names another way. The report still says the member
+    /// is private, and a key the table has not got keeps the checker's
+    /// own sentence.
+    #[test]
+    fn a_private_static_method_reads_as_private() {
+        let source = "struct S as\n    n: number\nend\n\nimpl S as\n    private function helper(): number\n        return 1\n    end\nend\n\nprint(S.helper())\nprint(S.nope)\n";
+
+        assert_eq!(
+            resited("Key 'helper' not found in table 'S'", source, 11, 7).message,
+            "`helper` is private to `S`; only its impl reaches it"
+        );
+        let shapes = crate::declarations::shapes(source);
+        assert!(
+            resite_report("Key 'nope' not found in table 'S'", &shapes, source, 12, 7).is_none()
         );
     }
 

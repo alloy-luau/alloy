@@ -1944,7 +1944,7 @@ impl State {
         }
 
         for shape in &self.known_shapes_at(Some(uri)).shapes {
-            let alloy::declarations::Shape::Enum { name, variants } = shape else {
+            let alloy::declarations::Shape::Enum { name, variants, .. } = shape else {
                 continue;
             };
 

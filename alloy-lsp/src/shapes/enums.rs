@@ -62,12 +62,17 @@ fn variant_table_name(body: &str, known: &Known) -> Option<String> {
     let tag = tag_of(&m)?;
 
     known.shapes.iter().find_map(|s| {
-        let Shape::Enum { name, variants } = s else {
+        let Shape::Enum {
+            name,
+            generics,
+            variants,
+        } = s
+        else {
             return None;
         };
         let (_, payload) = variants.iter().find(|(v, _)| *v == tag)?;
 
-        (payload.len() == slots(&m)).then(|| with_arguments(name, &[(payload, &m)], known))
+        (payload.len() == slots(&m)).then(|| with_arguments(name, generics, &[(payload, &m)]))
     })
 }
 
@@ -82,57 +87,28 @@ fn slots(m: &[(String, String)]) -> usize {
     m.iter().filter(|(k, _)| slot_index(k).is_some()).count()
 }
 
-/// The enum's name with the arguments its printed variants carry. The
-/// shape keeps no parameter list, so a payload spelled as a bare name
-/// that no shape, interface, or primitive names, and that prints
-/// otherwise in its slot, is a parameter, and the slot holds its
-/// argument. The bare name when no slot binds one.
-// ponytail: a parameter list on `Shape::Enum` would name the
-// parameters outright; that is the compiler's declaration index.
-fn with_arguments(name: &str, tables: &[Printed], known: &Known) -> String {
-    const PRIMITIVES: [&str; 13] = [
-        "number", "string", "boolean", "nil", "any", "unknown", "never", "thread", "buffer",
-        "table", "userdata", "vector", "function",
-    ];
-    let declared = |word: &str| {
-        PRIMITIVES.contains(&word)
-            || known.shapes.iter().any(|s| s.name() == word)
-            || known.interfaces.iter().any(|i| i.name == word)
-    };
-    let parameter = |payload: &str| {
-        !payload.is_empty()
-            && payload
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && !declared(payload)
-    };
-    let mut args: Vec<String> = Vec::new();
+/// The enum's name with the arguments its printed variants carry: a
+/// payload spelled as a parameter holds that argument in its slot. A
+/// payload that only mentions one, `Tree<T>`, binds nothing. The bare
+/// name when a parameter has no slot to read.
+fn with_arguments(name: &str, generics: &[String], tables: &[Printed]) -> String {
+    let args: Vec<String> = generics
+        .iter()
+        .filter_map(|g| {
+            tables.iter().find_map(|(payload, m)| {
+                let i = payload.iter().position(|p| p.trim() == g)?;
 
-    for (payload, m) in tables {
-        for (i, p) in payload.iter().enumerate() {
-            let p = p.trim();
+                m.iter()
+                    .find(|(k, _)| slot_index(k) == Some(i + 1))
+                    .map(|(_, v)| v.trim().to_string())
+            })
+        })
+        .collect();
 
-            if !parameter(p) || args.iter().any(|a| a == p) {
-                continue;
-            }
+    match args.len() == generics.len() && !args.is_empty() {
+        true => format!("{name}<{}>", args.join(", ")),
 
-            let slot = m
-                .iter()
-                .find(|(k, _)| slot_index(k) == Some(i + 1))
-                .map(|(_, v)| v.trim().to_string());
-
-            match slot {
-                Some(v) if v != p => args.push(v),
-
-                _ => return name.to_string(),
-            }
-        }
-    }
-
-    match args.is_empty() {
-        true => name.to_string(),
-
-        false => format!("{name}<{}>", args.join(", ")),
+        false => name.to_string(),
     }
 }
 
@@ -140,7 +116,7 @@ fn with_arguments(name: &str, tables: &[Printed], known: &Known) -> String {
 /// unit variants as strings: `Shape | "Empty"` is `Shape`.
 pub(crate) fn fold_enum_unions(text: &mut String, known: &Known) {
     for shape in &known.shapes {
-        let Shape::Enum { name, variants } = shape else {
+        let Shape::Enum { name, variants, .. } = shape else {
             continue;
         };
         let units: Vec<String> = variants
@@ -227,7 +203,12 @@ fn word_at_or_after(text: &str, name: &str, from: usize) -> Option<usize> {
 /// arguments its slots carry.
 pub(crate) fn fold_enums(text: &mut String, known: &Known) {
     for shape in &known.shapes {
-        let Shape::Enum { name, variants } = shape else {
+        let Shape::Enum {
+            name,
+            generics,
+            variants,
+        } = shape
+        else {
             continue;
         };
 
@@ -245,7 +226,7 @@ pub(crate) fn fold_enums(text: &mut String, known: &Known) {
             let at = from + i;
             let anchor = tagged_table_at(text, at).unwrap_or(at);
             let folded = union_around(text, anchor).and_then(|(start, end, found)| {
-                enum_of_members(&found, name, variants, known).map(|n| (start, end, n))
+                enum_of_members(&found, name, generics, variants).map(|n| (start, end, n))
             });
 
             match folded {
@@ -276,8 +257,8 @@ fn tagged_table_at(text: &str, at: usize) -> Option<usize> {
 fn enum_of_members(
     found: &[&str],
     name: &str,
+    generics: &[String],
     variants: &[(String, Vec<String>)],
-    known: &Known,
 ) -> Option<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut tables: Vec<(&[String], Members)> = Vec::new();
@@ -316,7 +297,7 @@ fn enum_of_members(
 
     let tables: Vec<Printed> = tables.iter().map(|(p, m)| (*p, m)).collect();
 
-    Some(with_arguments(name, &tables, known))
+    Some(with_arguments(name, generics, &tables))
 }
 
 /// The union a byte sits in: its start, its end, and its members, with

@@ -390,7 +390,7 @@ pub fn complete(offset: u32) -> String {
                         }
                     } else if quote.is_none() {
                         for shape in &s.shapes {
-                            let Shape::Enum { name, variants } = shape else {
+                            let Shape::Enum { name, variants, .. } = shape else {
                                 continue;
                             };
 

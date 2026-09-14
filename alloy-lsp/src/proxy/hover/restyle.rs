@@ -170,7 +170,7 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .collect();
         let holds = doc.shapes.iter().chain(doc.import_shapes.iter()).any(|s| {
-            matches!(s, alloy::declarations::Shape::Enum { name: n, variants }
+            matches!(s, alloy::declarations::Shape::Enum { name: n, variants, .. }
                 if *n == name && variants.iter().any(|(v, _)| *v == variant))
         });
 

@@ -1492,6 +1492,9 @@ pub enum Shape {
     },
     Enum {
         name: String,
+        /// `enum Opt<T>`: the parameter names, in order, without their
+        /// defaults. A payload spelled as one carries its argument.
+        generics: Vec<String>,
         /// Each variant with its payload types as source text.
         variants: Vec<(String, Vec<String>)>,
     },
@@ -1510,14 +1513,23 @@ impl Shape {
     }
 }
 
-/// The names in a generic list: `<T, U: Shape>` gives `T` and `U`.
+/// The names in a generic list: `<T, U: Shape>` gives `T` and `U`. A
+/// default stays on its name, `B = string`, so a fold can fill it.
 fn generic_names(text: &str) -> Vec<String> {
-    text.trim()
-        .trim_start_matches('<')
-        .trim_end_matches('>')
-        .split(',')
+    let inner = text.trim().trim_start_matches('<').trim_end_matches('>');
+
+    crate::shapes::top_level_parts(inner)
+        .iter()
         .map(|item| item.split(':').next().unwrap_or("").trim().to_string())
         .filter(|n| !n.is_empty())
+        .collect()
+}
+
+/// The parameter names alone: `<L, R = string>` gives `L` and `R`.
+fn parameter_names(text: &str) -> Vec<String> {
+    generic_names(text)
+        .iter()
+        .map(|g| g.split('=').next().unwrap_or("").trim().to_string())
         .collect()
 }
 
@@ -1552,6 +1564,10 @@ pub fn shapes(src: &str) -> Vec<Shape> {
 
             Stmt::Enum(e) => out.push(Shape::Enum {
                 name: text(e.name),
+                generics: e
+                    .generics
+                    .map(|g| parameter_names(&text(g)))
+                    .unwrap_or_default(),
                 variants: e
                     .variants
                     .iter()
@@ -1605,6 +1621,10 @@ fn namespace_enums(
         match m.stmt.under_default() {
             Stmt::Enum(e) => out.push(Shape::Enum {
                 name: format!("{inner}.{}", text(e.name)),
+                generics: e
+                    .generics
+                    .map(|g| parameter_names(&text(g)))
+                    .unwrap_or_default(),
                 variants: e
                     .variants
                     .iter()
@@ -1764,6 +1784,7 @@ mod shape_tests {
                 },
                 Shape::Enum {
                     name: "E".into(),
+                    generics: vec![],
                     variants: vec![
                         ("A".into(), vec![]),
                         ("B".into(), vec!["number".into(), "string".into()])
@@ -1771,5 +1792,28 @@ mod shape_tests {
                 },
             ]
         );
+    }
+
+    /// A generic enum names its parameters, without their defaults; a
+    /// struct keeps the default on the name for the fold that fills it.
+    #[test]
+    fn a_generic_enum_names_its_parameters() {
+        let src = "enum Either<L, R = string> as\n    Left(L),\n    Right(R)\nend\nstruct Pair<A: Shape<X, Y>, B = string> as\n    read a: A\nend\n";
+        let got = shapes(src);
+        assert_eq!(
+            got[0],
+            Shape::Enum {
+                name: "Either".into(),
+                generics: vec!["L".into(), "R".into()],
+                variants: vec![
+                    ("Left".into(), vec!["L".into()]),
+                    ("Right".into(), vec!["R".into()])
+                ],
+            }
+        );
+        let Shape::Struct { generics, .. } = &got[1] else {
+            panic!("a struct");
+        };
+        assert_eq!(generics, &vec!["A".to_string(), "B = string".to_string()]);
     }
 }

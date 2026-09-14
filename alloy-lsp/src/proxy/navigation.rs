@@ -821,9 +821,9 @@ impl State {
             .values()
             .flat_map(|d| d.shapes.iter().chain(&d.import_shapes))
             .any(|s| match s {
-                alloy::declarations::Shape::Enum { name: n, variants } => {
-                    n == owner && variants.iter().any(|(v, p)| v == name && p.is_empty())
-                }
+                alloy::declarations::Shape::Enum {
+                    name: n, variants, ..
+                } => n == owner && variants.iter().any(|(v, p)| v == name && p.is_empty()),
 
                 _ => false,
             });

@@ -1778,7 +1778,7 @@ fn variant_call_report(
     }
 
     let payload = shapes.iter().find_map(|s| match s {
-        crate::declarations::Shape::Enum { name, variants } if *name == receiver => variants
+        crate::declarations::Shape::Enum { name, variants, .. } if *name == receiver => variants
             .iter()
             .find(|(v, _)| *v == member)
             .map(|(_, types)| types.len()),

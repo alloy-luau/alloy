@@ -1021,7 +1021,7 @@ pub fn import_enums(source: &str, from: &Path, aliases: &[(String, PathBuf)]) ->
         crate::declarations::shapes(text)
             .into_iter()
             .filter_map(|shape| match shape {
-                crate::declarations::Shape::Enum { name, variants } => Some((
+                crate::declarations::Shape::Enum { name, variants, .. } => Some((
                     name,
                     variants
                         .into_iter()

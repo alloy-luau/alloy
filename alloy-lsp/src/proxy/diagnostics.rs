@@ -510,7 +510,7 @@ impl State {
             .values()
             .flat_map(|d| d.shapes.iter())
             .find_map(|s| match s {
-                alloy::declarations::Shape::Enum { name, variants } if name == bare => Some(
+                alloy::declarations::Shape::Enum { name, variants, .. } if name == bare => Some(
                     variants
                         .iter()
                         .map(|(v, payload)| (v.clone(), payload.len()))

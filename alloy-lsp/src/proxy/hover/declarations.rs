@@ -580,7 +580,7 @@ pub(crate) fn pattern_bindings(
     let args = pattern[open + 1..].trim_end().trim_end_matches(')');
 
     let found = known.shapes.iter().find_map(|s| match s {
-        alloy::declarations::Shape::Enum { name, variants } => variants
+        alloy::declarations::Shape::Enum { name, variants, .. } => variants
             .iter()
             .find(|(v, _)| v == variant)
             .map(|(_, payload)| (name.clone(), payload.clone())),

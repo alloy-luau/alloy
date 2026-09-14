@@ -71,7 +71,7 @@ pub(crate) fn enum_of_variant(table: &str, known: &Known) -> Option<String> {
     let variant = tag.trim().trim_matches('"');
 
     known.shapes.iter().find_map(|s| match s {
-        Shape::Enum { name, variants } if variants.iter().any(|(v, _)| v == variant) => {
+        Shape::Enum { name, variants, .. } if variants.iter().any(|(v, _)| v == variant) => {
             Some(name.clone())
         }
 
@@ -90,7 +90,7 @@ fn enum_table_name(m: &[(String, String)], known: &Known) -> Option<String> {
     }
 
     known.shapes.iter().find_map(|s| match s {
-        Shape::Enum { name, variants } => {
+        Shape::Enum { name, variants, .. } => {
             let names: Vec<String> = variants.iter().map(|(v, _)| v.clone()).collect();
 
             same_set(&names, &keys).then(|| name.clone())
@@ -135,7 +135,7 @@ fn namespace_table_name(m: &[(String, String)], known: &Known) -> Option<String>
 /// The enum a unit variant belongs to, by the name it prints as.
 fn enum_of_unit(unit: &str, known: &Known) -> Option<String> {
     known.shapes.iter().find_map(|s| match s {
-        Shape::Enum { name, variants }
+        Shape::Enum { name, variants, .. }
             if variants.iter().any(|(v, p)| v == unit && p.is_empty()) =>
         {
             Some(name.clone())

@@ -565,7 +565,7 @@ fn closing_angle(text: &str, open: usize) -> Option<usize> {
 
 /// The comma-separated parts of an argument list, with the commas
 /// inside a nested list left alone.
-fn top_level_parts(text: &str) -> Vec<&str> {
+pub(crate) fn top_level_parts(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
@@ -2340,10 +2340,12 @@ mod tests {
                 },
                 Shape::Enum {
                     name: "Rarity".into(),
+                    generics: vec![],
                     variants: vec![("Common".into(), vec![]), ("Rare".into(), vec![])],
                 },
                 Shape::Enum {
                     name: "Boost".into(),
+                    generics: vec![],
                     variants: vec![
                         ("None".into(), vec![]),
                         ("Coins".into(), vec!["number".into()]),
@@ -2578,6 +2580,7 @@ mod tests {
         let known = Known {
             shapes: vec![Shape::Enum {
                 name: "Opt".into(),
+                generics: vec!["T".into()],
                 variants: vec![("Some".into(), vec!["T".into()]), ("Nil".into(), vec![])],
             }],
             ..Default::default()
@@ -2614,6 +2617,70 @@ mod tests {
         );
     }
 
+    /// The enum's parameter list names the slot to read: a payload
+    /// spelled as a parameter carries the argument, and any other
+    /// payload, an alias the fold does not know, binds nothing.
+    #[test]
+    fn a_generic_enum_reads_its_arguments_from_its_parameters() {
+        let known = Known {
+            shapes: vec![
+                Shape::Enum {
+                    name: "Opt".into(),
+                    generics: vec!["T".into()],
+                    variants: vec![("Some".into(), vec!["T".into()]), ("Nil".into(), vec![])],
+                },
+                Shape::Enum {
+                    name: "Tagged".into(),
+                    generics: vec!["T".into()],
+                    variants: vec![
+                        ("Both".into(), vec!["Alias".into(), "T".into()]),
+                        ("None".into(), vec![]),
+                    ],
+                },
+                Shape::Enum {
+                    name: "Either".into(),
+                    generics: vec!["L".into(), "R".into()],
+                    variants: vec![
+                        ("Left".into(), vec!["L".into()]),
+                        ("Right".into(), vec!["R".into()]),
+                    ],
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            fold(
+                "local a: { read tag: \"Some\", read _1: number, read map: t1 } | { read tag: \"Nil\", read map: t1 }",
+                &known
+            ),
+            "local a: Opt<number>"
+        );
+        // `Alias` resolves to `number` in the print; the slot is not
+        // an argument, and `T` alone is.
+        assert_eq!(
+            fold(
+                "local a: { read _1: number, read _2: string, read tag: \"Both\" } | { read tag: \"None\" }",
+                &known
+            ),
+            "local a: Tagged<string>"
+        );
+        // The checker prints `Either.Right("x")` with `any` in the
+        // `Left` slot, so the fold reads both arguments; the `Right`
+        // table alone has no slot for `L`, and the name stands bare.
+        assert_eq!(
+            fold(
+                "local b: { read _1: any, read tag: \"Left\" } | { read _1: string, read tag: \"Right\" }",
+                &known
+            ),
+            "local b: Either<any, string>"
+        );
+        assert_eq!(
+            fold("local r: { read _1: string, read tag: \"Right\" }", &known),
+            "local r: Either"
+        );
+    }
+
     #[test]
     fn a_symbol_and_a_nested_enum_read_by_name() {
         let known = Known {
@@ -2621,6 +2688,7 @@ mod tests {
             shapes: vec![
                 Shape::Enum {
                     name: "Shape".into(),
+                    generics: vec![],
                     variants: vec![
                         ("Circle".into(), vec!["number".into()]),
                         ("Rect".into(), vec!["number".into(), "number".into()]),
@@ -2628,6 +2696,7 @@ mod tests {
                 },
                 Shape::Enum {
                     name: "Event".into(),
+                    generics: vec![],
                     variants: vec![
                         ("Spawn".into(), vec!["Player".into(), "Vector3".into()]),
                         ("Hit".into(), vec!["Player".into(), "Shape".into()]),
@@ -2653,6 +2722,7 @@ mod tests {
             interfaces: Vec::new(),
             shapes: vec![Shape::Enum {
                 name: "Boost".into(),
+                generics: vec![],
                 variants: vec![
                     ("None".into(), vec![]),
                     ("Coins".into(), vec!["number".into()]),

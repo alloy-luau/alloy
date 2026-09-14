@@ -305,7 +305,7 @@ impl<'s> Desugar<'s> {
                 continue;
             }
 
-            self.check_attr_args(a, &name, declared.as_ref().map(|d| d.params.as_slice()));
+            self.check_attr_args(a, &name, declared.as_ref());
         }
 
         if let (Some(_), Some(at)) = (inline, noinline) {
@@ -331,14 +331,29 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The arguments a use of an attribute carries, as Luau. A parameter
+    /// the use leaves out takes the default its declaration writes.
+    // ponytail: a default is its source text; an Alloy literal, `[1]`,
+    // needs the renderer.
+    pub(crate) fn attr_args(&mut self, a: &Attr, name: &str) -> Vec<String> {
+        let mut args: Vec<String> = a.args.iter().map(|e| self.render_to_string(e)).collect();
+        let defaults = self
+            .attr_decls
+            .get(name)
+            .map(|d| d.defaults.clone())
+            .unwrap_or_default();
+
+        for default in defaults.iter().skip(args.len()) {
+            let Some(default) = default else { break };
+            args.push(default.clone());
+        }
+
+        args
+    }
+
     /// The arguments of one attribute: the count a built-in takes, and the
     /// count and the literal types a declared one takes.
-    pub(crate) fn check_attr_args(
-        &mut self,
-        a: &Attr,
-        name: &str,
-        params: Option<&[(String, Option<String>)]>,
-    ) {
+    pub(crate) fn check_attr_args(&mut self, a: &Attr, name: &str, decl: Option<&AttrDecl>) {
         const NO_ARGS: &[&str] = &[
             "native",
             "checked",
@@ -389,15 +404,30 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        let Some(params) = params else {
+        let Some(decl) = decl else {
             return;
         };
+        let params = decl.params.as_slice();
+        // The arguments are positional, so a default makes its parameter
+        // optional only when every parameter after it has one too.
+        let required = decl
+            .defaults
+            .iter()
+            .rposition(Option::is_none)
+            .map_or(0, |i| i + 1);
 
-        if a.args.len() != params.len() {
+        if a.args.len() > params.len() || a.args.len() < required {
+            let count = if required == params.len() {
+                format!(
+                    "{} argument{}",
+                    params.len(),
+                    if params.len() == 1 { "" } else { "s" }
+                )
+            } else {
+                format!("{required} to {} arguments", params.len())
+            };
             let message = format!(
-                "the attribute `{name}` takes {} argument{}, {} given",
-                params.len(),
-                if params.len() == 1 { "" } else { "s" },
+                "the attribute `{name}` takes {count}, {} given",
                 a.args.len()
             );
             self.diagnose(a.span, &message);
@@ -715,6 +745,15 @@ impl<'s> Desugar<'s> {
                             )
                         })
                         .collect();
+                    let defaults: Vec<Option<String>> = a
+                        .params
+                        .iter()
+                        .map(|p| {
+                            p.default
+                                .as_ref()
+                                .map(|d| self.text_of(d.span()).to_string())
+                        })
+                        .collect();
                     let requires: Vec<Require> =
                         a.requires.iter().map(|c| self.require_of(c)).collect();
                     self.attr_decls.insert(
@@ -722,6 +761,7 @@ impl<'s> Desugar<'s> {
                         AttrDecl {
                             targets,
                             params,
+                            defaults,
                             requires,
                         },
                     );
@@ -1340,8 +1380,7 @@ impl<'s> Desugar<'s> {
                 Some(n) if !self.attr_reaches(n, "function") => {}
 
                 Some(n) => {
-                    let args: Vec<String> =
-                        a.args.iter().map(|e| self.render_to_string(e)).collect();
+                    let args = self.attr_args(a, n);
                     user.push(format!("{n} = {{ {} }}", args.join(", ")));
                 }
             }
@@ -1784,6 +1823,35 @@ print(a)
 
         let fine = "attribute range(min: number, max: number) on field\nstruct S as\n    @range(0, 1)\n    x: number\nend\nprint(S)\n";
         assert!(messages(fine).is_empty(), "{:?}", messages(fine));
+    }
+
+    /// A parameter with a default is optional: `@icon()` writes the
+    /// declared value into the attrs table, so `Attributes.get` reads
+    /// it; `@icon("x")` keeps its own; a parameter without a default
+    /// still reports.
+    #[test]
+    fn an_attribute_parameter_default_fills_an_omitted_argument() {
+        let src = "attribute icon(asset: string = \"rbxassetid://0\") on struct, function\n@icon()\nstruct Sword as damage: number end\n@icon(\"x\")\nstruct Axe as damage: number end\n@icon()\nlocal function f() end\nprint(Sword, Axe, f)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        let ship = crate::compile(src).unwrap().ship;
+        assert_eq!(
+            ship.matches("icon = { \"rbxassetid://0\" }").count(),
+            2,
+            "{ship}"
+        );
+        assert!(ship.contains("icon = { \"x\" }"), "{ship}");
+
+        let required = "attribute icon(asset: string) on struct\n@icon()\nstruct Sword as damage: number end\nprint(Sword)\n";
+        assert_eq!(
+            messages(required),
+            vec!["the attribute `icon` takes 1 argument, 0 given"]
+        );
+
+        let mixed = "attribute weight(n: number, tag: string = \"x\") on struct\n@weight()\nstruct S as x: number end\nprint(S)\n";
+        assert_eq!(
+            messages(mixed),
+            vec!["the attribute `weight` takes 1 to 2 arguments, 0 given"]
+        );
     }
 
     #[test]

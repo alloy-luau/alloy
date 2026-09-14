@@ -933,7 +933,7 @@ impl<'s> Desugar<'s> {
                 continue;
             }
 
-            let args: Vec<String> = a.args.iter().map(|e| self.render_to_string(e)).collect();
+            let args = self.attr_args(a, &name);
             parts.push(format!("{name} = {{ {} }}", args.join(", ")));
         }
 

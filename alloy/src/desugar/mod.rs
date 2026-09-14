@@ -174,6 +174,9 @@ struct FieldType {
 pub struct AttrDecl {
     pub targets: Vec<String>,
     pub params: Vec<(String, Option<String>)>,
+    /// One entry per parameter: the default's source text, or `None`
+    /// for a parameter every use has to write.
+    pub defaults: Vec<Option<String>>,
     /// The `requires` clauses, in the order the body writes them. Empty
     /// for a declaration that states no contract.
     pub requires: Vec<Require>,

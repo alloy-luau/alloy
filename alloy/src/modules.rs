@@ -1114,6 +1114,11 @@ pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrD
                     )
                 })
                 .collect();
+            let defaults = a
+                .params
+                .iter()
+                .map(|p| p.default.as_ref().map(|d| span_text(src, toks, d.span())))
+                .collect();
             let requires = a
                 .requires
                 .iter()
@@ -1124,6 +1129,7 @@ pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrD
                 crate::desugar::AttrDecl {
                     targets,
                     params,
+                    defaults,
                     requires,
                 },
             ));

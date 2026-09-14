@@ -1293,3 +1293,85 @@ pub(crate) fn a_rename_of_a_namespace_member_reaches_every_head() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The group of a namespace reads under every word a file writes it
+/// under. `M.Ns` stands after a dot, so the walk over plain names never
+/// saw it, and references on the group answered with the declaration
+/// alone.
+#[test]
+pub(crate) fn a_namespace_group_reads_under_every_head() {
+    let dir = std::env::temp_dir().join(format!("alloy-nav-group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let sources = [
+        (
+            "group.aly",
+            "export namespace Ns as\n    struct T as\n        value: number,\n    end\nend\n",
+        ),
+        (
+            "gstar.aly",
+            "import * as M from \"./group\"\n\nlocal c = new M.Ns.T { value = 3 }\nprint(c)\n",
+        ),
+        (
+            "galias.aly",
+            "import { Ns as A } from \"./group\"\n\nlocal a = new A.T { value = 1 }\nprint(a)\n",
+        ),
+    ];
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+
+    for (rel, src) in sources {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            format!("file://{}", path.display()),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+    }
+
+    let module = imports::module_path(&dir.join("src").join("group.aly"));
+    let sites = |rel: &str| {
+        let uri = format!("file://{}", dir.join("src").join(rel).display());
+        let source = st.docs[&uri].source.clone();
+
+        st.group_uses(&uri, &source, &module, "Ns")
+            .into_iter()
+            .map(|(s, _)| {
+                let (line, character) = position_of(&source, s);
+
+                format!("{rel} {}:{character}", line + 1)
+            })
+            .collect::<Vec<String>>()
+    };
+
+    assert_eq!(sites("group.aly"), ["group.aly 1:17"]);
+    assert_eq!(sites("gstar.aly"), ["gstar.aly 3:16"]);
+    // The list binds the alias, so the entry and the alias are
+    // both this group.
+    assert_eq!(
+        sites("galias.aly"),
+        ["galias.aly 1:9", "galias.aly 1:15", "galias.aly 3:14"]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

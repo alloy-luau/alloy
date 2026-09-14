@@ -57,16 +57,30 @@ impl Server {
                 continue;
             }
 
-            for (s, e) in name_uses(&d.source, &word) {
-                // A member reads bare inside its namespace and by the
-                // path outside; a name of the same spelling anywhere
-                // else is not this one.
-                if !is_group {
-                    let inside = *u == home && s >= owner.start && s <= owner.end;
+            let Some(module) = &module else {
+                continue;
+            };
 
-                    if !inside {
-                        continue;
-                    }
+            // The group itself, under every word this file writes it
+            // under: `M.Ns`, the alias of `import { Ns as A }`, and the
+            // plain `Ns`.
+            if is_group {
+                for (s, e) in st.group_uses(u, &d.source, module, &owner.path) {
+                    out.push(json!({
+                        "uri": u,
+                        "range": range_value(position_of(&d.source, s), position_of(&d.source, e)),
+                    }));
+                }
+
+                continue;
+            }
+
+            // A member reads bare inside its namespace and by the path
+            // outside; a name of the same spelling anywhere else is not
+            // this one.
+            for (s, e) in name_uses(&d.source, &word) {
+                if *u != home || s < owner.start || s > owner.end {
+                    continue;
                 }
 
                 out.push(json!({
@@ -75,16 +89,8 @@ impl Server {
                 }));
             }
 
-            if is_group {
-                continue;
-            }
-
             // `Math.PI` outside the namespace: the member after the
             // dot, under every word this file puts the group under.
-            let Some(module) = &module else {
-                continue;
-            };
-
             for (a, b) in member_uses(
                 &d.source,
                 &st.namespace_heads(u, &d.source, module, &owner.path),
@@ -664,6 +670,61 @@ impl State {
         }
 
         heads
+    }
+
+    /// Every place one file writes a namespace group itself: the word
+    /// the file binds the group to, alone or after the word that holds
+    /// what it came from. `M.Ns` under a module binding, `A` under
+    /// `import { Ns as A }`, and `Ns` in the module's own file.
+    ///
+    /// The head list says which words stand for the group. A head after
+    /// a dot is no name of its own, so the walk over plain names misses
+    /// it and the member walk reads it.
+    pub(crate) fn group_uses(
+        &self,
+        uri: &str,
+        source: &str,
+        module: &Path,
+        path: &str,
+    ) -> Vec<(usize, usize)> {
+        let reaches = |spec: &str| {
+            self.resolve_spec(uri, spec)
+                .map(|p| imports::module_path(&p))
+                .is_some_and(|p| p == module)
+        };
+        let mut holders: Vec<String> = module_bindings(source)
+            .into_iter()
+            .filter(|(_, spec)| reaches(spec))
+            .map(|(bound, _)| bound)
+            .collect();
+
+        // A group inside another reads under its parent's word.
+        if let Some(parent) = path.rsplit('.').nth(1) {
+            holders.push(parent.to_string());
+        }
+
+        let mut out = Vec::new();
+
+        for head in self.namespace_heads(uri, source, module, path) {
+            out.extend(name_uses(source, &head));
+            out.extend(member_uses(source, &holders, &head));
+        }
+
+        // The name an import list writes, whatever it binds it to.
+        let root = path.split('.').next().unwrap_or(path);
+
+        if !path.contains('.') {
+            out.extend(
+                import_entries(source)
+                    .into_iter()
+                    .filter(|it| it.name == root && reaches(&it.spec))
+                    .map(|it| it.name_at),
+            );
+        }
+
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// The import entry a byte offset belongs to: one whose own name or

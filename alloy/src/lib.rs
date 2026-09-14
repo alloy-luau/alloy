@@ -692,6 +692,27 @@ mod tests {
     }
 
     #[test]
+    fn a_destructured_local_under_an_import_of_its_name_reports() {
+        let options = EmitOptions {
+            file_name: "src/dup.aly".to_string(),
+            ..EmitOptions::default()
+        };
+        let src = "import { f } from \"./lib\"\nlocal t = { f = 1 }\nlocal { f } = t\nlocal [g, h] = { 1, 2 }\nprint(f, g, h)\n";
+        let got: Vec<String> = compile_with(src, &options)
+            .unwrap()
+            .diagnostics
+            .into_iter()
+            .map(|d| d.message)
+            .filter(|m| m.contains("already imported"))
+            .collect();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0].starts_with("`f` is already imported on line 1"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
     fn a_unit_variant_inside_a_payload_refutes() {
         let src = "enum Inner as A, B end\nenum Wrapper as Wrap(Inner), Plain end\nlocal w: Wrapper = Wrapper.Plain\nmatch w with\n    case Wrap(A) then print(1)\n    case Plain then print(2)\nend\n";
         let got = messages(src);

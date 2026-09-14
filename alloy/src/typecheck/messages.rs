@@ -591,16 +591,22 @@ fn rewrite_await(message: &str, line: &str) -> Option<String> {
 }
 
 /// `Expected this to be 'Opt' but got 'Opt'`: Luau prints a `typeof`
-/// alias without its arguments, so both sides read the same. The line
-/// says what the reader can act on: the annotation, and the argument
+/// alias without its arguments, so both sides read the same. The fold
+/// may also name a type of the same shape, `Ns.Opt2` for a line that
+/// writes `Opt`, so the line decides the name. It says what the reader
+/// can act on: the type it writes, the annotation, and the argument
 /// the value carries when it is one literal.
 fn rewrite_same_name(message: &str, line: &str) -> Option<String> {
     let want = quoted_after(message, "Expected this to be '")?;
     let got = quoted_after(message, "but got '")?;
 
-    if want != got || want.contains('<') || want.contains(' ') {
+    if want != got {
         return None;
     }
+
+    let Some(name) = type_on_line(line) else {
+        return Some("the type arguments differ".to_string());
+    };
 
     // `local o: Opt<number> = Opt.Some("x")`: the annotation and the
     // value around the `=`.
@@ -608,21 +614,65 @@ fn rewrite_same_name(message: &str, line: &str) -> Option<String> {
         .split_once(':')
         .and_then(|(_, rest)| rest.split_once('='))
         .map(|(ty, value)| (ty.trim(), value.trim()))
-        .filter(|(ty, _)| ty.starts_with(want) && ty.contains('<'));
+        .filter(|(ty, _)| ty.starts_with(name) && ty.contains('<'));
 
     let Some((annotation, value)) = annotation else {
-        return Some(format!("the type arguments of `{want}` differ"));
+        return Some(format!("the type arguments of `{name}` differ"));
     };
 
     match literal_argument(value) {
         Some(kind) => Some(format!(
-            "`{value}` is an `{want}<{kind}>`; the annotation says `{annotation}`"
+            "`{value}` is an `{name}<{kind}>`; the annotation says `{annotation}`"
         )),
 
         None => Some(format!(
             "the type arguments differ; the annotation is `{annotation}`"
         )),
     }
+}
+
+/// The type name a line writes: the target of an `impl` head, a name
+/// before `<`, or the head of a constructor path, `Opt.Some(`. A type
+/// starts with a capital, and a path keeps its namespace, `Ns.Opt2`.
+fn type_on_line(line: &str) -> Option<&str> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+    let is_type = |w: &str| w.chars().next().is_some_and(char::is_uppercase);
+    let word_before = |at: usize| {
+        let start = line[..at].rfind(|c| !is_word(c)).map_or(0, |i| i + 1);
+
+        &line[start..at]
+    };
+
+    if let Some(rest) = line.trim_start().strip_prefix("impl ") {
+        let rest = rest.split_once(" for ").map_or(rest, |(_, target)| target);
+        let end = rest.find(|c| !is_word(c)).unwrap_or(rest.len());
+        let head = &rest[..end];
+
+        if is_type(head) {
+            return Some(head);
+        }
+    }
+
+    for (at, _) in line.match_indices('<') {
+        let word = word_before(at);
+
+        if is_type(word) {
+            return Some(word);
+        }
+    }
+
+    for (at, _) in line.match_indices('(') {
+        let word = word_before(at);
+
+        if let Some((head, variant)) = word.rsplit_once('.')
+            && is_type(head)
+            && is_type(variant)
+        {
+            return Some(head);
+        }
+    }
+
+    None
 }
 
 /// The type of a call's one literal argument, `Opt.Some("x")`: a
@@ -2543,6 +2593,50 @@ end
                 24
             ),
             "Expected this to be 'Opt', but got 'number'"
+        );
+    }
+
+    /// Two enums of one shape in a project: the fold names the other
+    /// one, `Ns.Opt2`, for a line that writes `Opt`. The rewrite names
+    /// the type the line writes, and no type the line does not.
+    #[test]
+    fn a_same_name_mismatch_names_the_type_the_line_writes() {
+        let known = crate::shapes::Known::default();
+        let message = "Expected this to be 'Ns.Opt2' but got 'Ns.Opt2'";
+        assert_eq!(
+            friendly_type_message(
+                message,
+                &known,
+                Some("local b: Opt<string> = Opt.Some(1)"),
+                24
+            ),
+            "`Opt.Some(1)` is an `Opt<number>`; the annotation says `Opt<string>`"
+        );
+        assert_eq!(
+            friendly_type_message(message, &known, Some("take(Opt.Some(1))"), 6),
+            "the type arguments of `Opt` differ"
+        );
+        assert_eq!(
+            friendly_type_message(message, &known, Some("impl Opt<T> as"), 6),
+            "the type arguments of `Opt` differ"
+        );
+        assert_eq!(
+            friendly_type_message(message, &known, Some("impl Show for Ns.Opt2<T> as"), 6),
+            "the type arguments of `Ns.Opt2` differ"
+        );
+        assert_eq!(
+            friendly_type_message(message, &known, Some("take(x)"), 6),
+            "the type arguments differ"
+        );
+        // A plain union alias prints whole, and the same on both sides.
+        assert_eq!(
+            friendly_type_message(
+                "Expected this to be 'Opt | { read tag: \"Nil\" }' but got 'Opt | { read tag: \"Nil\" }'",
+                &known,
+                Some("local b: Opt<string> = a"),
+                24
+            ),
+            "the type arguments differ; the annotation is `Opt<string>`"
         );
     }
 

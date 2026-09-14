@@ -198,7 +198,9 @@ pub(crate) fn foreign_method_hover(doc: &Doc, start: usize, end: usize) -> Optio
     };
     let rest = rest.replacen(" -> ", ": ", 1);
 
-    Some(format!("```alloy\nfunction {owner}.{word}{rest}\n```"))
+    let value = format!("```alloy\nfunction {owner}.{word}{rest}\n```");
+
+    Some(name_method_doc(&value, doc).unwrap_or(value))
 }
 
 /// The hover of a function parameter at its declaration: the parameter
@@ -570,7 +572,14 @@ pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) 
             Some((keyword, line))
         })?;
 
-    Some(format!(
-        "```alloy\n{line}\n```\nA field of `{keyword} {owner}`."
-    ))
+    let mut out = format!("```alloy\n{line}\n```\nA field of `{keyword} {owner}`.");
+
+    // The comment above the declaration, from the source that holds it:
+    // a field of an imported struct says the same at its use.
+    if let Some(text) = member_doc(doc, &owner, word) {
+        out.push_str("\n\n");
+        out.push_str(&text);
+    }
+
+    Some(out)
 }

@@ -1356,6 +1356,116 @@ pub(crate) fn name_trait_method(
     Some(format!("{fence}\n{rebuilt}\n```{tail}"))
 }
 
+/*
+The doc comment above a member of a declaration in reach: a field of a
+`struct` or an `interface`, or a method of an `impl` or a `trait`.
+
+`doc_before` reads the block above one offset, and only the hover of a
+declaration ever held that offset. A use of the member reads the same
+text here, from the source that declares it, so `p.hp` in one file says
+what `hp` says in the other.
+*/
+pub(crate) fn member_doc(doc: &Doc, owner: &str, member: &str) -> Option<String> {
+    let heads = [
+        format!("struct {owner}"),
+        format!("interface {owner}"),
+        format!("trait {owner}"),
+        format!("impl {owner}"),
+    ];
+
+    for src in std::iter::once(&doc.source).chain(doc.import_sources.iter()) {
+        let mut at = 0;
+        let mut inside = false;
+
+        for line in src.lines() {
+            let line_start = at;
+            at += line.len() + 1;
+            let text = line.trim();
+            let head = text.strip_prefix("export ").unwrap_or(text);
+            let head = head.strip_prefix("global ").unwrap_or(head);
+
+            // A block opens at the margin, and the line at the margin
+            // after it closes the one before.
+            if !line.starts_with([' ', '\t']) && !text.is_empty() {
+                // `impl Trait for Owner` names the owner after `for`.
+                inside = heads.iter().any(|h| {
+                    head.starts_with(h.as_str())
+                        && head[h.len()..].starts_with(|c: char| c.is_whitespace() || c == '<')
+                }) || head.starts_with("impl ")
+                    && head
+                        .split(" for ")
+                        .nth(1)
+                        .is_some_and(|rest| names_the_owner(rest, owner));
+
+                continue;
+            }
+
+            if !inside {
+                continue;
+            }
+
+            let names_it = field_key(text) == Some(member)
+                || text
+                    .trim_start_matches("private ")
+                    .trim_start_matches("public ")
+                    .strip_prefix("function ")
+                    .is_some_and(|rest| {
+                        rest.starts_with(member) && rest[member.len()..].starts_with(['(', '<'])
+                    });
+
+            if names_it && let Some(text) = alloy::declarations::doc_before(src, line_start) {
+                return Some(text);
+            }
+        }
+    }
+
+    None
+}
+
+/*
+A method hover with the doc comment of its declaration appended.
+
+Several passes write the head, `function Owner:m(...)`, so the comment
+goes on once they are all done. The `impl` of the receiver carries it,
+and a method that takes its text from the trait it implements reads the
+trait's.
+*/
+pub(crate) fn name_method_doc(value: &str, doc: &Doc) -> Option<String> {
+    let (block, tail) = value.split_once("\n```")?;
+
+    if !tail.trim().is_empty() {
+        return None;
+    }
+
+    let body = block.split_once('\n')?.1;
+    let head = body.strip_prefix("function ")?;
+    let (owner, rest) = head.split_once([':', '.'])?;
+    let member: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    if member.is_empty() || !rest[member.len()..].starts_with(['(', '<']) {
+        return None;
+    }
+
+    let text = member_doc(doc, owner, &member)
+        .or_else(|| member_doc(doc, &trait_of_method(doc, &member)?, &member))?;
+
+    Some(format!("{block}\n```{tail}\n\n{text}"))
+}
+
+/// Whether the text after `for` in an `impl` header names `owner`.
+fn names_the_owner(rest: &str, owner: &str) -> bool {
+    let named: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+
+    named == owner
+}
+
 /// A parameter the child prints as a `local`. The two differ in what a
 /// reader may do to them, and the source says which this is.
 pub(crate) fn unlocal_parameter(

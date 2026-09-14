@@ -1,4 +1,4 @@
-use super::super::hover::{impl_self_type, shadow_home, shadows_an_import};
+use super::super::hover::{impl_self_type, member_doc, shadow_home, shadows_an_import};
 use super::super::*;
 use super::support::one_file;
 
@@ -1162,5 +1162,37 @@ fn a_namespace_constructor_names_its_own_struct() {
     assert_eq!(
         crate::proxy::hover::source_type(doc, point, 6),
         Some("Point".to_string())
+    );
+}
+
+/// A doc comment stands on the declaration of a member, and every
+/// hover of that member reads it: a field where it is used, and a
+/// method through the trait that requires it.
+#[test]
+fn a_member_carries_its_doc_comment_to_every_hover() {
+    const SRC: &str = "export struct Player as\n    --- The player's health points.\n    hp: number\nend\n\nexport trait Greeter as\n    --- Says hello.\n    function greet(self, name: string): string\nend\n\nexport struct Bot as\n    id: number\nend\n\nimpl Greeter for Bot as\n    function greet(self, name: string): string\n        return \"hi\"\n    end\nend\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+
+    assert_eq!(
+        member_doc(doc, "Player", "hp"),
+        Some("The player's health points.".to_string())
+    );
+    // The `impl` writes no comment of its own, so the trait's stands.
+    assert_eq!(member_doc(doc, "Bot", "greet"), None);
+    assert_eq!(
+        name_method_doc(
+            "```alloy\nfunction Bot:greet(self: Bot, name: string): string\n```",
+            doc
+        ),
+        Some(
+            "```alloy\nfunction Bot:greet(self: Bot, name: string): string\n```\n\nSays hello."
+                .to_string()
+        )
+    );
+    // A hover that already carries text keeps it.
+    assert_eq!(
+        name_method_doc("```alloy\nfunction Bot:greet(self: Bot)\n```\n\nSaid.", doc),
+        None
     );
 }

@@ -1159,6 +1159,13 @@ impl Server {
                                 text = with_init;
                             }
 
+                            // The head of a method comes from several
+                            // passes; the comment above its declaration
+                            // goes on once they have all run.
+                            if let Some(with_doc) = name_method_doc(&text, doc) {
+                                text = with_doc;
+                            }
+
                             // A component's factory returns whatever the
                             // configured `create` gives; the checker has
                             // no type for it and prints its own marker.

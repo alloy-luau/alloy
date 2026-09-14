@@ -24,10 +24,10 @@ pub(crate) use modules::shadows_an_import;
 pub(crate) use restyle::{
     close_empty_packs, close_item_packs, declared_annotation, declared_signature,
     drop_bound_intersections, empty_parameter_names, fold_std_shapes, invents_a_type,
-    is_byte_count, keep_annotation, lowers_a_block, name_by_declaration, name_method_receiver,
-    name_self_receiver, name_solver_variable, name_trait_method, names_a_key,
-    prefer_constructed_struct, restates_itself, restore_struct_arguments, restyle_hover,
-    source_type, unlocal_parameter,
+    is_byte_count, keep_annotation, lowers_a_block, member_doc, name_by_declaration,
+    name_method_doc, name_method_receiver, name_self_receiver, name_solver_variable,
+    name_trait_method, names_a_key, prefer_constructed_struct, restates_itself,
+    restore_struct_arguments, restyle_hover, source_type, unlocal_parameter,
 };
 
 use super::completion::{lands_on_member, member_position, sep_of};

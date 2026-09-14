@@ -442,7 +442,9 @@ pub fn locals_in_scope(src: &str, offset: usize) -> Vec<Local> {
 
                 _ => inner,
             };
-            scope.retain(|(_, _, l)| l.name != local.name);
+            // A name of an enclosing block stays: the inner binding
+            // shadows it, and it is back in scope once the block ends.
+            scope.retain(|(d, _, l)| l.name != local.name || *d < at);
             scope.push((at, bind, local));
         }
 
@@ -465,7 +467,45 @@ pub fn locals_in_scope(src: &str, offset: usize) -> Vec<Local> {
         scope.push((depth, bind, local));
     }
 
-    scope.into_iter().map(|(_, _, l)| l).collect()
+    // One entry per name, the deepest of them: a binding an inner block
+    // made shadows the one around it.
+    let mut out: Vec<Local> = Vec::new();
+
+    for (_, _, local) in scope.into_iter().rev() {
+        if !out.iter().any(|l| l.name == local.name) {
+            out.push(local);
+        }
+    }
+
+    out.reverse();
+
+    out
+}
+
+/// The binding `name` has at the caret: the one the enclosing blocks
+/// declare, or the one the caret's own line makes. A declaration in
+/// another function never reaches the caret.
+pub fn binding_in_scope(src: &str, offset: usize, name: &str) -> Option<Local> {
+    let offset = offset.min(src.len());
+
+    if let Some(local) = locals_in_scope(src, offset)
+        .into_iter()
+        .find(|l| l.name == name)
+    {
+        return Some(local);
+    }
+
+    // The caret sits on the declaration itself. `local rows: Row[] = f()`
+    // binds below its own line, so the walk above leaves it out.
+    let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = src[line_start..]
+        .find('\n')
+        .map_or(src.len(), |i| line_start + i);
+
+    bindings_of(code_of(&src[line_start..line_end]))
+        .into_iter()
+        .find(|(l, _)| l.name == name)
+        .map(|(l, _)| l)
 }
 
 #[cfg(test)]

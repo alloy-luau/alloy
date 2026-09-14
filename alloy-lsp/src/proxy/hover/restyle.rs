@@ -394,11 +394,20 @@ pub(crate) fn declared_field_type(source: &str, field: &str) -> Option<String> {
 
 /// A hover header keeps the type the source wrote: `items: Item[]`
 /// instead of the child's expansion of the array. The annotation comes
-/// from the first `name: T` in the source.
+/// from the binding the caret reaches, and from no other scope.
 pub(crate) fn keep_annotation(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
     let Caret { offset, start, end } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
     let (decl_at, annotation) = declared_annotation(&doc.source, word, offset)?;
+
+    // The binding the caret reaches decides. A parameter of another
+    // function is out of scope here, and a `local` the source gave no
+    // type keeps the child's own answer.
+    if let Some(local) = crate::context::binding_in_scope(&doc.source, offset, word)
+        && local.annotation.as_deref() != Some(annotation.as_str())
+    {
+        return None;
+    }
 
     // A test on the name between its declaration and the hover narrows
     // it: the child's type is the narrowed one, and it stays.

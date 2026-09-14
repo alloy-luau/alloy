@@ -18,6 +18,36 @@ pub(crate) fn a_declared_annotation_keeps_its_type_arguments() {
         Some("{ x: number, y: number }".to_string())
     );
 }
+/// A hover reads the binding the caret can see: the parameter of
+/// another function with the same name annotates nothing here, and a
+/// `local` the source gave no type keeps the child's own answer.
+#[test]
+pub(crate) fn a_hover_keeps_the_annotation_of_the_binding_in_scope() {
+    let src = concat!(
+        "function useit(format: string): string\n",
+        "    return format\n",
+        "end\n",
+        "\n",
+        "function loopit()\n",
+        "    local format = 1\n",
+        "    print(format)\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let counted = "```luau\nlocal format: number\n```";
+
+    // The `local` of `loopit` and its use: the child's `number` stands.
+    assert_eq!(keep_annotation(counted, doc, 5, 10), None);
+    assert_eq!(keep_annotation(counted, doc, 6, 10), None);
+
+    // The parameter, in the function that declares it.
+    assert_eq!(
+        keep_annotation("```luau\nlocal format: unknown\n```", doc, 1, 11),
+        Some("```luau\nlocal format: string\n```".to_string())
+    );
+}
+
 /// A state with one open document, so the declarations are there.
 pub(crate) fn hover_of(src: &str, line: u32, character: u32, printed: &str) -> String {
     let (st, uri) = one_file(src);

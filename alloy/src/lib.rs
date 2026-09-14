@@ -668,6 +668,19 @@ mod tests {
     }
 
     #[test]
+    fn a_method_with_its_own_generics_keeps_the_impls() {
+        let src = "struct Box<T> as\n    v: T\nend\nimpl Box<T> as\n    function map<U>(self, f: (T) -> U): Box<U>\n        return new Box { v = f(self.v) }\n    end\nend\n";
+        let out = compile(src).unwrap();
+        assert!(
+            out.ship
+                .contains("function Box.map<T, U>(self, f: (T) -> U): Box<U>"),
+            "{}",
+            out.ship
+        );
+        assert!(!out.ship.contains("mapT"), "{}", out.ship);
+    }
+
+    #[test]
     fn a_unit_variant_inside_a_payload_refutes() {
         let src = "enum Inner as A, B end\nenum Wrapper as Wrap(Inner), Plain end\nlocal w: Wrapper = Wrapper.Plain\nmatch w with\n    case Wrap(A) then print(1)\n    case Plain then print(2)\nend\n";
         let got = messages(src);

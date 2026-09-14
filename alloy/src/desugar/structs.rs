@@ -287,8 +287,9 @@ impl<'s> Desugar<'s> {
             // The insert anchors on the method's own name, not on the
             // gap after `function`: a diagnostic the checker puts on the
             // inserted owner then lands on a name the source shows.
-            // A method of a generic impl carries the impl's parameters,
-            // unless it declares its own.
+            // A method of a generic impl carries the impl's parameters.
+            // One with its own list gets them in front of its own:
+            // `map<U>` under `impl Box<T>` reads `map<T, U>`.
             let method_generics = if m.body.generics.is_none() {
                 impl_generics.as_str()
             } else {
@@ -298,9 +299,22 @@ impl<'s> Desugar<'s> {
                 self.byte_start(name_span),
                 &format!(" {owner}.{mname}{method_generics}"),
             );
-            let after_name = self.byte_end(name_span);
-            let rest = TokSpan::new(name_span.end as usize, m.span.end as usize);
-            let _ = after_name;
+
+            let mut rest = TokSpan::new(name_span.end as usize, m.span.end as usize);
+
+            if let Some(g) = m.body.generics
+                && let Some(inner) = impl_generics
+                    .strip_prefix('<')
+                    .and_then(|rest| rest.strip_suffix('>'))
+                && !inner.is_empty()
+            {
+                // The renderer writes in order: copy through the `<`,
+                // write the impl's list, and the rest starts after it.
+                let open = self.byte_start(g);
+                self.copy(self.byte_end(name_span), open + 1);
+                self.generate(open + 1, &format!("{inner}, "));
+                rest = TokSpan::new(g.start as usize + 1, m.span.end as usize);
+            }
 
             // The prologue sits on the header line, so a method that
             // carries one takes the header path too.

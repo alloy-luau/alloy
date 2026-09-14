@@ -1776,6 +1776,14 @@ impl<'s> Desugar<'s> {
         };
         let text = self.text_of(*n).to_string();
 
+        // `new B { }` inside the namespace that declares `B`: the member
+        // renders under one name, `NS_B`, and every struct index is keyed
+        // by that one. The bare name has to resolve the way the emit
+        // renames it, else the fields form reads a user `new` instead.
+        if let Some(rendered) = self.ns_member_name(&text) {
+            return Some((*n, rendered));
+        }
+
         if self.struct_fields.contains_key(&text) {
             return Some((*n, text));
         }

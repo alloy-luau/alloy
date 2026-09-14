@@ -912,3 +912,68 @@ fn a_construction_reads_the_raw_constructor_not_a_user_new() {
     );
     assert!(ship.contains("return Zoo_Lion({ name = name })"), "{ship}");
 }
+
+/// The bare name inside the namespace names the same member the path
+/// names, so `new B { }` and `new NS.B { }` build the struct the same
+/// way. The bare name resolved to no struct index, so the construction
+/// fell through to `NS_B.new` and the checker typed the fields table
+/// against the user's parameters.
+#[test]
+fn a_bare_construction_inside_the_namespace_reads_the_raw_constructor() {
+    let head =
+        "namespace NS as\n    struct B as\n        x: number\n        y: number\n    end\n\n";
+    let user_new = format!(
+        "{head}    impl B as\n        function new(x: number, y: number): B\n            return new B {{ x = x, y = y }}\n        end\n    end\nend\n\nprint(NS)\n"
+    );
+    let (ship, check, messages) = compile(&user_new);
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(
+        check.contains("return NS_B.__new({ x = x, y = y })"),
+        "{check}"
+    );
+    assert!(ship.contains("return NS_B({ x = x, y = y })"), "{ship}");
+
+    // The qualified path takes the same name.
+    let qualified = user_new.replace("new B {", "new NS.B {");
+    let (_, check, messages) = compile(&qualified);
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(
+        check.contains("return NS_B.__new({ x = x, y = y })"),
+        "{check}"
+    );
+
+    // Two levels deep: the bare name inside the inner namespace names
+    // the member `Out_In_B`.
+    let nested = "namespace Out as\n    namespace In as\n        struct B as\n            x: number\n        end\n\n        impl B as\n            function new(x: number): B\n                return new B { x = x }\n            end\n        end\n    end\nend\n\nprint(Out)\n";
+    let (ship, check, messages) = compile(nested);
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(
+        check.contains("return Out_In_B.__new({ x = x })"),
+        "{check}"
+    );
+    assert!(ship.contains("return Out_In_B({ x = x })"), "{ship}");
+
+    // No user `new`: the construction reads the raw constructor already,
+    // and the bare name still resolves to the member.
+    let plain = format!(
+        "{head}    function make(): B\n        return new B {{ x = 1, y = 2 }}\n    end\nend\n\nprint(NS)\n"
+    );
+    let (ship, check, messages) = compile(&plain);
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(
+        check.contains("return NS_B.__new({ x = 1, y = 2 })"),
+        "{check}"
+    );
+    assert!(ship.contains("return NS_B({ x = 1, y = 2 })"), "{ship}");
+
+    // The field check reads the same struct, so a name the struct lacks
+    // reports from the bare form too.
+    let bad = user_new.replace("{ x = x, y = y }", "{ x = x, z = y }");
+    let (_, _, messages) = compile(&bad);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`NS.B` has no field `z`")),
+        "{messages:?}"
+    );
+}

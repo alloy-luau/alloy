@@ -116,6 +116,7 @@ impl Server {
         // it is used: the arguments of this use name the members, so the
         // hover writes one line per member instead of the clause.
         let hover = expand_each(&decl.hover, &doc.source, start);
+        let hover = with_member_methods(&hover, doc, &key);
         let (sl, sc) = position_of(&doc.source, start);
         let (el, ec) = position_of(&doc.source, end);
         let result = json!({
@@ -172,6 +173,91 @@ impl Server {
 
         true
     }
+}
+
+/*
+The hover of a namespace member, with the methods of its `impl` blocks
+listed inside the block.
+
+`summaries` keys its impl index by the bare name of a top level `impl`,
+so a member of a namespace finds none: the block stands inside the
+namespace body as `impl Vec2`, or outside it as `impl Geo.Vec2`. Both
+routes read here, from the sources in reach.
+*/
+fn with_member_methods(hover: &str, doc: &Doc, path: &str) -> String {
+    let Some((ns, name)) = path.rsplit_once('.') else {
+        return hover.to_string();
+    };
+    let mut lines: Vec<&str> = hover.lines().collect();
+    // The block the hover opens with: a struct or an enum takes methods,
+    // and one that already lists them needs none.
+    let opens = lines
+        .get(1)
+        .map(|l| l.trim_start().trim_start_matches("export "))
+        .is_some_and(|l| l.starts_with("struct ") || l.starts_with("enum "));
+    let Some(end) = lines.iter().position(|l| *l == "end") else {
+        return hover.to_string();
+    };
+
+    if !opens || lines[..end].iter().any(|l| l.contains("function ")) {
+        return hover.to_string();
+    }
+
+    let methods = member_methods(doc, ns, name, path);
+
+    if methods.is_empty() {
+        return hover.to_string();
+    }
+
+    let owned: Vec<String> = methods.iter().map(|m| format!("    {m}")).collect();
+    lines.splice(end..end, owned.iter().map(String::as_str));
+
+    lines.join("\n")
+}
+
+/// The public method lines of every `impl` of `path`, from the sources in
+/// reach: a block that names the path outright, and one inside the
+/// namespace body that names the member alone.
+fn member_methods(doc: &Doc, ns: &str, name: &str, path: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    for src in std::iter::once(&doc.source).chain(doc.import_sources.iter()) {
+        let blocks = alloy::impl_blocks::impl_blocks(src);
+
+        if blocks.is_empty() {
+            continue;
+        }
+
+        let ranges = alloy::declarations::namespace_ranges(src);
+
+        for block in blocks {
+            let inside = || {
+                ranges
+                    .iter()
+                    .any(|r| r.path == ns && block.start >= r.start && block.start <= r.end)
+            };
+
+            if block.target != path && !(block.target == name && inside()) {
+                continue;
+            }
+
+            // The header, then one line per method, then `end`: the
+            // hover of the block already writes them as an author would.
+            for line in block.hover.lines().skip(2) {
+                if line == "end" {
+                    break;
+                }
+
+                let line = line.trim();
+
+                if !line.is_empty() && !out.iter().any(|held| held == line) {
+                    out.push(line.to_string());
+                }
+            }
+        }
+    }
+
+    out
 }
 
 /// Whether a line opens the `default` arm. The body may stand on the
@@ -511,6 +597,48 @@ pub(crate) fn binds_a_value(bindings: &[alloy::declarations::Binding], name: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn doc_of(src: &str) -> Doc {
+        Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    }
+
+    /// The hover of a namespace member lists the methods of its `impl`,
+    /// whether the block stands inside the namespace body or outside it
+    /// under the member's path.
+    #[test]
+    fn a_namespace_member_lists_the_methods_of_its_impl() {
+        const INSIDE: &str = "namespace Geo as\n    struct Vec2 as\n        x: number\n    end\n\n    impl Vec2 as\n        function new(x: number): Vec2\n            return new Vec2 { x = x }\n        end\n    end\nend\n";
+        const OUTSIDE: &str = "namespace Geo as\n    struct Vec2 as\n        x: number\n    end\nend\n\nimpl Geo.Vec2 as\n    function new(x: number): Geo.Vec2\n        return new Geo.Vec2 { x = x }\n    end\nend\n";
+
+        for src in [INSIDE, OUTSIDE] {
+            let doc = doc_of(src);
+            let decl = doc
+                .decls
+                .iter()
+                .find(|d| d.name == "Geo.Vec2")
+                .expect("the member");
+            let hover = with_member_methods(&decl.hover, &doc, "Geo.Vec2");
+
+            assert!(
+                hover.contains("    public function new(x: number)"),
+                "{hover}"
+            );
+        }
+
+        // A top level struct already carries them, so nothing repeats.
+        let doc = doc_of(
+            "struct P as\n    x: number\nend\nimpl P as\n    function new(x: number): P\n        return new P { x = x }\n    end\nend\n",
+        );
+        let decl = doc.decls.iter().find(|d| d.name == "P").expect("P");
+
+        assert_eq!(with_member_methods(&decl.hover, &doc, "P"), decl.hover);
+    }
 
     /// `local Point = 1` hovered as another file's `struct Point`.
     #[test]

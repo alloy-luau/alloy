@@ -622,14 +622,18 @@ fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
         .filter_map(|part| part.split_once(':').map(|(k, _)| k.trim()))
         .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
         .collect();
+    // `Ping.cal(1)` calls, and `calls`, `spec`, and `instance` are data:
+    // a call names a verb, and at a tie the verb wins over the data.
+    let called = line.contains(&format!("{key}("));
     let near = members
         .iter()
-        .map(|m| (edit_distance(m, key), *m))
-        .filter(|(d, _)| *d <= 2)
+        .filter(|m| !called || REMOTE_VERBS.contains(m))
+        .map(|m| (edit_distance(m, key), !REMOTE_VERBS.contains(m), *m))
+        .filter(|(d, ..)| *d <= 2)
         .min();
 
     Some(match near {
-        Some((_, m)) => format!("remote `{receiver}` has no `{key}`; did you mean `{m}`?"),
+        Some((.., m)) => format!("remote `{receiver}` has no `{key}`; did you mean `{m}`?"),
 
         None => format!("remote `{receiver}` has no `{key}`"),
     })
@@ -1883,6 +1887,32 @@ mod tests {
         assert_eq!(
             rewrite_remote_key(&message, "    Chat:call(\"hi\")"),
             Some("remote `Chat` has no `call`".to_string())
+        );
+    }
+
+    /// `Ping.cal(1)` is a call, so `calls`, the record of the fires, is
+    /// not what the reader meant; a verb the remote has is, or nothing.
+    #[test]
+    fn a_remote_call_suggests_a_verb_over_the_calls_record() {
+        let table = "{ calls: RemoteCalls, call: (n: number) -> Future<number>, fire: (n: number) -> (), instance: Instance?, spec: any }";
+        let message = format!("Key 'cal' not found in table '{table}'");
+
+        assert_eq!(
+            rewrite_remote_key(&message, "    Ping.cal(1)"),
+            Some("remote `Ping` has no `cal`; did you mean `call`?".to_string())
+        );
+
+        let event =
+            "{ calls: RemoteCalls, fire: (n: number) -> (), instance: Instance?, spec: any }";
+        let message = format!("Key 'cal' not found in table '{event}'");
+
+        assert_eq!(
+            rewrite_remote_key(&message, "    Ping.cal(1)"),
+            Some("remote `Ping` has no `cal`".to_string())
+        );
+        assert_eq!(
+            rewrite_remote_key(&message, "    print(#Ping.cal)"),
+            Some("remote `Ping` has no `cal`; did you mean `calls`?".to_string())
         );
     }
 

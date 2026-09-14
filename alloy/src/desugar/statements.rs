@@ -1168,6 +1168,15 @@ impl<'s> Desugar<'s> {
                 );
             }
 
+            // A macro call that stands alone is a statement, so the
+            // body's statements stay statements and a `return` in it
+            // returns from the function around the call.
+            Stmt::Call(e @ Expr::Macro { .. }, _) => {
+                let saved = std::mem::replace(&mut self.macro_stmt, true);
+                self.expr(e);
+                self.macro_stmt = saved;
+            }
+
             // `new X(...)`, `await f()`, `async do ... end`: a call once
             // rendered. `try f()` drops its value into a throwaway local,
             // since the unwrapped value is a name and a name is no

@@ -152,6 +152,55 @@ pub(crate) fn body_locals(body: &str) -> Vec<String> {
     out
 }
 
+/// Where a `return` sits in a one-line macro body.
+enum BodyReturn {
+    /// The body writes no `return`.
+    None,
+    /// The body ends in `return <value>`: the byte the `return` starts
+    /// at, and the value it carries.
+    Tail(usize, String),
+    /// Every other shape: an early `return`, one with no value, and one
+    /// with more than one. Such a body has no value for an expression.
+    Other,
+}
+
+/// Reads a macro body for the `return` that gives it a value.
+///
+/// In expression position a macro's value is its last expression, so a
+/// body that ends in `return <value>` gives that value and the `return`
+/// drops out. The body is one line of the tokens the declaration wrote.
+fn body_return(body: &str) -> BodyReturn {
+    let returns = body_parts(body)
+        .iter()
+        .filter(|(_, word)| *word == "return")
+        .count();
+
+    if returns == 0 {
+        return BodyReturn::None;
+    }
+
+    let Ok(lexed) = alloy_syntax::lexer::lex(body) else {
+        return BodyReturn::Other;
+    };
+    let (chunk, errors) =
+        alloy_syntax::parser::parse_lenient(body, &lexed.toks, Default::default());
+
+    if !errors.is_empty() {
+        return BodyReturn::Other;
+    }
+
+    match chunk.block.stmts.last() {
+        // One `return`, last, with one value: the value of the body.
+        Some(alloy_syntax::ast::Stmt::Return(r)) if returns == 1 && r.values.len() == 1 => {
+            let at = lexed.toks[r.span.start as usize].start as usize;
+
+            BodyReturn::Tail(at, r.values[0].span().text(body, &lexed.toks).to_string())
+        }
+
+        _ => BodyReturn::Other,
+    }
+}
+
 pub(crate) fn is_simple_text(t: &str) -> bool {
     !t.is_empty()
         && t.chars()
@@ -209,6 +258,31 @@ impl<'s> Desugar<'s> {
             }
         }
 
+        // In expression position the macro's value is its last
+        // expression. A body that ends in `return <value>` gives that
+        // value, and the `return` drops out; any other `return` shape
+        // leaves the call with no value to stand for.
+        let mut body = m.body.as_str();
+        let mut tail = m.tail.clone();
+
+        if !self.macro_stmt && tail.is_none() {
+            match body_return(body) {
+                BodyReturn::Tail(at, value) => {
+                    body = body[..at].trim_end();
+                    tail = Some(value);
+                }
+
+                BodyReturn::Other => self.diagnose(
+                    span,
+                    &format!(
+                        "the macro `{name}` returns a statement; in an expression its body must end in a value"
+                    ),
+                ),
+
+                BodyReturn::None => {}
+            }
+        }
+
         // Substitute whole tokens in the one-line body, each behind the
         // gap the declaration wrote.
         let substitute = |text: &str| -> String {
@@ -248,8 +322,8 @@ impl<'s> Desugar<'s> {
             out
         };
 
-        let stmts = substitute(&m.body);
-        let tail = m.tail.as_ref().map(|t| substitute(t));
+        let stmts = substitute(body);
+        let tail = tail.as_deref().map(substitute);
 
         let source = match (stmts.is_empty(), &tail) {
             (true, Some(t)) => t.clone(),
@@ -726,5 +800,68 @@ mod tests {
             messages(&format!("{none}$tick(1)\n")),
             vec!["the macro `tick` takes 0 arguments, 1 given"]
         );
+    }
+
+    /*
+    A macro body that ends in `return <value>`. In expression position
+    the expansion spliced the statement in whole, so `local n = $sum(1)`
+    emitted `local n = return 1 + 2`, which is no Luau.
+
+    The value of such a body is the expression the `return` carries, and
+    the word drops out. A body with any other `return` shape has no
+    value for an expression, and the call reports.
+    */
+    #[test]
+    fn a_macro_body_that_returns_a_value_gives_it_to_an_expression() {
+        let decl = "macro sum(a, b = 2)\n    return a + b\nend\n\n";
+        let ship = |src: &str| -> String { crate::compile(src).unwrap().ship };
+
+        // Both arities: the default stands in for the argument it
+        // replaces, and the `return` is gone.
+        let out = ship(&format!(
+            "{decl}local n = $sum(1)\nlocal m = $sum(1, 5)\nprint(n, m)\n"
+        ));
+
+        assert!(out.contains("local n = 1 + 2"), "{out}");
+        assert!(out.contains("local m = 1 + 5"), "{out}");
+        assert!(!out.contains("= return"), "{out}");
+
+        // A statement-position call keeps the `return`, so the body
+        // returns from the function around the call.
+        let out = ship(&format!(
+            "{decl}local function one(): number\n    $sum(1)\nend\nprint(one())\n"
+        ));
+
+        assert!(out.contains("return 1 + 2"), "{out}");
+
+        // An early `return`, and a `return` with no value: neither has
+        // a value for an expression.
+        let early = "macro pick(c)\n    if c then return 1 end\n    return 2\nend\n\n";
+        assert_eq!(
+            messages(&format!("{early}local p = $pick(true)\nprint(p)\n")),
+            vec![
+                "the macro `pick` returns a statement; in an expression its body must end in a value"
+            ]
+        );
+
+        let bare = "macro stop()\n    return\nend\n\n";
+        assert_eq!(
+            messages(&format!("{bare}local s = $stop()\nprint(s)\n")),
+            vec![
+                "the macro `stop` returns a statement; in an expression its body must end in a value"
+            ]
+        );
+
+        // The same bodies stand as statements.
+        assert!(messages(&format!("{early}$pick(true)\n")).is_empty());
+        assert!(messages(&format!("{bare}$stop()\n")).is_empty());
+
+        // A body with statements in front of the value still wraps in a
+        // closure, and the value is the `return`'s expression.
+        let mixed = "macro noisy(x)\n    print(x)\n    return x + 1\nend\n\n";
+        let out = ship(&format!("{mixed}local v = $noisy(2)\nprint(v)\n"));
+
+        assert!(out.contains("return 2 + 1"), "{out}");
+        assert!(out.contains("print(2)"), "{out}");
     }
 }

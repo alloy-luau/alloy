@@ -486,6 +486,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         macros: HashMap::new(),
         test_names: Vec::new(),
         macro_serial: 0,
+        macro_stmt: false,
         structs_with_to_string: HashSet::new(),
         private_types: HashSet::new(),
         self_prologue: None,
@@ -1026,6 +1027,10 @@ struct Desugar<'s> {
     mapped_used: Vec<&'static str>,
     /// Expansions so far, for the unique names of a body's locals.
     macro_serial: u32,
+    /// True while a macro call that stands alone as a statement
+    /// expands. Its body's statements stay statements, so a `return`
+    /// in the body returns from the function around the call.
+    macro_stmt: bool,
     /// Structs whose impl writes `to_string`: they print through it, so
     /// the default printer stays out.
     structs_with_to_string: HashSet<String>,

@@ -993,6 +993,10 @@ pub fn import_privates_for_file(path: &Path, source: &str) -> Vec<(String, Vec<S
     import_privates(source, &from, &aliases)
 }
 
+/// One enum a module declares: its name, and each variant with how
+/// many values it carries.
+type ImportedEnum = (String, Vec<(String, usize)>);
+
 /// The import shapes of a file under the nearest `alloy.toml`.
 /// The enums every module a source imports declares, each with its
 /// variants and how many values they carry. A `match` over an imported
@@ -1003,7 +1007,7 @@ pub fn import_enums(
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, Vec<(String, usize)>)> {
     let mut seen: Vec<PathBuf> = Vec::new();
-    let mut modules: Vec<(PathBuf, Vec<(String, Vec<(String, usize)>)>)> = Vec::new();
+    let mut modules: Vec<(PathBuf, Vec<ImportedEnum>)> = Vec::new();
     let named = named_specs(source, from, aliases);
     let stars = star_locals(source, from, aliases);
 

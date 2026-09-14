@@ -958,6 +958,13 @@ impl Server {
                                     map_from_shadow(&mut d, Some(&source), &st);
                                     friendly_message(&mut d, doc, &st);
 
+                                    // The wording pass may leave the
+                                    // report naming a member that is
+                                    // there; the lint says the rest.
+                                    if answers_to_the_private_lint(&d, doc, &lint_config) {
+                                        continue;
+                                    }
+
                                     // Two references in one desugar map to
                                     // one source token: report it once.
                                     if !out.iter().any(|o| {
@@ -1363,6 +1370,11 @@ impl Server {
                 for d in items.iter_mut() {
                     friendly_message(d, doc, &st);
                 }
+
+                // The wording pass may leave a report naming a member
+                // that is there; the push path drops the same one.
+                let lint_config = st.lint_config();
+                items.retain(|d| !answers_to_the_private_lint(d, doc, &lint_config));
 
                 // Alloy's own reports travel by push alone: a push
                 // overwrites the set an earlier server left on the file,

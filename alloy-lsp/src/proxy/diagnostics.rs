@@ -1212,21 +1212,7 @@ pub(crate) fn keep_diagnostic(
         return false;
     }
 
-    // The checker reads a private member as missing: the declaring file
-    // keeps it out of the struct's public type. `alloy doc private`
-    // promises a type error there, so the report that names the member
-    // as private stands beside `private_access`, the way `alloy flux`
-    // keeps it. The two shapes that name no private member point at a
-    // member that is there, so they answer to the lint alone.
-    if (message.contains("has no method") || message.contains("not found in table"))
-        && let Some(out) = &doc.output
-        && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
-        && out.lints.iter().any(|l| {
-            l.name == "private_access"
-                && alloy::lint::level_in(lint_config, &silence, l.name) != alloy::lint::Level::Allow
-                && alloy::directives::line_of(&doc.source, l.start as usize) == sl as usize
-        })
-    {
+    if answers_to_the_private_lint(d, doc, lint_config) {
         return false;
     }
 
@@ -1623,6 +1609,40 @@ pub(crate) fn names_word(line: &str, phrase: &str) -> bool {
 
         !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
             && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// True for a report that names a member the struct does have, on a
+/// line `private_access` already lints. The declaring file keeps a
+/// private member out of the struct's public type, so the checker reads
+/// it as missing. `alloy doc private` promises a type error there, so
+/// the report that names the member as private stands beside the lint;
+/// these two would send the reader after a member that is there.
+/// `alloy flux` drops the same two, after the same rewrite, so the
+/// caller tests the message the reader sees.
+pub(crate) fn answers_to_the_private_lint(
+    d: &Value,
+    doc: &Doc,
+    lint_config: &alloy::config::LintConfig,
+) -> bool {
+    let message = d.get("message").and_then(Value::as_str).unwrap_or_default();
+
+    if !message.contains("has no method") && !message.contains("not found in table") {
+        return false;
+    }
+
+    let Some(out) = &doc.output else {
+        return false;
+    };
+    let Some(((sl, _), _)) = d.get("range").and_then(range_of) else {
+        return false;
+    };
+    let silence = alloy::directives::scan(&doc.source);
+
+    out.lints.iter().any(|l| {
+        l.name == "private_access"
+            && alloy::lint::level_in(lint_config, &silence, l.name) != alloy::lint::Level::Allow
+            && alloy::directives::line_of(&doc.source, l.start as usize) == sl as usize
     })
 }
 

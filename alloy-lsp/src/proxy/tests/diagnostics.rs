@@ -61,38 +61,65 @@ pub(crate) fn child(line: u32, message: &str, severity: u64) -> Value {
 }
 #[test]
 pub(crate) fn a_private_read_keeps_the_error_beside_the_lint() {
-    // `alloy flux` reports the read as an error and lints it. The
-    // editor shows both; the two shapes that name a member that is
-    // there answer to the lint alone.
+    // `alloy flux` reports the read as an error and lints it, so the
+    // editor shows both. A report that names a member the struct does
+    // have answers to the lint alone, after the wording pass writes it.
     let source = concat!(
         "struct Box as\n",
         "    value: number,\n",
         "    private secret: number,\n",
         "end\n",
         "\n",
+        "impl Box as\n",
+        "    private function hide(self)\n",
+        "        self.secret = 0\n",
+        "    end\n",
+        "end\n",
+        "\n",
         "local b = new Box { value = 1, secret = 0 }\n",
         "print(b.secret)\n",
+        "b:hide()\n",
     );
     let (st, uri) = one_file(source);
     let doc = st.docs.get(uri).unwrap();
     let config = alloy::config::LintConfig::default();
+    let lints: Vec<usize> = doc
+        .output
+        .as_ref()
+        .map(|o| {
+            o.lints
+                .iter()
+                .filter(|l| l.name == "private_access")
+                .map(|l| alloy::directives::line_of(&doc.source, l.start as usize))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    assert!(
-        doc.output
-            .as_ref()
-            .is_some_and(|o| o.lints.iter().any(|l| l.name == "private_access")),
-        "the fixture must lint the read"
-    );
+    assert_eq!(lints, vec![12, 13], "the fixture must lint both accesses");
     assert!(keep_diagnostic(
-        &child(6, "TypeError: Type 'Box' does not have key 'secret'", 1),
+        &child(12, "TypeError: Type 'Box' does not have key 'secret'", 1),
         doc,
         None,
         &config
     ));
     assert!(!keep_diagnostic(
-        &child(6, "TypeError: Key 'secret' not found in table 'Box'", 1),
+        &child(13, "TypeError: Key 'hide' not found in table 'Box'", 1),
         doc,
         None,
+        &config
+    ));
+    assert!(answers_to_the_private_lint(
+        &child(13, "StructError: `Box` has no method `hide`", 1),
+        doc,
+        &config
+    ));
+    assert!(!answers_to_the_private_lint(
+        &child(
+            12,
+            "StructError: `secret` is private to `Box`; only its impl reaches it",
+            1
+        ),
+        doc,
         &config
     ));
 }

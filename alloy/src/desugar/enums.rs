@@ -1690,6 +1690,55 @@ mod tests {
         assert!(messages.is_empty(), "{messages:?}");
     }
 
+    /// An enum inside an imported namespace reads under its path,
+    /// `Geo.Kind`, because the module has no top-level declaration of
+    /// it. The path resolved to the rendered name a local namespace
+    /// writes, `Geo_Kind`, which the enum index never holds, so every
+    /// arm covered nothing and the match reported.
+    #[test]
+    fn a_match_over_an_imported_namespace_enum_is_exhaustive() {
+        let src = "import { Geo } from \"./lib\"\nlocal function t(k: Geo.Kind): number\n    return match k with\n        case Geo.Kind.Round then 1\n        case Geo.Kind.Square then 2\n    end\nend\nprint(t)\n";
+        let variants = vec![("Round".to_string(), 0), ("Square".to_string(), 0)];
+        let options = EmitOptions {
+            import_enums: vec![("Geo.Kind".to_string(), variants.clone())],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert!(messages.is_empty(), "{messages:?}");
+
+        // Two levels deep, and one arm short: the message names the enum
+        // by its path and the variant with no arm.
+        let deep = "import { Outer } from \"./lib\"\nlocal function t(k: Outer.Inner.Kind): number\n    return match k with\n        case Outer.Inner.Kind.Round then 1\n    end\nend\nprint(t)\n";
+        let options = EmitOptions {
+            import_enums: vec![("Outer.Inner.Kind".to_string(), variants)],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(deep, &options).expect("compiles");
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "this match is not exhaustive: `Outer.Inner.Kind` has no arm for `Square`; add it or a `default` arm"
+            ]
+        );
+    }
+
+    /// The shape scan reads a namespace member, so the module that
+    /// imports the namespace knows the enum's variants.
+    #[test]
+    fn the_shape_scan_lists_an_enum_inside_a_namespace() {
+        let src = "export namespace Outer as\n    public namespace Inner as\n        public enum Kind as\n            Round\n            Square\n        end\n    end\nend\n";
+        let names: Vec<String> = crate::declarations::shapes(src)
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect();
+
+        assert_eq!(names, vec!["Outer.Inner.Kind".to_string()]);
+    }
+
     #[test]
     fn one_arm_that_covers_every_value_needs_no_branch() {
         // `(else v)` is not Luau, so a match expression with one arm and

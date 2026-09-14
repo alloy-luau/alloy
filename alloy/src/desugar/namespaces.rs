@@ -649,13 +649,17 @@ impl<'s> Desugar<'s> {
     /// of `case Math.Shape.Circle` is the enum `Math_Shape`.
     pub(crate) fn enum_of_path(&self, text: &str) -> Option<(String, String)> {
         let (head, variant) = text.rsplit_once('.')?;
-        let name = self
-            .namespace_path_name(head)
-            .unwrap_or_else(|| head.to_string());
+        // A namespace this file declares renders its enum under one
+        // name, `Geo_Kind`. An imported namespace has no declaration
+        // here, so the enum index keys it by the path the source writes,
+        // the way `import_struct_fields` keys a struct member.
+        let rendered = self.namespace_path_name(head);
+        let name = [rendered.as_deref(), Some(head)]
+            .into_iter()
+            .flatten()
+            .find(|n| self.enums.contains_key(*n))?;
 
-        self.enums
-            .contains_key(&name)
-            .then(|| (name, variant.to_string()))
+        Some((name.to_string(), variant.to_string()))
     }
 
     /// The path a message names a declaration by. `Math_Vec2` is the

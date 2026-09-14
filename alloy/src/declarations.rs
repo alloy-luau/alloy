@@ -1515,11 +1515,49 @@ pub fn shapes(src: &str) -> Vec<Shape> {
                 }
             }
 
+            // A namespace member has no top-level declaration, so an
+            // enum inside one reads under its path, `Geo.Kind`, the way
+            // `struct_fields_by_name` lists a struct member.
+            Stmt::Namespace(ns) => namespace_enums(src, toks, ns, "", &mut out),
+
             _ => {}
         }
     }
 
     out
+}
+
+/// The enums one namespace declares, under the path each one reads by.
+fn namespace_enums(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    ns: &alloy_syntax::ast::NamespaceDecl,
+    path: &str,
+    out: &mut Vec<Shape>,
+) {
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
+    let inner = match path.is_empty() {
+        true => text(ns.name),
+
+        false => format!("{path}.{}", text(ns.name)),
+    };
+
+    for m in &ns.members {
+        match m.stmt.under_default() {
+            Stmt::Enum(e) => out.push(Shape::Enum {
+                name: format!("{inner}.{}", text(e.name)),
+                variants: e
+                    .variants
+                    .iter()
+                    .map(|v| (text(v.name), v.payload.iter().map(|p| text(*p)).collect()))
+                    .collect(),
+            }),
+
+            Stmt::Namespace(deeper) => namespace_enums(src, toks, deeper, &inner, out),
+
+            _ => {}
+        }
+    }
 }
 
 /// One struct under one of its names: the name, then each field with

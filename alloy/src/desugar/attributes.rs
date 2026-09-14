@@ -969,7 +969,11 @@ impl<'s> Desugar<'s> {
         // An imported enum is as exhaustible as one declared here; the
         // file names its variants the same way.
         for (name, variants) in &self.options.import_enums {
-            if self.imported_names.contains(name) && !self.enums.contains_key(name) {
+            // An enum inside an imported namespace reads under its path,
+            // `Geo.Kind`, and the import list binds the head, `Geo`.
+            let bound = name.split('.').next().unwrap_or(name);
+
+            if self.imported_names.contains(bound) && !self.enums.contains_key(name) {
                 self.enums.insert(name.clone(), variants.clone());
                 self.enum_decls.insert(name.clone(), variants.clone());
             }

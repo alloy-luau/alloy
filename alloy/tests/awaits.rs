@@ -221,3 +221,20 @@ fn an_await_of_a_plain_function_names_it() {
         "local function later(): Future<number>\n    return Future.resolve(7)\nend\n\nasync function go()\n    print(await later())\nend\nprint(go)\n",
     );
 }
+
+/// `await (x)` with a space is the word; `await(x)` that touches is a
+/// call of a Luau function of that name.
+#[test]
+fn an_await_before_a_spaced_paren_is_the_word() {
+    let options = EmitOptions {
+        file_name: "paren.aly".to_string(),
+        ..EmitOptions::default()
+    };
+    let src = "async function slow(): Future<number>\n    return 7\nend\nasync function main()\n    local a = await (slow())\n    print(a)\nend\n";
+    let out = alloy::compile_with(src, &options).unwrap();
+    assert!(out.ship.contains("__alloy.await((slow()))"), "{}", out.ship);
+
+    let luau = "local await = function(x) return x end\nprint(await(1))\n";
+    let out = alloy::compile_with(luau, &options).unwrap();
+    assert!(out.ship.contains("print(await(1))"), "{}", out.ship);
+}

@@ -272,9 +272,12 @@ pub fn prefix_operand_follows(src: &str, toks: &[Tok], i: usize) -> bool {
     }
 
     match toks.get(i + 1).map(|t| t.kind) {
-        Some(TokKind::LParen | TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpHead) => {
-            false
-        }
+        // `await(x)` is a call of a Luau function of that name;
+        // `await (x)` with a space is the word over a parenthesised
+        // operand.
+        Some(TokKind::LParen) => toks[i].end != toks[i + 1].start,
+
+        Some(TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpHead) => false,
 
         // `return try end` closes a block: the word after is no operand.
         Some(TokKind::Ident) => starts_an_expression(text(src, toks, i + 1)),

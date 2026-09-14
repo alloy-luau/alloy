@@ -194,3 +194,57 @@ fn a_namespace_name_opens_no_list() {
     let at = "namespace Na".len();
     assert_eq!(context::detect(src, at), None);
 }
+
+/// A struct of a namespace has no top level shape, so the checker
+/// prints its emit name in a hint and a solver variable in a hover.
+/// The hint reads the path the source wrote, and the hover names the
+/// struct the `new` on the line constructs.
+#[test]
+fn a_constructed_namespace_struct_reads_by_its_path() {
+    let src = "namespace Ns as\n    struct T as\n        x: number\n    end\nend\n\nlocal v = new Ns.T { x = 1 }\nprint(v)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut hint = json!({ "label": [{ "value": ": " }, { "value": "Ns_T" }] });
+    crate::shapes::fold_value(&mut hint, &st.known_shapes_at(Some(uri)));
+
+    assert_eq!(hint["label"][1]["value"], "Ns.T");
+
+    let printed = "```luau\nlocal v: t2 where t1 = {\n    new: (f: {\n        x: number\n    }) -> t2\n} ; t2 = { @metatable t1,\n{\n    x: number\n} }\n```";
+
+    assert_eq!(
+        prefer_constructed_struct(printed, doc, 6, 6),
+        Some("```luau\nlocal v: Ns.T\n```".to_string())
+    );
+    assert_eq!(
+        prefer_constructed_struct("```luau\nlocal v: t1\n```", doc, 6, 6),
+        Some("```luau\nlocal v: Ns.T\n```".to_string())
+    );
+
+    // Through `import * as M`, the path starts with the module.
+    let src = "import * as M from \"./mod\"\n\nlocal v = new M.Ns.T { x = 1 }\nprint(v)\n";
+    let (mut st, uri) = one_file(src);
+    let mod_uri = "file:///mod.aly";
+    st.docs.insert(
+        mod_uri.to_string(),
+        Doc::new(
+            "export namespace Ns as\n    export struct T as\n        x: number\n    end\nend\n"
+                .to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    let decls = st.docs[mod_uri].decls.clone();
+    let doc = st.docs.get_mut(uri).expect("doc");
+    doc.import_decls = decls;
+
+    assert_eq!(
+        crate::proxy::hover::source_type(doc, 2, 6),
+        Some("M.Ns.T".to_string())
+    );
+    assert_eq!(
+        prefer_constructed_struct("```luau\nlocal v: t1\n```", doc, 2, 6),
+        Some("```luau\nlocal v: M.Ns.T\n```".to_string())
+    );
+}

@@ -326,6 +326,13 @@ impl Doc {
             alloy::modules::import_shapes_for_file(std::path::Path::new(&options.file_name), text);
         self.import_sources =
             alloy::modules::import_sources_for_file(std::path::Path::new(&options.file_name), text);
+        // A member of an imported namespace prints by its emit name
+        // too, `Ns_T`, and the fold reads the pair off this list.
+        self.namespaces.extend(
+            self.import_sources
+                .iter()
+                .flat_map(|text| alloy::declarations::namespace_names(text)),
+        );
         self.import_interfaces = self
             .import_sources
             .iter()

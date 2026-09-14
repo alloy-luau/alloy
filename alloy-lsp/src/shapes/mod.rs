@@ -465,6 +465,10 @@ pub fn fold_value(value: &mut Value, known: &Known) {
                 || s.contains("ResultErr")
                 || s.contains("Result2<")
                 || s.contains("Result3<")
+                || known
+                    .namespaces
+                    .iter()
+                    .any(|(emitted, _)| s.contains(emitted.as_str()))
             {
                 *s = fold(s, known);
             }

@@ -135,12 +135,13 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
         return impl_self_type(doc, line).filter(|t| declares(t.split('<').next().unwrap_or(t)));
     }
 
-    // `local root = new Node { ... }`, `local b = new Box<<number>> { }`.
+    // `local root = new Node { ... }`, `local b = new Box<<number>> { }`,
+    // and `new Ns.T { }` for a member of a namespace.
     if let Some(i) = text.find("new ") {
         let rest = text[i + "new ".len()..].trim_start();
         let name: String = rest
             .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
             .collect();
 
         if declares(&name) {
@@ -225,6 +226,19 @@ pub(crate) fn declares_a_struct(doc: &Doc, name: &str) -> bool {
             .map(|l| l.trim_start().trim_start_matches("export "))
             .is_some_and(|l| l.starts_with("struct "))
     };
+    // `new M.Ns.T { }` through `import * as M`: the module declares
+    // the path under `M`.
+    let name = match name.split_once('.') {
+        Some((module, rest))
+            if crate::proxy::navigation::module_bindings(&doc.source)
+                .iter()
+                .any(|(m, _)| m == module) =>
+        {
+            rest
+        }
+
+        _ => name,
+    };
 
     doc.shapes
         .iter()
@@ -303,23 +317,38 @@ pub(crate) fn prefer_constructed_struct(
 ) -> Option<String> {
     let (fence, body) = value.split_once('\n')?;
     let inner = body.trim().strip_suffix("```")?.trim();
-    let (head, printed) = inner.rsplit_once(": ")?;
+    let (head, printed) = inner.split_once(": ")?;
     let named = source_type(doc, line, character)?;
 
-    if printed == named || printed.contains(' ') {
+    if printed == named {
         return None;
     }
 
     // `new Pair<<number, string>>` names the struct with its arguments,
     // and the declaration stands under the name alone.
     let is_struct = |n: &str| declares_a_struct(doc, n.split('<').next().unwrap_or(n));
+    // A struct the compiler lists nowhere, a member of a namespace,
+    // prints as a solver variable with or without its clause: `t1`,
+    // or `t2 where t1 = { ... }`. The print names nothing.
+    let unnamed = printed
+        .split_whitespace()
+        .next()
+        .is_some_and(|w| is_solver_variable(w.trim_end_matches('?')));
     let offset = offset_of(&doc.source, line, character)?;
     let (start, end) = keywords::word_range(&doc.source, offset);
     let word = &doc.source[start..end];
 
     // The cursor is on the binding the line declares.
-    (head.ends_with(word) && is_struct(printed) && is_struct(&named))
-        .then(|| format!("{fence}\n{head}: {named}\n```"))
+    (head.ends_with(word)
+        && (unnamed || (!printed.contains(' ') && is_struct(printed)))
+        && is_struct(&named))
+    .then(|| format!("{fence}\n{head}: {named}\n```"))
+}
+
+/// Whether a word is a solver variable, `t1`: a name the checker made
+/// and no source can write.
+fn is_solver_variable(word: &str) -> bool {
+    word.len() > 1 && word.starts_with('t') && word[1..].chars().all(|c| c.is_ascii_digit())
 }
 
 /// A hover that prints one solver variable, `t3?`, names nothing. The
@@ -333,9 +362,8 @@ pub(crate) fn name_solver_variable(
     let (fence, body) = value.split_once('\n')?;
     let inner = body.trim().strip_suffix("```")?.trim();
     let optional = inner.ends_with('?');
-    let var = inner.trim_end_matches('?');
 
-    if var.len() < 2 || !var.starts_with('t') || !var[1..].chars().all(|c| c.is_ascii_digit()) {
+    if !is_solver_variable(inner.trim_end_matches('?')) {
         return None;
     }
 

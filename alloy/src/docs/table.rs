@@ -119,7 +119,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "enum",
-        "```alloy\nenum Name as\n    Unit\n    Payload(T)\nend\n```\nVariants with optional payloads. A unit enum is a string union at runtime; a payload enum is a tagged table. `match` takes it apart and `impl Name` adds methods.\n\nThe word is also free as a name. `enum` before a name on the same line declares; `local enum = { Idle = 1 }` and `enum.Idle` read the Luau way.",
+        "```alloy\nenum Name as\n    Unit\n    Payload(number)\nend\n```\nVariants with optional payloads. A unit enum is a string union at runtime; a payload enum is a tagged table. `match` takes it apart and `impl Name` adds methods.\n\nThe word is also free as a name. `enum` before a name on the same line declares; `local enum = { Idle = 1 }` and `enum.Idle` read the Luau way.",
     ),
     (
         "match",

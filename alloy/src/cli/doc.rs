@@ -144,6 +144,22 @@ fn json() -> String {
                 "members": Vec::<serde_json::Value>::new(),
             })
         }))
+        // A diagnostic's kind opens the section that explains it, as
+        // `alloy doc StructError` does.
+        .chain(docs::KINDS.iter().filter_map(|(kind, number)| {
+            let sec = docs::section(number)?;
+            let url = docs::book_url(number).unwrap_or_default();
+            let body = sec.key.and_then(docs::lookup).unwrap_or_default();
+
+            Some(serde_json::json!({
+                "key": kind,
+                "title": kind,
+                "group": "Errors",
+                "markdown": format!("`{kind}` is a report of section {number}, {}: {url}\n\n{body}", sec.title),
+                "signature": serde_json::Value::Null,
+                "members": Vec::<serde_json::Value>::new(),
+            }))
+        }))
         .collect();
     let lints: Vec<serde_json::Value> = LINTS
         .iter()
@@ -673,12 +689,35 @@ mod tests {
         let index = index(false);
 
         assert!(index.contains("Errors\n    AlloyError"), "{index}");
+    }
 
-        // The kinds are no entries: the docs site reads the JSON as is.
+    /// The docs site reads the JSON, so every kind the index lists
+    /// under `Errors` is an entry of that group, once, with the
+    /// section it opens.
+    #[test]
+    fn the_json_holds_a_page_for_every_error_kind() {
         let value: serde_json::Value = serde_json::from_str(&json()).expect("json");
         let entries = value["entries"].as_array().expect("entries");
 
-        assert!(!entries.iter().any(|e| e["key"] == "StructError"));
+        for (kind, number) in docs::KINDS {
+            let found: Vec<_> = entries.iter().filter(|e| e["key"] == *kind).collect();
+
+            assert_eq!(found.len(), 1, "{kind}");
+            assert_eq!(found[0]["group"], "Errors", "{kind}");
+            assert_eq!(found[0]["title"], *kind, "{kind}");
+
+            let markdown = found[0]["markdown"].as_str().expect("markdown");
+
+            assert!(
+                markdown.contains(&format!("section {number}, ")),
+                "{markdown}"
+            );
+        }
+
+        assert_eq!(
+            entries.iter().filter(|e| e["group"] == "Errors").count(),
+            docs::KINDS.len()
+        );
     }
 
     /// The index prints one `Lints` heading. The markup lints belong to

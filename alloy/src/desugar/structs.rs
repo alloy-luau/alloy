@@ -1122,13 +1122,16 @@ impl<'s> Desugar<'s> {
                     let mname = self.text_of(m.name).to_string();
                     let mut sig = self.signature_text(m.signature);
 
-                    // An untyped `self` is `any` in the check artifact: the
-                    // default lands on every implementing struct.
+                    // An untyped `self` is the trait's own interface in
+                    // the check artifact. The default body then reads
+                    // the trait's methods and nothing else, so a typo
+                    // or a private field of an implementing struct
+                    // reports here, in the trait's own file.
                     if self.options.check {
                         if sig.starts_with("(self)") {
-                            sig = sig.replacen("(self)", "(self: any)", 1);
+                            sig = sig.replacen("(self)", &format!("(self: {name})"), 1);
                         } else if sig.starts_with("(self,") {
-                            sig = sig.replacen("(self,", "(self: any,", 1);
+                            sig = sig.replacen("(self,", &format!("(self: {name},"), 1);
                         }
                     }
 
@@ -2229,6 +2232,34 @@ mod tests {
         // The same type written with other spacing is the same type.
         let same = "trait Held as\n    function slot(self): Array<number>\nend\nstruct Bag as\n    n: number\nend\nimpl Held for Bag as\n    function slot(self): Array< number >\n        return Array.new()\n    end\nend\nprint(new Bag { n = 1 })\n";
         assert!(messages(same).is_empty(), "{:?}", messages(same));
+    }
+
+    /// A default body's `self` is the trait's own interface in the
+    /// check artifact. A field of an implementing struct is not on that
+    /// record, so a typo, or a private field, reports in the trait's
+    /// file. A call of another trait method still resolves.
+    #[test]
+    fn a_trait_default_types_self_as_the_trait() {
+        let src = "trait Shape as\n    function area(self): number\n    function label(self): string\n        return `area {self:area()}`\n    end\nend\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(
+            out.check
+                .contains("function Shape.label(self: Shape): string"),
+            "{}",
+            out.check
+        );
+
+        // A second parameter keeps its place.
+        let two = "trait Tagged as\n    function tag(self, n: number): string\n        return tostring(n)\n    end\nend\n";
+        let out = crate::compile(two).unwrap();
+
+        assert!(
+            out.check
+                .contains("function Tagged.tag(self: Tagged, n: number): string"),
+            "{}",
+            out.check
+        );
     }
 
     /// `async function` is a trait signature too. The body reader used

@@ -5,11 +5,28 @@
 use alloy::declarations::Shape;
 
 use super::Known;
-use super::naming::{enum_of_variant, is_tagged_variant};
-use super::strings::{balanced_len, enclosing_brace, group_start, match_loose, member_len};
+use super::strings::{balanced_len, enclosing_brace, group_start, member_len, members};
 
-/// A tagged table the union fold could not pair with its siblings still
-/// names one variant; the enum is what the reader wrote.
+/// The members a variant table prints, by key.
+type Members = Vec<(String, String)>;
+
+/// A printed variant beside the payload types its declaration names.
+type Printed<'a> = (&'a [String], &'a Members);
+
+/// The slot a payload key names: `_1` is the first.
+fn slot_index(key: &str) -> Option<usize> {
+    let digits = key.strip_prefix('_')?;
+
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// A variant table the union fold could not pair with its siblings
+/// still names one variant; the enum is what the reader wrote. A
+/// generic enum's alias is a plain union, so a unit prints as a table
+/// with its tag alone beside the methods, `{ read map: t1, read tag:
+/// "Nil" }`, and a payload carries the argument in its slot.
 pub(crate) fn fold_variant_tables(text: &mut String, known: &Known) {
     let mut from = 0;
 
@@ -26,9 +43,7 @@ pub(crate) fn fold_variant_tables(text: &mut String, known: &Known) {
         };
         let body = text[open..open + len].to_string();
 
-        if is_tagged_variant(&body)
-            && let Some(name) = enum_of_variant(&body, known)
-        {
+        if let Some(name) = variant_table_name(&body, known) {
             text.replace_range(open..open + len, &name);
             from = open + name.len();
 
@@ -36,6 +51,88 @@ pub(crate) fn fold_variant_tables(text: &mut String, known: &Known) {
         }
 
         from = at + 1;
+    }
+}
+
+/// The enum a lone variant table belongs to, with the arguments its
+/// slots carry: one slot per payload type, and any other member is
+/// a method of the enum.
+fn variant_table_name(body: &str, known: &Known) -> Option<String> {
+    let m = members(body);
+    let tag = tag_of(&m)?;
+
+    known.shapes.iter().find_map(|s| {
+        let Shape::Enum { name, variants } = s else {
+            return None;
+        };
+        let (_, payload) = variants.iter().find(|(v, _)| *v == tag)?;
+
+        (payload.len() == slots(&m)).then(|| with_arguments(name, &[(payload, &m)], known))
+    })
+}
+
+/// The variant a table's `tag` literal names.
+fn tag_of(m: &[(String, String)]) -> Option<String> {
+    m.iter()
+        .find(|(k, _)| k == "tag")
+        .map(|(_, v)| v.trim().trim_matches('"').to_string())
+}
+
+fn slots(m: &[(String, String)]) -> usize {
+    m.iter().filter(|(k, _)| slot_index(k).is_some()).count()
+}
+
+/// The enum's name with the arguments its printed variants carry. The
+/// shape keeps no parameter list, so a payload spelled as a bare name
+/// that no shape, interface, or primitive names, and that prints
+/// otherwise in its slot, is a parameter, and the slot holds its
+/// argument. The bare name when no slot binds one.
+// ponytail: a parameter list on `Shape::Enum` would name the
+// parameters outright; that is the compiler's declaration index.
+fn with_arguments(name: &str, tables: &[Printed], known: &Known) -> String {
+    const PRIMITIVES: [&str; 13] = [
+        "number", "string", "boolean", "nil", "any", "unknown", "never", "thread", "buffer",
+        "table", "userdata", "vector", "function",
+    ];
+    let declared = |word: &str| {
+        PRIMITIVES.contains(&word)
+            || known.shapes.iter().any(|s| s.name() == word)
+            || known.interfaces.iter().any(|i| i.name == word)
+    };
+    let parameter = |payload: &str| {
+        !payload.is_empty()
+            && payload
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !declared(payload)
+    };
+    let mut args: Vec<String> = Vec::new();
+
+    for (payload, m) in tables {
+        for (i, p) in payload.iter().enumerate() {
+            let p = p.trim();
+
+            if !parameter(p) || args.iter().any(|a| a == p) {
+                continue;
+            }
+
+            let slot = m
+                .iter()
+                .find(|(k, _)| slot_index(k) == Some(i + 1))
+                .map(|(_, v)| v.trim().to_string());
+
+            match slot {
+                Some(v) if v != p => args.push(v),
+
+                _ => return name.to_string(),
+            }
+        }
+    }
+
+    match args.is_empty() {
+        true => name.to_string(),
+
+        false => format!("{name}<{}>", args.join(", ")),
     }
 }
 
@@ -122,10 +219,12 @@ fn word_at_or_after(text: &str, name: &str, from: usize) -> Option<usize> {
 }
 
 /// An enum prints as the union of its members: `"Name"` for a unit,
-/// `{ _1: T, tag: "V" }` for a payload. The members come in the order
-/// of their text, and a payload of another enum may already read by
-/// name, so the match is a set: a union whose members are the enum's,
-/// in any order, reads as the enum.
+/// `{ _1: T, tag: "V" }` for a payload, and a table with its tag alone
+/// for a unit of a generic enum, whose alias is a plain union. The
+/// members come in the order of their text, and a payload of another
+/// enum may already read by name, so the match is a set: a union whose
+/// members are the enum's, in any order, reads as the enum, with the
+/// arguments its slots carry.
 pub(crate) fn fold_enums(text: &mut String, known: &Known) {
     for shape in &known.shapes {
         let Shape::Enum { name, variants } = shape else {
@@ -136,46 +235,88 @@ pub(crate) fn fold_enums(text: &mut String, known: &Known) {
             continue;
         }
 
-        let members: Vec<String> = variants
-            .iter()
-            .map(|(v, p)| {
-                if p.is_empty() {
-                    format!("\"{v}\"")
-                } else {
-                    let fields: Vec<String> = p
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| format!("_{}: {t}", i + 1))
-                        .collect();
-
-                    format!("{{ {}, tag: \"{v}\" }}", fields.join(", "))
-                }
-            })
-            .collect();
-        let first = members[0].split(',').next().unwrap_or("").to_string();
+        // A unit prints as its quoted name, and a payload's table
+        // carries the name as its tag, so the first variant's name
+        // anchors the search either way.
+        let quoted = format!("\"{}\"", variants[0].0);
         let mut from = 0;
 
-        while let Some(i) = text[from..].find(&first) {
+        while let Some(i) = text[from..].find(&quoted) {
             let at = from + i;
-            let Some((start, end, found)) = union_around(text, at) else {
-                from = at + 1;
-                continue;
-            };
-            let all = members.len() == found.len()
-                && members.iter().all(|m| {
-                    found
-                        .iter()
-                        .any(|f| match_loose(f, m).is_some_and(|len| len == f.len()))
-                });
+            let anchor = tagged_table_at(text, at).unwrap_or(at);
+            let folded = union_around(text, anchor).and_then(|(start, end, found)| {
+                enum_of_members(&found, name, variants, known).map(|n| (start, end, n))
+            });
 
-            if all {
-                text.replace_range(start..end, name);
-                from = start + name.len();
-            } else {
-                from = at + 1;
+            match folded {
+                Some((start, end, folded)) => {
+                    text.replace_range(start..end, &folded);
+                    from = start + folded.len();
+                }
+
+                None => from = at + 1,
             }
         }
     }
+}
+
+/// The `{` of the variant table whose `tag` literal sits at `at`.
+fn tagged_table_at(text: &str, at: usize) -> Option<usize> {
+    let open = enclosing_brace(text, at)?;
+    let len = balanced_len(&text[open..])?;
+    let m = members(&text[open..open + len]);
+
+    m.iter()
+        .any(|(k, v)| k == "tag" && text[at..].starts_with(v.trim()))
+        .then_some(open)
+}
+
+/// The enum's name when the members of a union are its variants, each
+/// as a quoted unit or a tagged table with one slot per payload type.
+fn enum_of_members(
+    found: &[&str],
+    name: &str,
+    variants: &[(String, Vec<String>)],
+    known: &Known,
+) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut tables: Vec<(&[String], Members)> = Vec::new();
+
+    for f in found {
+        let f = f.trim();
+        let (v, m) = match f.strip_prefix('"').and_then(|u| u.strip_suffix('"')) {
+            Some(unit) => (unit.to_string(), Vec::new()),
+
+            None if f.starts_with('{') => {
+                let m = members(f);
+
+                (tag_of(&m)?, m)
+            }
+
+            None => return None,
+        };
+        let (_, payload) = variants.iter().find(|(n, _)| *n == v)?;
+
+        if payload.len() != slots(&m) {
+            return None;
+        }
+
+        seen.push(v);
+        tables.push((payload, m));
+    }
+
+    seen.sort();
+    seen.dedup();
+    let mut all: Vec<String> = variants.iter().map(|(v, _)| v.clone()).collect();
+    all.sort();
+
+    if seen != all {
+        return None;
+    }
+
+    let tables: Vec<Printed> = tables.iter().map(|(p, m)| (*p, m)).collect();
+
+    Some(with_arguments(name, &tables, known))
 }
 
 /// The union a byte sits in: its start, its end, and its members, with

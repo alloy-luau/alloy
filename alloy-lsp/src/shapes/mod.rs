@@ -831,21 +831,32 @@ pub fn fold(text: &str, known: &Known) -> String {
 /// nothing, and every pass that reads the text after the fold had to
 /// parse around it.
 fn drop_free_clauses(text: &mut String) {
-    while let Some(i) = text.rfind(" where ") {
+    let mut limit = text.len();
+
+    // A message may hold several clauses, and the checker cuts the last
+    // one short; a clause that stays does not stop the ones before it.
+    while let Some(i) = text[..limit].rfind(" where ") {
         let (head_start, head) = head_of(text, i);
         let head = head.to_string();
         let tail_start = i + " where ".len();
         let (bindings, tail_end) = parse_bindings(&text[tail_start..]);
 
         if bindings.is_empty() || bindings.iter().any(|b| mentions(&head, &b.var)) {
-            break;
+            limit = i;
+
+            continue;
         }
 
         let parsed_end = tail_start + tail_end;
         let clause_end = text[tail_start..]
             .find("\n```")
             .map_or(parsed_end, |k| (tail_start + k).max(parsed_end));
+        // A message quotes the type, and a return type at the end of
+        // the clause reads the closing quote as its own; the quote
+        // stays with the message.
+        let clause_end = clause_end - usize::from(text[..clause_end].ends_with(['\'', '`']));
         text.replace_range(head_start..clause_end, &head);
+        limit = head_start;
     }
 }
 
@@ -2555,6 +2566,51 @@ mod tests {
         assert_eq!(
             fold(text, &Known::default()),
             "```luau\nlocal function report(result: Result<any, string>): ()\n```"
+        );
+    }
+
+    /// A generic enum's alias is a plain union: a payload carries its
+    /// argument in a slot, and a unit prints as a table with its tag
+    /// alone beside the methods. The union reads as the enum with the
+    /// argument, and the method's clause goes with it.
+    #[test]
+    fn a_generic_enum_reads_with_its_argument() {
+        let known = Known {
+            shapes: vec![Shape::Enum {
+                name: "Opt".into(),
+                variants: vec![("Some".into(), vec!["T".into()]), ("Nil".into(), vec![])],
+            }],
+            ..Default::default()
+        };
+        let text = "```luau\nlocal a: {\n    read _1: number,\n    read map: t1,\n    read tag: \"Some\"\n} | {\n    read map: t1,\n    read tag: \"Nil\"\n} where t1 = <T>(self: {\n    read _1: T,\n    read map: t1,\n    read tag: \"Some\"\n} | {\n    read map: t1,\n    read tag: \"Nil\"\n}, f: any) -> any\n```";
+        assert_eq!(fold(text, &known), "```luau\nlocal a: Opt<number>\n```");
+
+        let message = "Type '{ read _1: number, read map: t1, read tag: \"Some\" } | { read map: t1, read tag: \"Nil\" }' could not be converted into 'Opt<string>'";
+        assert_eq!(
+            fold(message, &known),
+            "Type 'Opt<number>' could not be converted into 'Opt<string>'"
+        );
+
+        // The checker cuts the last clause of a long message short; the
+        // whole clauses before it still go.
+        let cut = "Expected this to be\n\t'{ read _1: string, read map: t1, read tag: \"Some\" } | { read map: t1, read tag: \"Nil\" } where t1 = <T>(Opt, any) -> any'\nbut got\n\t'{ read _1: number, read map: t1, read tag: \"Some\" } | { read map: t1, read tag: \"Nil\" } where t1 = <T>(Opt, any) -> any'; \nthe 1st component of the union is `Opt<number> where t1 = <T>(Opt`";
+        assert_eq!(
+            fold(cut, &known),
+            "Expected this to be\n\t'Opt<string>'\nbut got\n\t'Opt<number>'; \nthe 1st component of the union is `Opt<number> where t1 = <T>(Opt`"
+        );
+
+        // A unit table alone, and a payload table alone, each name the
+        // enum; the payload keeps its argument.
+        assert_eq!(
+            fold("local n: { read map: t1, read tag: \"Nil\" }", &known),
+            "local n: Opt"
+        );
+        assert_eq!(
+            fold(
+                "local s: { read _1: string, read map: t1, read tag: \"Some\" }",
+                &known
+            ),
+            "local s: Opt<string>"
         );
     }
 

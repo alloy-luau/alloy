@@ -1445,7 +1445,7 @@ fn a_cut_result_hint_reads_by_the_method_tables_arguments() {
     let _ = std::fs::remove_dir_all(&dir);
     let label = hint_label(hints.first().expect("the hint stays"));
 
-    assert_eq!(label, ": Result<Opt, any>");
+    assert_eq!(label, ": Result<Opt<number>, any>");
 
     for slot in ["_1", "__err", "__ok", " more ..."] {
         assert!(!label.contains(slot), "{label}");

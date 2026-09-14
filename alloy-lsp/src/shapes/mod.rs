@@ -478,6 +478,116 @@ pub fn fold_value(value: &mut Value, known: &Known) {
     }
 }
 
+/// A print with the defaults its declaration gives filled in:
+/// `Pair<number>` of `struct Pair<A, B = string>` reads
+/// `Pair<number, string>`. The emit writes the arguments the source
+/// wrote and Luau fills the rest from the alias, so the print names
+/// fewer arguments than the type carries.
+pub fn fill_generic_defaults(text: &str, shapes: &[Shape]) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+
+    while let Some(rel) = text[at..].find('<') {
+        let open = at + rel;
+        let name_start = text[..open]
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(0, |p| p + 1);
+        let name = &text[name_start..open];
+        // `Pair<<number>>` is the source's own form, where the emit has
+        // yet to run; its arguments are already the ones written.
+        let nested = text[open + 1..].starts_with('<');
+        let params = shapes.iter().find_map(|s| match s {
+            Shape::Struct {
+                name: held,
+                generics,
+                ..
+            } if held == name && !nested => Some(generics),
+
+            _ => None,
+        });
+        let (Some(params), Some(close)) = (params, closing_angle(text, open)) else {
+            out.push_str(&text[at..open + 1]);
+            at = open + 1;
+
+            continue;
+        };
+        let written = top_level_parts(&text[open + 1..close]);
+        let mut filled: Vec<String> = written.iter().map(|p| p.trim().to_string()).collect();
+
+        for param in params.iter().skip(filled.len()) {
+            match param.split_once('=') {
+                Some((_, default)) => filled.push(default.trim().to_string()),
+
+                None => break,
+            }
+        }
+
+        out.push_str(&text[at..open]);
+        out.push('<');
+        out.push_str(&filled.join(", "));
+        out.push('>');
+        at = close + 1;
+    }
+
+    out.push_str(&text[at..]);
+    out
+}
+
+/// The `>` that closes the `<` at `open`, counting the pairs between.
+fn closing_angle(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '<' => depth += 1,
+
+            '>' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+
+            // A type argument list holds no line of its own.
+            '\n' => return None,
+
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// The comma-separated parts of an argument list, with the commas
+/// inside a nested list left alone.
+fn top_level_parts(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+
+    for (i, c) in text.char_indices() {
+        match c {
+            '<' | '(' | '{' => depth += 1,
+
+            '>' | ')' | '}' => depth = depth.saturating_sub(1),
+
+            ',' if depth == 0 => {
+                out.push(&text[start..i]);
+                start = i + 1;
+            }
+
+            _ => {}
+        }
+    }
+
+    if !text[start..].trim().is_empty() {
+        out.push(&text[start..]);
+    }
+
+    out
+}
+
 /// One `tN = { ... }` binding of a `where` clause.
 struct Binding {
     var: String,
@@ -2145,6 +2255,44 @@ mod tests {
         assert_eq!(
             fold("ResultErr<Item, string>", &known),
             "Result<Item, string>"
+        );
+    }
+
+    /// `new Pair<<number>>` of `struct Pair<A, B = string>`: Luau
+    /// fills the second argument from the alias, and the print stops
+    /// short of it.
+    #[test]
+    fn a_generic_print_carries_the_defaults_of_its_declaration() {
+        let shapes = vec![Shape::Struct {
+            name: "Pair".into(),
+            fields: vec![("first".into(), false), ("second".into(), false)],
+            generics: vec!["A".into(), "B = string".into()],
+            types: vec!["A".into(), "B".into()],
+        }];
+
+        assert_eq!(
+            fill_generic_defaults("local p: Pair<number>", &shapes),
+            "local p: Pair<number, string>"
+        );
+        // A list the source wrote whole stays as it is, and so does
+        // the declaration's own line.
+        assert_eq!(
+            fill_generic_defaults("Pair<number, boolean>", &shapes),
+            "Pair<number, boolean>"
+        );
+        assert_eq!(
+            fill_generic_defaults("struct Pair<A, B = string> as", &shapes),
+            "struct Pair<A, B = string> as"
+        );
+        // The source's own `<<...>>` names its arguments already.
+        assert_eq!(
+            fill_generic_defaults("new Pair<<number>>", &shapes),
+            "new Pair<<number>>"
+        );
+        // A parameter with no default leaves the list as it stands.
+        assert_eq!(
+            fill_generic_defaults("Other<number>", &shapes),
+            "Other<number>"
         );
     }
 

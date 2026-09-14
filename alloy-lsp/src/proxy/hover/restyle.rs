@@ -148,11 +148,22 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
                 .strip_prefix("<<")
                 .and_then(|a| a.find(">>").map(|e| a[..e].to_string()));
 
-            return Some(match args {
+            let printed = match args {
                 Some(a) => format!("{name}<{a}>"),
 
                 None => name,
-            });
+            };
+            // `new Pair<<number>>` of `struct Pair<A, B = string>`: the
+            // source names the arguments it has to, and the type
+            // carries the rest.
+            let shapes: Vec<alloy::declarations::Shape> = doc
+                .shapes
+                .iter()
+                .chain(&doc.import_shapes)
+                .cloned()
+                .collect();
+
+            return Some(crate::shapes::fill_generic_defaults(&printed, &shapes));
         }
     }
 

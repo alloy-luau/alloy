@@ -812,6 +812,54 @@ pub fn import_shapes(
 /// each with whether it carries a default. The construction check reads
 /// them, so `new Box { }` on an imported struct names the fields it
 /// leaves unset.
+/// Every `import { Name as Local }` of a source: the module the name
+/// comes from, the name the module declares, and the name this file
+/// binds. Two modules can each declare a `Point`, so an index keyed by
+/// the declared name alone holds one of them. The alias is a key of its
+/// own, and it names the right module.
+fn renamed_specs(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(PathBuf, String, String)> {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Import(node) = stmt else {
+            continue;
+        };
+        let specs = match &node.kind {
+            ImportKind::Named(list)
+            | ImportKind::Both(_, list)
+            | ImportKind::Namespace(_, list)
+            | ImportKind::TypeOnly(list) => list,
+
+            ImportKind::Default(_) => continue,
+        };
+        let spec = text(node.path);
+        let Some(path) = resolve(spec.trim_matches(['"', '\'']), from, aliases) else {
+            continue;
+        };
+
+        for sp in specs {
+            let Some(alias) = sp.alias else {
+                continue;
+            };
+
+            out.push((path.clone(), text(sp.name), text(alias)));
+        }
+    }
+
+    out
+}
+
 pub fn import_struct_fields(
     source: &str,
     from: &Path,
@@ -819,6 +867,7 @@ pub fn import_struct_fields(
 ) -> Vec<(String, Vec<(String, bool)>)> {
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut out: Vec<(String, Vec<(String, bool)>)> = Vec::new();
+    let renames = renamed_specs(source, from, aliases);
 
     for spec in import_specs(source) {
         let Some(path) = resolve(&spec, from, aliases) else {
@@ -836,6 +885,17 @@ pub fn import_struct_fields(
         };
 
         for (name, fields) in crate::declarations::struct_field_defaults(&text) {
+            // An alias keys an entry of its own, so `Point as PointA`
+            // and `Point as PointB` each read their own module.
+            for (_, _, local) in renames
+                .iter()
+                .filter(|(p, declared, _)| *p == path && *declared == name)
+            {
+                if !out.iter().any(|(n, _)| n == local) {
+                    out.push((local.clone(), fields.clone()));
+                }
+            }
+
             if !out.iter().any(|(n, _)| *n == name) {
                 out.push((name, fields));
             }
@@ -853,9 +913,10 @@ pub fn import_privates(
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, Vec<String>)> {
-    let mut out = Vec::new();
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
 
     let mut seen: Vec<PathBuf> = Vec::new();
+    let renames = renamed_specs(source, from, aliases);
 
     for spec in import_specs(source) {
         let Some(path) = resolve(&spec, from, aliases) else {
@@ -875,6 +936,15 @@ pub fn import_privates(
         // `struct_privates` names a namespace member under its path as
         // well, so `new Zoo.Box { secret = 1 }` finds the shape.
         for (name, private) in crate::declarations::struct_privates(&text) {
+            for (_, _, local) in renames
+                .iter()
+                .filter(|(p, declared, _)| *p == path && *declared == name)
+            {
+                if !out.iter().any(|(n, _)| n == local) {
+                    out.push((local.clone(), private.clone()));
+                }
+            }
+
             if !out.iter().any(|(n, _)| *n == name) {
                 out.push((name, private));
             }
@@ -2354,6 +2424,81 @@ mod tests {
             import_problems(src, Path::new("src/main.aly"), &from, &[]).is_empty(),
             "{:?}",
             import_problems(src, Path::new("src/main.aly"), &from, &[])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two modules each declare a `Point`, and the file imports both
+    /// under aliases. The field index keys the local name too, so each
+    /// construction reads its own module.
+    #[test]
+    fn two_modules_of_one_struct_name_stay_apart() {
+        let dir = std::env::temp_dir().join(format!("alloy-two-points-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/a.aly"),
+            "export struct Point as\n    x: number\nend\n",
+        )
+        .expect("module");
+        std::fs::write(
+            dir.join("src/b.aly"),
+            "export struct Point as\n    private name: string\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let src =
+            "import { Point as PointA } from \"./a\"\nimport { Point as PointB } from \"./b\"\n";
+        let fields = import_struct_fields(src, &from, &[]);
+
+        assert_eq!(
+            fields
+                .iter()
+                .find(|(n, _)| n == "PointA")
+                .map(|(_, f)| f.clone()),
+            Some(vec![("x".to_string(), false)])
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|(n, _)| n == "PointB")
+                .map(|(_, f)| f.clone()),
+            Some(vec![("name".to_string(), false)])
+        );
+
+        // The private fields key the local name the same way.
+        let privates = import_privates(src, &from, &[]);
+        assert_eq!(
+            privates
+                .iter()
+                .find(|(n, _)| n == "PointB")
+                .map(|(_, f)| f.clone()),
+            Some(vec![("name".to_string())])
+        );
+
+        // The check then reads the right fields on each side: the
+        // construction of one is no report for the other.
+        let main = format!(
+            "{src}\nlocal a = new PointA {{ x = 1 }}\nlocal b = new PointB {{ name = \"hi\" }}\nprint(a, b)\n"
+        );
+        let options = crate::EmitOptions::default().imports(&main, &from, &[]);
+        let out = crate::compile_with(&main, &options).expect("compile");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        // A field of the other module's `Point` still reports.
+        let swapped = format!("{src}\nlocal a = new PointA {{ name = \"hi\" }}\nprint(a)\n");
+        let options = crate::EmitOptions::default().imports(&swapped, &from, &[]);
+        let out = crate::compile_with(&swapped, &options).expect("compile");
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "`new PointA { ... }` leaves `x` unset; a field without a default needs a value",
+                "`PointA` has no field `name`; its fields are `x`",
+            ]
         );
 
         let _ = std::fs::remove_dir_all(&dir);

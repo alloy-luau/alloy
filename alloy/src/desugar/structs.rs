@@ -1818,11 +1818,15 @@ impl<'s> Desugar<'s> {
             return Some((*n, resolved));
         }
 
-        // `import { Box as B }`: the module declares `Box`.
+        // `import { Box as B }`: the module declares `Box`, and the
+        // import index carries the local name too, so two modules'
+        // `Point` stay apart. The name the source wrote answers first;
+        // the declared name is the fallback for an index that holds
+        // only it.
         match self.import_renames.get(&text) {
-            Some(declared) => Some((*n, declared.clone())),
+            Some(declared) if self.declared_fields(&text).is_none() => Some((*n, declared.clone())),
 
-            None => Some((*n, text)),
+            _ => Some((*n, text)),
         }
     }
 

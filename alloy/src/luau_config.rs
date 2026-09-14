@@ -151,30 +151,69 @@ pub const ALLOY_ALIAS: (&str, &str) = ("alloy", "./build/alloy");
 /// the text and the names of what it added.
 pub fn add_defaults_luaurc(text: &str) -> Result<(String, Vec<String>), String> {
     let current = parse_luaurc(text).unwrap_or_default();
-    let mut edits = Vec::new();
+    let mut out = text.to_string();
     let mut added = Vec::new();
 
     if current.language_mode.is_none() {
-        edits.push(crate::jsonc::Edit::Set {
+        let edit = crate::jsonc::Edit::Set {
             path: crate::jsonc::path(&["languageMode"]),
             value: "\"strict\"".to_string(),
-        });
+        };
+        out = crate::jsonc::apply(&out, &[edit], "  ")?;
         added.push("strict mode".to_string());
     }
 
-    if !current.aliases.iter().any(|(a, _)| a == ALLOY_ALIAS.0) {
-        edits.push(crate::jsonc::Edit::Set {
-            path: crate::jsonc::path(&["aliases", ALLOY_ALIAS.0]),
-            value: format!("\"{}\"", ALLOY_ALIAS.1),
-        });
+    if let Some(text) = add_alias_luaurc(&out, ALLOY_ALIAS)? {
+        out = text;
         added.push(format!("@{}", ALLOY_ALIAS.0));
     }
 
-    if edits.is_empty() {
-        return Ok((text.to_string(), added));
+    Ok((out, added))
+}
+
+/// Adds one alias to a `.luaurc`, or `None` when the file has it
+/// already. Every other byte stays, comments included.
+pub fn add_alias_luaurc(text: &str, alias: (&str, &str)) -> Result<Option<String>, String> {
+    let current = parse_luaurc(text).unwrap_or_default();
+
+    if current.aliases.iter().any(|(a, _)| a == alias.0) {
+        return Ok(None);
     }
 
-    crate::jsonc::apply(text, &edits, "  ").map(|t| (t, added))
+    let edit = crate::jsonc::Edit::Set {
+        path: crate::jsonc::path(&["aliases", alias.0]),
+        value: format!("\"{}\"", alias.1),
+    };
+
+    crate::jsonc::apply(text, &[edit], "  ").map(Some)
+}
+
+/// The same as `add_alias_luaurc`, for a `.config.luau`. The entry goes
+/// in as text, so the rest of the chunk keeps its bytes. The error says
+/// why a chunk cannot take the alias.
+pub fn add_alias_config_luau(text: &str, alias: (&str, &str)) -> Result<Option<String>, String> {
+    let current =
+        parse_config_luau(text).ok_or("the chunk returns no table with a `luau` table")?;
+
+    if current.aliases.iter().any(|(a, _)| a == alias.0) {
+        return Ok(None);
+    }
+
+    let mut out = text.to_string();
+    let (at, entry) = match table_body(&out, "aliases") {
+        Some(at) => (at, format!("\n            {} = \"{}\",", alias.0, alias.1)),
+
+        None => (
+            table_body(&out, "luau").ok_or("the chunk has no `luau` table")?,
+            format!(
+                "\n        aliases = {{\n            {} = \"{}\",\n        }},",
+                alias.0, alias.1
+            ),
+        ),
+    };
+    out.insert_str(at, &entry);
+
+    Ok(Some(out))
 }
 
 /// The byte after the `{` that opens the table field named `name`.
@@ -193,22 +232,8 @@ pub fn add_defaults_config_luau(text: &str) -> Option<(String, Vec<String>)> {
     let mut out = text.to_string();
     let mut added = Vec::new();
 
-    if !current.aliases.iter().any(|(a, _)| a == ALLOY_ALIAS.0) {
-        let (at, entry) = match table_body(&out, "aliases") {
-            Some(at) => (
-                at,
-                format!("\n            {} = \"{}\",", ALLOY_ALIAS.0, ALLOY_ALIAS.1),
-            ),
-
-            None => (
-                table_body(&out, "luau")?,
-                format!(
-                    "\n        aliases = {{\n            {} = \"{}\",\n        }},",
-                    ALLOY_ALIAS.0, ALLOY_ALIAS.1
-                ),
-            ),
-        };
-        out.insert_str(at, &entry);
+    if let Some(text) = add_alias_config_luau(&out, ALLOY_ALIAS).ok()? {
+        out = text;
         added.push(format!("@{}", ALLOY_ALIAS.0));
     }
 

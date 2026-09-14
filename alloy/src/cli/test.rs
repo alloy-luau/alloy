@@ -179,6 +179,10 @@ fn test_once(args: &[String]) -> ExitCode {
 
     print_diagnostics(&input, &report.diagnostics, &report.failures);
 
+    for line in &report.ok {
+        eprintln!("{}", p.ok(line));
+    }
+
     for note in &report.notes {
         eprintln!("{}", p.note(note));
     }

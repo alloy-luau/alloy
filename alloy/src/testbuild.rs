@@ -30,6 +30,8 @@ pub struct Report {
     pub diagnostics: Vec<(PathBuf, Diagnostic)>,
     pub failures: Vec<(PathBuf, String)>,
     pub notes: Vec<String>,
+    /// What the run set up, such as the `@lest` alias.
+    pub ok: Vec<String>,
 }
 
 impl Report {
@@ -890,60 +892,67 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
                 .push(format!("wrote lest.toml: suite `{}`", config.test.suite));
         }
 
-        report.notes.extend(lest_alias(root)?);
+        lest_alias(root, &mut report)?;
     }
 
     Ok(report)
 }
 
-/// Adds the `@lest` alias to the root's `.luaurc`, which lest resolves
-/// to the framework it writes under `.lest/core`.
-fn lest_alias(root: &Path) -> std::io::Result<Vec<String>> {
-    let rc = root.join(".luaurc");
-    let mut notes = Vec::new();
+/// The alias lest resolves to the framework it writes under
+/// `.lest/core`.
+const LEST_ALIAS: (&str, &str) = ("lest", ".lest/core");
 
-    if !rc.is_file() {
-        if crate::luau_config::has_config(root) {
-            notes.push("add `lest = \".lest/core\"` to the aliases of .config.luau".to_string());
-
-            return Ok(notes);
-        }
-
+/// Adds the `@lest` alias to the Luau configuration of the root, the
+/// file lest and the build read. A file the editor cannot change gets
+/// a note that says why.
+fn lest_alias(root: &Path, report: &mut Report) -> std::io::Result<()> {
+    // `.config.luau` wins over `.luaurc`, as in Luau.
+    let Some(path) = [".config.luau", ".luaurc"]
+        .iter()
+        .map(|name| root.join(name))
+        .find(|p| p.is_file())
+    else {
         let c = crate::luau_config::LuauConfig {
             language_mode: Some("strict".to_string()),
-            aliases: vec![("lest".to_string(), ".lest/core".to_string())],
+            aliases: vec![(LEST_ALIAS.0.to_string(), LEST_ALIAS.1.to_string())],
         };
-        std::fs::write(&rc, crate::luau_config::render_luaurc(&c))?;
-        notes.push("wrote .luaurc: strict mode and the @lest alias".to_string());
+        std::fs::write(root.join(".luaurc"), crate::luau_config::render_luaurc(&c))?;
+        report
+            .notes
+            .push("wrote .luaurc: strict mode and the @lest alias".to_string());
 
-        return Ok(notes);
+        return Ok(());
+    };
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let text = std::fs::read_to_string(&path)?;
+    let edited = if name == ".config.luau" {
+        crate::luau_config::add_alias_config_luau(&text, LEST_ALIAS)
+    } else {
+        crate::luau_config::add_alias_luaurc(&text, LEST_ALIAS)
+    };
+
+    match edited {
+        Ok(Some(text)) => {
+            std::fs::write(&path, text)?;
+            report
+                .ok
+                .push(format!("added {} to the aliases of {name}", LEST_ALIAS.0));
+        }
+
+        // The file carries the alias already.
+        Ok(None) => {}
+
+        Err(e) => report.notes.push(format!(
+            "add `{} = \"{}\"` to the aliases of {name}: {e}",
+            LEST_ALIAS.0, LEST_ALIAS.1
+        )),
     }
 
-    let text = std::fs::read_to_string(&rc)?;
-    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Ok(notes);
-    };
-    let Some(map) = json.as_object_mut() else {
-        return Ok(notes);
-    };
-    let aliases = map
-        .entry("aliases")
-        .or_insert_with(|| serde_json::Value::Object(Default::default()));
-
-    if let Some(aliases) = aliases.as_object_mut()
-        && !aliases.contains_key("lest")
-    {
-        aliases.insert(
-            "lest".to_string(),
-            serde_json::Value::String(".lest/core".to_string()),
-        );
-        let mut text = serde_json::to_string_pretty(&json).unwrap_or(text);
-        text.push('\n');
-        std::fs::write(&rc, text)?;
-        notes.push("added @lest to .luaurc".to_string());
-    }
-
-    Ok(notes)
+    Ok(())
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -997,6 +1006,62 @@ mod tests {
         let out = sliced(src).unwrap();
         assert!(out.contains("impl V"));
         assert!(!out.contains("struct W"));
+    }
+
+    /// `alloy test` adds the `@lest` alias to the Luau configuration
+    /// the project has. A note that names the file is the last resort,
+    /// not the first.
+    #[test]
+    fn the_lest_alias_lands_in_the_luau_configuration() {
+        let dir = std::env::temp_dir().join(format!("alloy-lest-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder");
+
+        // `.config.luau`, the file `alloy init` writes.
+        let path = dir.join(".config.luau");
+        std::fs::write(&path, crate::config::CONFIG_LUAU_TEMPLATE).expect("the file");
+
+        let mut report = Report::default();
+        lest_alias(&dir, &mut report).expect("the edit");
+        let text = std::fs::read_to_string(&path).expect("the file");
+        let back = crate::luau_config::parse_config_luau(&text).expect("the chunk");
+
+        assert_eq!(
+            back.aliases,
+            vec![
+                ("alloy".to_string(), "./build/alloy".to_string()),
+                ("lest".to_string(), ".lest/core".to_string()),
+            ],
+            "{text}"
+        );
+        assert_eq!(report.ok, ["added lest to the aliases of .config.luau"]);
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+
+        // A second run changes nothing.
+        let mut again = Report::default();
+        lest_alias(&dir, &mut again).expect("the edit");
+        assert_eq!(std::fs::read_to_string(&path).expect("the file"), text);
+        assert!(again.ok.is_empty() && again.notes.is_empty());
+
+        // A `.luaurc` keeps its comments and its own aliases.
+        std::fs::remove_file(&path).expect("the file");
+        let rc = dir.join(".luaurc");
+        std::fs::write(
+            &rc,
+            "{\n  // ours\n  \"aliases\": { \"pkg\": \"Packages\" }\n}\n",
+        )
+        .expect("the file");
+
+        let mut report = Report::default();
+        lest_alias(&dir, &mut report).expect("the edit");
+        let text = std::fs::read_to_string(&rc).expect("the file");
+
+        assert!(text.contains("// ours"), "{text}");
+        assert!(text.contains("\"pkg\""), "{text}");
+        assert!(text.contains("\".lest/core\""), "{text}");
+        assert_eq!(report.ok, ["added lest to the aliases of .luaurc"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

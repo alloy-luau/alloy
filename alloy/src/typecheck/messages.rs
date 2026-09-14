@@ -98,6 +98,7 @@ pub fn friendly_type_message(
         .or_else(|| rewrite_remote_key(&folded, line))
         .or_else(|| rewrite_remote_handler(&folded, line))
         .or_else(|| rewrite_await(&folded, line))
+        .or_else(|| rewrite_same_name(&folded, line))
         .or_else(|| rewrite_arity(&folded, line, col))
         .or_else(|| rewrite_dot_self(&folded, line, col))
     {
@@ -587,6 +588,63 @@ fn rewrite_await(message: &str, line: &str) -> Option<String> {
         .unwrap_or(got);
 
     Some(format!("`await` needs a Future; `{got}` is not one"))
+}
+
+/// `Expected this to be 'Opt' but got 'Opt'`: Luau prints a `typeof`
+/// alias without its arguments, so both sides read the same. The line
+/// says what the reader can act on: the annotation, and the argument
+/// the value carries when it is one literal.
+fn rewrite_same_name(message: &str, line: &str) -> Option<String> {
+    let want = quoted_after(message, "Expected this to be '")?;
+    let got = quoted_after(message, "but got '")?;
+
+    if want != got || want.contains('<') || want.contains(' ') {
+        return None;
+    }
+
+    // `local o: Opt<number> = Opt.Some("x")`: the annotation and the
+    // value around the `=`.
+    let annotation = line
+        .split_once(':')
+        .and_then(|(_, rest)| rest.split_once('='))
+        .map(|(ty, value)| (ty.trim(), value.trim()))
+        .filter(|(ty, _)| ty.starts_with(want) && ty.contains('<'));
+
+    let Some((annotation, value)) = annotation else {
+        return Some(format!("the type arguments of `{want}` differ"));
+    };
+
+    match literal_argument(value) {
+        Some(kind) => Some(format!(
+            "`{value}` is an `{want}<{kind}>`; the annotation says `{annotation}`"
+        )),
+
+        None => Some(format!(
+            "the type arguments differ; the annotation is `{annotation}`"
+        )),
+    }
+}
+
+/// The type of a call's one literal argument, `Opt.Some("x")`: a
+/// string, a number, a boolean, or `nil`. Anything else is unknown.
+fn literal_argument(value: &str) -> Option<&'static str> {
+    let inner = value.split_once('(')?.1.strip_suffix(')')?.trim();
+
+    if inner.is_empty() || inner.contains(',') {
+        return None;
+    }
+
+    match inner {
+        "true" | "false" => Some("boolean"),
+
+        "nil" => Some("nil"),
+
+        _ if inner.starts_with(['"', '\'', '`']) => Some("string"),
+
+        _ if inner.parse::<f64>().is_ok() => Some("number"),
+
+        _ => None,
+    }
 }
 
 /// A remote's whole surface reaches a missing-member message. The
@@ -2450,6 +2508,41 @@ end
                 14
             ),
             "`await` needs a Future; `number` is not one"
+        );
+    }
+
+    /// Luau prints a `typeof` alias without its arguments, so a mismatch
+    /// of them reads `Opt` against `Opt`. The line says what differs.
+    #[test]
+    fn a_same_name_mismatch_names_the_type_arguments() {
+        let known = crate::shapes::Known::default();
+        let message = "Expected this to be 'Opt' but got 'Opt'";
+        assert_eq!(
+            friendly_type_message(
+                message,
+                &known,
+                Some("local o: Opt<number> = Opt.Some(\"x\")"),
+                24
+            ),
+            "`Opt.Some(\"x\")` is an `Opt<string>`; the annotation says `Opt<number>`"
+        );
+        assert_eq!(
+            friendly_type_message(message, &known, Some("local o: Opt<number> = make()"), 24),
+            "the type arguments differ; the annotation is `Opt<number>`"
+        );
+        assert_eq!(
+            friendly_type_message(message, &known, Some("take(Opt.Some(\"x\"))"), 6),
+            "the type arguments of `Opt` differ"
+        );
+        // Two different names keep the checker's sentence.
+        assert_eq!(
+            friendly_type_message(
+                "Expected this to be 'Opt', but got 'number'",
+                &known,
+                Some("local o: Opt<number> = 1"),
+                24
+            ),
+            "Expected this to be 'Opt', but got 'number'"
         );
     }
 

@@ -55,7 +55,7 @@ impl Server {
         // reader writes the path under the words its own file binds:
         // `Outer.Inner.T` here, `M.Ns.T` under a module binding. The
         // longest path answers first.
-        let found = member_keys(&key)
+        let found = member_keys(&key, &doc.namespace_ranges, start)
             .iter()
             .find_map(|k| lookup(k))
             .or_else(|| sigils.iter().find_map(|k| lookup(k)));
@@ -299,11 +299,13 @@ fn declaration_key(source: &str, start: usize, end: usize) -> Option<String> {
     }
 }
 
-/// The keys a dotted name answers to, longest first. `M.Ns.T` is the
+/// The keys a name at `at` answers to, longest first. `M.Ns.T` is the
 /// member `Ns.T` of a module the file binds to `M`, and `Outer.Inner.T`
 /// is keyed whole. The bare word is no key of a member: it would answer
-/// a field read with any declaration of that spelling.
-fn member_keys(key: &str) -> Vec<String> {
+/// a field read with any declaration of that spelling. A word inside a
+/// namespace body is the group's own member, which the group's file
+/// writes bare and the index keys under the path.
+fn member_keys(key: &str, groups: &[alloy::declarations::NamespaceSpan], at: usize) -> Vec<String> {
     let mut out = vec![key.to_string()];
     let mut rest = key;
 
@@ -312,6 +314,12 @@ fn member_keys(key: &str) -> Vec<String> {
     {
         out.push(tail.to_string());
         rest = tail;
+    }
+
+    for ns in groups {
+        if (ns.start..=ns.end).contains(&at) && ns.members.iter().any(|(m, _)| *m == key) {
+            out.push(format!("{}.{key}", ns.path));
+        }
     }
 
     out
@@ -1030,13 +1038,40 @@ mod contract_tests {
             Some("Outer.Inner.T")
         );
         assert_eq!(
-            member_keys("Outer.Inner.T"),
+            member_keys("Outer.Inner.T", &[], 0),
             ["Outer.Inner.T", "Inner.T"].map(String::from)
         );
         // `M.Ns.T` under a module binding: the index holds `Ns.T`.
-        assert_eq!(member_keys("M.Ns.T"), ["M.Ns.T", "Ns.T"].map(String::from));
+        assert_eq!(
+            member_keys("M.Ns.T", &[], 0),
+            ["M.Ns.T", "Ns.T"].map(String::from)
+        );
         // A field read stops at its own key: the bare word would
         // answer with any declaration of that spelling.
-        assert_eq!(member_keys("p.value"), ["p.value"].map(String::from));
+        assert_eq!(
+            member_keys("p.value", &[], 0),
+            ["p.value"].map(String::from)
+        );
+    }
+
+    /// The group's own file writes a member bare, and the index keys it
+    /// under the path, so the caret inside the body asks for both.
+    #[test]
+    fn a_member_inside_its_own_group_asks_under_the_path() {
+        let src = "export namespace Ns as\n    struct T as\n        value: number,\n    end\n\n    function make(): T\n        return new T { value = 0 }\n    end\nend\n\nlocal T = 1\n";
+        let groups = alloy::declarations::namespace_ranges(src);
+        let inside = src.find(": T").expect("the return type") + 2;
+        let outside = src.rfind('T').expect("the local");
+
+        assert_eq!(
+            member_keys("T", &groups, inside),
+            ["T", "Ns.T"].map(String::from)
+        );
+        assert_eq!(member_keys("T", &groups, outside), ["T"].map(String::from));
+        // A word the group never declares keeps its own key.
+        assert_eq!(
+            member_keys("other", &groups, inside),
+            ["other"].map(String::from)
+        );
     }
 }

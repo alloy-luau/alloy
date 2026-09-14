@@ -1854,7 +1854,13 @@ fn expr_needs_desugar(e: &Expr) -> bool {
             return true;
         }
 
-        Expr::Index { .. } | Expr::Call { .. } if chain_has_alloy(e) => return true,
+        // A written `<<T>>` lowers on every call: the ship drops it,
+        // and the check artifact spells it the Luau way.
+        Expr::Index { .. } | Expr::Call { .. }
+            if chain_has_alloy(e) || expressions::chain_has_type_args(e) =>
+        {
+            return true;
+        }
 
         _ => {}
     }

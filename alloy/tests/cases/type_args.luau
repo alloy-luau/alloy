@@ -6,17 +6,17 @@ local Pair = {} Pair.__index = Pair setmetatable(Pair, { __call = function(_, f)
  type Pair<A, B> = typeof(setmetatable({} :: { first: A, second: B }, Pair)) Pair.__tostring = function(s) return __alloy.show_struct("Pair", s, { "first", "second" }) end
 
 -- 1. a written list that holds an Alloy spelling
-local written = __alloy.HashMap.new<<string, __alloy.Array<number>>>()
+local written = __alloy.HashMap.new()
 
 -- 2. a written list with a nested list inside it
-local nested = __alloy.HashMap.new<<string, __alloy.Array<Pair<number, __alloy.Array<string>>>>>()
+local nested = __alloy.HashMap.new()
 
 -- 3. a list the annotation infers
-local inferred: __alloy.HashMap<string, __alloy.Array<number>> = __alloy.HashMap.new<<string, __alloy.Array<number>>>()
+local inferred: __alloy.HashMap<string, __alloy.Array<number>> = __alloy.HashMap.new()
 
 -- 4. a list the return type infers
 function make(): __alloy.HashMap<string, __alloy.Array<number>>
-    return __alloy.HashMap.new<<string, __alloy.Array<number>>>()
+    return __alloy.HashMap.new()
 end
 
 print(written, nested, inferred, make())

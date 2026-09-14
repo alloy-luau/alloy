@@ -362,7 +362,13 @@ impl<'s> Desugar<'s> {
     /// One `<<A, B>>` type-argument list in Luau's own spelling. The
     /// type edits rewrite an annotation, and a list never reaches them,
     /// so every list, written or inferred, comes through here instead.
+    /// The ship artifact takes none: the runtime reads no `<<T>>` at
+    /// a call, and the check artifact is the one the types serve.
     pub(crate) fn lower_type_args(&mut self, text: &str) -> String {
+        if !self.options.check {
+            return String::new();
+        }
+
         let trimmed = text.trim();
         let Some(inner) = trimmed
             .strip_prefix("<<")
@@ -658,6 +664,40 @@ mod tests {
             "{}",
             out.check
         );
+    }
+
+    #[test]
+    fn a_written_type_argument_list_leaves_the_ship() {
+        // The runtime reads no `<<T>>` at a call. The check artifact
+        // keeps the list, and the ship calls without it.
+        let src = "struct Box<T> as\n    value: T\nend\nimpl Box<T> as\n    function of<U>(v: U): Box<U>\n        return new Box<<U>> { value = v }\n    end\nend\nfunction ident<T>(x: T): T\n    return x\nend\nlocal M = { f = ident }\nlocal a = ident<<number>>(1)\nlocal b = M.f<<number>>(2)\nlocal c = M:f<<number>>(3)\nlocal d = Box.of<<number>>(9)\nlocal e = ident<<string>> \"x\"\nident<<number>>(7)\nprint(a, b, c, d, e)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.ship.contains("<<"), "{}", out.ship);
+
+        for call in [
+            "ident(1)",
+            "M.f(2)",
+            "M:f(3)",
+            "Box.of(9)",
+            "ident\"x\"",
+            "\nident(7)\n",
+        ] {
+            assert!(out.ship.contains(call), "{call}: {}", out.ship);
+        }
+
+        for call in [
+            "ident<<number>>(1)",
+            "M.f<<number>>(2)",
+            "M:f<<number>>(3)",
+            "Box.of<<number>>(9)",
+            "ident<<string>>\"x\"",
+            "\nident<<number>>(7)\n",
+        ] {
+            assert!(out.check.contains(call), "{call}: {}", out.check);
+        }
+
+        assert_eq!(out.ship.lines().count(), src.lines().count());
     }
 
     #[test]

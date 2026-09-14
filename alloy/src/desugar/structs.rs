@@ -289,8 +289,22 @@ impl<'s> Desugar<'s> {
             // inserted owner then lands on a name the source shows.
             // A method of a generic impl carries the impl's parameters.
             // One with its own list gets them in front of its own:
-            // `map<U>` under `impl Box<T>` reads `map<T, U>`.
-            let method_generics = if m.body.generics.is_none() {
+            // `map<U>` under `impl Box<T>` reads `map<T, U>`. A static
+            // method that names none of them takes none: a `T` nothing
+            // reads is one an explicit `of<<number>>` binds by mistake.
+            let impl_params: Vec<&str> = impl_generics
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .split(',')
+                .map(|p| p.trim().trim_end_matches("..."))
+                .filter(|p| !p.is_empty())
+                .collect();
+            let carries = has_self
+                || (m.span.start as usize..m.span.end as usize).any(|k| {
+                    self.toks[k].kind == TokKind::Ident
+                        && impl_params.contains(&self.toks[k].text(self.src))
+                });
+            let method_generics = if m.body.generics.is_none() && carries {
                 impl_generics.as_str()
             } else {
                 ""
@@ -303,6 +317,7 @@ impl<'s> Desugar<'s> {
             let mut rest = TokSpan::new(name_span.end as usize, m.span.end as usize);
 
             if let Some(g) = m.body.generics
+                && carries
                 && let Some(inner) = impl_generics
                     .strip_prefix('<')
                     .and_then(|rest| rest.strip_suffix('>'))
@@ -2258,6 +2273,24 @@ mod tests {
 
         assert!(!out.ship.contains("@test"), "{}", out.ship);
         assert!(!out.check.contains("@test"), "{}", out.check);
+    }
+
+    /// A static method of a generic impl takes the impl's parameters
+    /// only when it names one: `of<U>` alone binds `U` to an explicit
+    /// `of<<number>>`, and `make(): Box<T>` still needs its `T`.
+    #[test]
+    fn a_static_method_carries_the_impl_generics_it_names() {
+        let src = "struct Box<T> as\n    value: T\nend\nimpl Box<T> as\n    function of<U>(v: U): Box<U>\n        return new Box<<U>> { value = v }\n    end\n    function make(): Box<T>\n        return new Box<<T>> { value = nil :: any }\n    end\n    function get(self): T\n        return self.value\n    end\nend\nprint(Box)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for header in [
+            "function Box.of<U>(v: U): Box<U>",
+            "function Box.make<T>(): Box<T>",
+            "function Box.get<T>(self: Box<T>): T",
+        ] {
+            assert!(out.check.contains(header), "{header}: {}", out.check);
+        }
     }
 
     /// A trait names the return type of every method it declares, so an

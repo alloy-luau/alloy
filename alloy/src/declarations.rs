@@ -133,9 +133,14 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
             for v in &d.variants {
                 let vname = text(v.name);
                 let vdoc = doc_before(src, start_of(v.span));
+                // The span starts at an attribute above the name, which is
+                // not part of the qualified name.
+                let written = text(TokSpan {
+                    start: v.name.start,
+                    end: v.span.end,
+                });
                 let mut hover = format!(
-                    "```alloy\n{enum_name}.{}\n```\nA variant of `enum {enum_name}`.",
-                    text(v.span)
+                    "```alloy\n{enum_name}.{written}\n```\nA variant of `enum {enum_name}`."
                 );
 
                 if let Some(d) = vdoc {
@@ -1021,6 +1026,17 @@ mod tests {
         assert_eq!(
             d[2].hover,
             "```alloy\nMsg.Move(number)\n```\nA variant of `enum Msg`."
+        );
+    }
+
+    #[test]
+    fn an_attribute_above_a_variant_stays_out_of_its_name() {
+        let src = "attribute icon(asset: string) on variant\nenum Drop as\n    @icon(\"coin\")\n    Coin\nend\n";
+        let d = summaries(src, false);
+        let coin = d.iter().find(|x| x.name == "Coin").expect("the variant");
+        assert_eq!(
+            coin.hover,
+            "```alloy\nDrop.Coin\n```\nA variant of `enum Drop`."
         );
     }
 

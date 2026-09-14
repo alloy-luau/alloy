@@ -312,8 +312,19 @@ pub(crate) fn compile_file(path: &str, args: &[String]) -> Option<(String, alloy
         }
     };
 
+    // The nearest alloy.toml's `[emit]` applies to one file the way it
+    // applies to the project build.
+    let emit = Path::new(path)
+        .parent()
+        .and_then(alloy::config::Config::find)
+        .and_then(|c| alloy::config::Config::load(&c).ok())
+        .map(|c| c.emit)
+        .unwrap_or_default();
     let options = alloy::EmitOptions {
-        wait_timeout: option(args, "--wait-timeout").and_then(|t| t.parse().ok()),
+        wait_timeout: option(args, "--wait-timeout")
+            .and_then(|t| t.parse().ok())
+            .or(emit.wait_timeout),
+        erase_type_imports: emit.erase_type_imports,
         file_name: path.to_string(),
         definitions: path.ends_with(".d.aly"),
         ..alloy::EmitOptions::default().imports_for_file(Path::new(path), &source)

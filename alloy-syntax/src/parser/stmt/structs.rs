@@ -393,7 +393,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
 
-                let b = self.binding()?;
+                let b = self.binding("parameter")?;
                 let default = if self.eat("=") {
                     Some(self.expr()?)
                 } else {

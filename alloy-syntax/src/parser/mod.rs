@@ -328,6 +328,18 @@ impl<'a> Parser<'a> {
 
     /// Records a diagnostic when a name is an Alloy reserved word. The
     /// parse goes on with the name, so the rest of the file still reports.
+    /*
+    A Luau reserved word where a bound name goes: the word, then a
+    token only a name can stand in front of there.
+
+    `end` alone is the `end` of the block, and the old report names it
+    that way. `end:`, `end,`, `end=`, `end)` and `end in` each follow a
+    name, so the word is a binding the language cannot spell.
+    */
+    fn reserved_binding(&self) -> bool {
+        self.at_reserved() && matches!(self.text_at(1), ":" | "," | "=" | ")" | "in")
+    }
+
     fn reject_reserved(&mut self, name: TokSpan) {
         let tok = self.toks[name.start as usize];
         let word = &self.src[tok.start as usize..tok.end as usize];

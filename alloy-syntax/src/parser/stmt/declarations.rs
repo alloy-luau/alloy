@@ -257,10 +257,10 @@ impl<'a> Parser<'a> {
         }
 
         let keyword = TokSpan::new(keyword_at, keyword_at + 1);
-        let mut names = vec![self.binding()?];
+        let mut names = vec![self.binding("local")?];
 
         while self.eat(",") {
-            names.push(self.binding()?);
+            names.push(self.binding("local")?);
         }
 
         let values = if self.eat("=") {
@@ -483,7 +483,12 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    pub(super) fn binding(&mut self) -> Result<Binding, ParseError> {
+    /*
+    One bound name, with its optional type: a parameter, a `local`
+    name, or a `for` variable. `noun` names the place, for the report a
+    reserved word draws there.
+    */
+    pub(super) fn binding(&mut self, noun: &str) -> Result<Binding, ParseError> {
         let start = self.pos;
 
         let destructure = if self.at("{") {
@@ -545,10 +550,34 @@ impl<'a> Parser<'a> {
             Some(_) => TokSpan::new(start, self.pos),
 
             None => {
-                let n = self.expect_name()?;
-                self.reject_reserved(n);
+                // A word the language keeps, where a name goes:
+                // `function f(end: number, start: number)` read the
+                // `end` as the body's own, so the type and every line
+                // behind it reported against a function that had
+                // already ended. The word is the mistake; the read
+                // takes it and goes on to the next binding.
+                match self.reserved_binding() {
+                    true => {
+                        let tok = self.toks[self.pos];
+                        let word = &self.src[tok.start as usize..tok.end as usize];
+                        self.diagnostics.push(ParseError {
+                            offset: tok.start as usize,
+                            message: format!(
+                                "`{word}` is a reserved word and cannot name a {noun}"
+                            ),
+                        });
+                        let i = self.bump();
 
-                n
+                        TokSpan::new(i, i + 1)
+                    }
+
+                    false => {
+                        let n = self.expect_name()?;
+                        self.reject_reserved(n);
+
+                        n
+                    }
+                }
             }
         };
 

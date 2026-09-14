@@ -1062,6 +1062,71 @@ mod tests {
         }
     }
 
+    /*
+    A Luau reserved word where a bound name goes. `function f(end:
+    number, start: number)` read the `end` as the body's own, so the
+    type and every line behind it reported: six errors for one word.
+
+    The binding reader names the word once and reads on to the next
+    binding. A `local` name and a `for` variable share the reader.
+    */
+    #[test]
+    fn a_reserved_word_as_a_bound_name_reports_once() {
+        let messages = |src: &str| -> Vec<String> {
+            compile(src)
+                .unwrap()
+                .diagnostics
+                .into_iter()
+                .map(|d| d.message)
+                .collect()
+        };
+
+        // The list goes on: the parameter after the bad one still reads.
+        let src = "function rangeLen(end: number, size: number): number\n    return size\nend\n\nprint(rangeLen(10, 2))\n";
+
+        assert_eq!(
+            messages(src),
+            vec!["`end` is a reserved word and cannot name a parameter"]
+        );
+        assert_eq!(
+            compile(src).unwrap().diagnostics[0].start as usize,
+            src.find("end:").unwrap()
+        );
+        assert_eq!(
+            docs::kind_for("`end` is a reserved word and cannot name a parameter"),
+            "ReservedWord"
+        );
+
+        for (src, word, noun) in [
+            ("local end = 1\nprint(1)\n", "end", "local"),
+            (
+                "for end = 1, 3 do\n    print(1)\nend\n",
+                "end",
+                "loop variable",
+            ),
+            (
+                "for k, in in { } do\n    print(k)\nend\n",
+                "in",
+                "loop variable",
+            ),
+        ] {
+            assert_eq!(
+                messages(src),
+                vec![format!(
+                    "`{word}` is a reserved word and cannot name a {noun}"
+                )],
+                "{src:?}"
+            );
+        }
+
+        // A bare `end` still closes the block: the word alone is no
+        // binding, and the old report names the place the parse stopped.
+        assert_eq!(
+            messages("do\n    local\nend\n"),
+            vec!["expected a name, found `end`"]
+        );
+    }
+
     #[test]
     fn new_on_a_name_without_a_constructor_is_one_diagnostic_over_the_expression() {
         let src = "attribute icon(asset: string) on struct\nenum Msg as\n    Quit\nend\nlocal a = new icon { }\nlocal m = new Msg { }\nprint(a, m)\n";

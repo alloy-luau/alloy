@@ -35,7 +35,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn for_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
         self.expect("for")?;
-        let first = self.binding()?;
+        let first = self.binding("loop variable")?;
 
         if self.eat("=") {
             let from = self.expr()?;
@@ -64,7 +64,7 @@ impl<'a> Parser<'a> {
         let mut vars = vec![first];
 
         while self.eat(",") {
-            vars.push(self.binding()?);
+            vars.push(self.binding("loop variable")?);
         }
 
         self.expect("in")?;

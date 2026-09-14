@@ -179,89 +179,11 @@ pub fn labeled(message: &str) -> String {
     format!("{}: {text}", kind_for(message))
 }
 
-/// The book section a compiler diagnostic belongs to, from its text.
-/// The diagnostics name what they are about; the first match wins, from
-/// the most specific wording to the least.
+/// The book section a compiler diagnostic prints as its code: the
+/// section of its kind. `alloy doc 6.1` then lists `DuplicateError`,
+/// the kind the line names, and `alloy doc DuplicateError` opens 6.1.
 pub fn code_for(message: &str) -> Option<&'static str> {
-    let m = message.to_ascii_lowercase();
-    let rules: &[(&[&str], &str)] = &[
-        (&["`global` is removed"], "3.2"),
-        (&["names no module"], "3.2"),
-        // The export list's own reports read "binding", which the
-        // pattern rule below would take.
-        (&["of this module", "exported twice"], "3.2"),
-        (&["an `impl` targets"], "3.6"),
-        (&["not exhaustive"], "4.2"),
-        (&["remote"], "4.3"),
-        (&["directive"], "4.4"),
-        // `try` and `Result` are one contract; 3.3 is Futures.
-        (&["result"], "4.1"),
-        (&["a `const`"], "6.1"),
-        (&["reserved word"], "6.1"),
-        // The `declare` keyword page documents an ambient declaration.
-        (&["is already declared in"], "6.1"),
-        // The forms a Luau user writes from another language: the
-        // keyword page holds the grammar each one gets wrong.
-        (
-            &["a comment starts with", "has no `++`", "`declare` takes"],
-            "6.1",
-        ),
-        (&["markup"], "3.13"),
-        (&["@test", "test "], "3.14"),
-        (&["@cfg"], "3.11"),
-        (&["macro"], "3.10"),
-        (&["` requires ", "`each ", "`requires` clause"], "3.11"),
-        (&["attribute", "derive"], "3.11"),
-        (
-            &[
-                "`or` pattern",
-                "pattern",
-                "destructur",
-                "let-else",
-                "binding",
-            ],
-            "3.5",
-        ),
-        (&["variant", "enum"], "3.4"),
-        (&["async", "await", "try", "future"], "3.3"),
-        (&["data file", ".json", ".toml"], "5.11"),
-        (&["does not parse"], "3.2"),
-        (&["import", "export", "require", "module"], "3.2"),
-        (&["extension", "foreign", "primitive"], "3.9"),
-        (
-            &[
-                "trait",
-                "impl",
-                "struct",
-                "field",
-                "`new ",
-                "constructor",
-                "sealed",
-                "parameters in",
-            ],
-            "3.6",
-        ),
-        (&["interface", "type "], "3.7"),
-        (&["?.", "?:", "??", "->", "=>", "safe", "non-nil"], "3.1"),
-        (&["ternary", "spread", "where", "in operator"], "3.8"),
-        // A syntax error is about the grammar, and the keyword page is
-        // where the grammar lives. Last, so a kinded message wins.
-        (
-            &[
-                "expected",
-                "unexpected",
-                "unterminated",
-                "needs an",
-                "needs a",
-            ],
-            "6.1",
-        ),
-    ];
-
-    rules
-        .iter()
-        .find(|(words, _)| words.iter().any(|w| m.contains(w)))
-        .map(|(_, code)| *code)
+    kind_section(kind_for(message)).map(|s| s.number)
 }
 
 #[cfg(test)]
@@ -291,6 +213,20 @@ mod tests {
             assert_eq!(
                 super::kind_section(&kind.to_ascii_lowercase()).map(|s| s.number),
                 Some(*number)
+            );
+        }
+    }
+
+    /// The code a diagnostic prints is the section of its kind, so the
+    /// page that code opens lists the kind in its `Reports:` line.
+    #[test]
+    fn every_kind_is_listed_by_the_section_its_code_opens() {
+        for (kind, _) in super::KINDS {
+            let code = super::kind_section(kind).map(|s| s.number).unwrap();
+
+            assert!(
+                super::section_kinds(code).contains(kind),
+                "{kind}: section {code} does not list it"
             );
         }
     }

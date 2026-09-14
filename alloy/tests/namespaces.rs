@@ -254,7 +254,7 @@ fn one_name_twice_in_a_file_reports() {
         messages("namespace M as\n    const a = 1\nend\n\nnamespace M as\n    const b = 2\nend\n");
     assert_eq!(
         hits,
-        vec!["`M` is declared twice; a namespace has one name here".to_string()]
+        vec!["`M` is already a namespace on line 1; one name holds one declaration".to_string()]
     );
 }
 

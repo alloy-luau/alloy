@@ -657,11 +657,20 @@ impl<'s> Desugar<'s> {
             };
             let name = self.text_of(ns.name).to_string();
 
-            if seen.iter().any(|(n, _)| *n == name) {
-                let message = format!("`{name}` is declared twice; a namespace has one name here");
-                self.diagnose(ns.name, &message);
-            } else {
-                seen.push((name.clone(), ns.name));
+            // At the top level `check_duplicate_decls` reports the pair
+            // with every other declaration; a nested pair is only here.
+            match seen.iter().find(|(n, _)| *n == name) {
+                Some((_, first)) if parent.is_some() => {
+                    let line = self.line_of(self.byte_start(*first));
+                    let message = format!(
+                        "`{name}` is already a namespace on line {line}; one name holds one declaration"
+                    );
+                    self.diagnose(ns.name, &message);
+                }
+
+                Some(_) => {}
+
+                None => seen.push((name.clone(), ns.name)),
             }
 
             let key = key_of(parent, &name);

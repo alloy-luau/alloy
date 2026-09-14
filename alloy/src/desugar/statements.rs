@@ -754,10 +754,6 @@ impl<'s> Desugar<'s> {
             let name = self.text_of(span).to_string();
 
             match seen.iter().find(|(n, _, _)| *n == name) {
-                // Two namespaces of one name read their own report; see
-                // `check_namespace_names`.
-                Some((_, first, _)) if *first == kind && kind == "a namespace" => {}
-
                 Some((_, first, line)) => hits.push((
                     span,
                     format!(
@@ -2912,13 +2908,12 @@ mod tests {
             );
         }
 
-        // Two namespaces of one name keep their own report, so the
-        // message does not come twice.
+        // Two namespaces of one name report once, in the same words.
         let two =
             "namespace Shape as\n    const n = 1\nend\nnamespace Shape as\n    const m = 2\nend\n";
         assert_eq!(
             messages(two),
-            vec!["`Shape` is declared twice; a namespace has one name here"]
+            vec!["`Shape` is already a namespace on line 1; one name holds one declaration"]
         );
 
         // One name per declaration is clean.
@@ -2956,6 +2951,31 @@ mod tests {
         // One name each is clean, and the report comes once.
         let ok = "remote function Ping(id: number): boolean from client\nmacro double(x)\n    x + x\nend\nprint($double(3))\n";
         assert!(messages(ok).is_empty(), "{:?}", messages(ok));
+    }
+
+    /// Every duplicate prints one kind and one code: `error(6.1):
+    /// DuplicateError`, the section the kind opens, whatever the
+    /// declaration is.
+    #[test]
+    fn every_duplicate_prints_the_kinds_section() {
+        let sources = [
+            "struct Dup as\n    x: number\nend\nstruct Dup as\n    y: number\nend\n",
+            "enum Dup as\n    A\nend\nenum Dup as\n    B\nend\n",
+            "remote function Dup(id: number): boolean from client\nremote function Dup(id: string): boolean from client\n",
+            "namespace Dup as\n    const n = 1\nend\nnamespace Dup as\n    const m = 2\nend\n",
+            "macro Dup(x)\n    x + x\nend\nmacro Dup(x, y)\n    x * y\nend\nprint($Dup(3))\n",
+        ];
+
+        for src in sources {
+            let got = messages(src);
+            let message = got
+                .iter()
+                .find(|m| m.contains("one name holds one declaration"))
+                .unwrap_or_else(|| panic!("{got:?}"));
+
+            assert_eq!(crate::docs::kind_for(message), "DuplicateError", "{src}");
+            assert_eq!(crate::docs::code_for(message), Some("6.1"), "{src}");
+        }
     }
 
     /// `{ T }` is Luau's array form, so a bounded `{ T }` parameter

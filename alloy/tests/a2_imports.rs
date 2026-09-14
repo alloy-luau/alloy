@@ -22,6 +22,17 @@ fn a_module_lists_what_it_exports() {
     );
 }
 
+/// An `export { ... }` list names the types of the declarations it
+/// holds, so an import of one binds the type as `export struct` does.
+#[test]
+fn an_export_list_names_the_types_it_holds() {
+    let source = "struct Named as\n    n: number\nend\n\nenum Kind<T> as A, B end\n\ninterface Shape as\n    area: number\nend\n\ntype Id = number\n\nfunction make(): number\n    return 1\nend\n\nexport { Named, Kind, Shape, Id, make, Named as Other }\n";
+    assert_eq!(
+        alloy::modules::exported_types(source),
+        vec!["Named", "Other", "Kind<T>", "Shape=", "Id="]
+    );
+}
+
 #[test]
 fn an_import_names_the_module_and_what_it_exports() {
     let dir = scratch("imports");

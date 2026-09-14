@@ -642,7 +642,7 @@ impl<'s> Desugar<'s> {
             .generics
             .map(|g| strip_bounds(self.text_of(g)))
             .unwrap_or_default();
-        let export = if st.exported || self.ns_export {
+        let export = if st.exported || self.ns_export || self.export_listed_types.contains(&name) {
             "export "
         } else {
             ""
@@ -1124,7 +1124,7 @@ impl<'s> Desugar<'s> {
         let name = self.decl_name(t.name);
         let start = self.byte_start(t.span);
         let end_tok = self.toks[t.span.end as usize - 1];
-        let export = if t.exported || self.ns_export {
+        let export = if t.exported || self.ns_export || self.export_listed_types.contains(&name) {
             "export "
         } else {
             ""
@@ -1296,7 +1296,7 @@ impl<'s> Desugar<'s> {
         let name = self.decl_name(i.name);
         let start = self.byte_start(i.span);
         let end_tok = self.toks[i.span.end as usize - 1];
-        let export = if i.exported || self.ns_export {
+        let export = if i.exported || self.ns_export || self.export_listed_types.contains(&name) {
             "export "
         } else {
             ""

@@ -513,6 +513,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ns_force_local: false,
         export_listed: HashSet::new(),
         export_listed_types: HashSet::new(),
+        file_types: HashMap::new(),
         type_name_spans: chunk.type_names.clone(),
     };
 
@@ -1111,10 +1112,13 @@ struct Desugar<'s> {
     /// The names a top-level `export { ... }` list carries, so a
     /// namespace it names exports its types too.
     export_listed: HashSet<String>,
-    /// The type aliases a top-level `export type { ... }` list names
-    /// under their own names. Luau has no way to re-export an alias, so
-    /// the declaration takes the `export` word instead.
+    /// The types a top-level `export { ... }` list names under their
+    /// own names. Luau has no way to re-export an alias, so the
+    /// declaration takes the `export` word instead.
     export_listed_types: HashSet<String>,
+    /// The types the top level declares without `export`, and whether
+    /// each is a value too: a struct is, an interface is not.
+    file_types: HashMap<String, bool>,
     /// The next function header takes `local`: a namespace member never
     /// leaks into the file, and a plain `function f()` would be a Luau
     /// global. The attributed path reads it, since the modifier goes

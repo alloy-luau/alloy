@@ -87,15 +87,26 @@ impl<'s> Desugar<'s> {
     pub(crate) fn scan_namespaces(&mut self, block: &Block) {
         // `namespace Math as ... end` and `export { Math }` below it
         // export the group the way `export namespace` does.
-        // The type aliases the file declares, so an `export type { T }`
-        // list can say which name is one of its own.
-        let mut aliases: Vec<String> = Vec::new();
-
+        // The types the file declares, so an `export { T }` list can
+        // say which name is one of its own.
         for stmt in &block.stmts {
-            if let Stmt::TypeAlias(t) = stmt.under_default()
-                && !t.exported
-            {
-                aliases.push(self.text_of(t.name).to_string());
+            let (name, value, exported) = match stmt.under_default() {
+                Stmt::TypeAlias(t) => (t.name, false, t.exported),
+
+                Stmt::Interface(i) => (i.name, false, i.exported),
+
+                Stmt::Struct(s) => (s.name, true, s.exported),
+
+                Stmt::Enum(e) => (e.name, true, e.exported),
+
+                Stmt::Trait(t) => (t.name, true, t.exported),
+
+                _ => continue,
+            };
+
+            if !exported {
+                self.file_types
+                    .insert(self.text_of(name).to_string(), value);
             }
         }
 
@@ -107,13 +118,13 @@ impl<'s> Desugar<'s> {
             for spec in &list.specs {
                 let name = self.text_of(spec.name).to_string();
 
-                // `export type { T }` of a type the file declares: Luau
-                // has no re-export for an alias, and `export type T = T`
-                // is a cycle. The declaration takes the word instead.
+                // `export { T }` of a type the file declares: Luau has
+                // no re-export for an alias, and `export type T = T` is
+                // a cycle. The declaration takes the word instead, and
+                // a struct or an enum sends its type out with its value.
                 if list.from.is_none()
-                    && (list.type_only || spec.is_type)
                     && spec.alias.is_none()
-                    && aliases.contains(&name)
+                    && self.file_types.contains_key(&name)
                 {
                     self.export_listed_types.insert(name.clone());
                 }

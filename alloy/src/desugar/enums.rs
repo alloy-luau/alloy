@@ -248,7 +248,7 @@ impl<'s> Desugar<'s> {
             test.push_str(&format!(" or {t}"));
         }
 
-        let export = if e.exported || self.ns_export {
+        let export = if e.exported || self.ns_export || self.export_listed_types.contains(&name) {
             "export "
         } else {
             ""

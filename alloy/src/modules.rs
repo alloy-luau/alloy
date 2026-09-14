@@ -70,14 +70,15 @@ pub fn exported_types(source: &str) -> Vec<String> {
     out
 }
 
-/// The types an exported namespace carries, under the names the emit
-/// gives them: `export namespace Math as struct Vec2 ... end` exports
-/// `Math_Vec2`. A namespace body is not a line the scan above can read,
-/// so this one goes through the parser.
+/// The types an `export { ... }` list sends out: a struct, an enum, an
+/// interface, or an alias the file declares, and the types an exported
+/// namespace carries under the names the emit gives them, `Math_Vec2`.
+/// Neither is a line the scan above can read, so this one goes
+/// through the parser.
 fn exported_namespace_types(source: &str) -> Vec<String> {
     use alloy_syntax::ast::Stmt;
 
-    if !source.contains("namespace") {
+    if !source.contains("namespace") && !source.contains("export") {
         return Vec::new();
     }
 
@@ -90,12 +91,15 @@ fn exported_namespace_types(source: &str) -> Vec<String> {
     };
     let toks = &parsed.lexed.toks;
     let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
-    let mut listed: Vec<String> = Vec::new();
+    // Each listed name with the name it goes out under.
+    let mut listed: Vec<(String, String)> = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
-        if let Stmt::ExportList(list) = stmt {
+        if let Stmt::ExportList(list) = stmt
+            && list.from.is_none()
+        {
             for spec in &list.specs {
-                listed.push(text(spec.name));
+                listed.push((text(spec.name), text(spec.alias.unwrap_or(spec.name))));
             }
         }
     }
@@ -103,16 +107,51 @@ fn exported_namespace_types(source: &str) -> Vec<String> {
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
-        let Stmt::Namespace(ns) = stmt.under_default() else {
-            continue;
-        };
-        let name = text(ns.name);
+        // An entry the line scan wrote already, for `export struct`.
+        let (name, generics, exported, marker) = match stmt.under_default() {
+            Stmt::Namespace(ns) => {
+                let name = text(ns.name);
 
-        if !ns.exported && !listed.contains(&name) {
+                if ns.exported || listed.iter().any(|(n, _)| *n == name) {
+                    collect_namespace_types(source, toks, ns, &name, &mut out);
+                }
+
+                continue;
+            }
+
+            Stmt::Struct(d) => (text(d.name), d.generics.map(text), d.exported, ""),
+
+            Stmt::Enum(d) => (text(d.name), d.generics.map(text), d.exported, ""),
+
+            Stmt::Trait(d) => (text(d.name), None, d.exported, ""),
+
+            Stmt::Interface(d) => (text(d.name), d.generics.map(text), d.exported, "="),
+
+            Stmt::TypeAlias(d) => {
+                let after = toks[d.name.end as usize - 1].end as usize;
+
+                (
+                    text(d.name),
+                    Some(source[after..].to_string()),
+                    d.exported,
+                    "=",
+                )
+            }
+
+            _ => continue,
+        };
+
+        if exported {
             continue;
         }
 
-        collect_namespace_types(source, toks, ns, &name, &mut out);
+        let params = generics
+            .map(|g| type_params(g.trim_start()))
+            .unwrap_or_default();
+
+        for (_, alias) in listed.iter().filter(|(n, _)| *n == name) {
+            out.push(format!("{alias}{params}{marker}"));
+        }
     }
 
     out

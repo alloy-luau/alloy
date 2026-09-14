@@ -440,10 +440,13 @@ impl<'s> Desugar<'s> {
                 Stmt::ExportList(e) if e.from.is_none() => {
                     for sp in &e.specs {
                         let name = self.text_of(sp.name).to_string();
+                        // A value list may name a type the file
+                        // declares, `export { Shape }` of an interface.
+                        let file_type = self.file_types.get(&name).copied();
                         let known = match e.type_only || sp.is_type {
                             true => types.contains(&name) || values.contains(&name),
 
-                            false => values.contains(&name),
+                            false => values.contains(&name) || file_type.is_some(),
                         };
 
                         // A dotted name reads a namespace member; the
@@ -459,7 +462,7 @@ impl<'s> Desugar<'s> {
 
                         // A type goes out as an alias, not as a field
                         // of the export table.
-                        if !(e.type_only || sp.is_type) {
+                        if !(e.type_only || sp.is_type || file_type == Some(false)) {
                             let out = sp.alias.unwrap_or(sp.name);
                             sent.push((self.text_of(out).to_string(), out));
                         }
@@ -617,12 +620,15 @@ impl<'s> Desugar<'s> {
                         .alias
                         .map(|a| self.text_of(a).to_string())
                         .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(&name).to_string());
+                    // A type of this file: an interface or an alias
+                    // holds no value, a struct or an enum holds one.
+                    let file_type = self.file_types.get(&name).copied();
 
                     // A type is no value: the module sends it out as an
                     // alias, not as a field of the export table. A
                     // namespace member reads by the name the emit gave
                     // it, `Geom_Point`.
-                    if e.type_only || sp.is_type {
+                    if e.type_only || sp.is_type || file_type == Some(false) {
                         // A type alias of this file takes the `export`
                         // word on its own line; an alias of itself is a
                         // cycle, and Luau reads none.
@@ -635,6 +641,12 @@ impl<'s> Desugar<'s> {
                             .unwrap_or_else(|| name.clone());
                         types.push(format!("export type {exported} = {target}"));
                     } else {
+                        // `export { Named as Other }` of a struct: the
+                        // type goes out under the new name too.
+                        if file_type == Some(true) && sp.alias.is_some() {
+                            types.push(format!("export type {exported} = {name}"));
+                        }
+
                         self.exports.push((exported, name));
                     }
                 }
@@ -931,6 +943,31 @@ print(ex)
             "{}",
             out.ship
         );
+    }
+
+    /// `export { Named }` after the declaration sends the type out
+    /// with the value: the declaration takes the `export` word, an
+    /// interface or an alias goes out as a type alone, and a rename
+    /// adds an alias.
+    #[test]
+    fn an_export_list_sends_the_type_of_a_declaration_out() {
+        let src = "struct Named as\n    n: number\nend\n\nenum Kind as\n    A,\n    B,\nend\n\ninterface Shape as\n    area: number\nend\n\ntype Id = number\n\nfunction make(): Named\n    return new Named { n = 1 }\nend\n\nexport { Named, Kind, Shape, Id, make, Named as Other }\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for text in [&out.ship, &out.check] {
+            assert!(text.contains(" export type Named = "), "{text}");
+            assert!(text.contains(" export type Kind = "), "{text}");
+            assert!(text.contains("\nexport type Shape = "), "{text}");
+            assert!(text.contains("\nexport type Id = number"), "{text}");
+            assert!(
+                text.contains(
+                    "export type Other = Named return { Named = Named, Kind = Kind, make = make, Other = Named }"
+                ),
+                "{text}"
+            );
+            assert_eq!(text.lines().count(), src.lines().count(), "{text}");
+        }
     }
 
     #[test]

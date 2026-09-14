@@ -812,12 +812,13 @@ pub fn import_shapes(
 /// each with whether it carries a default. The construction check reads
 /// them, so `new Box { }` on an imported struct names the fields it
 /// leaves unset.
-/// Every `import { Name as Local }` of a source: the module the name
-/// comes from, the name the module declares, and the name this file
-/// binds. Two modules can each declare a `Point`, so an index keyed by
-/// the declared name alone holds one of them. The alias is a key of its
-/// own, and it names the right module.
-fn renamed_specs(
+/// Every `import { Name }` and `import { Name as Local }` of a source:
+/// the module the name comes from, the name the module declares, and
+/// the name this file binds. Two modules can each declare a `Point`, so
+/// an index keyed by the declared name alone holds one of them. The
+/// name this file binds is a key of its own, and it names the right
+/// module.
+fn named_specs(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
@@ -849,12 +850,42 @@ fn renamed_specs(
         };
 
         for sp in specs {
-            let Some(alias) = sp.alias else {
-                continue;
-            };
-
-            out.push((path.clone(), text(sp.name), text(alias)));
+            out.push((
+                path.clone(),
+                text(sp.name),
+                text(sp.alias.unwrap_or(sp.name)),
+            ));
         }
+    }
+
+    out
+}
+
+/// The module each `import * as X` binds, with the local name it binds
+/// it under. A star import binds the module table, so a declaration of
+/// the module reads one level deeper here: `X.State`.
+fn star_locals(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Vec<(PathBuf, String)> {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Import(node) = stmt else {
+            continue;
+        };
+        let ImportKind::Namespace(local, _) = &node.kind else {
+            continue;
+        };
+        let spec = node.path.text(source, toks).to_string();
+        let Some(path) = resolve(spec.trim_matches(['"', '\'']), from, aliases) else {
+            continue;
+        };
+
+        out.push((path, local.text(source, toks).to_string()));
     }
 
     out
@@ -867,7 +898,7 @@ pub fn import_struct_fields(
 ) -> Vec<(String, Vec<(String, bool)>)> {
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut out: Vec<(String, Vec<(String, bool)>)> = Vec::new();
-    let renames = renamed_specs(source, from, aliases);
+    let renames = named_specs(source, from, aliases);
 
     for spec in import_specs(source) {
         let Some(path) = resolve(&spec, from, aliases) else {
@@ -916,7 +947,7 @@ pub fn import_privates(
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
 
     let mut seen: Vec<PathBuf> = Vec::new();
-    let renames = renamed_specs(source, from, aliases);
+    let renames = named_specs(source, from, aliases);
 
     for spec in import_specs(source) {
         let Some(path) = resolve(&spec, from, aliases) else {
@@ -972,8 +1003,9 @@ pub fn import_enums(
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, Vec<(String, usize)>)> {
     let mut seen: Vec<PathBuf> = Vec::new();
-    let mut out: Vec<(String, Vec<(String, usize)>)> = Vec::new();
-    let renames = renamed_specs(source, from, aliases);
+    let mut modules: Vec<(PathBuf, Vec<(String, Vec<(String, usize)>)>)> = Vec::new();
+    let named = named_specs(source, from, aliases);
+    let stars = star_locals(source, from, aliases);
 
     for spec in import_specs(source) {
         let Some(path) = resolve(&spec, from, aliases) else {
@@ -989,28 +1021,49 @@ pub fn import_enums(
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
+        let enums = crate::declarations::shapes(&text)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                crate::declarations::Shape::Enum { name, variants } => Some((
+                    name,
+                    variants.into_iter().map(|(v, p)| (v, p.len())).collect(),
+                )),
 
-        for shape in crate::declarations::shapes(&text) {
-            let crate::declarations::Shape::Enum { name, variants } = shape else {
-                continue;
-            };
-            let variants: Vec<(String, usize)> =
-                variants.into_iter().map(|(v, p)| (v, p.len())).collect();
+                _ => None,
+            })
+            .collect();
+        modules.push((path, enums));
+    }
+    let mut out: Vec<(String, Vec<(String, usize)>)> = Vec::new();
+    let mut push = |key: String, variants: &Vec<(String, usize)>| {
+        if !out.iter().any(|(n, _)| *n == key) {
+            out.push((key, variants.clone()));
+        }
+    };
 
-            // An alias keys an entry of its own, so `State as S1` and
-            // `State as S2` each read their own module.
-            for (_, _, local) in renames
+    // First the names this file binds. Each one names the module it
+    // comes from, so two modules' `State` stay apart: `State as S1` and
+    // `State as S2`, and `import * as A` and `import * as B`, which
+    // bind the module table and read the enum as `A.State`.
+    for (path, enums) in &modules {
+        for (name, variants) in enums {
+            for (_, _, local) in named
                 .iter()
-                .filter(|(p, declared, _)| *p == path && *declared == name)
+                .filter(|(p, declared, _)| p == path && declared == name)
             {
-                if !out.iter().any(|(n, _)| n == local) {
-                    out.push((local.clone(), variants.clone()));
-                }
+                push(local.clone(), variants);
             }
 
-            if !out.iter().any(|(n, _)| *n == name) {
-                out.push((name, variants));
+            for (_, local) in stars.iter().filter(|(p, _)| p == path) {
+                push(format!("{local}.{name}"), variants);
             }
+        }
+    }
+
+    // Then the declared name, for an index that holds only it.
+    for (_, enums) in &modules {
+        for (name, variants) in enums {
+            push(name.clone(), variants);
         }
     }
 
@@ -2587,6 +2640,74 @@ mod tests {
             messages,
             vec![
                 "this match is not exhaustive: `S2` has no arm for `Up`; add it or a `default` arm"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /*
+    Two star imports of two modules that each declare a `State`. The
+    star form registers the module table as a namespace, whose enum
+    lookup fell back to the declared name, so `B.State` read the first
+    module's variants and every arm of the second match reported.
+
+    The enum index keys a star import by `<alias>.<name>`, so each
+    alias names the module it stands for.
+    */
+    #[test]
+    fn two_star_aliases_of_one_enum_name_stay_apart() {
+        let dir = std::env::temp_dir().join(format!("alloy-star-states-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/a.aly"),
+            "export enum State as\n    Idle\n    Running\nend\n",
+        )
+        .expect("module");
+        std::fs::write(
+            dir.join("src/b.aly"),
+            "export enum State as\n    Off\n    On\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let clean = |src: &str| -> Vec<String> {
+            let options = crate::EmitOptions::default().imports(src, &from, &[]);
+
+            crate::compile_with(src, &options)
+                .expect("compile")
+                .diagnostics
+                .into_iter()
+                .map(|d| d.message)
+                .collect()
+        };
+
+        // Two star aliases. Each match covers its own module's enum.
+        let src = "import * as A from \"./a\"\nimport * as B from \"./b\"\nfunction a(s: A.State): number\n    match s with\n        case A.State.Idle then return 0\n        case A.State.Running then return 1\n    end\nend\nfunction b(s: B.State): number\n    match s with\n        case B.State.Off then return 0\n        case B.State.On then return 1\n    end\nend\nprint(a(A.State.Idle), b(B.State.On))\n";
+        let enums = import_enums(src, &from, &[]);
+
+        assert_eq!(
+            enums
+                .iter()
+                .find(|(n, _)| n == "B.State")
+                .map(|(_, v)| v.clone()),
+            Some(vec![("Off".to_string(), 0), ("On".to_string(), 0)])
+        );
+        assert!(clean(src).is_empty(), "{:?}", clean(src));
+
+        // One star alias and one name list. The name this file binds
+        // names the module it comes from, whichever module reads first.
+        let mixed = "import * as A from \"./a\"\nimport { State } from \"./b\"\nfunction b(s: State): number\n    match s with\n        case State.Off then return 0\n        case State.On then return 1\n    end\nend\nfunction a(s: A.State): number\n    match s with\n        case A.State.Idle then return 0\n        case A.State.Running then return 1\n    end\nend\nprint(a(A.State.Idle), b(State.On))\n";
+
+        assert!(clean(mixed).is_empty(), "{:?}", clean(mixed));
+
+        // A missing variant of the star-imported enum still reports.
+        let short = "import * as A from \"./a\"\nimport * as B from \"./b\"\nfunction b(s: B.State): number\n    match s with\n        case B.State.Off then return 0\n    end\nend\nprint(b(B.State.Off))\n";
+
+        assert_eq!(
+            clean(short),
+            vec![
+                "this match is not exhaustive: `B.State` has no arm for `On`; add it or a `default` arm"
             ]
         );
 

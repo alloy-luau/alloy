@@ -2514,3 +2514,29 @@ fn a_namespaced_struct_literal_lists_its_fields() {
     assert_eq!(three, ["q"]);
     assert_eq!(star, ["n"]);
 }
+
+/// `import { Ns as A }` binds the group under another name; the
+/// literal `new A.T { ` still lists the fields the module declares.
+#[test]
+fn an_aliased_namespace_literal_lists_its_fields() {
+    let dir = super::documents::alias_root(
+        "namespace-alias-literal",
+        &[(
+            "src/lib.aly",
+            "export namespace Ns as\n    struct T as\n        n: number\n    end\nend\n",
+        )],
+    );
+    let src = "import { Ns as A } from \"./lib\"\n\nlocal c = new A.T { \n";
+    let uri = path_to_uri(&dir.join("src/main.aly"));
+    let st = files(&[(uri.as_str(), src)]);
+    let at = src.len() - 1;
+    let ctx = context::detect(src, at).expect("a context");
+    let labels: Vec<String> = st
+        .context_items(&uri, at, &ctx)
+        .iter()
+        .map(|i| i["label"].as_str().unwrap_or_default().to_string())
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(labels, ["n"]);
+}

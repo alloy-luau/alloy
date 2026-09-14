@@ -1594,21 +1594,40 @@ impl State {
             .map(|d| d.import_decls.as_slice())
             .unwrap_or_default();
 
-        std::iter::successors(Some(name), |path| {
-            path.split_once('.').map(|(_, rest)| rest)
-        })
-        .find_map(|path| {
-            decls
-                .iter()
-                .copied()
-                .chain(imported)
-                .find(|d| d.name == path)
-        })
-        .map(|d| context::record_entries(&d.hover))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|f| inside || !f.private)
-        .collect()
+        // `import { Ns as A }` then `new A.T { |`: the module declares
+        // the member under its own group name, so the alias reads as
+        // that name first.
+        let declared = self
+            .docs
+            .get(uri)
+            .into_iter()
+            .flat_map(|d| import_entries(&d.source))
+            .filter(|it| it.bound != it.name)
+            .find_map(|it| {
+                let rest = name.strip_prefix(it.bound.as_str())?.strip_prefix('.')?;
+
+                Some(format!("{}.{rest}", it.name))
+            });
+
+        declared
+            .as_deref()
+            .into_iter()
+            .chain([name])
+            .flat_map(|n| {
+                std::iter::successors(Some(n), |path| path.split_once('.').map(|(_, rest)| rest))
+            })
+            .find_map(|path| {
+                decls
+                    .iter()
+                    .copied()
+                    .chain(imported)
+                    .find(|d| d.name == path)
+            })
+            .map(|d| context::record_entries(&d.hover))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| inside || !f.private)
+            .collect()
     }
 
     /// The type a name has at a position: its annotation, the type its

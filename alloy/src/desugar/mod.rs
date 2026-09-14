@@ -1959,6 +1959,18 @@ impl<'s> Desugar<'s> {
         let mut bodies = Vec::new();
         stmts_function_spans(&block.stmts, &mut bodies);
 
+        // A macro body expands at each `$name` call, so the call is the
+        // use and the body itself is quiet.
+        let macros: Vec<(&str, TokSpan)> = block
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Macro(m) => Some((self.text_of(m.name), m.span)),
+
+                _ => None,
+            })
+            .collect();
+
         for s in &block.stmts {
             let (name, decl, kind) = match s {
                 Stmt::Struct(d) => (d.name, d.span, "struct"),
@@ -1972,21 +1984,20 @@ impl<'s> Desugar<'s> {
             let name = self.text_of(name);
             let mut deferred = false;
 
-            for k in 0..decl.start as usize {
+            // A field, `x.Point`, and a type, `p: Point`, read no
+            // value; the alias is in scope over the whole block. A
+            // declaration head of the name is the duplicate check's.
+            let reads = |k: usize| {
                 let t = self.toks[k];
-
-                // A field, `x.Point`, and a type, `p: Point`, read no
-                // value; the alias is in scope over the whole block. A
-                // declaration head of the name is the duplicate check's.
                 let before = if k > 0 {
                     self.toks[k - 1].text(self.src)
                 } else {
                     ""
                 };
 
-                if t.kind != TokKind::Ident
-                    || t.text(self.src) != name
-                    || matches!(
+                t.kind == TokKind::Ident
+                    && t.text(self.src) == name
+                    && !matches!(
                         before,
                         "." | "struct"
                             | "enum"
@@ -2001,7 +2012,22 @@ impl<'s> Desugar<'s> {
                             | "remote"
                             | "macro"
                     )
-                    || self.type_name_spans.iter().any(|s| s.start as usize == k)
+                    && !self.type_name_spans.iter().any(|s| s.start as usize == k)
+            };
+            let expands = |k: usize| {
+                k > 0
+                    && self.toks[k - 1].text(self.src) == "$"
+                    && macros.iter().any(|(m, span)| {
+                        *m == self.toks[k].text(self.src)
+                            && (span.start as usize..span.end as usize).any(&reads)
+                    })
+            };
+
+            for k in 0..decl.start as usize {
+                if macros
+                    .iter()
+                    .any(|(_, span)| (span.start as usize..span.end as usize).contains(&k))
+                    || !(reads(k) || expands(k))
                 {
                     continue;
                 }

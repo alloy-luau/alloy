@@ -595,14 +595,47 @@ impl<'a> Parser<'a> {
             "declare" if self.options.definitions && not_declared(self.text_at(1)).is_some() => {
                 let noun = not_declared(self.text_at(1)).unwrap_or_default();
                 self.bump();
+                let at = self.toks[self.pos].start as usize;
+                self.report_at(
+                    at,
+                    &format!(
+                        "`declare` takes a function, a name with a type, an extern type, or a class; {noun} is not declared"
+                    ),
+                );
+                self.skip_declaration(start)?;
 
-                Err(self.err(&format!(
-                    "`declare` takes a function, a name with a type, an extern type, or a class; {noun} is not declared"
-                )))
+                Ok(Stmt::Error(TokSpan::new(start, self.pos)))
             }
 
             _ => self.expr_stmt(start),
         }
+    }
+
+    /*
+    Moves past a declaration the parser does not read, to the `end` that
+    closes it.
+
+    Statement recovery reads one token and stops at the next line, which
+    leaves the body to report again, once per member. A body sits in from
+    the keyword that opened it, so the first `end` at or left of that
+    column is the one that closes the declaration, and a keyword that
+    opens a statement there is the file going on. `expect_end` then
+    reports a missing `end` once, the way every body reader does.
+    */
+    fn skip_declaration(&mut self, opener: usize) -> Result<(), ParseError> {
+        let column = self.column_at(opener);
+
+        while !self.at_end() {
+            if self.column_at(self.pos) <= column && (self.at("end") || self.body_ends_early()) {
+                break;
+            }
+
+            self.bump();
+        }
+
+        self.expect_end(opener)?;
+
+        Ok(())
     }
 
     /// Moves past the brace group at the cursor, balanced.

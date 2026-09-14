@@ -372,3 +372,50 @@ fn a_header_with_as_is_clean() {
         assert_eq!(lenient(src), (0, 0), "{src:?}");
     }
 }
+
+/*
+`declare struct`, and the four other declarations Luau's definition
+syntax has no form for, report once. Recovery used to read the `declare`
+alone, so the body reported again, once per member.
+*/
+#[test]
+fn a_declaration_declare_does_not_take_reports_once() {
+    let options = ParseOptions {
+        definitions: true,
+        ..ParseOptions::default()
+    };
+
+    for (word, noun) in [
+        ("struct", "a struct"),
+        ("enum", "an enum"),
+        ("trait", "a trait"),
+        ("interface", "an interface"),
+        ("namespace", "a namespace"),
+    ] {
+        for body in [
+            "    name: string\n",
+            "    function get(n: number): number\n",
+        ] {
+            let src = format!("declare {word} Old\n{body}end\n");
+            let lexed = lexer::lex(&src).unwrap();
+            let (chunk, diagnostics) = parser::parse_lenient(&src, &lexed.toks, options);
+            assert_eq!(
+                diagnostics.len(),
+                1,
+                "one report for {src:?}, got {diagnostics:?}"
+            );
+            assert_eq!(
+                diagnostics[0].message,
+                format!(
+                    "`declare` takes a function, a name with a type, an extern type, or a class; {noun} is not declared"
+                )
+            );
+            assert_eq!(diagnostics[0].offset, 8, "the report sits on `{word}`");
+            assert!(
+                printer::coverage_errors(&chunk).is_empty(),
+                "the declaration covers its tokens"
+            );
+            assert_eq!(printer::print_chunk(&src, &lexed.toks, &chunk), src);
+        }
+    }
+}

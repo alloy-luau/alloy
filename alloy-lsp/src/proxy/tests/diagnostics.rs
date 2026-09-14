@@ -664,3 +664,25 @@ pub(crate) fn a_three_line_import_cuts_the_dead_name_alone() {
         }])
     );
 }
+#[test]
+pub(crate) fn a_bad_character_reports_one_character_wide() {
+    // Two bytes, one UTF-16 unit: the range covers `é` and stops.
+    let (st, uri) = one_file("local café = 1\n");
+    let items = st.alloy_diagnostics(uri);
+    let range = &items[0]["range"];
+    assert!(
+        items[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("unexpected character")),
+        "{items:?}"
+    );
+    assert_eq!(range["start"], json!({ "line": 0, "character": 9 }));
+    assert_eq!(range["end"], json!({ "line": 0, "character": 10 }));
+
+    // Four bytes, two UTF-16 units: one character still.
+    let (st, uri) = one_file("local x😀y = 1\n");
+    let items = st.alloy_diagnostics(uri);
+    let range = &items[0]["range"];
+    assert_eq!(range["start"], json!({ "line": 0, "character": 7 }));
+    assert_eq!(range["end"], json!({ "line": 0, "character": 9 }));
+}

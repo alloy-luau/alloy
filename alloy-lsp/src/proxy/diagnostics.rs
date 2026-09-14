@@ -7,6 +7,11 @@ use super::documents::project_aliases;
 use super::hover::{byte_column, impl_width, method_owner, utf16_column, without_self, word_width};
 use super::*;
 
+/// The head of the lexer's report about one character it cannot read.
+/// The reader sees `unexpected character 'é'`, and the character is one
+/// byte range of the source.
+const BAD_CHARACTER: &str = "unexpected character ";
+
 impl State {
     /// The compiler's diagnostics of one document as LSP diagnostics.
     /// Another open source that builds the same module as this one:
@@ -66,14 +71,25 @@ impl State {
         // the file can say; the child reads Alloy source and reports
         // every line of it, so those reports are dropped.
         if let Some(e) = &doc.error {
-            let (line, character) = position_of(&doc.source, e.offset.min(doc.source.len()));
-            let end = doc
-                .source
-                .lines()
-                .nth(line as usize)
-                .map(|l| l.trim_end().encode_utf16().count() as u32)
-                .unwrap_or(character + 1)
-                .max(character + 1);
+            let at = e.offset.min(doc.source.len());
+            let (line, character) = position_of(&doc.source, at);
+            // The lexer points at one character, and the rest of the
+            // line is code the reader wrote on purpose. The range is
+            // that character alone, in the UTF-16 units it takes.
+            let one_character = e
+                .message
+                .starts_with(BAD_CHARACTER)
+                .then(|| doc.source[at..].chars().next())
+                .flatten()
+                .map(|c| character + c.len_utf16() as u32);
+            let end = one_character.unwrap_or_else(|| {
+                doc.source
+                    .lines()
+                    .nth(line as usize)
+                    .map(|l| l.trim_end().encode_utf16().count() as u32)
+                    .unwrap_or(character + 1)
+                    .max(character + 1)
+            });
             diagnostics.push(json!({
                 "range": {
                     "start": { "line": line, "character": character },

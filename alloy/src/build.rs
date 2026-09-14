@@ -390,10 +390,12 @@ fn run_inner(
     // The ingots start once per build and see every file.
     let ingots = crate::ingot::Ingots::load(root, config);
 
+    // The failure names the project's own alloy.toml. A relative path
+    // would print under `[build] in`, where no alloy.toml sits.
     for p in &ingots.problems {
         report
             .failures
-            .push((PathBuf::from(crate::config::FILE_NAME), p.to_string()));
+            .push((ingots.root.join(crate::config::FILE_NAME), p.to_string()));
     }
 
     for path in sources {

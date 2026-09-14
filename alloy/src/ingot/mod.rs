@@ -490,7 +490,17 @@ impl Ingot {
 
             (None, None) => return Err("names neither a path nor a repo".to_string()),
         };
-        let manifest = Manifest::load(&dir.join(manifest::FILE_NAME))?;
+        let path = dir.join(manifest::FILE_NAME);
+        // The report names the manifest as the toml wrote it,
+        // `ingots/x/ingot.toml`, not the absolute path the read used.
+        let manifest = Manifest::load(&path).map_err(|e| match &table.path {
+            Some(p) => e.replace(
+                &path.display().to_string(),
+                &Path::new(p).join(manifest::FILE_NAME).display().to_string(),
+            ),
+
+            None => e,
+        })?;
 
         if manifest.name != name {
             return Err(format!(

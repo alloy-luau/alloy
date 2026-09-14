@@ -201,8 +201,11 @@ fn a_missing_ingot_is_a_problem_not_a_panic() {
     let ingots = Ingots::load(&std::env::temp_dir(), &c);
     assert!(ingots.is_empty());
     assert_eq!(ingots.problems.len(), 1);
+    // The manifest path reads as the toml wrote it, under the root.
     assert!(
-        ingots.problems[0].message.contains("cannot read"),
+        ingots.problems[0]
+            .to_string()
+            .starts_with("ingot `none`: cannot read nowhere/ingot.toml: "),
         "{}",
         ingots.problems[0]
     );
@@ -215,6 +218,8 @@ fn a_missing_ingot_is_a_problem_not_a_panic() {
     std::fs::write(dir.join("src/a.aly"), "local x = 1\nprint(x)\n").unwrap();
     let report = alloy::build::run_project(&dir, &c).unwrap();
     assert_eq!(report.failures.len(), 1);
+    // The failure names the root's alloy.toml, not one under `src`.
+    assert_eq!(report.failures[0].0, dir.join("alloy.toml"));
     assert!(report.failures[0].1.contains("ingot `none`"));
     assert_eq!(report.written.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);

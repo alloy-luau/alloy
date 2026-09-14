@@ -51,7 +51,14 @@ impl Server {
                 })?
             })
         };
-        let found = lookup(&key).or_else(|| sigils.iter().find_map(|k| lookup(k)));
+        // The index keys a namespace member by its whole path, and a
+        // reader writes the path under the words its own file binds:
+        // `Outer.Inner.T` here, `M.Ns.T` under a module binding. The
+        // longest path answers first.
+        let found = member_keys(&key)
+            .iter()
+            .find_map(|k| lookup(k))
+            .or_else(|| sigils.iter().find_map(|k| lookup(k)));
         // `import { Thing as ThingAlias }`: the alias is this file's word
         // for the export, and the declaration sits under the name the
         // module wrote. Without this the child answers instead, and it
@@ -267,7 +274,19 @@ fn declaration_key(source: &str, start: usize, end: usize) -> Option<String> {
             return None;
         }
 
-        let (hs, he) = keywords::word_range(source, at);
+        let (mut hs, he) = keywords::word_range(source, at);
+
+        // The whole path in front of the word: `Outer.Inner.T` names a
+        // member two groups deep, and the index keys it by its path.
+        while let Some(head) = source[line_start..hs].trim_end().strip_suffix('.') {
+            let at = line_start + head.len().saturating_sub(1);
+
+            if head.is_empty() || !keywords::is_word_at(source, at) {
+                break;
+            }
+
+            hs = keywords::word_range(source, at).0;
+        }
 
         return Some(format!("{}.{word}", &source[hs..he]));
     }
@@ -278,6 +297,24 @@ fn declaration_key(source: &str, start: usize, end: usize) -> Option<String> {
 
         false => Some(word.to_string()),
     }
+}
+
+/// The keys a dotted name answers to, longest first. `M.Ns.T` is the
+/// member `Ns.T` of a module the file binds to `M`, and `Outer.Inner.T`
+/// is keyed whole. The bare word is no key of a member: it would answer
+/// a field read with any declaration of that spelling.
+fn member_keys(key: &str) -> Vec<String> {
+    let mut out = vec![key.to_string()];
+    let mut rest = key;
+
+    while let Some((_, tail)) = rest.split_once('.')
+        && tail.contains('.')
+    {
+        out.push(tail.to_string());
+        rest = tail;
+    }
+
+    out
 }
 
 /// Whether a line opens the `default` arm. The body may stand on the
@@ -901,7 +938,9 @@ fn each_arguments(source: &str, at: usize, param: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod contract_tests {
-    use super::{declares_a_type, each_arguments, each_clause, expand_each};
+    use super::{
+        declaration_key, declares_a_type, each_arguments, each_clause, expand_each, member_keys,
+    };
 
     #[test]
     fn a_clause_line_splits_into_its_parts() {
@@ -976,5 +1015,28 @@ mod contract_tests {
             "```alloy\nexport namespace Ns as\n    public struct T\nend\n```"
         ));
         assert!(!declares_a_type("```alloy\nfunction make(): number\n```"));
+    }
+
+    /// The index keys a namespace member by its whole path. A reader
+    /// writes that path under the words its own file binds, so the
+    /// caret's key holds every word in front of the name.
+    #[test]
+    fn a_member_two_groups_deep_keys_by_its_path() {
+        let src = "local z: Outer.Inner.T = new Outer.Inner.T { value = 9 }\n";
+        let at = src.find("Inner.T").expect("the path") + "Inner.".len();
+
+        assert_eq!(
+            declaration_key(src, at, at + 1).as_deref(),
+            Some("Outer.Inner.T")
+        );
+        assert_eq!(
+            member_keys("Outer.Inner.T"),
+            ["Outer.Inner.T", "Inner.T"].map(String::from)
+        );
+        // `M.Ns.T` under a module binding: the index holds `Ns.T`.
+        assert_eq!(member_keys("M.Ns.T"), ["M.Ns.T", "Ns.T"].map(String::from));
+        // A field read stops at its own key: the bare word would
+        // answer with any declaration of that spelling.
+        assert_eq!(member_keys("p.value"), ["p.value"].map(String::from));
     }
 }

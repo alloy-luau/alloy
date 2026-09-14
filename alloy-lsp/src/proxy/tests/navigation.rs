@@ -316,6 +316,36 @@ pub(crate) fn a_rename_of_an_imported_name_reaches_every_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `Outer.Inner.T`: the word in front of the group is a group of this
+/// file, not a module binding. The member is the declaring file's own,
+/// so go-to-definition and rename read it like any other member.
+#[test]
+fn a_member_two_groups_deep_resolves_in_its_own_file() {
+    let src = "export namespace Outer as\n    namespace Inner as\n        struct T as\n            value: number,\n        end\n    end\nend\n\nlocal z: Outer.Inner.T = new Outer.Inner.T { value = 9 }\n";
+    let uri = "file:///w/src/nested.aly";
+    let st = super::support::files(&[(uri, src)]);
+    let at = src.rfind("Inner.T").expect("the path") + "Inner.".len();
+    let (file, name) = st
+        .module_member_at(uri, src, at)
+        .expect("the member the path names");
+
+    assert_eq!(file, Path::new("/w/src/nested.aly"));
+    assert_eq!(name, "T");
+
+    // A word in front that names no group of the file answers nothing.
+    let other = "local p = { value = 1 }\nprint(p.value)\n";
+    let st = super::support::files(&[("file:///w/src/plain.aly", other)]);
+
+    assert_eq!(
+        st.module_member_at(
+            "file:///w/src/plain.aly",
+            other,
+            other.rfind("value").expect("the field")
+        ),
+        None
+    );
+}
+
 /// The child indexes the check artifact, where a namespace member is
 /// `Ns_T` and carries a `__new` and a `new` the author never wrote. An
 /// Alloy file answers a workspace query from its own source.

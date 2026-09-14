@@ -593,20 +593,26 @@ impl State {
 
             // `M.Ns.T`: the word in front of the group holds the module.
             None => {
-                let before = source[..holder_at].trim_end().strip_suffix('.')?;
-                let at = before.len().checked_sub(1)?;
+                let by_module = || {
+                    let before = source[..holder_at].trim_end().strip_suffix('.')?;
+                    let at = before.len().checked_sub(1)?;
 
-                if !keywords::is_word_at(source, at) {
-                    return None;
-                }
+                    if !keywords::is_word_at(source, at) {
+                        return None;
+                    }
 
-                let (ms, me) = keywords::word_range(source, at);
-                let spec = module_bindings(source)
-                    .into_iter()
-                    .find(|(bound, _)| *bound == source[ms..me])
-                    .map(|(_, spec)| spec)?;
-                let file =
-                    imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
+                    let (ms, me) = keywords::word_range(source, at);
+                    let spec = module_bindings(source)
+                        .into_iter()
+                        .find(|(bound, _)| *bound == source[ms..me])
+                        .map(|(_, spec)| spec)?;
+
+                    imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))
+                };
+                // `Outer.Inner.T`: the word in front is a group of this
+                // file, so the member is this file's own. The holds
+                // test below says whether the group has it.
+                let file = by_module().or_else(|| uri_to_path(uri))?;
 
                 (file, holder.to_string())
             }

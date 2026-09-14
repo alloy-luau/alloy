@@ -100,6 +100,33 @@ impl<'s> Scan<'s> {
         best.map(|(_, n)| n)
     }
 
+    /// The block path a token sits in: the names of the `struct`,
+    /// `impl` and `namespace` blocks that enclose it, outermost first.
+    /// Two functions in different blocks share no scope, so they may
+    /// share a name.
+    fn enclosing_path(&self, j: usize) -> String {
+        let mut parts: Vec<(usize, &'s str)> = Vec::new();
+
+        for (i, e) in self.st.ends.iter().enumerate() {
+            let Some(e) = e else { continue };
+
+            if !(i < j && j < *e) || !matches!(self.t(i), "struct" | "impl" | "namespace") {
+                continue;
+            }
+
+            let name = if self.at(i, "impl") && self.is_name(i + 1) && self.at(i + 2, "for") {
+                self.last_segment(i + 3)
+            } else {
+                self.last_segment(i + 1)
+            };
+
+            parts.push((i, name));
+        }
+
+        parts.sort_unstable();
+        parts.iter().map(|(_, n)| *n).collect::<Vec<_>>().join(".")
+    }
+
     /// The last name of a dotted path that starts at `i`: `Zoo.Lion` is
     /// `Lion`. An `impl` may target a namespace member, and the struct
     /// that declares a private member is the member itself.
@@ -342,8 +369,9 @@ impl<'s> Scan<'s> {
             }
 
             // A `@cfg` pair declares one name per build, so the two
-            // bodies never stand together.
-            if self.attributed(head) {
+            // bodies never stand together. Any other attribute, such as
+            // `@test`, leaves both bodies in the build.
+            if self.cfg_gated(head) {
                 continue;
             }
 
@@ -355,8 +383,7 @@ impl<'s> Scan<'s> {
             }
 
             let path = self.slice(start, j);
-            let owner = self.enclosing_owner(start).unwrap_or("");
-            let key = format!("{owner}.{path}");
+            let key = format!("{}.{path}", self.enclosing_path(start));
 
             match seen.iter().find(|(k, _)| *k == key) {
                 Some((_, first)) => {
@@ -378,14 +405,13 @@ impl<'s> Scan<'s> {
         }
     }
 
-    /// Whether an attribute line stands right above the token.
-    fn attributed(&self, i: usize) -> bool {
+    /// Whether a `@cfg` line stands right above the token.
+    fn cfg_gated(&self, i: usize) -> bool {
         let at = self.start(i) as usize;
         let from = self.src[..at].rfind('\n').map_or(0, |n| n + 1);
         let above = self.src[..from].trim_end();
         let above = &above[above.rfind('\n').map_or(0, |n| n + 1)..];
-
-        above.trim_start().starts_with('@')
+        above.trim_start().starts_with("@cfg")
     }
 
     /// A write into the value a `const` holds: `X.field = v`, `X[k] = v`,

@@ -1435,6 +1435,27 @@ mod tests {
         // Two impls may write one method name; the owner tells them apart.
         let two = "struct A as\n    x: number\nend\nstruct B as\n    x: number\nend\nimpl A as\n    function get(self): number\n        return self.x\n    end\nend\nimpl B as\n    function get(self): number\n        return self.x\n    end\nend\nprint(A, B)\n";
         assert_eq!(names(two), Vec::<&str>::new());
+        // `@test` keeps both bodies in the build, so the pair still fires.
+        // Only a `@cfg` pair stands apart.
+        assert_eq!(
+            names(
+                "@test\nfunction name()\n    return 1\nend\n\nfunction name()\n    return 2\nend\n"
+            ),
+            vec!["duplicate_function"]
+        );
+        assert_eq!(
+            names(
+                "@cfg(debug)\nfunction name()\n    return 1\nend\n\n@cfg(not debug)\nfunction name()\n    return 2\nend\n"
+            ),
+            Vec::<&str>::new()
+        );
+        // A namespace holds its own scope, so the two names never meet.
+        assert_eq!(
+            names(
+                "namespace A as\n    function name()\n        return 1\n    end\nend\n\nfunction name()\n    return 2\nend\n"
+            ),
+            Vec::<&str>::new()
+        );
     }
 
     /// An `if` expression in a `case` arm has no `end`; counting one

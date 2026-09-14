@@ -1448,6 +1448,9 @@ impl<'s> Desugar<'s> {
         // a second slot and leave the first one nil.
         if hoisted && is_local {
             first_tok += 1 + u32::from(exported);
+        } else if exported {
+            // `export` goes: `local` takes its place in the lead.
+            first_tok += 1;
         }
 
         let decl_start = self.toks[first_tok as usize].start;

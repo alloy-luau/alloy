@@ -681,6 +681,17 @@ mod tests {
     }
 
     #[test]
+    fn an_attributed_export_function_drops_the_export_word() {
+        let out = compile("@native\nexport function f(): number\n    return 1\nend\n").unwrap();
+        assert!(
+            out.ship.contains("@native local function f(): number"),
+            "{}",
+            out.ship
+        );
+        assert!(!out.ship.contains("local export"), "{}", out.ship);
+    }
+
+    #[test]
     fn a_unit_variant_inside_a_payload_refutes() {
         let src = "enum Inner as A, B end\nenum Wrapper as Wrap(Inner), Plain end\nlocal w: Wrapper = Wrapper.Plain\nmatch w with\n    case Wrap(A) then print(1)\n    case Plain then print(2)\nend\n";
         let got = messages(src);

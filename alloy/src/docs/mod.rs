@@ -33,6 +33,7 @@ pub fn kind_for(message: &str) -> &'static str {
         // the Alloy form, and the rules below would read the declaration
         // word in the sentence as that declaration's own family.
         (&["body is `as ... end`"], "SyntaxError"),
+        (&["one name holds one declaration"], "DuplicateError"),
         (&["a comment starts with"], "SyntaxError"),
         (&["has no `++`"], "SyntaxError"),
         (&["`declare` takes"], "DeclareError"),

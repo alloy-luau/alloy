@@ -803,6 +803,16 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
         }
     }
 
+    // A report the resite moved onto a line the compiler already
+    // reported says the same thing twice: a duplicate declaration lands
+    // on the second name, where Alloy's own report stands.
+    analysis.diagnostics.retain(|d| {
+        !(d.kind == "TypeError" || d.kind == "SyntaxError")
+            || !files
+                .iter()
+                .any(|f| f.rel == d.rel && f.error_lines.contains(&d.line))
+    });
+
     // The checker checks an invariant position both ways and against
     // the optional a method's parameter carries, so one mistake reads
     // three times at one place. Nothing in the source is optional.

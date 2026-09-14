@@ -603,6 +603,15 @@ impl<'s> Scan<'s> {
         nest
     }
 
+    /// Whether a namespace body encloses token `j`.
+    pub(crate) fn in_namespace(&self, j: usize) -> bool {
+        self.st
+            .ends
+            .iter()
+            .enumerate()
+            .any(|(i, e)| self.at(i, "namespace") && e.is_some_and(|e| i < j && j < e))
+    }
+
     /// Whether a loop encloses token `j`.
     pub(crate) fn in_loop(&self, j: usize) -> bool {
         self.st.ends.iter().enumerate().any(|(i, e)| {

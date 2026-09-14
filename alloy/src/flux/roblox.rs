@@ -524,6 +524,12 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // `export` on a namespace member exports nothing; the build
+            // reports the word, so the member is no export to document.
+            if self.in_namespace(i) {
+                continue;
+            }
+
             // The line above ends in a comment: documented.
             let gap = self.gap_before(i);
             let above = gap.trim_end_matches([' ', '\t']);
@@ -778,6 +784,14 @@ mod tests {
         );
         assert_eq!(
             all("-- Adds one.\nexport function f(): number\n    return 1\nend\n"),
+            Vec::<&str>::new()
+        );
+        // `export` on a namespace member exports nothing, and the build
+        // says so; the lint does not call the member exported.
+        assert_eq!(
+            all(
+                "-- The group.\nexport namespace Outer as\n    export namespace Inner as\n        public function greet(): string\n            return \"hi\"\n        end\n    end\nend\n"
+            ),
             Vec::<&str>::new()
         );
     }

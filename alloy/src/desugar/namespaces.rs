@@ -852,7 +852,7 @@ impl<'s> Desugar<'s> {
         let header = match info.parent.is_some() {
             true => format!("{} = {{}}", info.path),
 
-            false => format!("local {} = {{}}", info.path),
+            false => self.decl_head(&info.path).trim_end().to_string(),
         };
         self.generate(decl_start, &header);
 

@@ -23,7 +23,7 @@ use alloy_syntax::ast::{
     Binding, Block, CallArgs, ChildName, Chunk, ClassMember, Cond, DefaultExport, Destructure,
     Expr, FunctionBody, GenericFor, If, IndexKey, Local, Stmt, TableField, TokSpan, TypeEdit,
 };
-use alloy_syntax::lexer::Tok;
+use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 
@@ -471,6 +471,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         renames: Vec::new(),
         ship_blanks: Vec::new(),
         structs: HashSet::new(),
+        hoisted: Vec::new(),
         struct_generics: HashMap::new(),
         structs_with_new: HashMap::new(),
         impl_target: None,
@@ -545,6 +546,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
+    d.scan_hoisted(&chunk.block);
     d.scan_plain_tables(&chunk.block);
     d.scan_reduce_inserts(&chunk.block);
     d.scan_static_checks(&chunk.block);
@@ -595,6 +597,16 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
     for kind in d.mapped_used.clone() {
         let line = format!("{} ", Desugar::mapped_type_function(kind));
+        d.generate(insert_at, &line);
+    }
+
+    // A table a function reads above its declaration opens on the first
+    // line, so no line count moves, and the declaration fills it. One
+    // table from the first line on: the checker types every write to
+    // it as one, where a forward `local Point` alone reads as nil.
+    if !d.hoisted.is_empty() {
+        let tables = vec!["{}"; d.hoisted.len()].join(", ");
+        let line = format!("local {} = {tables} ", d.hoisted.join(", "));
         d.generate(insert_at, &line);
     }
 
@@ -965,6 +977,9 @@ struct Desugar<'s> {
     structs: HashSet<String>,
     /// The type parameters of a struct or an enum as the source writes
     /// them, `<T>`, for the ones that take any.
+    /// The struct, enum, and namespace names a use precedes. The first
+    /// line declares them, and their declaration assigns in place.
+    hoisted: Vec<String>,
     struct_generics: HashMap<String, String>,
     /// The structs whose `impl` writes a constructor, `new` or `New`, by
     /// its name: they construct through it, and the fields form stays
@@ -1677,6 +1692,43 @@ pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
     }
 }
 
+/// The token span of every function body under these statements. A use
+/// inside one runs after the declaration it reads.
+fn stmts_function_spans(stmts: &[Stmt], out: &mut Vec<TokSpan>) {
+    for s in stmts {
+        // A namespace renders its members itself, so the child walk
+        // skips them; the bodies are still bodies.
+        if let Stmt::Namespace(ns) = s {
+            for m in &ns.members {
+                stmts_function_spans(std::slice::from_ref(&m.stmt), out);
+            }
+
+            continue;
+        }
+
+        for c in stmt_children(s) {
+            child_function_spans(c, out);
+        }
+    }
+}
+
+fn child_function_spans(c: Child<'_>, out: &mut Vec<TokSpan>) {
+    match c {
+        Child::Expr(e) => {
+            for c in expr_children(e) {
+                child_function_spans(c, out);
+            }
+        }
+
+        Child::Block(b) => stmts_function_spans(&b.stmts, out),
+
+        Child::Function(f) => {
+            out.push(f.span);
+            stmts_function_spans(&f.block.stmts, out);
+        }
+    }
+}
+
 /// Reports if a function header itself needs rewriting.
 fn function_needs_rewrite(body: &FunctionBody) -> bool {
     body.is_async.is_some()
@@ -1896,6 +1948,92 @@ impl<'s> Desugar<'s> {
 
     fn text_of(&self, span: TokSpan) -> &'s str {
         &self.src[self.byte_start(span) as usize..self.byte_end(span) as usize]
+    }
+
+    /// The struct, enum, and namespace names a function body reads
+    /// above their declaration. Such a function would call a nil global
+    /// `Point`; the first line opens the table instead, and the
+    /// declaration fills it. A use that runs at the top level before the
+    /// declaration reads an empty table, so it reports.
+    fn scan_hoisted(&mut self, block: &Block) {
+        let mut bodies = Vec::new();
+        stmts_function_spans(&block.stmts, &mut bodies);
+
+        for s in &block.stmts {
+            let (name, decl, kind) = match s {
+                Stmt::Struct(d) => (d.name, d.span, "struct"),
+
+                Stmt::Enum(d) => (d.name, d.span, "enum"),
+
+                Stmt::Namespace(d) => (d.name, d.span, "namespace"),
+
+                _ => continue,
+            };
+            let name = self.text_of(name);
+            let mut deferred = false;
+
+            for k in 0..decl.start as usize {
+                let t = self.toks[k];
+
+                // A field, `x.Point`, and a type, `p: Point`, read no
+                // value; the alias is in scope over the whole block. A
+                // declaration head of the name is the duplicate check's.
+                let before = if k > 0 {
+                    self.toks[k - 1].text(self.src)
+                } else {
+                    ""
+                };
+
+                if t.kind != TokKind::Ident
+                    || t.text(self.src) != name
+                    || matches!(
+                        before,
+                        "." | "struct"
+                            | "enum"
+                            | "namespace"
+                            | "impl"
+                            | "for"
+                            | "trait"
+                            | "class"
+                            | "interface"
+                            | "type"
+                            | "attribute"
+                            | "remote"
+                            | "macro"
+                    )
+                    || self.type_name_spans.iter().any(|s| s.start as usize == k)
+                {
+                    continue;
+                }
+
+                if bodies
+                    .iter()
+                    .any(|b| (b.start as usize..b.end as usize).contains(&k))
+                {
+                    deferred = true;
+                    continue;
+                }
+
+                let message =
+                    format!("`{name}` is declared below this use; move the {kind} above it");
+                self.diagnose(TokSpan::new(k, k + 1), &message);
+                break;
+            }
+
+            if deferred {
+                self.hoisted.push(name.to_string());
+            }
+        }
+    }
+
+    /// `local Name = {} ` for a declaration, or nothing for one the
+    /// first line opened.
+    fn decl_head(&self, name: &str) -> String {
+        if self.hoisted.iter().any(|h| h == name) {
+            String::new()
+        } else {
+            format!("local {name} = {{}} ")
+        }
     }
 
     fn line_of(&self, byte: u32) -> usize {

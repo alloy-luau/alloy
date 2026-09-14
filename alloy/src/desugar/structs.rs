@@ -772,6 +772,7 @@ impl<'s> Desugar<'s> {
             ("f".to_string(), String::new())
         };
         let d = defaults.join(" ");
+        let head = self.decl_head(&name);
         let header = if self.options.check {
             let new_fn = if self.structs_with_new.contains_key(&name) {
                 String::new()
@@ -788,11 +789,11 @@ impl<'s> Desugar<'s> {
             };
 
             format!(
-                "local {name} = {{}} {name}.__index = {name}{private_table} function {name}.__new{fn_generics}({param}){ret} {d} return (setmetatable(f, {name}) :: any) end{new_fn}"
+                "{head}{name}.__index = {name}{private_table} function {name}.__new{fn_generics}({param}){ret} {d} return (setmetatable(f, {name}) :: any) end{new_fn}"
             )
         } else {
             format!(
-                "local {name} = {{}} {name}.__index = {name} setmetatable({name}, {{ __call = function(_, f) {d} return setmetatable(f, {name}) end }}) function {name}.new(f) return {name}(f) end"
+                "{head}{name}.__index = {name} setmetatable({name}, {{ __call = function(_, f) {d} return setmetatable(f, {name}) end }}) function {name}.new(f) return {name}(f) end"
             )
         };
         self.generate(start, &header);

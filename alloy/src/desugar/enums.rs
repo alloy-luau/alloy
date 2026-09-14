@@ -136,10 +136,8 @@ impl<'s> Desugar<'s> {
         };
 
         // Header line. An attribute line above `enum` keeps its newline.
-        self.generate(
-            start,
-            &format!("local {name} = {{}} {name}.__index = {name}"),
-        );
+        let head = self.decl_head(&name);
+        self.generate(start, &format!("{head}{name}.__index = {name}"));
         self.blank_lines(start, header_end);
         let mut cursor = header_end;
         let mut types = Vec::new();

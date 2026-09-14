@@ -843,7 +843,7 @@ impl State {
             return None;
         }
 
-        let owner = receiver_type(doc, head.len() - 1);
+        let owner = receiver_type(self, doc, head.len() - 1);
         let mut traits: Vec<String> = Vec::new();
 
         for site in self
@@ -930,7 +930,7 @@ impl State {
                 .collect();
 
             for (start, end, receiver) in method_calls(&d.source, name) {
-                let holds = match receiver_type(d, receiver) {
+                let holds = match receiver_type(self, d, receiver) {
                     Some(ty) => targets.contains(&ty.as_str()),
 
                     None => only_one,
@@ -956,7 +956,7 @@ impl State {
     /// of `c.x`, the name in front of the brace of `new Shape { x = 1 }`
     /// or of `case Shape { x }`, or the struct whose body declares it.
     fn field_owner(&self, doc: &Doc, start: usize, end: usize) -> Option<String> {
-        if let Some(owner) = used_field_owner(doc, start) {
+        if let Some(owner) = used_field_owner(self, doc, start) {
             return Some(owner);
         }
 
@@ -1021,7 +1021,7 @@ impl State {
         };
 
         for (u, d) in &self.docs {
-            let mut mine: Vec<Value> = field_sites(d, &owner, &name)
+            let mut mine: Vec<Value> = field_sites(self, d, &owner, &name)
                 .into_iter()
                 .map(|(s, e)| text_edit(&d.source, s, e, &new_name))
                 .collect();
@@ -1220,7 +1220,7 @@ impl State {
         let mut changes: Map<String, Value> = Map::new();
 
         for (u, d) in &self.docs {
-            let edits: Vec<Value> = field_sites(d, owner, name)
+            let edits: Vec<Value> = field_sites(self, d, owner, name)
                 .into_iter()
                 .map(|(s, e)| text_edit(&d.source, s, e, new_name))
                 .collect();
@@ -1699,7 +1699,7 @@ fn bound_at(src: &str, name: &str) -> Option<(String, usize)> {
 /// in the struct body, each key of a constructor, and each read off a
 /// receiver of that type. A receiver whose type the source does not
 /// say names no struct, so it stays as it is.
-fn field_sites(doc: &Doc, owner: &str, name: &str) -> Vec<(usize, usize)> {
+fn field_sites(st: &State, doc: &Doc, owner: &str, name: &str) -> Vec<(usize, usize)> {
     let mut out = constructor_keys(&doc.source, owner, name);
     out.extend(field_declaration(&doc.source, owner, name));
 
@@ -1709,7 +1709,7 @@ fn field_sites(doc: &Doc, owner: &str, name: &str) -> Vec<(usize, usize)> {
                 .toks
                 .iter()
                 .filter(|t| t.text(&doc.source) == name)
-                .filter(|t| used_field_owner(doc, t.start as usize).as_deref() == Some(owner))
+                .filter(|t| used_field_owner(st, doc, t.start as usize).as_deref() == Some(owner))
                 .map(|t| (t.start as usize, t.end as usize)),
         );
     }

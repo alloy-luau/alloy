@@ -631,6 +631,37 @@ fn a_field_at_a_use_reads_its_declaration() {
     assert_eq!(used_field_hover(&st, doc, 0, 1), None);
 }
 
+#[test]
+fn every_hop_of_a_field_chain_names_its_owner() {
+    let a = "import { B } from \"./b\"\n\nstruct A as\n    b: B,\nend\n\nlocal a = new A { b = new B { c = new C { value = 1 } } }\nprint(a.b.c.value)\n";
+    let b = "export struct B as\n    c: C,\nend\n";
+    let c = "export struct C as\n    value: number,\nend\n";
+    let st = super::support::files(&[
+        ("file:///a.aly", a),
+        ("file:///b.aly", b),
+        ("file:///c.aly", c),
+    ]);
+    let doc = st.docs.get("file:///a.aly").expect("doc");
+    // The name of one hop, by the text that runs from it.
+    let hover = |rest: &str, name: usize| {
+        let start = a.rfind(rest).expect("the chain");
+
+        used_field_hover(&st, doc, start, start + name)
+    };
+    assert_eq!(
+        hover("b.c.value", 1).as_deref(),
+        Some("```alloy\nb: B\n```\nA field of `struct A`.")
+    );
+    assert_eq!(
+        hover("c.value", 1).as_deref(),
+        Some("```alloy\nc: C\n```\nA field of `struct B`.")
+    );
+    assert_eq!(
+        hover("value)", 5).as_deref(),
+        Some("```alloy\nvalue: number\n```\nA field of `struct C`.")
+    );
+}
+
 /// The second link of a chain named the receiver by the first word of
 /// the folded self type, `read`.
 #[test]

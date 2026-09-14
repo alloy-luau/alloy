@@ -495,7 +495,7 @@ pub(crate) fn enclosing_brace(source: &str, at: usize) -> Option<usize> {
 /// The type that owns a field where it is read, `self.secret` or `p.x`:
 /// the `impl` block around a `self`, else what the receiver's own
 /// declaration says. None when the word sits after no `.`.
-pub(crate) fn used_field_owner(doc: &Doc, start: usize) -> Option<String> {
+pub(crate) fn used_field_owner(st: &State, doc: &Doc, start: usize) -> Option<String> {
     // The word sits after a `.`; a `:` names a method and `..` is the
     // concatenation operator.
     let head = doc.source[..start].trim_end();
@@ -504,13 +504,13 @@ pub(crate) fn used_field_owner(doc: &Doc, start: usize) -> Option<String> {
         return None;
     }
 
-    receiver_type(doc, head.len() - 1)
+    receiver_type(st, doc, head.len() - 1)
 }
 
 /// The type a receiver holds, for the separator at `at`: the type of the
 /// `impl` block around a `self`, else what the receiver's own
 /// declaration says. `p.x` and `p:m()` read the same receiver.
-pub(crate) fn receiver_type(doc: &Doc, at: usize) -> Option<String> {
+pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> {
     let receiver_head = doc.source[..at].trim_end();
 
     if !receiver_head.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
@@ -519,6 +519,14 @@ pub(crate) fn receiver_type(doc: &Doc, at: usize) -> Option<String> {
 
     let (rs, re) = keywords::word_range(&doc.source, receiver_head.len() - 1);
     let receiver = &doc.source[rs..re];
+
+    // `a.b.c`: the receiver is itself a field of the hop before it, so
+    // no binding of the file names it. The hop that holds it says what
+    // type it carries, and the walk reads one link at a time.
+    if let Some(hop) = used_field_owner(st, doc, rs) {
+        return field_type(st, doc, &hop, receiver);
+    }
+
     // `self` reads the type of the `impl` block around it; any other
     // name reads its annotation or what it starts from.
     let owner = match receiver {
@@ -546,16 +554,16 @@ pub(crate) fn receiver_type(doc: &Doc, at: usize) -> Option<String> {
     Some(owner.split('<').next().unwrap_or(&owner).to_string())
 }
 
-/// A field where it is read, `self.secret` or `p.x`. The child answers
-/// with the type alone; the declaration carries `private`, the
-/// modifiers, and the struct that owns it.
-pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) -> Option<String> {
-    let word = &doc.source[start..end];
-    let owner = used_field_owner(doc, start)?;
-    // The declaration of the struct, here or in a module this file
-    // imports, and the line inside it that declares the field.
-    let (keyword, line) = doc
-        .decls
+/// The line a struct body writes for one field, with the keyword of
+/// the declaration that holds it: this file's own, else a module of
+/// the workspace.
+fn declared_field_line(
+    st: &State,
+    doc: &Doc,
+    owner: &str,
+    field: &str,
+) -> Option<(&'static str, String)> {
+    doc.decls
         .iter()
         .chain(st.docs.values().flat_map(|d| d.decls.iter()))
         .filter(|d| d.name == owner)
@@ -566,11 +574,29 @@ pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) 
             let line = d
                 .hover
                 .lines()
-                .find(|l| field_key(l) == Some(word))
+                .find(|l| field_key(l) == Some(field))
                 .map(|l| l.trim().trim_end_matches(',').trim_end().to_string())?;
 
             Some((keyword, line))
-        })?;
+        })
+}
+
+/// The type one field of a struct holds, as the name a next hop reads
+/// off it: `b: B?` gives `B`.
+fn field_type(st: &State, doc: &Doc, owner: &str, field: &str) -> Option<String> {
+    let (_, line) = declared_field_line(st, doc, owner, field)?;
+    let named = alloy::docs::type_head(line.split_once(':')?.1.trim())?;
+
+    Some(named.split('<').next().unwrap_or(&named).to_string())
+}
+
+/// A field where it is read, `self.secret` or `p.x`. The child answers
+/// with the type alone; the declaration carries `private`, the
+/// modifiers, and the struct that owns it.
+pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) -> Option<String> {
+    let word = &doc.source[start..end];
+    let owner = used_field_owner(st, doc, start)?;
+    let (keyword, line) = declared_field_line(st, doc, &owner, word)?;
 
     let mut out = format!("```alloy\n{line}\n```\nA field of `{keyword} {owner}`.");
 

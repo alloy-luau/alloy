@@ -113,6 +113,17 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
             h["label"] = json!(text);
         }
 
+        // A bound leaves the type parameter list at emit and joins every
+        // use of the parameter as an intersection: the check artifact
+        // casts `xs[i]` to `(T & Ord)`. The reader wrote `T`.
+        if let Some(text) = drop_bound_intersections(&hint_label(h), doc) {
+            h["label"] = json!(text.clone());
+
+            if h.pointer("/textEdits/0/newText").is_some() {
+                h["textEdits"][0]["newText"] = json!(text);
+            }
+        }
+
         let label = hint_label(h);
 
         if !label.starts_with(": ") {

@@ -67,6 +67,10 @@ pub struct Interface {
     /// `interface` block. The alias marks no field `read` or `write`,
     /// so a printed record that marks one is another type.
     pub alias: bool,
+    /// Whether a `trait` declared it. The emit marks every method of a
+    /// trait `read`, so the printed record reads as a mapped type over
+    /// the name; the source wrote the name alone.
+    pub is_trait: bool,
 }
 
 /// The interfaces a source declares, with their bases and fields, and
@@ -134,6 +138,7 @@ fn record_aliases(source: &str) -> Vec<Interface> {
                 bases: Vec::new(),
                 fields,
                 alias: true,
+                is_trait: false,
             });
         }
     }
@@ -141,12 +146,42 @@ fn record_aliases(source: &str) -> Vec<Interface> {
     out
 }
 
+/// The interfaces and the traits a source declares. A trait is a named
+/// record too: the emit writes `type Ord = { read cmp: ... }`, and the
+/// checker prints that record wherever a bound on a type parameter
+/// reaches it.
 fn declared_interfaces(source: &str) -> Vec<Interface> {
     let mut out: Vec<Interface> = Vec::new();
     let mut open: Option<Interface> = None;
 
     for line in source.lines() {
         let text = line.trim();
+
+        if let Some(rest) = text
+            .strip_prefix("trait ")
+            .or_else(|| text.strip_prefix("export trait "))
+        {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            if let Some(previous) = open.take() {
+                out.push(previous);
+            }
+
+            if !name.is_empty() {
+                open = Some(Interface {
+                    name,
+                    bases: Vec::new(),
+                    fields: Vec::new(),
+                    alias: false,
+                    is_trait: true,
+                });
+            }
+
+            continue;
+        }
 
         if let Some(rest) = text
             .strip_prefix("interface ")
@@ -171,6 +206,7 @@ fn declared_interfaces(source: &str) -> Vec<Interface> {
                 bases,
                 fields: Vec::new(),
                 alias: false,
+                is_trait: false,
             });
 
             continue;
@@ -189,6 +225,25 @@ fn declared_interfaces(source: &str) -> Vec<Interface> {
         let head = text
             .trim_start_matches("read ")
             .trim_start_matches("write ");
+
+        // A trait writes its members as `function name(...)`, and the
+        // emit gives each one a key of that name.
+        if let Some(rest) = head
+            .trim_start_matches("private ")
+            .trim_start_matches("public ")
+            .strip_prefix("function ")
+        {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            if !name.is_empty() {
+                current.fields.push(name);
+            }
+
+            continue;
+        }
 
         if let Some((name, _)) = head.split_once(':')
             && !name.trim().is_empty()

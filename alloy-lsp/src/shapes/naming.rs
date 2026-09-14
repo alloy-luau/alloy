@@ -332,7 +332,10 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
             }
 
             // An interface carries the fields of what it extends too.
-            for iface in &known.interfaces {
+            // A trait is no mapped type: the emit marks every method of
+            // one `read`, so `Readonly<Ord>` names what the source
+            // spelled `Ord`.
+            for iface in known.interfaces.iter().filter(|i| !i.is_trait) {
                 let every = iface.inherited(&known.interfaces);
                 let all: Vec<&String> = every.iter().collect();
 
@@ -614,6 +617,22 @@ mod tests {
         let body = "{ collect: (self: { next: (self: any) -> U? }) -> Array<U>, next: (self: { next: (self: any) -> U? }) -> U?, take_while: (self: { next: (self: any) -> U? }, f: (U) -> boolean) -> any }";
 
         assert_eq!(name_of_body(body, &known), Some("Iter<U>".to_string()));
+    }
+
+    /// A bound on a type parameter prints as the trait's own record.
+    /// The trait is a name the source wrote, and the emit marks every
+    /// method of one `read`, so the record is no mapped type.
+    #[test]
+    fn a_trait_s_record_reads_as_the_trait() {
+        let known = Known {
+            interfaces: crate::shapes::interfaces(
+                "export trait Ord as\n    function cmp(self, other: Ord): number\nend\n",
+            ),
+            ..Known::default()
+        };
+        let printed = "{ read cmp: (self: any, other: t1) -> number }";
+
+        assert_eq!(name_of_body(printed, &known), Some("Ord".to_string()));
     }
 
     #[test]

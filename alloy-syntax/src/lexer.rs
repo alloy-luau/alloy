@@ -117,9 +117,10 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
     // absent. No token covers the mark, so the printer keeps it in the gap
     // before the first token. A mark anywhere else stays an error.
     let mut i = if src.starts_with('\u{feff}') { 3 } else { 0 };
-    // The brace depth inside each open interpolation hole, innermost last.
-    // A `}` at depth zero closes the hole and resumes the string.
-    let mut holes: Vec<usize> = Vec::new();
+    // The brace depth inside each open interpolation hole, innermost last,
+    // with the backtick that opened the string. A `}` at depth zero
+    // closes the hole and resumes the string.
+    let mut holes: Vec<(usize, usize)> = Vec::new();
 
     macro_rules! err {
         ($pos:expr, $($msg:tt)*) => {
@@ -231,7 +232,7 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
                             start: start as u32,
                             end: end as u32,
                         });
-                        holes.push(0);
+                        holes.push((0, start));
                         i = end;
                     }
 
@@ -244,12 +245,14 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
                         i = end;
                     }
 
+                    Segment::Newline => err!(start, "{MULTILINE_TEMPLATE}"),
+
                     Segment::Unterminated => err!(start, "unterminated interpolated string"),
                 }
             }
 
             b'{' if !holes.is_empty() => {
-                *holes.last_mut().expect("checked") += 1;
+                holes.last_mut().expect("checked").0 += 1;
                 toks.push(Tok {
                     kind: TokKind::Symbol,
                     start: i as u32,
@@ -258,8 +261,8 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
                 i += 1;
             }
 
-            b'}' if holes.last().is_some_and(|d| *d > 0) => {
-                *holes.last_mut().expect("checked") -= 1;
+            b'}' if holes.last().is_some_and(|h| h.0 > 0) => {
+                holes.last_mut().expect("checked").0 -= 1;
                 toks.push(Tok {
                     kind: TokKind::Symbol,
                     start: i as u32,
@@ -284,7 +287,7 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
                     );
                 }
 
-                holes.pop();
+                let (_, open) = holes.pop().expect("checked");
                 let start = i;
 
                 match interp_segment(b, i + 1) {
@@ -294,7 +297,7 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
                             start: start as u32,
                             end: end as u32,
                         });
-                        holes.push(0);
+                        holes.push((0, open));
                         i = end;
                     }
 
@@ -306,6 +309,8 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
                         });
                         i = end;
                     }
+
+                    Segment::Newline => err!(open, "{MULTILINE_TEMPLATE}"),
 
                     Segment::Unterminated => err!(start, "unterminated interpolated string"),
                 }
@@ -381,12 +386,20 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
     Ok(Lexed { toks, comments })
 }
 
+/// Luau reads a raw newline inside a template as a malformed string, so
+/// the lexer refuses it here. A `\` before the newline is an escape and
+/// stays legal.
+const MULTILINE_TEMPLATE: &str =
+    "a template string stays on one line; use `\\n` or join two strings";
+
 /// How one text segment of an interpolated string ends.
 enum Segment {
     /// At an unescaped `{`; the value is the byte past it.
     Hole(usize),
     /// At the closing backtick; the value is the byte past it.
     End(usize),
+    /// At a raw newline.
+    Newline,
     Unterminated,
 }
 
@@ -402,6 +415,8 @@ fn interp_segment(b: &[u8], from: usize) -> Segment {
             b'{' => return Segment::Hole(i + 1),
 
             b'`' => return Segment::End(i + 1),
+
+            b'\n' => return Segment::Newline,
 
             _ => i += 1,
         }
@@ -734,6 +749,21 @@ mod tests {
             kinds.iter().filter(|k| **k == TokKind::InterpTail).count(),
             2
         );
+    }
+
+    #[test]
+    fn template_over_two_lines_reports_at_the_backtick() {
+        for src in [
+            "x = `line one\nline two`",
+            "x = `a {1}\nb`",
+            "x = `a {1} b {2}\nc`",
+        ] {
+            let err = lex(src).unwrap_err();
+            assert_eq!(err.offset, 4, "{src:?}");
+            assert_eq!(err.message, MULTILINE_TEMPLATE, "{src:?}");
+        }
+
+        assert!(lex("x = `a\\nb`").is_ok(), "an escaped newline stays legal");
     }
 
     #[test]

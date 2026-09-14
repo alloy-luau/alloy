@@ -114,10 +114,26 @@ impl<'s> Desugar<'s> {
         } else {
             super::modules::type_arguments(&alias_generics)
         };
-        // The check artifact types a generic enum's unit variant as a
-        // tagged table too: the constructors return the enum, and a
+        // The check artifact types a generic enum as a plain union of
+        // `read` tables, one per variant, that list the methods its
+        // impls write. The solver finds no `T` through a metatable
+        // alias whose payload names the enum, `Node(Tree<T>, Tree<T>)`,
+        // and a metatable alias prints no argument, so `Opt.Some(1)`
+        // hovered `Opt`. The unit variant is a tagged table too: a
         // method call on a union with a string in it fails.
         let plain = self.options.check && !alias_generics.is_empty();
+        let methods = if plain {
+            let derives_clone = e
+                .attributes
+                .iter()
+                .filter(|a| a.name.is_some_and(|n| self.text_of(n) == "derive"))
+                .flat_map(|a| a.args.iter())
+                .any(|arg| self.text_of(arg.span()) == "Clone");
+
+            self.enum_alias_methods(&name, derives_clone)
+        } else {
+            String::new()
+        };
 
         // Header line. An attribute line above `enum` keeps its newline.
         self.generate(
@@ -153,7 +169,7 @@ impl<'s> Desugar<'s> {
                 };
                 self.generate(vs, &format!("{name}.{vname} = {value}"));
                 types.push(if plain {
-                    format!("typeof(setmetatable({{}} :: {{ tag: \"{vname}\" }}, {name}))")
+                    format!("{{ read tag: \"{vname}\"{methods} }}")
                 } else {
                     format!("\"{vname}\"")
                 });
@@ -170,11 +186,22 @@ impl<'s> Desugar<'s> {
                     .map(|(i, t)| format!("_{}: {}", i + 1, self.copy_type_to_string(*t)))
                     .collect();
                 // The alias carries the metatable, so a method an `impl`
-                // writes on the enum resolves on a payload value.
-                let variant_type = format!(
-                    "typeof(setmetatable({{}} :: {{ tag: \"{vname}\", {} }}, {name}))",
-                    field_types.join(", ")
-                );
+                // writes on the enum resolves on a payload value. A
+                // generic enum lists the methods instead.
+                let variant_type = if plain {
+                    let fields: Vec<String> =
+                        field_types.iter().map(|f| format!("read {f}")).collect();
+
+                    format!(
+                        "{{ read tag: \"{vname}\", {}{methods} }}",
+                        fields.join(", ")
+                    )
+                } else {
+                    format!(
+                        "typeof(setmetatable({{}} :: {{ tag: \"{vname}\", {} }}, {name}))",
+                        field_types.join(", ")
+                    )
+                };
                 // The check artifact types a plain constructor as this
                 // one variant, not as the whole enum: a mixed enum's
                 // union holds strings, and a method call on it would
@@ -335,6 +362,40 @@ impl<'s> Desugar<'s> {
         if e.exported {
             self.exports.push((name.clone(), name));
         }
+    }
+
+    /// The methods a generic enum's alias lists, `read m: typeof(Opt.m)`
+    /// each: the impls of this file, the impls of other files, and a
+    /// derived `clone`. `typeof` keeps the method's own generic list;
+    /// a spelled `self: Opt<T>` names the alias inside itself, and the
+    /// solver then finds no `T` for a call that takes an `Opt<T>`.
+    fn enum_alias_methods(&self, name: &str, derives_clone: bool) -> String {
+        let mut names: Vec<String> = self
+            .type_members
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|m| m.kind == "function" && m.shape.starts_with("(self"))
+            .map(|m| m.name.clone())
+            .collect();
+
+        for e in &self.options.foreign_impls {
+            if e.head().0 == name && !e.is_static {
+                names.push(e.name.clone());
+            }
+        }
+
+        if derives_clone {
+            names.push("clone".to_string());
+        }
+
+        names.sort();
+        names.dedup();
+
+        names
+            .iter()
+            .map(|m| format!(", read {m}: typeof({name}.{m})"))
+            .collect()
     }
 
     pub(crate) fn renamed(&self, name: &str) -> Option<String> {
@@ -2004,7 +2065,7 @@ mod tests {
         );
         assert!(
             out.check.contains(
-                "export type Opt<T> = typeof(setmetatable({} :: { tag: \"Some\", _1: T }, Opt)) | typeof(setmetatable({} :: { tag: \"Nil\" }, Opt))"
+                "export type Opt<T> = { read tag: \"Some\", read _1: T } | { read tag: \"Nil\" }"
             ),
             "{}",
             out.check
@@ -2080,8 +2141,48 @@ mod tests {
             "{}",
             out.check
         );
+        assert!(
+            out.check.contains(
+                "export type Opt<T> = { read tag: \"Some\", read _1: T, read map: typeof(Opt.map) } | { read tag: \"Nil\", read map: typeof(Opt.map) }"
+            ),
+            "{}",
+            out.check
+        );
         assert!(!out.ship.contains("Opt.map"), "{}", out.ship);
         assert!(out.ship.contains("if o == \"Nil\" then 0"), "{}", out.ship);
+    }
+
+    /// `Node(Tree<T>, Tree<T>)`: a payload that names the enum. The
+    /// solver finds no `T` for `Tree.Node(l, r)` through a metatable
+    /// alias, so a generic enum is a plain union of `read` tables, and
+    /// the methods of its impl and a derived `clone` sit in each
+    /// member as `typeof(Tree.m)`, which keeps the method's own `<T>`.
+    #[test]
+    fn a_recursive_generic_payload_is_a_plain_union() {
+        let src = "@derive(Clone)\nexport enum Tree<T> as\n    Leaf(T)\n    Node(Tree<T>, Tree<T>)\nend\n\nimpl Tree<T> as\n    function depth(self): number\n        return 1\n    end\nend\n\nfunction sumTree(t: Tree<number>): number\n    match t with\n        case Leaf(v) then return v\n        case Node(l, r) then return sumTree(l) + sumTree(r)\n    end\nend\nprint(sumTree(Tree.Leaf(1)))\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("function Tree.Node<T>(_1: Tree<T>, _2: Tree<T>): Tree<T> return"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains(
+                "export type Tree<T> = { read tag: \"Leaf\", read _1: T, read clone: typeof(Tree.clone), read depth: typeof(Tree.depth) } | { read tag: \"Node\", read _1: Tree<T>, read _2: Tree<T>, read clone: typeof(Tree.clone), read depth: typeof(Tree.depth) }"
+            ),
+            "{}",
+            out.check
+        );
+        assert!(!out.check.contains("setmetatable({} ::"), "{}", out.check);
+        assert!(
+            out.check
+                .contains("local l, r = _m1._1, _m1._2 return sumTree(l) + sumTree(r)"),
+            "{}",
+            out.check
+        );
     }
 
     /// A generic enum's alias asks for arguments the arms do not spell,

@@ -225,6 +225,26 @@ fn body_return(body: &str) -> BodyReturn {
     }
 }
 
+/// The one expression a macro body is, when the parser read it as a
+/// statement: `print(x)` or `new Pt { x = 0 }`. In expression position
+/// that expression is the body's value. A body of any other shape has
+/// no value, and the caller reports it.
+fn body_value(body: &str) -> Option<String> {
+    let lexed = alloy_syntax::lexer::lex(body).ok()?;
+    let (chunk, errors) =
+        alloy_syntax::parser::parse_lenient(body, &lexed.toks, Default::default());
+
+    if !errors.is_empty() {
+        return None;
+    }
+
+    match chunk.block.stmts.as_slice() {
+        [alloy_syntax::ast::Stmt::Call(e, _)] => Some(e.span().text(body, &lexed.toks).to_string()),
+
+        _ => None,
+    }
+}
+
 pub(crate) fn is_simple_text(t: &str) -> bool {
     !t.is_empty()
         && t.chars()
@@ -320,12 +340,39 @@ impl<'s> Desugar<'s> {
                         tail = Some(value);
                     }
 
-                    BodyReturn::Other { .. } => self.diagnose(
-                        span,
-                        &format!(
-                            "the macro `{name}` returns a statement; in an expression its body must end in a value"
-                        ),
-                    ),
+                    BodyReturn::Other { .. } => {
+                        self.diagnose(
+                            span,
+                            &format!(
+                                "the macro `{name}` returns a statement; in an expression its body must end in a value"
+                            ),
+                        );
+
+                        return "nil".to_string();
+                    }
+
+                    // A body of one expression the parser read as a
+                    // statement gives that expression. Behind the
+                    // `return` of the nested compile a `new` lowers to
+                    // its one-call form; alone it lowers to statements,
+                    // and statements cannot stand in an expression.
+                    BodyReturn::None if !body.is_empty() => match body_value(body) {
+                        Some(value) => {
+                            body = "";
+                            tail = Some(value);
+                        }
+
+                        None => {
+                            self.diagnose(
+                                span,
+                                &format!(
+                                    "the macro `{name}` expands to statements; in an expression its body must end in a value"
+                                ),
+                            );
+
+                            return "nil".to_string();
+                        }
+                    },
 
                     BodyReturn::None => {}
                 },
@@ -489,6 +536,20 @@ impl<'s> Desugar<'s> {
                     .enum_decls
                     .iter()
                     .map(|(name, variants)| (name.clone(), variants.clone()))
+                    .collect(),
+                // The structs of this file travel as imported shapes:
+                // a `new` in the body then lowers to the one-call form
+                // and its fields check, as a `new` in this file does.
+                import_struct_fields: self
+                    .options
+                    .import_struct_fields
+                    .iter()
+                    .cloned()
+                    .chain(
+                        self.struct_fields
+                            .iter()
+                            .map(|(n, f)| (n.clone(), f.clone())),
+                    )
                     .collect(),
                 // The outer file already binds every global it names;
                 // the fragment lands inside it and needs no prologue.
@@ -767,6 +828,59 @@ mod tests {
             messages(&one),
             vec![
                 "in macro expansion: this match is not exhaustive: `Choice` has no arm for `No`; add it or a `default` arm".to_string()
+            ]
+        );
+    }
+
+    /// A body of one `new Pt { ... }` is a statement to the parser. In
+    /// expression position the expansion wrote the statements a `new`
+    /// alone gets, `local p = local _n1 = ...`, and Luau refused it.
+    #[test]
+    fn a_struct_literal_macro_is_a_value_in_expression_position() {
+        let decl = "macro origin() new Pt { x = 0, y = 0 } end\n\n";
+        let calls = [
+            "local p = $origin()\nprint(p)\n",
+            "print($origin())\n",
+            "local s = match 1 with\n    case 0 then tostring($origin())\n    default \"n\"\nend\nprint(s)\n",
+        ];
+
+        for call in calls {
+            let out = crate::compile(&format!("{decl}{call}")).unwrap();
+
+            assert!(out.diagnostics.is_empty(), "{call}: {:?}", out.diagnostics);
+            assert!(
+                out.ship.contains("__alloy.construct(Pt, { x = 0, y = 0 })"),
+                "{call}: {}",
+                out.ship
+            );
+            assert!(!out.ship.contains("local _n1"), "{call}: {}", out.ship);
+        }
+
+        // Alone, the call is a statement and the body stays one.
+        let out = crate::compile(&format!("{decl}$origin()\n")).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.ship.contains("local _n1 = "), "{}", out.ship);
+
+        // A body of two statements has no value, and the call says so
+        // instead of shipping statements Luau cannot read.
+        assert_eq!(
+            messages(
+                "macro two(x)\n    print(x)\n    print(x)\nend\n\nlocal t = $two(1)\nprint(t)\n"
+            ),
+            vec![
+                "the macro `two` expands to statements; in an expression its body must end in a value"
+            ]
+        );
+
+        // A struct this file declares reaches the body with its fields.
+        assert_eq!(
+            messages(
+                "struct Own as\n    x: number\nend\n\nmacro bad() new Own { z = 1 } end\n\nlocal o = $bad()\nprint(o)\n"
+            ),
+            vec![
+                "in macro expansion: `new Own { ... }` leaves `x` unset; a field without a default needs a value",
+                "in macro expansion: `Own` has no field `z`; its fields are `x`",
             ]
         );
     }

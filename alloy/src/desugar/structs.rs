@@ -883,21 +883,26 @@ impl<'s> Desugar<'s> {
             .options
             .foreign_impls
             .iter()
-            .filter(|e| e.target == name)
+            .filter(|e| e.head().0 == name)
         {
+            let generics = e.head().1;
             let mut params: Vec<String> = Vec::new();
 
+            // `impl Box<T>` in another file: the stub binds `T` itself.
             if !e.is_static {
-                params.push(format!("self: {name}"));
+                let args = super::modules::type_arguments(generics);
+                params.push(format!("self: {name}{args}"));
             }
 
             if !e.params.is_empty() {
                 params.push(e.params.clone());
             }
 
-            let ret = e.ret.clone().unwrap_or_else(|| "()".to_string());
+            // A method that declares no return type returns what its
+            // body returns; `()` would reject the body's own value.
+            let ret = e.ret.clone().unwrap_or_else(|| "any".to_string());
             out.push_str(&format!(
-                " {name}.{} = (nil :: any) :: ({}) -> {ret}",
+                " {name}.{} = (nil :: any) :: {generics}({}) -> {ret}",
                 e.name,
                 params.join(", ")
             ));

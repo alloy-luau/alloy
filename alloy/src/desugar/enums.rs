@@ -38,6 +38,53 @@ pub(crate) fn same_type_text(a: &str, b: &str) -> bool {
 
 /// Whether a bare pattern name reads as a variant: it starts with a
 /// capital. A binding the author meant starts lowercase.
+/// A constructor's generic list and the arguments of the enum it
+/// returns. A parameter the payload names stays a parameter; one it
+/// does not name takes its default, or `any`: `Either.Left(4)` is an
+/// `Either<number, string>`, and `Opt.Nil` an `Opt<any>`.
+fn variant_arguments(alias_generics: &str, payload: &[String]) -> (String, String) {
+    let mut names = Vec::new();
+    let mut args = Vec::new();
+
+    for item in split_generics(alias_generics) {
+        let (name, default) = match item.split_once('=') {
+            Some((n, d)) => (n.trim(), d.trim()),
+
+            None => (item.as_str(), "any"),
+        };
+
+        if payload.iter().any(|t| names_word(t, name)) {
+            names.push(name.to_string());
+            args.push(name.to_string());
+        } else {
+            args.push(default.to_string());
+        }
+    }
+
+    let generics = if names.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", names.join(", "))
+    };
+
+    (generics, format!("<{}>", args.join(", ")))
+}
+
+/// True when the type text writes `name` as a whole word.
+fn names_word(text: &str, name: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+    text.match_indices(name).any(|(at, _)| {
+        let before = text[..at].chars().next_back().is_none_or(|c| !is_word(c));
+        let after = text[at + name.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word(c));
+
+        before && after
+    })
+}
+
 pub(crate) fn is_variant_name(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
@@ -56,8 +103,8 @@ impl<'s> Desugar<'s> {
         let header_end = self.toks[e.generics.unwrap_or(e.name).end as usize].end;
         let start = self.byte_start(e.span);
         // `enum Opt<T>`: the alias keeps the list with its defaults, a
-        // constructor takes the names alone, and a unit variant casts
-        // to the enum of `any` arguments.
+        // constructor takes the names its payload writes, and the
+        // enum it returns fills the rest with a default or `any`.
         let alias_generics = e
             .generics
             .map(|g| strip_bounds(self.text_of(g)))
@@ -67,13 +114,10 @@ impl<'s> Desugar<'s> {
         } else {
             super::modules::type_arguments(&alias_generics)
         };
-        let any_args = if alias_generics.is_empty() {
-            String::new()
-        } else {
-            let anys = vec!["any"; split_generics(&alias_generics).len()];
-
-            format!("<{}>", anys.join(", "))
-        };
+        // The check artifact types a generic enum's unit variant as a
+        // tagged table too: the constructors return the enum, and a
+        // method call on a union with a string in it fails.
+        let plain = self.options.check && !alias_generics.is_empty();
 
         // Header line. An attribute line above `enum` keeps its newline.
         self.generate(
@@ -99,13 +143,20 @@ impl<'s> Desugar<'s> {
             } else if v.payload.is_empty() {
                 // The checker widens a string field to `string`; the cast
                 // to the enum keeps `Ok(Zone.Spawn)` a `Result<Zone, _>`.
-                let value = if self.options.check {
-                    format!("(\"{vname}\" :: {name}{any_args})")
+                let (_, args) = variant_arguments(&alias_generics, &[]);
+                let value = if plain {
+                    format!("((\"{vname}\" :: any) :: {name}{args})")
+                } else if self.options.check {
+                    format!("(\"{vname}\" :: {name})")
                 } else {
                     format!("\"{vname}\"")
                 };
                 self.generate(vs, &format!("{name}.{vname} = {value}"));
-                types.push(format!("\"{vname}\""));
+                types.push(if plain {
+                    format!("typeof(setmetatable({{}} :: {{ tag: \"{vname}\" }}, {name}))")
+                } else {
+                    format!("\"{vname}\"")
+                });
                 unit_tests.push(format!("v == \"{vname}\""));
             } else {
                 let params: Vec<String> = (1..=v.payload.len()).map(|i| format!("_{i}")).collect();
@@ -124,15 +175,25 @@ impl<'s> Desugar<'s> {
                     "typeof(setmetatable({{}} :: {{ tag: \"{vname}\", {} }}, {name}))",
                     field_types.join(", ")
                 );
-                // The check artifact types the constructor as this one
-                // variant, not as the whole enum: a mixed enum's union
-                // holds strings, and a method call on it would read one.
-                // The variant is a subtype, so a `{name}` annotation
-                // still takes the value.
-                let (plist, ret) = if self.options.check {
-                    (field_types.join(", "), format!(": {variant_type}"))
+                // The check artifact types a plain constructor as this
+                // one variant, not as the whole enum: a mixed enum's
+                // union holds strings, and a method call on it would
+                // read one. The variant is a subtype, so a `{name}`
+                // annotation still takes the value. A generic enum's
+                // constructor returns the enum, so `Opt.Some(1)` is an
+                // `Opt<number>`.
+                let (fn_generics, plist, ret) = if plain {
+                    let (generics, args) = variant_arguments(&alias_generics, &field_types);
+
+                    (generics, field_types.join(", "), format!(": {name}{args}"))
+                } else if self.options.check {
+                    (
+                        fn_generics.clone(),
+                        field_types.join(", "),
+                        format!(": {variant_type}"),
+                    )
                 } else {
-                    (params.join(", "), String::new())
+                    (fn_generics.clone(), params.join(", "), String::new())
                 };
                 let value = format!(
                     "setmetatable({{ tag = \"{vname}\", {} }}, {name})",
@@ -261,10 +322,13 @@ impl<'s> Desugar<'s> {
 
             false => types.join(" | "),
         };
+        // The methods another file's `impl` writes, declared on the
+        // class table so that file's `function {name}.m` adds no key.
+        let foreign = self.foreign_impl_lines(&name);
         self.generate(
             end_tok.start,
             &format!(
-                "function {name}.is(v) return {test} end{printer} {export}type {name}{alias_generics} = {union}"
+                "function {name}.is(v) return {test} end{printer} {export}type {name}{alias_generics} = {union}{foreign}"
             ),
         );
 
@@ -439,10 +503,19 @@ impl<'s> Desugar<'s> {
             Pattern::Bind(name) => {
                 let n = self.text_of(*name).to_string();
 
-                if self.unit_variant_of(&n).is_some() {
-                    out.tests.push(format!("{path} == \"{n}\""));
-                } else {
-                    out.binds.push((n, path.to_string()));
+                match self.unit_variant_of(&n) {
+                    // The check artifact reads a generic enum's unit
+                    // variant as a tagged table; the tag test narrows
+                    // the union the way a payload test does.
+                    Some(e) if self.options.check && self.castable_enum(&e).is_none() => {
+                        out.tests.push(format!(
+                            "type({path}) == \"table\" and {path}.tag == \"{n}\""
+                        ));
+                    }
+
+                    Some(_) => out.tests.push(format!("{path} == \"{n}\"")),
+
+                    None => out.binds.push((n, path.to_string())),
                 }
             }
 
@@ -1900,9 +1973,10 @@ mod tests {
             .collect()
     }
 
-    /// `enum Opt<T>`: the alias and each constructor carry the
-    /// parameter, a unit variant casts to the enum of `any`, and the
-    /// ship artifact keeps the tagged table.
+    /// `enum Opt<T>`: a constructor returns the enum, so `Opt.Some(1)`
+    /// is an `Opt<number>`; a unit variant is a tagged table that casts
+    /// to the enum of `any`, so a method call on the union types. The
+    /// ship artifact keeps the tagged table and the string.
     #[test]
     fn a_generic_enum_types_its_constructors_and_alias() {
         let src = "export enum Opt<T> as\n    Some(T)\n    Nil\nend\nlocal a: Opt<number> = Opt.Some(1)\nlocal b: Opt<string> = Opt.Nil\nprint(a, b)\n";
@@ -1917,20 +1991,20 @@ mod tests {
             out.check
         );
         assert!(
-            out.check.contains(
-                "function Opt.Some<T>(_1: T): typeof(setmetatable({} :: { tag: \"Some\", _1: T }, Opt)) return"
-            ),
+            out.check
+                .contains("function Opt.Some<T>(_1: T): Opt<T> return"),
             "{}",
             out.check
         );
         assert!(
-            out.check.contains("Opt.Nil = (\"Nil\" :: Opt<any>)"),
+            out.check
+                .contains("Opt.Nil = ((\"Nil\" :: any) :: Opt<any>)"),
             "{}",
             out.check
         );
         assert!(
             out.check.contains(
-                "export type Opt<T> = typeof(setmetatable({} :: { tag: \"Some\", _1: T }, Opt)) | \"Nil\""
+                "export type Opt<T> = typeof(setmetatable({} :: { tag: \"Some\", _1: T }, Opt)) | typeof(setmetatable({} :: { tag: \"Nil\" }, Opt))"
             ),
             "{}",
             out.check
@@ -1945,8 +2019,9 @@ mod tests {
         assert!(out.ship.contains("Opt.Nil = \"Nil\""), "{}", out.ship);
     }
 
-    /// A default belongs to the alias alone; a constructor names the
-    /// parameters, the way a struct's `__new` does.
+    /// A default belongs to the alias alone. A constructor names the
+    /// parameters its payload writes, and the enum it returns fills
+    /// the rest with the default, or `any`.
     #[test]
     fn a_generic_default_stays_on_the_enum_alias() {
         let src = "enum Either<L, R = string> as\n    Left(L)\n    Right(R)\nend\nlocal e: Either<number> = Either.Left(1)\nprint(e)\n";
@@ -1959,15 +2034,54 @@ mod tests {
             out.check
         );
         assert!(
-            out.check.contains("function Either.Left<L, R>(_1: L)"),
+            out.check
+                .contains("function Either.Left<L>(_1: L): Either<L, string>"),
             "{}",
             out.check
         );
         assert!(
-            out.check.contains("function Either.Right<L, R>(_1: R)"),
+            out.check
+                .contains("function Either.Right<R>(_1: R): Either<any, R>"),
             "{}",
             out.check
         );
+    }
+
+    /// `impl Opt<T>` in another file: the declaring file's check
+    /// artifact declares the method on the class table with the impl's
+    /// own generic list, so the impl's `function Opt.map` adds no key
+    /// and a call on any `Opt<T>` finds it. A `case Nil` arm tests the
+    /// tag, since the unit variant is a table there.
+    #[test]
+    fn a_cross_file_impl_of_a_generic_enum_declares_its_methods() {
+        let src = "export enum Opt<T> as\n    Some(T)\n    Nil\nend\nlocal function f(o: Opt<number>): number\n    return match o with\n        case Nil then 0\n        case Some(v) then v\n    end\nend\nprint(f)\n";
+        let options = EmitOptions {
+            foreign_impls: vec![crate::extensions::Extension {
+                target: "Opt<T>".to_string(),
+                name: "map".to_string(),
+                is_static: false,
+                params: "f: (T) -> T".to_string(),
+                ret: Some("Opt<T>".to_string()),
+            }],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("Opt.map = (nil :: any) :: <T>(self: Opt<T>, f: (T) -> T) -> Opt<T>"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("if type(o) == \"table\" and o.tag == \"Nil\" then 0"),
+            "{}",
+            out.check
+        );
+        assert!(!out.ship.contains("Opt.map"), "{}", out.ship);
+        assert!(out.ship.contains("if o == \"Nil\" then 0"), "{}", out.ship);
     }
 
     /// A generic enum's alias asks for arguments the arms do not spell,

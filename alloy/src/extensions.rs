@@ -26,6 +26,18 @@ pub struct Extension {
     pub ret: Option<String>,
 }
 
+impl Extension {
+    /// The target's name and the generic list the `impl` head wrote:
+    /// `Box<T>` is `("Box", "<T>")`, and `Box` is `("Box", "")`.
+    pub fn head(&self) -> (&str, &str) {
+        match self.target.find('<') {
+            Some(at) => self.target.split_at(at),
+
+            None => (self.target.as_str(), ""),
+        }
+    }
+}
+
 /// True for a type that is not an Alloy struct: an Instance class, a
 /// datatype, or a primitive.
 pub fn is_foreign(name: &str) -> bool {
@@ -330,17 +342,19 @@ fn impls(src: &str, own: bool) -> FileImpls {
             continue;
         }
 
-        // A generic target's signatures name parameters the declaring
-        // file has not got, so they do not travel to it. A trait impl
-        // writes its methods on the same table a plain impl does, so
-        // those travel the way a plain impl's do.
-        if own && i.generics.is_some() {
-            continue;
-        }
+        // `impl Box<T>`: the head travels with its generic list, so the
+        // declaring file's stub binds `T` itself. A trait impl writes
+        // its methods on the same table a plain impl does, so those
+        // travel the way a plain impl's do.
+        let head = format!(
+            "{target}{}",
+            i.generics
+                .map(|g| crate::desugar::strip_bounds(text(g)))
+                .unwrap_or_default()
+        );
 
         if let Some(name) = i.trait_name {
-            out.trait_impls
-                .push((text(name).to_string(), target.to_string()));
+            out.trait_impls.push((text(name).to_string(), head.clone()));
         }
 
         for m in &i.methods {
@@ -357,7 +371,7 @@ fn impls(src: &str, own: bool) -> FileImpls {
             }
 
             out.methods.push(Extension {
-                target: target.to_string(),
+                target: head.clone(),
                 name: text(*first).to_string(),
                 is_static: !has_self,
                 params,
@@ -648,10 +662,15 @@ mod tests {
         assert_eq!(found[0].ret.as_deref(), Some("number"));
         assert!(!found[0].is_static);
 
-        // A generic target's signatures name parameters the declaring
-        // file has not got, so they stay here.
-        let generic = "import { Bag } from \"./bag\"\n\nimpl Bag<T> as\n    function first(self): T\n        return self.items[1]\n    end\nend\n";
-        assert!(struct_impls(generic).is_empty());
+        // A generic target travels with its generic list, so the
+        // declaring file's stub binds `T` itself.
+        let generic = "import { Bag } from \"./bag\"\n\nimpl Bag<T: Ord> as\n    function first(self): T\n        return self.items[1]\n    end\nend\n";
+        let found = struct_impls(generic);
+
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].target, "Bag<T>");
+        assert_eq!(found[0].head(), ("Bag", "<T>"));
+        assert_eq!(found[0].ret.as_deref(), Some("T"));
     }
 
     /// An `impl Trait for S` on a struct another file declares brings

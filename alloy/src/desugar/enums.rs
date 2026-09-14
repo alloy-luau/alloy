@@ -898,9 +898,9 @@ impl<'s> Desugar<'s> {
             // so its own column says what is left out.
             for j in 0..*arity {
                 let others_bind = payloads.iter().all(|r| {
-                    r.iter().enumerate().all(|(i, p)| {
-                        i == j || matches!(p, Pattern::Wildcard(_) | Pattern::Bind(_))
-                    })
+                    r.iter()
+                        .enumerate()
+                        .all(|(i, p)| i == j || self.irrefutable(p))
                 });
 
                 if !others_bind {
@@ -984,9 +984,7 @@ impl<'s> Desugar<'s> {
                 }
 
                 Pattern::Array { items, rest, .. } => {
-                    let all_bind = items
-                        .iter()
-                        .all(|i| matches!(i, Pattern::Wildcard(_) | Pattern::Bind(_)));
+                    let all_bind = items.iter().all(|i| self.irrefutable(i));
 
                     if !all_bind {
                         return false;
@@ -1089,7 +1087,7 @@ impl<'s> Desugar<'s> {
     /// a struct this file declares, and every field it names binds.
     fn struct_pattern_covers(&self, p: &Pattern) -> bool {
         let Pattern::Struct { name, fields, .. } = p else {
-            return matches!(p, Pattern::Wildcard(_) | Pattern::Bind(_));
+            return self.irrefutable(p);
         };
         let Some(n) = name else {
             return false;
@@ -1103,22 +1101,35 @@ impl<'s> Desugar<'s> {
             })
     }
 
+    /// Whether a pattern matches every value: a wildcard, or a name that
+    /// binds. A bare name that spells a unit variant tests for it (see
+    /// `compile_pattern`), so it refutes.
+    pub(crate) fn irrefutable(&self, p: &Pattern) -> bool {
+        match p {
+            Pattern::Wildcard(_) => true,
+
+            Pattern::Bind(n) => self.unit_variant_of(self.text_of(*n)).is_none(),
+
+            _ => false,
+        }
+    }
+
     /// Reports if the payload rows of one variant cover every payload.
     ///
     /// A row of irrefutable patterns covers. Otherwise one field must be
     /// the only refutable field in every row, and that field's column must
     /// cover on its own.
     pub(crate) fn payloads_cover(&self, rows: &[&Vec<&Pattern>], arity: usize) -> bool {
-        let irrefutable = |p: &Pattern| matches!(p, Pattern::Wildcard(_) | Pattern::Bind(_));
-
-        if rows.iter().any(|r| r.iter().all(|p| irrefutable(p))) {
+        if rows.iter().any(|r| r.iter().all(|p| self.irrefutable(p))) {
             return true;
         }
 
         (0..arity).any(|j| {
-            let others_bind = rows
-                .iter()
-                .all(|r| r.iter().enumerate().all(|(i, p)| i == j || irrefutable(p)));
+            let others_bind = rows.iter().all(|r| {
+                r.iter()
+                    .enumerate()
+                    .all(|(i, p)| i == j || self.irrefutable(p))
+            });
 
             if !others_bind {
                 return false;

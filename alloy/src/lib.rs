@@ -654,6 +654,17 @@ mod tests {
     }
 
     #[test]
+    fn a_unit_variant_inside_a_payload_refutes() {
+        let src = "enum Inner as A, B end\nenum Wrapper as Wrap(Inner), Plain end\nlocal w: Wrapper = Wrapper.Plain\nmatch w with\n    case Wrap(A) then print(1)\n    case Plain then print(2)\nend\n";
+        let got = messages(src);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0].contains("`Wrapper` has no arm for `Wrap(B)`; add it or a `default` arm"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
     fn a_ternary_branch_may_call_a_method_on_a_call() {
         let out =
             compile("local level = 7\nlocal tier = level > 5 ? tostring(level):rep(2) : \"low\"\n")

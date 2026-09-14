@@ -1204,7 +1204,23 @@ pub(crate) fn declared_signature(
         return forward_declaration(fence, body, tail, doc, &word);
     }
 
-    let name_end = name_end_in(body, &word)?;
+    // The declaration of a hoisted function assigns the forward
+    // `local`, so the child prints that local's optional type:
+    // `function isOdd: ((n: number) -> boolean)?`. The header under
+    // the caret says what the function takes and returns.
+    let Some(name_end) = name_end_in(body, &word) else {
+        let typed_binding = body
+            .strip_prefix("function ")
+            .or_else(|| body.strip_prefix("local "))
+            .and_then(|rest| rest.strip_prefix(&word))
+            .is_some_and(|after| after.starts_with(':'));
+
+        if !typed_binding || !heads_the_line(doc, line, &word) {
+            return None;
+        }
+
+        return declared_head(doc, &word).map(|out| format!("{fence}\n{out}\n```{tail}"));
+    };
     let child = head_spans(body, name_end)?;
     let owner = printed_owner(&body[..name_end], &word);
     // The file may bind the name as a value too: `local new =
@@ -1320,9 +1336,16 @@ fn forward_declaration(
 
     // A `const` declared below its use: no function head names it, and
     // the line the author wrote says what the name is.
-    let Some((source, is_async)) = declaration_head(doc, word) else {
-        return forward_constant(doc, word).map(|out| format!("{fence}\n{out}\n```{tail}"));
-    };
+    let out = declared_head(doc, word).or_else(|| forward_constant(doc, word))?;
+
+    Some(format!("{fence}\n{out}\n```{tail}"))
+}
+
+/// The signature the source declares for a function name, as the hover
+/// prints one: `function later(n: number): boolean`. An async function
+/// answers a Future.
+fn declared_head(doc: &Doc, word: &str) -> Option<String> {
+    let (source, is_async) = declaration_head(doc, word)?;
     let spans = head_spans(source, word.len())?;
     let mut out = format!("function {}", &source[..spans.params.1]);
 
@@ -1337,7 +1360,24 @@ fn forward_declaration(
         });
     }
 
-    Some(format!("{fence}\n{out}\n```{tail}"))
+    Some(out)
+}
+
+/// Whether the source line under the caret is the header of the
+/// function `word`, with any of `export`, `local`, and `async` in front.
+fn heads_the_line(doc: &Doc, line: u32, word: &str) -> bool {
+    let Some(text) = doc.source.lines().nth(line as usize) else {
+        return false;
+    };
+    let mut head = text.trim();
+
+    for keyword in ["export ", "local ", "async "] {
+        head = head.strip_prefix(keyword).unwrap_or(head);
+    }
+
+    head.strip_prefix("function ")
+        .and_then(|rest| rest.strip_prefix(word))
+        .is_some_and(|after| after.starts_with(['(', '<']))
 }
 
 /// The `const` a name below its use declares: the keyword with the type

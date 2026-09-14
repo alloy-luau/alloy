@@ -1493,3 +1493,22 @@ fn a_cut_result_hint_reads_by_the_method_tables_arguments() {
         assert!(!label.contains(slot), "{label}");
     }
 }
+
+/// A function called above its declaration gets a forward `local`, and
+/// its declaration assigns that local. The child prints the local's
+/// optional type on the declaration's own name; the header the caret
+/// sits on says what the function is, the way a call site reads it.
+#[test]
+fn a_hoisted_function_s_declaration_reads_its_own_header() {
+    let src = "function isEven(n: number): boolean\n    return isOdd(n - 1)\nend\n\nfunction isOdd(n: number): boolean\n    return isEven(n - 1)\nend\n";
+    let (st, uri) = super::support::one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed = "```luau\nfunction isOdd: ((n: number) -> boolean)?\n```";
+    assert_eq!(
+        declared_signature(printed, doc, 4, 9).as_deref(),
+        Some("```luau\nfunction isOdd(n: number): boolean\n```")
+    );
+
+    // The same print on a line that declares nothing is the child's.
+    assert_eq!(declared_signature(printed, doc, 1, 11), None);
+}

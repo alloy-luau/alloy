@@ -272,17 +272,19 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     f.at_line = vec![0; f.items.len()];
     f.measure_lines();
 
-    // An `if` expression is no bracket group, so the width alone cannot
-    // break it. The render says which ones came out past the column, the
-    // next pass breaks those, and a pass that breaks nothing is the
-    // last. Three cover an `if` expression inside another.
+    // An `if` expression and a `match` are no bracket group, so the
+    // width alone cannot break them. The render says which ones came out
+    // past the column, the next pass breaks those, and a pass that
+    // breaks nothing is the last. Three cover one inside another.
     for _ in 0..3 {
         let tree = f.tree();
         let hard = f.hard_breaks(&tree);
         f.render_nodes(&tree, &hard, 0);
         f.flush();
+        let broke_ifs = f.force_long_expr_ifs();
+        let broke_matches = f.force_long_matches();
 
-        if !f.force_long_expr_ifs() {
+        if !broke_ifs && !broke_matches {
             break;
         }
 
@@ -1022,6 +1024,38 @@ mod tests {
         let src = "match m with\ncase Ok(v) then\nprint(v)\ncase Err(e) then print(e)\ndefault\nprint(0)\nend\n";
         let want = "match m with\n    case Ok(v) then\n        print(v)\n    case Err(e) then print(e)\n    default\n        print(0)\nend\n";
         assert_eq!(fmt(src), want);
+        // The hand-broken form keeps its lines.
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A `match` is no bracket group, so the width alone cannot break it.
+    /// One written on a line that runs past `column_width` takes the
+    /// shape a hand-broken one has: each arm one level in, its body one
+    /// level deeper, and `end` back at the `match`. A second run changes
+    /// nothing.
+    #[test]
+    fn a_long_one_line_match_breaks_its_arms() {
+        let a = "\"1111111111111111111111111111111111111111111\"";
+        let b = "\"2222222222222222222222222222222222222222222\"";
+        let src = format!(
+            "match n with case 0 then return {a} case 1 then return {b} default return 0 end\n"
+        );
+        let want = format!(
+            "match n with\n    case 0 then\n        return {a}\n    case 1 then\n        return {b}\n    default\n        return 0\nend\n"
+        );
+        assert!(src.lines().any(|l| l.chars().count() > 100));
+        assert_eq!(fmt(&src), want);
+        assert_eq!(fmt(&want), want);
+
+        // Two arms on a line break even under the width.
+        let two = "match n with case 1 then f() case 2 then g() end\n";
+        let broken =
+            "match n with\n    case 1 then\n        f()\n    case 2 then\n        g()\nend\n";
+        assert_eq!(fmt(two), broken);
+
+        // One arm that fits keeps its line.
+        let one = "local x = match n with case 1 then f() end\n";
+        assert_eq!(fmt(one), one);
     }
 
     #[test]

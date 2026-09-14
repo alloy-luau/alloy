@@ -1000,6 +1000,149 @@ impl<'s> Formatter<'s> {
         out
     }
 
+    // --- the `match` block ---------------------------------------------------------
+
+    /// Breaks every `match` the last render left crowded: one whose head
+    /// line runs past `column_width` with an arm still on it, or one that
+    /// holds two arms on a line. True when one broke, so the caller
+    /// renders again.
+    ///
+    /// The shape is the one a hand-broken `match` already takes: each arm
+    /// one level under the `match`, its body one level deeper, and `end`
+    /// back at the `match`. A `match` whose arms each own a line stays as
+    /// it is, so a second run changes nothing.
+    pub(crate) fn force_long_matches(&mut self) -> bool {
+        let mut changed = false;
+
+        for i in 0..self.items.len() {
+            if !self.items[i].is("match") || self.items[i].name_here || !self.starts_block(i) {
+                continue;
+            }
+
+            let (arms, bodies, close) = self.match_parts(i);
+
+            if arms.is_empty() {
+                continue;
+            }
+
+            let head = self.at_line[i];
+            let long =
+                self.lines.get(head).map_or(0, |l| l.chars().count()) > self.options.column_width;
+            let on_head = arms
+                .iter()
+                .chain(close.iter())
+                .any(|m| self.at_line[*m] == head);
+            let crowded = arms
+                .windows(2)
+                .any(|w| self.at_line[w[0]] == self.at_line[w[1]]);
+
+            if !crowded && !(long && on_head) {
+                continue;
+            }
+
+            for b in arms.into_iter().chain(bodies).chain(close) {
+                if self.items[b].newlines_before == 0 {
+                    self.forced[b] = true;
+                    self.items[b].newlines_before = 1;
+                    changed = true;
+                }
+            }
+        }
+
+        changed
+    }
+
+    /// The arms of the `match` at `start`, the first item of each arm
+    /// body, and the `end` that closes the block. An arm of a nested
+    /// `match` belongs to that one, so only the arms one block in count.
+    fn match_parts(&self, start: usize) -> (Vec<usize>, Vec<usize>, Option<usize>) {
+        let mut arms = Vec::new();
+        let mut bodies = Vec::new();
+        let mut close = None;
+        let mut depth = 1i32;
+        let mut i = start + 1;
+
+        while i < self.items.len() {
+            if self.items[i].is_comment() {
+                i += 1;
+
+                continue;
+            }
+
+            depth += self.block_delta(i);
+
+            if depth == 0 {
+                close = Some(i);
+
+                break;
+            }
+
+            let it = &self.items[i];
+            let arm = depth == 1 && !it.name_here && (it.is("case") || it.is("default"));
+
+            if arm {
+                arms.push(i);
+
+                // The body opens after the `then` of a `case`; a
+                // `default` takes the arm word itself.
+                let head = match it.is("default") {
+                    true => Some(i),
+
+                    false => self.arm_then(i),
+                };
+
+                if let Some(h) = head
+                    && let Some(b) = self.next_code(h)
+                    && !self.opens_arm(b)
+                {
+                    bodies.push(b);
+                }
+            }
+
+            i += 1;
+        }
+
+        (arms, bodies, close)
+    }
+
+    /// The `then` that ends the head of the `case` arm at `start`, or
+    /// none for an arm the parser would refuse.
+    fn arm_then(&self, start: usize) -> Option<usize> {
+        let mut bracket = 0i32;
+
+        for j in start + 1..self.items.len() {
+            let t = &self.items[j];
+
+            if t.is_comment() {
+                continue;
+            }
+
+            if opens(&t.text) {
+                bracket += 1;
+            } else if closes(&t.text) {
+                bracket -= 1;
+            } else if bracket <= 0 {
+                if t.is("then") {
+                    return Some(j);
+                }
+
+                if self.opens_arm(j) {
+                    return None;
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Whether the item at `i` ends the arm before it: the word of
+    /// another arm, or the `end` of the `match`.
+    fn opens_arm(&self, i: usize) -> bool {
+        let it = &self.items[i];
+
+        !it.name_here && (it.is("case") || it.is("default") || it.is("end"))
+    }
+
     /// The opener of the group that holds item `i`, or none at the top.
     fn enclosing_open(&self, i: usize) -> Option<usize> {
         let mut depth = 0i32;

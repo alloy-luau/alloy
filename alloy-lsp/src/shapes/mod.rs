@@ -1417,7 +1417,8 @@ fn mentions(text: &str, var: &str) -> bool {
     })
 }
 
-fn replace_var(text: &str, var: &str, name: &str) -> String {
+/// The text with every whole-word `var` read as `name`.
+pub fn replace_var(text: &str, var: &str, name: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
 
@@ -2643,6 +2644,31 @@ mod tests {
     /// The enum's parameter list names the slot to read: a payload
     /// spelled as a parameter carries the argument, and any other
     /// payload, an alias the fold does not know, binds nothing.
+    /// A generic struct value prints as its table, and the field that
+    /// holds the parameter names the argument: `Box<number>`, nested
+    /// too.
+    #[test]
+    fn a_generic_struct_value_reads_its_arguments_from_its_fields() {
+        let known = Known {
+            shapes: vec![Shape::Struct {
+                name: "Box".into(),
+                fields: vec![("inner".into(), false)],
+                generics: vec!["T".into()],
+                types: vec!["T".into()],
+            }],
+            ..Default::default()
+        };
+        let printed = "local mapped: { @metatable t1, { inner: number } } where t1 = { __index: t1, map: <T, U>(self: { @metatable t1, { inner: T } }, f: (T) -> U) -> { @metatable t1, { inner: U } } }";
+        assert_eq!(fold(printed, &known), "local mapped: Box<number>");
+        assert_eq!(
+            fold(
+                "{ @metatable t1, { inner: { @metatable t1, { inner: string } } } }",
+                &known
+            ),
+            "Box<Box<string>>"
+        );
+    }
+
     #[test]
     fn a_generic_enum_reads_its_arguments_from_its_parameters() {
         let known = Known {

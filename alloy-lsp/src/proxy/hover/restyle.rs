@@ -179,6 +179,14 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
         }
     }
 
+    // `local mapped = a:map(double)`: the method's declared return
+    // under the receiver's arguments and the call's own.
+    if let Some(offset) = offset_of(&doc.source, line, character)
+        && let Some(named) = method_call_type(doc, rest, offset)
+    {
+        return Some(named);
+    }
+
     // `local p = Point.new(1, 2)`, and `local v = Geo.Vec2.new(5)` for a
     // namespace member: the path in front of `.new` names the struct.
     let path: String = rest
@@ -188,6 +196,199 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
     let target = path.strip_suffix(".new")?;
 
     (rest[path.len()..].starts_with('(') && declares(target)).then(|| target.to_string())
+}
+
+/// The declared return of `recv:name(args)` with its parameters bound.
+/// The receiver's declared type binds the impl's, `T` of `Box<T>` to
+/// `number`, and each argument's declared type binds the method's own:
+/// `double: (number) -> number` against `f: (T) -> U` binds `U`, so
+/// `Box<U>` reads `Box<number>`. None while the return names a
+/// parameter nothing bound.
+fn method_call_type(doc: &Doc, call: &str, offset: usize) -> Option<String> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let (receiver, after) = call.split_once(':')?;
+    let receiver = receiver.trim();
+    let name: String = after.chars().take_while(|c| is_word(*c)).collect();
+    let list = after[name.len()..].trim_start();
+
+    if receiver.is_empty() || !receiver.chars().all(is_word) || !list.starts_with('(') {
+        return None;
+    }
+
+    let len = group_len(list, '(', ')')?;
+    let named = match crate::context::declared(&doc.source, offset, receiver)? {
+        crate::context::Declared::Annotation(t) => t,
+
+        crate::context::Declared::Init(init) => constructed_type(doc, init.strip_prefix("new ")?)?,
+    };
+    let (owner, owner_args) = match named.split_once('<') {
+        Some((o, a)) => (o, crate::shapes::top_level_parts(a.strip_suffix('>')?)),
+
+        None => (named.as_str(), Vec::new()),
+    };
+    let declared = std::iter::once(&doc.source)
+        .chain(doc.import_sources.iter())
+        .map(|src| struct_generics(src, owner))
+        .find(|g| !g.is_empty())
+        .unwrap_or_default();
+    let impl_params: Vec<&str> = declared
+        .trim_matches(['<', '>'])
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    if impl_params.len() != owner_args.len() {
+        return None;
+    }
+
+    let head = impl_method_head(doc, owner, &name)?;
+    let spans = head_spans(head, name.len())?;
+    let (a, b) = spans.ret?;
+    let own: Vec<String> = spans
+        .generics
+        .map(|(g, h)| {
+            head[g..h]
+                .trim_matches(['<', '>'])
+                .split(',')
+                .map(|p| p.split(':').next().unwrap_or("").trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut bindings: Vec<(String, String)> = impl_params
+        .iter()
+        .zip(&owner_args)
+        .map(|(p, a)| (p.to_string(), a.trim().to_string()))
+        .collect();
+    let params = crate::shapes::top_level_parts(&head[spans.params.0 + 1..spans.params.1 - 1]);
+    let args = crate::shapes::top_level_parts(&list[1..len - 1]);
+    let typed = params
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| *p != "self" && !p.starts_with("self:"))
+        .zip(&args);
+
+    for (param, arg) in typed {
+        let Some((_, pattern)) = param.split_once(':') else {
+            continue;
+        };
+        let mut pattern = pattern.trim().to_string();
+
+        for (g, bound) in &bindings {
+            pattern = crate::shapes::replace_var(&pattern, g, bound);
+        }
+
+        if let Some(actual) = argument_type(doc, arg.trim(), offset) {
+            unify(&pattern, &actual, &own, &mut bindings);
+        }
+    }
+
+    let mut out = head[a..b].trim().to_string();
+
+    for (g, bound) in &bindings {
+        out = crate::shapes::replace_var(&out, g, bound);
+    }
+
+    let unbound = impl_params
+        .iter()
+        .copied()
+        .chain(own.iter().map(String::as_str))
+        .any(|g| mentions_word(&out, g));
+
+    (!unbound).then_some(out)
+}
+
+/// The type an argument is written with: a literal's, a name's
+/// annotation or `new`, or a declared function's head as `(A) -> R`.
+// ponytail: literals, annotated names, and function heads only; a
+// nested call or a field reads nothing, and the return stays unbound.
+fn argument_type(doc: &Doc, arg: &str, offset: usize) -> Option<String> {
+    if arg.parse::<f64>().is_ok() {
+        return Some("number".to_string());
+    }
+
+    if arg.starts_with(['"', '\'', '`']) {
+        return Some("string".to_string());
+    }
+
+    if matches!(arg, "true" | "false") {
+        return Some("boolean".to_string());
+    }
+
+    if arg.is_empty() || !arg.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    if let Some((head, _)) = declaration_head(doc, arg) {
+        let spans = head_spans(head, arg.len())?;
+        let params: Vec<&str> =
+            crate::shapes::top_level_parts(&head[spans.params.0 + 1..spans.params.1 - 1])
+                .into_iter()
+                .map(|p| p.split_once(':').map_or(p.trim(), |(_, t)| t.trim()))
+                .collect();
+        let ret = spans.ret.map_or("()", |(a, b)| head[a..b].trim());
+
+        return Some(format!("({}) -> {ret}", params.join(", ")));
+    }
+
+    match crate::context::declared(&doc.source, offset, arg)? {
+        crate::context::Declared::Annotation(t) => Some(t),
+
+        crate::context::Declared::Init(init) => constructed_type(doc, init.strip_prefix("new ")?),
+    }
+}
+
+/// Binds each parameter of `own` in `pattern` to what stands at the
+/// same place in `actual`: `(T) -> U` against `(number) -> string`
+/// binds both. The first binding of a parameter holds.
+fn unify(pattern: &str, actual: &str, own: &[String], bindings: &mut Vec<(String, String)>) {
+    let (pattern, actual) = (pattern.trim(), actual.trim());
+
+    if own.iter().any(|g| g == pattern) {
+        if !bindings.iter().any(|(g, _)| g == pattern) {
+            bindings.push((pattern.to_string(), actual.to_string()));
+        }
+
+        return;
+    }
+
+    // A function type: the parameters pairwise, then the return.
+    if pattern.starts_with('(')
+        && actual.starts_with('(')
+        && let Some(pl) = group_len(pattern, '(', ')')
+        && let Some(al) = group_len(actual, '(', ')')
+    {
+        let ps = crate::shapes::top_level_parts(&pattern[1..pl - 1]);
+        let r#as = crate::shapes::top_level_parts(&actual[1..al - 1]);
+
+        for (p, a) in ps.iter().zip(&r#as) {
+            unify(p, a, own, bindings);
+        }
+
+        if let Some(pr) = pattern[pl..].trim().strip_prefix("->")
+            && let Some(ar) = actual[al..].trim().strip_prefix("->")
+        {
+            unify(pr, ar, own, bindings);
+        }
+
+        return;
+    }
+
+    // One generic type under another: `Box<T>` against `Box<number>`.
+    if let Some((pn, pa)) = pattern.split_once('<')
+        && let Some((an, aa)) = actual.split_once('<')
+        && pn == an
+        && let Some(pa) = pa.strip_suffix('>')
+        && let Some(aa) = aa.strip_suffix('>')
+    {
+        let ps = crate::shapes::top_level_parts(pa);
+        let r#as = crate::shapes::top_level_parts(aa);
+
+        for (p, a) in ps.iter().zip(&r#as) {
+            unify(p, a, own, bindings);
+        }
+    }
 }
 
 /// The struct a `new` builds, from the text after the keyword: the
@@ -1277,6 +1478,149 @@ pub(crate) fn restore_struct_arguments(value: &str, doc: &Doc, line: u32) -> Opt
     let rebuilt = with_struct_arguments(&body[open..], doc, &scope);
 
     (rebuilt != body[open..]).then(|| format!("{fence}\n{}{rebuilt}\n```{tail}", &body[..open]))
+}
+
+/// A method's head under its receiver's arguments. `a:map(` on
+/// `local a: Box<number>` binds the `T` of `struct Box<T>` to `number`:
+/// `map<U>(self: Box<number>, f: (number) -> U): Box<U>`. The method's
+/// own parameters stay in the list.
+pub(crate) fn bind_receiver_arguments(
+    value: &str,
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let (fence, rest) = value.split_once('\n')?;
+    let (body, tail) = rest.split_once("\n```")?;
+    let head = body.strip_prefix("function ")?;
+    let open = head.find('(')?;
+    let (owner, name) = head[..open].split_once(':')?;
+    let name = name.split('<').next()?;
+    // The receiver: the word before `:name(` on the cursor's line.
+    let text = doc.source.lines().nth(line as usize)?;
+    let before: String = text.chars().take(character as usize).collect();
+    let call = before.rfind(&format!(":{name}("))?;
+    let receiver = before[..call].trim_end();
+    let start = receiver
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map_or(0, |i| i + 1);
+    let receiver = &receiver[start..];
+    let offset = offset_of(&doc.source, line, character)?;
+    let named = match crate::context::declared(&doc.source, offset, receiver)? {
+        crate::context::Declared::Annotation(t) => t,
+
+        crate::context::Declared::Init(init) => constructed_type(doc, init.strip_prefix("new ")?)?,
+    };
+    let (bare, args) = named.split_once('<')?;
+
+    if bare != owner {
+        return None;
+    }
+
+    let args = crate::shapes::top_level_parts(args.strip_suffix('>')?);
+    let declared = std::iter::once(&doc.source)
+        .chain(doc.import_sources.iter())
+        .map(|src| struct_generics(src, owner))
+        .find(|g| !g.is_empty())?;
+    let params: Vec<&str> = declared
+        .trim_matches(['<', '>'])
+        .split(',')
+        .map(str::trim)
+        .collect();
+
+    if params.len() != args.len() {
+        return None;
+    }
+
+    let own: Vec<&str> = head[..open]
+        .split_once('<')
+        .map(|(_, g)| {
+            g.trim_end_matches('>')
+                .split(',')
+                .map(str::trim)
+                .filter(|g| !params.contains(g))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = format!("function {owner}:{name}");
+
+    if !own.is_empty() {
+        out.push_str(&format!("<{}>", own.join(", ")));
+    }
+
+    let mut list = head[open..].to_string();
+
+    for (p, a) in params.iter().zip(&args) {
+        list = crate::shapes::replace_var(&list, p, a.trim());
+    }
+
+    out.push_str(&list);
+
+    (out != body).then(|| format!("{fence}\n{out}\n```{tail}"))
+}
+
+/// The column of the callee's name on the cursor's line, for a
+/// signature label `function Owner:name(` or `function name(`.
+fn callee_column(doc: &Doc, label: &str, line: u32, character: u32) -> Option<u32> {
+    let head = label.strip_prefix("function ")?;
+    let open = head.find('(')?;
+    let name = head[..open].rsplit([':', '.']).next()?.split('<').next()?;
+    let text = doc.source.lines().nth(line as usize)?;
+    let before: String = text.chars().take(character as usize).collect();
+    let call = before.rfind(&format!("{name}("))?;
+
+    Some(call as u32)
+}
+
+/// Signature help through the hover's restyle: the source's own head
+/// replaces the print, a struct name gets its declared parameters
+/// back, and the receiver binds the impl's own. The parameters follow
+/// the label, one per top-level comma.
+pub(crate) fn restyle_signatures(result: &mut Value, doc: &Doc, line: u32, character: u32) {
+    let Some(signatures) = result.get_mut("signatures").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for sig in signatures.iter_mut() {
+        let Some(label) = sig["label"].as_str() else {
+            continue;
+        };
+        let mut text = format!("```luau\n{label}\n```");
+
+        // The hover's passes read the word under the cursor; here the
+        // cursor sits in the call, so the callee's own column stands in.
+        if let Some(at) = callee_column(doc, label, line, character)
+            && let Some(written) = declared_signature(&text, doc, line, at)
+        {
+            text = written;
+        }
+
+        if let Some(named) = restore_struct_arguments(&text, doc, line) {
+            text = named;
+        }
+
+        if let Some(bound) = bind_receiver_arguments(&text, doc, line, character) {
+            text = bound;
+        }
+
+        let Some(rebuilt) = text
+            .strip_prefix("```luau\n")
+            .and_then(|t| t.strip_suffix("\n```"))
+        else {
+            continue;
+        };
+
+        if rebuilt == label {
+            continue;
+        }
+
+        let parameters: Vec<Value> = crate::proxy::completion::payload_types(rebuilt)
+            .into_iter()
+            .map(|p| json!({ "label": p }))
+            .collect();
+        sig["label"] = json!(rebuilt);
+        sig["parameters"] = json!(parameters);
+    }
 }
 
 /// The text with every bare generic struct name given the parameters

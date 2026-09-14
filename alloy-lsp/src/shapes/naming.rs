@@ -175,10 +175,10 @@ fn generic_struct_of_body(body: &str, known: &Known) -> Option<String> {
 
     for shape in &known.shapes {
         let Shape::Struct {
-            name,
             fields: decl,
             generics,
             types,
+            ..
         } = shape
         else {
             continue;
@@ -194,26 +194,56 @@ fn generic_struct_of_body(body: &str, known: &Known) -> Option<String> {
             continue;
         }
 
-        let args: Vec<String> = generics
-            .iter()
-            .map(|g| {
-                decl.iter()
-                    .zip(types)
-                    .find(|((_, _), ty)| ty.trim() == g)
-                    .and_then(|((f, _), _)| fields.iter().find(|(k, _)| k == f))
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or_default()
-            })
-            .collect();
-
-        if args.iter().any(String::is_empty) {
-            return Some(name.clone());
-        }
-
-        return Some(format!("{name}<{}>", args.join(", ")));
+        return struct_with_arguments(shape, &fields, known);
     }
 
     None
+}
+
+/// The struct's name with the arguments its printed fields carry: a
+/// field declared as a parameter holds that argument, `inner: T` under
+/// `inner: number` reads `Box<number>`. The bare name when a parameter
+/// has no field to read.
+fn struct_with_arguments(
+    shape: &Shape,
+    printed: &[(String, String)],
+    known: &Known,
+) -> Option<String> {
+    let Shape::Struct {
+        name,
+        fields: decl,
+        generics,
+        types,
+    } = shape
+    else {
+        return None;
+    };
+
+    if generics.is_empty() || decl.len() != types.len() {
+        return Some(name.clone());
+    }
+
+    let args: Vec<String> = generics
+        .iter()
+        .map(|g| {
+            decl.iter()
+                .zip(types)
+                .find(|((_, _), ty)| ty.trim() == g)
+                .and_then(|((f, _), _)| printed.iter().find(|(k, _)| k == f))
+                .map(|(_, v)| {
+                    let v = v.trim();
+
+                    name_of_body(v, known).unwrap_or_else(|| v.to_string())
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+
+    if args.iter().any(String::is_empty) {
+        return Some(name.clone());
+    }
+
+    Some(format!("{name}<{}>", args.join(", ")))
 }
 
 pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
@@ -227,14 +257,18 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
         let table = table.strip_suffix('}')?.trim();
         // A guard on a field prints it twice, `read dirty: true, write
         // dirty: boolean`; the field set is what names the struct.
-        let mut printed: Vec<String> = members(table)
+        let typed: Vec<(String, String)> = members(table)
             .into_iter()
-            .map(|(k, _)| {
-                k.trim_start_matches("read ")
-                    .trim_start_matches("write ")
-                    .to_string()
+            .map(|(k, v)| {
+                (
+                    k.trim_start_matches("read ")
+                        .trim_start_matches("write ")
+                        .to_string(),
+                    v,
+                )
             })
             .collect();
+        let mut printed: Vec<String> = typed.iter().map(|(k, _)| k.clone()).collect();
         printed.sort();
         printed.dedup();
 
@@ -247,7 +281,7 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
         }
 
         for shape in &known.shapes {
-            if let Shape::Struct { name, fields, .. } = shape {
+            if let Shape::Struct { fields, .. } = shape {
                 let all: Vec<&String> = fields.iter().map(|(f, _)| f).collect();
                 let public: Vec<&String> =
                     fields.iter().filter(|(_, p)| !p).map(|(f, _)| f).collect();
@@ -259,7 +293,7 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
                 if !printed.is_empty()
                     && (same_set(&printed, &all) || same_set(&printed, &public) || holds_all)
                 {
-                    return Some(name.clone());
+                    return struct_with_arguments(shape, &typed, known);
                 }
             }
         }

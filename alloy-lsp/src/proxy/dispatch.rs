@@ -1477,6 +1477,12 @@ impl Server {
                     if let Some(uri) = &ctx {
                         st.rewrite_variant_signatures(uri, result);
 
+                        if let Some((line, character)) = position
+                            && let Some(doc) = st.docs.get(uri)
+                        {
+                            restyle_signatures(result, doc, line, character);
+                        }
+
                         // The child answered nothing: a macro call is
                         // gone from the emit, and a file with an
                         // unclosed call has no compile at all, so the

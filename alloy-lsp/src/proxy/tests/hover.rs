@@ -1,4 +1,6 @@
-use super::super::hover::{impl_self_type, member_doc, shadow_home, shadows_an_import};
+use super::super::hover::{
+    impl_self_type, member_doc, shadow_home, shadows_an_import, source_type,
+};
 use super::super::*;
 use super::support::one_file;
 
@@ -919,6 +921,46 @@ fn an_import_alias_reads_the_export_s_declaration() {
         .expect("Thing");
     assert!(hover.contains("export struct Thing as"), "{hover}");
     assert!(!hover.contains(" where "), "{hover}");
+}
+
+/*
+`a:map(double)` on `local a: Box<number>`: the child prints the method
+as declared, `map<T, U>(self: Box, f: (T) -> U): Box`. Signature help
+binds the impl's `T` to the receiver's `number` and keeps the method's
+own `U`, with the declared return `Box<U>`. The hint on the binding
+reads the argument `double` binds, `Box<number>`, and inserts it.
+*/
+#[test]
+fn a_method_on_an_instantiated_struct_carries_the_instantiation() {
+    let src = "struct Box<T> as\n    inner: T\nend\n\nimpl Box<T> as\n    function map<U>(self, f: (T) -> U): Box<U>\n        return new Box { inner = f(self.inner) }\n    end\nend\n\nlocal a: Box<number> = new Box { inner = 1 }\n\nlocal function double(x: number): number\n    return x * 2\nend\n\nlocal mapped = a:map(double)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut result = json!({
+        "signatures": [{
+            "label": "function Box:map<T, U>(self: Box, f: (T) -> U): Box",
+            "parameters": [{ "label": [34, 45] }],
+        }],
+    });
+    restyle_signatures(&mut result, doc, 16, 22);
+    assert_eq!(
+        result["signatures"][0]["label"],
+        "function Box:map<U>(self: Box<number>, f: (number) -> U): Box<U>"
+    );
+    assert_eq!(
+        result["signatures"][0]["parameters"],
+        json!([{ "label": "self: Box<number>" }, { "label": "f: (number) -> U" }])
+    );
+
+    assert_eq!(source_type(doc, 16, 12).as_deref(), Some("Box<number>"));
+
+    let mut hints = vec![json!({
+        "kind": 1,
+        "label": ": Box",
+        "position": { "line": 16, "character": 12 },
+    })];
+    clean_hints(&mut hints, doc);
+    assert_eq!(hint_label(&hints[0]), ": Box<number>");
+    assert_eq!(hints[0]["textEdits"][0]["newText"], ": Box<number>");
 }
 
 /*

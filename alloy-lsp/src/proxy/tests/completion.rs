@@ -2720,3 +2720,42 @@ fn an_aliased_namespace_literal_lists_its_fields() {
 
     assert_eq!(labels, ["n"]);
 }
+
+/// A top-level function is callable above its declaration, and the
+/// emit binds it as a `local function` the child scopes from that line
+/// down. The list above the line gets the function from the source,
+/// with its header as the detail; below the line the child has it.
+#[test]
+fn a_function_declared_below_the_caret_is_offered_there() {
+    let src = concat!(
+        "function caller()\n",
+        "    hel\n",
+        "end\n",
+        "\n",
+        "--- Prints a line.\n",
+        "function helperBelow(n: number): string\n",
+        "    print(\"i am below\")\n",
+        "end\n",
+        "\n",
+        "hel\n",
+    );
+    let (st, uri) = one_file(src);
+    let items = st.functions_below(uri, 1, 7, &json!([]));
+
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["label"], "helperBelow");
+    assert_eq!(items[0]["kind"], 3);
+    assert_eq!(
+        items[0]["detail"],
+        "function helperBelow(n: number): string"
+    );
+    assert_eq!(items[0]["documentation"]["value"], "Prints a line.");
+
+    // The child lists it already, and below the declaration the child
+    // is the one that has it.
+    assert!(
+        st.functions_below(uri, 1, 7, &json!([{ "label": "helperBelow" }]))
+            .is_empty()
+    );
+    assert!(st.functions_below(uri, 9, 3, &json!([])).is_empty());
+}

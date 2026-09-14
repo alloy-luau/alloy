@@ -1721,6 +1721,7 @@ impl Server {
                             extra.extend(st.primitive_completions(uri, line, character, result));
                             extra.extend(st.std_completions(uri, line, character, result));
                             extra.extend(st.value_scope(uri, line, character, result));
+                            extra.extend(st.functions_below(uri, line, character, result));
                             extra.extend(st.directive_completions(uri, line, character));
                             // A trait has no table in the emit, so the
                             // child answers nothing for `self` inside a

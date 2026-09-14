@@ -22,7 +22,7 @@ pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 #[cfg(test)]
 pub(crate) use modules::shadows_an_import;
 pub(crate) use restyle::{
-    close_empty_packs, close_item_packs, declared_annotation, declared_signature,
+    close_empty_packs, close_item_packs, declared_annotation, declared_head, declared_signature,
     drop_bound_intersections, empty_parameter_names, fold_std_shapes, invents_a_type,
     is_byte_count, keep_annotation, lowers_a_block, member_doc, name_by_declaration,
     name_method_doc, name_method_receiver, name_self_receiver, name_solver_variable,

@@ -142,6 +142,82 @@ impl State {
         items
     }
 
+    /// The file's own top-level functions declared below the caret. A
+    /// call above the declaration is a forward call, and the emit
+    /// binds the function as a `local` the child scopes from its line
+    /// down, so the child's list holds the name only after that line.
+    pub(crate) fn functions_below(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &Value,
+    ) -> Vec<Value> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+
+        // A member of a value is no function of the file.
+        if member_position(doc, line, character).is_some() {
+            return Vec::new();
+        }
+
+        let listed: HashSet<&str> = result
+            .get("items")
+            .and_then(Value::as_array)
+            .or_else(|| result.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|i| i["label"].as_str())
+            .collect();
+        let mut items = Vec::new();
+
+        for text in doc.source.lines().skip(line as usize + 1) {
+            // A top-level header starts at the margin; a method of an
+            // `impl` and a member of a namespace sit inside a body.
+            if text.starts_with([' ', '\t']) {
+                continue;
+            }
+
+            let mut head = text;
+
+            for keyword in ["export ", "local ", "async "] {
+                head = head.strip_prefix(keyword).unwrap_or(head);
+            }
+
+            let Some(rest) = head.strip_prefix("function ") else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            if name.is_empty()
+                || !rest[name.len()..].starts_with(['(', '<'])
+                || listed.contains(name.as_str())
+            {
+                continue;
+            }
+
+            let detail = declared_head(doc, &name).unwrap_or_else(|| format!("function {name}"));
+            let mut item = json!({ "label": name, "kind": 3, "detail": detail });
+            let doc_text = doc
+                .bindings
+                .iter()
+                .find(|b| b.name == name)
+                .and_then(|b| b.doc.clone());
+
+            if let Some(text) = doc_text {
+                item["documentation"] = json!({ "kind": "markdown", "value": text });
+            }
+
+            items.push(item);
+        }
+
+        items
+    }
+
     /// The macros an import list binds under another name, each with the
     /// file's own word for it. A macro's declaration carries its sigil and
     /// the name the module wrote, `$logit`, so `import { logit as log }`

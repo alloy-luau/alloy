@@ -28,7 +28,7 @@ pub(crate) use std_completions::{complete_std_members, roblox_enum_names};
 use super::documents::{normalize, project_aliases};
 use super::hints::writable_type;
 use super::hover::{
-    builtin_attribute_targets, declared_attribute_targets, remote_spec, std_receiver,
+    builtin_attribute_targets, declared_attribute_targets, declared_head, remote_spec, std_receiver,
 };
 use super::navigation::{instance_segments, module_file_of};
 use super::*;

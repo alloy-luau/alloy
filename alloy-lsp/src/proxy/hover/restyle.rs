@@ -1344,7 +1344,7 @@ fn forward_declaration(
 /// The signature the source declares for a function name, as the hover
 /// prints one: `function later(n: number): boolean`. An async function
 /// answers a Future.
-fn declared_head(doc: &Doc, word: &str) -> Option<String> {
+pub(crate) fn declared_head(doc: &Doc, word: &str) -> Option<String> {
     let (source, is_async) = declaration_head(doc, word)?;
     let spans = head_spans(source, word.len())?;
     let mut out = format!("function {}", &source[..spans.params.1]);

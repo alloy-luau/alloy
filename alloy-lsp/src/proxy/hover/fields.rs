@@ -433,11 +433,14 @@ pub(crate) fn declared_field_hover(doc: &Doc, start: usize, end: usize) -> Optio
     // The nearest record above, still open: a `struct` or an `interface`
     // with no `end` at the margin yet, or a `type` whose braces have not
     // closed. A `type` body carries fields the same way a struct does.
+    // A namespace member answers under two names at one offset: the
+    // path the source writes, `Ns.T`, and the name the emit gives it,
+    // `Ns_T`. The reader wrote the path.
     let owner = doc
         .decls
         .iter()
         .filter(|d| d.offset < start && declared_field_owner(d).is_some())
-        .max_by_key(|d| d.offset)?;
+        .max_by_key(|d| (d.offset, d.name.contains('.')))?;
     let keyword = declared_field_owner(owner)?;
 
     if keyword == "type" {
@@ -565,29 +568,41 @@ fn declared_field_line(
     doc: &Doc,
     owner: &str,
     field: &str,
-) -> Option<(&'static str, String)> {
-    doc.decls
-        .iter()
-        .chain(st.docs.values().flat_map(|d| d.decls.iter()))
-        .filter(|d| d.name == owner)
-        .find_map(|d| {
-            let keyword = ["struct", "interface", "class"]
-                .into_iter()
-                .find(|k| d.hover.contains(&format!("{k} ")))?;
-            let line = d
-                .hover
-                .lines()
-                .find(|l| field_key(l) == Some(field))
-                .map(|l| l.trim().trim_end_matches(',').trim_end().to_string())?;
+) -> Option<(&'static str, String, String)> {
+    // A namespace member is keyed by the path the source writes,
+    // `Ns.T`, and a receiver carries the last word of it alone. A
+    // struct of that spelling is the one the reader means, so the walk
+    // takes the path only when no name matches whole.
+    let read = |exact: bool| {
+        doc.decls
+            .iter()
+            .chain(st.docs.values().flat_map(|d| d.decls.iter()))
+            .filter(|d| match exact {
+                true => d.name == owner,
 
-            Some((keyword, line))
-        })
+                false => d.name.contains('.') && d.name.rsplit('.').next() == Some(owner),
+            })
+            .find_map(|d| {
+                let keyword = ["struct", "interface", "class"]
+                    .into_iter()
+                    .find(|k| d.hover.contains(&format!("{k} ")))?;
+                let line = d
+                    .hover
+                    .lines()
+                    .find(|l| field_key(l) == Some(field))
+                    .map(|l| l.trim().trim_end_matches(',').trim_end().to_string())?;
+
+                Some((keyword, line, d.name.clone()))
+            })
+    };
+
+    read(true).or_else(|| read(false))
 }
 
 /// The type one field of a struct holds, as the name a next hop reads
 /// off it: `b: B?` gives `B`.
 fn field_type(st: &State, doc: &Doc, owner: &str, field: &str) -> Option<String> {
-    let (_, line) = declared_field_line(st, doc, owner, field)?;
+    let (_, line, _) = declared_field_line(st, doc, owner, field)?;
     let named = alloy::docs::type_head(line.split_once(':')?.1.trim())?;
 
     Some(named.split('<').next().unwrap_or(&named).to_string())
@@ -599,7 +614,7 @@ fn field_type(st: &State, doc: &Doc, owner: &str, field: &str) -> Option<String>
 pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) -> Option<String> {
     let word = &doc.source[start..end];
     let owner = used_field_owner(st, doc, start)?;
-    let (keyword, line) = declared_field_line(st, doc, &owner, word)?;
+    let (keyword, line, owner) = declared_field_line(st, doc, &owner, word)?;
 
     let mut out = format!("```alloy\n{line}\n```\nA field of `{keyword} {owner}`.");
 

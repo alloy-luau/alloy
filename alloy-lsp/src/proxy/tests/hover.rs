@@ -456,6 +456,22 @@ pub(crate) fn a_type_body_field_reads_as_it_is_written() {
         Some("```alloy\nlabel: string\n```\nA field of `type HudProps`.".to_string())
     );
 }
+/// A field of a namespace member names the path the source writes.
+/// The declaration index keys the member twice, under `Ns.T` and under
+/// the `Ns_T` the emit writes, and the walk took the emit's name.
+#[test]
+pub(crate) fn a_namespace_member_field_names_the_path() {
+    const SRC: &str =
+        "export namespace Ns as\n    struct T as\n        value: number,\n    end\nend\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let at = SRC.find("value").expect("value");
+
+    assert_eq!(
+        declared_field_hover(doc, at, at + "value".len()),
+        Some("```alloy\nvalue: number\n```\nA field of `struct Ns.T`.".to_string())
+    );
+}
 /// A `type` that names no record has no field to answer for, and a
 /// name below the closed body belongs to nothing.
 #[test]

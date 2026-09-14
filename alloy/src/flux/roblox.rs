@@ -145,6 +145,13 @@ impl<'s> Scan<'s> {
         let mut c = at;
 
         while c > 0 {
+            // A chain never crosses a statement boundary. `workspace:wait()`
+            // on the line above is its own statement, so the walk stops
+            // there and each call answers for its own receiver.
+            if c != at && self.statement_start(c) {
+                break;
+            }
+
             let j = c - 1;
             let text = self.t(j);
 
@@ -685,6 +692,16 @@ mod tests {
                 "function _g(props: { part: Widget })\n    local n = props.part:clone()\n    print(n)\nend\n"
             ),
             Vec::<&str>::new()
+        );
+        // A `:wait()` on the line above is its own statement. Each call
+        // answers for its own receiver.
+        assert_eq!(
+            names("workspace:wait()\nworkspace:clone()\n"),
+            vec!["deprecated_method"]
+        );
+        assert_eq!(
+            names("workspace:wait()\nworkspace:remove()\nscript:remove()\n"),
+            vec!["deprecated_method"; 2]
         );
     }
 

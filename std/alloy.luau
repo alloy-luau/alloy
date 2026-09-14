@@ -2909,13 +2909,24 @@ function alloy.remote(spec: any): Remote
 					return nil
 				end
 			end
-			remote.fire = record("fire")
-			remote.fire_all = record("fire_all")
-			remote.fire_except = record("fire_except")
+			-- A send packs its arguments first, as it does under
+			-- Roblox, so a value that does not fit its width raises
+			-- here too. The server's send carries the player first.
+			local function sent(name: string, lead: number)
+				local send = record(name)
+				return function(...)
+					outgoing(select(lead + 1, ...))
+					return send(...)
+				end
+			end
+			local lead = if spec.from_server and not spec.from_client then 1 else 0
+			remote.fire = sent("fire", lead)
+			remote.fire_all = sent("fire_all", 0)
+			remote.fire_except = sent("fire_except", 1)
 			remote.on = record("on")
 			remote.once = record("once")
 			remote.on_ratelimited = record("on_ratelimited")
-			local call = record("call")
+			local call = sent("call", lead)
 			local answer = function(...)
 				call(...)
 				return alloy.future(function()

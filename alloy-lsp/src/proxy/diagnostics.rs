@@ -1536,12 +1536,18 @@ pub(crate) fn alloy_wording(d: &mut Value, doc: &Doc, shapes: &[alloy::declarati
     }
 
     // `Damage.on(...)` where the side has no `on`: the table is the
-    // remote's surface, and the source names the remote.
-    if message.contains("not found in table 'Remote'")
-        && let Some(key) = quoted_after(&message, "Key '")
-        && let Some(name) = span.split('.').next().filter(|n| !n.is_empty())
-    {
-        d["message"] = json!(format!("{kind}: remote `{name}` has no `{key}`"));
+    // remote's surface, and the source names the remote. The compiler
+    // writes the sentence off the source line; the span the report
+    // covers may start at a macro's `$`, which read as the name.
+    // The message reaches here folded, so an empty `Known` is enough.
+    if message.contains("not found in table 'Remote'") {
+        let better = alloy::typecheck::friendly_type_message(
+            &body,
+            &alloy::shapes::Known::default(),
+            Some(line),
+            sc as usize + 1,
+        );
+        d["message"] = json!(format!("{kind}: {better}"));
 
         return;
     }
@@ -1593,13 +1599,6 @@ pub(crate) fn alloy_wording(d: &mut Value, doc: &Doc, shapes: &[alloy::declarati
     {
         d["message"] = json!(rewritten);
     }
-}
-
-/// The text between `opener` and the next quote.
-pub(crate) fn quoted_after<'a>(message: &'a str, opener: &str) -> Option<&'a str> {
-    let at = message.find(opener)? + opener.len();
-
-    message[at..].find('\'').map(|end| &message[at..at + end])
 }
 
 /// The names a message writes in backticks.

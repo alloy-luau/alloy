@@ -859,3 +859,26 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
     );
     assert!(st.compiler_actions(uri, whole).is_empty());
 }
+
+/// A missing member of a remote names the remote the source declared.
+/// The report sits on the `$` of the macro around the call, so the
+/// name has to come off the source line, not off the reported span.
+#[test]
+pub(crate) fn a_missing_remote_member_names_the_remote() {
+    let src = concat!(
+        "export remote Damage(target: string, amount: number) from client\n",
+        "\n",
+        "@test\n",
+        "function fires_damage()\n",
+        "    $assert_eq(#Damage.nope, 1)\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let mut d = json!({
+        "range": { "start": { "line": 4, "character": 4 }, "end": { "line": 4, "character": 5 } },
+        "message": "TypeError: Key 'nope' not found in table 'Remote'",
+    });
+    alloy_wording(&mut d, &st.docs[uri], &[]);
+
+    assert_eq!(d["message"], "TypeError: remote `Damage` has no `nope`");
+}

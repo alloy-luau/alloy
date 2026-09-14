@@ -60,6 +60,55 @@ pub(crate) fn child(line: u32, message: &str, severity: u64) -> Value {
     })
 }
 #[test]
+pub(crate) fn a_private_method_call_reads_as_private() {
+    // The checker reads a call of a private method from another file
+    // as a member the struct has not got; `alloy flux` prints the
+    // privacy sentence, and the editor now prints the same one.
+    let dir = std::env::temp_dir().join(format!("alloy-private-method-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    std::fs::write(
+        dir.join("src/lib.aly"),
+        "export struct Counter as\n    read name: string\nend\n\nimpl Counter as\n    private function reset(self)\n    end\nend\n",
+    )
+    .expect("lib.aly");
+    let source =
+        "import { Counter } from \"./lib\"\n\nfunction use(c: Counter)\n    c.reset()\nend\n";
+    std::fs::write(dir.join("src/other.aly"), source).expect("other.aly");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let uri = path_to_uri(&dir.join("src/other.aly"));
+    let (options, jsx) = st.options_for(&uri);
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(source.to_string(), 1, &options, &jsx, None),
+    );
+
+    let doc = st.docs.get(&uri).expect("doc");
+    let mut d = json!({
+        "range": { "start": { "line": 3, "character": 6 }, "end": { "line": 3, "character": 11 } },
+        "severity": 1,
+        "message": "TypeError: Type 'Counter' does not have key 'reset'",
+    });
+    friendly_message(&mut d, doc, &st);
+
+    assert_eq!(
+        d["message"],
+        "StructError: `reset` is private to `Counter`; only its impl reaches it"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+#[test]
 pub(crate) fn a_private_read_keeps_the_error_beside_the_lint() {
     // `alloy flux` reports the read as an error and lints it, so the
     // editor shows both. A report that names a member the struct does

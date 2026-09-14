@@ -1306,13 +1306,36 @@ pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
         .map(|(uri, _)| uri.clone());
     // A type inside a message reads as a hover does: the runtime's
     // names go, and a struct's private view folds to the struct.
-    let known = st.known_shapes_at(here.as_deref());
+    let mut known = st.known_shapes_at(here.as_deref());
 
     if let Some(message) = d.get("message").and_then(Value::as_str) {
         let mut folded = json!(message);
         strip_std_prefix(&mut folded);
         let text = crate::shapes::fold(folded.as_str().unwrap_or(message), &known);
         d["message"] = json!(crate::shapes::friendly_text(&text));
+    }
+
+    // A private method sits outside the struct's public table, so the
+    // checker reads a call of one from another file as a member the
+    // struct has not got. The rewrite names a private member off the
+    // shape, the way it names a private field, so the methods the
+    // project's impls keep to themselves join the shapes here. `alloy
+    // flux` feeds its own rewrite the same list.
+    let privates = st.project_impls();
+
+    for shape in &mut known.shapes {
+        let alloy::declarations::Shape::Struct { name, fields, .. } = shape else {
+            continue;
+        };
+        let Some((_, names)) = privates.privates.iter().find(|(t, _)| t == name) else {
+            continue;
+        };
+
+        for n in names {
+            if !fields.iter().any(|(f, _)| f == n) {
+                fields.push((n.clone(), true));
+            }
+        }
     }
 
     alloy_wording(d, doc, &known.shapes);

@@ -417,6 +417,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         new_stmt_next: 0,
         import_next: 0,
         expected_generic: None,
+        expected_payload: None,
         result_asyncs: options.import_result_asyncs.iter().cloned().collect(),
         inserts: Vec::new(),
         return_at: None,
@@ -824,6 +825,11 @@ struct Desugar<'s> {
     /// name and arguments, so the constructor call takes them. The
     /// solver reads no expected type into a generic call.
     expected_generic: Option<(String, String)>,
+    /// `local f: Future<T> = async do ... end`: the payload type `T`,
+    /// so the block's closure carries it. Without it the checker infers
+    /// the closure's result, and an open result lands on `unknown`. An
+    /// `async function` header reads its own return type the same way.
+    expected_payload: Option<String>,
     /// The async functions of this file, and the imported ones, declared
     /// to return a `Result`: `try await` on a call to one is the Result.
     result_asyncs: HashSet<String>,

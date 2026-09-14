@@ -302,7 +302,20 @@ impl<'s> Desugar<'s> {
 
                     None => String::new(),
                 };
-                self.generate(anchor, &format!("{std}.{helper}(function({params})"));
+                // `local f: Future<T> = async do ... end` names the
+                // payload, and the closure carries it: the checker
+                // otherwise infers the body's result, and an open
+                // result lands on `unknown`. The hint is for this
+                // block alone, so a nested one takes none.
+                let payload = match self.expected_payload.take() {
+                    Some(t) if !is_try => format!(": {}", self.lower_type(&t)),
+
+                    _ => String::new(),
+                };
+                self.generate(
+                    anchor,
+                    &format!("{std}.{helper}(function({params}){payload}"),
+                );
                 // The two keywords are replaced; the block and `end` copy.
                 let after_keywords = self.toks[span.start as usize + 1].end;
                 let end_tok = self.toks[span.end as usize - 1];

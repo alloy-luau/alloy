@@ -456,6 +456,7 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        self.expected_payload = self.annotated_async_block(stmt);
         // Render the statement into a side buffer first, so the hoists it
         // asks for can go in front of it on the same line.
         let saved_hoists = std::mem::take(&mut self.hoists);
@@ -1026,6 +1027,26 @@ impl<'s> Desugar<'s> {
         (span.start..span.end)
             .map(|i| TokSpan::new(i as usize, i as usize + 1))
             .find(|one| self.text_of(*one) == name)
+    }
+
+    /// The payload of `local f: Future<T> = async do ... end`. The
+    /// annotation names the answer, not what the block returns, so the
+    /// block's closure carries `T`. A binding with no annotation keeps
+    /// the inference.
+    fn annotated_async_block(&self, stmt: &Stmt) -> Option<String> {
+        let Stmt::Local(l) = stmt else {
+            return None;
+        };
+
+        if l.names.len() != 1 || l.values.len() != 1 {
+            return None;
+        }
+
+        if !matches!(l.values[0], Expr::AsyncBlock { .. }) {
+            return None;
+        }
+
+        settled_type(self.text_of(l.names[0].ty?))
     }
 
     pub(crate) fn stmt_inner(&mut self, stmt: &Stmt) {
@@ -3209,6 +3230,44 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(
             out.ship.contains("local held = __alloy.future(function()"),
+            "{}",
+            out.ship
+        );
+    }
+
+    /// `local f: Future<T> = async do ... end` gives the block's
+    /// closure `: T`. The checker read the closure's own result before,
+    /// and an open result landed on `Future<unknown>`.
+    #[test]
+    fn an_annotated_async_block_carries_the_payload_type() {
+        let src = "async function slow(tag: string): string\n    return tag\nend\n\nasync function run()\n    local first: Future<string> = async do\n        return await slow(\"first\")\n    end\n    local loose = async do\n        return await slow(\"loose\")\n    end\n    local tried: Future<number> = async do\n        local r: Result<number, string> = try do\n            return 1\n        end\n        return r:unwrap_or(0)\n    end\n    print(await first, await loose, await tried)\nend\n\nrun()\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains(
+                "local first: __alloy.Future<string> = __alloy.future(function(): string"
+            ),
+            "{}",
+            out.ship
+        );
+        // No annotation, so the inference stands.
+        assert!(
+            out.ship
+                .contains("local loose = __alloy.future(function()\n"),
+            "{}",
+            out.ship
+        );
+        // The hint belongs to the block the binding names; the `try do`
+        // inside it takes none.
+        assert!(
+            out.ship.contains(
+                "local tried: __alloy.Future<number> = __alloy.future(function(): number"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.ship.contains("__alloy.try_block(function(__fail)\n"),
             "{}",
             out.ship
         );

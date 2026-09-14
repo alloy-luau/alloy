@@ -100,6 +100,10 @@ fn main() -> ExitCode {
         Some("init") if wants_help(&args) => command_help(help::INIT_TEXT),
         Some("init") => cli::init::init(),
 
+        // Before the dispatcher: `alloy self uninstall --help` must
+        // print the usage, not remove the install.
+        Some("self") if wants_help(&args) => command_help(help::SELF_TEXT),
+
         Some("self") => cli::self_cmd::run(&args[1..]),
 
         Some("ingot") if wants_help(&args) => command_help(help::INGOT_TEXT),

@@ -19,96 +19,150 @@ pub use members::{
 };
 pub use table::{TABLE, keys_with_prefix, lookup};
 
+/// The kinds a diagnostic prints, each with the book section that
+/// explains it. `alloy doc <kind>` opens the section, so every kind
+/// `kind_for` and the checker name has a row here.
+pub const KINDS: &[(&str, &str)] = &[
+    ("AlloyError", "4.1"),
+    ("AsyncError", "3.3"),
+    ("AttributeContract", "3.11"),
+    ("AttributeError", "3.11"),
+    ("BoundError", "3.6"),
+    ("ConstError", "6.1"),
+    ("ConstructorError", "3.6"),
+    ("DataError", "5.11"),
+    ("DeclareError", "6.1"),
+    ("DirectiveError", "4.4"),
+    ("DuplicateError", "6.1"),
+    ("EnumError", "3.4"),
+    ("ExhaustiveMatch", "4.2"),
+    ("ImportError", "3.2"),
+    ("IngotError", "5.12"),
+    ("InternalError", "4.1"),
+    ("MacroError", "3.10"),
+    ("MarkupError", "3.13"),
+    ("ReservedWord", "6.1"),
+    ("ResultError", "4.1"),
+    ("StructError", "3.6"),
+    ("SyntaxError", "6.1"),
+    ("TestError", "3.14"),
+    ("TraitContract", "3.6"),
+    ("TypeError", "5.4"),
+    ("UnknownModule", "3.2"),
+    ("WireType", "4.3"),
+];
+
+/// The section a kind name opens, in any case: `alloy doc structerror`
+/// opens what `alloy doc StructError` does.
+pub fn kind_section(name: &str) -> Option<&'static Section> {
+    KINDS
+        .iter()
+        .find(|(kind, _)| kind.eq_ignore_ascii_case(name))
+        .and_then(|(_, number)| section(number))
+}
+
+/// The kinds a section explains, for its page.
+pub fn section_kinds(number: &str) -> Vec<&'static str> {
+    KINDS
+        .iter()
+        .filter(|(_, n)| *n == number)
+        .map(|(kind, _)| *kind)
+        .collect()
+}
+
+/// The words of a diagnostic, lower case, and the kind they name. The
+/// first match wins, from the most specific wording to the least.
+const KIND_RULES: &[(&[&str], &str)] = &[
+    (&["internal:"], "InternalError"),
+    // The removal report names a declaration kind, which the rules
+    // below would read as the kind's own family.
+    (&["`global` is removed"], "ImportError"),
+    (&["needs `as` before its body"], "SyntaxError"),
+    // The forms a Luau user writes from another language. Each names
+    // the Alloy form, and the rules below would read the declaration
+    // word in the sentence as that declaration's own family.
+    (&["body is `as ... end`"], "SyntaxError"),
+    (&["one name holds one declaration"], "DuplicateError"),
+    (&["a comment starts with"], "SyntaxError"),
+    (&["interpolation hole is empty"], "SyntaxError"),
+    (&["has no `++`"], "SyntaxError"),
+    (&["`declare` takes", "`declare` belongs"], "DeclareError"),
+    // A header the parser cannot read. The `trait` rule below would
+    // read the word as a contract report.
+    (&["takes no type parameters"], "SyntaxError"),
+    (&["markup:"], "MarkupError"),
+    (&["names no module"], "UnknownModule"),
+    (&["is a script, not a module"], "UnknownModule"),
+    (&["returns nothing to import"], "UnknownModule"),
+    (&["ingot `"], "IngotError"),
+    (&["reserved word"], "ReservedWord"),
+    (&["is already declared in"], "DeclareError"),
+    (
+        &["in macro expansion", "returns from the function"],
+        "MacroError",
+    ),
+    (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),
+    // The `impl` header names a struct and an enum in one sentence;
+    // the enum rule below would take it.
+    (&["an `impl` targets"], "StructError"),
+    (&["remote"], "WireType"),
+    (&["directive"], "DirectiveError"),
+    (&["result"], "ResultError"),
+    // After `result`, so `try await` on a Result keeps that kind.
+    (&["await", "async"], "AsyncError"),
+    (&["a `const`"], "ConstError"),
+    // Before the test rule: `test ` also matches a struct the user
+    // named `Test`, and a message about constructing one says
+    // `new Test { ... }`. The `new ` marker is the narrower of the
+    // two, so it answers first.
+    (&["`new ", "constructor", "construct"], "ConstructorError"),
+    // Before the `@test` rule: `@test` on a method is about where
+    // the attribute goes, not about a test.
+    (&["goes on a function, not a method"], "AttributeError"),
+    (&["@test", "test "], "TestError"),
+    (&["@cfg"], "AttributeError"),
+    (&["macro"], "MacroError"),
+    // An attribute contract: the report names the attribute and the
+    // clause it broke. Above the import rule, because the word
+    // `requires` holds the word `require`.
+    (
+        &["` requires ", "`each ", "`requires` clause"],
+        "AttributeContract",
+    ),
+    (&["attribute", "derive"], "AttributeError"),
+    (&["data file"], "DataError"),
+    // A module the importer names that the parser cannot read. The
+    // words of the report name neither `import` nor `module`.
+    (&["does not parse"], "ImportError"),
+    (&["import", "export", "require", "module"], "ImportError"),
+    // A bound on a generic. Before the trait rule: the report names
+    // the trait the bound asks for, and it is about the argument.
+    (&["does not implement"], "BoundError"),
+    (
+        &["does not write", "parameters in", "trait"],
+        "TraitContract",
+    ),
+    (&["field", "sealed", "struct"], "StructError"),
+    (&["variant", "enum"], "EnumError"),
+    (
+        &[
+            "expected",
+            "unexpected",
+            "unterminated",
+            "needs a",
+            "found",
+            "cannot follow",
+        ],
+        "SyntaxError",
+    ),
+];
+
 /// The kind of a compiler diagnostic, from its text: the word before
 /// the colon in `ReservedWord: ...`, the way the checker names its own.
 pub fn kind_for(message: &str) -> &'static str {
     let m = message.to_ascii_lowercase();
-    let rules: &[(&[&str], &str)] = &[
-        (&["internal:"], "InternalError"),
-        // The removal report names a declaration kind, which the rules
-        // below would read as the kind's own family.
-        (&["`global` is removed"], "ImportError"),
-        (&["needs `as` before its body"], "SyntaxError"),
-        // The forms a Luau user writes from another language. Each names
-        // the Alloy form, and the rules below would read the declaration
-        // word in the sentence as that declaration's own family.
-        (&["body is `as ... end`"], "SyntaxError"),
-        (&["one name holds one declaration"], "DuplicateError"),
-        (&["a comment starts with"], "SyntaxError"),
-        (&["interpolation hole is empty"], "SyntaxError"),
-        (&["has no `++`"], "SyntaxError"),
-        (&["`declare` takes", "`declare` belongs"], "DeclareError"),
-        // A header the parser cannot read. The `trait` rule below would
-        // read the word as a contract report.
-        (&["takes no type parameters"], "SyntaxError"),
-        (&["markup:"], "MarkupError"),
-        (&["names no module"], "UnknownModule"),
-        (&["is a script, not a module"], "UnknownModule"),
-        (&["returns nothing to import"], "UnknownModule"),
-        (&["ingot `"], "IngotError"),
-        (&["reserved word"], "ReservedWord"),
-        (&["is already declared in"], "DeclareError"),
-        (
-            &["in macro expansion", "returns from the function"],
-            "MacroError",
-        ),
-        (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),
-        // The `impl` header names a struct and an enum in one sentence;
-        // the enum rule below would take it.
-        (&["an `impl` targets"], "StructError"),
-        (&["remote"], "WireType"),
-        (&["directive"], "DirectiveError"),
-        (&["result"], "ResultError"),
-        // After `result`, so `try await` on a Result keeps that kind.
-        (&["await", "async"], "AsyncError"),
-        (&["a `const`"], "ConstError"),
-        // Before the test rule: `test ` also matches a struct the user
-        // named `Test`, and a message about constructing one says
-        // `new Test { ... }`. The `new ` marker is the narrower of the
-        // two, so it answers first.
-        (&["`new ", "constructor", "construct"], "ConstructorError"),
-        // Before the `@test` rule: `@test` on a method is about where
-        // the attribute goes, not about a test.
-        (&["goes on a function, not a method"], "AttributeError"),
-        (&["@test", "test "], "TestError"),
-        (&["@cfg"], "AttributeError"),
-        (&["macro"], "MacroError"),
-        // An attribute contract: the report names the attribute and the
-        // clause it broke. Above the import rule, because the word
-        // `requires` holds the word `require`.
-        (
-            &["` requires ", "`each ", "`requires` clause"],
-            "AttributeContract",
-        ),
-        (&["attribute", "derive"], "AttributeError"),
-        (&["data file"], "DataError"),
-        // A module the importer names that the parser cannot read. The
-        // words of the report name neither `import` nor `module`.
-        (&["does not parse"], "ImportError"),
-        (&["import", "export", "require", "module"], "ImportError"),
-        // A bound on a generic. Before the trait rule: the report names
-        // the trait the bound asks for, and it is about the argument.
-        (&["does not implement"], "BoundError"),
-        (
-            &["does not write", "parameters in", "trait"],
-            "TraitContract",
-        ),
-        (&["field", "sealed", "struct"], "StructError"),
-        (&["variant", "enum"], "EnumError"),
-        (
-            &[
-                "expected",
-                "unexpected",
-                "unterminated",
-                "needs a",
-                "found",
-                "cannot follow",
-            ],
-            "SyntaxError",
-        ),
-    ];
 
-    rules
+    KIND_RULES
         .iter()
         .find(|(words, _)| words.iter().any(|w| m.contains(w)))
         .map(|(_, kind)| *kind)
@@ -212,6 +266,35 @@ pub fn code_for(message: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// `alloy doc <kind>` opens a section for every kind a diagnostic
+    /// prints: the ones `kind_for` names, its fallback, and the ones
+    /// the type checker names.
+    #[test]
+    fn every_diagnostic_kind_names_a_section() {
+        let named = super::KIND_RULES
+            .iter()
+            .map(|(_, kind)| *kind)
+            .chain(["AlloyError", "TypeError"]);
+
+        for kind in named {
+            assert!(
+                super::kind_section(kind).is_some(),
+                "`{kind}` opens no section"
+            );
+        }
+
+        for (kind, number) in super::KINDS {
+            assert!(
+                super::section(number).is_some(),
+                "{kind}: no section {number}"
+            );
+            assert_eq!(
+                super::kind_section(&kind.to_ascii_lowercase()).map(|s| s.number),
+                Some(*number)
+            );
+        }
+    }
+
     /// The `Future` entry documents every member the std declares. The
     /// two drift apart the moment the std grows a method, and the doc
     /// is the only place a reader looks.

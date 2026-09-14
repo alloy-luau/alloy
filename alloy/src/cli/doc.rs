@@ -179,10 +179,17 @@ fn load_project_ingots() {
 
 /// The page for one topic, or none.
 fn page(topic: &str, color: bool) -> Option<String> {
-    // A section number, as a diagnostic's code: `alloy doc 4.2`.
-    if let Some(sec) = docs::section(topic) {
-        let url = docs::book_url(topic).unwrap_or_default();
-        let head = format!("**{} {}**\n{url}\n\n", sec.number, sec.title);
+    // A section number, as a diagnostic's code, `alloy doc 4.2`, or a
+    // diagnostic's kind, `alloy doc StructError`, in any case.
+    if let Some(sec) = docs::section(topic).or_else(|| docs::kind_section(topic)) {
+        let url = docs::book_url(sec.number).unwrap_or_default();
+        let kinds = docs::section_kinds(sec.number);
+        let reports = if kinds.is_empty() {
+            String::new()
+        } else {
+            format!("Reports: {}\n", kinds.join(", "))
+        };
+        let head = format!("**{} {}**\n{url}\n{reports}\n", sec.number, sec.title);
         let body = match sec.key {
             Some("lints") => return Some(render(&head, color) + &lints_page(color)),
             Some(key) => docs::lookup(key).unwrap_or(""),
@@ -388,6 +395,14 @@ fn index(color: bool) -> String {
         out.push_str(&wrap(&shown.join("  "), 4, ui::term_width().clamp(40, 100)));
         out.push('\n');
     }
+
+    // A diagnostic's kind opens the section that explains it. The
+    // kinds are no entries of the table, so the JSON does not list
+    // them, and the docs site keeps its shape.
+    out.push_str(&heading("Errors", color));
+    let kinds: Vec<&str> = docs::KINDS.iter().map(|(kind, _)| *kind).collect();
+    out.push_str(&wrap(&kinds.join("  "), 4, ui::term_width().clamp(40, 100)));
+    out.push('\n');
 
     out.push_str(&heading("Lints", color));
     let names: Vec<String> = LINTS
@@ -632,6 +647,38 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(keys.contains(&"unused_variable"), "{keys:?}");
+    }
+
+    /// `alloy doc StructError` opens the section its code names, the
+    /// page `alloy doc 3.6` prints. It answered `no doc` while the
+    /// number worked.
+    #[test]
+    fn a_diagnostic_kind_opens_its_section() {
+        for (kind, number) in docs::KINDS {
+            let by_number = page(number, false).unwrap_or_else(|| panic!("no page for {number}"));
+
+            assert_eq!(
+                page(kind, false).as_deref(),
+                Some(by_number.as_str()),
+                "{kind}"
+            );
+            assert_eq!(
+                page(&kind.to_ascii_lowercase(), false).as_deref(),
+                Some(by_number.as_str()),
+                "{kind}"
+            );
+            assert!(by_number.contains(kind), "{kind} is not listed on {number}");
+        }
+
+        let index = index(false);
+
+        assert!(index.contains("Errors\n    AlloyError"), "{index}");
+
+        // The kinds are no entries: the docs site reads the JSON as is.
+        let value: serde_json::Value = serde_json::from_str(&json()).expect("json");
+        let entries = value["entries"].as_array().expect("entries");
+
+        assert!(!entries.iter().any(|e| e["key"] == "StructError"));
     }
 
     /// The index prints one `Lints` heading. The markup lints belong to

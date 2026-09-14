@@ -292,12 +292,13 @@ impl State {
     }
 
     /*
-    The quick fixes for three of the compiler's own reports.
+    The quick fixes for three of the compiler's own reports, and for
+    the checker's report on a remote in the compiler's words.
 
     Each one says what the file is missing, so the edit writes it: the
-    `new` a construction wants, the arms a `match` does not cover, and
-    the variant a misspelling meant. The child reads the emit, where
-    none of the three is left to see.
+    `new` a construction wants, the arms a `match` does not cover, the
+    variant a misspelling meant, and the verb a remote's member meant.
+    The child reads the emit, where none of the four is left to see.
     */
     pub(crate) fn compiler_actions(
         &self,
@@ -364,6 +365,49 @@ impl State {
                     "message": alloy::docs::labeled(&d.message),
                 }],
                 "edit": { "changes": { uri: edits } },
+            }));
+        }
+
+        // `Damage.fier(1, 2)`: the wording pass names the verb the
+        // member meant. The report spans the whole call head, so the
+        // edit finds the member on the line.
+        for d in self.child_diagnostics.get(uri).into_iter().flatten() {
+            let Some(message) = d.get("message").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(((sl, sc), (el, _))) = d.get("range").and_then(range_of) else {
+                continue;
+            };
+
+            if el < from_line || sl > to_line {
+                continue;
+            }
+
+            let Some((wrote, name)) = remote_verb_fix(message) else {
+                continue;
+            };
+            let Some(text) = doc.source.lines().nth(sl as usize) else {
+                continue;
+            };
+            let from = byte_column(doc, sl, sc) - 1;
+            let Some(i) = text[from..].find(&format!(".{wrote}")) else {
+                continue;
+            };
+            let start = utf16_column(doc, sl, from + i + 2);
+            let end = start + wrote.encode_utf16().count() as u32;
+
+            actions.push(json!({
+                "title": format!("Rename to `{name}`"),
+                "kind": "quickfix",
+                "isPreferred": true,
+                "diagnostics": [d],
+                "edit": { "changes": { uri: [{
+                    "range": {
+                        "start": { "line": sl, "character": start },
+                        "end": { "line": sl, "character": end },
+                    },
+                    "newText": name,
+                }] } },
             }));
         }
 
@@ -1363,7 +1407,7 @@ pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
         }
     }
 
-    alloy_wording(d, doc, &known.shapes);
+    alloy_wording(d, doc, &known.shapes, &raw);
 
     let Some(message) = d.get("message").and_then(Value::as_str) else {
         return;
@@ -1463,7 +1507,15 @@ pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
 /// a type alias or on a value, `is` against a name no type has, an
 /// `impl` for an alias, a method called with a dot, and the arity of a
 /// method call, which the source writes without `self`.
-pub(crate) fn alloy_wording(d: &mut Value, doc: &Doc, shapes: &[alloy::declarations::Shape]) {
+///
+/// `raw` is the report as the child wrote it, before the fold: the
+/// remote rewrite lists the members the fold cuts to `Remote`.
+pub(crate) fn alloy_wording(
+    d: &mut Value,
+    doc: &Doc,
+    shapes: &[alloy::declarations::Shape],
+    raw: &str,
+) {
     let Some(message) = d.get("message").and_then(Value::as_str).map(str::to_string) else {
         return;
     };
@@ -1539,10 +1591,11 @@ pub(crate) fn alloy_wording(d: &mut Value, doc: &Doc, shapes: &[alloy::declarati
     // remote's surface, and the source names the remote. The compiler
     // writes the sentence off the source line; the span the report
     // covers may start at a macro's `$`, which read as the name.
-    // The message reaches here folded, so an empty `Known` is enough.
+    // The raw report still lists the members of the surface, so the
+    // "did you mean" reads as `alloy flux` prints it.
     if message.contains("not found in table 'Remote'") {
         let better = alloy::typecheck::friendly_type_message(
-            &body,
+            raw,
             &alloy::shapes::Known::default(),
             Some(line),
             sc as usize + 1,
@@ -1626,6 +1679,21 @@ fn nearest_variant_fix(message: &str) -> Option<String> {
 
         _ => None,
     }
+}
+
+/// The member a remote typo meant, with the member the file wrote:
+/// the compiler's sentence names both.
+fn remote_verb_fix(message: &str) -> Option<(String, String)> {
+    let (head, tail) = message.split_once("; did you mean ")?;
+
+    if !head.contains("remote `") || !head.contains("` has no `") {
+        return None;
+    }
+
+    let wrote = quoted_names(head).pop()?;
+    let name = quoted_names(tail).pop()?;
+
+    Some((wrote, name))
 }
 
 /// The edit distance of two names, for a "did you mean".

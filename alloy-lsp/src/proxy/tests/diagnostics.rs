@@ -878,7 +878,49 @@ pub(crate) fn a_missing_remote_member_names_the_remote() {
         "range": { "start": { "line": 4, "character": 4 }, "end": { "line": 4, "character": 5 } },
         "message": "TypeError: Key 'nope' not found in table 'Remote'",
     });
-    alloy_wording(&mut d, &st.docs[uri], &[]);
+    let raw = d["message"].as_str().unwrap().to_string();
+    alloy_wording(&mut d, &st.docs[uri], &[], &raw);
 
     assert_eq!(d["message"], "TypeError: remote `Damage` has no `nope`");
+}
+
+/// A member one edit away from a verb the remote has: the fold cuts
+/// the surface to `Remote`, so the suggestion reads the raw report,
+/// and the quick fix renames the member alone.
+#[test]
+pub(crate) fn a_remote_typo_keeps_its_suggestion_and_its_fix() {
+    let src = concat!(
+        "remote Damage(target: number, amount: number) from client\n",
+        "\n",
+        "function main()\n",
+        "    Damage.fier(1, 2)\n",
+        "end\n",
+        "\n",
+        "main()\n",
+    );
+    let (mut st, uri) = one_file(src);
+    let raw = "TypeError: Key 'fier' not found in table '{ calls: RemoteCalls, fire: (number, number) -> (), instance: Instance?, on: ((Player, number, number) -> ()) -> RBXScriptConnection, spec: RemoteSpec, wait: () -> Future<Player> }'";
+    let mut d = json!({
+        "range": { "start": { "line": 3, "character": 4 }, "end": { "line": 3, "character": 15 } },
+        "severity": 1,
+        "message": "TypeError: Key 'fier' not found in table 'Remote'",
+    });
+    alloy_wording(&mut d, &st.docs[uri], &[], raw);
+
+    assert_eq!(
+        d["message"],
+        "TypeError: remote `Damage` has no `fier`; did you mean `fire`?"
+    );
+
+    st.child_diagnostics.insert(uri.to_string(), vec![d]);
+    let actions = st.compiler_actions(uri, ((0, 0), (99, 0)));
+
+    assert_eq!(actions[0]["title"], "Rename to `fire`");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri],
+        json!([{
+            "range": { "start": { "line": 3, "character": 11 }, "end": { "line": 3, "character": 15 } },
+            "newText": "fire",
+        }])
+    );
 }

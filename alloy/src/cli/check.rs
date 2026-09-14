@@ -66,7 +66,9 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
         (denied, "denied", ui::RED),
     ]);
 
-    if report.is_clean() && denied == 0 {
+    let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
+
+    if report.is_clean() && denied == 0 && !(deny_warnings && warnings > 0) {
         eprintln!("{} {counts}", p.ok("check"));
 
         ExitCode::SUCCESS

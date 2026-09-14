@@ -21,8 +21,10 @@ pub(crate) fn fmt_cmd(args: &[String]) -> ExitCode {
         }
     };
 
+    let written = alloy::build::written_dirs(&root, &config);
+
     if positional.is_empty() {
-        match alloy::build::sources(&root.join(&config.build.input)) {
+        match alloy::build::sources(&root.join(&config.build.input), &written) {
             Ok(list) => files.extend(list),
 
             Err(e) => {
@@ -35,7 +37,7 @@ pub(crate) fn fmt_cmd(args: &[String]) -> ExitCode {
             let path = PathBuf::from(p);
 
             if path.is_dir() {
-                match alloy::build::sources(&path) {
+                match alloy::build::sources(&path, &written) {
                     Ok(list) => files.extend(list),
 
                     Err(e) => {

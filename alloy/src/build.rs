@@ -140,9 +140,9 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
 }
 
 /// The Alloy sources under `input`, sorted.
-pub fn sources(input: &Path) -> std::io::Result<Vec<PathBuf>> {
+pub fn sources(input: &Path, written: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
     let mut list = Vec::new();
-    walk(input, &mut list)?;
+    walk(input, written, &mut list)?;
     list.sort();
 
     Ok(list)
@@ -171,11 +171,21 @@ fn run_with(root: &Path, config: &Config, write: bool, keep: bool) -> std::io::R
     let mut expected: HashSet<PathBuf> = HashSet::new();
     let mut imports: Vec<(PathBuf, Vec<crate::ImportRef>)> = Vec::new();
 
+    // A project whose `out` (or spec folder) sits under `in` would read
+    // its own output back as a source on the next run.
+    let written = written_dirs(root, config);
+
+    if input.is_dir() && normalize_path(&out).starts_with(normalize_path(&input)) {
+        report
+            .notes
+            .push("[build] out sits inside in; its files are skipped".to_string());
+    }
+
     let mut sources = Vec::new();
-    walk(&input, &mut sources)?;
+    walk(&input, &written, &mut sources)?;
     sources.sort();
     let mut plain = Vec::new();
-    walk_plain(&input, &mut plain)?;
+    walk_plain(&input, &written, &mut plain)?;
 
     // The structs of every source, so a remote in one file packs a
     // struct another file declares.
@@ -969,10 +979,21 @@ pub fn globs(patterns: &[String]) -> std::io::Result<GlobSet> {
     b.build().map_err(std::io::Error::other)
 }
 
+/// The directories the build writes, as normalized paths: the output
+/// folder and the spec folder. A source walk skips them. Without this a
+/// project whose `out` sits under `in` reads its own output back and
+/// nests one level deeper on every run.
+pub fn written_dirs(root: &Path, config: &Config) -> Vec<PathBuf> {
+    vec![
+        normalize_path(&root.join(&config.build.out)),
+        normalize_path(&root.join(&config.test.out)),
+    ]
+}
+
 /// A directory the source walks leave alone: a dot directory, a package
-/// store, a build tree, or a nested project with an `alloy.toml` of its
-/// own, which builds on its own.
-fn skipped_dir(path: &Path, top: bool) -> bool {
+/// store, a build tree, a directory the build writes, or a nested
+/// project with an `alloy.toml` of its own, which builds on its own.
+fn skipped_dir(path: &Path, top: bool, written: &[PathBuf]) -> bool {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -980,14 +1001,20 @@ fn skipped_dir(path: &Path, top: bool) -> bool {
 
     (name.starts_with('.') && name != ".ember")
         || matches!(name.as_str(), "node_modules" | "target")
+        || (!top && written.contains(&normalize_path(path)))
         || (!top && path.join(crate::config::FILE_NAME).is_file())
 }
 
 /// Every plain Luau file under a directory, recursively: what a require
 /// from emitted code may name beside the sources.
-pub fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    fn go(dir: &Path, top: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        if !dir.is_dir() || skipped_dir(dir, top) {
+pub fn walk_plain(dir: &Path, written: &[PathBuf], out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn go(
+        dir: &Path,
+        top: bool,
+        written: &[PathBuf],
+        out: &mut Vec<PathBuf>,
+    ) -> std::io::Result<()> {
+        if !dir.is_dir() || skipped_dir(dir, top, written) {
             return Ok(());
         }
 
@@ -995,7 +1022,7 @@ pub fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
             let path = entry?.path();
 
             if path.is_dir() {
-                go(&path, false, out)?;
+                go(&path, false, written, out)?;
             } else if matches!(
                 path.extension().and_then(|e| e.to_str()),
                 Some("luau" | "lua")
@@ -1007,7 +1034,7 @@ pub fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         Ok(())
     }
 
-    go(dir, true, out)?;
+    go(dir, true, written, out)?;
     out.sort();
 
     Ok(())
@@ -1015,9 +1042,14 @@ pub fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 
 /// Every `.json` and `.toml` file under a directory, recursively: what
 /// a data import may name.
-pub fn walk_data(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    fn go(dir: &Path, top: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        if !dir.is_dir() || skipped_dir(dir, top) {
+pub fn walk_data(dir: &Path, written: &[PathBuf], out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn go(
+        dir: &Path,
+        top: bool,
+        written: &[PathBuf],
+        out: &mut Vec<PathBuf>,
+    ) -> std::io::Result<()> {
+        if !dir.is_dir() || skipped_dir(dir, top, written) {
             return Ok(());
         }
 
@@ -1025,7 +1057,7 @@ pub fn walk_data(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
             let path = entry?.path();
 
             if path.is_dir() {
-                go(&path, false, out)?;
+                go(&path, false, written, out)?;
             } else if crate::data::Format::of_path(&path).is_some()
                 && !crate::data::is_project_file(&path)
             {
@@ -1036,16 +1068,21 @@ pub fn walk_data(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         Ok(())
     }
 
-    go(dir, true, out)?;
+    go(dir, true, written, out)?;
     out.sort();
 
     Ok(())
 }
 
 /// Every Alloy source under a directory, recursively.
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    fn go(dir: &Path, top: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        if !dir.is_dir() || skipped_dir(dir, top) {
+fn walk(dir: &Path, written: &[PathBuf], out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn go(
+        dir: &Path,
+        top: bool,
+        written: &[PathBuf],
+        out: &mut Vec<PathBuf>,
+    ) -> std::io::Result<()> {
+        if !dir.is_dir() || skipped_dir(dir, top, written) {
             return Ok(());
         }
 
@@ -1053,7 +1090,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
             let path = entry?.path();
 
             if path.is_dir() {
-                go(&path, false, out)?;
+                go(&path, false, written, out)?;
             } else if matches!(
                 path.extension().and_then(|e| e.to_str()),
                 Some("aly" | "alx")
@@ -1065,7 +1102,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         Ok(())
     }
 
-    go(dir, true, out)
+    go(dir, true, written, out)
 }
 
 fn walk_all(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -1103,6 +1140,25 @@ mod tests {
         let files: Vec<String> = lints.iter().map(|(p, _)| p.display().to_string()).collect();
         assert_eq!(files, vec!["a.aly", "b.aly", "c.aly"]);
         assert!(lints[0].1.message.contains("`a.aly` imports `b.aly`"));
+    }
+
+    #[test]
+    fn a_walk_skips_the_output_folder_under_the_input() {
+        let dir = std::env::temp_dir().join(format!("alloy-out-in-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("main.aly"), "").unwrap();
+        std::fs::write(dir.join("build/main.luau"), "").unwrap();
+        std::fs::write(dir.join("tests/main.spec.luau"), "").unwrap();
+        let written = vec![dir.join("build"), dir.join("tests")];
+        let mut plain = Vec::new();
+        walk_plain(&dir, &written, &mut plain).unwrap();
+        assert!(plain.is_empty(), "{plain:?}");
+        let mut list = Vec::new();
+        walk(&dir, &written, &mut list).unwrap();
+        assert_eq!(list, vec![dir.join("main.aly")]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -345,8 +345,9 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     // A plain `.luau` beside the sources sits in the output too, as the
     // build copies it, so a require of it resolves.
     let input = root.join(&config.build.input);
+    let written = crate::build::written_dirs(root, config);
     let mut plain = Vec::new();
-    let _ = crate::build::walk_plain(&input, &mut plain);
+    let _ = crate::build::walk_plain(&input, &written, &mut plain);
 
     for path in plain {
         let rel = path.strip_prefix(&input).unwrap_or(&path);
@@ -366,7 +367,7 @@ pub fn analyze(root: &Path, config: &Config, files: &[CheckSource]) -> Result<An
     // the same stem is left out: the build reports that collision, and
     // the module wins here as it does there.
     let mut data = Vec::new();
-    let _ = crate::build::walk_data(&input, &mut data);
+    let _ = crate::build::walk_data(&input, &written, &mut data);
 
     for path in data {
         let rel = path.strip_prefix(&input).unwrap_or(&path);

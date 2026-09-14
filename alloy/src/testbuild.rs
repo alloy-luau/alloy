@@ -500,12 +500,13 @@ fn write_modules(
     std::fs::write(dir.join("alloy.luau"), crate::RUNTIME)?;
     std::fs::write(dir.join("shim.luau"), crate::SHIM)?;
     let exclude = crate::build::globs(&config.build.exclude)?;
+    let written = crate::build::written_dirs(root, config);
     let jsx = config.markup(root).ok();
     let runtime = modules.join("alloy");
     let tree = crate::project::Tree::load(root, config);
     let aliases = crate::modules::aliases(root, &tree);
 
-    for path in crate::build::sources(&input)? {
+    for path in crate::build::sources(&input, &written)? {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
 
         if exclude.is_match(&rel) {
@@ -557,7 +558,7 @@ fn write_modules(
     }
 
     let mut plain = Vec::new();
-    crate::build::walk_plain(&input, &mut plain)?;
+    crate::build::walk_plain(&input, &written, &mut plain)?;
 
     for path in plain {
         let rel = path.strip_prefix(&input).unwrap_or(&path);
@@ -571,7 +572,7 @@ fn write_modules(
     }
 
     let mut data = Vec::new();
-    crate::build::walk_data(&input, &mut data)?;
+    crate::build::walk_data(&input, &written, &mut data)?;
 
     for path in data {
         let rel = path.strip_prefix(&input).unwrap_or(&path);
@@ -768,6 +769,7 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
     let out_dir = root.join(&config.test.out);
     let mut expected: HashSet<PathBuf> = HashSet::new();
     let exclude = crate::build::globs(&config.build.exclude)?;
+    let written = crate::build::written_dirs(root, config);
     let ingots = crate::ingot::Ingots::load(root, config);
 
     for p in &ingots.problems {
@@ -780,7 +782,7 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
     // extension name routes through the dispatcher in every spec.
     let mut extensions = Vec::new();
 
-    for path in crate::build::sources(&input)? {
+    for path in crate::build::sources(&input, &written)? {
         if path.extension().is_some_and(|e| e == "aly")
             && let Ok(source) = std::fs::read_to_string(&path)
         {
@@ -794,7 +796,7 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
         }
     }
 
-    for path in crate::build::sources(&input)? {
+    for path in crate::build::sources(&input, &written)? {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
 
         if exclude.is_match(&rel) {

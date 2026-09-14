@@ -103,6 +103,49 @@ pub(crate) fn a_bound_reads_where_the_source_wrote_it() {
         "export function cheapest<T: Priced>(a: T, b: T): T"
     );
 }
+/// A bound reaches a local through the cast the check artifact writes.
+/// The artifact puts `(T & Ord)` on the array's element and on the read
+/// of one, so the trait's record prints twice, and the two assignments
+/// print the branch twice. The fold names the record, drops the
+/// repeats, and the hover and the hint both read `T`.
+#[test]
+pub(crate) fn a_bound_on_a_local_reads_as_the_parameter() {
+    let src = concat!(
+        "trait Ord as\n",
+        "    function cmp(self, other: number): number\n",
+        "end\n",
+        "\n",
+        "function largestBoxed<T: Ord>(xs: (T & Ord)[]): T\n",
+        "    local best = xs[1]\n",
+        "    return best\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let record = "{\n    read cmp: (self: any, other: number) -> number\n}";
+    let branch = format!("(T & {record} & {record})");
+    let printed = format!("```luau\nlocal best: {branch} | {branch}\n```");
+    let mut text = crate::shapes::fold(&printed, &st.known_shapes_at(Some(uri)));
+
+    assert_eq!(text, "```luau\nlocal best: (T & Ord)\n```");
+
+    if let Some(next) = drop_bound_intersections(&text, doc) {
+        text = next;
+    }
+
+    assert_eq!(text, "```luau\nlocal best: T\n```");
+
+    // The hint on the same binding reads the same way.
+    let mut hints = vec![json!({
+        "position": { "line": 5, "character": 14 },
+        "label": ": (T & Ord)",
+        "textEdits": [{ "newText": ": (T & Ord)" }],
+    })];
+    clean_hints(&mut hints, doc);
+
+    assert_eq!(hints[0]["label"], json!(": T"));
+    assert_eq!(hints[0]["textEdits"][0]["newText"], json!(": T"));
+}
 #[test]
 pub(crate) fn a_union_keeps_the_order_the_source_wrote() {
     let src = concat!(

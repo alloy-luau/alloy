@@ -668,6 +668,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_namespace_names(&mut out, known);
     fold_full_views(&mut out, known);
     fold_interfaces(&mut out, known);
+    fold_bound_records(&mut out, known);
     fold_name_parens(&mut out);
     fold_signalish(&mut out);
     fold_array_alias(&mut out);
@@ -679,7 +680,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_negated_members(&mut out);
     out = fold_temp_receiver(&out);
     fold_aliases(&mut out, known);
-    fold_union_dupes(&mut out);
+    fold_repeated_members(&mut out);
     fold_intersection_dupes(&mut out);
     fold_array_parens(&mut out);
     // `Array<number[] | number[]>` is one array once the union folds.
@@ -888,11 +889,13 @@ fn fold_named_unions(text: &mut String) {
 
 /// `T | D` of an `unwrap_or` prints twice when both are the same:
 /// `number | number` reads as `number`, and two instantiations of one
-/// alias print as two members, `Array<number> | Array<number>`. Each
-/// type after a `: ` on a line loses its repeated members, at any
-/// depth.
-fn fold_union_dupes(text: &mut String) {
-    if !text.contains(" | ") {
+/// alias print as two members, `Array<number> | Array<number>`. An
+/// intersection repeats a member the same way: the check artifact
+/// writes the bound of a type parameter on the array's element and on
+/// the read of one, so `T & Ord & Ord` reaches the reader. Each type
+/// after a `: ` on a line loses its repeated members, at any depth.
+fn fold_repeated_members(text: &mut String) {
+    if !text.contains(" | ") && !text.contains(" & ") {
         return;
     }
 
@@ -933,7 +936,24 @@ fn dedupe_type(text: &str) -> String {
         return kept.join(" | ");
     }
 
-    // No union at this depth: each bracket group gets its own pass.
+    let parts = split_at_depth(text, " & ", true);
+
+    if parts.len() > 1 {
+        let mut kept: Vec<String> = Vec::new();
+
+        for m in parts {
+            let m = dedupe_type(m.trim());
+
+            if !kept.contains(&m) {
+                kept.push(m);
+            }
+        }
+
+        return kept.join(" & ");
+    }
+
+    // No union and no intersection at this depth: each bracket group
+    // gets its own pass.
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
 
@@ -1302,6 +1322,42 @@ fn resolve(bindings: &[Binding], known: &Known) -> Vec<(String, String)> {
     }
 
     resolved
+}
+
+/// A trait's record inside a longer intersection. A bound leaves the
+/// type parameter list at emit and joins every use of the parameter,
+/// `T & { read cmp: ... }`. `fold_interfaces` reads a whole
+/// intersection, so no name reaches one member of one; the trait names
+/// its own record here, and the bound then drops with the rest.
+fn fold_bound_records(text: &mut String, known: &Known) {
+    if !known.interfaces.iter().any(|i| i.is_trait) {
+        return;
+    }
+
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find('{') {
+        let open = from + i;
+
+        let Some(len) = balanced_len(&text[open..]) else {
+            break;
+        };
+        let body = text[open..open + len].to_string();
+
+        match known
+            .interfaces
+            .iter()
+            .find(|f| f.is_trait && f.matches(&body, &known.interfaces))
+        {
+            Some(iface) => {
+                let name = iface.name.clone();
+                text.replace_range(open..open + len, &name);
+                from = open + name.len();
+            }
+
+            None => from = open + 1,
+        }
+    }
 }
 
 /// An interface prints as its bases met with a table of the fields it

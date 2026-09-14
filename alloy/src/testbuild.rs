@@ -651,6 +651,24 @@ pub fn spec(
             message: e.message,
         }
     })?;
+    // A source the lenient parse could not read is no spec: the tree is
+    // the recovery's, not the author's, and the slice would register a
+    // test the file never wrote. The diagnostics report and the caller
+    // writes nothing.
+    if !parsed.diagnostics.is_empty() {
+        let diagnostics = parsed
+            .diagnostics
+            .iter()
+            .map(|e| Diagnostic {
+                start: e.offset as u32,
+                end: e.offset as u32,
+                message: e.message.clone(),
+            })
+            .collect();
+
+        return Ok(Some((String::new(), diagnostics, 0)));
+    }
+
     let Some(sliced) = slice(source, &parsed.lexed.toks, &parsed.chunk) else {
         return Ok(None);
     };
@@ -814,6 +832,13 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
 
         let target = out_dir.join(&spec_rel);
         expected.insert(target.clone());
+
+        // `spec` gives no text for a source that does not parse. The
+        // diagnostics above count it; the spec it wrote before stays, so
+        // a syntax error deletes nothing.
+        if text.is_empty() {
+            continue;
+        }
         let shown = config.test.out.join(&spec_rel);
         let current = std::fs::read_to_string(&target).ok();
 
@@ -1064,5 +1089,54 @@ end
             text.contains("local __alloy = require(\"./.modules/alloy\")"),
             "{text}"
         );
+    }
+
+    /// A source that does not parse gives the recovery's tree, not the
+    /// author's, and the slice read a `@test` out of it. The spec built
+    /// and the run passed. The parse diagnostics now come back with no
+    /// text, so the caller reports them and writes nothing.
+    #[test]
+    fn a_source_that_does_not_parse_writes_no_spec() {
+        let src =
+            "namespace A {\n    @test\n    function name()\n        $assert(1 == 1)\n    end\n}\n";
+        let (text, diagnostics, count) = spec(
+            &Config::default(),
+            Path::new("/none"),
+            Path::new("src/broken.aly"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(text.is_empty(), "{text}");
+        assert_eq!(count, 0);
+        assert!(!diagnostics.is_empty());
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("`namespace` is a reserved word")),
+            "{:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+
+        // The same file with braces turned into `as ... end` parses, so
+        // the spec builds.
+        let good = "namespace A as\n    @test\n    function name()\n        $assert(1 == 1)\n    end\nend\n";
+        let (text, diagnostics, count) = spec(
+            &Config::default(),
+            Path::new("/none"),
+            Path::new("src/good.aly"),
+            good,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(count, 1);
+        assert!(text.contains("__lest.describe(\"good\""), "{text}");
     }
 }

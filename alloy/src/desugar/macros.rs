@@ -328,6 +328,14 @@ impl<'s> Desugar<'s> {
             &EmitOptions {
                 file_name: self.options.file_name.clone(),
                 macros,
+                // The enums of this file. The fragment is its own
+                // compile, so a `match` in the body covers them only
+                // when the index travels with it.
+                macro_enums: self
+                    .enum_decls
+                    .iter()
+                    .map(|(name, variants)| (name.clone(), variants.clone()))
+                    .collect(),
                 // The outer file already binds every global it names;
                 // the fragment lands inside it and needs no prologue.
                 ..self.options.clone()
@@ -589,6 +597,25 @@ mod tests {
         );
         assert!(messages("local m = $map[[\"sword\", 10]]\nprint(m)\n").is_empty());
         assert!(messages("local m = $map[]\nprint(m)\n").is_empty());
+    }
+
+    /// A macro body compiles as a fragment of its own, so it needs the
+    /// enums of the file it expands in. Without them a `match` over one
+    /// covered nothing and reported. The body travels as tokens joined
+    /// by spaces, so `Choice.Yes` reaches the fragment as `Choice . Yes`.
+    #[test]
+    fn a_match_in_a_macro_body_covers_the_enum_of_the_file() {
+        let src = "enum Choice as\n    Yes\n    No\nend\n\nmacro describe(c)\n    local r = match c with\n        case Choice.Yes then \"yes\"\n        case Choice.No then \"no\"\n    end\n    r\nend\n\nlocal function show(x: Choice): string\n    return $describe(x)\nend\n\nprint(show(Choice.Yes))\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+
+        // An arm that leaves a variant out still reports.
+        let one = src.replace("        case Choice.No then \"no\"\n", "");
+        assert_eq!(
+            messages(&one),
+            vec![
+                "in macro expansion: this match is not exhaustive: `Choice` has no arm for `No`; add it or a `default` arm".to_string()
+            ]
+        );
     }
 
     /// A macro substitutes; there is no call for the checker to count.

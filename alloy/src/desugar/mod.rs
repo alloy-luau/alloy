@@ -149,6 +149,10 @@ pub struct EmitOptions {
     /// attribute is used, so a use here needs the declaration there.
     /// See `crate::modules::import_attributes`.
     pub import_attributes: Vec<(String, AttrDecl)>,
+    /// The enums the file around a macro expansion declares. A macro
+    /// body compiles as a fragment of its own, and a `match` in it
+    /// covers the enums of the file it lands in. See `compile_fragment`.
+    pub macro_enums: Vec<(String, Vec<(String, usize)>)>,
     /// An ingot rewrote the source before the compile read it. The
     /// order of the statements is then the ingot's, not the author's,
     /// so `import_order` says nothing about it.
@@ -288,6 +292,7 @@ impl Default for EmitOptions {
             plain_modules: Vec::new(),
             ambient_names: Vec::new(),
             import_attributes: Vec::new(),
+            macro_enums: Vec::new(),
             ingot_rewrite: false,
         }
     }

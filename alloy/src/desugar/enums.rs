@@ -271,7 +271,10 @@ impl<'s> Desugar<'s> {
     /// the bare `Big` answers `("Big", None)` for the caller to find the
     /// enum by its variant.
     pub(crate) fn pattern_variant(&self, name: TokSpan) -> (String, Option<String>) {
-        let text = self.text_of(name).to_string();
+        // A macro body travels as tokens joined by spaces, so a path
+        // reaches here as `Choice . Yes`. No name holds a space, so the
+        // join drops out again.
+        let text: String = self.text_of(name).split_whitespace().collect();
 
         if !text.contains('.') {
             return (text, None);

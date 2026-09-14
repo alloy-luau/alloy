@@ -1013,6 +1013,15 @@ impl<'s> Desugar<'s> {
                 }
             }
         }
+
+        // A macro body is a fragment of the file it expands in, so the
+        // enums of that file are in scope with no import behind them.
+        for (name, variants) in &self.options.macro_enums {
+            if !self.enums.contains_key(name) {
+                self.enums.insert(name.clone(), variants.clone());
+                self.enum_decls.insert(name.clone(), variants.clone());
+            }
+        }
     }
 
     /// The names one import list binds, with the name each one renames:

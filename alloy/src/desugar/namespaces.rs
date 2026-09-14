@@ -753,6 +753,10 @@ impl<'s> Desugar<'s> {
     /// The enum a dotted pattern names, with the variant: `Math.Shape`
     /// of `case Math.Shape.Circle` is the enum `Math_Shape`.
     pub(crate) fn enum_of_path(&self, text: &str) -> Option<(String, String)> {
+        // A macro body travels as tokens joined by spaces, so a path
+        // reaches here as `Choice . Yes`. No name holds a space, so the
+        // join drops the spaces out again.
+        let text: String = text.split_whitespace().collect();
         let (head, variant) = text.rsplit_once('.')?;
         // A namespace this file declares renders its enum under one
         // name, `Geo_Kind`. An imported namespace has no declaration

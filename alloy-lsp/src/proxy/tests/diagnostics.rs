@@ -60,6 +60,43 @@ pub(crate) fn child(line: u32, message: &str, severity: u64) -> Value {
     })
 }
 #[test]
+pub(crate) fn a_private_read_keeps_the_error_beside_the_lint() {
+    // `alloy flux` reports the read as an error and lints it. The
+    // editor shows both; the two shapes that name a member that is
+    // there answer to the lint alone.
+    let source = concat!(
+        "struct Box as\n",
+        "    value: number,\n",
+        "    private secret: number,\n",
+        "end\n",
+        "\n",
+        "local b = new Box { value = 1, secret = 0 }\n",
+        "print(b.secret)\n",
+    );
+    let (st, uri) = one_file(source);
+    let doc = st.docs.get(uri).unwrap();
+    let config = alloy::config::LintConfig::default();
+
+    assert!(
+        doc.output
+            .as_ref()
+            .is_some_and(|o| o.lints.iter().any(|l| l.name == "private_access")),
+        "the fixture must lint the read"
+    );
+    assert!(keep_diagnostic(
+        &child(6, "TypeError: Type 'Box' does not have key 'secret'", 1),
+        doc,
+        None,
+        &config
+    ));
+    assert!(!keep_diagnostic(
+        &child(6, "TypeError: Key 'secret' not found in table 'Box'", 1),
+        doc,
+        None,
+        &config
+    ));
+}
+#[test]
 pub(crate) fn a_region_silences_the_checkers_reports_between_its_pair() {
     let source = concat!(
         "--@alloy-ignore-start\n",
@@ -219,14 +256,6 @@ pub(crate) fn the_directive_list_holds_every_directive() {
 
     // `--@` asks for Alloy's own; the Luau hot comments stay out.
     assert!(!labels.iter().any(|l| l.starts_with("--!")));
-}
-#[test]
-pub(crate) fn the_key_a_message_says_is_missing() {
-    assert_eq!(
-        missing_key("TypeError: Type 'Wallet' does not have key 'balance'"),
-        Some("balance")
-    );
-    assert_eq!(missing_key("TypeError: something else"), None);
 }
 #[test]
 pub(crate) fn a_range_on_whitespace_moves_to_the_next_token() {

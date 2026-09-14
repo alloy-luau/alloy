@@ -1212,16 +1212,19 @@ pub(crate) fn keep_diagnostic(
         return false;
     }
 
-    // `private_access` already says the field is private; the checker
-    // says at the same place that it does not exist.
-    if let Some(field) = missing_key(message)
+    // The checker reads a private member as missing: the declaring file
+    // keeps it out of the struct's public type. `alloy doc private`
+    // promises a type error there, so the report that names the member
+    // as private stands beside `private_access`, the way `alloy flux`
+    // keeps it. The two shapes that name no private member point at a
+    // member that is there, so they answer to the lint alone.
+    if (message.contains("has no method") || message.contains("not found in table"))
         && let Some(out) = &doc.output
         && let Some(((sl, _), _)) = d.get("range").and_then(range_of)
         && out.lints.iter().any(|l| {
             l.name == "private_access"
                 && alloy::lint::level_in(lint_config, &silence, l.name) != alloy::lint::Level::Allow
                 && alloy::directives::line_of(&doc.source, l.start as usize) == sl as usize
-                && l.message.contains(&format!("`{field}`"))
         })
     {
         return false;
@@ -1621,13 +1624,6 @@ pub(crate) fn names_word(line: &str, phrase: &str) -> bool {
         !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
             && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
     })
-}
-
-/// The key a `does not have key 'balance'` message names.
-pub(crate) fn missing_key(message: &str) -> Option<&str> {
-    let at = message.find("does not have key '")? + "does not have key '".len();
-
-    message[at..].find('\'').map(|end| &message[at..at + end])
 }
 
 /// The variable of a `LocalUnused` or `FunctionUnused` lint.

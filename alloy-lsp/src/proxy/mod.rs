@@ -42,7 +42,7 @@ use completion::{
 #[allow(unused_imports)]
 use diagnostics::{
     alias_key_line, collapse_diagnostics, consumed_by_intrinsic, friendly_message, keep_diagnostic,
-    missing_key, quoted_span_on_line, snap_ranges, unmet_expectations, unused_name,
+    quoted_span_on_line, snap_ranges, unmet_expectations, unused_name,
 };
 #[allow(unused_imports)]
 use documents::{

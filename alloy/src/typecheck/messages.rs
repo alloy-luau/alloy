@@ -96,6 +96,7 @@ pub fn friendly_type_message(
     // runs on the text before the fold names it as well as after.
     if let Some(better) = rewrite_remote_key(&stripped, line)
         .or_else(|| rewrite_remote_key(&folded, line))
+        .or_else(|| rewrite_remote_handler(&folded, line))
         .or_else(|| rewrite_await(&folded, line))
         .or_else(|| rewrite_arity(&folded, line, col))
         .or_else(|| rewrite_dot_self(&folded, line, col))
@@ -632,6 +633,109 @@ fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
 
         None => format!("remote `{receiver}` has no `{key}`"),
     })
+}
+
+/// The arity of a remote's handler, in the remote's terms. The checker
+/// compares two printed function types and names neither the remote nor
+/// the parameters the source wrote.
+fn rewrite_remote_handler(message: &str, line: &str) -> Option<String> {
+    let want = quoted_after(message, "Expected this to be '")?;
+    let got = quoted_after(message.split_once("but got ")?.1, "'")?;
+    let sends = fn_params(want)?;
+    let takes = fn_params(got)?;
+
+    if sends.len() == takes.len() {
+        return None;
+    }
+
+    let remote = remote_verb_call(line)?;
+    let names = handler_params(line);
+    // The handler names the values it takes, so the ones the remote
+    // sends read back in the source's own words. A handler short of the
+    // count names none of them.
+    let listed = match names.len() >= sends.len() && !sends.is_empty() {
+        true => {
+            let quoted: Vec<String> = names[..sends.len()]
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect();
+
+            format!(" ({})", quoted.join(", "))
+        }
+
+        false => String::new(),
+    };
+    let unit = match takes.len() {
+        1 => "parameter",
+
+        _ => "parameters",
+    };
+
+    Some(format!(
+        "the handler takes {} {unit}; `{remote}` sends {}{listed}",
+        takes.len(),
+        sends.len()
+    ))
+}
+
+/// The parameter types of a printed function type: `(A, B) -> ()`
+/// answers `["A", "B"]`. A type that is no function answers nothing.
+fn fn_params(ty: &str) -> Option<Vec<&str>> {
+    use crate::desugar::{group_len, split_top_level};
+
+    let ty = ty.trim();
+    let len = group_len(ty, '(', ')')?;
+
+    if !ty[len..].trim_start().starts_with("->") {
+        return None;
+    }
+
+    let inner = ty[1..len - 1].trim();
+
+    Some(match inner.is_empty() {
+        true => Vec::new(),
+
+        false => split_top_level(inner, ','),
+    })
+}
+
+/// The remote a verb call on a line names: `Net.Ping.on(` answers
+/// `Ping`. A path that starts lowercase names a value, not a remote.
+fn remote_verb_call(line: &str) -> Option<String> {
+    REMOTE_VERBS.iter().find_map(|verb| {
+        let at = line.find(&format!(".{verb}("))?;
+        let path: String = line[..at]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let name = path.rsplit('.').next()?.to_string();
+
+        name.starts_with(|c: char| c.is_uppercase()).then_some(name)
+    })
+}
+
+/// The parameter names a handler on the line writes: `function(a, b)`
+/// answers `["a", "b"]`. A list that runs past the line answers none.
+fn handler_params(line: &str) -> Vec<String> {
+    use crate::desugar::{group_len, split_top_level};
+
+    let Some(at) = line.find("function(") else {
+        return Vec::new();
+    };
+    let rest = &line[at + "function".len()..];
+    let Some(len) = group_len(rest, '(', ')') else {
+        return Vec::new();
+    };
+
+    split_top_level(&rest[1..len - 1], ',')
+        .iter()
+        .map(|p| p.split(':').next().unwrap_or("").trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
 }
 
 /// The edit distance of two names, for a "did you mean".
@@ -2312,6 +2416,23 @@ end
                 1
             ),
             "remote `Toast` has no `fira`"
+        );
+    }
+
+    /// `.on(function(sender, id, extra))` on a remote that sends two
+    /// values printed two function types and asked the reader to compare
+    /// them. The report now counts the parameters and names the remote.
+    #[test]
+    fn a_remote_handler_of_the_wrong_arity_counts_its_parameters() {
+        let message = "TypeError: Expected this to be '(Player, number) -> ()' but got '(Player, number, unknown) -> ()'; it takes `Player, number, unknown` in the latter type and `Player, number` in the former type, and `Player, number, unknown` is not a supertype of `Player, number`";
+        assert_eq!(
+            friendly_type_message(
+                message,
+                &crate::shapes::Known::default(),
+                Some("    Net.Ping.on(function(sender, id, extra)"),
+                17,
+            ),
+            "the handler takes 3 parameters; `Ping` sends 2 (`sender`, `id`)"
         );
     }
 

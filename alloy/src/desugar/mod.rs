@@ -43,6 +43,7 @@ mod types;
 use macros::MacroRef;
 use namespaces::{NamespaceInfo, NsFrame};
 pub(crate) use remotes::WIRE_WIDTHS;
+pub(crate) use types::{group_len, split_top_level};
 
 /// A message tied to a source byte range.
 #[derive(Debug, Clone, PartialEq, Eq)]

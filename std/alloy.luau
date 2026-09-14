@@ -1555,7 +1555,9 @@ alloy.Signal = Signal
 
 --- A first-in, first-out queue over a ring of indices. `push` appends,
 --- `pop` takes the oldest. Iterating reads front to back without a pop.
-export type Queue<T> = {
+--- The `__iter` in the type is for the checker: a `for` over a plain
+--- table type reports, and the metatable form binds the element type.
+export type Queue<T> = typeof(setmetatable({} :: {
 	push: (self: Queue<T>, value: T) -> (),
 	pop: (self: Queue<T>) -> T?,
 	peek: (self: Queue<T>) -> T?,
@@ -1563,7 +1565,7 @@ export type Queue<T> = {
 	is_empty: (self: Queue<T>) -> boolean,
 	clear: (self: Queue<T>) -> (),
 	to_array: (self: Queue<T>) -> Array<T>,
-}
+}, {} :: { __iter: (self: any) -> () -> T? }))
 
 local Queue = {}
 Queue.__index = Queue
@@ -1646,7 +1648,7 @@ alloy.Queue = Queue
 --- A binary heap. `pop` yields the least value under `less`, which
 --- defaults to `<`; pass one for tables: `Heap.new(function(a, b) return
 --- a.cost < b.cost end)`. Iterating pops nothing; `to_array` sorts.
-export type Heap<T> = {
+export type Heap<T> = typeof(setmetatable({} :: {
 	-- In the type alone, as `Result.__ok` is: `Queue<T>` has the same
 	-- members, and without this the checker prints one name for both.
 	read __less: (T, T) -> boolean,
@@ -1657,7 +1659,7 @@ export type Heap<T> = {
 	is_empty: (self: Heap<T>) -> boolean,
 	clear: (self: Heap<T>) -> (),
 	to_array: (self: Heap<T>) -> Array<T>,
-}
+}, {} :: { __iter: (self: any) -> () -> T? }))
 
 local Heap = {}
 Heap.__index = Heap
@@ -1857,7 +1859,7 @@ alloy.Scope = Scope
 --- chain methods on top. Nothing runs until `collect`, `for_each`, or a
 --- `for` loop pulls. `Iter.from` takes an array, a function, or anything
 --- with `__iter`; `Iter.range(a, b, step)` counts.
-export type Iter<T> = {
+export type Iter<T> = typeof(setmetatable({} :: {
 	next: (self: Iter<T>) -> T?,
 	map: <U>(self: Iter<T>, f: (T) -> U) -> Iter2<U>,
 	filter: (self: Iter<T>, f: (T) -> boolean) -> Iter<T>,
@@ -1874,11 +1876,11 @@ export type Iter<T> = {
 	reduce: <U>(self: Iter<T>, f: (U, T) -> U, init: U) -> U,
 	first: (self: Iter<T>) -> T?,
 	last: (self: Iter<T>) -> T?,
-}
+}, {} :: { __iter: (self: any) -> () -> T? }))
 
 -- `Iter2` and `Iter3`: the same shape one and two maps deep, for the
 -- reason `Array2` gives.
-export type Iter2<T> = {
+export type Iter2<T> = typeof(setmetatable({} :: {
 	next: (self: { next: (self: any) -> T? }) -> T?,
 	map: <U>(self: { next: (self: any) -> T? }, f: (T) -> U) -> Iter3<U>,
 	filter: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter2<T>,
@@ -1895,9 +1897,9 @@ export type Iter2<T> = {
 	reduce: <U>(self: { next: (self: any) -> T? }, f: (U, T) -> U, init: U) -> U,
 	first: (self: { next: (self: any) -> T? }) -> T?,
 	last: (self: { next: (self: any) -> T? }) -> T?,
-}
+}, {} :: { __iter: (self: any) -> () -> T? }))
 
-export type Iter3<T> = {
+export type Iter3<T> = typeof(setmetatable({} :: {
 	next: (self: { next: (self: any) -> T? }) -> T?,
 	map: <U>(self: { next: (self: any) -> T? }, f: (T) -> U) -> any,
 	filter: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter3<T>,
@@ -1914,7 +1916,7 @@ export type Iter3<T> = {
 	reduce: <U>(self: { next: (self: any) -> T? }, f: (U, T) -> U, init: U) -> U,
 	first: (self: { next: (self: any) -> T? }) -> T?,
 	last: (self: { next: (self: any) -> T? }) -> T?,
-}
+}, {} :: { __iter: (self: any) -> () -> T? }))
 
 local Iter = {}
 Iter.__index = Iter

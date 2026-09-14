@@ -376,6 +376,26 @@ fn in_on_a_value_that_is_no_container_reports() {
     analyze(good, "in-good");
 }
 
+/// A `for` over an `Iter`, a `Queue`, or a `Heap` reported "Cannot
+/// iterate over a table without indexer": the checker reads an
+/// `__iter` from the type's metatable, and the std types had none.
+/// Each loop binds the element type, so a wrong annotation reports.
+#[test]
+fn a_for_loop_over_a_std_collection_binds_the_element() {
+    let good = "local seen = 0\nfor i in Iter.range(1, 10, 2) do\n    seen += i\nend\nlocal jobs = Queue.from({ \"a\", \"b\" })\nfor j in jobs do\n    seen += #j\nend\nlocal open = Heap.from({ 3, 1, 2 })\nfor h in open do\n    seen += h\nend\nprint(seen)\n";
+    analyze(good, "for-std-good");
+
+    let bad = "for i in Iter.range(1, 3) do\n    local s: string = i\n    print(s)\nend\n";
+    let Some(reported) = reports(bad, "for-std-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0].contains("Expected this to be 'string', but got 'number'"),
+        "{reported:?}"
+    );
+}
+
 /// `satisfies` emitted a `::`, which casts either way, so a literal that
 /// leaves a key of `T` out went through.
 #[test]

@@ -2,7 +2,7 @@
 local Lest = require("@lest")
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect
 local alloy = require("../alloy")
-local Iter, Queue = alloy.Iter, alloy.Queue
+local Iter, Queue, Heap = alloy.Iter, alloy.Queue, alloy.Heap
 
 describe("Iter", function()
 	it("chains lazily and collects", function()
@@ -67,5 +67,19 @@ describe("Iter", function()
 			table.insert(seen, v)
 		end
 		expect(seen).toEqual({ 1, 2, 3 })
+	end)
+
+	it("reads a range, a queue, and a heap in a for loop", function()
+		local seen = {}
+		for i in Iter.range(1, 10, 2) do
+			table.insert(seen, i)
+		end
+		for j in Queue.from({ "a", "b" }) do
+			table.insert(seen, j)
+		end
+		for h in Heap.from({ 3, 1, 2 }) do
+			table.insert(seen, h)
+		end
+		expect(seen).toEqual({ 1, 3, 5, 7, 9, "a", "b", 1, 2, 3 })
 	end)
 end)

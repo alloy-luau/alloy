@@ -797,6 +797,22 @@ impl<'s> Desugar<'s> {
                     None => seen.push((name, kind, self.line_of(self.byte_start(span)))),
                 }
             }
+
+            // A function or a local shadows the way Luau allows, so the
+            // pair reports against an import alone: the emit writes the
+            // binding under the import, and the import is lost.
+            for span in bound_names(stmt) {
+                let name = self.text_of(span).to_string();
+
+                if let Some((_, "imported", line)) = seen.iter().find(|(n, _, _)| *n == name) {
+                    hits.push((
+                        span,
+                        format!(
+                            "`{name}` is already imported on line {line}; one name holds one declaration"
+                        ),
+                    ));
+                }
+            }
         }
 
         for (span, message) in hits {
@@ -2964,6 +2980,30 @@ mod tests {
         assert!(messages(ok).is_empty(), "{:?}", messages(ok));
     }
 
+    /// A function or a local under an import of its name replaces the
+    /// import in silence. The pair reports once, at the binding. A local
+    /// inside a function body is its own scope and stays quiet.
+    #[test]
+    fn a_binding_under_an_import_of_its_name_reports_once() {
+        let head = "import { f } from \"./lib\"\n\n";
+        let want = vec!["`f` is already imported on line 1; one name holds one declaration"];
+
+        for decl in [
+            "function f(): number\n    return 2\nend\n",
+            "async function f(): number\n    return 2\nend\n",
+            "local function f(): number\n    return 2\nend\n",
+            "local f = 2\n",
+            "const f = 2\n",
+        ] {
+            let src = format!("{head}{decl}print(f)\n");
+            assert_eq!(messages(&src), want, "{decl}");
+        }
+
+        let inner =
+            format!("{head}function g(): number\n    local f = 2\n    return f\nend\nprint(g())\n");
+        assert!(messages(&inner).is_empty(), "{:?}", messages(&inner));
+    }
+
     /// A remote registers one channel under its name, and a macro binds
     /// one template. A second of either used to win in silence, so the
     /// wire spec and the expansion both changed with no report.
@@ -3406,5 +3446,22 @@ fn declared_kind(stmt: &Stmt) -> Option<(TokSpan, &'static str)> {
         Stmt::Macro(d) => Some((d.name, "a macro")),
 
         _ => None,
+    }
+}
+
+/// The names a top-level function or local binds. `function M.f()`
+/// names a field of `M`, and a destructure binds through its fields.
+fn bound_names(stmt: &Stmt) -> Vec<TokSpan> {
+    match stmt.under_default() {
+        Stmt::Function(f) if f.path.len() == 1 => vec![f.path[0]],
+        Stmt::LocalFunction(f) => vec![f.name],
+        Stmt::Local(l) => l
+            .names
+            .iter()
+            .filter(|b| b.destructure.is_none())
+            .map(|b| b.name)
+            .collect(),
+
+        _ => Vec::new(),
     }
 }

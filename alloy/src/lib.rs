@@ -1262,6 +1262,16 @@ mod tests {
             docs::labeled("internal: generated text holds a newline"),
             "InternalError: internal: generated text holds a newline"
         );
+        // A namespace above its declaration opens a page of its own,
+        // the way the struct form does.
+        assert_eq!(
+            docs::kind_for("`Geo` is declared below this use; move the namespace above it"),
+            "DeclareError"
+        );
+        assert_eq!(
+            docs::kind_for("`Vec2` is declared below this use; move the struct above it"),
+            "StructError"
+        );
     }
 
     /// A struct the reader named `Test` still reports as a constructor

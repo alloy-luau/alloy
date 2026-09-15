@@ -99,6 +99,10 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     (&["ingot `"], "IngotError"),
     (&["reserved word"], "ReservedWord"),
     (&["is already declared in"], "DeclareError"),
+    // A namespace used above its declaration. The struct, enum, and
+    // function forms name their own kind in the sentence; a namespace
+    // has no section, so the report is about the declaration.
+    (&["move the namespace above it"], "DeclareError"),
     (
         &["in macro expansion", "returns from the function"],
         "MacroError",

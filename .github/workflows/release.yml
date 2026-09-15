@@ -45,9 +45,9 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           fi
           for crate in alloy-syntax luaux alloy-ingot alloy alloy-lsp alloy-web; do
-            found=$(grep -m1 '^version' "$crate/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
+            found=$(grep -m1 '^version' "crates/$crate/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
             if [ "$found" != "$version" ]; then
-              echo "the release is $version but $crate/Cargo.toml says $found"
+              echo "the release is $version but crates/$crate/Cargo.toml says $found"
               exit 1
             fi
           done

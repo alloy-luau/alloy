@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 fn workspace() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn read(rel: &str) -> String {
@@ -49,7 +49,8 @@ fn the_tag_guard_passes_for_this_version() {
     let tag = format!("v{}", alloy::VERSION);
     let version = tag.trim_start_matches('v');
 
-    for dir in guarded_crates() {
+    for name in guarded_crates() {
+        let dir = format!("crates/{name}");
         assert_eq!(
             package_version(&dir),
             version,
@@ -73,8 +74,10 @@ fn the_guard_walks_every_member() {
     let guarded = guarded_crates();
 
     for member in members {
+        // The members sit under `crates/`; the guard names them bare.
+        let name = member.trim_start_matches("crates/").to_string();
         assert!(
-            guarded.contains(&member),
+            guarded.contains(&name),
             "the release guard skips {member}; a mismatched version would reach crates.io"
         );
     }

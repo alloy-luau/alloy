@@ -275,10 +275,12 @@ impl<'s> Desugar<'s> {
                 }
             }
 
+            // The operand keeps its chunks, so the editor maps its names.
             Expr::Await { operand, .. } => {
-                let inner = self.render_to_string(operand);
                 let std = self.std();
-                self.generate(anchor, &format!("{std}.await({inner})"));
+                self.generate(anchor, &format!("{std}.await("));
+                self.expr(operand);
+                self.generate(anchor, ")");
             }
 
             Expr::Try { operand, span } => {
@@ -786,9 +788,9 @@ impl<'s> Desugar<'s> {
             self.diagnose(span, &format!("`try` needs a Result; `{text}` is `{ty}`"));
         }
 
+        // The operand keeps its chunks, so the editor maps its names.
         let value = match operand {
             Expr::Await { operand: inner, .. } => {
-                let x = self.render_to_string(inner);
                 let std = self.std();
                 // A Future that settles with a Result yields that
                 // Result, not an Ok around it: the typed form says so.
@@ -800,12 +802,16 @@ impl<'s> Desugar<'s> {
                     "try_await"
                 };
 
-                format!("{std}.{helper}({x})")
+                self.to_side(|d| {
+                    d.generate(anchor, &format!("{std}.{helper}("));
+                    d.expr(inner);
+                    d.generate(anchor, ")");
+                })
             }
 
-            other => self.render_to_string(other),
+            other => self.render_to_side(other),
         };
-        let temp = self.hoist_text(value, anchor);
+        let temp = self.hoist_rendered(value, anchor);
 
         match target {
             // Inside a `try do` block the Err leaves through the block's

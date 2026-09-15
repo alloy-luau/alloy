@@ -508,12 +508,22 @@ impl<'s> Desugar<'s> {
     /// variant type wrong, and a value the code just built has one; read
     /// through the enum it narrows right. The ship artifact keeps the
     /// scrutinee as it is.
-    pub(crate) fn scrutinee_local(&mut self, value: String, ename: &str, anchor: u32) -> String {
+    pub(crate) fn scrutinee_local(
+        &mut self,
+        value: Renderer<'s>,
+        ename: &str,
+        anchor: u32,
+    ) -> String {
         self.temp_next += 1;
         let name = format!("_v{}", self.temp_next);
+        let cast = self.to_side(|d| {
+            d.generate(anchor, "(");
+            d.r.append(value);
+            d.generate(anchor, &format!(") :: {ename}"));
+        });
         self.hoists.push(Hoist::Fresh {
             name: name.clone(),
-            value: format!("({value}) :: {ename}"),
+            value: HoistValue::Rendered(cast),
             anchor,
         });
 
@@ -539,7 +549,7 @@ impl<'s> Desugar<'s> {
             match ename {
                 Some(e) => {
                     let anchor = self.byte_start(sc.span());
-                    let value = self.render_to_string(sc);
+                    let value = self.render_to_side(sc);
                     let path = self.scrutinee_local(value, &e, anchor);
                     paths.push(path);
                 }
@@ -1319,31 +1329,37 @@ impl<'s> Desugar<'s> {
 
         let pats: Vec<&[Pattern]> = m.arms.iter().map(|a| a.patterns.as_slice()).collect();
 
-        // `match a, b with` becomes `do local _1 = a local _2 = b`.
+        // `match a, b with` becomes `do local _1 = a local _2 = b`. Each
+        // scrutinee keeps its chunks, so the editor maps its names.
         let mut paths = Vec::new();
-        let mut header = String::from("do");
+        self.generate(start, "do");
 
         for (col, sc) in m.scrutinees.iter().enumerate() {
-            let value = self.render_to_string(sc);
+            let value = self.render_to_side(sc);
             // The check artifact reads the scrutinee as the enum the arms
             // name; see `scrutinee_local`.
-            let value = match self
+            let cast = self
                 .options
                 .check
                 .then(|| self.column_enum(&pats, col))
-                .flatten()
-            {
-                Some(e) => format!("({value}) :: {e}"),
-
-                None => value,
-            };
+                .flatten();
             self.temp_next += 1;
             let index = self.temp_next;
-            header.push_str(&format!(" local _m{index} = {value}"));
+            self.generate(start, &format!(" local _m{index} = "));
+
+            match cast {
+                Some(e) => {
+                    self.generate(start, "(");
+                    self.r.append(value);
+                    self.generate(start, &format!(") :: {e}"));
+                }
+
+                None => self.r.append(value),
+            }
+
             paths.push(format!("_m{index}"));
         }
 
-        self.generate(start, &header);
         let mut cursor = with_end;
         let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
 
@@ -1594,11 +1610,14 @@ impl<'s> Desugar<'s> {
     // --- conditions with bindings -------------------------------------------
 
     /// The declarations and test for a `Cond::Local`, for a block context
-    /// where temps and bindings can be locals.
+    /// where temps and bindings can be locals. Each declaration keeps
+    /// the chunks of its value, so a name in the value maps to its own
+    /// source text and the editor finds references through it.
     pub(crate) fn cond_local_parts(
         &mut self,
         cond: &Cond,
-    ) -> (Vec<String>, String, Vec<(String, String)>) {
+        anchor: u32,
+    ) -> (Vec<Renderer<'s>>, String, Vec<(String, String)>) {
         let Cond::Local {
             negated,
             bindings,
@@ -1618,19 +1637,14 @@ impl<'s> Desugar<'s> {
             // An earlier name in this condition is its temp by now.
             let map: HashMap<String, String> = binds.iter().cloned().collect();
             self.renames.push(map);
-            let value = self.render_to_string(&b.value);
+            let value = self.render_to_side(&b.value);
             self.renames.pop();
             let ty =
                 b.ty.map(|t| format!(": {}", self.text_of(t)))
                     .unwrap_or_default();
-            // A later binding runs only when the earlier ones are truthy.
-            let value = if prior.is_empty() {
-                value
-            } else {
-                format!("if {} then {value} else nil", prior.join(" and "))
-            };
 
-            match &b.pattern {
+            // The name each declaration binds, and its type.
+            let (head, ty) = match &b.pattern {
                 // The branch declares the name from a temp the test refined,
                 // so the name is `T`, not `T?`, in the branch and in any
                 // closure there. A negated condition keeps the name, since
@@ -1639,31 +1653,52 @@ impl<'s> Desugar<'s> {
                     let name = self.text_of(*n).to_string();
 
                     if *negated {
-                        decls.push(format!("local {name}{ty} = {value}"));
                         tests.push(name.clone());
-                        prior.push(name);
+                        prior.push(name.clone());
+
+                        (name, ty)
                     } else {
                         self.temp_next += 1;
                         let temp = format!("_c{}", self.temp_next);
-                        decls.push(format!("local {temp}{ty} = {value}"));
                         tests.push(temp.clone());
                         prior.push(temp.clone());
-                        binds.push((name, temp));
+                        binds.push((name, temp.clone()));
+
+                        (temp, ty)
                     }
                 }
 
                 pat => {
                     self.temp_next += 1;
                     let temp = format!("_c{}", self.temp_next);
-                    decls.push(format!("local {temp} = {value}"));
                     let mut c = Compiled::default();
                     self.compile_pattern(pat, &temp, &mut c);
                     let test = join_tests(&c.tests);
                     tests.push(format!("({test})"));
                     prior.push(format!("({test})"));
                     binds.extend(c.binds);
+
+                    (temp, String::new())
                 }
-            }
+            };
+
+            // A later binding runs only when the earlier ones are truthy.
+            // The test this binding adds is the last one in `prior`.
+            let earlier = &prior[..prior.len() - 1];
+            let decl = self.to_side(|d| {
+                d.generate(anchor, &format!("local {head}{ty} = "));
+
+                if !earlier.is_empty() {
+                    d.generate(anchor, &format!("if {} then ", earlier.join(" and ")));
+                }
+
+                d.r.append(value);
+
+                if !earlier.is_empty() {
+                    d.generate(anchor, " else nil");
+                }
+            });
+            decls.push(decl);
         }
 
         let mut test = tests.join(" and ");
@@ -1681,6 +1716,17 @@ impl<'s> Desugar<'s> {
         }
 
         (decls, test, binds)
+    }
+
+    /// Writes the declarations of a condition, one space apart.
+    fn append_decls(&mut self, anchor: u32, decls: Vec<Renderer<'s>>) {
+        for (i, decl) in decls.into_iter().enumerate() {
+            if i > 0 {
+                self.generate(anchor, " ");
+            }
+
+            self.r.append(decl);
+        }
     }
 
     pub(crate) fn if_with_locals(&mut self, span: TokSpan, i: &If) {
@@ -1709,7 +1755,7 @@ impl<'s> Desugar<'s> {
                 }
 
                 Cond::Local { .. } => {
-                    let (decls, test, binds) = self.cond_local_parts(cond);
+                    let (decls, test, binds) = self.cond_local_parts(cond, kw_tok.start);
                     let lead = if guard_clause {
                         ""
                     } else if idx == 0 {
@@ -1729,7 +1775,9 @@ impl<'s> Desugar<'s> {
                         extra_ends += 1;
                     }
 
-                    let mut text = format!("{lead}{} if {test} then", decls.join(" "));
+                    self.generate(kw_tok.start, lead);
+                    self.append_decls(kw_tok.start, decls);
+                    let mut text = format!(" if {test} then");
 
                     if !binds.is_empty() && !matches!(cond, Cond::Local { negated: true, .. }) {
                         let names: Vec<String> = binds.iter().map(|(n, _)| n.clone()).collect();
@@ -1890,13 +1938,12 @@ impl<'s> Desugar<'s> {
 
     pub(crate) fn while_with_local(&mut self, span: TokSpan, w: &While) {
         let start = self.byte_start(span);
-        let (decls, test, binds) = self.cond_local_parts(&w.cond);
+        let (decls, test, binds) = self.cond_local_parts(&w.cond, start);
         let do_tok = self.find_tok_after(w.cond.span().end, "do");
         let do_end = self.toks[do_tok as usize].end;
-        let mut text = format!(
-            "while true do {} if not ({test}) then break end",
-            decls.join(" ")
-        );
+        self.generate(start, "while true do ");
+        self.append_decls(start, decls);
+        let mut text = format!(" if not ({test}) then break end");
 
         if !binds.is_empty() {
             let names: Vec<String> = binds.iter().map(|(n, _)| n.clone()).collect();
@@ -1940,10 +1987,11 @@ impl<'s> Desugar<'s> {
                 }
 
                 Cond::Local { .. } => {
-                    let (decls, test, binds) = self.cond_local_parts(cond);
+                    let (decls, test, binds) = self.cond_local_parts(cond, anchor);
 
                     for d in decls {
                         // `local x = e` hoists as a temp-like declaration.
+                        let d = d.finish().0;
                         let d = d.strip_prefix("local ").unwrap_or(&d).to_string();
                         let (name, value) = d
                             .split_once(" = ")
@@ -2598,5 +2646,66 @@ mod tests {
             "{:?}",
             lint_names(src)
         );
+    }
+
+    /// The value of an `if local`, a match scrutinee, a `try` operand, and
+    /// an `await` operand keep their chunks in the output, so the editor
+    /// maps a name in them back to its own text, and references and
+    /// rename find that site. A whole-line generate mapped every byte
+    /// to the statement.
+    #[test]
+    fn a_copied_operand_maps_back_to_its_own_text() {
+        let cases = [
+            (
+                "local items = {}\nlocal function f(key: string)\n    if local v = items:get(key) then\n        print(v)\n    end\nend\n",
+                "items:get(key)",
+            ),
+            (
+                "local items = {}\nlocal function f(key: string)\n    if not local v = items:get(key) then\n        return\n    end\n    print(v)\nend\n",
+                "items:get(key)",
+            ),
+            (
+                "local items = {}\nwhile local job = items:pop() do\n    print(job)\nend\n",
+                "items:pop()",
+            ),
+            (
+                "enum Shape as\n    Circle(number)\n    Empty\nend\nlocal shapes = { Shape.Empty }\nmatch shapes[1] with\n    case Circle(r) then print(r)\n    case Empty then print(0)\nend\n",
+                "shapes[1]",
+            ),
+            (
+                "enum Shape as\n    Circle(number)\n    Empty\nend\nlocal shapes = { Shape.Empty }\nlocal n = match shapes[1] with\n    case Circle(r) then r\n    case Empty then 0\nend\nprint(n)\n",
+                "shapes[1]",
+            ),
+            (
+                "local function parse(s: string): Result<number, string>\n    return Ok(1)\nend\nlocal function run(): Result<number, string>\n    local v = try parse(\"1\")\n    return Ok(v)\nend\nprint(run)\n",
+                "parse(\"1\")",
+            ),
+            (
+                "local function load(): Future<number>\n    return Future.resolved(1)\nend\nasync function run()\n    local v = await load()\n    print(v)\nend\n",
+                "load()",
+            ),
+        ];
+
+        for (src, needle) in cases {
+            let options = EmitOptions {
+                check: true,
+                ..EmitOptions::default()
+            };
+            let out = crate::compile_with(src, &options).unwrap();
+            assert!(
+                out.diagnostics.is_empty(),
+                "{needle}: {:?}",
+                out.diagnostics
+            );
+            let at = out
+                .check
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {}", out.check)) as u32;
+            let want = src.find(needle).unwrap() as u32;
+
+            for i in 0..u32::try_from(needle.len()).unwrap() {
+                assert_eq!(out.map.to_source(at + i), want + i, "{needle}: offset {i}");
+            }
+        }
     }
 }

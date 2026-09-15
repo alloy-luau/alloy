@@ -540,10 +540,18 @@ impl<'s> Desugar<'s> {
                     name,
                     value,
                     anchor,
-                } => {
-                    let line = format!("local {name} = {value} ");
-                    self.generate(anchor, &line);
-                }
+                } => match value {
+                    HoistValue::Text(text) => {
+                        let line = format!("local {name} = {text} ");
+                        self.generate(anchor, &line);
+                    }
+
+                    HoistValue::Rendered(rendered) => {
+                        self.generate(anchor, &format!("local {name} = "));
+                        self.r.append(rendered);
+                        self.generate(anchor, " ");
+                    }
+                },
             }
         }
 

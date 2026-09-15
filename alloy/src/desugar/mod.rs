@@ -827,7 +827,7 @@ enum Hoist<'s> {
     /// whose type must not be another module's.
     Fresh {
         name: String,
-        value: String,
+        value: HoistValue<'s>,
         anchor: u32,
     },
 }
@@ -2585,9 +2585,15 @@ impl<'s> Desugar<'s> {
 
     /// Renders an expression into its own renderer, chunks and all.
     fn render_to_side(&mut self, e: &Expr) -> Renderer<'s> {
+        self.to_side(|d| d.expr(e))
+    }
+
+    /// Runs `render` against its own renderer and returns that renderer,
+    /// chunks and all, so a caller can append it with provenance.
+    fn to_side(&mut self, render: impl FnOnce(&mut Self)) -> Renderer<'s> {
         let mut side = Renderer::new(self.src);
         std::mem::swap(&mut self.r, &mut side);
-        self.expr(e);
+        render(self);
         std::mem::swap(&mut self.r, &mut side);
 
         side
@@ -2629,7 +2635,7 @@ impl<'s> Desugar<'s> {
         let name = format!("_m{}", self.import_next);
         self.hoists.push(Hoist::Fresh {
             name: name.clone(),
-            value: format!("require({path})"),
+            value: HoistValue::Text(format!("require({path})")),
             anchor,
         });
 
@@ -2658,14 +2664,20 @@ impl<'s> Desugar<'s> {
     /// a function literal as an argument, keeps every line in place.
     fn hoist(&mut self, e: &Expr) -> String {
         let anchor = self.byte_start(e.span());
+        let rendered = self.render_to_side(e);
 
+        self.hoist_rendered(rendered, anchor)
+    }
+
+    /// Hoists a rendered value, chunks and all, into a temp and returns
+    /// the temp's name.
+    fn hoist_rendered(&mut self, rendered: Renderer<'s>, anchor: u32) -> String {
         if self.no_hoist > 0 {
-            let value = self.render_to_string(e);
+            let value = rendered.finish().0;
 
             return self.hoist_text(value, anchor);
         }
 
-        let rendered = self.render_to_side(e);
         self.temp_next += 1;
         let index = self.temp_next;
         self.hoists.push(Hoist::Temp {

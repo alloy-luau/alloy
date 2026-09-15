@@ -140,7 +140,9 @@ impl Server {
         let word = doc.source[start..end].to_string();
         let known = st.known_shapes_at(Some(uri));
 
-        let Some(answer) = case_binding_text(doc, line as usize, start, &word, &known) else {
+        let Some(answer) = case_binding_text(doc, line as usize, start, &word, &known)
+            .or_else(|| expression_binding_text(&doc.source, line as usize, &word))
+        else {
             return false;
         };
         let (sl, sc) = position_of(&doc.source, start);
@@ -329,6 +331,51 @@ fn member_keys(key: &str, groups: &[alloy::declarations::NamespaceSpan], at: usi
 /// same line, so the word alone and the word with a body both count.
 fn opens_the_default_arm(text: &str) -> bool {
     text == "default" || text.starts_with("default ")
+}
+
+/// The binding an `if local` expression on the caret's line makes for
+/// `word`, as the reader wrote it: `local b = g(5)`. The expression
+/// form hoists its temp and substitutes the name, so the emit holds no
+/// local the child could read. A statement-form `if local` opens the
+/// line, and the child answers that one from its own local.
+// ponytail: the source text alone; the temp's type needs a hover
+// through the child under another name.
+pub(crate) fn expression_binding_text(source: &str, line: usize, word: &str) -> Option<String> {
+    let text = source.lines().nth(line)?;
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find("local ") {
+        let at = from + i;
+        from = at + 1;
+        let head = text[..at].trim_end();
+        let head = head.strip_suffix("not").map_or(head, str::trim_end);
+        let Some(before) = head
+            .strip_suffix("if")
+            .or_else(|| head.strip_suffix("elseif"))
+        else {
+            continue;
+        };
+
+        // The statement form, or a word that ends in `if`.
+        if before.trim().is_empty() || before.ends_with(is_word) {
+            continue;
+        }
+
+        let rest = &text[at + "local ".len()..];
+        let name: String = rest.chars().take_while(|c| is_word(*c)).collect();
+
+        if name != word {
+            continue;
+        }
+
+        let (head, value) = rest.split_once('=')?;
+        let value = value.split(" then").next()?.trim();
+
+        return Some(format!("```alloy\nlocal {} = {value}\n```", head.trim()));
+    }
+
+    None
 }
 
 /// The line of the `case` arm that holds `line`: the nearest `case`
@@ -753,6 +800,25 @@ pub(crate) fn binds_a_value(bindings: &[alloy::declarations::Binding], name: &st
 
 #[cfg(test)]
 mod tests {
+    /// A name an `if local` expression binds has no local in the emit,
+    /// so the hover reads the binding from the source. The statement
+    /// form opens its line, and the child answers that one.
+    #[test]
+    fn an_if_local_expression_binding_hovers_as_written() {
+        let src = "if local a = f2(if local b: number = g(5) then b else 0) then\nlocal x = if not local c = h() then 0 else c\n";
+
+        assert_eq!(
+            super::expression_binding_text(src, 0, "b").as_deref(),
+            Some("```alloy\nlocal b: number = g(5)\n```")
+        );
+        assert_eq!(super::expression_binding_text(src, 0, "a"), None);
+        assert_eq!(
+            super::expression_binding_text(src, 1, "c").as_deref(),
+            Some("```alloy\nlocal c = h()\n```")
+        );
+        assert_eq!(super::expression_binding_text(src, 1, "x"), None);
+    }
+
     use super::*;
 
     fn doc_of(src: &str) -> Doc {

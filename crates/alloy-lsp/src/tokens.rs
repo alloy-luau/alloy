@@ -203,8 +203,8 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
             _ => {}
         }
 
-        // `@Contracted` and `$triple`: the sigil and the name are one
-        // word to the reader.
+        // `@Contracted` and `$triple`: the name draws, and the sigil
+        // stays with the grammar, which gives it a punctuation scope.
         if tok.kind == TokKind::Symbol && matches!(text, "@" | "$") {
             let name = match toks.get(i + 1) {
                 Some(n) if n.kind == TokKind::Ident && n.start == tok.end => *n,
@@ -216,7 +216,7 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
                 }
             };
             push(
-                tok.start,
+                name.start,
                 name.end,
                 if text == "@" { "decorator" } else { "macro" },
                 0,
@@ -530,16 +530,17 @@ mod tests {
         };
         let line_of = |needle: &str| position_of(SRC, SRC.find(needle).expect(needle));
 
-        // `@Contracted` and `$triple(2)`, sigil and name as one word.
+        // `@Contracted` and `$triple(2)`: the name alone, one column
+        // past the sigil.
         assert!(named("decorator").contains(&{
             let (l, c) = line_of("@Contracted");
 
-            (l, c, 11)
+            (l, c + 1, 10)
         }));
         assert!(named("macro").contains(&{
             let (l, c) = line_of("$triple(2)");
 
-            (l, c, 7)
+            (l, c + 1, 6)
         }));
 
         // `case Geo.Kind.Round then`: the namespace, the enum, and the

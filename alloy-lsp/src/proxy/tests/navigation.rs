@@ -979,6 +979,77 @@ fn a_trait_method_renames_the_trait_every_impl_and_the_calls() {
     );
 }
 
+/// A receiver that a function's return binds, `c = make_gadget()`, and
+/// a field receiver, `h.g`, hold the struct the way a constructed local
+/// does: the rename of the method reaches every call.
+#[test]
+fn a_method_rename_reaches_a_returned_and_a_field_receiver() {
+    const DEP: &str = concat!(
+        "export namespace M as\n",
+        "    struct Gadget as\n",
+        "        spins: number = 0\n",
+        "    end\n",
+        "\n",
+        "    impl Gadget as\n",
+        "        function spin(self): number\n",
+        "            self.spins += 1\n",
+        "            return self.spins\n",
+        "        end\n",
+        "    end\n",
+        "end\n",
+    );
+    const MAIN: &str = concat!(
+        "import { M } from \"./gadget\"\n",
+        "\n",
+        "struct Holder as\n",
+        "    g: M.Gadget\n",
+        "end\n",
+        "\n",
+        "function make_gadget(): M.Gadget\n",
+        "    return new M.Gadget {}\n",
+        "end\n",
+        "\n",
+        "local a = new M.Gadget {}\n",
+        "local c = make_gadget()\n",
+        "local h = new Holder { g = new M.Gadget {} }\n",
+        "local gs: Array<M.Gadget> = [ new M.Gadget {} ]\n",
+        "print(a:spin(), c:spin(), h.g:spin(), gs[1]:spin())\n",
+    );
+    let st = super::support::files(&[("file:///gadget.aly", DEP), ("file:///main.aly", MAIN)]);
+    let calls: Vec<usize> = MAIN.match_indices(":spin(").map(|(i, _)| i + 1).collect();
+    assert_eq!(calls.len(), 4);
+
+    // Every call site names the one method, the returned and the field
+    // receiver among them.
+    for at in &calls {
+        let target = st.name_target("file:///main.aly", *at);
+        assert!(
+            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Gadget" && name == "spin"),
+            "{at}: {target:?}"
+        );
+    }
+
+    let edit = st.method_edits("Gadget", "spin", "twirl").expect("edit");
+    let at = |uri: &str, src: &str| -> Vec<usize> {
+        edit["changes"][uri]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| {
+                let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+                offset_of(src, line, column).expect("offset")
+            })
+            .collect()
+    };
+    assert_eq!(
+        at("file:///gadget.aly", DEP),
+        [DEP.find("spin(self)").expect("declaration")],
+        "{edit}"
+    );
+    assert_eq!(at("file:///main.aly", MAIN), calls, "{edit}");
+}
+
 /// A receiver typed by the trait reaches the method with no impl in
 /// between: a parameter bound `<T: Speaker>`, an annotation `s: Speaker`,
 /// a bound of two traits, and `self` in the trait's own default body. A

@@ -119,6 +119,7 @@ fn self_type(after: &str) -> &str {
 
 /// The type name a `self` annotation stands for. A modifier is no
 /// name, an array reads as `Array`, and a generic reads as its head.
+/// A member of a namespace, `M.Gadget`, is one name with its path.
 fn receiver_type_name(ty: &str) -> Option<String> {
     let mut t = ty.trim();
 
@@ -134,7 +135,7 @@ fn receiver_type_name(ty: &str) -> Option<String> {
 
     let head: String = t
         .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
         .collect();
 
     match head.is_empty() || matches!(head.as_str(), "any" | "unknown" | "nil" | "self") {

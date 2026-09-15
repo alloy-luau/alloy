@@ -2073,6 +2073,20 @@ mod tests {
         assert_eq!(fold("local m: { __ok: number }", &known), "local m: {}");
     }
 
+    /// A method of a namespace member prints `M_Gadget:spin(self:
+    /// M_Gadget)`; the receiver is the whole path once the name folds.
+    #[test]
+    fn a_namespace_member_method_keeps_its_path_as_the_receiver() {
+        let known = Known {
+            namespaces: vec![("M_Gadget".to_string(), "M.Gadget".to_string())],
+            ..Known::default()
+        };
+        assert_eq!(
+            fold("function M_Gadget:spin(self: M_Gadget): number", &known),
+            "function M.Gadget:spin(self: M.Gadget): number"
+        );
+    }
+
     #[test]
     fn a_chain_method_hover_names_the_receiver_type() {
         let known = Known::default();

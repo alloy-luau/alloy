@@ -978,9 +978,9 @@ pub(crate) fn names_a_key(doc: &Doc, line: u32, character: u32) -> bool {
 /// parameter list, the parameter list, and the return type. The first
 /// two carry their brackets; the return is the type alone.
 pub(crate) struct Head {
-    generics: Option<(usize, usize)>,
-    params: (usize, usize),
-    ret: Option<(usize, usize)>,
+    pub(crate) generics: Option<(usize, usize)>,
+    pub(crate) params: (usize, usize),
+    pub(crate) ret: Option<(usize, usize)>,
 }
 
 /// Reads `<A, B>(p: T): R` from `at`, the byte just past a function's

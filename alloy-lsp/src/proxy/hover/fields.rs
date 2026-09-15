@@ -519,6 +519,25 @@ pub(crate) fn used_field_owner(st: &State, doc: &Doc, start: usize) -> Option<St
     receiver_type(st, doc, head.len() - 1)
 }
 
+/// The declared return type of a call `f(...)`, for a name the result
+/// of a function binds. `None` for a call of a method, of a field, or
+/// of a function the file has no header for.
+fn call_return(doc: &Doc, init: &str) -> Option<String> {
+    let (name, list) = init.trim().split_once('(')?;
+
+    if !list.ends_with(')')
+        || name.is_empty()
+        || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+
+    let (head, _) = super::restyle::declaration_head(doc, name)?;
+    let (a, b) = super::restyle::head_spans(head, name.len())?.ret?;
+
+    alloy::docs::type_head(head[a..b].trim())
+}
+
 /// The type a receiver holds, for the separator at `at`: the type of the
 /// `impl` block around a `self`, else what the receiver's own
 /// declaration says. `p.x` and `p:m()` read the same receiver.
@@ -535,13 +554,12 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
     // `a.b.c`: the receiver is itself a field of the hop before it, so
     // no binding of the file names it. The hop that holds it says what
     // type it carries, and the walk reads one link at a time.
-    if let Some(hop) = used_field_owner(st, doc, rs) {
-        return field_type(st, doc, &hop, receiver);
-    }
-
+    //
     // `self` reads the type of the `impl` block around it; any other
     // name reads its annotation or what it starts from.
     let owner = match receiver {
+        _ if let Some(hop) = used_field_owner(st, doc, rs) => field_type(st, doc, &hop, receiver)?,
+
         "self" => {
             let (line, _) = position_of(&doc.source, rs);
             impl_self_type(doc, line)?
@@ -572,7 +590,13 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
                         path.to_string()
                     }
 
-                    _ => alloy::docs::value_head(&v)?,
+                    // `local c = make_gadget()`: the declared return
+                    // of the function names the type.
+                    _ => match call_return(doc, &v) {
+                        Some(ret) => ret,
+
+                        None => alloy::docs::value_head(&v)?,
+                    },
                 },
             },
         },

@@ -77,6 +77,8 @@ pub(crate) struct State {
     /// order. The proxy draws tokens of its own for the Alloy
     /// constructs, and it paints with the child's numbers.
     pub(crate) token_types: Vec<String>,
+    /// The semantic token modifiers the child's legend names.
+    pub(crate) token_modifiers: Vec<String>,
     /// Whether the editor takes snippet text in a completion item.
     pub(crate) snippets: bool,
     /// Whether the editor takes a watcher registration. Without one the

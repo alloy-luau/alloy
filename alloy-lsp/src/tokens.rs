@@ -20,7 +20,7 @@ use crate::doc::{Doc, offset_of, position_of};
 /// modifiers.
 type Token = (u32, u32, u64, u64, u64);
 
-pub fn remap(data: &[u64], doc: &Doc, types: &[String]) -> Vec<u64> {
+pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<u64> {
     let Some(out) = doc.mapping() else {
         return data.to_vec();
     };
@@ -61,7 +61,7 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String]) -> Vec<u64> {
 
     // The child's tokens stand first, so a word both of them describe
     // keeps the child's reading.
-    tokens.extend(alloy_tokens(doc, types));
+    tokens.extend(alloy_tokens(doc, types, modifiers));
     tokens.sort_by_key(|t| (t.0, t.1));
     tokens.dedup_by_key(|t| (t.0, t.1));
 
@@ -162,7 +162,7 @@ fn contract_body(
 }
 
 /// The tokens the proxy draws from the source itself.
-fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
+fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token> {
     if types.is_empty() {
         return Vec::new();
     }
@@ -175,14 +175,17 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
     let src = &doc.source;
     let toks = &lexed.toks;
     let mut out: Vec<Token> = Vec::new();
-    let mut push = |start: u32, end: u32, name: &str| {
+    let mut push = |start: u32, end: u32, name: &str, mods: u64| {
         let Some(kind) = type_index(types, name) else {
             return;
         };
         let (line, column) = position_of(src, start as usize);
         let width = src[start as usize..end as usize].encode_utf16().count() as u64;
-        out.push((line, column, width, kind, 0));
+        out.push((line, column, width, kind, mods));
     };
+    // The `declaration` bit of the child's modifier legend; a legend
+    // without it paints the plain kind.
+    let declaration = type_index(modifiers, "declaration").map_or(0, |i| 1 << i);
     // Whether the walk stands inside a hole of an interpolated string:
     // the head and each middle piece open one, and the tail closes it.
     let mut in_hole = false;
@@ -216,6 +219,7 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
                 tok.start,
                 name.end,
                 if text == "@" { "decorator" } else { "macro" },
+                0,
             );
             i += 2;
 
@@ -231,7 +235,7 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
         // The name a hole reads. The child sees the same bytes, and it
         // draws nothing inside a string.
         if in_hole && matches!(toks[i - 1].kind, TokKind::InterpHead | TokKind::InterpMid) {
-            push(tok.start, tok.end, "variable");
+            push(tok.start, tok.end, "variable", 0);
             i += 1;
 
             continue;
@@ -253,6 +257,7 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
 
                     _ => "decorator",
                 },
+                0,
             );
             i += 2;
 
@@ -270,7 +275,9 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
 
                         TokKind::RParen => depth -= 1,
 
-                        TokKind::Ident if depth == 1 && opens => push(t.start, t.end, "parameter"),
+                        TokKind::Ident if depth == 1 && opens => {
+                            push(t.start, t.end, "parameter", 0)
+                        }
 
                         _ => {}
                     }
@@ -323,23 +330,23 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
                                 "method"
                             };
 
-                            push(t.start, t.end, name);
+                            push(t.start, t.end, name, 0);
                         }
 
                         TokKind::Ident if depth > 0 && (after("(") || after(",")) => {
-                            push(t.start, t.end, "parameter");
+                            push(t.start, t.end, "parameter", 0);
                         }
 
                         TokKind::Ident if matches!(word, "requires" | "each") => {
-                            push(t.start, t.end, "keyword");
+                            push(t.start, t.end, "keyword", 0);
                         }
 
                         TokKind::Ident if matches!(word, "public" | "private") => {
-                            push(t.start, t.end, visibility);
+                            push(t.start, t.end, visibility, 0);
                         }
 
                         TokKind::Ident if matches!(word, "function" | "field") => {
-                            push(t.start, t.end, "keyword");
+                            push(t.start, t.end, "keyword", 0);
                         }
 
                         _ => {}
@@ -350,6 +357,27 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
 
                 continue;
             }
+
+            continue;
+        }
+
+        // `function helper(` and `function map<U>(`: the name a
+        // declaration gives. The child paints the call sites and leaves
+        // the declaration alone. A head whose first parameter is `self`
+        // is a method, the way its call sites paint.
+        if i > 0
+            && toks[i - 1].text(src) == "function"
+            && let Some(open) = (i + 1..toks.len().min(i + 12))
+                .take_while(|k| *k == i + 1 || toks[i + 1].text(src) == "<")
+                .find(|k| toks[*k].kind == TokKind::LParen)
+        {
+            let kind = match toks.get(open + 1).map(|t| t.text(src)) {
+                Some("self") => "method",
+
+                _ => "function",
+            };
+            push(tok.start, tok.end, kind, declaration);
+            i += 1;
 
             continue;
         }
@@ -396,7 +424,7 @@ fn alloy_tokens(doc: &Doc, types: &[String]) -> Vec<Token> {
 
                 None => continue,
             };
-            push(segment.start, segment.end, name);
+            push(segment.start, segment.end, name, 0);
         }
 
         i = j + 1;
@@ -455,7 +483,7 @@ mod tests {
             None,
         );
         let types = legend();
-        let drawn = alloy_tokens(&doc, &types);
+        let drawn = alloy_tokens(&doc, &types, &[]);
         let named = |name: &str| {
             let kind = type_index(&types, name).expect("the type");
 
@@ -490,7 +518,7 @@ mod tests {
             None,
         );
         let types = legend();
-        let drawn = alloy_tokens(&doc, &types);
+        let drawn = alloy_tokens(&doc, &types, &[]);
         let named = |name: &str| {
             let kind = type_index(&types, name).expect("the type");
 
@@ -535,7 +563,7 @@ mod tests {
         );
 
         // The merge sorts by line then column, so the deltas hold.
-        let out = remap(&[], &doc, &types);
+        let out = remap(&[], &doc, &types, &[]);
         let mut place = (0u64, 0u64);
 
         for chunk in out.chunks_exact(5) {
@@ -547,6 +575,53 @@ mod tests {
         }
 
         assert!(place.0 > 0 && !out.is_empty());
+    }
+
+    /// The child paints a call site and leaves the declaration's own
+    /// name plain. The proxy paints the name with the `declaration`
+    /// modifier: a function for a top-level or a local head, a method
+    /// for a head whose first parameter is `self`.
+    #[test]
+    fn a_declaration_name_paints_its_kind_with_the_declaration_modifier() {
+        const SRC: &str = concat!(
+            "struct P as\n    x: number\nend\n",
+            "impl P as\n    function get(self): number\n        return self.x\n    end\n",
+            "    function map<U>(self, f: (number) -> U): U\n        return f(self.x)\n    end\n",
+            "    function make(x: number): P\n        return new P { x = x }\n    end\nend\n",
+            "function helper()\n    return 1\nend\n",
+            "local function loc()\n    return helper()\nend\n",
+        );
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let modifiers = ["definition".to_string(), "declaration".to_string()];
+        let drawn = alloy_tokens(&doc, &types, &modifiers);
+        let at = |needle: &str, skip: usize| {
+            let (line, column) = position_of(SRC, SRC.find(needle).expect(needle) + skip);
+            let token = drawn
+                .iter()
+                .find(|t| t.0 == line && t.1 == column)
+                .unwrap_or_else(|| panic!("{needle}: {drawn:?}"));
+
+            (types[token.3 as usize].as_str(), token.4)
+        };
+
+        assert_eq!(at("function get(", "function ".len()), ("method", 2));
+        assert_eq!(at("function map<U>(", "function ".len()), ("method", 2));
+        assert_eq!(at("function make(", "function ".len()), ("function", 2));
+        assert_eq!(at("function helper(", "function ".len()), ("function", 2));
+        assert_eq!(at("function loc(", "function ".len()), ("function", 2));
+        // A call site keeps the child's own token.
+        let (line, column) = position_of(SRC, SRC.find("return helper()").unwrap() + 7);
+        assert!(
+            !drawn.iter().any(|t| t.0 == line && t.1 == column),
+            "{drawn:?}"
+        );
     }
 
     /// A `macro` and an `attribute` declaration carry the name and the
@@ -569,7 +644,7 @@ mod tests {
             None,
         );
         let types = legend();
-        let drawn = alloy_tokens(&doc, &types);
+        let drawn = alloy_tokens(&doc, &types, &[]);
         let at = |name: &str, needle: &str| {
             let kind = type_index(&types, name).expect("the type");
             let (line, column) = position_of(SRC, SRC.find(needle).expect(needle));
@@ -619,7 +694,7 @@ mod tests {
             None,
         );
         let types = legend();
-        let drawn = alloy_tokens(&doc, &types);
+        let drawn = alloy_tokens(&doc, &types, &[]);
         let at = |needle: &str| {
             let (line, column) = position_of(SRC, SRC.find(needle).expect(needle));
 
@@ -662,7 +737,7 @@ mod tests {
         // Tokens: `local` (0,0,5), `nil` inside the generated text (0,18,3),
         // `print` (1,0,5).
         let data = [0, 0, 5, 1, 0, 0, 18, 3, 2, 0, 1, 0, 5, 3, 0];
-        let out = remap(&data, &doc, &[]);
+        let out = remap(&data, &doc, &[], &[]);
         assert_eq!(out, vec![0, 0, 5, 1, 0, 1, 0, 5, 3, 0]);
     }
 
@@ -682,7 +757,7 @@ mod tests {
         let col = line.find("self").unwrap() as u64;
         // `self` on the return line, then `x` right after the dot.
         let data = [5, col, 4, 9, 0, 0, 5, 1, 9, 0];
-        let out = remap(&data, &doc, &[]);
+        let out = remap(&data, &doc, &[], &[]);
         assert_eq!(out.len(), 5, "{out:?}");
         let source_line = src.lines().nth(5).unwrap();
         let x_col = source_line.find(".x").unwrap() as u64 + 1;
@@ -710,7 +785,7 @@ mod tests {
         // `number` on the first line, then the second `number` after it.
         let data = [0, col, 6, 1, 0, 0, 9, 6, 1, 0];
         assert_eq!(
-            remap(&data, &doc, &[]),
+            remap(&data, &doc, &[], &[]),
             vec![0, col, 6, 1, 0, 0, 9, 6, 1, 0]
         );
     }
@@ -737,7 +812,7 @@ mod tests {
         let col = line.find("props").unwrap() as u64;
         let str_col = line.find("\"s\"").unwrap() as u64;
         let data = [1, 6, 5, 8, 0, 1, col, 5, 8, 0, 0, str_col - col, 3, 18, 0];
-        let out = remap(&data, &doc, &[]);
+        let out = remap(&data, &doc, &[], &[]);
         // `props` on line 2 stays at 6, `props` on line 3 lands on the
         // hole's `props`, and the string on the `"s"` of the attribute.
         assert_eq!(out.len(), 15, "{out:?}");

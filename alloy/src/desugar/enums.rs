@@ -16,8 +16,10 @@ use super::*;
 pub(crate) struct Compiled {
     /// The tests, joined with `and`. Empty means the pattern always matches.
     tests: Vec<String>,
-    /// The bindings, as name and access path.
-    binds: Vec<(String, String)>,
+    /// The bindings, as the name's source span and access path. The
+    /// span lets a declaration copy the name, so the editor maps it
+    /// back to the pattern site.
+    binds: Vec<(TokSpan, String)>,
 }
 
 pub(crate) fn join_tests(tests: &[String]) -> String {
@@ -564,6 +566,45 @@ impl<'s> Desugar<'s> {
         paths
     }
 
+    /// The names a bind list declares, in order.
+    fn bind_names(&self, binds: &[(TokSpan, String)]) -> Vec<String> {
+        binds
+            .iter()
+            .map(|(n, _)| self.text_of(*n).to_string())
+            .collect()
+    }
+
+    /// Each bound name and the path it reads, for a rename pass.
+    fn bind_map(&self, binds: &[(TokSpan, String)]) -> HashMap<String, String> {
+        binds
+            .iter()
+            .map(|(n, p)| (self.text_of(*n).to_string(), p.clone()))
+            .collect()
+    }
+
+    /// Writes `<keyword> a, b = x, y` at `anchor`; `keyword` carries the
+    /// space the caller wants in front of it. Each name copies from the
+    /// source, so the editor maps it to the pattern site. Nothing for an
+    /// empty list.
+    fn write_binds(&mut self, anchor: u32, keyword: &str, binds: &[(TokSpan, String)]) {
+        if binds.is_empty() {
+            return;
+        }
+
+        self.generate(anchor, &format!("{keyword} "));
+
+        for (i, (name, _)) in binds.iter().enumerate() {
+            if i > 0 {
+                self.generate(anchor, ", ");
+            }
+
+            self.copy_span(*name);
+        }
+
+        let values: Vec<&str> = binds.iter().map(|(_, v)| v.as_str()).collect();
+        self.generate(anchor, &format!(" = {}", values.join(", ")));
+    }
+
     /// Compiles a pattern against an access path.
     pub(crate) fn compile_pattern(&mut self, p: &Pattern, path: &str, out: &mut Compiled) {
         match p {
@@ -584,7 +625,7 @@ impl<'s> Desugar<'s> {
 
                     Some(_) => out.tests.push(format!("{path} == \"{n}\"")),
 
-                    None => out.binds.push((n, path.to_string())),
+                    None => out.binds.push((*name, path.to_string())),
                 }
             }
 
@@ -628,7 +669,7 @@ impl<'s> Desugar<'s> {
                     match pattern {
                         Some(sub_pat) => self.compile_pattern(sub_pat, &sub, out),
 
-                        None => out.binds.push((fname, sub)),
+                        None => out.binds.push((*field, sub)),
                     }
                 }
             }
@@ -646,10 +687,9 @@ impl<'s> Desugar<'s> {
                 }
 
                 if let Some(r) = rest {
-                    let rname = self.text_of(*r).to_string();
                     let std = self.std();
                     out.binds.push((
-                        rname,
+                        *r,
                         format!("{std}.Array.slice({path}, {})", items.len() + 1),
                     ));
                 }
@@ -664,10 +704,7 @@ impl<'s> Desugar<'s> {
                 let tb = self.cast_tests(&join_tests(&cb.tests), path);
                 out.tests.push(format!("(({ta}) or ({tb}))"));
 
-                let names_a: Vec<&String> = ca.binds.iter().map(|(n, _)| n).collect();
-                let names_b: Vec<&String> = cb.binds.iter().map(|(n, _)| n).collect();
-
-                if names_a != names_b {
+                if self.bind_names(&ca.binds) != self.bind_names(&cb.binds) {
                     self.diagnose(
                         *span,
                         "both sides of an `or` pattern must bind the same names",
@@ -678,7 +715,7 @@ impl<'s> Desugar<'s> {
                     let pb = cb
                         .binds
                         .iter()
-                        .find(|(m, _)| m == n)
+                        .find(|(m, _)| self.text_of(*m) == self.text_of(*n))
                         .map(|(_, p)| p.clone())
                         .unwrap_or_else(|| pa.clone());
                     // The checker refines each side by its own tag and
@@ -686,7 +723,7 @@ impl<'s> Desugar<'s> {
                     // reads the payload untyped.
                     let (pa, pb) = (self.cast_root(pa), self.cast_root(&pb));
                     out.binds
-                        .push((n.clone(), format!("(if {ta} then {pa} else {pb})")));
+                        .push((*n, format!("(if {ta} then {pa} else {pb})")));
                 }
             }
         }
@@ -709,7 +746,7 @@ impl<'s> Desugar<'s> {
         let mut test = join_tests(&c.tests);
 
         if let Some(g) = guard {
-            let map: HashMap<String, String> = c.binds.iter().cloned().collect();
+            let map = self.bind_map(&c.binds);
             self.renames.push(map);
             let text = self.render_to_string(g);
             self.renames.pop();
@@ -1383,17 +1420,7 @@ impl<'s> Desugar<'s> {
             self.copy(cursor, arm_start);
             let (test, c) = self.arm_test(&arm.patterns, &paths, arm.guard.as_ref());
             let keyword = if i == 0 { "if" } else { "elseif" };
-            let mut text = format!("{keyword} {test} then");
-
-            if !c.binds.is_empty() {
-                let names: Vec<String> = c.binds.iter().map(|(n, _)| n.clone()).collect();
-                let values: Vec<String> = c.binds.iter().map(|(_, p)| p.clone()).collect();
-                text.push_str(&format!(
-                    " local {} = {}",
-                    names.join(", "),
-                    values.join(", ")
-                ));
-            }
+            let text = format!("{keyword} {test} then");
 
             // The arm head runs to `then`; the block follows.
             let then_tok = self.find_tok_after(
@@ -1405,15 +1432,14 @@ impl<'s> Desugar<'s> {
             );
             let then_end = self.toks[then_tok as usize].end;
             self.generate(arm_start, &text);
+            self.write_binds(arm_start, " local", &c.binds);
             cursor = then_end;
 
             self.scopes.push(HashSet::new());
 
-            for (n, _) in &c.binds {
-                let names = n.clone();
-
+            for name in self.bind_names(&c.binds) {
                 if let Some(scope) = self.scopes.last_mut() {
-                    scope.insert(names);
+                    scope.insert(name);
                 }
             }
 
@@ -1526,7 +1552,7 @@ impl<'s> Desugar<'s> {
             cursor = then_end;
             let vs = self.byte_start(arm.value.span());
             self.copy(cursor, vs);
-            let map: HashMap<String, String> = c.binds.iter().cloned().collect();
+            let map = self.bind_map(&c.binds);
             self.renames.push(map);
             self.expr(&arm.value);
             self.renames.pop();
@@ -1562,14 +1588,6 @@ impl<'s> Desugar<'s> {
         // Luau has `const` of its own, so the keyword passes through and
         // a reassignment is Luau's compile error.
         let keyword = self.text_of(p.keyword).to_string();
-        let binds = if c.binds.is_empty() {
-            String::new()
-        } else {
-            let names: Vec<String> = c.binds.iter().map(|(n, _)| n.clone()).collect();
-            let values: Vec<String> = c.binds.iter().map(|(_, v)| v.clone()).collect();
-
-            format!("{keyword} {} = {}", names.join(", "), values.join(", "))
-        };
 
         match &p.else_block {
             None => {
@@ -1581,7 +1599,7 @@ impl<'s> Desugar<'s> {
                     ),
                     anchor,
                 );
-                self.generate(anchor, &binds);
+                self.write_binds(anchor, &keyword, &c.binds);
             }
 
             Some(block) => {
@@ -1600,9 +1618,7 @@ impl<'s> Desugar<'s> {
                 self.copy(after, end_tok.start);
                 self.copy(end_tok.start, end_tok.end);
 
-                if !binds.is_empty() {
-                    self.generate(end_tok.end, &format!(" {binds}"));
-                }
+                self.write_binds(end_tok.end, &format!(" {keyword}"), &c.binds);
             }
         }
     }
@@ -1617,7 +1633,7 @@ impl<'s> Desugar<'s> {
         &mut self,
         cond: &Cond,
         anchor: u32,
-    ) -> (Vec<Renderer<'s>>, String, Vec<(String, String)>) {
+    ) -> (Vec<Renderer<'s>>, String, Vec<(TokSpan, String)>) {
         let Cond::Local {
             negated,
             bindings,
@@ -1630,12 +1646,12 @@ impl<'s> Desugar<'s> {
 
         let mut decls = Vec::new();
         let mut tests = Vec::new();
-        let mut binds: Vec<(String, String)> = Vec::new();
+        let mut binds: Vec<(TokSpan, String)> = Vec::new();
         let mut prior: Vec<String> = Vec::new();
 
         for b in bindings {
             // An earlier name in this condition is its temp by now.
-            let map: HashMap<String, String> = binds.iter().cloned().collect();
+            let map = self.bind_map(&binds);
             self.renames.push(map);
             let value = self.render_to_side(&b.value);
             self.renames.pop();
@@ -1662,7 +1678,7 @@ impl<'s> Desugar<'s> {
                         let temp = format!("_c{}", self.temp_next);
                         tests.push(temp.clone());
                         prior.push(temp.clone());
-                        binds.push((name, temp.clone()));
+                        binds.push((*n, temp.clone()));
 
                         (temp, ty)
                     }
@@ -1704,7 +1720,7 @@ impl<'s> Desugar<'s> {
         let mut test = tests.join(" and ");
 
         if let Some(f) = filter {
-            let map: HashMap<String, String> = binds.iter().cloned().collect();
+            let map = self.bind_map(&binds);
             self.renames.push(map);
             let text = self.render_to_string(f);
             self.renames.pop();
@@ -1777,19 +1793,11 @@ impl<'s> Desugar<'s> {
 
                     self.generate(kw_tok.start, lead);
                     self.append_decls(kw_tok.start, decls);
-                    let mut text = format!(" if {test} then");
+                    self.generate(kw_tok.start, &format!(" if {test} then"));
 
-                    if !binds.is_empty() && !matches!(cond, Cond::Local { negated: true, .. }) {
-                        let names: Vec<String> = binds.iter().map(|(n, _)| n.clone()).collect();
-                        let values: Vec<String> = binds.iter().map(|(_, v)| v.clone()).collect();
-                        text.push_str(&format!(
-                            " local {} = {}",
-                            names.join(", "),
-                            values.join(", ")
-                        ));
+                    if !matches!(cond, Cond::Local { negated: true, .. }) {
+                        self.write_binds(kw_tok.start, " local", &binds);
                     }
-
-                    self.generate(kw_tok.start, &text);
                 }
             }
 
@@ -1943,19 +1951,8 @@ impl<'s> Desugar<'s> {
         let do_end = self.toks[do_tok as usize].end;
         self.generate(start, "while true do ");
         self.append_decls(start, decls);
-        let mut text = format!(" if not ({test}) then break end");
-
-        if !binds.is_empty() {
-            let names: Vec<String> = binds.iter().map(|(n, _)| n.clone()).collect();
-            let values: Vec<String> = binds.iter().map(|(_, v)| v.clone()).collect();
-            text.push_str(&format!(
-                " local {} = {}",
-                names.join(", "),
-                values.join(", ")
-            ));
-        }
-
-        self.generate(start, &text);
+        self.generate(start, &format!(" if not ({test}) then break end"));
+        self.write_binds(start, " local", &binds);
         let body_start = self.block_start_or(&w.block, do_end);
         self.copy(do_end, body_start);
         self.block(&w.block);
@@ -2004,7 +2001,7 @@ impl<'s> Desugar<'s> {
                         });
                     }
 
-                    let map: HashMap<String, String> = binds.iter().cloned().collect();
+                    let map = self.bind_map(&binds);
                     self.renames.push(map);
                     let v = self.render_to_string(value);
                     self.renames.pop();
@@ -2706,6 +2703,55 @@ mod tests {
             for i in 0..u32::try_from(needle.len()).unwrap() {
                 assert_eq!(out.map.to_source(at + i), want + i, "{needle}: offset {i}");
             }
+        }
+    }
+
+    /// The name a condition binds, `v` in `if local v = f() then`, is
+    /// copied from the source into the `local v = _c1` the lowering
+    /// writes, so the editor maps the declaration back to the pattern
+    /// site and references on `v` find it. A destructuring pattern and
+    /// a match arm copy each name the same way.
+    #[test]
+    fn a_bound_name_maps_back_to_its_pattern_site() {
+        let cases = [
+            (
+                "local function f(): number?\n    return 1\nend\nif local v = f() then\n    print(v)\nend\n",
+                "local v = _c1",
+                "v = f()",
+            ),
+            (
+                "local function f(): number?\n    return 1\nend\nwhile local w = f() do\n    print(w)\nend\n",
+                "local w = _c1",
+                "w = f()",
+            ),
+            (
+                "local function pt(): { x: number, y: number }?\n    return { x = 1, y = 2 }\nend\nif local { x, y } = pt() then\n    print(x + y)\nend\n",
+                "local x, y = _c1.x, _c1.y",
+                "x, y } = pt()",
+            ),
+            (
+                "enum Shape as\n    Circle(number)\n    Empty\nend\nlocal s = Shape.Empty\nmatch s with\n    case Circle(r) then print(r)\n    case Empty then print(0)\nend\n",
+                "local r = _m1._1",
+                "r) then",
+            ),
+        ];
+
+        for (src, generated, at_pattern) in cases {
+            let options = EmitOptions {
+                check: true,
+                ..EmitOptions::default()
+            };
+            let out = crate::compile_with(src, &options).unwrap();
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            let at =
+                out.check
+                    .find(generated)
+                    .unwrap_or_else(|| panic!("{generated}: {}", out.check)) as u32;
+            let want = src.find(at_pattern).unwrap() as u32;
+            let name_at = at + "local ".len() as u32;
+
+            assert_eq!(out.map.to_source(name_at), want, "{generated}");
+            assert!(!out.map.is_generated(name_at), "{generated}");
         }
     }
 }

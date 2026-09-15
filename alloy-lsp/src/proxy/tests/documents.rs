@@ -513,11 +513,16 @@ pub(crate) fn capabilities_lose_formatting_and_gain_renames() {
     let mut m = json!({ "result": { "capabilities": {
             "documentFormattingProvider": true,
             "documentRangeFormattingProvider": true,
+            "diagnosticProvider": { "interFileDependencies": true, "workspaceDiagnostics": false },
             "semanticTokensProvider": { "legend": {}, "full": { "delta": true }, "range": true }
         } } });
     edit_capabilities(&mut m);
     let caps = &m["result"]["capabilities"];
     assert_eq!(caps["documentFormattingProvider"], true);
+
+    // The proxy publishes; a client that also pulled saw each report
+    // twice.
+    assert!(caps.get("diagnosticProvider").is_none());
 
     // `alloy fmt` reads a whole file, so the editor offers no
     // "Format Selection" over a range it cannot hold.

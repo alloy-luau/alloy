@@ -71,6 +71,12 @@ pub(crate) fn edit_capabilities(message: &mut Value) {
     // The proxy formats `.aly` itself, with `alloy fmt`.
     caps.insert("documentFormattingProvider".into(), Value::Bool(true));
 
+    // The proxy publishes every report itself, for the file the child
+    // answered and for its importers. A client that also pulls shows
+    // each report twice, so the pull capability goes; a pull that
+    // still arrives is answered with the same list.
+    caps.remove("diagnosticProvider");
+
     // No range formatting. `alloy fmt` reads a whole file and rewraps to
     // `[fmt] column_width`, so it can move text across the edge of a
     // selection: an edit set cut to the range would either drop that

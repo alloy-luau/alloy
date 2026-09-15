@@ -1,6 +1,6 @@
 [package]
 name = "alloy-web"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 description = "The Alloy compiler and its editor answers, for the playground in a browser."
 edition.workspace = true
 rust-version.workspace = true

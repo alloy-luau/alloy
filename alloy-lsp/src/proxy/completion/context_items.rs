@@ -1743,8 +1743,10 @@ impl Server {
             // `(` opens an attribute's argument list and `{` the field
             // list of an object initializer; anywhere else the editor
             // asked on one for nothing, and the child would list
-            // globals.
-            if matches!(trigger, Some("(" | "{")) {
+            // globals. A string in a call the emit rewrote,
+            // `$todo("why")`, maps to no byte of its own, and the child
+            // would list the scope of the line it lands on.
+            if matches!(trigger, Some("(" | "{")) || string_left_behind(doc, line, character) {
                 drop(st);
                 self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": [] }));
 

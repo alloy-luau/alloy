@@ -933,6 +933,24 @@ pub(crate) fn clean_completion(
     }
 }
 
+/// Whether the caret sits in a string of the source and its shadow
+/// position sits in none. A string the emit copied, `GetService("`,
+/// keeps the child's own list; one the emit rewrote has no list.
+pub(crate) fn string_left_behind(doc: &Doc, line: u32, character: u32) -> bool {
+    let Some(offset) = offset_of(&doc.source, line, character) else {
+        return false;
+    };
+    let (sl, sc) = doc.to_shadow(line, character);
+    let quoted_in_shadow = doc
+        .shadow
+        .lines()
+        .nth(sl as usize)
+        .and_then(|text| offset_of(text, 0, sc).map(|at| context::in_string(text, at)))
+        .unwrap_or(false);
+
+    context::in_string(&doc.source, offset) && !quoted_in_shadow
+}
+
 /// The call the caret sits in: the name in front of the innermost `(`
 /// that is still open, and how many arguments stand before the caret.
 /// `$double(` keeps its sigil, which is how a macro is declared.

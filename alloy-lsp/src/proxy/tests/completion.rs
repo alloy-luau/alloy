@@ -2834,3 +2834,38 @@ fn an_intrinsic_call_answers_signature_help_from_its_documentation() {
     assert!(st.declared_signature_help(uri, 4, 6).is_none());
 }
 
+/// A caret inside the string argument of an intrinsic: the expansion
+/// holds no byte of the string at that position, so the child would
+/// list the whole scope. A string the emit copies keeps the child's
+/// own answer.
+#[test]
+fn a_string_an_intrinsic_rewrote_lists_nothing() {
+    use super::super::completion::string_left_behind;
+
+    const SRC: &str = concat!(
+        "$todo(\"handle error case\")\n",
+        "print(\"hello world\")\n",
+        "local s = game:GetService(\"Players\")\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).unwrap();
+    let column = |line: &str, text: &str| (line.find(text).unwrap() + text.len()) as u32;
+
+    assert!(string_left_behind(
+        doc,
+        0,
+        column("$todo(\"handle error case\")", "handle")
+    ));
+    assert!(!string_left_behind(
+        doc,
+        1,
+        column("print(\"hello world\")", "hello")
+    ));
+    assert!(!string_left_behind(
+        doc,
+        2,
+        column("local s = game:GetService(\"Players\")", "Pl")
+    ));
+    // Outside every string the child answers as before.
+    assert!(!string_left_behind(doc, 1, 3));
+}

@@ -564,7 +564,9 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
             },
         },
     };
-    let owner = owner.split('<').next().unwrap_or(&owner);
+    // `Counter {}` with no `new`: the file does not compile, and the
+    // reader still means the struct.
+    let owner = owner.split(['<', ' ', '{']).next().unwrap_or(&owner);
 
     Some(owner.rsplit('.').next().unwrap_or(owner).to_string())
 }

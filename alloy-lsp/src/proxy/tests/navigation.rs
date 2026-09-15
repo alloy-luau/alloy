@@ -1342,13 +1342,15 @@ fn a_field_and_an_impl_method_refuse_each_other() {
         Some("`area` is already a method on line 6")
     );
 
-    // The other way round. The child renames a method of a plain
-    // `impl`, and the fields it stands beside are the proxy's to read.
+    // The other way round. The method is the struct's own, and the
+    // fields it stands beside are the proxy's to read.
     let method = at("area(self)");
+    let target = st.name_target(uri, method);
 
-    assert!(st.name_target(uri, method).is_none());
+    assert!(matches!(&target, Some(Target::Method { trait_name, .. }) if trait_name == "Box"));
     assert_eq!(
-        st.rename_clash(uri, method, None, "size").as_deref(),
+        st.rename_clash(uri, method, target.as_ref(), "size")
+            .as_deref(),
         Some("`size` is already a field on line 2")
     );
 }
@@ -1732,4 +1734,157 @@ fn a_hoisted_function_keeps_its_forward_declaration_out_of_sight() {
     let found = Some(json!([{ "uri": uri, "range": declaration }]));
     assert_eq!(st.declared_definition(uri, 5, 11), found);
     assert_eq!(st.declared_definition(uri, 8, 9), found);
+}
+
+/// A method of a plain `impl` reaches its declaration and every call
+/// from either end: a `:` call, a `Counter.bump(c)` call, a private
+/// method, and a call in a file that imports the struct. The child
+/// finds no site through a `:` call on the struct's table.
+#[test]
+fn a_struct_method_renames_the_declaration_and_every_call() {
+    const COUNTER: &str = concat!(
+        "export struct Counter as\n",
+        "    count: number = 0\n",
+        "end\n",
+        "\n",
+        "impl Counter as\n",
+        "    function bump(self)\n",
+        "        self.count += 1\n",
+        "    end\n",
+        "\n",
+        "    private function reset(self)\n",
+        "        self.count = 0\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "function main()\n",
+        "    local c = new Counter {}\n",
+        "    c:bump()\n",
+        "    Counter.bump(c)\n",
+        "    c:reset()\n",
+        "    local d = Counter {}\n",
+        "    d:bump()\n",
+        "end\n",
+    );
+    const USER: &str = concat!(
+        "import { Counter } from \"./counter\"\n",
+        "\n",
+        "local c = new Counter {}\n",
+        "c:bump()\n",
+    );
+    let st = super::support::files(&[("file:///counter.aly", COUNTER), ("file:///user.aly", USER)]);
+    let at = |src: &str, text: &str| src.find(text).expect(text);
+    let sites = |edit: &Value, uri: &str, src: &str| -> Vec<usize> {
+        edit["changes"][uri]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| {
+                let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+                offset_of(src, line, column).expect("offset")
+            })
+            .collect()
+    };
+
+    for caret in [
+        at(COUNTER, "bump(self)"),
+        at(COUNTER, "c:bump") + 2,
+        at(COUNTER, "Counter.bump") + 8,
+        at(USER, "c:bump") + 2,
+    ] {
+        let uri = match caret == at(USER, "c:bump") + 2 {
+            true => "file:///user.aly",
+
+            false => "file:///counter.aly",
+        };
+        let target = st.name_target(uri, caret);
+
+        assert!(
+            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Counter" && name == "bump"),
+            "{caret}: {target:?}"
+        );
+    }
+
+    let edit = st.method_edits("Counter", "bump", "poke").expect("edit");
+
+    assert_eq!(
+        sites(&edit, "file:///counter.aly", COUNTER),
+        [
+            at(COUNTER, "bump(self)"),
+            at(COUNTER, "c:bump") + 2,
+            at(COUNTER, "Counter.bump") + 8,
+            // `Counter {}` with no `new` compiles to nothing, and the
+            // reader still means the struct.
+            at(COUNTER, "d:bump") + 2,
+        ],
+        "{edit}"
+    );
+    assert_eq!(
+        sites(&edit, "file:///user.aly", USER),
+        [at(USER, "c:bump") + 2],
+        "{edit}"
+    );
+
+    // A private method reads the same way.
+    let reset = st.name_target("file:///counter.aly", at(COUNTER, "c:reset") + 2);
+
+    assert!(matches!(&reset, Some(Target::Method { name, .. }) if name == "reset"));
+    assert_eq!(
+        sites(
+            &st.method_edits("Counter", "reset", "clear").expect("edit"),
+            "file:///counter.aly",
+            COUNTER
+        ),
+        [at(COUNTER, "reset(self)"), at(COUNTER, "c:reset") + 2]
+    );
+}
+
+/// A trait's default method with an empty `impl Trait for S`: the
+/// struct writes no method of its own, and a call on it still reaches
+/// the trait's declaration, from either end.
+#[test]
+fn a_default_method_reaches_a_struct_with_an_empty_impl() {
+    const SRC: &str = concat!(
+        "trait Greeter as\n",
+        "    function greet(self): string\n",
+        "        return \"hi\"\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "struct Person as\n",
+        "    name: string\n",
+        "end\n",
+        "\n",
+        "impl Greeter for Person as\n",
+        "end\n",
+        "\n",
+        "local p = new Person { name = \"a\" }\n",
+        "print(p:greet())\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let declaration = SRC.find("greet(self)").expect("declaration");
+    let call = SRC.find("p:greet").expect("call") + 2;
+
+    for caret in [declaration, call] {
+        let target = st.name_target(uri, caret);
+
+        assert!(
+            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Greeter" && name == "greet"),
+            "{caret}: {target:?}"
+        );
+    }
+
+    let edit = st.method_edits("Greeter", "greet", "hello").expect("edit");
+    let starts: Vec<usize> = edit["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .map(|e| {
+            let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+            offset_of(SRC, line, column).expect("offset")
+        })
+        .collect();
+
+    assert_eq!(starts, [declaration, call], "{edit}");
 }

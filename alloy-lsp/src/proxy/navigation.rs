@@ -1053,9 +1053,12 @@ impl State {
             .into_iter()
             .find(|site| site.at == (s, e));
 
+        // A plain `impl S` declares the method on `S` itself, so the
+        // struct stands where a trait would.
         if let Some(site) = here {
             return site
                 .trait_name
+                .or(site.target)
                 .map(|trait_name| Target::Method { trait_name, name });
         }
 
@@ -1074,7 +1077,11 @@ impl State {
             return None;
         }
 
-        let owner = receiver_type(self, doc, head.len() - 1);
+        // `Counter.bump(c)`: the receiver is the struct itself.
+        let owner = receiver_type(self, doc, head.len() - 1).or_else(|| {
+            dot.then(|| self.impl_target_at(doc, head.len() - 1))
+                .flatten()
+        });
         let mut traits: Vec<String> = Vec::new();
 
         for site in self
@@ -1082,7 +1089,7 @@ impl State {
             .values()
             .flat_map(|d| trait_method_sites(&d.source))
         {
-            let Some(trait_name) = site.trait_name else {
+            let Some(trait_name) = site.trait_name.clone().or(site.target.clone()) else {
                 continue;
             };
             let mine = match (&owner, &site.target) {
@@ -1092,11 +1099,13 @@ impl State {
 
                 (Some(o), Some(t)) => o == t,
 
+                // The trait's own body: an `impl Trait for S` with no
+                // method of its own still hands `S` the default.
+                (Some(o), None) => self.implements(o, &trait_name),
+
                 // A receiver with no type of its own: one trait that
                 // declares the name is still the one the call means.
                 (None, _) => true,
-
-                _ => false,
             };
 
             if site.name == name && mine && !traits.contains(&trait_name) {
@@ -1116,8 +1125,39 @@ impl State {
         }
     }
 
+    /// The impl target the word before `at` names: the `Counter` of
+    /// `Counter.bump(c)`. `None` for a word no `impl` block targets.
+    fn impl_target_at(&self, doc: &Doc, at: usize) -> Option<String> {
+        let head = doc.source[..at].trim_end();
+
+        if head.is_empty() || !keywords::is_word_at(&doc.source, head.len() - 1) {
+            return None;
+        }
+
+        let (s, e) = keywords::word_range(&doc.source, head.len() - 1);
+        let word = &doc.source[s..e];
+
+        self.docs
+            .values()
+            .flat_map(|d| &d.impl_blocks)
+            .any(|b| b.target == word)
+            .then(|| word.to_string())
+    }
+
+    /// Whether any file writes `impl Trait for S`, with or without a
+    /// method in the block.
+    fn implements(&self, owner: &str, trait_name: &str) -> bool {
+        self.docs
+            .values()
+            .flat_map(|d| &d.impl_blocks)
+            .any(|b| b.target == owner && b.trait_name.as_deref() == Some(trait_name))
+    }
+
     /*
-    The whole rename of one trait method, as a workspace edit.
+    The whole rename of one method, as a workspace edit.
+
+    The name is the trait's, or the struct's for a method of a plain
+    `impl S`; the child ties none of the sites of either together.
 
     A trait declares the method once, every `impl Trait for S` writes it
     again, and a call reads it off a value. The emit gives a trait no
@@ -1144,37 +1184,47 @@ impl State {
                     .map(move |site| (u.clone(), site))
             })
             .collect();
-        let targets: Vec<&str> = sites
-            .iter()
-            .filter(|(_, s)| s.name == name && s.trait_name.as_deref() == Some(trait_name))
-            .filter_map(|(_, s)| s.target.as_deref())
+        let mine = |s: &MethodSite| {
+            s.name == name
+                && match &s.trait_name {
+                    Some(t) => t == trait_name,
+
+                    None => s.target.as_deref() == Some(trait_name),
+                }
+        };
+        // Every struct the trait reaches, an empty `impl Trait for S`
+        // among them; the struct itself for a plain `impl S`.
+        let targets: Vec<String> = self
+            .docs
+            .values()
+            .flat_map(|d| &d.impl_blocks)
+            .filter(|b| b.trait_name.as_deref() == Some(trait_name))
+            .map(|b| b.target.clone())
+            .chain([trait_name.to_string()])
             .collect();
         // The name belongs to this trait alone: nothing else declares it.
-        let only_one = !sites
-            .iter()
-            .any(|(_, s)| s.name == name && s.trait_name.as_deref() != Some(trait_name));
+        let only_one = !sites.iter().any(|(_, s)| s.name == name && !mine(s));
         let mut changes: Map<String, Value> = Map::new();
 
         for (u, d) in &self.docs {
             let mut edits: Vec<Value> = sites
                 .iter()
-                .filter(|(owner, s)| {
-                    owner == u && s.name == name && s.trait_name.as_deref() == Some(trait_name)
-                })
+                .filter(|(owner, s)| owner == u && mine(s))
                 .map(|(_, s)| text_edit(&d.source, s.at.0, s.at.1, new_name))
                 .collect();
 
             for (start, end, receiver, dotted) in method_calls(&d.source, name) {
                 let holds = match receiver_type(self, d, receiver) {
-                    Some(ty) => {
-                        targets.contains(&ty.as_str())
-                            || ty == trait_name
-                            || bound_by(&d.source, &ty, trait_name)
-                    }
+                    Some(ty) => targets.contains(&ty) || bound_by(&d.source, &ty, trait_name),
 
                     // `Ns.f()` reads a namespace the file never binds;
-                    // only a `:` call with no type still means the trait.
-                    None => only_one && !dotted,
+                    // only a `:` call with no type still means the
+                    // trait. `Counter.bump(c)` names the struct itself.
+                    None => {
+                        (only_one && !dotted)
+                            || (dotted
+                                && self.impl_target_at(d, receiver).as_deref() == Some(trait_name))
+                    }
                 };
 
                 if holds {
@@ -1485,6 +1535,7 @@ impl State {
                         .flat_map(|d| trait_method_sites(&d.source))
                         .filter(|s| s.trait_name.as_deref() == Some(trait_name))
                         .filter_map(|s| s.target)
+                        .chain([trait_name.clone()])
                         .collect();
 
                     targets.iter().find_map(|owner| {
@@ -2598,6 +2649,7 @@ question about one byte: which name is this, and where else is it
 written. One walk answers both, so an edit the rename writes always has
 a reference beside it.
 */
+#[derive(Debug)]
 pub(crate) enum Target {
     /// A name a module exports, with the file that declares it.
     Export(PathBuf, String),
@@ -2627,7 +2679,9 @@ pub(crate) enum Target {
     /// A method a trait declares. The trait writes it once, every
     /// `impl Trait for S` writes it again, and a call reads it off a
     /// value; the emit types the receiver as `any`, so the child ties
-    /// none of the three together.
+    /// none of the three together. A method of a plain `impl S` is
+    /// the struct's: `trait_name` holds `S`, and the child finds no
+    /// site of it through a `:` call.
     Method { trait_name: String, name: String },
     /// An `import` statement holds no other name either answer can
     /// reach: not the keywords, not the module path. The child would

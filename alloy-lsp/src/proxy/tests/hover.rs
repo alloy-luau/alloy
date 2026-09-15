@@ -1512,3 +1512,42 @@ fn a_hoisted_function_s_declaration_reads_its_own_header() {
     // The same print on a line that declares nothing is the child's.
     assert_eq!(declared_signature(printed, doc, 1, 11), None);
 }
+
+/// `$assert_eq(p:len(), 5)` expands to generated text that quotes the
+/// argument for its message and writes it again as code. The hover
+/// home is the code, not the quoted copy, for an intrinsic and for a
+/// macro of the file's own.
+#[test]
+pub(crate) fn a_hover_in_a_macro_argument_lands_on_the_code() {
+    let head = concat!(
+        "struct Point as\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "impl Point as\n",
+        "    function len(self): number\n",
+        "        return self.x\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "macro m(v)\n",
+        "    print(\"v\", v)\n",
+        "end\n",
+        "\n",
+        "local p = new Point { x = 3 }\n",
+    );
+
+    for call in ["$assert_eq(p:len(), 3)", "$dbg(p:len())", "$m(p:len())"] {
+        let src = format!("{head}{call}\n");
+        let (st, uri) = one_file(&src);
+        let doc = st.docs.get(uri).unwrap();
+        let (line, column) =
+            shadow_home(&doc.shadow, 15, "len").unwrap_or_else(|| panic!("{call}"));
+        let text = doc.shadow.lines().nth(line as usize).unwrap();
+        let at = offset_of(text, 0, column).unwrap();
+
+        assert!(text[at..].starts_with("len()"), "{call}: {text}");
+        assert!(text[..at].ends_with("p:"), "{call}: {text}");
+        assert!(!context::in_string(text, at), "{call}: {text}");
+    }
+}

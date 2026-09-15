@@ -446,10 +446,28 @@ pub(crate) fn shadow_home(shadow: &str, line: u32, word: &str) -> Option<(u32, u
 
     above.chain(below).find_map(|i| {
         let text = lines[i];
-        let byte = keywords::find_word(text, word)?;
+        let byte = word_outside_strings(text, word)?;
 
         Some((i as u32, text[..byte].chars().count() as u32))
     })
+}
+
+/// The column of `word` as a whole word outside every string of the
+/// line. An intrinsic writes its argument twice, `"p:len()"` as text
+/// for the message and `p:len()` as code, and the code is the one
+/// with a type behind it.
+fn word_outside_strings(text: &str, word: &str) -> Option<usize> {
+    let mut from = 0;
+
+    loop {
+        let at = from + keywords::find_word(&text[from..], word)?;
+
+        if !context::in_string(text, at) {
+            return Some(at);
+        }
+
+        from = at + word.len();
+    }
 }
 
 /// Whether the file binds the name itself: a declaration, a local, a

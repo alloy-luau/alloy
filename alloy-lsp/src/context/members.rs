@@ -310,7 +310,10 @@ fn open_bracket(head: &str) -> Option<usize> {
 /// the byte before it names no word. A `.` before it is allowed, since
 /// the emit qualifies a std name as `__alloy.Name`.
 fn access_starts(line: &str, needle: &str) -> Vec<usize> {
+    // An intrinsic quotes its argument for the message it prints, so
+    // `"p:len()"` stands before the `p:len()` the child can type.
     line.match_indices(needle)
+        .filter(|(i, _)| !super::in_string(line, *i))
         .filter(|(i, _)| {
             line[..*i]
                 .chars()

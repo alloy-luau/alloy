@@ -2759,3 +2759,42 @@ fn a_function_declared_below_the_caret_is_offered_there() {
     );
     assert!(st.functions_below(uri, 9, 3, &json!([])).is_empty());
 }
+
+/// `$assert_eq(p:|, 5)`: the intrinsic quotes the argument for its
+/// message, so `p:` stands twice on the lowered line. The member list
+/// belongs after the code, not inside the string.
+#[test]
+pub(crate) fn a_member_in_a_macro_argument_finds_the_code() {
+    let head = concat!(
+        "struct Point as\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "local p = new Point { x = 3 }\n",
+    );
+
+    for line in ["$assert_eq(p:len(), 3)", "$dbg(p:len())"] {
+        let src = format!("{head}{line}\n");
+        let (st, uri) = one_file(&src);
+        let doc = st.docs.get(uri).unwrap();
+        let column = line.find("p:").unwrap() + 2;
+        let (shadow_no, _) = doc.to_shadow(5, column as u32);
+        let shadow_line = doc.shadow.lines().nth(shadow_no as usize).unwrap();
+        let at = context::member_column(
+            line,
+            shadow_line,
+            "p",
+            context::Access::Plain,
+            ':',
+            0,
+            column,
+        )
+        .unwrap_or_else(|| panic!("{line}: {shadow_line}"));
+
+        assert!(shadow_line[..at].ends_with("p:"), "{line}: {shadow_line}");
+        assert!(
+            !context::in_string(shadow_line, at),
+            "{line}: {shadow_line}"
+        );
+    }
+}

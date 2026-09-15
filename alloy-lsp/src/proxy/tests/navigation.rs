@@ -1840,6 +1840,64 @@ fn a_struct_method_renames_the_declaration_and_every_call() {
     );
 }
 
+/// A method of an exported struct, from its own declaration: the
+/// dependency knows no importer, so the walk finds each file that
+/// imports the struct by module path, through an alias too.
+#[test]
+fn a_struct_method_reaches_a_call_through_an_import_alias() {
+    const GADGET: &str = concat!(
+        "export struct Gadget as\n",
+        "    power: number\n",
+        "end\n",
+        "\n",
+        "impl Gadget as\n",
+        "    function new(power: number): Gadget\n",
+        "        return new Gadget { power = power }\n",
+        "    end\n",
+        "\n",
+        "    function spin(self): number\n",
+        "        return self.power * 2\n",
+        "    end\n",
+        "end\n",
+    );
+    const MAIN: &str = concat!(
+        "import { Gadget as Gizmo } from \"../dep/gadget\"\n",
+        "\n",
+        "local gizmo = Gizmo.new(3)\n",
+        "local gizmo_spin = gizmo:spin()\n",
+    );
+    let st = super::support::files(&[
+        ("file:///dep/gadget.aly", GADGET),
+        ("file:///src/main.aly", MAIN),
+    ]);
+    let at = |src: &str, text: &str| src.find(text).expect(text);
+    let target = st.name_target("file:///dep/gadget.aly", at(GADGET, "spin(self)"));
+
+    assert!(
+        matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Gadget" && name == "spin"),
+        "{target:?}"
+    );
+
+    let edit = st.method_edits("Gadget", "spin", "whirl").expect("edit");
+    let (line, column) = position_of(MAIN, at(MAIN, "gizmo:spin") + 6);
+
+    assert_eq!(
+        edit["changes"]["file:///src/main.aly"],
+        json!([{
+            "range": range_value((line, column), (line, column + 4)),
+            "newText": "whirl",
+        }]),
+        "{edit}"
+    );
+    assert_eq!(
+        edit["changes"]["file:///dep/gadget.aly"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "{edit}"
+    );
+}
+
 /// A trait's default method with an empty `impl Trait for S`: the
 /// struct writes no method of its own, and a call on it still reaches
 /// the trait's declaration, from either end.

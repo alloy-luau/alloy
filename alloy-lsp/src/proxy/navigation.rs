@@ -1231,6 +1231,14 @@ impl State {
             .collect();
         // The name belongs to this trait alone: nothing else declares it.
         let only_one = !sites.iter().any(|(_, s)| s.name == name && !mine(s));
+        // The modules that declare a target. An importer names one by
+        // its module path, the way the export rename finds importers.
+        let declared: Vec<PathBuf> = self
+            .docs
+            .iter()
+            .filter(|(_, d)| d.decls.iter().any(|dc| targets.contains(&dc.name)))
+            .filter_map(|(u, _)| uri_to_path(u).map(|p| imports::module_path(&p)))
+            .collect();
         let mut changes: Map<String, Value> = Map::new();
 
         for (u, d) in &self.docs {
@@ -1239,10 +1247,26 @@ impl State {
                 .filter(|(owner, s)| owner == u && mine(s))
                 .map(|(_, s)| text_edit(&d.source, s.at.0, s.at.1, new_name))
                 .collect();
+            // `import { Gadget as Gizmo }`: this file writes the target
+            // under its alias, so a receiver of that type holds it too.
+            let aliases: Vec<String> = import_entries(&d.source)
+                .into_iter()
+                .filter(|it| {
+                    targets.contains(&it.name)
+                        && self
+                            .resolve_spec(u, &it.spec)
+                            .is_some_and(|p| declared.contains(&imports::module_path(&p)))
+                })
+                .map(|it| it.bound)
+                .collect();
 
             for (start, end, receiver, dotted) in method_calls(&d.source, name) {
                 let holds = match receiver_type(self, d, receiver) {
-                    Some(ty) => targets.contains(&ty) || bound_by(&d.source, &ty, trait_name),
+                    Some(ty) => {
+                        targets.contains(&ty)
+                            || aliases.contains(&ty)
+                            || bound_by(&d.source, &ty, trait_name)
+                    }
 
                     // `Ns.f()` reads a namespace the file never binds;
                     // only a `:` call with no type still means the

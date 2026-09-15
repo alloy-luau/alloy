@@ -636,21 +636,7 @@ impl Server {
         // A project an import leads into gets its shadows too: the
         // importer's require points into it, and the child resolves a
         // require against the files that are there.
-        // ponytail: the file poll watches the root alone, so an edit of
-        // a dependency on disk waits for the next scan.
-        for dep in config
-            .as_ref()
-            .map(|c| alloy::build::dependency_inputs(&root, c))
-            .unwrap_or_default()
-        {
-            let dep_out = Config::find(&dep).and_then(|p| {
-                let c = Config::load(&p).ok()?;
-
-                Some(p.parent()?.join(&c.build.out))
-            });
-            walk(&dep, dep_out.as_deref(), &mut files, &mut plain);
-        }
-
+        walk_dependencies(&root, config.as_ref(), &mut files, &mut plain);
         files.sort();
         files.dedup();
         log::took(&format!("scan: walked {} sources", files.len()), started);
@@ -820,9 +806,11 @@ impl Server {
     }
 
     /// The folders a file poll watches: `[build] in`, every folder the
-    /// mount table and the Luau configuration name, and the workspace
+    /// mount table and the Luau configuration name, the `[build] in` of
+    /// every project the root's sources import into, and the workspace
     /// root's own files. The output folder stays out: the build writes
-    /// there, and a poll of it would answer its own writes.
+    /// there, and a poll of it would answer its own writes. Each tick
+    /// reads the list again, so an import added since follows.
     pub(crate) fn poll_roots(&self) -> Vec<PathBuf> {
         let root = self.state.lock().expect("state").root.clone();
         let Some(root) = root else {
@@ -839,6 +827,8 @@ impl Server {
             for m in config.mount.values() {
                 roots.push(base.join(&m.0));
             }
+
+            roots.extend(alloy::build::dependency_inputs(&base, &config));
         }
 
         for (_, target) in project_aliases(&root, Some(&root)) {
@@ -863,12 +853,39 @@ impl Server {
         let Some(root) = root else {
             return;
         };
-        let out = Config::find_within(&root, &root)
-            .and_then(|p| Config::load(&p).ok().map(|c| (p, c)))
+        let config =
+            Config::find_within(&root, &root).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
+        let out = config
+            .as_ref()
             .map(|(p, c)| p.parent().unwrap_or(&root).join(&c.build.out));
+        let config = config.map(|(_, c)| c);
         let mut files = Vec::new();
         let mut plain = Vec::new();
         walk(&root, out.as_deref(), &mut files, &mut plain);
+        walk_dependencies(&root, config.as_ref(), &mut files, &mut plain);
+
+        // A source the editor does not hold open, saved on disk since
+        // its shadow: a dependency edited in another window. The shadow
+        // follows the disk, the way a watched change makes it.
+        let stale: Vec<(String, String)> = {
+            let st = self.state.lock().expect("state");
+
+            files
+                .iter()
+                .filter_map(|path| {
+                    let uri = path_to_uri(path);
+                    let doc = st.docs.get(&uri)?;
+
+                    if st.editor_open.contains(&uri) {
+                        return None;
+                    }
+
+                    let text = std::fs::read_to_string(path).ok()?;
+
+                    (text != doc.source).then_some((uri, text))
+                })
+                .collect()
+        };
 
         // What the mirror does not already hold, letter for letter.
         let changed: Vec<PathBuf> = {
@@ -892,16 +909,21 @@ impl Server {
                 .collect()
         };
 
-        if changed.is_empty() && fresh.is_empty() {
+        if changed.is_empty() && fresh.is_empty() && stale.is_empty() {
             return;
         }
 
         log::info(&format!(
-            "rescan: {} plain files, {} shadows",
+            "rescan: {} plain files, {} shadows, {} saved sources",
             changed.len(),
-            fresh.len()
+            fresh.len(),
+            stale.len()
         ));
         self.open_workspace();
+
+        for (uri, text) in &stale {
+            self.open_doc(uri, text.clone(), 0, false);
+        }
 
         // The child caches a module it has read; it re-reads one it
         // hears about.
@@ -931,6 +953,7 @@ impl Server {
 
         let mut touched = changed;
         touched.extend(fresh);
+        touched.extend(stale.iter().filter_map(|(uri, _)| uri_to_path(uri)));
         self.refresh_importers(&touched);
     }
 
@@ -1244,6 +1267,27 @@ pub(crate) fn normalize(path: &Path) -> PathBuf {
     }
 
     out
+}
+
+/// Walks the `[build] in` of every project the root's sources import
+/// into, each with its own output folder left out.
+fn walk_dependencies(
+    root: &Path,
+    config: Option<&Config>,
+    files: &mut Vec<PathBuf>,
+    plain: &mut Vec<PathBuf>,
+) {
+    for dep in config
+        .map(|c| alloy::build::dependency_inputs(root, c))
+        .unwrap_or_default()
+    {
+        let dep_out = Config::find(&dep).and_then(|p| {
+            let c = Config::load(&p).ok()?;
+
+            Some(p.parent()?.join(&c.build.out))
+        });
+        walk(&dep, dep_out.as_deref(), files, plain);
+    }
 }
 
 /// One workspace root as a directory name. Two servers run at once, one

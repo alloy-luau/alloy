@@ -696,6 +696,46 @@ fn a_dependency_shadow_sits_where_the_require_names_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The file poll watches the `[build] in` of every project the root's
+/// sources import into, so a dependency saved outside the editor
+/// reaches the next tick.
+#[test]
+fn the_poll_watches_the_folder_of_a_dependency() {
+    let dir = alias_root(
+        "poll-dependency",
+        &[
+            ("app/alloy.toml", "[build]\nin = \"src\"\nout = \"build\"\n"),
+            (
+                "app/src/main.aly",
+                "import { double } from \"../../shared/src/util\"\nprint(double(2))\n",
+            ),
+            (
+                "shared/alloy.toml",
+                "[build]\nin = \"src\"\nout = \"build\"\n",
+            ),
+            (
+                "shared/src/util.aly",
+                "export function double(n: number): number\n    return n * 2\nend\n",
+            ),
+        ],
+    );
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(std::io::sink()),
+        Vec::new(),
+        None,
+    );
+    server.state.lock().expect("state").root = Some(dir.join("app"));
+
+    let roots = server.poll_roots();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        roots.contains(&normalize(&dir.join("shared/src"))),
+        "{roots:?}"
+    );
+}
+
 /// A dependency's declarations join the workspace symbols, under the
 /// path they live at, so the reader sees where the name lives.
 #[test]

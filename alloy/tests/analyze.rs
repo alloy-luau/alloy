@@ -852,3 +852,33 @@ fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `if local v: number = f()` wrote the annotation on the temp, which
+/// holds the `number?` the value has, so the one annotation a reader
+/// writes reported. The annotation now goes on the name the branch
+/// declares, where the test has narrowed the temp; a wrong one still
+/// reports there.
+#[test]
+fn an_annotated_if_local_types_the_narrowed_name() {
+    let head = "function f2(n: number): number?\n    if n > 0 then\n        return n + 1\n    end\n    return nil\nend\n\n";
+    let good = format!("{head}if local v3: number = f2(4) then\n    print(v3)\nend\n");
+    let out = alloy::compile(&good).unwrap();
+    assert!(
+        out.check
+            .contains("do local _c1 = f2(4) if _c1 then local v3: number = _c1"),
+        "{}",
+        out.check
+    );
+    analyze(&good, "if-local-annotated-good");
+
+    let bad = format!("{head}if local v3: string = f2(4) then\n    print(v3)\nend\n");
+    let Some(reported) = reports(&bad, "if-local-annotated-bad") else {
+        return;
+    };
+    assert!(
+        reported
+            .iter()
+            .any(|l| l.contains("Expected this to be 'string', but got 'number'")),
+        "{reported:?}"
+    );
+}

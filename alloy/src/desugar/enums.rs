@@ -16,11 +16,14 @@ use super::*;
 pub(crate) struct Compiled {
     /// The tests, joined with `and`. Empty means the pattern always matches.
     tests: Vec<String>,
-    /// The bindings, as the name's source span and access path. The
-    /// span lets a declaration copy the name, so the editor maps it
-    /// back to the pattern site.
-    binds: Vec<(TokSpan, String)>,
+    /// The bindings. The name's span lets a declaration copy the name,
+    /// so the editor maps it back to the pattern site.
+    binds: Vec<Bind>,
 }
+
+/// One name a pattern binds: its source span, the access path it
+/// reads, and the annotation an `if local v: T` wrote on it.
+type Bind = (TokSpan, String, Option<TokSpan>);
 
 pub(crate) fn join_tests(tests: &[String]) -> String {
     if tests.is_empty() {
@@ -567,49 +570,60 @@ impl<'s> Desugar<'s> {
     }
 
     /// The names a bind list declares, in order.
-    fn bind_names(&self, binds: &[(TokSpan, String)]) -> Vec<String> {
+    fn bind_names(&self, binds: &[Bind]) -> Vec<String> {
         binds
             .iter()
-            .map(|(n, _)| self.text_of(*n).to_string())
+            .map(|(n, ..)| self.text_of(*n).to_string())
             .collect()
     }
 
     /// Each bound name and the path it reads, for a rename pass.
-    fn bind_map(&self, binds: &[(TokSpan, String)]) -> HashMap<String, String> {
+    fn bind_map(&self, binds: &[Bind]) -> HashMap<String, String> {
         binds
             .iter()
-            .map(|(n, p)| (self.text_of(*n).to_string(), p.clone()))
+            .map(|(n, p, _)| (self.text_of(*n).to_string(), p.clone()))
             .collect()
     }
 
-    /// Writes `<keyword> a, b = x, y` at `anchor`; `keyword` carries the
-    /// space the caller wants in front of it. A name on the anchor's
-    /// line copies from the source, so the editor maps it to the
-    /// pattern site. A name on another line, as in a let-else whose
+    /// Writes `<keyword> a: T, b = x, y` at `anchor`; `keyword` carries
+    /// the space the caller wants in front of it. A name on the
+    /// anchor's line copies from the source, so the editor maps it to
+    /// the pattern site. A name on another line, as in a let-else whose
     /// declaration follows the `end`, stays generated: a copied byte
     /// keeps its line. Nothing for an empty list.
-    fn write_binds(&mut self, anchor: u32, keyword: &str, binds: &[(TokSpan, String)]) {
+    fn write_binds(&mut self, anchor: u32, keyword: &str, binds: &[Bind]) {
         if binds.is_empty() {
             return;
         }
 
         self.generate(anchor, &format!("{keyword} "));
 
-        for (i, (name, _)) in binds.iter().enumerate() {
+        for (i, (name, _, ty)) in binds.iter().enumerate() {
             if i > 0 {
                 self.generate(anchor, ", ");
             }
 
-            if self.line_of(self.byte_start(*name)) == self.line_of(anchor) {
-                self.copy_span(*name);
-            } else {
-                let text = self.text_of(*name);
-                self.generate(anchor, text);
+            self.copy_on_line(anchor, *name);
+
+            if let Some(ty) = ty {
+                self.generate(anchor, ": ");
+                self.copy_on_line(anchor, *ty);
             }
         }
 
-        let values: Vec<&str> = binds.iter().map(|(_, v)| v.as_str()).collect();
+        let values: Vec<&str> = binds.iter().map(|(_, v, _)| v.as_str()).collect();
         self.generate(anchor, &format!(" = {}", values.join(", ")));
+    }
+
+    /// Copies a span when it sits on the anchor's line, and generates
+    /// its text otherwise.
+    fn copy_on_line(&mut self, anchor: u32, span: TokSpan) {
+        if self.line_of(self.byte_start(span)) == self.line_of(anchor) {
+            self.copy_span(span);
+        } else {
+            let text = self.text_of(span);
+            self.generate(anchor, text);
+        }
     }
 
     /// Compiles a pattern against an access path.
@@ -632,7 +646,7 @@ impl<'s> Desugar<'s> {
 
                     Some(_) => out.tests.push(format!("{path} == \"{n}\"")),
 
-                    None => out.binds.push((*name, path.to_string())),
+                    None => out.binds.push((*name, path.to_string(), None)),
                 }
             }
 
@@ -676,7 +690,7 @@ impl<'s> Desugar<'s> {
                     match pattern {
                         Some(sub_pat) => self.compile_pattern(sub_pat, &sub, out),
 
-                        None => out.binds.push((*field, sub)),
+                        None => out.binds.push((*field, sub, None)),
                     }
                 }
             }
@@ -698,6 +712,7 @@ impl<'s> Desugar<'s> {
                     out.binds.push((
                         *r,
                         format!("{std}.Array.slice({path}, {})", items.len() + 1),
+                        None,
                     ));
                 }
             }
@@ -718,19 +733,19 @@ impl<'s> Desugar<'s> {
                     );
                 }
 
-                for (n, pa) in &ca.binds {
+                for (n, pa, _) in &ca.binds {
                     let pb = cb
                         .binds
                         .iter()
-                        .find(|(m, _)| self.text_of(*m) == self.text_of(*n))
-                        .map(|(_, p)| p.clone())
+                        .find(|(m, ..)| self.text_of(*m) == self.text_of(*n))
+                        .map(|(_, p, _)| p.clone())
                         .unwrap_or_else(|| pa.clone());
                     // The checker refines each side by its own tag and
                     // cannot pick one across the `or`; the check artifact
                     // reads the payload untyped.
                     let (pa, pb) = (self.cast_root(pa), self.cast_root(&pb));
                     out.binds
-                        .push((*n, format!("(if {ta} then {pa} else {pb})")));
+                        .push((*n, format!("(if {ta} then {pa} else {pb})"), None));
                 }
             }
         }
@@ -1640,7 +1655,7 @@ impl<'s> Desugar<'s> {
         &mut self,
         cond: &Cond,
         anchor: u32,
-    ) -> (Vec<Renderer<'s>>, String, Vec<(TokSpan, String)>) {
+    ) -> (Vec<Renderer<'s>>, String, Vec<Bind>) {
         let Cond::Local {
             negated,
             bindings,
@@ -1653,7 +1668,7 @@ impl<'s> Desugar<'s> {
 
         let mut decls = Vec::new();
         let mut tests = Vec::new();
-        let mut binds: Vec<(TokSpan, String)> = Vec::new();
+        let mut binds: Vec<Bind> = Vec::new();
         let mut prior: Vec<String> = Vec::new();
 
         for b in bindings {
@@ -1670,8 +1685,11 @@ impl<'s> Desugar<'s> {
             let (head, ty) = match &b.pattern {
                 // The branch declares the name from a temp the test refined,
                 // so the name is `T`, not `T?`, in the branch and in any
-                // closure there. A negated condition keeps the name, since
-                // it must stay in scope after a guard clause.
+                // closure there. The annotation goes on the name there
+                // too: the temp holds the `T?` the value has, and the
+                // reader's `v: T` is the narrowed one. A negated
+                // condition keeps the name, since it must stay in scope
+                // after a guard clause.
                 Pattern::Bind(n) if self.unit_variant_of(self.text_of(*n)).is_none() => {
                     let name = self.text_of(*n).to_string();
 
@@ -1685,9 +1703,9 @@ impl<'s> Desugar<'s> {
                         let temp = format!("_c{}", self.temp_next);
                         tests.push(temp.clone());
                         prior.push(temp.clone());
-                        binds.push((*n, temp.clone()));
+                        binds.push((*n, temp.clone(), b.ty));
 
-                        (temp, ty)
+                        (temp, String::new())
                     }
                 }
 

@@ -455,12 +455,13 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        // An edit that starts earlier owns the text; its own copy comes
-        // back through here for the name.
+        // An edit that starts at or before the name owns the text; its
+        // own copy comes back through here for the name. `M.G[]` is an
+        // array edit that starts on the name itself.
         let (s, _, _) = best.as_ref()?;
 
         match self.earliest_edit_start(start, end) {
-            Some(at) if at < *s => None,
+            Some(at) if at <= *s => None,
 
             _ => best,
         }

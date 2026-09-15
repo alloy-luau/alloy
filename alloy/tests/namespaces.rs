@@ -103,6 +103,17 @@ fn a_type_of_a_namespace_renders_under_one_name() {
     assert!(out.contains("local v: Math_Vec2"), "{out}");
 }
 
+/// `M.G[]` is an array edit that starts on the namespace path, so the
+/// array owns the text and the path renders inside it.
+#[test]
+fn a_namespace_type_in_an_array_renders_under_one_name() {
+    let out = clean(
+        "namespace M as\n    struct G as\n        x: number\n    end\nend\n\nlocal gs: M.G[] = [new M.G { x = 1 }]\n\nprint(#gs)\n",
+    );
+    assert!(out.contains("local gs: __alloy.Array<M_G>"), "{out}");
+    assert!(!out.contains("M_G[]"), "{out}");
+}
+
 /// A plain `type` member takes the same name.
 #[test]
 fn a_type_alias_member_renders_under_one_name() {

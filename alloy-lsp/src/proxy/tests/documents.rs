@@ -902,3 +902,29 @@ pub(crate) fn a_generated_name_keeps_its_width() {
 
     assert_eq!(range, range_value((6, 13), (6, 21)), "{line}");
 }
+
+/// A mirror another root left behind a week ago goes at initialize; a
+/// fresh one and the session's own stay.
+#[test]
+pub(crate) fn stale_mirrors_of_other_roots_are_purged() {
+    let base = std::env::temp_dir().join(format!("alloy-lsp-purge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let own = base.join("own").join("root");
+    let old = base.join("old");
+    let fresh = base.join("fresh");
+    std::fs::create_dir_all(&own).expect("own");
+    std::fs::create_dir_all(&old).expect("old");
+    std::fs::create_dir_all(&fresh).expect("fresh");
+    let week_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 60 * 60);
+    std::fs::File::open(&old)
+        .expect("old dir")
+        .set_modified(week_ago)
+        .expect("mtime");
+
+    purge_stale_mirrors(&own);
+
+    assert!(own.exists());
+    assert!(fresh.exists());
+    assert!(!old.exists());
+    let _ = std::fs::remove_dir_all(&base);
+}

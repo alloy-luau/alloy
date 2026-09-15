@@ -1343,6 +1343,40 @@ pub(crate) fn mirror_dir(root: Option<&Path>, above: usize) -> PathBuf {
     dir.join("root")
 }
 
+/// Removes the mirrors of other roots that no server touched for a
+/// week. A server that was killed leaves its mirror behind, and a
+/// probe that opens thousands of roots leaves one each.
+pub(crate) fn purge_stale_mirrors(mirror: &Path) {
+    const WEEK: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    let own = mirror_base(mirror).to_path_buf();
+    let Some(parent) = own.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        if path == own {
+            continue;
+        }
+
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > WEEK);
+
+        if stale {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 /// How many folders above its root a mirror keeps: the `up` folders
 /// in its path. A mirror set by hand has none.
 fn above_of(mirror: &Path) -> usize {

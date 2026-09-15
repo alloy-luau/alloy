@@ -137,6 +137,7 @@ impl Server {
                 let mut st = self.state.lock().expect("state");
                 st.mirror = mirror_dir(root.as_deref(), mirror_above(root.as_deref()));
                 let _ = std::fs::remove_dir_all(mirror_base(&st.mirror));
+                purge_stale_mirrors(&st.mirror);
                 let _ = std::fs::create_dir_all(&st.mirror);
                 st.root = root;
                 st.initialize_id = message.get("id").map(id_key);
@@ -254,6 +255,11 @@ impl Server {
             Some("exit") => {
                 self.stopping.store(true, Ordering::Relaxed);
                 self.to_child(&message);
+
+                // The mirror is this session's alone; a root opened
+                // once and never again left its copy behind.
+                let mirror = self.state.lock().expect("state").mirror.clone();
+                let _ = std::fs::remove_dir_all(mirror_base(&mirror));
 
                 return false;
             }

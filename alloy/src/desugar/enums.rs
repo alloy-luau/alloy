@@ -583,9 +583,11 @@ impl<'s> Desugar<'s> {
     }
 
     /// Writes `<keyword> a, b = x, y` at `anchor`; `keyword` carries the
-    /// space the caller wants in front of it. Each name copies from the
-    /// source, so the editor maps it to the pattern site. Nothing for an
-    /// empty list.
+    /// space the caller wants in front of it. A name on the anchor's
+    /// line copies from the source, so the editor maps it to the
+    /// pattern site. A name on another line, as in a let-else whose
+    /// declaration follows the `end`, stays generated: a copied byte
+    /// keeps its line. Nothing for an empty list.
     fn write_binds(&mut self, anchor: u32, keyword: &str, binds: &[(TokSpan, String)]) {
         if binds.is_empty() {
             return;
@@ -598,7 +600,12 @@ impl<'s> Desugar<'s> {
                 self.generate(anchor, ", ");
             }
 
-            self.copy_span(*name);
+            if self.line_of(self.byte_start(*name)) == self.line_of(anchor) {
+                self.copy_span(*name);
+            } else {
+                let text = self.text_of(*name);
+                self.generate(anchor, text);
+            }
         }
 
         let values: Vec<&str> = binds.iter().map(|(_, v)| v.as_str()).collect();

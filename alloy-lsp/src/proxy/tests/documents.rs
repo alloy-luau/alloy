@@ -783,3 +783,31 @@ fn a_struct_of_a_dependency_completes_its_fields() {
 
     assert_eq!(names, ["x", "y"]);
 }
+
+/// A method of an imported enum: the emit writes the header
+/// `function Status.describe(self)` as generated text anchored at the
+/// name, so the child's range on it came back one character wide.
+/// The source spells the name at the anchor, and the range keeps it.
+#[test]
+pub(crate) fn a_generated_name_keeps_its_width() {
+    let src = concat!(
+        "export enum Status as\n",
+        "    Idle\n",
+        "    Busy\n",
+        "end\n",
+        "\n",
+        "impl Status as\n",
+        "    function describe(self): string\n",
+        "        return \"x\"\n",
+        "    end\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).unwrap();
+    let line = doc.shadow.lines().nth(6).expect("the header");
+    let at = line.find("describe").expect("the name") as u32;
+    let mut range = range_value((6, at), (6, at + 8));
+    super::super::capabilities::map_range_value(&mut range, doc);
+
+    assert_eq!(range, range_value((6, 13), (6, 21)), "{line}");
+}

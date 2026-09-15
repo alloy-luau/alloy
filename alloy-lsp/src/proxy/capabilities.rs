@@ -16,8 +16,36 @@ pub(crate) fn map_range_value(value: &mut Value, doc: &Doc) {
             doc.to_source(el, ec)
         };
         let end = if end < start { start } else { end };
+        let end = spelled_end(doc, (sl, sc), (el, ec), start).unwrap_or(end);
         *value = range_value(start, end);
     }
+}
+
+/// The end of a generated name the source spells at its anchor:
+/// `function Status.describe` is generated text anchored at the
+/// `describe` the author wrote, so the range keeps the name's width.
+/// `None` for a range the map already reads whole.
+fn spelled_end(
+    doc: &Doc,
+    (sl, sc): (u32, u32),
+    (el, ec): (u32, u32),
+    start: (u32, u32),
+) -> Option<(u32, u32)> {
+    if sl != el || !doc.generated_at(sl, sc) {
+        return None;
+    }
+
+    let text = &doc.shadow[offset_of(&doc.shadow, sl, sc)?..offset_of(&doc.shadow, el, ec)?];
+
+    if text.is_empty() || !text.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let at = offset_of(&doc.source, start.0, start.1)?;
+
+    doc.source[at..]
+        .starts_with(text)
+        .then(|| position_of(&doc.source, at + text.len()))
 }
 
 /// The child's capabilities, as the editor should see them: no

@@ -1182,6 +1182,65 @@ export type Mul<T = any> = { read mul: (self: any, other: any) -> T }
 export type Div<T = any> = { read div: (self: any, other: any) -> T }
 export type Serialize = { read serialize: (self: any) -> any }
 
+-- The character a player spawns, by rig. `[roblox] rig` in alloy.toml
+-- picks the one `Player.Character` reads as.
+export type R15Character = Model & {
+	HumanoidRootPart: Part?,
+	Head: MeshPart?,
+
+	UpperTorso: MeshPart?,
+	LowerTorso: MeshPart?,
+
+	LeftUpperArm: MeshPart?,
+	LeftLowerArm: MeshPart?,
+	LeftHand: MeshPart?,
+
+	RightUpperArm: MeshPart?,
+	RightLowerArm: MeshPart?,
+	RightHand: MeshPart?,
+
+	LeftUpperLeg: MeshPart?,
+	LeftLowerLeg: MeshPart?,
+	LeftFoot: MeshPart?,
+
+	RightUpperLeg: MeshPart?,
+	RightLowerLeg: MeshPart?,
+	RightFoot: MeshPart?,
+
+	Humanoid: (Humanoid & {
+		Animator: Animator?,
+		HumanoidDescription: HumanoidDescription?,
+	})?,
+
+	BodyColors: BodyColors?,
+
+	-- Every spawned character carries these two, whatever the rig.
+	Animate: LocalScript?,
+	Health: Script?,
+}
+
+-- The R6 part names carry spaces, so the keys are quoted.
+export type R6Character = Model & {
+	HumanoidRootPart: Part?,
+	Head: Part?,
+	Torso: Part?,
+
+	["Left Arm"]: Part?,
+	["Right Arm"]: Part?,
+	["Left Leg"]: Part?,
+	["Right Leg"]: Part?,
+
+	Humanoid: (Humanoid & {
+		Animator: Animator?,
+		HumanoidDescription: HumanoidDescription?,
+	})?,
+
+	BodyColors: BodyColors?,
+
+	Animate: LocalScript?,
+	Health: Script?,
+}
+
 local Set = {}
 Set.__index = Set
 

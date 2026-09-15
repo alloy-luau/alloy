@@ -796,6 +796,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     out = fold_private_views(&out);
     fold_namespace_names(&mut out, known);
     fold_full_views(&mut out, known);
+    fold_rig_characters(&mut out);
     fold_interfaces(&mut out, known);
     fold_bound_records(&mut out, known);
     fold_name_parens(&mut out);
@@ -1678,6 +1679,46 @@ fn fold_signalish(text: &mut String) {
 
         let name = format!("Signalish<{arg}>");
         text.replace_range(at..end + tail.len(), &name);
+        from = at + name.len();
+    }
+}
+
+/// `Model & { HumanoidRootPart: Part?, ... }` is a rig's character
+/// type; the child prints the intersection behind the alias, and the
+/// reader knows it as `R15Character` or `R6Character`.
+fn fold_rig_characters(text: &mut String) {
+    const HEAD: &str = "Model & {";
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find(HEAD) {
+        let at = from + i;
+        let before = text[..at].chars().next_back();
+        let brace = at + HEAD.len() - 1;
+
+        if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            from = brace;
+            continue;
+        }
+
+        let Some(len) = balanced_len(&text[brace..]) else {
+            from = brace;
+            continue;
+        };
+        let keys: Vec<String> = members(&text[brace + 1..brace + len - 1])
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let has = |k: &str| keys.iter().any(|x| x == k);
+        let name = if has("HumanoidRootPart") && has("UpperTorso") {
+            "R15Character"
+        } else if has("HumanoidRootPart") && has("Torso") {
+            "R6Character"
+        } else {
+            from = brace;
+            continue;
+        };
+
+        text.replace_range(at..brace + len, name);
         from = at + name.len();
     }
 }
@@ -2571,6 +2612,24 @@ mod tests {
     fn a_resolved_head_drops_a_clause_it_cannot_parse() {
         let text = "```luau\nlocal self: t1 where t1 = { @metatable t2, {\n    read color: t3,\n    read cost: number,\n    read id: string\n} } ; t3 = {\n    [number]: number,\n    concat: (self: t3, other: t3) -> t3,\n    push: (self: t3, ...number) -> ()\n} ; t2 = <T>(x: T) -> T ; t4 = {\n    __new: (f: {}) -> t1\n}\n```";
         assert_eq!(fold(text, &known()), "```luau\nlocal self: Saber\n```");
+    }
+
+    /// The child prints the rig's character as the intersection behind
+    /// the alias; the reader knows it by the name the std declares.
+    #[test]
+    fn a_rig_character_reads_by_name() {
+        let r15 = "```luau\nlocal c: (Model & {\n    Animate: LocalScript?,\n    BodyColors: BodyColors?,\n    Head: MeshPart?,\n    Health: Script?,\n    Humanoid: (Humanoid & {\n        Animator: Animator?,\n        HumanoidDescription: HumanoidDescription?\n    })?,\n    HumanoidRootPart: Part?,\n    LeftFoot: MeshPart?,\n    UpperTorso: MeshPart?\n})?\n```";
+        assert_eq!(
+            fold(r15, &Known::default()),
+            "```luau\nlocal c: R15Character?\n```"
+        );
+
+        let r6 = "local c: (Model & { [\"Left Arm\"]: Part?, Head: Part?, HumanoidRootPart: Part?, Torso: Part? })?";
+        assert_eq!(fold(r6, &Known::default()), "local c: R6Character?");
+
+        // Any other model keeps its shape.
+        let other = "local m: Model & { Root: Part? }";
+        assert_eq!(fold(other, &Known::default()), other);
     }
 
     #[test]

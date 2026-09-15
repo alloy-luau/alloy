@@ -19,6 +19,7 @@ pub struct Config {
     pub lint: LintConfig,
     pub fmt: FmtConfig,
     pub flux: FluxConfig,
+    pub roblox: RobloxConfig,
     pub test: TestConfig,
     pub project: Project,
     /// The `[mount]` table: alias to `[path, mount]`. The folder at
@@ -780,6 +781,24 @@ impl FluxConfig {
             too_many_lines: self.too_many_lines,
             max_nesting: self.max_nesting,
             cognitive_complexity: self.cognitive_complexity,
+        }
+    }
+}
+
+/// The `[roblox]` table: what the place is like.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct RobloxConfig {
+    /// The rig of a player's character, `R15` or `R6`. `Player.Character`
+    /// types as `R15Character?` or `R6Character?` in the editor and in
+    /// `alloy flux`.
+    pub rig: String,
+}
+
+impl Default for RobloxConfig {
+    fn default() -> Self {
+        Self {
+            rig: "R15".to_string(),
         }
     }
 }

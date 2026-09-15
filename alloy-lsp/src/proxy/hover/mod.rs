@@ -283,7 +283,13 @@ impl Server {
             let is_std = alloy::desugar::AMBIENT.contains(&word)
                 || matches!(
                     word,
-                    "SignalConnection" | "Signalish" | "Partial" | "Readonly" | "Sink"
+                    "SignalConnection"
+                        | "Signalish"
+                        | "Partial"
+                        | "Readonly"
+                        | "Sink"
+                        | "R15Character"
+                        | "R6Character"
                 );
 
             // A `:` opens a type far more often than it closes a

@@ -155,14 +155,13 @@ fn main() -> ExitCode {
         workspace_root = Some(root);
     }
 
+    let config = workspace_root
+        .as_deref()
+        .and_then(|r| alloy::config::Config::find_within(r, r))
+        .and_then(|p| alloy::config::Config::load(&p).ok());
     // `[flux] new_solver = false` in the root's alloy.toml runs the old
     // solver, the way `--old-solver` does.
-    let new_solver = new_solver
-        && !workspace_root
-            .as_deref()
-            .and_then(|r| alloy::config::Config::find_within(r, r))
-            .and_then(|p| alloy::config::Config::load(&p).ok())
-            .is_some_and(|c| !c.flux.new_solver);
+    let new_solver = new_solver && !config.as_ref().is_some_and(|c| !c.flux.new_solver);
 
     let mut child_args: Vec<String> = vec!["lsp".to_string(), "--stdio".to_string()];
 
@@ -180,12 +179,20 @@ fn main() -> ExitCode {
         child_args.push(flag);
     }
 
+    // The rig types `Player.Character`. The editor's `rig` setting wins
+    // over `[roblox] rig` in alloy.toml.
+    let rig = editor_options
+        .get("rig")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| config.as_ref().map(|c| c.roblox.rig.clone()))
+        .unwrap_or_else(|| "R15".to_string());
     let mut injected = std::collections::HashSet::new();
 
     for path in &definitions {
-        match prepare_definitions(path)
-            .and_then(|p| extensions::apply(&p, &exts, &mut injected, workspace_root.as_deref()))
-        {
+        match prepare_definitions(path).and_then(|p| {
+            extensions::apply(&p, &exts, &rig, &mut injected, workspace_root.as_deref())
+        }) {
             Ok(p) => child_args.push(format!("--definitions={}", p.display())),
 
             Err(e) => log::error(&format!("definitions {}: {e}", path.display())),

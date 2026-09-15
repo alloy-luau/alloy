@@ -384,6 +384,8 @@ pub const AMBIENT_TYPES: &[&str] = &[
     "Heap",
     "Scope",
     "Iter",
+    "R15Character",
+    "R6Character",
 ];
 
 pub const PRIMITIVES: &[&str] = &[

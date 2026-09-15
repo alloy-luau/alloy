@@ -34,16 +34,18 @@ fn cache_dir(root: Option<&Path>) -> PathBuf {
         .join(crate::proxy::root_key(root))
 }
 
-/// A definitions file with the extensions injected, written to the
-/// cache directory. The original path comes back when nothing applies.
+/// A definitions file with the extensions injected and `Player.Character`
+/// typed by the rig, written to the cache directory. The original path
+/// comes back when nothing applies.
 pub fn apply(
     path: &Path,
     exts: &[Extension],
+    rig: &str,
     done: &mut HashSet<usize>,
     root: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let before = done.len();
-    let target = alloy::extensions::apply(path, exts, done, &cache_dir(root))?;
+    let target = alloy::extensions::apply(path, exts, rig, done, &cache_dir(root))?;
 
     if done.len() > before {
         log::info(&format!(

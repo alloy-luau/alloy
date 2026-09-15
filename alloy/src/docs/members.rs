@@ -1267,6 +1267,8 @@ pub const TYPE_SIGNATURES: &[(&str, &str)] = &[
     ("Heap", "Heap<T>"),
     ("Scope", "Scope"),
     ("Iter", "Iter<T>"),
+    ("R15Character", "R15Character"),
+    ("R6Character", "R6Character"),
     ("Symbol", "Symbol"),
     ("Signal", "Signal<T...>"),
     ("Partial", "Partial<T>"),

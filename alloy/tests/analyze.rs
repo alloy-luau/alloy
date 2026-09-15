@@ -853,6 +853,72 @@ fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `[roblox] rig` types `Player.Character`: `HumanoidRootPart` is a
+/// `Part?` on either rig, and `Torso` is an R6 part alone.
+#[test]
+fn the_rig_types_the_character_of_a_player() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let defs = root.join("tools/types/globalTypes.d.luau");
+
+    if !defs.is_file() {
+        eprintln!("skipped: no definitions");
+
+        return;
+    }
+
+    let src = "function spawned(player: Player)\n    if local character = player.Character then\n        local root: string = character.HumanoidRootPart\n        local torso: string = character.Torso\n    end\nend\n";
+
+    for rig in ["R15", "R6"] {
+        let dir = std::env::temp_dir().join(format!("alloy-rig-flux-{rig}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("alloy.toml"),
+            format!(
+                "[build]\nin = \"src\"\nout = \"build\"\n\n[flux]\nroblox_types = false\ndefinitions = [\"{}\"]\n\n[roblox]\nrig = \"{rig}\"\n",
+                defs.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/c.aly"), src).unwrap();
+
+        let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+        let report = alloy::build::flux_project(&dir, &config).unwrap();
+        assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+        let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
+            eprintln!("skipped: luau-lsp is not installed");
+
+            return;
+        };
+        let errors: Vec<String> = analysis
+            .diagnostics
+            .iter()
+            .filter(|d| d.is_error())
+            .map(|d| format!("{} {}", d.line, d.message))
+            .collect();
+
+        let root_line = errors
+            .iter()
+            .find(|e| e.starts_with("3 "))
+            .unwrap_or_else(|| panic!("{rig}: no report on the root part: {errors:?}"));
+        assert!(root_line.contains("Part?"), "{rig}: {errors:?}");
+
+        let torso_line = errors
+            .iter()
+            .find(|e| e.starts_with("4 "))
+            .unwrap_or_else(|| panic!("{rig}: no report on the torso: {errors:?}"));
+
+        match rig {
+            "R15" => assert!(torso_line.contains("Torso"), "{rig}: {errors:?}"),
+
+            _ => assert!(torso_line.contains("Part?"), "{rig}: {errors:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// `if not local v: number = f()` keeps the name as the binding, so the
 /// annotation checks the `number?` the value has. The declaration
 /// writes `number?`; the guard's return narrows the name to `number`

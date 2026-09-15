@@ -278,6 +278,8 @@ impl<'a> Parser<'a> {
                             | "Heap"
                             | "Scope"
                             | "Iter"
+                            | "R15Character"
+                            | "R6Character"
                     ) && self.text_at(1) != ".";
                     let i = self.bump();
                     self.type_names.push(TokSpan::new(i, i + 1));

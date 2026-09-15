@@ -413,26 +413,26 @@ fn trait_ret(signature: &str) -> Option<String> {
     None
 }
 
-/// A definitions file with the extensions injected, written under
-/// `dir`. The original path comes back when nothing applies. `done`
-/// collects the indexes of the extensions that found their target.
+/// A definitions file with the extensions injected and `Player.Character`
+/// typed by `rig`, written under `dir`. The original path comes back
+/// when nothing applies. `done` collects the indexes of the extensions
+/// that found their target.
 pub fn apply(
     path: &Path,
     exts: &[Extension],
+    rig: &str,
     done: &mut HashSet<usize>,
     dir: &Path,
 ) -> Result<PathBuf, String> {
-    if exts.is_empty() {
-        return Ok(path.to_path_buf());
-    }
-
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let (patched, applied) = inject(&text, exts);
+    let rigged = rig_character(&patched, rig);
 
-    if applied.is_empty() {
+    if applied.is_empty() && rigged.is_none() {
         return Ok(path.to_path_buf());
     }
 
+    let patched = rigged.unwrap_or(patched);
     done.extend(applied.iter().copied());
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let name = path
@@ -509,6 +509,52 @@ pub fn primitives_text(exts: &[Extension], done: &mut HashSet<usize>) -> Option<
     }
 
     Some(text)
+}
+
+/// The two rig types, cut from the std's own text, so the definitions
+/// and the runtime say one thing. A definitions file declares a type
+/// with `type`, not `export type`.
+pub fn rig_types() -> String {
+    let text = crate::RUNTIME;
+    let start = text
+        .find("export type R15Character = ")
+        .expect("R15Character in the std");
+    let r6 = start
+        + text[start..]
+            .find("export type R6Character = ")
+            .expect("R6Character in the std");
+    let end = r6 + text[r6..].find("\n}\n").expect("end of R6Character") + 3;
+
+    text[start..end].replace("export type ", "type ")
+}
+
+/// The definitions text with the `Character` of `Player` typed by the
+/// rig, `R15Character?` or `R6Character?`, and the two types declared
+/// at the end. `None` when the text declares no `Player.Character`.
+pub fn rig_character(text: &str, rig: &str) -> Option<String> {
+    let name = if rig == "R6" {
+        "R6Character"
+    } else {
+        "R15Character"
+    };
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let head = lines.iter().position(|l| {
+        l.starts_with("declare extern type Player ")
+            || l.starts_with("declare class Player ")
+            || l.trim_end() == "declare class Player"
+    })?;
+    let at = head
+        + 1
+        + lines[head + 1..]
+            .iter()
+            .take_while(|l| l.trim_end() != "end")
+            .position(|l| l.trim() == "Character: Model?")?;
+    lines[at] = format!("\tCharacter: {name}?");
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out.push_str(&rig_types());
+
+    Some(out)
 }
 
 /// Injects the extensions into a definitions text. Returns the new text
@@ -637,6 +683,36 @@ fn insertion_point(lines: &[String], ext: &Extension) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Player.Character` reads as the rig's type, and the definitions
+    /// carry the two types the std declares, so the child resolves them.
+    #[test]
+    fn the_rig_types_the_character_of_a_player() {
+        let text = "declare extern type Model extends Instance with\nend\ndeclare extern type Player extends Instance with\n\tCharacter: Model?\n\tCharacterAdded: RBXScriptSignal<Model>\nend\n";
+
+        let r15 = rig_character(text, "R15").expect("Player");
+        assert!(r15.contains("\tCharacter: R15Character?\n"), "{r15}");
+        assert!(
+            r15.contains("\tCharacterAdded: RBXScriptSignal<Model>\n"),
+            "{r15}"
+        );
+        assert!(r15.contains("\ntype R15Character = Model & {\n"), "{r15}");
+        assert!(r15.contains("\ntype R6Character = Model & {\n"), "{r15}");
+        assert!(!r15.contains("export type"), "{r15}");
+        assert!(r15.contains("\t[\"Left Arm\"]: Part?,\n"), "{r15}");
+
+        let r6 = rig_character(text, "R6").expect("Player");
+        assert!(r6.contains("\tCharacter: R6Character?\n"), "{r6}");
+
+        // A definitions file with no Player stays as it is.
+        assert!(
+            rig_character(
+                "declare extern type Model extends Instance with\nend\n",
+                "R15"
+            )
+            .is_none()
+        );
+    }
 
     fn ext(name: &str, is_static: bool, ret: Option<&str>) -> Extension {
         Extension {

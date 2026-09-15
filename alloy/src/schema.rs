@@ -361,6 +361,17 @@ pub const TABLES: &[Table] = &[
         open: None,
     },
     Table {
+        name: "roblox",
+        doc: "What the place is like. `rig` picks the character type `Player.Character` reads as; the editor's `alloy-luau.rig` setting wins over it.",
+        keys: &[key(
+            "rig",
+            Ty::Choice(&["R15", "R6"]),
+            r#""R15""#,
+            "The rig of a player's character. `Player.Character` types as `R15Character?` or `R6Character?`; `alloy doc R15Character` shows the parts.",
+        )],
+        open: None,
+    },
+    Table {
         name: "test",
         doc: "Where `alloy test` writes the specs: one lest spec per source with a `@test`, with everything the tests reach. `alloy doc test` explains it.",
         keys: &[

@@ -481,7 +481,7 @@ pub fn analyze(
     let mut with_exts = Vec::new();
 
     for d in &definitions {
-        match crate::extensions::apply(d, &exts, &mut injected, &ext_dir) {
+        match crate::extensions::apply(d, &exts, &config.roblox.rig, &mut injected, &ext_dir) {
             Ok(p) => with_exts.push(p),
 
             Err(e) => analysis

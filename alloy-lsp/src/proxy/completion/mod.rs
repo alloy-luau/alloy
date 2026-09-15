@@ -958,6 +958,37 @@ pub(crate) fn string_left_behind(doc: &Doc, line: u32, character: u32) -> bool {
 /// `None` when no call is open, or when the name is a member of
 /// something else: the child answers for those.
 pub(crate) fn open_call(src: &str, offset: usize) -> Option<(String, u32)> {
+    let (start, end, active) = open_paren_word(src, offset)?;
+
+    // A declaration's parameter list is no call.
+    if declares_params(src, start) {
+        return None;
+    }
+
+    let sigil = src[..start].ends_with('$');
+
+    // `w:combine(` and `M.make(` name a member of a value; the child
+    // types the receiver and answers for those.
+    if !sigil && src[..start].ends_with(['.', ':']) {
+        return None;
+    }
+
+    let name = &src[start..end];
+
+    Some((
+        match sigil {
+            true => format!("${name}"),
+
+            false => name.to_string(),
+        },
+        active,
+    ))
+}
+
+/// The word before the innermost open `(` at `offset`, and how many
+/// commas that level has taken: the byte range of the word and the
+/// active parameter. `None` with no `(` open, or with no word before it.
+pub(crate) fn open_paren_word(src: &str, offset: usize) -> Option<(usize, usize, u32)> {
     let head = &src[..offset.min(src.len())];
     // One frame per open bracket: where a `(` opened, and how many
     // commas the level has taken.
@@ -1015,24 +1046,44 @@ pub(crate) fn open_call(src: &str, offset: usize) -> Option<(String, u32)> {
     }
 
     let (start, end) = keywords::word_range(src, before.len() - 1);
-    let sigil = src[..start].ends_with('$');
 
-    // `w:combine(` and `M.make(` name a member of a value; the child
-    // types the receiver and answers for those.
-    if !sigil && src[..start].ends_with(['.', ':']) {
-        return None;
+    Some((start, end, active))
+}
+
+/// Whether the name starting at `start` is the one a declaration
+/// binds: `function f(`, `remote f(`, `macro f(`, `attribute f(`, and
+/// the dotted `function M.f(`. The caret inside such a list asks for
+/// no signature.
+pub(crate) fn declares_params(src: &str, start: usize) -> bool {
+    // `function(` opens a function with no name.
+    let (s, e) = keywords::word_range(src, start);
+
+    if &src[s..e] == "function" {
+        return true;
     }
 
-    let name = &src[start..end];
+    let mut at = start;
 
-    Some((
-        match sigil {
-            true => format!("${name}"),
+    // Back over `M.` and `M:` to the head of the path.
+    while let Some(rest) = src[..at].strip_suffix(['.', ':']) {
+        let (s, _) = keywords::word_range(src, rest.len().saturating_sub(1));
 
-            false => name.to_string(),
-        },
-        active,
-    ))
+        if s >= rest.len() || rest.is_empty() {
+            break;
+        }
+
+        at = s;
+    }
+
+    let before = src[..at].trim_end();
+
+    if before.is_empty() {
+        return false;
+    }
+
+    let (s, e) = keywords::word_range(src, before.len() - 1);
+
+    matches!(&src[s..e], "function" | "remote" | "macro" | "attribute")
 }
 
 /// The line a source declares a callable name on: a `function`, a

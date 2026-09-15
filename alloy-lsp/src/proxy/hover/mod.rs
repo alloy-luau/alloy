@@ -80,6 +80,28 @@ impl Server {
         }
     }
 
+    /// Whether a signature-help caret sits in the parameter list of a
+    /// declaration, where no call is open.
+    pub(crate) fn in_declared_params(&self, uri: &str, message: &Value) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = position_of_message(message) else {
+            return false;
+        };
+        let st = self.state.lock().expect("state");
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        super::completion::open_paren_word(&doc.source, offset)
+            .is_some_and(|(start, _, _)| super::completion::declares_params(&doc.source, start))
+    }
+
     /// The shadow position of a signature-help caret inside a call in
     /// an intrinsic's argument, where the argument stands as code.
     /// `None` when no such call is open at the caret.

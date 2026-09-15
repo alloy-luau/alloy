@@ -2640,6 +2640,52 @@ fn a_macro_and_an_unclosed_call_answer_from_the_declaration() {
     assert!(st3.declared_signature_help(uri3, 1, 16).is_none());
 }
 
+/// A declaration's parameter list is no call: `remote test(` shows no
+/// `function test()` while the reader writes the parameters, whether
+/// the list is still open or closed. A call of the remote answers.
+#[test]
+fn a_declaration_parameter_list_asks_for_no_signature() {
+    use super::super::completion::{declares_params, open_call, open_paren_word};
+
+    let declares = |src: &str, offset: usize| {
+        open_paren_word(src, offset).is_some_and(|(start, _, _)| declares_params(src, start))
+    };
+
+    let open = "remote test(";
+    assert!(declares(open, open.len()));
+
+    let closed = "remote test(n: number) from client\n";
+    assert!(declares(closed, "remote test(".len()));
+    assert!(declares(closed, "remote test(n: nu".len()));
+
+    for src in [
+        "remote function Ask(",
+        "function f(",
+        "local function f(",
+        "macro m(",
+        "attribute a(",
+        "impl P as\n    function m(self, ",
+        "function M.f(",
+        "local f = function(",
+    ] {
+        assert!(declares(src, src.len()), "{src}");
+    }
+
+    for src in ["test.fire(", "test(", "print(fire(", "local x = remote("] {
+        assert!(!declares(src, src.len()), "{src}");
+    }
+
+    // The proxy's own fallback reads no declaration there either.
+    assert!(open_call(open, open.len()).is_none());
+    let (st, uri) = super::support::one_file("remote test(n: number) from client\n");
+    assert!(st.declared_signature_help(uri, 0, 12).is_none());
+    assert!(st.declared_signature_help(uri, 0, 17).is_none());
+
+    // A call of a declared function still answers.
+    let (st, uri) = super::support::one_file("function test(n: number)\nend\n\ntest(\n");
+    assert!(st.declared_signature_help(uri, 3, 5).is_some());
+}
+
 /// A struct inside a namespace answers by its path, at one level and
 /// at three. A `*` import puts the module's own name in front of the
 /// path, and the fields the list offers are still the struct's.

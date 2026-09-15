@@ -759,6 +759,13 @@ impl Server {
             Some(m @ "textDocument/signatureHelp") => {
                 let uri = text_document_uri(&message).unwrap_or_default();
 
+                // `remote test(` declares; the child sees a call there.
+                if self.in_declared_params(&uri, &message) {
+                    self.respond(&message["id"], Value::Null);
+
+                    return true;
+                }
+
                 if let Some(home) = self.signature_home(&uri, &message) {
                     self.forward_request_at(message, Some(m), home);
 

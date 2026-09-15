@@ -245,6 +245,22 @@ fn body_value(body: &str) -> Option<String> {
     }
 }
 
+/// The last name of `a`, `a.b`, or `a.b.c`; none for any other shape.
+fn path_last(e: &Expr) -> Option<TokSpan> {
+    match e {
+        Expr::Name(n) => Some(*n),
+
+        Expr::Index {
+            object,
+            key: IndexKey::Field(f),
+            optional: false,
+            ..
+        } => path_last(object).map(|_| *f),
+
+        _ => None,
+    }
+}
+
 pub(crate) fn is_simple_text(t: &str) -> bool {
     !t.is_empty()
         && t.chars()
@@ -682,11 +698,22 @@ impl<'s> Desugar<'s> {
                 )
             }
 
-            ("nameof", 1) => {
-                let last = sources[0].rsplit(['.', ':']).next().unwrap_or(&sources[0]);
+            // `$nameof(a.b.c)` is `"c"`. A call, a literal, an operator,
+            // or a bracket index has no name to take, so it reports and
+            // writes `nil`, which still parses.
+            ("nameof", 1) => match path_last(&args[0]) {
+                Some(last) => luau_string(self.text_of(last)),
 
-                luau_string(last.trim())
-            }
+                None => {
+                    let text = sources[0].trim();
+                    self.diagnose(
+                        args[0].span(),
+                        &format!("`$nameof` takes a name or a dotted path; `{text}` is not one"),
+                    );
+
+                    "nil".to_string()
+                }
+            },
 
             ("stringify", 1) => luau_string(&sources[0]),
 
@@ -1155,6 +1182,47 @@ mod tests {
     `alloy flux` printed two raw checker syntax errors behind the one
     report. The `return` now comes off, and the rest of the body stays.
     */
+    /// `$nameof` takes a name or a dotted path and writes the last name.
+    /// It took any expression and wrote its text, so `$nameof(f())` was
+    /// `"f()"`. Now it reports and writes `nil`.
+    #[test]
+    fn nameof_takes_a_name_or_a_dotted_path() {
+        let src = "local a = { b = { c = 1 } }\nlocal M = { Ns = { T = 1 } }\nprint($nameof(a), $nameof(a.b.c), $nameof(M.Ns.T))\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("print(\"a\", \"c\", \"T\")"),
+            "{}",
+            out.check
+        );
+
+        let src = "local function f() return 1 end\nlocal t = { 1 }\nprint($nameof(f()), $nameof(\"literal\"), $nameof(1), $nameof(t[1]), $nameof(1 + 2))\n";
+        let out = crate::compile(src).unwrap();
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "`$nameof` takes a name or a dotted path; `f()` is not one",
+                "`$nameof` takes a name or a dotted path; `\"literal\"` is not one",
+                "`$nameof` takes a name or a dotted path; `1` is not one",
+                "`$nameof` takes a name or a dotted path; `t[1]` is not one",
+                "`$nameof` takes a name or a dotted path; `1 + 2` is not one",
+            ]
+        );
+        assert!(
+            out.check.contains("print(nil, nil, nil, nil, nil)"),
+            "{}",
+            out.check
+        );
+        // The report sits on the argument, not on the whole call, and
+        // reads as a MacroError.
+        let at = (src.find("$nameof(f())").unwrap() + "$nameof(".len()) as u32;
+        assert_eq!(out.diagnostics[0].start, at);
+        assert_eq!(crate::docs::kind_for(messages[0]), "MacroError");
+    }
+
     #[test]
     fn a_reported_macro_return_leaves_the_artifact_parsing() {
         let decl = "macro give_up()\n    print(\"bye\")\n    return 0\nend\n\n";

@@ -123,7 +123,8 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     (&["goes on a function, not a method"], "AttributeError"),
     (&["@test", "test "], "TestError"),
     (&["@cfg"], "AttributeError"),
-    (&["macro"], "MacroError"),
+    // An intrinsic names itself with its sigil: `$nameof`, `$map`.
+    (&["macro", "`$"], "MacroError"),
     // An attribute contract: the report names the attribute and the
     // clause it broke. Above the import rule, because the word
     // `requires` holds the word `require`.

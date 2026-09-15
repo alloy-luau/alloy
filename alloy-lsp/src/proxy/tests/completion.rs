@@ -2798,3 +2798,39 @@ pub(crate) fn a_member_in_a_macro_argument_finds_the_code() {
         );
     }
 }
+
+/// Signature help inside an intrinsic's arguments: the expansion is
+/// generated text, so the child answers nothing, and no source
+/// declares the intrinsic. The documentation writes its call shape.
+#[test]
+fn an_intrinsic_call_answers_signature_help_from_its_documentation() {
+    const SRC: &str = concat!(
+        "local p = { x = 1 }\n",
+        "local dbg_val = $dbg(p.x)\n",
+        "local str_val = $stringify(p.x)\n",
+        "$assert_eq(p.x, 1)\n",
+        "print(1)\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let label = |help: &Value| help["signatures"][0]["label"].as_str().unwrap().to_string();
+
+    let help = st.declared_signature_help(uri, 1, 21).expect("$dbg");
+    assert_eq!(label(&help), "$dbg(expr)");
+    assert_eq!(
+        help["signatures"][0]["parameters"][0]["label"],
+        json!("expr")
+    );
+    assert_eq!(help["activeParameter"], json!(0));
+
+    let help = st.declared_signature_help(uri, 2, 27).expect("$stringify");
+    assert_eq!(label(&help), "$stringify(expr)");
+
+    // Past the comma: the second parameter is the one being written.
+    let help = st.declared_signature_help(uri, 3, 16).expect("$assert_eq");
+    assert_eq!(label(&help), "$assert_eq(a, b)");
+    assert_eq!(help["activeParameter"], json!(1));
+
+    // A plain call is still the child's.
+    assert!(st.declared_signature_help(uri, 4, 6).is_none());
+}
+

@@ -328,7 +328,8 @@ impl State {
         // signature. A module the file imports answers the same way.
         let (label, parameters) = std::iter::once(doc.source.as_str())
             .chain(doc.import_sources.iter().map(String::as_str))
-            .find_map(|src| callable_signature(declared_line(src, &key)?))?;
+            .find_map(|src| callable_signature(declared_line(src, &key)?))
+            .or_else(|| intrinsic_signature(&key))?;
         let parameters: Vec<Value> = parameters
             .into_iter()
             .map(|p| json!({ "label": p }))
@@ -1034,6 +1035,24 @@ pub(crate) fn declared_line<'a>(src: &'a str, key: &str) -> Option<&'a str> {
     let end = src[at..].find('\n').map_or(src.len(), |i| at + i);
 
     Some(&src[start..end])
+}
+
+/// The signature the documentation writes for an intrinsic, with one
+/// parameter per comma: `$assert_eq(a, b)`. No source declares an
+/// intrinsic, and its expansion is generated text the child cannot
+/// tie to the call the author wrote.
+pub(crate) fn intrinsic_signature(key: &str) -> Option<(String, Vec<String>)> {
+    let line = keywords::doc(key)?.lines().nth(1)?.trim();
+    let open = line.find('(')?;
+    let close = line.rfind(')')?;
+    let parameters = line[open + 1..close]
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    Some((line.to_string(), parameters))
 }
 
 /// The signature a declaration line or hover writes, with its

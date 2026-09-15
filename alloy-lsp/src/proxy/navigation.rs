@@ -968,6 +968,33 @@ impl State {
                 return Some(Target::Export(file, word));
             }
 
+            // `<Header />`: the tag names a component function, and
+            // the lowering writes the call as generated text the child
+            // ties to nothing. The function's own walk answers, here or
+            // in the module an import reads it from.
+            if doc.is_alx
+                && matches!(
+                    markup::hover_spot(source, offset),
+                    Some(markup::Spot::Tag { .. })
+                )
+            {
+                if let Some(entry) = import_entries(source)
+                    .into_iter()
+                    .find(|it| it.bound == word && it.alias_at.is_none())
+                    && let Some(module) = self.entry_module(uri, &entry)
+                {
+                    return Some(Target::Export(module, entry.name));
+                }
+
+                if export_span(source, &word).is_some() {
+                    return Some(match exported {
+                        true => Target::Export(file, word),
+
+                        false => Target::Local(word),
+                    });
+                }
+            }
+
             // A member of a namespace this file declares. Every reader
             // writes it under the group, so the module's walk answers
             // for it whether or not the group is exported.

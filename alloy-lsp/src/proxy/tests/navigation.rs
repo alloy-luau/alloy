@@ -1888,3 +1888,90 @@ fn a_default_method_reaches_a_struct_with_an_empty_impl() {
 
     assert_eq!(starts, [declaration, call], "{edit}");
 }
+
+/// A component tag names the function: `<Header />` and
+/// `<Footer>...</Footer>` are sites of `Header` and `Footer`, from the
+/// tag and from the declaration. The lowering writes the call as
+/// generated text, so the child renames nothing from a tag.
+#[test]
+fn a_component_tag_is_a_site_of_its_function() {
+    const APP: &str = concat!(
+        "export function App()\n",
+        "    return (\n",
+        "        <Frame>\n",
+        "            <Header title=\"Shop\" />\n",
+        "            <Footer>\n",
+        "                <TextLabel />\n",
+        "            </Footer>\n",
+        "        </Frame>\n",
+        "    )\n",
+        "end\n",
+        "\n",
+        "export function Header(props: { title: string })\n",
+        "    return <TextLabel Text={props.title} />\n",
+        "end\n",
+        "\n",
+        "function Footer(props: { children: any })\n",
+        "    return <Frame />\n",
+        "end\n",
+    );
+    let st = super::support::files(&[("file:///app.alx", APP)]);
+    let uri = "file:///app.alx";
+    let at = |text: &str| APP.find(text).expect(text);
+    let starts = |edit: &Value, u: &str, src: &str| -> Vec<usize> {
+        edit["changes"][u]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| {
+                let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+                offset_of(src, line, column).expect("offset")
+            })
+            .collect()
+    };
+
+    // From the tag and from the declaration: one target.
+    for caret in [at("<Header") + 2, at("function Header") + 10] {
+        let target = st.name_target(uri, caret);
+
+        assert!(
+            matches!(&target, Some(Target::Export(_, name)) if name == "Header"),
+            "{caret}: {target:?}"
+        );
+    }
+
+    let edit = st
+        .export_rename(Path::new("/app.alx"), "Header", "Top")
+        .expect("edit");
+
+    assert_eq!(
+        starts(&edit, uri, APP),
+        [at("<Header") + 1, at("function Header") + 9],
+        "{edit}"
+    );
+
+    // A function the file keeps to itself: an open tag and a close tag.
+    for caret in [at("<Footer>") + 3, at("</Footer>") + 4] {
+        let target = st.name_target(uri, caret);
+
+        assert!(
+            matches!(&target, Some(Target::Local(name)) if name == "Footer"),
+            "{caret}: {target:?}"
+        );
+    }
+
+    let uses: Vec<usize> = name_uses(APP, "Footer")
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect();
+
+    assert_eq!(
+        uses,
+        [
+            at("<Footer>") + 1,
+            at("</Footer>") + 2,
+            at("function Footer") + 9
+        ]
+    );
+}

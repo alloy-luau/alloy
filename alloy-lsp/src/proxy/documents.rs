@@ -23,7 +23,7 @@ impl State {
         // for a file: a mirror set by hand has no folders above it.
         let climbed = root
             .as_deref()
-            .and_then(|r| climb(r, &real))
+            .and_then(|r| climb(r, &real, above_of(&self.mirror)))
             .filter(|rel| normalize(&self.mirror.join(rel)).starts_with(mirror_base(&self.mirror)));
         let rel = match climbed {
             Some(rel) => rel,
@@ -85,7 +85,7 @@ impl State {
             return None;
         }
 
-        let rel = climb(&self.mirror, mirror)?;
+        let rel = climb(&self.mirror, mirror, above_of(&self.mirror))?;
 
         Some(normalize(&self.root.as_deref()?.join(rel)))
     }
@@ -1303,42 +1303,85 @@ pub fn root_key(root: Option<&Path>) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// How many folders above the root the mirror keeps: a dependency at
-/// `../../shared` stays inside the mirror's own directory.
-// ponytail: a fixed depth; a project four folders further out falls
-// under `_outside`, where no require reaches it.
+/// The fewest folders above the root the mirror keeps, and the most: a
+/// dependency at `../../shared` stays inside the mirror's own directory,
+/// and one further out than `ABOVE_MAX` falls under `_outside`, where
+/// no require reaches it.
 const ABOVE: usize = 4;
+const ABOVE_MAX: usize = 8;
 
-pub(crate) fn mirror_dir(root: Option<&Path>) -> PathBuf {
+/// How many folders above the root the mirror keeps: `ABOVE`, or as
+/// many as the deepest project the root's sources import into needs,
+/// up to `ABOVE_MAX`. The child takes the mirror as its root at
+/// initialize, so the count is fixed there.
+pub(crate) fn mirror_above(root: Option<&Path>) -> usize {
+    let Some(root) = root else {
+        return ABOVE;
+    };
+    let deepest = Config::find_within(root, root)
+        .and_then(|p| Config::load(&p).ok().map(|c| (p, c)))
+        .and_then(|(p, c)| {
+            let base = normalize(p.parent().unwrap_or(root));
+
+            alloy::build::dependency_inputs(&base, &c)
+                .iter()
+                .filter_map(|dep| ups(&base, &normalize(dep)))
+                .max()
+        })
+        .unwrap_or(0);
+
+    deepest.clamp(ABOVE, ABOVE_MAX)
+}
+
+pub(crate) fn mirror_dir(root: Option<&Path>, above: usize) -> PathBuf {
     let mut dir = std::env::temp_dir().join("alloy-lsp").join(root_key(root));
 
-    for _ in 0..ABOVE {
+    for _ in 0..above {
         dir.push("up");
     }
 
     dir.join("root")
 }
 
+/// How many folders above its root a mirror keeps: the `up` folders
+/// in its path. A mirror set by hand has none.
+fn above_of(mirror: &Path) -> usize {
+    mirror
+        .ancestors()
+        .skip(1)
+        .take_while(|a| a.file_name().is_some_and(|n| n == "up"))
+        .count()
+}
+
 /// The directory that holds the whole mirror, the folders above the
 /// root included.
 pub(crate) fn mirror_base(mirror: &Path) -> &Path {
-    mirror.ancestors().nth(ABOVE + 1).unwrap_or(mirror)
+    mirror
+        .ancestors()
+        .nth(above_of(mirror) + 1)
+        .unwrap_or(mirror)
 }
 
-/// `path` relative to the folder `base`, with at most `ABOVE` leading
-/// `..`; `None` further out, or on another drive.
-fn climb(base: &Path, path: &Path) -> Option<PathBuf> {
+/// How many folders `base` climbs to the one it shares with `path`;
+/// `None` when they share nothing, as on another drive.
+fn ups(base: &Path, path: &Path) -> Option<usize> {
     let base: Vec<_> = base.components().collect();
     let path: Vec<_> = path.components().collect();
     let common = base.iter().zip(&path).take_while(|(a, b)| a == b).count();
 
-    if common == 0 || base.len() - common > ABOVE {
-        return None;
-    }
+    (common > 0).then(|| base.len() - common)
+}
 
+/// `path` relative to the folder `base`, with at most `above` leading
+/// `..`; `None` further out, or on another drive.
+fn climb(base: &Path, path: &Path, above: usize) -> Option<PathBuf> {
+    let up = ups(base, path).filter(|n| *n <= above)?;
+    let base: Vec<_> = base.components().collect();
+    let path: Vec<_> = path.components().collect();
+    let common = base.len() - up;
     let mut out = PathBuf::new();
 
-    for _ in common..base.len() {
+    for _ in 0..up {
         out.push("..");
     }
 

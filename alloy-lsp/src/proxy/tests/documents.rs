@@ -653,7 +653,7 @@ fn a_dependency_shadow_sits_where_the_require_names_it() {
 
     let st = State {
         root: Some(app.clone()),
-        mirror: mirror_dir(Some(&app)),
+        mirror: mirror_dir(Some(&app), mirror_above(Some(&app))),
         ..State::default()
     };
     let main = st.mirror_path(&app.join("src/main.aly"));
@@ -680,7 +680,7 @@ fn a_dependency_shadow_sits_where_the_require_names_it() {
     // under `_outside`.
     let deep = State {
         root: Some(dir.join("a/b/c/d/e/app")),
-        mirror: mirror_dir(Some(&dir.join("a/b/c/d/e/app"))),
+        mirror: mirror_dir(Some(&dir.join("a/b/c/d/e/app")), mirror_above(None)),
         ..State::default()
     };
     let far = dir.join("x.aly");
@@ -694,6 +694,52 @@ fn a_dependency_shadow_sits_where_the_require_names_it() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The mirror keeps as many folders above the root as the deepest
+/// dependency needs: a project five folders up, past the fixed four,
+/// still lands inside the mirror, and its real path reads back.
+#[test]
+fn the_mirror_depth_follows_the_deepest_dependency() {
+    let dir = alias_root(
+        "mirror-depth",
+        &[
+            (
+                "a/b/c/d/app/alloy.toml",
+                "[build]\nin = \"src\"\nout = \"build\"\n",
+            ),
+            (
+                "a/b/c/d/app/src/main.aly",
+                "import { double } from \"../../../../../../shared/src/util\"\nprint(double(2))\n",
+            ),
+            (
+                "shared/alloy.toml",
+                "[build]\nin = \"src\"\nout = \"build\"\n",
+            ),
+            (
+                "shared/src/util.aly",
+                "export function double(n: number): number\n    return n * 2\nend\n",
+            ),
+        ],
+    );
+    let app = dir.join("a/b/c/d/app");
+    let above = mirror_above(Some(&app));
+    let st = State {
+        root: Some(app.clone()),
+        mirror: mirror_dir(Some(&app), above),
+        ..State::default()
+    };
+    let util = dir.join("shared/src/util.aly");
+    let lands = st.mirror_path(&util);
+    let back = st.real_path(&lands);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(above, 5);
+    assert!(lands.starts_with(mirror_base(&st.mirror)), "{lands:?}");
+    assert!(!lands.starts_with(st.mirror.join("_outside")), "{lands:?}");
+    assert_eq!(back, Some(normalize(&util.with_extension("luau"))));
+    // No dependency: the fixed four hold.
+    assert_eq!(mirror_above(Some(&dir)), 4);
 }
 
 /// The file poll watches the `[build] in` of every project the root's
@@ -746,7 +792,7 @@ fn a_dependency_declaration_is_a_workspace_symbol_under_its_path() {
     let util_uri = format!("file://{}", util.display());
     let mut st = State {
         root: Some(app.clone()),
-        mirror: mirror_dir(Some(&app)),
+        mirror: mirror_dir(Some(&app), mirror_above(Some(&app))),
         ..State::default()
     };
     let options = EmitOptions {
@@ -797,7 +843,7 @@ fn a_struct_of_a_dependency_completes_its_fields() {
     let uri = format!("file://{}", main.display());
     let mut st = State {
         root: Some(app.clone()),
-        mirror: mirror_dir(Some(&app)),
+        mirror: mirror_dir(Some(&app), mirror_above(Some(&app))),
         ..State::default()
     };
     let options = EmitOptions {

@@ -135,7 +135,7 @@ impl Server {
                             .and_then(uri_to_path)
                     });
                 let mut st = self.state.lock().expect("state");
-                st.mirror = mirror_dir(root.as_deref());
+                st.mirror = mirror_dir(root.as_deref(), mirror_above(root.as_deref()));
                 let _ = std::fs::remove_dir_all(mirror_base(&st.mirror));
                 let _ = std::fs::create_dir_all(&st.mirror);
                 st.root = root;

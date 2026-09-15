@@ -2686,6 +2686,69 @@ fn a_declaration_parameter_list_asks_for_no_signature() {
     assert!(st.declared_signature_help(uri, 3, 5).is_some());
 }
 
+/// An attribute use is a call: `@ratelimit(` answers with the shape
+/// the documentation writes, `@validate(` with the validator type the
+/// remote under it gives, and `@icon(` with its own declaration. An
+/// attribute that takes nothing answers nothing, and a declaration's
+/// parameter list still asks for no signature.
+#[test]
+fn an_attribute_use_answers_its_signature() {
+    let label = |help: &Value| {
+        help["signatures"][0]["label"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    let params = |help: &Value| {
+        help["signatures"][0]["parameters"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p["label"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<String>>()
+    };
+
+    let (st, uri) = one_file("@ratelimit(5, \nremote Ping(n: number) from client\n");
+    let help = st.declared_signature_help(uri, 0, 14).expect("@ratelimit");
+    assert_eq!(label(&help), "@ratelimit(count: number, seconds: number)");
+    assert_eq!(params(&help), ["count: number", "seconds: number"]);
+    assert_eq!(help["activeParameter"], json!(1));
+
+    let (st, uri) =
+        one_file("@validate(\n@u8\nremote Pong(n: number, tag: string = \"x\") from client\n");
+    let help = st.declared_signature_help(uri, 0, 10).expect("@validate");
+    assert_eq!(
+        label(&help),
+        "@validate(fn: (sender: Player, n: number, tag: string) -> boolean)"
+    );
+    assert_eq!(
+        params(&help),
+        ["fn: (sender: Player, n: number, tag: string) -> boolean"]
+    );
+
+    let (st, uri) = one_file("@cfg(\nfunction f() end\n");
+    let help = st.declared_signature_help(uri, 0, 5).expect("@cfg");
+    assert_eq!(label(&help), "@cfg(condition)");
+
+    let (st, uri) = one_file("@deprecated(\nfunction f() end\n");
+    let help = st.declared_signature_help(uri, 0, 12).expect("@deprecated");
+    assert_eq!(label(&help), "@deprecated(message: string)");
+
+    let (st, uri) = one_file(
+        "attribute icon(asset: string = \"none\") on struct\n\n@icon(\nstruct S as\nend\n",
+    );
+    let help = st.declared_signature_help(uri, 2, 6).expect("@icon");
+    assert_eq!(label(&help), "@icon(asset: string = \"none\")");
+    assert_eq!(params(&help), ["asset: string = \"none\""]);
+
+    // `@u8` takes nothing, and `remote test(` declares.
+    let (st, uri) = one_file("@u8(\n");
+    assert!(st.declared_signature_help(uri, 0, 4).is_none());
+    let (st, uri) = one_file("remote test(\n");
+    assert!(st.declared_signature_help(uri, 0, 12).is_none());
+}
+
 /// A struct inside a namespace answers by its path, at one level and
 /// at three. A `*` import puts the module's own name in front of the
 /// path, and the fields the list offers are still the struct's.

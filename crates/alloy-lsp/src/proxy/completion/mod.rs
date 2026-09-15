@@ -326,10 +326,14 @@ impl State {
         // The declaration index reads a parse, and a file with an
         // unclosed call has none; the source line still has the
         // signature. A module the file imports answers the same way.
-        let (label, parameters) = std::iter::once(doc.source.as_str())
-            .chain(doc.import_sources.iter().map(String::as_str))
-            .find_map(|src| callable_signature(declared_line(src, &key)?))
-            .or_else(|| intrinsic_signature(&key))?;
+        let (label, parameters) = match key.starts_with('@') {
+            true => attribute_signature(doc, &key, offset),
+
+            false => std::iter::once(doc.source.as_str())
+                .chain(doc.import_sources.iter().map(String::as_str))
+                .find_map(|src| callable_signature(declared_line(src, &key)?))
+                .or_else(|| intrinsic_signature(&key)),
+        }?;
         let parameters: Vec<Value> = parameters
             .into_iter()
             .map(|p| json!({ "label": p }))
@@ -953,7 +957,8 @@ pub(crate) fn string_left_behind(doc: &Doc, line: u32, character: u32) -> bool {
 
 /// The call the caret sits in: the name in front of the innermost `(`
 /// that is still open, and how many arguments stand before the caret.
-/// `$double(` keeps its sigil, which is how a macro is declared.
+/// `$double(` and `@icon(` keep their sigil, which is how a macro and
+/// an attribute are declared.
 ///
 /// `None` when no call is open, or when the name is a member of
 /// something else: the child answers for those.
@@ -965,11 +970,14 @@ pub(crate) fn open_call(src: &str, offset: usize) -> Option<(String, u32)> {
         return None;
     }
 
-    let sigil = src[..start].ends_with('$');
+    let sigil = src[..start]
+        .chars()
+        .last()
+        .filter(|c| matches!(c, '$' | '@'));
 
     // `w:combine(` and `M.make(` name a member of a value; the child
     // types the receiver and answers for those.
-    if !sigil && src[..start].ends_with(['.', ':']) {
+    if sigil.is_none() && src[..start].ends_with(['.', ':']) {
         return None;
     }
 
@@ -977,9 +985,9 @@ pub(crate) fn open_call(src: &str, offset: usize) -> Option<(String, u32)> {
 
     Some((
         match sigil {
-            true => format!("${name}"),
+            Some(s) => format!("{s}{name}"),
 
-            false => name.to_string(),
+            None => name.to_string(),
         },
         active,
     ))
@@ -1106,22 +1114,105 @@ pub(crate) fn declared_line<'a>(src: &'a str, key: &str) -> Option<&'a str> {
     Some(&src[start..end])
 }
 
-/// The signature the documentation writes for an intrinsic, with one
-/// parameter per comma: `$assert_eq(a, b)`. No source declares an
-/// intrinsic, and its expansion is generated text the child cannot
-/// tie to the call the author wrote.
+/// The signature the documentation writes for an intrinsic or a
+/// built-in attribute, with its parameters: `$assert_eq(a, b)`,
+/// `@ratelimit(count: number, seconds: number)`. No source declares
+/// one, and an expansion is generated text the child cannot tie to
+/// the call the author wrote.
+///
+/// The shape is the first line of the fence, and it opens with the
+/// key. A parameter that is a literal, `@rename("key")`, marks an
+/// example instead: no shape, so no signature.
 pub(crate) fn intrinsic_signature(key: &str) -> Option<(String, Vec<String>)> {
     let line = keywords::doc(key)?.lines().nth(1)?.trim();
-    let open = line.find('(')?;
-    let close = line.rfind(')')?;
-    let parameters = line[open + 1..close]
-        .split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect();
+    let rest = line.strip_prefix(key)?;
+
+    if !rest.starts_with('(') || !rest.ends_with(')') {
+        return None;
+    }
+
+    let parameters = payload_types(line);
+    let literal = parameters
+        .iter()
+        .any(|p| !p.starts_with(|c: char| c.is_alphanumeric() || c == '_'));
+
+    if literal {
+        return None;
+    }
 
     Some((line.to_string(), parameters))
+}
+
+/// The signature of an attribute use, `@icon(`: the use line of a
+/// declared attribute, from this file or an import, or the shape the
+/// documentation writes for a built-in one. An attribute that takes
+/// nothing, `@u8`, has no signature.
+///
+/// `@validate` takes the validator of the remote under it, so its
+/// parameter is the function type that remote gives a validator.
+pub(crate) fn attribute_signature(
+    doc: &Doc,
+    key: &str,
+    offset: usize,
+) -> Option<(String, Vec<String>)> {
+    let declared = doc
+        .decls
+        .iter()
+        .chain(doc.import_decls.iter())
+        .find(|d| d.name == key)
+        .and_then(|d| d.hover.lines().find(|l| l.starts_with(key)))
+        .map(|line| (line.to_string(), payload_types(line)));
+    let (label, parameters) = declared.or_else(|| intrinsic_signature(key))?;
+
+    if parameters.is_empty() {
+        return None;
+    }
+
+    if key == "@validate"
+        && let Some((_, params)) = remote_below(&doc.source, offset)
+    {
+        let fn_type = format!("({}) -> boolean", validator_params(&params).join(", "));
+
+        return Some((
+            format!("@validate(fn: {fn_type})"),
+            vec![format!("fn: {fn_type}")],
+        ));
+    }
+
+    Some((label, parameters))
+}
+
+/// The remote declared under the line at `offset`, past any other
+/// attribute line: its name and its parameters as `name: type`, each
+/// default left off. `None` when the next declaration is no remote.
+pub(crate) fn remote_below(src: &str, offset: usize) -> Option<(String, Vec<String>)> {
+    let offset = offset.min(src.len());
+    let next = offset + src[offset..].find('\n')? + 1;
+    let line = src[next..]
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('@'))?;
+    let (label, params) = callable_signature(line)?;
+    let head = label.strip_prefix("remote ")?;
+    let name = head[..head.find('(')?].rsplit(' ').next()?.to_string();
+    let params = params
+        .iter()
+        .map(|p| {
+            p.split_once('=')
+                .map_or(p.as_str(), |(t, _)| t)
+                .trim()
+                .to_string()
+        })
+        .collect();
+
+    Some((name, params))
+}
+
+/// The parameters a validator takes: the sender, then the remote's own.
+pub(crate) fn validator_params(params: &[String]) -> Vec<String> {
+    std::iter::once("sender: Player".to_string())
+        .chain(params.iter().cloned())
+        .collect()
 }
 
 /// The signature a declaration line or hover writes, with its

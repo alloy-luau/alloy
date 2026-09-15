@@ -324,7 +324,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@cfg",
-        "```alloy\n@cfg(server)\nfunction save(player: Player) end\n\n@cfg(client and not studio)\nconst hud = build_hud()\n```\nCode for one side. A function keeps its type and opens with the check: called where the condition fails, it raises. A local reads its value only where the condition holds, and stays typed as the value; elsewhere it is nil.\n\nThe conditions: `server`, `client`, `studio`, `edit`, `running`, and `test` (an `alloy test` run). Join them with `not`, `and`, `or`, or `any(...)` and `all(...)`. A shared module loads on both sides, so the runtime reads RunService when the code runs.\n\n**Applies to** `function` · `local`",
+        "```alloy\n@cfg(condition)\n\n@cfg(server)\nfunction save(player: Player) end\n\n@cfg(client and not studio)\nconst hud = build_hud()\n```\nCode for one side. A function keeps its type and opens with the check: called where the condition fails, it raises. A local reads its value only where the condition holds, and stays typed as the value; elsewhere it is nil.\n\nThe conditions: `server`, `client`, `studio`, `edit`, `running`, and `test` (an `alloy test` run). Join them with `not`, `and`, `or`, or `any(...)` and `all(...)`. A shared module loads on both sides, so the runtime reads RunService when the code runs.\n\n**Applies to** `function` · `local`",
     ),
     (
         "@native",
@@ -336,7 +336,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@deprecated",
-        "```alloy\n@deprecated\nfunction old() end\n```\nLuau's own: a call to the function is a lint. Passes through to the emit.",
+        "```alloy\n@deprecated(message: string)\n\n@deprecated\nfunction old() end\n```\nLuau's own: a call to the function is a lint. Passes through to the emit.",
     ),
     (
         "@inline",
@@ -368,15 +368,15 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@ratelimit",
-        "```alloy\n@ratelimit(count, seconds)\n```\nA per-player token bucket on the server, for client-to-server remotes.",
+        "```alloy\n@ratelimit(count: number, seconds: number)\n```\nA per-player token bucket on the server, for client-to-server remotes.",
     ),
     (
         "@timeout",
-        "```alloy\n@timeout(seconds)\n```\nOn a `remote function`: a `call` that gets no answer in the window rejects, with the remote's name and the seconds in the error.",
+        "```alloy\n@timeout(seconds: number)\n```\nOn a `remote function`: a `call` that gets no answer in the window rejects, with the remote's name and the seconds in the error.",
     ),
     (
         "@validate",
-        "```alloy\n@validate(fn)\n```\nA server-side predicate, `fn(sender, ...args)`, run before the handler: a false drops the event, or answers the call with nil, and the handler never sees it. Defaults fill in after it.",
+        "```alloy\n@validate(fn: (sender: Player, ...args) -> boolean)\n```\nA server-side predicate, `fn(sender, ...args)`, run before the handler: a false drops the event, or answers the call with nil, and the handler never sees it. Defaults fill in after it.",
     ),
     (
         "@u8",

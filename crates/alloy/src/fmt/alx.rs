@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn formatting_is_idempotent_on_the_alx_examples() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");
 
         if !dir.is_dir() {
             return;

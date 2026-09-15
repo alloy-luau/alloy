@@ -29,14 +29,14 @@ sed -i "0,/^version = \".*\"/s//version = \"$version\"/" Cargo.toml
 
 for crate in alloy-syntax luaux alloy-ingot alloy alloy-lsp alloy-web; do
   # Only the first version line is the package version.
-  sed -i "0,/^version = \".*\"/s//version = \"$version\"/" "$crate/Cargo.toml"
+  sed -i "0,/^version = \".*\"/s//version = \"$version\"/" "crates/$crate/Cargo.toml"
 done
 # The path dependencies name a version too.
-sed -i "s/\(alloy-syntax = { version = \)\"[^\"]*\"/\1\"$version\"/" alloy/Cargo.toml alloy-lsp/Cargo.toml
-sed -i "s/\(alloy-ingot = { version = \)\"[^\"]*\"/\1\"$version\"/" alloy/Cargo.toml
-sed -i "s/\(package = \"alloy-luau\", version = \)\"[^\"]*\"/\1\"$version\"/" alloy-lsp/Cargo.toml
+sed -i "s/\(alloy-syntax = { version = \)\"[^\"]*\"/\1\"$version\"/" crates/alloy/Cargo.toml crates/alloy-lsp/Cargo.toml
+sed -i "s/\(alloy-ingot = { version = \)\"[^\"]*\"/\1\"$version\"/" crates/alloy/Cargo.toml
+sed -i "s/\(package = \"alloy-luau\", version = \)\"[^\"]*\"/\1\"$version\"/" crates/alloy-lsp/Cargo.toml
 cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace
-git add Cargo.toml ./*/Cargo.toml Cargo.lock
+git add Cargo.toml crates/*/Cargo.toml Cargo.lock
 
 tag="v$version"
 git commit -m "chore(release): $version"

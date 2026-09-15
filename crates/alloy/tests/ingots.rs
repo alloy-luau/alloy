@@ -9,17 +9,21 @@ use alloy::config::Config;
 use alloy::ingot::Ingots;
 
 fn workspace() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 /// The example dir, with its binary built once per test run.
 fn shout_dir() -> PathBuf {
-    let dir = workspace().join("alloy-ingot/examples/shout");
-    let bin = workspace().join("target/debug/examples/shout");
+    let dir = workspace().join("crates/alloy-ingot/examples/shout");
+    let workspace_target = workspace().join("target");
+    let bin = workspace_target.join("debug/examples/shout");
 
     if !bin.is_file() {
         let status = std::process::Command::new(env!("CARGO"))
             .args(["build", "-p", "alloy-ingot", "--example", "shout"])
+            // The manifest names the workspace `target`, whatever the
+            // caller's CARGO_TARGET_DIR says.
+            .env("CARGO_TARGET_DIR", workspace_target)
             .current_dir(workspace())
             .status()
             .expect("cargo runs");
@@ -163,7 +167,7 @@ fn an_ingot_declares_the_props_it_reads_on_a_tag() {
     let dir = std::env::temp_dir().join("alloy-ingot-props-test");
     std::fs::create_dir_all(&dir).unwrap();
     let binary = shout_dir()
-        .join("../../../target/debug/examples/shout")
+        .join("../../../../target/debug/examples/shout")
         .display()
         .to_string()
         .replace('\\', "/");

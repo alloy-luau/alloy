@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn the_examples_carry_no_default_lints() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");
 
         // The examples are their own repository beside this one; a
         // checkout without it skips the test and says so.

@@ -11,12 +11,12 @@ mkdir -p "$out"
 
 # 1. The compiler.
 (cd alloy-web && wasm-pack build --target web --release --out-dir pkg)
-cp alloy-web/pkg/alloy_web.js alloy-web/pkg/alloy_web_bg.wasm "$out/"
+cp crates/alloy-web/pkg/alloy_web.js crates/alloy-web/pkg/alloy_web_bg.wasm "$out/"
 
 # 2. The analyzer and the VM.
 : "${LUAU_SRC:?set LUAU_SRC to a Luau checkout}"
 : "${LUAU_WASM:?set LUAU_WASM to its emscripten build directory}"
-em++ -O2 -std=c++17 -fexceptions alloy-web/luau/alloy_luau.cpp \
+em++ -O2 -std=c++17 -fexceptions crates/alloy-web/luau/alloy_luau.cpp \
   -I "$LUAU_SRC/Analysis/include" -I "$LUAU_SRC/Ast/include" -I "$LUAU_SRC/Config/include" \
   -I "$LUAU_SRC/Common/include" -I "$LUAU_SRC/VM/include" -I "$LUAU_SRC/Compiler/include" \
   "$LUAU_WASM/libLuau.Analysis.a" "$LUAU_WASM/libLuau.Compiler.a" "$LUAU_WASM/libLuau.VM.a" \

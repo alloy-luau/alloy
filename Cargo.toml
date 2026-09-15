@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["alloy", "alloy-syntax", "alloy-lsp", "alloy-ingot", "alloy-web", "luaux"]
+members = ["crates/alloy", "crates/alloy-syntax", "crates/alloy-lsp", "crates/alloy-ingot", "crates/alloy-web", "crates/luaux"]
 # `cargo run` with no `-p` runs the `alloy` command.
-default-members = ["alloy"]
+default-members = ["crates/alloy"]
 
 [workspace.package]
 version = "0.1.0-rc.5"

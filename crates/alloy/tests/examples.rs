@@ -24,7 +24,7 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn every_example_compiles_clean() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");
 
     // The examples are their own repository beside this one; a
     // checkout without it skips the test and says so.
@@ -80,7 +80,7 @@ fn every_example_compiles_clean() {
 /// itself: a second compile changes nothing and reports nothing.
 #[test]
 fn every_output_compiles_to_itself() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");
 
     // The examples are their own repository beside this one; a
     // checkout without it skips the test and says so.
@@ -136,7 +136,7 @@ fn every_output_compiles_to_itself() {
 /// dropped, and the file cut short at many points.
 #[test]
 fn damaged_examples_never_panic() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");
 
     // The examples are their own repository beside this one; a
     // checkout without it skips the test and says so.

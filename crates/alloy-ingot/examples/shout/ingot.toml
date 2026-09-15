@@ -1,7 +1,7 @@
 name = "shout"
 api = 1
 description = "The example ingot: $shout(x) compiles to string.upper(x)."
-binary = "../../../target/debug/examples/shout"
+binary = "../../../../target/debug/examples/shout"
 run = "first"
 hooks = ["transform", "output", "lint", "format", "hover", "complete", "actions"]
 

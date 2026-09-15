@@ -28,7 +28,7 @@ fn luau_lsp() -> Option<PathBuf> {
 
 /// The Roblox definitions checked into the repo.
 fn global_types() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/types/globalTypes.d.luau")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/types/globalTypes.d.luau")
 }
 
 struct KillOnDrop(std::process::Child);
@@ -1865,12 +1865,16 @@ fn data_files_import_as_typed_tables() {
 
 /// The `shout` example ingot of the alloy-ingot crate, built on demand.
 fn shout_ingot_dir() -> PathBuf {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let bin = workspace.join("target/debug/examples/shout");
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace_target = workspace.join("target");
+    let bin = workspace_target.join("debug/examples/shout");
 
     if !bin.is_file() {
         let status = Command::new(env!("CARGO"))
             .args(["build", "-p", "alloy-ingot", "--example", "shout"])
+            // The manifest names the workspace `target`, whatever the
+            // caller's CARGO_TARGET_DIR says.
+            .env("CARGO_TARGET_DIR", workspace_target)
             .current_dir(&workspace)
             .status()
             .expect("cargo runs");
@@ -1878,7 +1882,7 @@ fn shout_ingot_dir() -> PathBuf {
     }
 
     workspace
-        .join("alloy-ingot/examples/shout")
+        .join("crates/alloy-ingot/examples/shout")
         .canonicalize()
         .unwrap()
 }

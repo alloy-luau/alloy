@@ -13,7 +13,8 @@ mod strings;
 mod types;
 
 use bodies::Body;
-use strings::{code_of, last_word};
+pub(crate) use strings::code_of;
+use strings::last_word;
 
 // The proxy and the playground's wasm build (`alloy-web`, which
 // `#[path]`-includes this file) each call a different subset of these,

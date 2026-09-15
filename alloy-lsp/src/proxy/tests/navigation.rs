@@ -1477,6 +1477,66 @@ fn a_case_binding_answers_from_its_own_arm() {
     }
 }
 
+/// A let-else binds its name after the `end` of the else block, where
+/// the emit writes the declaration on another line. The proxy answers
+/// the references, the rename, and the definition from the pattern.
+#[test]
+fn a_let_else_binding_answers_from_its_own_pattern() {
+    const SRC: &str = concat!(
+        "enum Job as\n",
+        "    Build(string)\n",
+        "    Move(string)\n",
+        "end\n",
+        "\n",
+        "local function use_let_else(j: Job): string\n",
+        "    local Build(model) = j else\n",
+        "        return \"not a build\"\n",
+        "    end\n",
+        "    if #model > 3 then\n",
+        "        return model\n",
+        "    end\n",
+        "    return `small {model}`\n",
+        "end\n",
+        "\n",
+        "local function other(model: string): string\n",
+        "    return model\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let doc = st.docs.get(uri).unwrap();
+    let uses = |text: &str| {
+        let at = SRC.find(text).expect(text);
+
+        match st.name_target(uri, at) {
+            Some(Target::Binding { name, start, end }) => uses_in_range(SRC, &name, start, end)
+                .into_iter()
+                .map(|(s, _)| position_of(SRC, s))
+                .collect::<Vec<(u32, u32)>>(),
+
+            _ => panic!("{text} names no let-else binding"),
+        }
+    };
+    let sites = [(6, 16), (9, 8), (10, 15), (12, 19)];
+
+    assert_eq!(uses("model) = j"), sites, "the pattern's name");
+    assert_eq!(uses("model > 3"), sites, "a use of it");
+    assert_eq!(uses("model}`"), sites, "a use in a string hole");
+
+    // The definition is the name in the pattern, from every use.
+    for (text, line) in [("model) = j", 6), ("model > 3", 9), ("model}`", 12)] {
+        let at = SRC.find(text).expect(text);
+        let ((a, b), _) = let_else_binding(doc, line, "model").expect(text);
+        assert_eq!(position_of(SRC, a), (6, 16), "{text}");
+        assert_eq!(b - a, "model".len(), "{text}");
+        assert!(at >= a, "{text}");
+    }
+
+    // The parameter of the other function is the child's.
+    let at = SRC.find("model: string").unwrap();
+    assert!(st.name_target(uri, at).is_none());
+    assert!(let_else_binding(doc, 16, "model").is_none());
+}
+
 /// A member of an exported namespace, under every word a reader puts
 /// in front of it: the module's own `Ns.T`, the `Ns` an import list
 /// binds plain, the alias of `import { Ns as A }`, and the `M.Ns` of a

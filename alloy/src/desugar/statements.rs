@@ -1900,9 +1900,11 @@ impl<'s> Desugar<'s> {
         }
 
         let keyword = self.text_of(l.keyword).to_string();
-        let mut names = Vec::new();
+        // The plain names with their annotations, and their values.
+        let mut names: Vec<(TokSpan, String)> = Vec::new();
         let mut values = Vec::new();
-        let mut decls: Vec<String> = Vec::new();
+        // One declaration per destructure: its names and their values.
+        let mut decls: Vec<(Vec<TokSpan>, String)> = Vec::new();
 
         for (b, v) in l.names.iter().zip(&l.values) {
             self.expected_generic = b.ty.and_then(|t| generic_head(self.text_of(t)));
@@ -1914,7 +1916,7 @@ impl<'s> Desugar<'s> {
 
             match &b.destructure {
                 None => {
-                    names.push(format!("{}{ty}", self.text_of(b.name)));
+                    names.push((b.name, ty));
                     values.push(value);
                 }
 
@@ -1926,30 +1928,45 @@ impl<'s> Desugar<'s> {
                     };
                     let temp = self.hoist_text(typed, anchor);
                     let (ns, vs) = self.destructure_parts(d, &temp);
-                    decls.push(format!("{keyword} {ns} = {vs}"));
+                    decls.push((ns, vs.join(", ")));
                 }
             }
         }
 
-        let mut text = String::new();
+        // Each name copies from the source where its line allows, so
+        // the editor maps it back to the name the reader wrote.
+        let mut lead = "";
 
         if !names.is_empty() {
-            text.push_str(&format!(
-                "{keyword} {} = {}",
-                names.join(", "),
-                values.join(", ")
-            ));
-        }
+            self.generate(anchor, &format!("{keyword} "));
 
-        for d in decls {
-            if !text.is_empty() {
-                text.push(' ');
+            for (i, (name, ty)) in names.iter().enumerate() {
+                if i > 0 {
+                    self.generate(anchor, ", ");
+                }
+
+                self.copy_on_line(anchor, *name);
+                self.generate(anchor, ty);
             }
 
-            text.push_str(&d);
+            self.generate(anchor, &format!(" = {}", values.join(", ")));
+            lead = " ";
         }
 
-        self.generate(anchor, &text);
+        for (ns, vs) in decls {
+            self.generate(anchor, &format!("{lead}{keyword} "));
+
+            for (i, name) in ns.iter().enumerate() {
+                if i > 0 {
+                    self.generate(anchor, ", ");
+                }
+
+                self.copy_on_line(anchor, *name);
+            }
+
+            self.generate(anchor, &format!(" = {vs}"));
+            lead = " ";
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2096,37 +2113,46 @@ impl<'s> Desugar<'s> {
         self.copy(cursor, end);
     }
 
-    /// The names and values of a destructure over a temp.
-    pub(crate) fn destructure_parts(&mut self, d: &Destructure, temp: &str) -> (String, String) {
+    /// The names and values of a destructure over a temp. A name is
+    /// its source span, so a writer can copy it.
+    pub(crate) fn destructure_parts(
+        &mut self,
+        d: &Destructure,
+        temp: &str,
+    ) -> (Vec<TokSpan>, Vec<String>) {
         match d {
             Destructure::Table(fields) => {
-                let ns: Vec<String> = fields
-                    .iter()
-                    .map(|f| self.text_of(f.rename.unwrap_or(f.field)).to_string())
-                    .collect();
+                let ns: Vec<TokSpan> = fields.iter().map(|f| f.rename.unwrap_or(f.field)).collect();
                 let vs: Vec<String> = fields
                     .iter()
                     .map(|f| format!("{temp}.{}", self.text_of(f.field)))
                     .collect();
 
-                (ns.join(", "), vs.join(", "))
+                (ns, vs)
             }
 
             Destructure::Array { items, rest } => {
-                let mut ns: Vec<String> =
-                    items.iter().map(|i| self.text_of(*i).to_string()).collect();
+                let mut ns: Vec<TokSpan> = items.clone();
                 let mut vs: Vec<String> =
                     (1..=items.len()).map(|i| format!("{temp}[{i}]")).collect();
 
                 if let Some(r) = rest {
-                    ns.push(self.text_of(*r).to_string());
+                    ns.push(*r);
                     let std = self.std();
                     vs.push(format!("{std}.Array.slice({temp}, {})", items.len() + 1));
                 }
 
-                (ns.join(", "), vs.join(", "))
+                (ns, vs)
             }
         }
+    }
+
+    /// A destructure as one line of text, for a prologue.
+    fn destructure_text(&mut self, d: &Destructure, temp: &str) -> String {
+        let (ns, vs) = self.destructure_parts(d, temp);
+        let ns: Vec<&str> = ns.iter().map(|n| self.text_of(*n)).collect();
+
+        format!("local {} = {}", ns.join(", "), vs.join(", "))
     }
 
     // --- functions ---------------------------------------------------------
@@ -2246,8 +2272,7 @@ impl<'s> Desugar<'s> {
                     param_temp += 1;
                     let temp = format!("_p{param_temp}");
                     self.generate(ps, &temp);
-                    let (ns, vs) = self.destructure_parts(d, &temp);
-                    prologue.push(format!("local {ns} = {vs}"));
+                    prologue.push(self.destructure_text(d, &temp));
                 }
 
                 None => self.copy(ps, self.byte_end(p.name)),
@@ -2883,8 +2908,7 @@ impl<'s> Desugar<'s> {
                     temp += 1;
                     let t = format!("_p{temp}");
                     self.generate(vs, &t);
-                    let (ns, vals) = self.destructure_parts(d, &t);
-                    prologue.push(format!("local {ns} = {vals}"));
+                    prologue.push(self.destructure_text(d, &t));
                 }
 
                 None => self.copy(vs, self.byte_end(v.name)),

@@ -373,8 +373,16 @@ fn bindings_of(line: &str) -> Vec<(Local, Bind)> {
         };
 
         for part in split_top(names) {
-            if let Some(local) = binding_entry(part) {
-                out.push((local, bind));
+            // `local { a, b } = p` binds each name the pattern holds.
+            let inner = part
+                .trim()
+                .strip_prefix(['{', '['])
+                .and_then(|t| t.strip_suffix(['}', ']']));
+
+            for name in inner.map_or_else(|| vec![part], split_top) {
+                if let Some(local) = binding_entry(name) {
+                    out.push((local, bind));
+                }
             }
         }
     }
@@ -551,6 +559,14 @@ mod tests {
         assert!(!names.contains(&"doubled".to_string()), "{names:?}");
         // A name the caret's own line declares is not bound yet.
         assert!(!names.contains(&"kind".to_string()), "{names:?}");
+    }
+
+    /// A pattern local binds every name its brackets hold.
+    #[test]
+    fn a_pattern_local_binds_each_of_its_names() {
+        let src = "local { a, b } = p\nlocal [x, ...rest] = arr\nprint(|)\n";
+        let names = scope_at(src);
+        assert_eq!(names, ["a", "b", "rest", "x"], "{names:?}");
     }
 
     /// An arm binds its payload for that arm alone, and a method of an

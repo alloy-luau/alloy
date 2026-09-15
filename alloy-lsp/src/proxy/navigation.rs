@@ -476,6 +476,22 @@ impl Server {
             return true;
         }
 
+        // A let-else binding: the emit writes its declaration after
+        // the `end` of the else block, on another line, so the child
+        // points past that `end`. The pattern is where the name comes
+        // from.
+        if key == word
+            && let Some(((a, b), _)) = let_else_binding(doc, line as usize, word)
+        {
+            let s = position_of(&doc.source, a);
+            let e = position_of(&doc.source, b);
+            let result = json!([{ "uri": uri, "range": range_value(s, e) }]);
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         // `export local Size = 42` binds the name here. Another file's
         // `Size` is a declaration of its own and says nothing about the
         // binding the caret sits on, so the child answers for this one.
@@ -921,6 +937,17 @@ impl State {
             let line = position_of(source, offset).0 as usize;
 
             if !declares && let Some((start, end)) = case_arm_of_binding(doc, line, word) {
+                return Some(Target::Binding {
+                    name: word.to_string(),
+                    start,
+                    end,
+                });
+            }
+
+            // A let-else binding is the proxy's own too: the emit
+            // writes its declaration after the `end` of the else block,
+            // on another line, so the child ties the name to nothing.
+            if !declares && let Some((_, (start, end))) = let_else_binding(doc, line, word) {
                 return Some(Target::Binding {
                     name: word.to_string(),
                     start,

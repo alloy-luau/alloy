@@ -490,6 +490,83 @@ fn case_arm_span(doc: &Doc, case_line: usize, lines: &[&str]) -> Option<(usize, 
     Some((start, end))
 }
 
+/// The pattern of a let-else line: `local Build(model) = j else` gives
+/// `Build(model) = j`. A `local x = if c then a else b` is no let-else.
+fn let_else_pattern(text: &str) -> Option<&str> {
+    let head = text.strip_prefix("export ").unwrap_or(text);
+    let rest = head
+        .strip_prefix("local ")
+        .or_else(|| head.strip_prefix("const "))?;
+    let pattern = rest
+        .strip_suffix(" else")
+        .or_else(|| rest.split_once(" else ").map(|(p, _)| p))?;
+
+    (!pattern.contains(" then ")).then_some(pattern)
+}
+
+/// The let-else that binds `word` at `line`: the byte range of the name
+/// in its pattern, and the byte range of the name's scope, from the
+/// pattern line to the last line of the block that holds it. The emit
+/// writes the declaration after the `end` of the else block, on another
+/// line, so the child has no name of the reader's to point at.
+pub(crate) fn let_else_binding(
+    doc: &Doc,
+    line: usize,
+    word: &str,
+) -> Option<((usize, usize), (usize, usize))> {
+    let lines: Vec<&str> = doc.source.lines().collect();
+    let mut at = line.min(lines.len().checked_sub(1)?);
+    // The blocks the walk entered from below and has yet to leave.
+    let mut inside = 0i32;
+
+    let decl = loop {
+        let text = crate::context::code_of(lines.get(at)?).trim();
+        let pattern = let_else_pattern(text);
+        // The `else` of a let-else opens a block `value_openers` does
+        // not count.
+        let opens = crate::context::value_openers(text) + i32::from(pattern.is_some());
+        inside = (inside + crate::context::block_closers(text) - opens).max(0);
+
+        if inside == 0
+            && let Some(pattern) = pattern
+            && crate::context::pattern_names(pattern)
+                .iter()
+                .any(|l| l.name == word)
+        {
+            break at;
+        }
+
+        at = at.checked_sub(1)?;
+    };
+
+    let depth_of =
+        |text: &str| crate::context::value_openers(text) - crate::context::block_closers(text);
+    // The else block the declaration opens.
+    let mut depth = 1 + depth_of(lines[decl]);
+    let mut last = decl;
+
+    for (at, raw) in lines.iter().enumerate().skip(decl + 1) {
+        let text = crate::context::code_of(raw).trim();
+        let sibling = text.starts_with("else")
+            || text.starts_with("until")
+            || text.starts_with("case ")
+            || opens_the_default_arm(text);
+
+        if depth + depth_of(text) < 0 || (depth == 0 && sibling) {
+            break;
+        }
+
+        depth = (depth + depth_of(text)).max(0);
+        last = at;
+    }
+
+    let name = offset_of(&doc.source, decl as u32, 0)? + whole_word(lines[decl], word)?;
+    let start = offset_of(&doc.source, decl as u32, 0)?;
+    let end = offset_of(&doc.source, last as u32, 0)? + lines[last].len();
+
+    Some(((name, name + word.len()), (start, end)))
+}
+
 /// The arm that binds `word` at `line`, as a byte range: the arm the
 /// line sits in, or one around it, up to the outermost match. The arm is
 /// the whole scope of the name, so a rename and a reference list stop

@@ -12,6 +12,57 @@ fn line_of(text: &str, offset: usize) -> usize {
     text[..offset.min(text.len())].matches('\n').count()
 }
 
+/// A binder that declares its name on the anchor's line copies the
+/// name from the source: the negated `if local`, a table pattern, an
+/// array pattern. The editor then maps the child's answer back to the
+/// name the reader wrote.
+#[test]
+fn a_binder_name_on_its_line_copies_from_the_source() {
+    let src = concat!(
+        "struct Pair as\n",
+        "    a: number\n",
+        "    b: number\n",
+        "end\n",
+        "local function first(): string?\n",
+        "    return \"x\"\n",
+        "end\n",
+        "local function use_if_not_local(): string\n",
+        "    if not local name = first() then\n",
+        "        return \"none\"\n",
+        "    end\n",
+        "    return name\n",
+        "end\n",
+        "local function use_table_pattern(p: Pair): number\n",
+        "    local { a, b } = p\n",
+        "    return a + b\n",
+        "end\n",
+        "local function use_array_pattern(arr: number[]): number\n",
+        "    local [first_item, ...rest] = arr\n",
+        "    return first_item + #rest\n",
+        "end\n",
+    );
+    let out = alloy::compile(src).unwrap();
+
+    for (text, word) in [
+        ("name = first()", "name"),
+        ("a, b } = p", "a"),
+        ("b } = p", "b"),
+        ("first_item, ...rest", "first_item"),
+        ("rest] = arr", "rest"),
+    ] {
+        let s = src.find(text).unwrap() as u32;
+        let o = out
+            .map
+            .to_output(s)
+            .unwrap_or_else(|| panic!("{word} is generated"));
+        assert!(
+            out.check[o as usize..].starts_with(word),
+            "{word}: {}",
+            &out.check[o as usize..]
+        );
+    }
+}
+
 #[test]
 fn forward_then_back_is_identity_on_copied_bytes() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");

@@ -617,7 +617,7 @@ impl<'s> Desugar<'s> {
 
     /// Copies a span when it sits on the anchor's line, and generates
     /// its text otherwise.
-    fn copy_on_line(&mut self, anchor: u32, span: TokSpan) {
+    pub(crate) fn copy_on_line(&mut self, anchor: u32, span: TokSpan) {
         if self.line_of(self.byte_start(span)) == self.line_of(anchor) {
             self.copy_span(span);
         } else {
@@ -1681,8 +1681,10 @@ impl<'s> Desugar<'s> {
                 b.ty.map(|t| format!(": {}", self.text_of(t)))
                     .unwrap_or_default();
 
-            // The name each declaration binds, and its type.
-            let (head, ty) = match &b.pattern {
+            // The name each declaration binds, its type, and the
+            // source span of the name when the declaration is the
+            // reader's own binding.
+            let (head, ty, span) = match &b.pattern {
                 // The branch declares the name from a temp the test refined,
                 // so the name is `T`, not `T?`, in the branch and in any
                 // closure there. The annotation goes on the name there
@@ -1705,7 +1707,7 @@ impl<'s> Desugar<'s> {
                             format!("{ty}?")
                         };
 
-                        (name, ty)
+                        (name, ty, Some(*n))
                     } else {
                         self.temp_next += 1;
                         let temp = format!("_c{}", self.temp_next);
@@ -1713,7 +1715,7 @@ impl<'s> Desugar<'s> {
                         prior.push(temp.clone());
                         binds.push((*n, temp.clone(), b.ty));
 
-                        (temp, String::new())
+                        (temp, String::new(), None)
                     }
                 }
 
@@ -1727,7 +1729,7 @@ impl<'s> Desugar<'s> {
                     prior.push(format!("({test})"));
                     binds.extend(c.binds);
 
-                    (temp, String::new())
+                    (temp, String::new(), None)
                 }
             };
 
@@ -1735,7 +1737,18 @@ impl<'s> Desugar<'s> {
             // The test this binding adds is the last one in `prior`.
             let earlier = &prior[..prior.len() - 1];
             let decl = self.render_side(|d| {
-                d.generate(anchor, &format!("local {head}{ty} = "));
+                d.generate(anchor, "local ");
+
+                // The negated form declares the reader's name, so the
+                // name copies from the source and the editor maps it
+                // back to the condition.
+                match span {
+                    Some(n) => d.copy_on_line(anchor, n),
+
+                    None => d.generate(anchor, &head),
+                }
+
+                d.generate(anchor, &format!("{ty} = "));
 
                 if !earlier.is_empty() {
                     d.generate(anchor, &format!("if {} then ", earlier.join(" and ")));

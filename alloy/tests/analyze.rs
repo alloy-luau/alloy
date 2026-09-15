@@ -853,6 +853,39 @@ fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `if not local v: number = f()` keeps the name as the binding, so the
+/// annotation checks the `number?` the value has. The declaration
+/// writes `number?`; the guard's return narrows the name to `number`
+/// after it, and a wrong annotation still reports.
+#[test]
+fn an_annotated_negated_if_local_types_the_nilable_value() {
+    let head = "function f2(n: number): number?\n    if n > 0 then\n        return n + 1\n    end\n    return nil\nend\n\n";
+    let good = format!(
+        "{head}local function g(): number\n    if not local v3: number = f2(4) then\n        return 0\n    end\n    return v3\nend\nprint(g())\n"
+    );
+    let out = alloy::compile(&good).unwrap();
+    assert!(
+        out.check
+            .contains("local v3: number? = f2(4) if not (v3) then"),
+        "{}",
+        out.check
+    );
+    analyze(&good, "if-not-local-annotated-good");
+
+    let bad = format!(
+        "{head}local function g(): number\n    if not local v3: string = f2(4) then\n        return 0\n    end\n    return 1\nend\nprint(g())\n"
+    );
+    let Some(reported) = reports(&bad, "if-not-local-annotated-bad") else {
+        return;
+    };
+    assert!(
+        reported
+            .iter()
+            .any(|l| l.contains("Expected this to be 'string?', but got 'number?'")),
+        "{reported:?}"
+    );
+}
+
 /// `if local v: number = f()` wrote the annotation on the temp, which
 /// holds the `number?` the value has, so the one annotation a reader
 /// writes reported. The annotation now goes on the name the branch

@@ -1696,6 +1696,14 @@ impl<'s> Desugar<'s> {
                     if *negated {
                         tests.push(name.clone());
                         prior.push(name.clone());
+                        // The name holds the `T?` the value has until
+                        // the guard returns; the checker narrows it to
+                        // `T` after that. A wrong `T` still reports.
+                        let ty = if ty.is_empty() || ty.ends_with('?') {
+                            ty
+                        } else {
+                            format!("{ty}?")
+                        };
 
                         (name, ty)
                     } else {

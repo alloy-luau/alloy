@@ -802,7 +802,7 @@ impl<'s> Desugar<'s> {
                     "try_await"
                 };
 
-                self.to_side(|d| {
+                self.render_side(|d| {
                     d.generate(anchor, &format!("{std}.{helper}("));
                     d.expr(inner);
                     d.generate(anchor, ")");

@@ -2585,12 +2585,12 @@ impl<'s> Desugar<'s> {
 
     /// Renders an expression into its own renderer, chunks and all.
     fn render_to_side(&mut self, e: &Expr) -> Renderer<'s> {
-        self.to_side(|d| d.expr(e))
+        self.render_side(|d| d.expr(e))
     }
 
     /// Runs `render` against its own renderer and returns that renderer,
     /// chunks and all, so a caller can append it with provenance.
-    fn to_side(&mut self, render: impl FnOnce(&mut Self)) -> Renderer<'s> {
+    fn render_side(&mut self, render: impl FnOnce(&mut Self)) -> Renderer<'s> {
         let mut side = Renderer::new(self.src);
         std::mem::swap(&mut self.r, &mut side);
         render(self);

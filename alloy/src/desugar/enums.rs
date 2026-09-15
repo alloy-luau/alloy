@@ -516,7 +516,7 @@ impl<'s> Desugar<'s> {
     ) -> String {
         self.temp_next += 1;
         let name = format!("_v{}", self.temp_next);
-        let cast = self.to_side(|d| {
+        let cast = self.render_side(|d| {
             d.generate(anchor, "(");
             d.r.append(value);
             d.generate(anchor, &format!(") :: {ename}"));
@@ -1685,7 +1685,7 @@ impl<'s> Desugar<'s> {
             // A later binding runs only when the earlier ones are truthy.
             // The test this binding adds is the last one in `prior`.
             let earlier = &prior[..prior.len() - 1];
-            let decl = self.to_side(|d| {
+            let decl = self.render_side(|d| {
                 d.generate(anchor, &format!("local {head}{ty} = "));
 
                 if !earlier.is_empty() {

@@ -484,9 +484,9 @@ pub fn fold_value(value: &mut Value, known: &Known) {
 
 /// A print with the defaults its declaration gives filled in:
 /// `Pair<number>` of `struct Pair<A, B = string>` reads
-/// `Pair<number, string>`. The emit writes the arguments the source
-/// wrote and Luau fills the rest from the alias, so the print names
-/// fewer arguments than the type carries.
+/// `Pair<number, string>`, and an enum the same way. The emit writes
+/// the arguments the source wrote and Luau fills the rest from the
+/// alias, so the print names fewer arguments than the type carries.
 pub fn fill_generic_defaults(text: &str, shapes: &[Shape]) -> String {
     let mut out = String::new();
     let mut at = 0;
@@ -502,6 +502,11 @@ pub fn fill_generic_defaults(text: &str, shapes: &[Shape]) -> String {
         let nested = text[open + 1..].starts_with('<');
         let params = shapes.iter().find_map(|s| match s {
             Shape::Struct {
+                name: held,
+                generics,
+                ..
+            }
+            | Shape::Enum {
                 name: held,
                 generics,
                 ..
@@ -821,7 +826,10 @@ pub fn fold(text: &str, known: &Known) -> String {
     // The two arms of a cut Result read alike once the clause goes.
     fold_repeated_members(&mut out);
 
-    out
+    // `local p: Pair<number>` of `struct Pair<A, B = string>`: the
+    // print names the arguments the source wrote, and the type carries
+    // the default too.
+    fill_generic_defaults(&out, &known.shapes)
 }
 
 /// Drops a `where` clause the head no longer needs. A fold below the
@@ -2281,16 +2289,44 @@ mod tests {
     /// short of it.
     #[test]
     fn a_generic_print_carries_the_defaults_of_its_declaration() {
-        let shapes = vec![Shape::Struct {
-            name: "Pair".into(),
-            fields: vec![("first".into(), false), ("second".into(), false)],
-            generics: vec!["A".into(), "B = string".into()],
-            types: vec!["A".into(), "B".into()],
-        }];
+        let shapes = vec![
+            Shape::Struct {
+                name: "Pair".into(),
+                fields: vec![("first".into(), false), ("second".into(), false)],
+                generics: vec!["A".into(), "B = string".into()],
+                types: vec!["A".into(), "B".into()],
+            },
+            Shape::Enum {
+                name: "Either".into(),
+                generics: vec!["L".into(), "R = string".into()],
+                variants: vec![
+                    ("Left".into(), vec!["L".into()]),
+                    ("Right".into(), vec!["R".into()]),
+                ],
+            },
+        ];
 
         assert_eq!(
             fill_generic_defaults("local p: Pair<number>", &shapes),
             "local p: Pair<number, string>"
+        );
+        // An enum with a default fills the same way, and the hover of
+        // an annotated value reads the whole type through the fold.
+        assert_eq!(
+            fill_generic_defaults("local e: Either<number>", &shapes),
+            "local e: Either<number, string>"
+        );
+        let known = Known {
+            shapes: shapes.clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            fold("```luau\nlocal p: Pair<number>\n```", &known),
+            "```luau\nlocal p: Pair<number, string>\n```"
+        );
+        assert_eq!(
+            fold("```luau\nlocal e: Either<number>\n```", &known),
+            "```luau\nlocal e: Either<number, string>\n```"
         );
         // A list the source wrote whole stays as it is, and so does
         // the declaration's own line.

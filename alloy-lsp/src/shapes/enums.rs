@@ -95,13 +95,23 @@ fn with_arguments(name: &str, generics: &[String], tables: &[Printed]) -> String
     let args: Vec<String> = generics
         .iter()
         .filter_map(|g| {
-            tables.iter().find_map(|(payload, m)| {
-                let i = payload.iter().position(|p| p.trim() == g)?;
+            // `R = string`: a parameter no payload names takes its default.
+            let (param, default) = match g.split_once('=') {
+                Some((p, d)) => (p.trim(), Some(d.trim())),
 
-                m.iter()
-                    .find(|(k, _)| slot_index(k) == Some(i + 1))
-                    .map(|(_, v)| v.trim().to_string())
-            })
+                None => (g.as_str(), None),
+            };
+
+            tables
+                .iter()
+                .find_map(|(payload, m)| {
+                    let i = payload.iter().position(|p| p.trim() == param)?;
+
+                    m.iter()
+                        .find(|(k, _)| slot_index(k) == Some(i + 1))
+                        .map(|(_, v)| v.trim().to_string())
+                })
+                .or_else(|| default.map(str::to_string))
         })
         .collect();
 

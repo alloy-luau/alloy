@@ -1518,8 +1518,9 @@ pub enum Shape {
     },
     Enum {
         name: String,
-        /// `enum Opt<T>`: the parameter names, in order, without their
-        /// defaults. A payload spelled as one carries its argument.
+        /// `enum Opt<T>`: the parameter names, in order. A default stays
+        /// on its name, `R = string`, so a fold can fill it. A payload
+        /// spelled as a parameter carries its argument.
         generics: Vec<String>,
         /// Each variant with its payload types as source text.
         variants: Vec<(String, Vec<String>)>,
@@ -1548,14 +1549,6 @@ fn generic_names(text: &str) -> Vec<String> {
         .iter()
         .map(|item| item.split(':').next().unwrap_or("").trim().to_string())
         .filter(|n| !n.is_empty())
-        .collect()
-}
-
-/// The parameter names alone: `<L, R = string>` gives `L` and `R`.
-fn parameter_names(text: &str) -> Vec<String> {
-    generic_names(text)
-        .iter()
-        .map(|g| g.split('=').next().unwrap_or("").trim().to_string())
         .collect()
 }
 
@@ -1592,7 +1585,7 @@ pub fn shapes(src: &str) -> Vec<Shape> {
                 name: text(e.name),
                 generics: e
                     .generics
-                    .map(|g| parameter_names(&text(g)))
+                    .map(|g| generic_names(&text(g)))
                     .unwrap_or_default(),
                 variants: e
                     .variants
@@ -1649,7 +1642,7 @@ fn namespace_enums(
                 name: format!("{inner}.{}", text(e.name)),
                 generics: e
                     .generics
-                    .map(|g| parameter_names(&text(g)))
+                    .map(|g| generic_names(&text(g)))
                     .unwrap_or_default(),
                 variants: e
                     .variants
@@ -1820,8 +1813,8 @@ mod shape_tests {
         );
     }
 
-    /// A generic enum names its parameters, without their defaults; a
-    /// struct keeps the default on the name for the fold that fills it.
+    /// A generic enum and a struct name their parameters, and a
+    /// default stays on its name for the fold that fills it.
     #[test]
     fn a_generic_enum_names_its_parameters() {
         let src = "enum Either<L, R = string> as\n    Left(L),\n    Right(R)\nend\nstruct Pair<A: Shape<X, Y>, B = string> as\n    read a: A\nend\n";
@@ -1830,7 +1823,7 @@ mod shape_tests {
             got[0],
             Shape::Enum {
                 name: "Either".into(),
-                generics: vec!["L".into(), "R".into()],
+                generics: vec!["L".into(), "R = string".into()],
                 variants: vec![
                     ("Left".into(), vec!["L".into()]),
                     ("Right".into(), vec!["R".into()])

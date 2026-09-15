@@ -79,6 +79,22 @@ impl Server {
         }
     }
 
+    /// The shadow position of a signature-help caret inside a call in
+    /// an intrinsic's argument, where the argument stands as code.
+    /// `None` when no such call is open at the caret.
+    pub(crate) fn signature_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
+        if !is_alloy_uri(uri) {
+            return None;
+        }
+
+        let (line, character) = position_of_message(message)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+        let (shadow_line, _) = doc.to_shadow(line, character);
+
+        intrinsic_code_home(&doc.source, &doc.shadow, line, shadow_line, character)
+    }
+
     /// The shadow position a member completion belongs at. `a?.b` and
     /// `a!.b` lower to text the compiler wrote, and `await X.m()` moves
     /// the receiver into a call, so the member the author is typing maps
@@ -450,6 +466,68 @@ pub(crate) fn shadow_home(shadow: &str, line: u32, word: &str) -> Option<(u32, u
 
         Some((i as u32, text[..byte].chars().count() as u32))
     })
+}
+
+/// Where a caret inside a call in an intrinsic's argument stands in
+/// the shadow. The intrinsic lowers to one generated text, with the
+/// argument as a string for its message and as code after it, so the
+/// map holds no position for the caret and the child sees a call in
+/// the code alone. The text from the intrinsic's `(` to the caret is
+/// the key: its last match outside every string of the shadow line is
+/// the code copy. `None` when no call of the argument is open at the
+/// caret, where the intrinsic's own signature is the answer.
+pub(crate) fn intrinsic_code_home(
+    source: &str,
+    shadow: &str,
+    line: u32,
+    shadow_line: u32,
+    character: u32,
+) -> Option<(u32, u32)> {
+    let text = source.lines().nth(line as usize)?;
+    let at = offset_of(text, 0, character)?;
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    // The `(` of the intrinsic whose list holds the caret: the nearest
+    // open one to the left that a `$name` stands in front of.
+    let mut depth = 0i32;
+    let mut open = None;
+
+    for (i, c) in text[..at].char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+
+            '(' if depth > 0 => depth -= 1,
+
+            '(' => {
+                let head = &text[..i];
+                let name = head.rfind(|c: char| !is_word(c)).map_or(0, |p| p + 1);
+
+                if name > 0 && name < head.len() && head[..name].ends_with('$') {
+                    open = Some(i);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let prefix = &text[open? + 1..at];
+
+    // A call still open in the prefix is the one to help with.
+    if prefix.matches('(').count() <= prefix.matches(')').count() {
+        return None;
+    }
+
+    let shadow_text = shadow.lines().nth(shadow_line as usize)?;
+    let code = shadow_text
+        .match_indices(prefix)
+        .filter(|(i, _)| !context::in_string(shadow_text, *i))
+        .last()?
+        .0;
+    let column = shadow_text[..code + prefix.len()].encode_utf16().count() as u32;
+
+    Some((shadow_line, column))
 }
 
 /// The column of `word` as a whole word outside every string of the

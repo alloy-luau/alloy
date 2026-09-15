@@ -1,5 +1,5 @@
 use super::super::hover::{
-    impl_self_type, member_doc, shadow_home, shadows_an_import, source_type,
+    impl_self_type, intrinsic_code_home, member_doc, shadow_home, shadows_an_import, source_type,
 };
 use super::super::*;
 use super::support::one_file;
@@ -961,6 +961,30 @@ fn a_method_on_an_instantiated_struct_carries_the_instantiation() {
     clean_hints(&mut hints, doc);
     assert_eq!(hint_label(&hints[0]), ": Box<number>");
     assert_eq!(hints[0]["textEdits"][0]["newText"], ": Box<number>");
+}
+
+/*
+`$dbg(Point.new(1))`: the emit writes the argument as a string for the
+message and as code after it. A caret inside the inner call maps to
+the string, where the child sees no call to help with; the code copy
+is where it answers. A call outside an intrinsic maps to code already.
+*/
+#[test]
+fn a_call_inside_an_intrinsic_argument_maps_to_its_code_copy() {
+    let src = "struct Point as\n    x: number\nend\n\nimpl Point as\n    function new(x: number): Point\n        return new Point { x = x }\n    end\nend\n\nlocal v1 = $dbg(Point.new(1))\nlocal v2 = wrap(Point.new(1))\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let home = |line: u32, character: u32| {
+        intrinsic_code_home(&doc.source, &doc.shadow, line, line, character)
+    };
+    let (line, column) = home(10, 26).expect("the code copy");
+    let text = doc.shadow.lines().nth(line as usize).expect("the line");
+
+    assert!(text[..column as usize].ends_with("Point.new("), "{text}");
+    assert!(!crate::context::in_string(text, column as usize), "{text}");
+    // The intrinsic's own list, and a call outside one.
+    assert_eq!(home(10, 16), None);
+    assert_eq!(home(11, 26), None);
 }
 
 /*

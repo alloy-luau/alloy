@@ -752,6 +752,22 @@ impl Server {
                 self.forward_request(message, Some(m));
             }
 
+            // `$dbg(Point.new(1, 2))`: a call inside an intrinsic's
+            // argument answers from the code copy of the argument. The
+            // intrinsic's own list, with no call open in it, keeps the
+            // plain route, where the declaration answers.
+            Some(m @ "textDocument/signatureHelp") => {
+                let uri = text_document_uri(&message).unwrap_or_default();
+
+                if let Some(home) = self.signature_home(&uri, &message) {
+                    self.forward_request_at(message, Some(m), home);
+
+                    return true;
+                }
+
+                self.forward_request(message, Some(m));
+            }
+
             Some(_) => self.forward_request(message, method.as_deref()),
 
             None => {

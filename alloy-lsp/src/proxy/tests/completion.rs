@@ -736,8 +736,9 @@ pub(crate) fn a_result_a_literal_and_an_array_take_their_own_arms() {
         "[ ${1:first}, ...${2:rest} ]"
     );
 }
-/// `await X.m()` moves the receiver into a call the emit wrote, so
-/// the child's own mapping lands past the member.
+/// `await X.m()` moves the receiver into a call the emit wrote; the
+/// operand is copied, so the child's own mapping lands after the
+/// member as it does for a plain access.
 #[test]
 pub(crate) fn an_awaited_receiver_keeps_its_member_list() {
     let src = "local function f(p: Future<number>)\n    local s = await Future.all(p)\nend\n";
@@ -746,9 +747,9 @@ pub(crate) fn an_awaited_receiver_keeps_its_member_list() {
     let line = 1u32;
     let column = "    local s = await Future.".len() as u32;
 
-    // The emit wrote `__alloy.await(__alloy.Future.all(p))`, and the
-    // child's mapping no longer sits after `Future.`.
-    assert!(!lands_on_member(doc, line, column, "Future", '.', 0));
+    // The emit wrote `__alloy.await(__alloy.Future.all(p))` with the
+    // operand copied, so the mapping sits after `Future.`.
+    assert!(lands_on_member(doc, line, column, "Future", '.', 0));
 
     let shadow_line = doc.shadow.lines().nth(line as usize).unwrap();
     let at = context::member_column(

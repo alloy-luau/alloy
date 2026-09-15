@@ -692,11 +692,24 @@ impl<'s> Desugar<'s> {
         let server_fires = r.from_server && side != Some(crate::directives::Side::Client);
         let client_handles = r.from_server && side != Some(crate::directives::Side::Server);
         let server_handles = r.from_client && side != Some(crate::directives::Side::Client);
+        // `instance` is the Roblox object the runtime makes, by kind, so
+        // `Ping.instance:FireServer(1)` checks against the right class.
+        let unreliable = r
+            .attributes
+            .iter()
+            .any(|a| a.name.is_some_and(|n| self.text_of(n) == "unreliable"));
+        let class = if r.is_function {
+            "RemoteFunction"
+        } else if unreliable {
+            "UnreliableRemoteEvent"
+        } else {
+            "RemoteEvent"
+        };
         // `calls` is the testing hook: outside Roblox the runtime records
         // each fire there instead of sending it, so a `@test` reads it.
         let mut members = vec![
             format!("spec: {std}.RemoteSpec"),
-            "instance: Instance?".to_string(),
+            format!("instance: {class}?"),
             format!("calls: {std}.RemoteCalls"),
         ];
 
@@ -1028,6 +1041,36 @@ remote Chain(n: Node) from client
             out.check.contains("calls: __alloy.RemoteCalls"),
             "{}",
             out.check
+        );
+    }
+
+    /// `instance` is the Roblox object behind the remote, by kind, so a
+    /// `:FireServer` on a remote function reports.
+    #[test]
+    fn a_remote_types_its_instance_by_kind() {
+        let event = crate::compile("remote Ping(n: number) from client\n").unwrap();
+        assert!(
+            event.check.contains("instance: RemoteEvent?"),
+            "{}",
+            event.check
+        );
+
+        let unreliable =
+            crate::compile("@unreliable\nremote Tick(@u8 n: number) from server\n").unwrap();
+        assert!(
+            unreliable
+                .check
+                .contains("instance: UnreliableRemoteEvent?"),
+            "{}",
+            unreliable.check
+        );
+
+        let function =
+            crate::compile("remote function Ask(n: number) -> number from client\n").unwrap();
+        assert!(
+            function.check.contains("instance: RemoteFunction?"),
+            "{}",
+            function.check
         );
     }
 

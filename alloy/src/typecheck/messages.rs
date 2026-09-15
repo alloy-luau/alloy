@@ -702,9 +702,16 @@ fn literal_argument(value: &str) -> Option<&'static str> {
 fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
     let key = message.strip_prefix("Key '")?.split('\'').next()?;
     let table = message.split_once("' not found in table '")?.1;
-    // Every side of a remote carries `instance` and at least one of the
-    // verbs; the fold may have named the whole surface already.
-    let surface = table.contains("instance: Instance?")
+    // Every side of a remote carries `instance`, typed by the kind, and
+    // at least one of the verbs; the fold may have named the whole
+    // surface already.
+    let surface = [
+        "instance: RemoteEvent?",
+        "instance: UnreliableRemoteEvent?",
+        "instance: RemoteFunction?",
+    ]
+    .iter()
+    .any(|marker| table.contains(marker))
         && ["on:", "fire", "call:", "wait:"]
             .iter()
             .any(|verb| table.contains(verb));
@@ -1992,7 +1999,7 @@ mod tests {
     /// report named `Remote`, the emit's own name for the surface.
     #[test]
     fn a_remote_member_reports_through_either_separator() {
-        let table = "{ fire: (string) -> (), instance: Instance?, on: (any) -> RBXScriptConnection, spec: any }";
+        let table = "{ fire: (string) -> (), instance: RemoteEvent?, on: (any) -> RBXScriptConnection, spec: any }";
         let message = format!("Key 'call' not found in table '{table}'");
 
         assert_eq!(
@@ -2009,7 +2016,7 @@ mod tests {
     /// not what the reader meant; a verb the remote has is, or nothing.
     #[test]
     fn a_remote_call_suggests_a_verb_over_the_calls_record() {
-        let table = "{ calls: RemoteCalls, call: (n: number) -> Future<number>, fire: (n: number) -> (), instance: Instance?, spec: any }";
+        let table = "{ calls: RemoteCalls, call: (n: number) -> Future<number>, fire: (n: number) -> (), instance: RemoteFunction?, spec: any }";
         let message = format!("Key 'cal' not found in table '{table}'");
 
         assert_eq!(
@@ -2018,7 +2025,7 @@ mod tests {
         );
 
         let event =
-            "{ calls: RemoteCalls, fire: (n: number) -> (), instance: Instance?, spec: any }";
+            "{ calls: RemoteCalls, fire: (n: number) -> (), instance: RemoteEvent?, spec: any }";
         let message = format!("Key 'cal' not found in table '{event}'");
 
         assert_eq!(
@@ -2783,7 +2790,7 @@ end
     #[test]
     fn a_remote_surface_reads_as_the_remote() {
         let known = crate::shapes::Known::default();
-        let message = "Key 'blast' not found in table '{ call: (Player, string) -> Future<any>, fire: (Player, string) -> (), instance: Instance?, spec: any }'";
+        let message = "Key 'blast' not found in table '{ call: (Player, string) -> Future<any>, fire: (Player, string) -> (), instance: RemoteFunction?, spec: any }'";
         assert_eq!(
             friendly_type_message(message, &known, Some("Toast.blast(\"x\")"), 1),
             "remote `Toast` has no `blast`"

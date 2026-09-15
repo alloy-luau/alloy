@@ -937,7 +937,7 @@ pub(crate) fn a_remote_typo_keeps_its_suggestion_and_its_fix() {
         "main()\n",
     );
     let (mut st, uri) = one_file(src);
-    let raw = "TypeError: Key 'fier' not found in table '{ calls: RemoteCalls, fire: (number, number) -> (), instance: Instance?, on: ((Player, number, number) -> ()) -> RBXScriptConnection, spec: RemoteSpec, wait: () -> Future<Player> }'";
+    let raw = "TypeError: Key 'fier' not found in table '{ calls: RemoteCalls, fire: (number, number) -> (), instance: RemoteEvent?, on: ((Player, number, number) -> ()) -> RBXScriptConnection, spec: RemoteSpec, wait: () -> Future<Player> }'";
     let mut d = json!({
         "range": { "start": { "line": 3, "character": 4 }, "end": { "line": 3, "character": 15 } },
         "severity": 1,

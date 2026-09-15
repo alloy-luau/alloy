@@ -2575,7 +2575,7 @@ mod tests {
 
     #[test]
     fn a_remote_reads_by_name_in_place() {
-        let text = "```luau\nlocal BuySaber: {\n    call: (id: string) -> Future<any>,\n    fire: (id: string) -> (),\n    fire_all: (id: string) -> (),\n    fire_except: (except: Player, id: string) -> (),\n    instance: Instance?,\n    on: (handler: (sender: Player, id: string) -> ()) -> RBXScriptConnection,\n    on_ratelimited: (handler: (player: Player) -> ()) -> (),\n    once: (handler: (sender: Player, id: string) -> ()) -> RBXScriptConnection,\n    spec: any,\n    wait: () -> Future<any>\n}\n```";
+        let text = "```luau\nlocal BuySaber: {\n    call: (id: string) -> Future<any>,\n    fire: (id: string) -> (),\n    fire_all: (id: string) -> (),\n    fire_except: (except: Player, id: string) -> (),\n    instance: RemoteFunction?,\n    on: (handler: (sender: Player, id: string) -> ()) -> RBXScriptConnection,\n    on_ratelimited: (handler: (player: Player) -> ()) -> (),\n    once: (handler: (sender: Player, id: string) -> ()) -> RBXScriptConnection,\n    spec: any,\n    wait: () -> Future<any>\n}\n```";
         assert_eq!(
             fold(text, &Known::default()),
             "```luau\nlocal BuySaber: Remote\n```"

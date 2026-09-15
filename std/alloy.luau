@@ -2590,7 +2590,7 @@ export type RemoteCalls = { { name: string, args: { n: number, [number]: any } }
 
 export type Remote = {
 	spec: RemoteSpec,
-	instance: Instance?,
+	instance: (RemoteEvent | UnreliableRemoteEvent | RemoteFunction)?,
 	calls: RemoteCalls,
 	fire: (...any) -> (),
 	fire_all: (...any) -> (),

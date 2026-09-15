@@ -2686,6 +2686,46 @@ fn a_declaration_parameter_list_asks_for_no_signature() {
     assert!(st.declared_signature_help(uri, 3, 5).is_some());
 }
 
+/// `@validate(` offers the validator of the remote under it as a
+/// snippet: the sender first, then the remote's parameters at their
+/// declared types. A declared parameter of a function type offers the
+/// same shape.
+#[test]
+fn an_attribute_argument_offers_a_function_snippet() {
+    let items = |src: &str, head: &str| -> Vec<Value> {
+        let at = src.rfind(head).expect("the head") + head.len();
+        let (st, uri) = one_file(src);
+        let ctx = context::detect(src, at).expect("an argument context");
+
+        st.context_items(uri, at, &ctx)
+    };
+
+    let src = "@validate(\nremote Pong(n: number, tag: string = \"x\") from client\n";
+    let found = items(src, "@validate(");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["label"], json!("function(sender, n, tag) ... end"));
+    assert_eq!(
+        found[0]["textEdit"]["newText"],
+        json!("function(sender: Player, n: number, tag: string)\n\t$0\nend")
+    );
+    assert_eq!(found[0]["insertTextFormat"], json!(2));
+    assert_eq!(found[0]["detail"], json!("the validator for Pong"));
+    assert!(
+        found[0]["documentation"]["value"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("A server-side predicate")),
+        "{found:?}"
+    );
+
+    let src = "attribute guard(check: (id: string) -> boolean) on function\n\n@guard(\nfunction f() end\n";
+    let found = items(src, "@guard(");
+    assert_eq!(found[0]["label"], json!("function(id) ... end"));
+    assert_eq!(
+        found[0]["textEdit"]["newText"],
+        json!("function(id: string)\n\t$0\nend")
+    );
+}
+
 /// An attribute use is a call: `@ratelimit(` answers with the shape
 /// the documentation writes, `@validate(` with the validator type the
 /// remote under it gives, and `@icon(` with its own declaration. An

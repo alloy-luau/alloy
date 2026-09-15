@@ -162,6 +162,34 @@ impl State {
                         items.push(item);
                     }
                 }
+
+                // `@validate(` takes the validator of the remote under
+                // it, and a parameter of a function type takes a
+                // function of that shape: one snippet, the way the
+                // child offers a handler to `Connect(`.
+                let function = match attr.as_str() {
+                    "validate" => remote_below(&doc.source, offset).map(|(name, params)| {
+                        (
+                            validator_params(&params),
+                            format!("the validator for {name}"),
+                            keywords::doc("@validate").and_then(doc_sentence),
+                        )
+                    }),
+
+                    _ => ty
+                        .filter(|t| t.contains("->"))
+                        .map(|t| (payload_types(t), format!("takes `{t}` for `@{attr}`"), None)),
+                };
+
+                if let Some((params, detail, doc_text)) = function {
+                    let names: Vec<&str> = params
+                        .iter()
+                        .map(|p| p.split_once(':').map_or(p.as_str(), |(n, _)| n).trim())
+                        .collect();
+                    let label = format!("function({}) ... end", names.join(", "));
+                    let insert = format!("function({})\n\t$0\nend", params.join(", "));
+                    items.push(snippet(&label, &insert, 15, &detail, doc_text, from));
+                }
             }
 
             Context::Macro { sigil, .. } => {
@@ -1993,4 +2021,14 @@ fn gap_params(gap: &alloy::desugar::ContractGap) -> String {
 
         false => gap.shape.clone(),
     }
+}
+
+/// The first sentence past the fence of a documentation entry.
+fn doc_sentence(text: &str) -> Option<String> {
+    text.rsplit("```")
+        .next()?
+        .trim()
+        .lines()
+        .next()
+        .map(str::to_string)
 }

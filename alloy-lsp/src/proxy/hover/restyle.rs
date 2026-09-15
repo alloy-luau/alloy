@@ -300,9 +300,11 @@ fn method_call_type(doc: &Doc, call: &str, offset: usize) -> Option<String> {
 }
 
 /// The type an argument is written with: a literal's, a name's
-/// annotation or `new`, or a declared function's head as `(A) -> R`.
-// ponytail: literals, annotated names, and function heads only; a
-// nested call or a field reads nothing, and the return stays unbound.
+/// annotation or `new`, a declared function's head as `(A) -> R`, or
+/// the declared return of a call of one, `g(1)`.
+// ponytail: literals, annotated names, function heads, and one call
+// deep; a field or a nested chain reads nothing, and the return stays
+// unbound.
 fn argument_type(doc: &Doc, arg: &str, offset: usize) -> Option<String> {
     if arg.parse::<f64>().is_ok() {
         return Some("number".to_string());
@@ -314,6 +316,31 @@ fn argument_type(doc: &Doc, arg: &str, offset: usize) -> Option<String> {
 
     if matches!(arg, "true" | "false") {
         return Some("boolean".to_string());
+    }
+
+    // `g(1)`: the declared return of the function, unless it names one
+    // of the function's own parameters, which the call alone does not
+    // bind.
+    if let Some((name, list)) = arg.split_once('(')
+        && list.ends_with(')')
+        && !name.is_empty()
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        let (head, _) = declaration_head(doc, name)?;
+        let spans = head_spans(head, name.len())?;
+        let (a, b) = spans.ret?;
+        let ret = head[a..b].trim();
+        let own = spans
+            .generics
+            .map(|(g, h)| head[g..h].trim_matches(['<', '>']).to_string())
+            .unwrap_or_default();
+        let unbound = own
+            .split(',')
+            .filter_map(|p| p.split(':').next())
+            .map(str::trim)
+            .any(|g| !g.is_empty() && mentions_word(ret, g));
+
+        return (!unbound).then(|| ret.to_string());
     }
 
     if arg.is_empty() || !arg.chars().all(|c| c.is_alphanumeric() || c == '_') {

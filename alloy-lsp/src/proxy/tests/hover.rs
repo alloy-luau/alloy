@@ -964,6 +964,36 @@ fn a_method_on_an_instantiated_struct_carries_the_instantiation() {
 }
 
 /*
+`a:map(g(1))`: the argument is a call, and the declared return of `g`,
+`(number) -> number`, binds the method's `U` the way a named function
+does, so the hint on `m` reads `Box<number>`. A call of a function the
+file does not declare binds nothing, and the hint stays as the child
+printed it.
+*/
+#[test]
+fn a_call_as_the_argument_of_a_generic_method_binds_its_return() {
+    let src = "struct Box<T> as\n    inner: T\nend\n\nimpl Box<T> as\n    function map<U>(self, f: (T) -> U): Box<U>\n        return new Box { inner = f(self.inner) }\n    end\nend\n\nfunction g(n: number): (number) -> number\n    return function(x)\n        return x + n\n    end\nend\n\nlocal a: Box<number> = new Box { inner = 1 }\nlocal m = a:map(g(1))\nlocal u = a:map(h(1))\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut hints = vec![
+        json!({
+            "kind": 1,
+            "label": ": Box",
+            "position": { "line": 17, "character": 7 },
+        }),
+        json!({
+            "kind": 1,
+            "label": ": Box",
+            "position": { "line": 18, "character": 7 },
+        }),
+    ];
+    clean_hints(&mut hints, doc);
+    assert_eq!(hint_label(&hints[0]), ": Box<number>");
+    assert_eq!(hints[0]["textEdits"][0]["newText"], ": Box<number>");
+    assert_eq!(hint_label(&hints[1]), ": Box");
+}
+
+/*
 `local function add(a, b)`: the solver names one type parameter per
 untyped parameter, and the letters say nothing. The signature reads as
 the source wrote it, the parameter hover drops the letter, and the

@@ -2033,3 +2033,87 @@ fn a_component_tag_is_a_site_of_its_function() {
         ]
     );
 }
+
+/// A receiver built by the struct's own `.new()` through a star alias,
+/// `local g = M.Gadget.new(5)`, is a `Gadget`, so references from the
+/// method's declaration reach `g:spin()`. The receiver reader took the
+/// value's head, `M`, and matched nothing.
+#[test]
+pub(crate) fn a_receiver_from_new_through_a_star_alias_is_a_method_use() {
+    let module = concat!(
+        "export struct Gadget as\n",
+        "    power: number\n",
+        "end\n",
+        "\n",
+        "impl Gadget as\n",
+        "    function new(power: number): Gadget\n",
+        "        return new Gadget { power = power }\n",
+        "    end\n",
+        "\n",
+        "    function spin(self): number\n",
+        "        return self.power * 2\n",
+        "    end\n",
+        "end\n",
+    );
+    let user = concat!(
+        "import * as M from \"./gadget\"\n",
+        "\n",
+        "local g = M.Gadget.new(5)\n",
+        "print(g:spin())\n",
+    );
+    let dir = std::env::temp_dir().join(format!("alloy-nav-star-new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (rel, src) in [("gadget.aly", module), ("use.aly", user)] {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            format!("file://{}", path.display()),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+    }
+
+    let edit = st.method_edits("Gadget", "spin", "spin").expect("edits");
+    let _ = std::fs::remove_dir_all(&dir);
+    let changes = edit["changes"].as_object().expect("changes");
+    let user_uri = format!("file://{}", dir.join("src/use.aly").display());
+
+    // The declaration in the module, and the call in the user.
+    assert_eq!(
+        changes
+            .get(&user_uri)
+            .map(|v| v.as_array().map_or(0, Vec::len)),
+        Some(1),
+        "{edit}"
+    );
+    assert_eq!(
+        changes
+            .values()
+            .map(|v| v.as_array().map_or(0, Vec::len))
+            .sum::<usize>(),
+        2,
+        "{edit}"
+    );
+}

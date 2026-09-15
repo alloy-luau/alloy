@@ -552,7 +552,9 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
 
             // `local s = new S { ... }`: the constructor names the type.
             // A namespace member reads `new Ns.S { ... }`, where the
-            // type is the last word of the path.
+            // type is the last word of the path. `S.new(...)` names it
+            // the same way, under a star alias or not: `M.Gadget.new(5)`
+            // is a `Gadget`.
             context::Declared::Init(v) => match v.trim().strip_prefix("new ") {
                 Some(rest) => rest
                     .trim_start()
@@ -560,7 +562,18 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
                     .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
                     .collect(),
 
-                None => alloy::docs::value_head(&v)?,
+                None => match v.trim().split_once(".new(") {
+                    Some((path, _))
+                        if !path.is_empty()
+                            && path
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_' || c == '.') =>
+                    {
+                        path.to_string()
+                    }
+
+                    _ => alloy::docs::value_head(&v)?,
+                },
             },
         },
     };

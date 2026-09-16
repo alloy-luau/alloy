@@ -394,17 +394,28 @@ impl Server {
         let result = match method {
             "textDocument/hover" => match markup::hover_spot(&doc.source, offset) {
                 Some(spot) => {
-                    let member = match &spot {
-                        markup::Spot::Tag { name } if name.contains('.') => {
-                            let path: Vec<&str> = name.split('.').collect();
+                    // A dotted tag names a member, and the module an
+                    // import brings the component from says where it
+                    // is bound.
+                    let (member, from) = match &spot {
+                        markup::Spot::Tag { name } => {
+                            let member = name
+                                .contains('.')
+                                .then(|| {
+                                    let path: Vec<&str> = name.split('.').collect();
 
-                            components::member_at(&doc.source, &path, &load)
+                                    components::member_at(&doc.source, &path, &load)
+                                })
+                                .flatten();
+
+                            (member, markup::component_module(&doc.source, name, &load))
                         }
 
-                        _ => None,
+                        _ => (None, None),
                     };
 
-                    markup::hover(&spot, &bound, member.as_ref()).unwrap_or(Value::Null)
+                    markup::hover(&spot, &bound, member.as_ref(), from.as_deref())
+                        .unwrap_or(Value::Null)
                 }
 
                 None => return false,

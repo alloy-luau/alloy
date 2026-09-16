@@ -397,11 +397,10 @@ pub fn component_props(src: &str, name: &str) -> Vec<Field> {
         .collect()
 }
 
-/// The source that declares the component a tag names: `None` when this
-/// file declares it, and otherwise the module an import brings it from.
-/// The module declares the component under its own name, so a tag that
-/// reads an import's alias finds nothing.
-pub fn component_source(src: &str, name: &str, load: &Load) -> Option<String> {
+/// The module spec that declares the component a tag names: `None` when
+/// this file declares it. The module declares the component under its
+/// own name, so a tag that reads an import's alias finds nothing.
+pub fn component_module(src: &str, name: &str, load: &Load) -> Option<String> {
     let last = name.rsplit('.').next()?;
 
     if roblox::is_class(last) {
@@ -419,8 +418,13 @@ pub fn component_source(src: &str, name: &str, load: &Load) -> Option<String> {
 
     specs
         .into_iter()
-        .filter_map(|spec| load(&spec))
-        .find(|text| text.contains(&head))
+        .find(|spec| load(spec).is_some_and(|text| text.contains(&head)))
+}
+
+/// The source that declares the component a tag names: `None` when this
+/// file declares it, and otherwise the module an import brings it from.
+pub fn component_source(src: &str, name: &str, load: &Load) -> Option<String> {
+    load(&component_module(src, name, load)?)
 }
 
 /// The fields the type `name` declares in `src`: a `type` alias over a
@@ -747,23 +751,32 @@ fn chain(class: &str) -> Vec<&'static str> {
 }
 
 /// Hover text for a spot, when there is something to say. `member` is
-/// what a dotted tag name resolves to, when it resolves.
-pub fn hover(spot: &Spot, bound: &HashSet<String>, member: Option<&Member>) -> Option<Value> {
+/// what a dotted tag name resolves to, when it resolves. `from` is the
+/// module that declares the component, when another file declares it.
+pub fn hover(
+    spot: &Spot,
+    bound: &HashSet<String>,
+    member: Option<&Member>,
+    from: Option<&str>,
+) -> Option<Value> {
     let text = match spot {
         Spot::Tag { name } => {
-            if let Some(m) = member.filter(|_| name.contains('.')) {
+            // A tag stands on a function, so a dotted name that reaches
+            // one is a component and reads like a plain one.
+            let component = member.is_some_and(|m| m.detail == "function")
+                || bound.contains(name.split('.').next().unwrap_or(name));
+
+            if let Some(m) = member.filter(|m| name.contains('.') && m.detail != "function") {
                 let holder = name.rsplit_once('.').map(|(h, _)| h).unwrap_or(name);
                 let code = m
                     .signature
                     .clone()
                     .unwrap_or_else(|| format!("{holder}.{}", m.name));
-                let stands = match m.detail.as_str() {
-                    "function" => "a function. The tag calls it as a component.".to_string(),
 
-                    other => format!("a {other}. A tag stands on a function."),
-                };
-
-                format!("```alloy\n{code}\n```\n`{holder}.{}`: {stands}", m.name)
+                format!(
+                    "```alloy\n{code}\n```\n`{holder}.{}`: a {}. A tag stands on a function.",
+                    m.name, m.detail
+                )
             } else if roblox::is_class(name) {
                 let props = roblox::properties(name).count();
                 let events = roblox::events(name).count();
@@ -777,8 +790,14 @@ pub fn hover(spot: &Spot, bound: &HashSet<String>, member: Option<&Member>) -> O
                 format!(
                     "```alx\n<{name}>\n```\nRoblox class `{name}`.{extends}\n\n{props} properties, {events} events."
                 )
-            } else if bound.contains(name.split('.').next().unwrap_or(name)) {
-                format!("```alx\n<{name}>\n```\nComponent bound in this file.")
+            } else if component {
+                let home = match from {
+                    Some(spec) => format!("Component from `{spec}`."),
+
+                    None => "Component bound in this file.".to_string(),
+                };
+
+                format!("```alx\n<{name}>\n```\n{home}")
             } else {
                 let hint = roblox::closest_class(name)
                     .map(|c| format!(" Did you mean `{c}`?"))
@@ -1156,6 +1175,7 @@ mod tests {
             },
             &HashSet::new(),
             None,
+            None,
         )
         .unwrap();
         assert!(
@@ -1310,10 +1330,29 @@ mod tests {
         assert!(items.iter().any(|i| i["label"] == "Frame"));
     }
 
-    /// A dotted tag hovers as the member it names, with the line the
-    /// source writes for it.
+    /// A dotted tag that names a member which is not a function hovers
+    /// as that member, since a tag calls what it stands on.
     #[test]
     fn a_dotted_tag_hovers_as_its_member() {
+        let value = hover(
+            &Spot::Tag {
+                name: "Lib.Widgets".into(),
+            },
+            &HashSet::new(),
+            Some(&member("Widgets", 9, "namespace")),
+            None,
+        )
+        .expect("hover");
+        let text = value["contents"]["value"].as_str().unwrap_or("");
+
+        assert!(text.contains("a namespace"), "{text}");
+        assert!(!text.contains("__alloy"), "{text}");
+    }
+
+    /// A dotted tag on a function hovers as a tag, like a plain
+    /// component. The sentence says where the component is bound.
+    #[test]
+    fn a_dotted_tag_on_a_function_hovers_as_a_component() {
         let mut found = member("component", 3, "function");
         found.signature = Some("function component()".to_string());
 
@@ -1323,26 +1362,29 @@ mod tests {
             },
             &HashSet::new(),
             Some(&found),
+            None,
         )
         .expect("hover");
-        let text = value["contents"]["value"].as_str().unwrap_or("");
 
-        assert!(text.contains("function component()"), "{text}");
-        assert!(text.contains("`Scope.component`"), "{text}");
-        assert!(!text.contains("__alloy"), "{text}");
+        assert_eq!(
+            value["contents"]["value"].as_str().unwrap_or(""),
+            "```alx\n<Scope.component>\n```\nComponent bound in this file."
+        );
 
-        // A member that is not a function says so, since a tag calls it.
         let value = hover(
             &Spot::Tag {
-                name: "Lib.Widgets".into(),
+                name: "W.Widgets.button".into(),
             },
             &HashSet::new(),
-            Some(&member("Widgets", 9, "namespace")),
+            Some(&member("button", 3, "function")),
+            Some("./widgets"),
         )
         .expect("hover");
-        let text = value["contents"]["value"].as_str().unwrap_or("");
 
-        assert!(text.contains("a namespace"), "{text}");
+        assert_eq!(
+            value["contents"]["value"].as_str().unwrap_or(""),
+            "```alx\n<W.Widgets.button>\n```\nComponent from `./widgets`."
+        );
     }
 
     /// A tag inside a `{ }` hole has no element in the tree, so its
@@ -1365,6 +1407,7 @@ mod tests {
                 name: "key".into(),
             },
             &HashSet::new(),
+            None,
             None,
         )
         .expect("hover");

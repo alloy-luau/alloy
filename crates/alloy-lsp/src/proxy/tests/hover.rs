@@ -1626,3 +1626,46 @@ fn a_const_table_hovers_as_its_record_at_the_declaration() {
     assert!(text.contains("default: number"), "{text}");
     assert!(!text.contains("typeof("), "{text}");
 }
+
+/// A key of a table literal a `const` binds hovers as the entry the
+/// child printed for it in the record of the binding: nested keys, and
+/// a key whose value is a plain literal. A key inside a call's
+/// argument belongs to no entry of the binding.
+#[test]
+fn a_key_of_a_const_table_hovers_as_its_entry() {
+    let src = "export const SCHEMA = {\n  stats = {\n    strength = Scribe.Int(0, { Min = 0 }),\n  },\n  x = 1,\n}\n";
+    let printed = "```alloy\nexport const SCHEMA: {\n    stats: {\n        strength: {\n            default: number,\n            kind: \"int\"\n        }\n    },\n    x: number\n}\n```";
+    let path = |line: u32, character: u32| {
+        let Caret { offset, .. } = Caret::at(src, line, character).expect("word");
+
+        literal_key(src, offset)
+    };
+    let name = src.find("SCHEMA").expect("name");
+    let strength = path(2, 4).expect("strength");
+    let stats = path(1, 2).expect("stats");
+    let x = path(4, 2).expect("x");
+
+    assert_eq!(
+        strength,
+        (name, vec!["stats".to_string(), "strength".to_string()])
+    );
+    assert_eq!(stats.1, vec!["stats".to_string()]);
+    assert_eq!(x.1, vec!["x".to_string()]);
+    assert_eq!(path(2, 31), None);
+    assert_eq!(path(0, 13), None);
+    assert_eq!(
+        record_entry(printed, &strength.1).as_deref(),
+        Some("```alloy\nstrength: {\n    default: number,\n    kind: \"int\"\n}\n```")
+    );
+    assert_eq!(
+        record_entry(printed, &stats.1).as_deref(),
+        Some(
+            "```alloy\nstats: {\n    strength: {\n        default: number,\n        kind: \"int\"\n    }\n}\n```"
+        )
+    );
+    assert_eq!(
+        record_entry(printed, &x.1).as_deref(),
+        Some("```alloy\nx: number\n```")
+    );
+    assert_eq!(record_entry(printed, &["y".to_string()]), None);
+}

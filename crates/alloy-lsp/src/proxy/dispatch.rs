@@ -652,6 +652,18 @@ impl Server {
                     return true;
                 }
 
+                // A key of a table literal: the child reads it as a
+                // string and answers its byte count. At the binding it
+                // prints the whole record, and the response takes the
+                // key's entry out of that.
+                if m == "textDocument/hover"
+                    && let Some(home) = self.literal_key_home(&uri, &message)
+                {
+                    self.forward_request_at(message, method.as_deref(), home);
+
+                    return true;
+                }
+
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
                     && self.context_completion(&uri, &message, &id)
@@ -1235,11 +1247,35 @@ impl Server {
                                 text = optional;
                             }
 
+                            // A key of a table literal asked at its
+                            // binding: the entry the key names is the
+                            // hover, and a record with no such entry
+                            // says nothing about the key.
+                            let key_path = literal_key_path(doc, line, character);
+                            let key_entry = key_path
+                                .as_deref()
+                                .and_then(|path| record_entry(&text, path));
+                            let key_missing = key_path.is_some() && key_entry.is_none();
+
+                            if let Some(entry) = key_entry
+                                && let Some(Caret { start, end, .. }) =
+                                    Caret::at(&doc.source, line, character)
+                            {
+                                let (sl, sc) = position_of(&doc.source, start);
+                                let (el, ec) = position_of(&doc.source, end);
+                                text = entry;
+                                result["range"] = json!({
+                                    "start": { "line": sl, "character": sc },
+                                    "end": { "line": el, "character": ec }
+                                });
+                            }
+
                             // `type Player = Player` restates the token
                             // under the cursor and says nothing, and
                             // `string (5 bytes)` measures the key the
                             // emit wrote, not the name the source has.
-                            let says_nothing = restates_itself(&text)
+                            let says_nothing = key_missing
+                                || restates_itself(&text)
                                 || invents_a_type(&text, doc)
                                 || lowers_a_block(&text, doc, line, character)
                                 || (is_byte_count(&text) && names_a_key(doc, line, character));

@@ -679,3 +679,133 @@ pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) 
 
     Some(out)
 }
+
+impl Server {
+    /// The shadow position of the binding a key of a table literal
+    /// belongs to. The child reads the key as a string and answers its
+    /// byte count; at the binding it prints the whole record, and the
+    /// response takes the key's entry out of it.
+    pub(crate) fn literal_key_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
+        if !is_alloy_uri(uri) {
+            return None;
+        }
+
+        let (line, character) = position_of_message(message)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+        let Caret { offset, .. } = Caret::at(&doc.source, line, character)?;
+        let (at, _) = literal_key(&doc.source, offset)?;
+        let (l, c) = position_of(&doc.source, at);
+
+        Some(doc.to_shadow(l, c))
+    }
+}
+
+/// The binding a key of a table literal belongs to, and the keys down
+/// to it: `strength` in `const S = { stats = { strength = 1 } }` gives
+/// the offset of `S` and `["stats", "strength"]`. The literal is the
+/// value of a top-level `local` or `const`; a key inside a call's
+/// argument or a nested computed key names no entry of the binding.
+pub(crate) fn literal_key(source: &str, offset: usize) -> Option<(usize, Vec<String>)> {
+    use alloy_syntax::ast::{Expr, Stmt, TableField, TokSpan};
+
+    let parsed = alloy_syntax::parse_lenient(source, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let bytes = |span: TokSpan| {
+        let first = toks.get(span.start as usize)?;
+        let last = toks.get(span.end.checked_sub(1)? as usize)?;
+
+        Some(first.start as usize..last.end as usize)
+    };
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Local(l) = stmt.under_default() else {
+            continue;
+        };
+        let (Some(binding), Some(Expr::Table { fields, span }), 1) =
+            (l.names.first(), l.values.first(), l.names.len())
+        else {
+            continue;
+        };
+
+        if !bytes(*span)?.contains(&offset) {
+            continue;
+        }
+
+        let at = bytes(binding.name)?.start;
+        let mut path = Vec::new();
+        let mut fields = fields;
+
+        loop {
+            let mut next = None;
+
+            for field in fields {
+                let TableField::Named { name, value } = field else {
+                    continue;
+                };
+                let key = source[bytes(*name)?].to_string();
+
+                if bytes(*name)?.contains(&offset) {
+                    path.push(key);
+
+                    return Some((at, path));
+                }
+
+                if let Expr::Table { fields, span } = value
+                    && bytes(*span)?.contains(&offset)
+                {
+                    next = Some((key, fields));
+                }
+            }
+
+            let (key, inner) = next?;
+            path.push(key);
+            fields = inner;
+        }
+    }
+
+    None
+}
+
+/// The keys down to the literal key under the caret, or nothing when
+/// the caret is on no such key.
+pub(crate) fn literal_key_path(doc: &Doc, line: u32, character: u32) -> Option<Vec<String>> {
+    let Caret { offset, .. } = Caret::at(&doc.source, line, character)?;
+
+    literal_key(&doc.source, offset).map(|(_, path)| path)
+}
+
+/// One entry of the record a hover prints, by its path of keys:
+/// `strength: { default: number, kind: "int" }` out of the print of
+/// the whole table. A nested record keeps the child's lines, moved
+/// left to the key's own column.
+pub(crate) fn record_entry(text: &str, path: &[String]) -> Option<String> {
+    let (fence, rest) = text.split_once('\n')?;
+    let (body, tail) = rest.split_once("\n```")?;
+    let mut record = body.to_string();
+    let mut ty = String::new();
+
+    for key in path {
+        let field = crate::context::record_entries(&record)
+            .into_iter()
+            .find(|f| f.name == *key)?;
+        ty = field.ty;
+        record = ty.clone();
+    }
+
+    // The closing brace sits at the key's column: its indent is the
+    // one every line after the first moves left by.
+    let indent = ty
+        .lines()
+        .last()
+        .map_or(0, |l| l.len() - l.trim_start().len());
+    let mut lines = ty.lines();
+    let mut out = format!("{}: {}", path.last()?, lines.next()?);
+
+    for line in lines {
+        out.push('\n');
+        out.push_str(line.get(indent..).unwrap_or(line.trim_start()));
+    }
+
+    Some(format!("{fence}\n{out}\n```{tail}"))
+}

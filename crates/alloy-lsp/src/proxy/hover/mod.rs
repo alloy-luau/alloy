@@ -13,8 +13,9 @@ pub(crate) use declarations::{
 };
 pub(crate) use fields::{
     declared_field_hover, declared_field_owner, declared_parameter_hover,
-    declared_type_parameters_of, field_key, foreign_method_hover, function_name_of, receiver_type,
-    remote_parameter_hover, used_field_hover, used_field_owner,
+    declared_type_parameters_of, field_key, foreign_method_hover, function_name_of, literal_key,
+    literal_key_path, receiver_type, record_entry, remote_parameter_hover, used_field_hover,
+    used_field_owner,
 };
 pub(crate) use members::{attach_std_member_docs, std_member_hover, std_receiver};
 pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};

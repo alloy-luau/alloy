@@ -512,6 +512,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         member_names: HashMap::new(),
         ns_stack: Vec::new(),
         ns_export: false,
+        ns_test: false,
         ns_force_local: false,
         export_listed: HashSet::new(),
         export_listed_types: HashSet::new(),
@@ -1129,6 +1130,10 @@ struct Desugar<'s> {
     /// The namespace under render exports, so its type members carry
     /// `export` and another module can name them.
     ns_export: bool,
+    /// A `@test` reaches the namespace under render, so each of its
+    /// public functions is a test. The flag travels into a public
+    /// nested namespace and stops at a private member.
+    ns_test: bool,
     /// Every bare type name a type span holds, as the parser read them.
     /// A namespace's type renders under its own name, so the copy has
     /// to know where each name sits.

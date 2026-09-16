@@ -102,9 +102,9 @@ fn head_name(src: &str, toks: &[Tok], e: &Expr) -> Option<(String, bool)> {
     Some((first.text(src).to_string(), plain))
 }
 
-/// Whether a namespace holds a `@test`, at any depth. Such a namespace
-/// is a test of the file: the emit puts each member on the table, so the
-/// spec calls the test by its path.
+/// Whether a namespace holds a `@test`, at any depth, or carries one
+/// itself. Such a namespace is a test of the file: the emit puts each
+/// member on the table, so the spec calls the test by its path.
 fn namespace_has_test(src: &str, toks: &[Tok], ns: &alloy_syntax::ast::NamespaceDecl) -> bool {
     let tested = |attrs: &[alloy_syntax::ast::Attr]| {
         attrs.iter().any(|a| {
@@ -112,6 +112,12 @@ fn namespace_has_test(src: &str, toks: &[Tok], ns: &alloy_syntax::ast::Namespace
                 .is_some_and(|n| toks[n.start as usize].text(src) == "test")
         })
     };
+
+    // `@test namespace Suite as ... end`: every public function of the
+    // group is a test, so the whole group joins the spec.
+    if tested(&ns.attributes) {
+        return true;
+    }
 
     ns.members.iter().any(|m| match &m.stmt {
         Stmt::Function(f) => tested(&f.attrs),
@@ -1164,6 +1170,73 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Suite.ns_case = Suite_ns_case"), "{text}");
+    }
+
+    /// `@test` on the group makes every public function of it a test.
+    /// A private member and a member that binds no function stay out,
+    /// a member with its own `@test` registers once, and the flag
+    /// reaches a public nested namespace.
+    #[test]
+    fn a_test_namespace_registers_each_public_function() {
+        let src = "@test
+namespace Suite as
+    const LIMIT = 4
+
+    private function helper(n: number): number
+        return n * 2
+    end
+
+    function plain()
+        $assert_eq(helper(2), LIMIT)
+    end
+
+    @test
+    function marked()
+        $assert(true)
+    end
+
+    namespace Inner as
+        function deep()
+            $assert(true)
+        end
+    end
+
+    private namespace Hidden as
+        function skipped()
+            $assert(true)
+        end
+    end
+end
+";
+        let (text, diagnostics, count) = spec(
+            &Config::default(),
+            Path::new("/none"),
+            Path::new("src/m.aly"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(count, 3);
+        assert!(
+            text.contains("__lest.it(\"Suite.plain\", Suite.plain)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("__lest.it(\"Suite.marked\", Suite.marked)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("__lest.it(\"Suite.Inner.deep\", Suite.Inner.deep)"),
+            "{text}"
+        );
+        // A private member, a member that binds no function, and a
+        // private nested namespace register nothing.
+        assert!(!text.contains("__lest.it(\"Suite.helper"), "{text}");
+        assert!(!text.contains("__lest.it(\"Suite.LIMIT"), "{text}");
+        assert!(!text.contains("__lest.it(\"Suite.Hidden"), "{text}");
     }
 
     /// `$assert` lowers to the Luau `assert`, so the body needs nothing

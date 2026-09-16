@@ -39,7 +39,11 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
 
         "deprecated" => &["function", "namespace"],
 
-        "test" | "native" | "checked" | "inline" | "noinline" => &["function"],
+        // `@test` on a namespace makes every public function of the
+        // group a test, nested public namespaces included.
+        "test" => &["function", "namespace"],
+
+        "native" | "checked" | "inline" | "noinline" => &["function"],
 
         "unreliable" | "ratelimit" | "timeout" | "validate" | "immediate" => &["remote"],
 

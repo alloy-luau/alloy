@@ -11,7 +11,9 @@
 //! and the closing `end` carry the generated text, and a member renders
 //! where it stands.
 
-use alloy_syntax::ast::{Block, ImportKind, NamespaceDecl, NamespaceMember, Stmt, TokSpan};
+use alloy_syntax::ast::{
+    Attr, Block, FunctionBody, ImportKind, NamespaceDecl, NamespaceMember, Stmt, TokSpan,
+};
 
 use super::Desugar;
 
@@ -884,6 +886,21 @@ impl<'s> Desugar<'s> {
             scope: self.scope_depth(),
         });
         let saved_export = self.ns_export;
+        // `@test` on the group makes every public function of it a
+        // test. The flag reaches a public nested namespace too, since
+        // the group means "everything public here is a test". A group
+        // of tests holds nothing the game runs, so the ship artifact
+        // keeps none of it.
+        let saved_test = self.ns_test;
+
+        if has_attr(self, &ns.attributes, "test") {
+            self.ns_test = true;
+
+            if !self.options.tests {
+                self.ship_blanks.push((start, self.byte_end(ns.span)));
+            }
+        }
+
         // A member exports nothing on its own; the group carries the
         // export. `check_member_exports` reports the `export` word.
         let mark = self.exports.len();
@@ -897,6 +914,7 @@ impl<'s> Desugar<'s> {
         }
 
         self.ns_export = saved_export;
+        self.ns_test = saved_test;
         self.ns_stack.pop();
         self.exports.truncate(mark);
         self.copy(cursor, end_tok.start);
@@ -925,9 +943,14 @@ impl<'s> Desugar<'s> {
         let span = m.span;
         let start = self.byte_start(span);
         let stmt_start = self.byte_start(m.stmt.span());
+        let private = m.is_private(self.src, self.toks);
         // A private member stays inside the module, whatever the
         // namespace does.
-        self.ns_export = info.exported && !m.is_private(self.src, self.toks);
+        self.ns_export = info.exported && !private;
+        // A private member is no test, and a `@test` on the group does
+        // not reach into it.
+        let saved_test = self.ns_test;
+        self.ns_test = self.ns_test && !private;
 
         // `private` and `public` are Alloy's; Luau reads none of them.
         if start < stmt_start {
@@ -1009,7 +1032,27 @@ impl<'s> Desugar<'s> {
         // private one stays a local, so `Math.helper` finds nothing at
         // run time either.
         let mut tail = String::new();
-        let private = m.is_private(self.src, self.toks);
+
+        // `@test` on the group registers each public function of it.
+        // A member that carries its own `@test` registers through the
+        // attribute, so the group leaves it alone.
+        if self.ns_test
+            && let Some((name, body, attrs)) = member_function(m.stmt.under_default())
+            && !has_attr(self, attrs, "test")
+        {
+            let path = format!("{}.{}", info.path, self.text_of(name));
+            let rendered = self.decl_name(name);
+            self.test_names
+                .push((path.clone(), body.is_async.is_some()));
+
+            if !self.options.tests {
+                let std = self.std();
+                tail.push_str(&format!(
+                    " {std}.test({}, {rendered})",
+                    super::luau_string(&path)
+                ));
+            }
+        }
 
         for b in member_bindings(m, self.src, self.toks) {
             if !b.value || b.nested || private {
@@ -1034,6 +1077,28 @@ impl<'s> Desugar<'s> {
             };
             self.generate(self.byte_end(span), &text);
         }
+
+        self.ns_test = saved_test;
+    }
+}
+
+/// Whether an attribute list holds `name`.
+fn has_attr(d: &Desugar<'_>, attrs: &[Attr], name: &str) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.name.is_some_and(|n| d.text_of(n) == name))
+}
+
+/// A namespace member that declares a function, as its name, its body
+/// and its attributes. A dotted path names a member of another value,
+/// and every other statement is no function.
+fn member_function(stmt: &Stmt) -> Option<(TokSpan, &FunctionBody, &[Attr])> {
+    match stmt {
+        Stmt::Function(f) if f.path.len() == 1 => Some((f.path[0], &f.body, f.attrs.as_slice())),
+
+        Stmt::LocalFunction(f) => Some((f.name, &f.body, f.attrs.as_slice())),
+
+        _ => None,
     }
 }
 

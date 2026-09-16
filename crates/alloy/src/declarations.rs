@@ -1703,7 +1703,7 @@ fn struct_fields_of(
                 .map(|f| {
                     (
                         text(f.name),
-                        f.default.is_some(),
+                        field_can_stay_unset(&text(f.ty), f.default.is_some()),
                         f.visibility.is_some_and(|v| text(v) == "private"),
                     )
                 })
@@ -1736,10 +1736,19 @@ fn struct_fields_of(
     }
 }
 
+/// Whether a field can stay unset in `new Name { }`: it carries a
+/// default, or its type takes `nil`. `number?` and `nil | number` both
+/// read as optional; a missing key is `nil` at run time either way.
+pub fn field_can_stay_unset(ty: &str, has_default: bool) -> bool {
+    let ty = ty.trim();
+
+    has_default || ty.ends_with('?') || ty.split('|').any(|part| part.trim() == "nil")
+}
+
 /// Every struct a source declares, with each field and whether it
-/// carries a default. `new Name { }` needs a value for every field
-/// without one, so the check of a construction of a struct another
-/// module declares reads this.
+/// can stay unset. `new Name { }` needs a value for every field
+/// without a default or a `nil` in its type, so the check of a
+/// construction of a struct another module declares reads this.
 pub fn struct_field_defaults(src: &str) -> Vec<(String, Vec<(String, bool)>)> {
     struct_fields_by_name(src)
         .into_iter()

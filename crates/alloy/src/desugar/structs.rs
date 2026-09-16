@@ -1487,7 +1487,15 @@ impl<'s> Desugar<'s> {
         let fields = st
             .fields
             .iter()
-            .map(|f| (self.text_of(f.name).to_string(), f.default.is_some()))
+            .map(|f| {
+                (
+                    self.text_of(f.name).to_string(),
+                    crate::declarations::field_can_stay_unset(
+                        self.text_of(f.ty),
+                        f.default.is_some(),
+                    ),
+                )
+            })
             .collect();
         self.structs.insert(name.clone());
 
@@ -2494,6 +2502,19 @@ mod tests {
 
         let whole = messages("import { Box } from \"./box\"\n\nprint(new Box { label = \"a\" })\n");
         assert!(whole.is_empty(), "{whole:?}");
+    }
+
+    #[test]
+    fn an_optional_field_can_stay_unset() {
+        let src = "struct Health as\n    current: number\n    last_hit: number?\n    note: nil | string\nend\n\nlocal h = new Health { current = 1 }\n";
+        let messages: Vec<String> = crate::compile_with(src, &Default::default())
+            .unwrap()
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+
+        assert_eq!(messages, Vec::<String>::new());
     }
 
     /// The fields form on an imported struct reads every check the

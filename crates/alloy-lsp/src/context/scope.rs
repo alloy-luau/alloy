@@ -276,6 +276,34 @@ fn top_assign(text: &str) -> Option<usize> {
     None
 }
 
+/// The names a `match` head writes with `as`: `match a as left, b as
+/// right with` names two. The alias belongs to the block the head
+/// opens, so every arm, every guard, and the `default` read it, and
+/// the `end` takes it back.
+fn match_aliases(line: &str) -> Vec<Local> {
+    let words = words_at(line);
+    let Some(start) = words
+        .iter()
+        .position(|(at, w)| *w == "match" && alloy_syntax::contextual::keyword_at_byte(line, *at))
+    else {
+        return Vec::new();
+    };
+    // The head ends at its `with`; past that the arms begin.
+    let end = words[start..]
+        .iter()
+        .position(|(_, w)| *w == "with")
+        .map_or(words.len(), |i| start + i);
+
+    (start + 1..end.saturating_sub(1))
+        .filter(|i| words[*i].1 == "as")
+        .map(|i| Local {
+            name: words[i + 1].1.to_string(),
+            annotation: None,
+            kind: LocalKind::Variable,
+        })
+        .collect()
+}
+
 /// The names one line binds, each with the block it belongs to.
 fn bindings_of(line: &str) -> Vec<(Local, Bind)> {
     let mut out: Vec<(Local, Bind)> = Vec::new();
@@ -305,6 +333,9 @@ fn bindings_of(line: &str) -> Vec<(Local, Bind)> {
             .map(|l| (l, Bind::Inner))
             .collect();
     }
+
+    // `match e as name with` names the value under match.
+    out.extend(match_aliases(line).into_iter().map(|l| (l, Bind::Inner)));
 
     // Every `function` on the line: the name it declares and the
     // parameters its list holds.
@@ -559,6 +590,34 @@ mod tests {
         assert!(!names.contains(&"doubled".to_string()), "{names:?}");
         // A name the caret's own line declares is not bound yet.
         assert!(!names.contains(&"kind".to_string()), "{names:?}");
+    }
+
+    /// `match e as name with` names the value for every arm. The
+    /// scope left the name out, so the list that hides a constructor
+    /// on a value read the alias as a type.
+    #[test]
+    fn a_match_head_binds_its_alias() {
+        let src = concat!(
+            "local function f(a: number, b: number): number\n",
+            "    match a as left, b as right with\n",
+            "        case 0, 0 then\n",
+            "            print(|)\n",
+            "        default\n",
+            "            return 0\n",
+            "    end\n",
+            "    return 1\n",
+            "end\n",
+        );
+        let names = scope_at(src);
+        assert!(names.contains(&"left".to_string()), "{names:?}");
+        assert!(names.contains(&"right".to_string()), "{names:?}");
+
+        // The `default` reads it too, and the `end` takes it back.
+        let after = src.replace("print(|)", "print()").replace("return 1", "|");
+        assert!(!scope_at(&after).contains(&"left".to_string()));
+
+        // A local named `match` opens no head.
+        assert!(!scope_at("local match = 1\nprint(|)\n").contains(&"as".to_string()));
     }
 
     /// A pattern local binds every name its brackets hold.

@@ -635,8 +635,11 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             || (matches!(head_words.first(), Some(&"export") | Some(&"global"))
                 && head_words.get(1) == Some(&"type"));
 
-        if matches!(last, "satisfies" | "is" | "extends" | "impl")
-            || (last == "for" && head_words.first() == Some(&"impl"))
+        // `impl |X` names a type. `attribute p on impl |` writes the
+        // same word as a target, and the statement head tells the two
+        // apart.
+        if matches!(last, "satisfies" | "is" | "extends")
+            || (matches!(last, "impl" | "for") && head_words.first() == Some(&"impl"))
             || (last == "not" && second == Some("is"))
             || (last == "=" && type_decl && head_words.len() == 3)
         {
@@ -879,6 +882,22 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             let after = &rest_head[i + " on".len()..];
 
             if after.is_empty() || after.starts_with(' ') {
+                // A target word stands complete, so the `as` of the
+                // contract body comes next. A comma asks for one more
+                // target instead.
+                let last = after
+                    .trim_end()
+                    .rsplit([' ', ','])
+                    .next()
+                    .unwrap_or_default();
+
+                if after.ends_with(' ') && alloy_syntax::ATTRIBUTE_TARGETS.contains(&last) {
+                    return Some(Context::DeclarationAs {
+                        prefix: prefix.to_string(),
+                        interface: false,
+                    });
+                }
+
                 return Some(Context::AttributeTarget {
                     prefix: prefix.to_string(),
                 });
@@ -1634,6 +1653,38 @@ mod tests {
             })
         );
         assert_eq!(at("enum |"), None);
+    }
+
+    /// An attribute closes its header with `as` too, and the contract
+    /// body opens there. A comma asks for one more target instead.
+    #[test]
+    fn an_attribute_header_wants_as_after_the_targets() {
+        assert_eq!(
+            at("attribute provider(l: string[]) on impl |"),
+            Some(Context::DeclarationAs {
+                prefix: String::new(),
+                interface: false
+            })
+        );
+        assert_eq!(
+            at("export attribute tag() on struct, field a|"),
+            Some(Context::DeclarationAs {
+                prefix: "a".to_string(),
+                interface: false
+            })
+        );
+        assert_eq!(
+            at("attribute tag() on struct, |"),
+            Some(Context::AttributeTarget {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("attribute tag() on |"),
+            Some(Context::AttributeTarget {
+                prefix: String::new()
+            })
+        );
     }
 
     /// `impl` and `trait` close their header with `as` too.

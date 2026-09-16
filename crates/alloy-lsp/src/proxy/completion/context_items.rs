@@ -1112,7 +1112,7 @@ impl State {
                     "as",
                     14,
                     Some(
-                        "Opens the body: the fields of a struct, the variants of an enum, the methods of an `impl` or a `trait`."
+                        "Opens the body: the fields of a struct, the variants of an enum, the methods of an `impl` or a `trait`. An attribute opens its `requires` clauses with it."
                             .to_string(),
                     ),
                     offset - prefix.len(),

@@ -78,9 +78,11 @@ fn after_a_type_word(head: &str) -> bool {
     let words: Vec<&str> = head.split_whitespace().collect();
 
     match words.last().copied() {
-        Some("satisfies" | "is" | "extends" | "impl") => true,
+        Some("satisfies" | "is" | "extends") => true,
 
-        Some("for") => words.first() == Some(&"impl"),
+        // `attribute p on impl ` and `attribute p on struct, impl `
+        // write the word as a target, where no type goes.
+        Some("impl" | "for") => words.first() == Some(&"impl"),
 
         _ => false,
     }

@@ -547,7 +547,7 @@ pub fn complete(offset: u32) -> String {
 
             Context::DeclarationAs { prefix, interface } => {
                 let from = offset - prefix.len();
-                items.push(word("as", "keyword", Some("Opens the body: the fields of a struct, the variants of an enum, the methods of an `impl` or a `trait`.".to_string()), from));
+                items.push(word("as", "keyword", Some("Opens the body: the fields of a struct, the variants of an enum, the methods of an `impl` or a `trait`. An attribute opens its `requires` clauses with it.".to_string()), from));
 
                 if *interface {
                     items.push(word("extends", "keyword", Some("The interfaces this one takes its fields from.".to_string()), from));

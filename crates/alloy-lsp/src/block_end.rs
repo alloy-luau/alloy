@@ -182,6 +182,13 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
                 stack.push((line, at));
             }
 
+            // `attribute p(...) on impl as` opens the contract body.
+            // The target words open no block, so the `as` is the
+            // opener of the declaration.
+            "as" if head == "attribute" => {
+                stack.push((line, at));
+            }
+
             // A local named match opens nothing; `match x with` does.
             "match" if !alloy_syntax::contextual::keyword_at(src, toks, i) => {}
 
@@ -320,6 +327,8 @@ mod tests {
             "open class Player\n",
             "declare class Player\n",
             "declare extern type Player with\n",
+            "attribute provider(l: string[]) on impl as\n",
+            "export attribute tag() on struct, field as\n",
         ] {
             assert_eq!(needs_end(src, 0).as_deref(), Some(""), "{src:?}");
         }
@@ -338,6 +347,7 @@ mod tests {
         assert_eq!(needs_end("local x = if a then 1 else 2\n", 0), None);
         assert_eq!(needs_end("local s = \"if then\"\n", 0), None);
         assert_eq!(needs_end("-- function f()\n", 0), None);
+        assert_eq!(needs_end("attribute provider() on impl as\nend\n", 0), None);
     }
 
     #[test]

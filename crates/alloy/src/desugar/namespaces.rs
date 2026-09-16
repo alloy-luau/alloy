@@ -61,6 +61,17 @@ impl NamespaceInfo {
     }
 }
 
+/// One namespace member a sibling body names above its declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NsHoist {
+    /// The key of the namespace the member belongs to.
+    pub key: String,
+    /// The name the header declares, `Suite_helper`.
+    pub rendered: String,
+    /// The token the member's own name sits at.
+    pub name_tok: u32,
+}
+
 /// One namespace under render: its key, and the scope depth its body
 /// opened at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +148,93 @@ impl<'s> Desugar<'s> {
 
         self.scan_imported_namespaces(&block.stmts);
         self.scan_namespaces_in(&block.stmts, None);
+    }
+
+    /// The namespace members a sibling body names above their
+    /// declaration. Luau reads a local from its declaration down, so a
+    /// member that calls one below it would call nil. The header line
+    /// declares the name, and the declaration fills it. A use at the
+    /// namespace's own level runs before the declaration, so it
+    /// reports instead.
+    pub(crate) fn scan_ns_hoists(&mut self, block: &Block) {
+        self.scan_ns_hoists_in(&block.stmts, None);
+    }
+
+    fn scan_ns_hoists_in(&mut self, stmts: &[Stmt], parent: Option<&str>) {
+        for stmt in stmts {
+            let Stmt::Namespace(ns) = stmt.under_default() else {
+                continue;
+            };
+            let key = key_of(parent, self.text_of(ns.name));
+
+            self.ns_hoists_of(ns, &key);
+
+            let inner: Vec<&Stmt> = ns.members.iter().map(|m| &m.stmt).collect();
+
+            for one in inner {
+                self.scan_ns_hoists_in(std::slice::from_ref(one), Some(&key));
+            }
+        }
+    }
+
+    /// The hoists one namespace asks for, and the reports its own
+    /// level earns.
+    fn ns_hoists_of(&mut self, ns: &NamespaceDecl, key: &str) {
+        let Some(info) = self.namespaces.get(key).cloned() else {
+            return;
+        };
+        let Some(start) = ns.members.first().map(|m| m.span.start as usize) else {
+            return;
+        };
+        let mut bodies = Vec::new();
+
+        for m in &ns.members {
+            super::stmts_function_spans(std::slice::from_ref(&m.stmt), &mut bodies);
+        }
+
+        for m in &ns.members {
+            let Some(span) = hoistable_name(m.stmt.under_default()) else {
+                continue;
+            };
+            let name = self.text_of(span);
+            // A member the emit leaves under its own name needs no
+            // header line: the source name is the Luau name.
+            let Some(rendered) = info
+                .member(name)
+                .map(|x| x.rendered.clone())
+                .filter(|r| r != name && !r.contains('.'))
+            else {
+                continue;
+            };
+            let mut deferred = false;
+
+            for k in start..m.span.start as usize {
+                if !self.reads_name(k, name, true) {
+                    continue;
+                }
+
+                if bodies
+                    .iter()
+                    .any(|b| (b.start as usize..b.end as usize).contains(&k))
+                {
+                    deferred = true;
+                    continue;
+                }
+
+                let message =
+                    format!("`{name}` is declared below this use; move the function above it");
+                self.diagnose(TokSpan::new(k, k + 1), &message);
+                break;
+            }
+
+            if deferred {
+                self.ns_hoisted.push(NsHoist {
+                    key: key.to_string(),
+                    rendered,
+                    name_tok: span.start,
+                });
+            }
+        }
     }
 
     /// The namespaces the file imports. A module that exports
@@ -863,11 +961,29 @@ impl<'s> Desugar<'s> {
         self.blank_lines(start, decl_start);
         // The header line opens the table. A nested namespace is a field
         // of the one around it, so it takes no `local`.
-        let header = match info.parent.is_some() {
+        let mut header = match info.parent.is_some() {
             true => format!("{} = {{}}", info.path),
 
             false => self.decl_head(&info.path).trim_end().to_string(),
         };
+        // A member a sibling body reads above its declaration takes its
+        // slot here. A bare `local f` is enough: the checker types the
+        // slot from the `function f()` that fills it.
+        let ahead: Vec<String> = self
+            .ns_hoisted
+            .iter()
+            .filter(|h| h.key == key)
+            .map(|h| h.rendered.clone())
+            .collect();
+
+        if !ahead.is_empty() {
+            if !header.is_empty() {
+                header.push(' ');
+            }
+
+            header.push_str(&format!("local {}", ahead.join(", ")));
+        }
+
         self.generate(decl_start, &header);
 
         // The header text goes and its line stays. The `as` token ends
@@ -980,9 +1096,12 @@ impl<'s> Desugar<'s> {
         // the attributed path writes it instead.
         // `export function f` already writes the `local` itself, in the
         // export arm of `stmt`.
+        // One the header line declared drops the `local` too: a second
+        // slot would leave the first one nil.
         if let Stmt::Function(f) = m.stmt.under_default()
             && f.path.len() == 1
             && !f.exported
+            && !self.is_hoisted_fn(f.path[0])
         {
             match f.attrs.is_empty() {
                 true => self.generate(stmt_start, "local "),
@@ -1097,6 +1216,19 @@ fn member_function(stmt: &Stmt) -> Option<(TokSpan, &FunctionBody, &[Attr])> {
         Stmt::Function(f) if f.path.len() == 1 => Some((f.path[0], &f.body, f.attrs.as_slice())),
 
         Stmt::LocalFunction(f) => Some((f.name, &f.body, f.attrs.as_slice())),
+
+        _ => None,
+    }
+}
+
+/// The name a namespace member declares as a plain function, the one
+/// form the header line can declare ahead of. An `export` member
+/// writes its own `local`, and a dotted path names no member.
+fn hoistable_name(stmt: &Stmt) -> Option<TokSpan> {
+    match stmt {
+        Stmt::Function(f) if f.path.len() == 1 && !f.exported => Some(f.path[0]),
+
+        Stmt::LocalFunction(f) if !f.exported => Some(f.name),
 
         _ => None,
     }

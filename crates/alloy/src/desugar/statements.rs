@@ -215,7 +215,7 @@ impl<'s> Desugar<'s> {
                 && let Stmt::Function(f) = stmt
                 && f.path.len() == 1
                 && !f.exported
-                && !self.is_hoisted_fn(self.text_of(f.path[0]))
+                && !self.is_hoisted_fn(f.path[0])
             {
                 match f.attrs.is_empty() {
                     true => self.generate(start, "local "),
@@ -723,7 +723,7 @@ impl<'s> Desugar<'s> {
 
             Stmt::LocalFunction(f) if self.params_have_attrs(&f.body) => return true,
 
-            Stmt::LocalFunction(f) if self.is_hoisted_fn(self.text_of(f.name)) => return true,
+            Stmt::LocalFunction(f) if self.is_hoisted_fn(f.name) => return true,
 
             _ if self.options.check && self.holds_coalesce_if(s) => return true,
 
@@ -1251,7 +1251,7 @@ impl<'s> Desugar<'s> {
 
                 // `export function f` becomes `local function f`; one
                 // the first line declared fills that slot as written.
-                if !self.is_hoisted_fn(&name) {
+                if !self.is_hoisted_fn(f.path[0]) {
                     self.generate(anchor, "local ");
                 }
 
@@ -1263,11 +1263,10 @@ impl<'s> Desugar<'s> {
             // first line declared drops the `local` too: a second
             // slot would leave the first one nil.
             Stmt::LocalFunction(f)
-                if f.attrs.is_empty()
-                    && (f.exported || self.is_hoisted_fn(self.text_of(f.name))) =>
+                if f.attrs.is_empty() && (f.exported || self.is_hoisted_fn(f.name)) =>
             {
                 let name = self.text_of(f.name).to_string();
-                let hoisted = self.is_hoisted_fn(&name);
+                let hoisted = self.is_hoisted_fn(f.name);
 
                 if f.exported {
                     self.exports.push((name.clone(), name));

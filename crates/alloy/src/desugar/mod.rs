@@ -41,7 +41,7 @@ mod structs;
 mod types;
 
 use macros::MacroRef;
-use namespaces::{NamespaceInfo, NsFrame};
+use namespaces::{NamespaceInfo, NsFrame, NsHoist};
 pub(crate) use remotes::WIRE_WIDTHS;
 pub(crate) use types::{group_len, split_top_level, strip_bounds};
 
@@ -475,6 +475,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         structs: HashSet::new(),
         hoisted: Vec::new(),
         hoisted_fns: Vec::new(),
+        ns_hoisted: Vec::new(),
         struct_generics: HashMap::new(),
         structs_with_new: HashMap::new(),
         impl_target: None,
@@ -552,6 +553,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
     d.scan_hoisted(&chunk.block);
+    d.scan_ns_hoists(&chunk.block);
     d.scan_plain_tables(&chunk.block);
     d.scan_reduce_inserts(&chunk.block);
     d.scan_static_checks(&chunk.block);
@@ -996,6 +998,9 @@ struct Desugar<'s> {
     /// The function names a use precedes. The first line declares
     /// them, and `function f()` fills the slot the way Luau reads it.
     hoisted_fns: Vec<String>,
+    /// The namespace members a sibling body names above their
+    /// declaration. The namespace header declares each one.
+    ns_hoisted: Vec<NsHoist>,
     struct_generics: HashMap<String, String>,
     /// The structs whose `impl` writes a constructor, `new` or `New`, by
     /// its name: they construct through it, and the fields form stays
@@ -2024,41 +2029,7 @@ impl<'s> Desugar<'s> {
             let is_fn = kind == "function";
             let mut deferred = false;
 
-            // A field, `x.Point`, and a type, `p: Point`, read no
-            // value; the alias is in scope over the whole block. A
-            // declaration head of the name is the duplicate check's.
-            // A function name also sits in method calls, `o:tag()`,
-            // in nested heads, and in keys, `{ tag = 1 }`.
-            let reads = |k: usize| {
-                let t = self.toks[k];
-                let before = if k > 0 {
-                    self.toks[k - 1].text(self.src)
-                } else {
-                    ""
-                };
-                let after = self.toks.get(k + 1).map_or("", |t| t.text(self.src));
-
-                t.kind == TokKind::Ident
-                    && t.text(self.src) == name
-                    && !(is_fn && (matches!(before, "function" | "local" | ":") || after == "="))
-                    && !matches!(
-                        before,
-                        "." | "struct"
-                            | "enum"
-                            | "namespace"
-                            | "impl"
-                            | "for"
-                            | "trait"
-                            | "class"
-                            | "interface"
-                            | "type"
-                            | "attribute"
-                            | "remote"
-                            | "macro"
-                            | "$"
-                    )
-                    && !self.type_name_spans.iter().any(|s| s.start as usize == k)
-            };
+            let reads = |k: usize| self.reads_name(k, name, is_fn);
             // A macro that calls another macro expands what that one
             // reads too, down to the depth the expansion stops at.
             let expands = |k: usize| {
@@ -2125,9 +2096,52 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// Whether the first line declared a function of this name.
-    pub(crate) fn is_hoisted_fn(&self, name: &str) -> bool {
-        self.ns_stack.is_empty() && self.hoisted_fns.iter().any(|h| h == name)
+    /// Whether the token at `k` reads `name` as a value.
+    ///
+    /// A field, `x.Point`, and a type, `p: Point`, read no value; the
+    /// alias is in scope over the whole block. A declaration head of
+    /// the name is the duplicate check's. A function name also sits in
+    /// method calls, `o:tag()`, in nested heads, and in keys,
+    /// `{ tag = 1 }`.
+    pub(crate) fn reads_name(&self, k: usize, name: &str, is_fn: bool) -> bool {
+        let t = self.toks[k];
+        let before = if k > 0 {
+            self.toks[k - 1].text(self.src)
+        } else {
+            ""
+        };
+        let after = self.toks.get(k + 1).map_or("", |t| t.text(self.src));
+
+        t.kind == TokKind::Ident
+            && t.text(self.src) == name
+            && !(is_fn && (matches!(before, "function" | "local" | ":") || after == "="))
+            && !matches!(
+                before,
+                "." | "struct"
+                    | "enum"
+                    | "namespace"
+                    | "impl"
+                    | "for"
+                    | "trait"
+                    | "class"
+                    | "interface"
+                    | "type"
+                    | "attribute"
+                    | "remote"
+                    | "macro"
+                    | "$"
+            )
+            && !self.type_name_spans.iter().any(|s| s.start as usize == k)
+    }
+
+    /// Whether a line above the declaration declared the function: the
+    /// file's first line, or the header of the namespace it belongs to.
+    pub(crate) fn is_hoisted_fn(&self, name: TokSpan) -> bool {
+        if self.ns_hoisted.iter().any(|h| h.name_tok == name.start) {
+            return true;
+        }
+
+        self.ns_stack.is_empty() && self.hoisted_fns.iter().any(|h| h == self.text_of(name))
     }
 
     /// Whether the walk stands at the file's top level, outside any

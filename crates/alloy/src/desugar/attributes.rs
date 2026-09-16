@@ -1446,7 +1446,7 @@ impl<'s> Desugar<'s> {
         // The declaration starts after the attributes.
         let mut first_tok = attrs.last().map(|a| a.span.end).unwrap_or(span.start);
         let fname = name.map(|n| self.text_of(n).to_string());
-        let hoisted = fname.as_deref().is_some_and(|f| self.is_hoisted_fn(f));
+        let hoisted = name.is_some_and(|n| self.is_hoisted_fn(n));
 
         // The first line declared the name: a `local` here would open
         // a second slot and leave the first one nil.

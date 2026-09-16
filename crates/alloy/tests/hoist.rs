@@ -261,3 +261,66 @@ fn a_macro_chain_reads_the_table_through_every_level() {
         )]
     );
 }
+
+/// A namespace member that calls a sibling below it: the header line
+/// declares the mangled name, and the declaration fills the slot. A
+/// nested namespace declares its own at its own header.
+#[test]
+fn a_namespace_member_calls_a_sibling_declared_below_it() {
+    let src = "namespace Suite as\n  const LIMIT = 4\n  public function plain(): number\n    return helper(2)\n  end\n  private function helper(n: number): number\n    return n * 2\n  end\nend\n\nprint(Suite.plain())\n";
+    let out = compile(src);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    for text in [&out.ship, &out.check] {
+        let first = text.lines().next().unwrap();
+        assert_eq!(first, "local Suite = {} local Suite_helper", "{text}");
+        assert!(
+            text.contains("\n  function Suite_helper(n: number)"),
+            "{text}"
+        );
+        assert!(!text.contains("local function Suite_helper"), "{text}");
+        assert_eq!(text.lines().count(), src.lines().count(), "{text}");
+    }
+}
+
+#[test]
+fn a_nested_namespace_declares_its_own_hoist() {
+    let src = "namespace Outer as\n  namespace Inner as\n    public function a(): number\n      return b()\n    end\n    private function b(): number\n      return 2\n    end\n  end\n  public function top(): number\n    return late()\n  end\n  private function late(): number\n    return 10\n  end\nend\n";
+    let out = compile(src);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    for text in [&out.ship, &out.check] {
+        assert!(text.contains("local Outer = {} local Outer_late"), "{text}");
+        assert!(
+            text.contains("Outer.Inner = {} local Outer_Inner_b"),
+            "{text}"
+        );
+        assert!(text.contains("\n    function Outer_Inner_b("), "{text}");
+        assert!(text.contains("\n  function Outer_late("), "{text}");
+    }
+}
+
+/// A use at the namespace's own level runs before the declaration, so
+/// no slot saves it. The message names the line of the use.
+#[test]
+fn a_namespace_level_call_above_the_member_reports() {
+    let src = "namespace Suite as\n  const LIMIT = helper(2)\n  private function helper(n: number): number\n    return n * 2\n  end\nend\n";
+    let out = compile(src);
+    let hits: Vec<(usize, String)> = out
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                src[..d.start as usize].matches('\n').count() + 1,
+                d.message.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        hits,
+        vec![(
+            2,
+            "`helper` is declared below this use; move the function above it".to_string()
+        )]
+    );
+}

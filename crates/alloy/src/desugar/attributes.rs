@@ -1448,6 +1448,17 @@ impl<'s> Desugar<'s> {
         let fname = name.map(|n| self.text_of(n).to_string());
         let hoisted = name.is_some_and(|n| self.is_hoisted_fn(n));
 
+        // A namespace member writes `public` or `private` between the
+        // attributes and the declaration. The word is Alloy's; Luau
+        // reads none of it, so the lead takes its place.
+        if self
+            .toks
+            .get(first_tok as usize)
+            .is_some_and(|t| matches!(t.text(self.src), "public" | "private"))
+        {
+            first_tok += 1;
+        }
+
         // The first line declared the name: a `local` here would open
         // a second slot and leave the first one nil.
         if hoisted && is_local {

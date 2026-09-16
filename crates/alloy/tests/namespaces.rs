@@ -231,6 +231,28 @@ fn a_private_member_stays_off_the_table() {
     assert!(out.contains("return M_secret"), "{out}");
 }
 
+/// An attribute above a member leaves the visibility word to the
+/// lead: `@native public function f` writes `local function`, where
+/// `public` would be a Luau syntax error. The word goes whatever the
+/// declaration under it is.
+#[test]
+fn an_attributed_member_drops_its_visibility_word() {
+    let src = "namespace M as\n    @native\n    public function pub_a(n: number): number\n        return n\n    end\n    @inline\n    private function priv_b(n: number): number\n        return n\n    end\n    @native\n    public local function loc_c(n: number): number\n        return n\n    end\nend\n\nprint(M.pub_a(1), M.loc_c(1))\n";
+    let out = clean(src);
+
+    assert!(!out.contains("public"), "{out}");
+    assert!(!out.contains("private"), "{out}");
+    assert!(
+        out.contains("@native local function M_pub_a(n: number)"),
+        "{out}"
+    );
+    assert!(out.contains("local function M_priv_b(n: number)"), "{out}");
+    assert!(
+        out.contains("@native local function M_loc_c(n: number)"),
+        "{out}"
+    );
+}
+
 /// A use of a private member from outside reports, in the wording a
 /// private struct field takes.
 #[test]

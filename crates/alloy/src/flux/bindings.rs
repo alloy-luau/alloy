@@ -628,6 +628,14 @@ impl<'s> Scan<'s> {
 
             let (names, is_function): (Vec<usize>, bool) = match self.t(i) {
                 "local" | "const" if self.statement_start(i) => {
+                    // The module table reads an export, and a `global`
+                    // reads from anywhere, so neither name is unused.
+                    // `export const X`, `export local x` and
+                    // `export const { a, b } = t` all stay out.
+                    if matches!(self.prev(i), "export" | "global") {
+                        continue;
+                    }
+
                     let names = self.local_names(i);
                     let is_function = self.binds_function(i, &names);
 

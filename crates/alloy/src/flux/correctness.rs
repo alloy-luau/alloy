@@ -1218,6 +1218,23 @@ mod tests {
             unused("local a = 1  local b = 2  local c = 3\nprint(b)\n"),
             vec!["unused_variable", "unused_variable"]
         );
+        // The module table reads an export, so no exported binding is
+        // unused. A plain `local` beside one keeps its report.
+        assert_eq!(unused("export const SCHEMA = 1\n"), Vec::<&str>::new());
+        assert_eq!(unused("export local count = 3\n"), Vec::<&str>::new());
+        assert_eq!(unused("export const { a, b } = t\n"), Vec::<&str>::new());
+        assert_eq!(unused("global const LIMIT = 9\n"), Vec::<&str>::new());
+        assert_eq!(
+            unused("export const SCHEMA = 1\nlocal unused = 1\n"),
+            vec!["unused_variable"]
+        );
+        // The fix no longer offers `_SCHEMA` for an export.
+        let src = "export const SCHEMA = 1\nlocal unused = 1\n";
+        let out = crate::compile(src).unwrap();
+        assert_eq!(
+            apply_fixes(src, &out.lints).0,
+            "export const SCHEMA = 1\nlocal _unused = 1\n"
+        );
     }
 
     #[test]

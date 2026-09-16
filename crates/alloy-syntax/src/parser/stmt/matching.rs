@@ -141,10 +141,17 @@ impl<'a> Parser<'a> {
             }
         }
 
+        self.check_alias_names(&aliases)?;
+
         Ok((scrutinees, aliases))
     }
 
     /// The `as name` after one scrutinee, if the head wrote one.
+    ///
+    /// A lenient parse of a head that still closes reports the missing
+    /// name, drops the alias, and reads on: the arms and the `end` of
+    /// the match then parse, so one mistake is one report. A head no
+    /// `with` closes is the error node of its line instead.
     fn match_alias(&mut self) -> Result<Option<TokSpan>, ParseError> {
         if !self.at("as") {
             return Ok(None);
@@ -154,13 +161,64 @@ impl<'a> Parser<'a> {
 
         // `with` opens the arms, so it is the word the head ends on and
         // never the alias, however free a name it is elsewhere.
-        if !self.at_name() || self.at("with") {
+        if self.at_name() && !self.at("with") {
+            let at = self.bump();
+
+            return Ok(Some(TokSpan::new(at, at + 1)));
+        }
+
+        if !self.lenient
+            || !crate::contextual::with_closes_scrutinees(self.src, self.toks, self.pos - 1)
+        {
             return Err(self.err(ALIAS_NEEDS_NAME));
         }
 
-        let at = self.bump();
+        self.report(ALIAS_NEEDS_NAME);
 
-        Ok(Some(TokSpan::new(at, at + 1)))
+        while !self.at_end() && !self.at("with") && !self.at(",") {
+            self.bump();
+        }
+
+        Ok(None)
+    }
+
+    /// Reports a name two values of one head share. The second would
+    /// shadow the first, and both stand on one line.
+    fn check_alias_names(&mut self, aliases: &[Option<TokSpan>]) -> Result<(), ParseError> {
+        let mut seen: Vec<&str> = Vec::new();
+
+        for a in aliases.iter().flatten() {
+            let name = self.span_text(*a);
+
+            if seen.contains(&name) {
+                self.alias_error(
+                    *a,
+                    format!(
+                        "the alias `{name}` is already the alias of another value of this match; give each value its own name"
+                    ),
+                )?;
+
+                continue;
+            }
+
+            seen.push(name);
+        }
+
+        Ok(())
+    }
+
+    /// Reports a mistake about an alias, on the name it is about. A
+    /// lenient parse reads on, so the rest of the file still reports.
+    fn alias_error(&mut self, at: TokSpan, message: String) -> Result<(), ParseError> {
+        let offset = self.toks[at.start as usize].start as usize;
+
+        if self.lenient {
+            self.report_at(offset, &message);
+
+            return Ok(());
+        }
+
+        Err(ParseError { offset, message })
     }
 
     /// Reports a pattern that binds a name the head already aliased.
@@ -192,17 +250,10 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            let message =
-                format!("`{name}` is the alias of the match; a pattern cannot bind it again");
-            let offset = self.toks[b.start as usize].start as usize;
-
-            if self.lenient {
-                self.report_at(offset, &message);
-
-                continue;
-            }
-
-            return Err(ParseError { offset, message });
+            self.alias_error(
+                b,
+                format!("`{name}` is the alias of the match; a pattern cannot bind it again"),
+            )?;
         }
 
         Ok(())

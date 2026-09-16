@@ -531,6 +531,11 @@ fn a_match_head_takes_an_alias() {
     rejects("match e as with case 1 then a() default b() end\n");
     rejects("local v = match e as with case 1 then 1 default 2 end\n");
     rejects("match e as, f with case 1, 2 then a() default b() end\n");
+
+    // Each value of the head takes its own name.
+    rejects("match a as x, b as x with case 1, 2 then a(x) default b() end\n");
+    round_trip("match a as x, b as y with case 1, 2 then a(x, y) default b() end\n");
+    round_trip("match a as x, b with case 1, 2 then a(x) default b() end\n");
 }
 
 /// A pattern that binds the alias would give one value two names on
@@ -543,8 +548,12 @@ fn a_pattern_cannot_bind_the_alias() {
     rejects(expr);
     rejects("match e as s with case [ x, ...s ] then a() default b() end\n");
     // Another arm's name, and a field the pattern reads but does not
-    // bind, both stand.
+    // bind, both stand. A name an outer scope holds is the arm's to
+    // bind, alias or no alias.
     round_trip("match e as state with case Ready(n) then a(n, state) default b() end\n");
+    round_trip(
+        "local n = 1\nmatch e as state with case Ready(n) then a(n, state) default b(n) end\n",
+    );
     round_trip("match e as state with case P { state = n } then a(n) default b() end\n");
 
     let lexed = alloy_syntax::lexer::lex(stmt).unwrap();

@@ -342,8 +342,11 @@ The scan balances brackets, so a `with` inside a nested table does not
 count. At depth zero it stops at a token no scrutinee list holds, ex: the
 `=` of `match[k] = 1`, so the decision never reads into the next
 statement.
+
+The parser reads it too, to tell a head that still closes from one the
+file truncated.
 */
-fn with_closes_scrutinees(src: &str, toks: &[Tok], i: usize) -> bool {
+pub(crate) fn with_closes_scrutinees(src: &str, toks: &[Tok], i: usize) -> bool {
     let mut depth = 0usize;
 
     for n in 1..=SCRUTINEE_SCAN {

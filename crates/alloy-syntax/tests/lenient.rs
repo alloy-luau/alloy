@@ -643,3 +643,62 @@ fn an_unfinished_contract_clause_reports_once() {
     );
     assert_eq!((errors, diagnostics), (0, 1));
 }
+
+/*
+A match head whose `as` names nothing reports once.
+
+A head that a `with` still closes reads on without the alias, so the
+arms, the `end` of the match, and the `end` of the function around it
+all parse. A head no `with` closes is the error node of its line, and
+the file after it parses.
+*/
+#[test]
+fn a_match_head_without_an_alias_name_reports_once() {
+    for src in [
+        "match e as with\n    case 1 then print(1)\n    default print(2)\nend\n",
+        "match e as 5 with\n    case 1 then print(1)\n    default print(2)\nend\n",
+        "export local function f(e)\n    match e as with\n        case 1 then print(1)\n    end\nend\n",
+        "match e as\n",
+        "local function g(e)\n    match e as\nend\nprint(1)\n",
+        "match a as x, b as with\n    case 1, 2 then print(x)\n    default print(x)\nend\n",
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "one report for {src:?}, got {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics[0].message, "expected a name after `as`; write `match e as name with`",
+            "for {src:?}"
+        );
+    }
+
+    // The head still closes, so the match keeps its arms and the file
+    // after it parses.
+    let (errors, diagnostics) =
+        lenient("match e as with\n    case 1 then print(1)\n    default print(2)\nend\nprint(3)\n");
+    assert_eq!((errors, diagnostics), (0, 1));
+
+    // Nothing closes the head, so the statement is the error node and
+    // the `end` of the function around it still closes.
+    let (errors, diagnostics) = lenient("local function g(e)\n    match e as\nend\nprint(1)\n");
+    assert_eq!((errors, diagnostics), (0, 1));
+}
+
+/// Two values of one head under one name: the second would shadow the
+/// first. The report lands on the second name, once.
+#[test]
+fn two_values_of_a_head_cannot_share_a_name() {
+    let src = "match a as x, b as x with\n    case 1, 2 then print(x)\n    default print(x)\nend\n";
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "the alias `x` is already the alias of another value of this match; give each value its own name"
+    );
+    assert_eq!(&src[diagnostics[0].offset..diagnostics[0].offset + 1], "x");
+    assert_eq!(src[..diagnostics[0].offset].matches('x').count(), 1);
+}

@@ -86,6 +86,10 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     (&["a comment starts with"], "SyntaxError"),
     (&["interpolation hole is empty"], "SyntaxError"),
     (&["has no `++`"], "SyntaxError"),
+    // A pattern that binds the name the match head aliased. No rule
+    // below reads the sentence, and the default kind is not the one
+    // the parser reports it as.
+    (&["is the alias of the match"], "SyntaxError"),
     (&["`declare` takes", "`declare` belongs"], "DeclareError"),
     // A header the parser cannot read. The `trait` rule below would
     // read the word as a contract report.

@@ -42,11 +42,17 @@ pub(crate) fn in_array_pattern(head: &str) -> bool {
 
 /// The scrutinee of a `match` head: the text between `match` and the
 /// `with` that ends the head. `local r = match x with` and `return
-/// match x with` read the same as the statement form.
+/// match x with` read the same as the statement form. An `as name`
+/// alias names the value; the value itself stands in front of it.
 fn scrutinee_of(line: &str) -> Option<String> {
     let with = last_word_at(line, "with")?;
     let start = last_word_at(&line[..with], "match")? + "match".len();
-    let text = line[start..with].trim();
+    let head = line[start..with].trim();
+    let text = match last_word_at(head, "as") {
+        Some(at) => head[..at].trim(),
+
+        None => head,
+    };
 
     (!text.is_empty()).then(|| text.to_string())
 }
@@ -174,5 +180,17 @@ mod tests {
         let at = src.find("case Ok").unwrap() + "case ".len();
         assert_eq!(match_arms(src, at), ["Ok", "Err"]);
         assert!(match_arms("local x = 1\n", 5).is_empty());
+    }
+
+    /// `match e as name with` names the value. The completion reads the
+    /// value, not the name.
+    #[test]
+    fn a_head_alias_leaves_the_scrutinee() {
+        let src = "match player.state as state with\n    case \n";
+        let at = src.find("case ").unwrap() + "case ".len();
+        assert_eq!(match_scrutinee(src, at).as_deref(), Some("player.state"));
+        let plain = "match player.state with\n    case \n";
+        let at = plain.find("case ").unwrap() + "case ".len();
+        assert_eq!(match_scrutinee(plain, at).as_deref(), Some("player.state"));
     }
 }

@@ -561,6 +561,9 @@ pub struct ImplDecl {
 #[derive(Debug)]
 pub struct MatchStmt {
     pub scrutinees: Vec<Expr>,
+    /// The `as name` of each scrutinee, one entry per scrutinee. `None`
+    /// where the head wrote no alias.
+    pub aliases: Vec<Option<TokSpan>>,
     pub arms: Vec<MatchArm>,
     pub default: Option<Block>,
     pub span: TokSpan,
@@ -578,6 +581,8 @@ pub struct MatchArm {
 #[derive(Debug)]
 pub struct MatchExpr {
     pub scrutinees: Vec<Expr>,
+    /// The `as name` of each scrutinee; see [`MatchStmt::aliases`].
+    pub aliases: Vec<Option<TokSpan>>,
     pub arms: Vec<MatchExprArm>,
     pub default: Option<Box<Expr>>,
     pub span: TokSpan,

@@ -281,6 +281,10 @@ const CORPUS: &[&str] = &[
     "match e with case Join(p) or Leave(p) then f(p) default g() end",
     "local v = match k with case Enum.KeyCode.W then 1 default 0 end",
     "local match = string.match\nlocal n = match(s, '%d+')",
+    "match e as state with case Loading then a(state) default b(state) end",
+    "match a as left, b as right with case 0, _ then x(left, right) default y() end",
+    "match a as left, b with case 0, _ then x(left) default y() end",
+    "local v = match c as st with case 'a' then st case 'b' and st ~= '' then 2 default 3 end",
     // --- alloy: conditional bindings ---
     "if local x = f() then g(x) end",
     "if const x = f() then g(x) elseif local y = h() then g(y) else i() end",
@@ -506,6 +510,53 @@ fn a_match_arm_stops_at_the_next_case() {
     assert!(m.default.is_some(), "the default arm parses");
     rejects("match x with case 1 then a()\n");
     rejects("if local x then end\n");
+}
+
+/// `as name` in a match head binds the value for every arm. `with`
+/// closes the head, so it is never the name.
+#[test]
+fn a_match_head_takes_an_alias() {
+    let src = "match e as state with case Loading then a(state) default b(state) end\n";
+    let lexed = alloy_syntax::lexer::lex(src).unwrap();
+    let chunk = alloy_syntax::parser::parse(src, &lexed.toks).unwrap();
+    let alloy_syntax::ast::Stmt::Match(m) = &chunk.block.stmts[0] else {
+        panic!()
+    };
+    assert_eq!(m.aliases.len(), 1);
+    assert_eq!(
+        m.aliases[0].map(|a| a.text(src, &lexed.toks)),
+        Some("state")
+    );
+
+    rejects("match e as with case 1 then a() default b() end\n");
+    rejects("local v = match e as with case 1 then 1 default 2 end\n");
+    rejects("match e as, f with case 1, 2 then a() default b() end\n");
+}
+
+/// A pattern that binds the alias would give one value two names on
+/// one line.
+#[test]
+fn a_pattern_cannot_bind_the_alias() {
+    let stmt = "match e as state with case Ready(state) then a(state) default b() end\n";
+    let expr = "local v = match e as state with case { state } then 1 default 2 end\n";
+    rejects(stmt);
+    rejects(expr);
+    rejects("match e as s with case [ x, ...s ] then a() default b() end\n");
+    // Another arm's name, and a field the pattern reads but does not
+    // bind, both stand.
+    round_trip("match e as state with case Ready(n) then a(n, state) default b() end\n");
+    round_trip("match e as state with case P { state = n } then a(n) default b() end\n");
+
+    let lexed = alloy_syntax::lexer::lex(stmt).unwrap();
+    let (_, diagnostics) = alloy_syntax::parser::parse_lenient(
+        stmt,
+        &lexed.toks,
+        alloy_syntax::parser::ParseOptions::default(),
+    );
+    assert_eq!(
+        diagnostics[0].message,
+        "`state` is the alias of the match; a pattern cannot bind it again"
+    );
 }
 
 #[test]

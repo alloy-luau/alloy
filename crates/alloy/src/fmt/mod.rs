@@ -1289,6 +1289,19 @@ mod tests {
         assert!(header_as_fixes(&text).is_empty());
     }
 
+    /// The `as name` of a match head stays on the head line, with one
+    /// space on each side of the word.
+    #[test]
+    fn a_match_alias_stays_on_the_head_line() {
+        let src = "match s as state with\n    case Loading then print(state)\n    case Ready(n) then print(n, state)\nend\n";
+        assert_eq!(format(src).unwrap(), src);
+        assert_eq!(format("match s   as    state with\ncase Loading then print(state)\ncase Ready(n) then print(n, state)\nend\n").unwrap(), src);
+        let two = "match a as left, b as right with\n    case Loading, Loading then print(left, right)\n    default print(left, right)\nend\n";
+        assert_eq!(format(two).unwrap(), two);
+        let expr = "local v = match s as st with\n    case Loading then 0\n    default #tostring(st)\nend\n";
+        assert_eq!(format(expr).unwrap(), expr);
+    }
+
     /// A header that already reads `as` gains no second one.
     #[test]
     fn the_as_of_a_header_is_written_once() {

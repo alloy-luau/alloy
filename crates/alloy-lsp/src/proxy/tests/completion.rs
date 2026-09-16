@@ -524,6 +524,22 @@ pub(crate) fn an_attribute_on_a_method_leaves_test_out() {
 
     assert!(function.contains(&"@test".to_string()), "{function:?}");
 }
+
+/// A namespace takes `@test`: the group makes every public function of
+/// it a test. It takes `@cfg` and `@deprecated` too, and no attribute
+/// that names a struct or a remote.
+#[test]
+pub(crate) fn an_attribute_on_a_namespace_offers_test() {
+    let ns = attribute_labels("@\nnamespace Suite as\nend\n");
+
+    for name in ["@test", "@cfg", "@deprecated"] {
+        assert!(ns.contains(&name.to_string()), "{ns:?}");
+    }
+
+    for name in ["@derive", "@native", "@u8", "@ratelimit"] {
+        assert!(!ns.contains(&name.to_string()), "{ns:?}");
+    }
+}
 /// Nothing under the caret to carry the attribute: the file ends, or
 /// blank lines run to the end of it, or the line below starts no
 /// declaration. Only the attributes that go anywhere read there; every

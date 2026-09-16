@@ -574,6 +574,10 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            Context::RemoteFunction { prefix } => {
+                items.push(word("function", "keyword", Some("A remote that returns a value: `remote function Name(x: number): string from server`.".to_string()), offset - prefix.len()));
+            }
+
             Context::AttributeOn => {
                 items.push(word("on", "keyword", Some("What the attribute goes on: `on struct, field`.".to_string()), offset));
             }

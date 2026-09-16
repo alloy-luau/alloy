@@ -139,7 +139,17 @@ pub(crate) fn declares_a_name_at(source: &str, offset: usize) -> bool {
         word_start -= 1;
     }
 
-    DECLARERS.contains(&&source[word_start..end])
+    let declarer = &source[word_start..end];
+
+    // `remote |` takes the `function` word before the name, so the
+    // caret is on a keyword there and not yet on a name.
+    if declarer == "remote"
+        && crate::context::remote_takes_function(&source[line_start..start], &source[start..offset])
+    {
+        return false;
+    }
+
+    DECLARERS.contains(&declarer)
 }
 
 /// What a built-in attribute goes on. The list mirrors

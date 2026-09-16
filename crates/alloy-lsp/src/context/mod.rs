@@ -79,6 +79,9 @@ pub enum Context {
     },
     /// `remote X(...) |`: the `from`.
     RemoteFrom { prefix: String },
+    /// `remote |`: the `function` that makes the remote a call. An
+    /// event writes its name here instead.
+    RemoteFunction { prefix: String },
     /// `struct Name |`, `enum Name |`, `interface Name |`: the `as` that
     /// opens the body, and `extends` for an interface. The child would
     /// offer `assert` here.
@@ -230,6 +233,21 @@ fn attribute_argument(head: &str, prefix: &str) -> Option<Context> {
         param,
         quote,
     })
+}
+
+/// Whether `remote |` still takes the `function` word.
+///
+/// `head` is the line up to the word, `word` what the author typed. A
+/// remote function writes `function`; an event goes straight to its
+/// name, so the word is offered while it still matches.
+pub fn remote_takes_function(head: &str, word: &str) -> bool {
+    let head = head.trim_start();
+
+    head.strip_prefix("export ")
+        .unwrap_or(head)
+        .strip_prefix("remote ")
+        .is_some_and(str::is_empty)
+        && "function".starts_with(word)
 }
 
 /// The quote that opens the string the text ends inside, or None when
@@ -879,6 +897,12 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
     }
 
     if trimmed.starts_with("remote ") || trimmed.starts_with("export remote ") {
+        if remote_takes_function(head, prefix) {
+            return Some(Context::RemoteFunction {
+                prefix: prefix.to_string(),
+            });
+        }
+
         // The parameters closed and no `from` yet: the `from` comes next.
         let opens = head.matches('(').count();
         let closes = head.matches(')').count();
@@ -1718,6 +1742,32 @@ mod tests {
         );
         assert_eq!(at("remote Test(|"), Some(Context::Nothing));
         assert_eq!(at("local from = 1 |"), None);
+    }
+
+    /// `remote function Name(...): R from server` is the call form, so
+    /// the word comes right after `remote`. An event writes its name
+    /// there, which the list must not stand in the way of.
+    #[test]
+    fn a_remote_takes_the_function_word() {
+        assert_eq!(
+            at("remote |"),
+            Some(Context::RemoteFunction {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(
+            at("export remote fun|"),
+            Some(Context::RemoteFunction {
+                prefix: "fun".to_string()
+            })
+        );
+        // A name the author chose is no keyword.
+        assert_ne!(
+            at("remote Pi|"),
+            Some(Context::RemoteFunction {
+                prefix: "Pi".to_string()
+            })
+        );
     }
 
     #[test]

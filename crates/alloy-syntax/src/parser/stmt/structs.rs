@@ -418,6 +418,14 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
+    /*
+    `remote Name(params) from side`, and the `remote function` form.
+
+    The word `remote` opens a remote to the end of its line. A failed
+    header stops there instead of unwinding: the recovery would take the
+    `function` of `remote function f()` for a plain function and ask that
+    header for an `end` a remote never has.
+    */
     pub(super) fn remote_decl(
         &mut self,
         start: usize,
@@ -425,6 +433,30 @@ impl<'a> Parser<'a> {
         exported: bool,
     ) -> Result<Stmt, ParseError> {
         self.expect("remote")?;
+
+        match self.remote_tail(start, attributes, exported) {
+            Err(e) if self.lenient => {
+                self.report_at(e.offset, &e.message);
+
+                while !self.at_end() && !self.newline_before_pos() {
+                    self.bump();
+                }
+
+                Ok(Stmt::Error(TokSpan::new(start, self.pos)))
+            }
+
+            other => other,
+        }
+    }
+
+    /// The remote after its keyword: the name, the parameters, the return
+    /// type, and the side the declaration names.
+    fn remote_tail(
+        &mut self,
+        start: usize,
+        attributes: Vec<Attr>,
+        exported: bool,
+    ) -> Result<Stmt, ParseError> {
         let is_function = self.eat("function");
         let name = self.expect_name()?;
         let params = self.param_list()?;

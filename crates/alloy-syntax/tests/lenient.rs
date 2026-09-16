@@ -534,3 +534,53 @@ fn a_body_in_braces_names_the_as_form() {
         assert_eq!(printer::print_chunk(src, &lexed.toks, &chunk), src);
     }
 }
+
+/*
+A remote reads to the end of its line. A header without `from` asks for
+the word once. The recovery used to read the `function` of
+`remote function f()` as a plain function, which asked that header for an
+`end` a remote never has.
+*/
+#[test]
+fn a_remote_without_a_side_reports_once() {
+    for (src, message) in [
+        ("remote test()\n", "expected `from`, found end of file"),
+        (
+            "remote function test()\n",
+            "expected `from`, found end of file",
+        ),
+        (
+            "remote function test(): number\n",
+            "expected `from`, found end of file",
+        ),
+        (
+            "remote function test(\n",
+            "expected a name, found end of file",
+        ),
+        (
+            "remote function test() from\n",
+            "expected `client` or `server` after `from`",
+        ),
+        (
+            "remote function test() from bogus\n",
+            "expected `client` or `server` after `from`",
+        ),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "one report for {src:?}, got {diagnostics:?}"
+        );
+        assert_eq!(diagnostics[0].message, message, "for {src:?}");
+    }
+
+    // The error stops at the end of the line, so the file after it parses.
+    let (errors, diagnostics) = lenient("remote function test()\nlocal x = 1\nprint(x)\n");
+    assert_eq!((errors, diagnostics), (1, 1));
+
+    // A remote in a body leaves the `end` that closes the body.
+    let (errors, diagnostics) = lenient("namespace N as\n    remote function test()\nend\n");
+    assert_eq!((errors, diagnostics), (0, 1));
+}

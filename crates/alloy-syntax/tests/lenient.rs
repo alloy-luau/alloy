@@ -584,3 +584,62 @@ fn a_remote_without_a_side_reports_once() {
     let (errors, diagnostics) = lenient("namespace N as\n    remote function test()\nend\n");
     assert_eq!((errors, diagnostics), (0, 1));
 }
+
+/*
+An unfinished `requires` clause reports once, on its own line.
+
+The clause used to unwind the whole `attribute` statement. The recovery
+then read `impl as` as an impl declaration and reported the header, each
+line of the body, and the `end`: five reports for one missing word.
+*/
+#[test]
+fn an_unfinished_contract_clause_reports_once() {
+    for (clause, message) in [
+        (
+            "requires",
+            "a `requires` clause asks for a `function` or a `field`, found end of line",
+        ),
+        (
+            "requires public",
+            "a `requires` clause asks for a `function` or a `field`, found end of line",
+        ),
+        (
+            "requires private ",
+            "a `requires` clause asks for a `function` or a `field`, found end of line",
+        ),
+        (
+            "requires bogus thing",
+            "a `requires` clause asks for a `function` or a `field`, found `bogus`",
+        ),
+        (
+            "requires public function",
+            "expected a name, found end of line",
+        ),
+        (
+            "requires function each",
+            "expected a name, found end of line",
+        ),
+    ] {
+        let src = format!("attribute provider on impl as\n  {clause}\nend\n");
+        let (errors, diagnostics) = lenient(&src);
+        assert_eq!((errors, diagnostics), (0, 1), "one report for {clause:?}");
+
+        let lexed = lexer::lex(&src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(&src, &lexed.toks, ParseOptions::default());
+        assert_eq!(diagnostics[0].message, message, "for {clause:?}");
+
+        let line = src[..diagnostics[0].offset].matches('\n').count() + 1;
+        assert_eq!(line, 2, "the report sits on the clause for {clause:?}");
+    }
+
+    // A clause with no shape asks for the member alone, so it is whole.
+    let (errors, diagnostics) =
+        lenient("attribute provider on impl as\n  requires private field state\nend\n");
+    assert_eq!((errors, diagnostics), (0, 0));
+
+    // One broken clause leaves the clauses around it.
+    let (errors, diagnostics) = lenient(
+        "attribute provider on impl as\n  requires public function Start(self)\n  requires private\n  requires field state: number\nend\n",
+    );
+    assert_eq!((errors, diagnostics), (0, 1));
+}

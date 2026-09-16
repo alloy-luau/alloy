@@ -191,7 +191,29 @@ impl<'a> Parser<'a> {
                 return Err(self.err("unterminated attribute, expected `end`"));
             }
 
-            out.push(self.require_clause()?);
+            let at = self.pos;
+
+            match self.require_clause() {
+                Ok(clause) => out.push(clause),
+
+                /*
+                A clause is one line. An unfinished one reports once and
+                takes the rest of its line; the `end` of the body stays,
+                so the statement closes here. Unwinding would send the
+                recovery back to `attribute`, which reads the header
+                again as an `impl` and reports every line of the body.
+                */
+                Err(e) if self.lenient => {
+                    self.report_at(e.offset, &e.message);
+                    self.pos = self.pos.max(at + 1);
+
+                    while !self.at_end() && !self.newline_before_pos() {
+                        self.bump();
+                    }
+                }
+
+                Err(e) => return Err(e),
+            }
         }
 
         self.expect_end(opener)?;
@@ -213,10 +235,7 @@ impl<'a> Parser<'a> {
         };
 
         if !matches!(self.text(), "function" | "field") {
-            return Err(self.err(&format!(
-                "a `requires` clause asks for a `function` or a `field`, found {}",
-                self.found()
-            )));
+            return Err(self.clause_err("a `requires` clause asks for a `function` or a `field`"));
         }
 
         let kind_at = self.bump();
@@ -226,10 +245,10 @@ impl<'a> Parser<'a> {
             true => {
                 self.bump();
 
-                RequireMember::Each(self.expect_name()?)
+                RequireMember::Each(self.clause_name()?)
             }
 
-            false => RequireMember::Name(self.expect_name()?),
+            false => RequireMember::Name(self.clause_name()?),
         };
 
         /*
@@ -267,6 +286,41 @@ impl<'a> Parser<'a> {
             shape,
             span: TokSpan::new(start, self.pos),
         })
+    }
+
+    /// The name of the member a clause asks for.
+    fn clause_name(&mut self) -> Result<TokSpan, ParseError> {
+        if self.clause_ends() {
+            return Err(self.clause_err("expected a name"));
+        }
+
+        self.expect_name()
+    }
+
+    /// Reports if the clause stops at the cursor. A clause is one line,
+    /// so the first token of the next line is past it.
+    fn clause_ends(&self) -> bool {
+        self.at_end() || self.newline_before_pos()
+    }
+
+    /// The report for a clause that stops before it is whole. It sits
+    /// where the clause stops, so the editor marks the clause and not
+    /// the line under it.
+    fn clause_err(&self, wanted: &str) -> ParseError {
+        if !self.clause_ends() {
+            return self.err(&format!("{wanted}, found {}", self.found()));
+        }
+
+        let offset = self
+            .pos
+            .checked_sub(1)
+            .and_then(|i| self.toks.get(i))
+            .map_or(self.src.len(), |t| t.end as usize);
+
+        ParseError {
+            offset,
+            message: format!("{wanted}, found end of line"),
+        }
     }
 
     fn target_word(&mut self) -> Result<TokSpan, ParseError> {

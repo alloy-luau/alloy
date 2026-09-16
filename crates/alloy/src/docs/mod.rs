@@ -133,7 +133,7 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // clause it broke. Above the import rule, because the word
     // `requires` holds the word `require`.
     (
-        &["` requires ", "`each ", "`requires` clause"],
+        &["` requires ", "`each ", "`requires`"],
         "AttributeContract",
     ),
     (&["attribute", "derive"], "AttributeError"),

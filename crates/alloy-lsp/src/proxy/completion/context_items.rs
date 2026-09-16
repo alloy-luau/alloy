@@ -827,7 +827,7 @@ impl State {
 
                 // A contract on this declaration says which fields are
                 // missing. Those rank first.
-                for gap in contract_gaps_at(doc, offset) {
+                for gap in contract_gaps_at(doc, offset, "field") {
                     let ty = match gap.shape.is_empty() {
                         true => "unknown".to_string(),
 
@@ -838,9 +838,18 @@ impl State {
 
                         false => format!("{} {}: {ty}", gap.visibility, gap.member),
                     };
-                    let mut item = word(&gap.member, 5, None, from);
+                    let mut item = word(
+                        &gap.member,
+                        5,
+                        Some(format!("`@{}` requires this field.", gap.attr)),
+                        from,
+                    );
                     item["textEdit"]["newText"] = json!(insert);
-                    item["detail"] = json!(format!("required by `@{}`", gap.attr));
+                    item["detail"] = json!(gap_detail(gap));
+                    // The editor matches the word the author typed
+                    // against this, so `pri` and `state` both keep the
+                    // row while the label stays the member's name.
+                    item["filterText"] = json!(insert);
                     item["sortText"] = json!("0");
                     items.push(item);
                 }
@@ -884,7 +893,7 @@ impl State {
                 // A contract on this declaration says what is missing.
                 // Those members rank first: the author is here to write
                 // one of them.
-                for gap in contract_gaps_at(doc, offset) {
+                for gap in contract_gaps_at(doc, offset, "function") {
                     let insert = match gap.visibility.is_empty() {
                         true => format!("function {}{}", gap.member, gap_params(gap)),
 
@@ -899,10 +908,14 @@ impl State {
                         &gap.member,
                         &format!("{insert}\n\t$0\nend"),
                         2,
-                        &format!("required by `@{}`", gap.attr),
+                        &gap_detail(gap),
                         Some(format!("`@{}` requires this member.", gap.attr)),
                         from,
                     );
+                    // The editor matches the word the author typed
+                    // against this, so `pri`, `function` and `Start`
+                    // all keep the row.
+                    item["filterText"] = json!(insert);
                     item["sortText"] = json!("0");
                     items.push(item);
                 }
@@ -1999,20 +2012,73 @@ impl State {
 }
 
 /*
-The members a contract asks for in the declaration the offset sits in.
+The members of one kind a contract asks for in the body the offset sits
+in. `kind` is `function` for a method column and `field` for a field
+column: a `requires field` clause goes on the struct, and the same
+declaration can carry gaps of both kinds.
 
-A gap carries the `end` it belongs in front of, and the declaration runs
-from the attribute to that `end`, so an offset inside the body finds its
-own gaps and no others.
+A half-written member stops the compile, so the list is empty there. The
+items carry a `filterText` of the whole clause instead, which keeps the
+row while the editor filters by the word the author types.
 */
-fn contract_gaps_at(doc: &Doc, offset: usize) -> Vec<&alloy::desugar::ContractGap> {
+fn contract_gaps_at<'a>(
+    doc: &'a Doc,
+    offset: usize,
+    kind: &str,
+) -> Vec<&'a alloy::desugar::ContractGap> {
     doc.output
         .as_ref()
         .map(|o| o.contract_gaps.as_slice())
         .unwrap_or_default()
         .iter()
-        .filter(|g| offset > g.start as usize && offset <= g.insert_at as usize)
+        .filter(|g| g.kind == kind && holds_the_gap(&doc.source, offset, g))
         .collect()
+}
+
+/// Whether the caret sits in the body a gap goes at the end of.
+///
+/// A gap carries the `end` it belongs in front of. Every line from the
+/// caret to that `end` belongs to the body, so each one sits deeper
+/// than the `end` does. A line back at that column closes another
+/// block, which puts the caret outside.
+fn holds_the_gap(src: &str, offset: usize, gap: &alloy::desugar::ContractGap) -> bool {
+    let insert_at = gap.insert_at as usize;
+
+    if offset > insert_at || insert_at > src.len() {
+        return false;
+    }
+
+    src[offset..insert_at].lines().skip(1).all(|line| {
+        let text = line.trim_start();
+
+        text.is_empty() || line.len() - text.len() > gap.indent as usize
+    })
+}
+
+/// The detail of a missing member: the clause that asks for it, and the
+/// attribute the clause belongs to.
+fn gap_detail(gap: &alloy::desugar::ContractGap) -> String {
+    let mut clause = "requires".to_string();
+
+    if !gap.visibility.is_empty() {
+        clause.push(' ');
+        clause.push_str(&gap.visibility);
+    }
+
+    clause.push(' ');
+    clause.push_str(&gap.kind);
+    clause.push(' ');
+    clause.push_str(&gap.member);
+
+    match gap.kind.as_str() {
+        "field" if !gap.shape.is_empty() => clause.push_str(&format!(": {}", gap.shape)),
+
+        "field" => {}
+
+        _ => clause.push_str(&gap_params(gap)),
+    }
+
+    format!("{clause} from `@{}`", gap.attr)
 }
 
 /// The parameter list a missing function takes: the one the clause wrote,

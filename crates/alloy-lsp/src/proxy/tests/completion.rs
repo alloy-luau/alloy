@@ -1952,7 +1952,7 @@ pub(crate) fn a_contract_offers_the_members_it_requires() {
         members[0],
         (
             "Start".to_string(),
-            "required by `@service`".to_string(),
+            "requires public function Start(self) from `@service`".to_string(),
             "0".to_string()
         )
     );
@@ -1963,8 +1963,60 @@ pub(crate) fn a_contract_offers_the_members_it_requires() {
         fields[0],
         (
             "state".to_string(),
-            "required by `@holds`".to_string(),
+            "requires private field state: number from `@holds`".to_string(),
             "0".to_string()
+        )
+    );
+
+    // A field goes on the struct and a method on the `impl`, so
+    // neither column offers the other's clause.
+    assert!(!members.iter().any(|(label, ..)| label == "state"));
+    assert!(!fields.iter().any(|(label, ..)| label == "Start"));
+}
+
+/// A `requires field` clause of an attribute that sits on the `impl`
+/// still goes on the struct the `impl` targets. The struct stands above
+/// the attribute, so the body the clause names is what says the column
+/// takes it.
+#[test]
+pub(crate) fn a_field_clause_reaches_the_struct_above_the_impl() {
+    let src = concat!(
+        "attribute provider on impl as\n",
+        "    requires private function Start(self)\n",
+        "    requires private field state: number\n",
+        "end\n\n",
+        "struct Holder as\n    \nend\n\n",
+        "@provider\nimpl Holder as\n    \nend\n"
+    );
+    let rows = |head: &str| -> Vec<(String, String)> {
+        let at = src.rfind(head).expect("the head") + head.len();
+        let (st, uri) = one_file(src);
+        let ctx = context::detect(src, at).expect("a member column");
+
+        st.context_items(uri, at, &ctx)
+            .iter()
+            .map(|i| {
+                (
+                    i["label"].as_str().unwrap_or_default().to_string(),
+                    i["filterText"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    };
+    let fields = rows("struct Holder as\n    ");
+    assert_eq!(
+        fields[0],
+        ("state".to_string(), "private state: number".to_string())
+    );
+
+    // The word the author types filters on the whole clause, so `pri`
+    // and `Start` both keep the row.
+    let members = rows("impl Holder as\n    ");
+    assert_eq!(
+        members[0],
+        (
+            "Start".to_string(),
+            "private function Start(self)".to_string()
         )
     );
 }

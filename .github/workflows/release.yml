@@ -163,17 +163,13 @@ jobs:
             echo "CARGO_REGISTRY_TOKEN is not set; add it under Settings > Secrets and variables > Actions"
             exit 1
           fi
-          # Only these two reach crates.io. `alloy-luau` depends on
-          # `alloy-luaux`, the vendored Luau fork in crates/luaux, by path
-          # and with no version, and that crate sets `publish = false`.
-          # Cargo refuses to publish a crate that carries a path-only
-          # dependency, so `alloy-luau` and `alloy-luau-lsp` cannot go up
-          # until the fork is published or replaced. `alloy-web` sets
-          # `publish = false` on purpose. The GitHub release above carries
+          # The order is the dependency order: a crate goes up after
+          # every crate it names. `alloy-web` sets `publish = false` on
+          # purpose, so it stays out. The GitHub release above carries
           # every binary, and `alloy self install` reads it, so the
           # toolchain reaches users either way.
           version="${{ needs.meta.outputs.version }}"
-          for package in alloy-syntax alloy-ingot; do
+          for package in alloy-syntax alloy-luaux alloy-ingot alloy-luau alloy-luau-lsp; do
             # crates.io refuses a request with no User-Agent, so the
             # check needs one or it never finds anything and the
             # publish below fails on a version that is already up.

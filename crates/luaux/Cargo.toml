@@ -6,7 +6,6 @@ edition = "2021"
 rust-version.workspace = true
 license = "MIT"
 repository.workspace = true
-publish = false
 
 [lib]
 name = "luaux"

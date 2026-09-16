@@ -20,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 # The fork of luaux 0.2.0 in crates/luaux; see its NOTICE.
-luaux = { package = "alloy-luaux", path = "../luaux" }
+luaux = { package = "alloy-luaux", version = "0.1.0-rc.5", path = "../luaux" }
 alloy-syntax = { version = "0.1.0-rc.5", path = "../alloy-syntax" }
 alloy-ingot = { version = "0.1.0-rc.5", path = "../alloy-ingot" }
 globset = "0.4"

@@ -1605,3 +1605,24 @@ pub(crate) fn a_hover_in_a_macro_argument_lands_on_the_code() {
         assert!(!context::in_string(text, at), "{call}: {text}");
     }
 }
+
+/// A `const` bound to a table literal hovers with the record the child
+/// printed at its declaration. The fold names every other print of
+/// that shape `typeof(SCHEMA)`, and the restyle has already written
+/// the source's keywords over the child's `local`.
+#[test]
+fn a_const_table_hovers_as_its_record_at_the_declaration() {
+    let src = "export const SCHEMA = {\n  stats = {\n    strength = { default = 0, kind = \"int\" },\n  },\n}\n\nprint(SCHEMA.stats)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed = "```luau\nlocal SCHEMA: {\n    stats: {\n        strength: {\n            default: number,\n            kind: \"int\"\n        }\n    }\n}\n```";
+    let text = restyle_hover(printed, doc, 0, 13).expect("restyled");
+    let text = crate::shapes::fold(&text, &st.known_shapes_at(Some(uri)));
+
+    assert!(
+        text.starts_with("```alloy\nexport const SCHEMA: {"),
+        "{text}"
+    );
+    assert!(text.contains("default: number"), "{text}");
+    assert!(!text.contains("typeof("), "{text}");
+}

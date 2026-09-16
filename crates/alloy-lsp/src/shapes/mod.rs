@@ -605,13 +605,16 @@ struct Binding {
 
 /// The name a hover declares, in `local X: T` or `X: T`. A type that
 /// reads back as the name of what it declares tells the reader
-/// nothing, so the fold leaves that one print alone.
+/// nothing, so the fold leaves that one print alone. The restyle runs
+/// first and writes the source's keywords, so `export const X: T` is
+/// the same subject.
 fn subject_of(text: &str) -> Option<String> {
-    let line = text
-        .lines()
-        .find(|l| l.trim_start().starts_with("local "))?
-        .trim_start()
-        .strip_prefix("local ")?;
+    let mut line = text.lines().nth(1)?.trim_start();
+
+    for keyword in ["export ", "local ", "const "] {
+        line = line.strip_prefix(keyword).unwrap_or(line);
+    }
+
     let (name, _) = line.split_once(": ")?;
     let name = name.trim();
 

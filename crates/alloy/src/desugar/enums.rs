@@ -508,52 +508,41 @@ impl<'s> Desugar<'s> {
             .unwrap_or_else(|| name.replace('.', "_"))
     }
 
-    /// A local for a match scrutinee: the head's alias, or a fresh name
-    /// in the check artifact, cast to the enum its arms name.
-    /// `type(x) == "table"` reads a lone variant type wrong, and a value
-    /// the code just built has one; read through the enum it narrows
-    /// right. The ship artifact keeps an unaliased scrutinee as it is.
+    /// A fresh local for a match scrutinee in the check artifact, cast
+    /// to the enum its arms name. `type(x) == "table"` reads a lone
+    /// variant type wrong, and a value the code just built has one; read
+    /// through the enum it narrows right. The ship artifact keeps the
+    /// scrutinee as it is.
+    ///
+    /// A head with an alias takes no hoist: its locals live inside the
+    /// closure `match_expr` writes, see `head_locals`.
     pub(crate) fn scrutinee_local(
         &mut self,
         value: Renderer<'s>,
-        ename: Option<&str>,
-        alias: Option<&str>,
+        ename: &str,
         anchor: u32,
     ) -> String {
-        let name = match alias {
-            Some(a) => a.to_string(),
-
-            None => {
-                self.temp_next += 1;
-
-                format!("_v{}", self.temp_next)
-            }
-        };
-        let value = match ename {
-            Some(e) => self.render_side(|d| {
-                d.generate(anchor, "(");
-                d.r.append(value);
-                d.generate(anchor, &format!(") :: {e}"));
-            }),
-
-            None => value,
-        };
+        self.temp_next += 1;
+        let name = format!("_v{}", self.temp_next);
+        let cast = self.render_side(|d| {
+            d.generate(anchor, "(");
+            d.r.append(value);
+            d.generate(anchor, &format!(") :: {ename}"));
+        });
         self.hoists.push(Hoist::Fresh {
             name: name.clone(),
-            value: HoistValue::Rendered(value),
+            value: HoistValue::Rendered(cast),
             anchor,
         });
 
         name
     }
 
-    /// The path each scrutinee reads through: the head's alias, a name,
-    /// or a temp, and in the check artifact a local typed as the enum
-    /// the arms name.
+    /// The path each scrutinee reads through: a name or a temp, and in
+    /// the check artifact a local typed as the enum the arms name.
     pub(crate) fn scrutinee_paths(
         &mut self,
         scrutinees: &[Expr],
-        aliases: &[Option<TokSpan>],
         arms: &[&[Pattern]],
     ) -> Vec<String> {
         let mut paths = Vec::new();
@@ -564,37 +553,75 @@ impl<'s> Desugar<'s> {
             } else {
                 None
             };
-            let alias = aliases.get(col).copied().flatten();
 
-            // A `while`, `repeat`, or `elseif` condition reads its
-            // operands again each pass, so nothing hoists there and the
-            // alias has no local to take. The arms would read a global
-            // of that name, so it reports instead.
-            if let Some(a) = alias
-                && self.no_hoist > 0
-            {
-                self.diagnose(
-                    a,
-                    "a `match` alias is not supported yet inside a `while`, `repeat`, or \
-                     `elseif` condition; bind the value to a local first",
-                );
+            match ename {
+                Some(e) => {
+                    let anchor = self.byte_start(sc.span());
+                    let value = self.render_to_side(sc);
+                    let path = self.scrutinee_local(value, &e, anchor);
+                    paths.push(path);
+                }
+
+                None => {
+                    let path = self.reusable(sc);
+                    paths.push(path);
+                }
             }
+        }
 
-            let alias = alias
-                .filter(|_| self.no_hoist == 0)
-                .map(|a| self.text_of(a).to_string());
+        paths
+    }
 
-            if alias.is_none() && ename.is_none() {
-                let path = self.reusable(sc);
-                paths.push(path);
+    /// `local a = x local b = y` for a match head, one local per
+    /// scrutinee: the alias the head wrote, or a temp. The check
+    /// artifact casts each value to the enum the arms name, the way
+    /// `scrutinee_local` does. The caller opens the block that holds
+    /// them, so an alias lives and dies with the match.
+    fn head_locals(
+        &mut self,
+        anchor: u32,
+        scrutinees: &[Expr],
+        aliases: &[Option<TokSpan>],
+        arms: &[&[Pattern]],
+    ) -> Vec<String> {
+        let mut paths = Vec::new();
 
-                continue;
-            }
-
-            let anchor = self.byte_start(sc.span());
+        for (col, sc) in scrutinees.iter().enumerate() {
             let value = self.render_to_side(sc);
-            let path = self.scrutinee_local(value, ename.as_deref(), alias.as_deref(), anchor);
-            paths.push(path);
+            let cast = self
+                .options
+                .check
+                .then(|| self.column_enum(arms, col))
+                .flatten();
+            self.generate(anchor, " local ");
+
+            // `match e as n with` names the local `n`. The name copies
+            // from the source, so the editor maps it to the alias.
+            match aliases.get(col).copied().flatten() {
+                Some(alias) => {
+                    self.copy_on_line(anchor, alias);
+                    paths.push(self.text_of(alias).to_string());
+                }
+
+                None => {
+                    self.temp_next += 1;
+                    let index = self.temp_next;
+                    self.generate(anchor, &format!("_m{index}"));
+                    paths.push(format!("_m{index}"));
+                }
+            }
+
+            self.generate(anchor, " = ");
+
+            match cast {
+                Some(e) => {
+                    self.generate(anchor, "(");
+                    self.r.append(value);
+                    self.generate(anchor, &format!(") :: {e}"));
+                }
+
+                None => self.r.append(value),
+            }
         }
 
         paths
@@ -1450,49 +1477,8 @@ impl<'s> Desugar<'s> {
 
         // `match a, b with` becomes `do local _1 = a local _2 = b`. Each
         // scrutinee keeps its chunks, so the editor maps its names.
-        let mut paths = Vec::new();
         self.generate(start, "do");
-
-        for (col, sc) in m.scrutinees.iter().enumerate() {
-            let value = self.render_to_side(sc);
-            // The check artifact reads the scrutinee as the enum the arms
-            // name; see `scrutinee_local`.
-            let cast = self
-                .options
-                .check
-                .then(|| self.column_enum(&pats, col))
-                .flatten();
-            self.generate(start, " local ");
-
-            // `match e as n with` names the local `n`. The name copies
-            // from the source, so the editor maps it to the alias.
-            match m.aliases.get(col).copied().flatten() {
-                Some(alias) => {
-                    self.copy_on_line(start, alias);
-                    paths.push(self.text_of(alias).to_string());
-                }
-
-                None => {
-                    self.temp_next += 1;
-                    let index = self.temp_next;
-                    self.generate(start, &format!("_m{index}"));
-                    paths.push(format!("_m{index}"));
-                }
-            }
-
-            self.generate(start, " = ");
-
-            match cast {
-                Some(e) => {
-                    self.generate(start, "(");
-                    self.r.append(value);
-                    self.generate(start, &format!(") :: {e}"));
-                }
-
-                None => self.r.append(value),
-            }
-        }
-
+        let paths = self.head_locals(start, &m.scrutinees, &m.aliases, &pats);
         self.alias_lints(m.span, &m.aliases);
 
         let mut cursor = with_end;
@@ -1587,7 +1573,15 @@ impl<'s> Desugar<'s> {
     pub(crate) fn match_expr(&mut self, m: &MatchExpr) {
         let start = self.byte_start(m.span);
         let pats: Vec<&[Pattern]> = m.arms.iter().map(|a| a.patterns.as_slice()).collect();
-        let paths = self.scrutinee_paths(&m.scrutinees, &m.aliases, &pats);
+        // A Luau if-expression holds no local, so a head with an alias
+        // becomes a closure: the name lives and dies inside it, the way
+        // the `do` block of the statement form holds one.
+        let aliased = m.aliases.iter().any(Option::is_some);
+        let mut paths = if aliased {
+            Vec::new()
+        } else {
+            self.scrutinee_paths(&m.scrutinees, &pats)
+        };
         self.alias_lints(m.span, &m.aliases);
         let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
@@ -1616,7 +1610,14 @@ impl<'s> Desugar<'s> {
             .unwrap_or(m.span.end - 1) as usize
             - 1]
         .end;
-        self.generate(start, "(");
+        if aliased {
+            self.generate(start, "(function()");
+            paths = self.head_locals(start, &m.scrutinees, &m.aliases, &pats);
+            self.generate(start, " return (");
+        } else {
+            self.generate(start, "(");
+        }
+
         let mut cursor = with_end;
         let last_index = m.arms.len().saturating_sub(1);
 
@@ -1673,7 +1674,7 @@ impl<'s> Desugar<'s> {
 
         let end_tok = self.toks[m.span.end as usize - 1];
         self.copy(cursor, end_tok.start);
-        self.generate(end_tok.start, ")");
+        self.generate(end_tok.start, if aliased { ") end)()" } else { ")" });
     }
 
     /// `local Ok(v) = e` and let-else.
@@ -2254,8 +2255,8 @@ mod tests {
         );
     }
 
-    /// The expression form takes the alias as a local in front of the
-    /// statement it sits in, so a guard reads it too.
+    /// The expression form holds the alias in a closure of its own, so
+    /// a guard reads it and nothing after the `end` does.
     #[test]
     fn a_match_expression_alias_takes_a_local() {
         let src = "enum State as\n    Loading\n    Ready(number)\nend\nlocal s = State.Loading\nlocal v = match s as st with\n    case Loading then 0\n    case Ready(n) and n > #tostring(st) then n\n    default 1\nend\nprint(v)\n";
@@ -2263,24 +2264,28 @@ mod tests {
 
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(
-            out.ship.contains("local st = s local v = ("),
+            out.ship
+                .contains("local v = (function() local st = s return ("),
             "{}",
             out.ship
         );
+        assert!(out.ship.contains(") end)()"), "{}", out.ship);
         assert!(out.ship.contains("#tostring(st)"), "{}", out.ship);
+        // The guard reads the alias, so nothing calls it unused.
+        assert!(unused(&out.lints).is_empty(), "{:?}", out.lints);
 
-        // A condition that reads its operands again each pass hoists
-        // nothing, so the alias has no local and the head reports.
-        let loop_src = "enum State as\n    Loading\nend\nlocal s = State.Loading\nwhile match s as st with\n    default #tostring(st) > 0\nend do\n    print(1)\nend\n";
+        // The closure holds the name, so a condition that reads its
+        // operands again each pass needs no hoist for it.
+        let loop_src = "enum State as\n    Loading\n    Ready(number)\nend\nlocal s = State.Loading\nwhile match s as st with\n    case Loading then #tostring(st) > 0\n    case Ready(n) then n > 0\nend do\n    print(1)\nend\n";
         let loops = crate::compile(loop_src).unwrap();
 
+        assert!(loops.diagnostics.is_empty(), "{:?}", loops.diagnostics);
         assert!(
             loops
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("bind the value to a local first")),
-            "{:?}",
-            loops.diagnostics
+                .ship
+                .contains("while (function() local st = s return ("),
+            "{}",
+            loops.ship
         );
         assert_eq!(
             src.lines().count(),
@@ -2314,6 +2319,28 @@ mod tests {
         assert!(unused(&crate::compile(&read).unwrap().lints).is_empty());
         let silenced = src.replace("as state", "as _state");
         assert!(unused(&crate::compile(&silenced).unwrap().lints).is_empty());
+    }
+
+    /// The expression form reports an unread alias the same way, and
+    /// the source its fix writes still compiles and reports nothing.
+    #[test]
+    fn the_fix_for_an_unused_alias_still_compiles() {
+        let src = "enum State as\n    Loading\n    Ready(number)\nend\nlocal s = State.Loading\nlocal v = match s as st with\n    case Loading then 0\n    case Ready(n) then n\nend\nprint(v)\n";
+        let out = crate::compile(src).unwrap();
+        let found = unused(&out.lints);
+        let [lint] = found.as_slice() else {
+            panic!("{:?}", out.lints)
+        };
+
+        assert_eq!(&src[lint.start as usize..lint.end as usize], "st");
+        let (fixed, n) = crate::lint::apply_fixes(src, &found);
+
+        assert_eq!(n, 1);
+        assert!(fixed.contains("local v = match s with\n"), "{fixed}");
+        let after = crate::compile(&fixed).unwrap();
+
+        assert!(after.diagnostics.is_empty(), "{:?}", after.diagnostics);
+        assert!(unused(&after.lints).is_empty(), "{:?}", after.lints);
     }
 
     /// `enum Opt<T>`: a constructor returns the enum, so `Opt.Some(1)`

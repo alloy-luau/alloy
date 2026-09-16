@@ -1170,20 +1170,10 @@ impl State {
             Context::AttributeTarget { prefix } => {
                 let from = offset - prefix.len();
 
-                for (target, doc_text) in [
-                    ("function", "A function or method."),
-                    ("struct", "A struct declaration."),
-                    ("enum", "An enum declaration."),
-                    ("variant", "One variant of an enum."),
-                    ("field", "A field of a struct."),
-                    ("param", "A parameter, on a function or a remote."),
-                    ("remote", "A remote declaration."),
-                    ("interface", "An interface declaration."),
-                    ("type", "A type alias."),
-                    ("local", "A local or const binding."),
-                    ("namespace", "A namespace declaration."),
-                ] {
-                    items.push(word(target, 21, Some(doc_text.to_string()), from));
+                for target in alloy_syntax::ATTRIBUTE_TARGETS {
+                    let doc = attribute_target_doc(target).map(str::to_string);
+
+                    items.push(word(target, 21, doc, from));
                 }
             }
 
@@ -2031,4 +2021,48 @@ fn doc_sentence(text: &str) -> Option<String> {
         .lines()
         .next()
         .map(str::to_string)
+}
+
+/// The one-line documentation of an attribute target.
+///
+/// The words come from [`alloy_syntax::ATTRIBUTE_TARGETS`], so a new
+/// target needs a line here. The test below holds the two lists together.
+fn attribute_target_doc(target: &str) -> Option<&'static str> {
+    let doc = match target {
+        "function" => "A function or method.",
+        "struct" => "A struct declaration.",
+        "enum" => "An enum declaration.",
+        "variant" => "One variant of an enum.",
+        "field" => "A field of a struct.",
+        "param" => "A parameter, on a function or a remote.",
+        "remote" => "A remote declaration.",
+        "interface" => "An interface declaration.",
+        "type" => "A type alias.",
+        "local" => "A local or const binding.",
+        "namespace" => "A namespace declaration.",
+        "impl" => "An `impl` block.",
+        "trait" => "A trait declaration.",
+
+        _ => return None,
+    };
+
+    Some(doc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attribute_target_doc;
+
+    /// The parser accepts the words of `ATTRIBUTE_TARGETS`, and the
+    /// completion offers them. A word with no line here would reach the
+    /// editor bare, so the two lists must stay together.
+    #[test]
+    fn every_attribute_target_carries_a_doc() {
+        for target in alloy_syntax::ATTRIBUTE_TARGETS {
+            assert!(
+                attribute_target_doc(target).is_some(),
+                "`{target}` has no documentation line"
+            );
+        }
+    }
 }

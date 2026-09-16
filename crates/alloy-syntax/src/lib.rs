@@ -25,6 +25,26 @@ pub mod printer;
 pub mod scan;
 pub mod stand_in;
 
+/// The words an `attribute ... on ...` clause accepts.
+///
+/// The parser and the editor read this one list, so the completion
+/// cannot fall behind the grammar.
+pub const ATTRIBUTE_TARGETS: &[&str] = &[
+    "function",
+    "struct",
+    "enum",
+    "variant",
+    "field",
+    "param",
+    "remote",
+    "interface",
+    "type",
+    "local",
+    "namespace",
+    "impl",
+    "trait",
+];
+
 /// One parsed file: its tokens with the comment spans, and its tree
 pub struct Parsed {
     pub lexed: lexer::Lexed,

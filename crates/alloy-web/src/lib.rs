@@ -581,7 +581,7 @@ pub fn complete(offset: u32) -> String {
             Context::AttributeTarget { prefix } => {
                 let from = offset - prefix.len();
 
-                for name in ["function", "struct", "enum", "variant", "field", "param", "remote", "interface", "type", "local"] {
+                for name in alloy_syntax::ATTRIBUTE_TARGETS {
                     items.push(word(name, "keyword", None, from));
                 }
             }

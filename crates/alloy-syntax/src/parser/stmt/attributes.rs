@@ -270,22 +270,7 @@ impl<'a> Parser<'a> {
     }
 
     fn target_word(&mut self) -> Result<TokSpan, ParseError> {
-        if matches!(
-            self.text(),
-            "function"
-                | "struct"
-                | "enum"
-                | "variant"
-                | "field"
-                | "param"
-                | "remote"
-                | "interface"
-                | "type"
-                | "local"
-                | "namespace"
-                | "impl"
-                | "trait"
-        ) {
+        if crate::ATTRIBUTE_TARGETS.contains(&self.text()) {
             let i = self.bump();
 
             return Ok(TokSpan::new(i, i + 1));

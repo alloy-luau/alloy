@@ -335,9 +335,15 @@ pub(crate) fn declaration_head(head: &str) -> Option<bool> {
     (after.ends_with([' ', '\t']) && after.trim().is_empty()).then_some(interface)
 }
 
-/// The declaration keyword a line starts with, `export` aside.
+/// The declaration keyword a line starts with, `export` and the
+/// visibility word of a namespace member aside.
 fn declaration_word(line: &str) -> Option<&'static str> {
     let t = line.trim_start();
+    let t = t
+        .strip_prefix("public ")
+        .or_else(|| t.strip_prefix("private "))
+        .map(str::trim_start)
+        .unwrap_or(t);
     let t = t.strip_prefix("export ").map(str::trim_start).unwrap_or(t);
     let binds = t.starts_with("local ") || t.starts_with("const ");
     let t = t
@@ -443,35 +449,36 @@ pub(crate) fn attribute_target(
         };
     }
 
-    // An indented line sits in a body: the nearest column-zero line above
-    // names it. A column-zero `end` or another statement ends the search.
-    let indented = head.starts_with(' ') || head.starts_with('\t');
+    // An indented line sits in a body: the first line above with less
+    // indentation opens it. The depth is free, so a struct inside a
+    // namespace reads the same as one at the margin.
+    let indent = head.len() - head.trim_start().len();
 
-    if indented {
-        for line in src[..line_start].lines().rev() {
-            if line.trim().is_empty() || !line.starts_with(|c: char| !c.is_whitespace()) {
-                continue;
-            }
+    if indent > 0 {
+        let opener = src[..line_start]
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .rev()
+            .find(|l| l.len() - l.trim_start().len() < indent);
 
-            return match declaration_word(line) {
-                Some("struct") | Some("interface") => (Some("field"), false),
-                Some("enum") => (Some("variant"), false),
-                // A member of an `impl` or a `trait` is a method. Every
-                // attribute of a function reads on one, `@test` apart:
-                // it registers a name with the runner, and a method
-                // takes a receiver no runner can give it.
-                Some("impl") | Some("trait") => (Some("method"), false),
-                _ => (None, false),
-            };
+        match opener.and_then(declaration_word) {
+            Some("struct") | Some("interface") => return (Some("field"), false),
+            Some("enum") => return (Some("variant"), false),
+            // A member of an `impl` or a `trait` is a method. Every
+            // attribute of a function reads on one, `@test` apart:
+            // it registers a name with the runner, and a method
+            // takes a receiver no runner can give it.
+            Some("impl") | Some("trait") => return (Some("method"), false),
+            // A namespace body holds declarations, as the margin does,
+            // so the line below names the target.
+            _ => {}
         }
-
-        return (None, false);
     }
 
-    // At column zero the attribute precedes a declaration: past the
-    // other attribute lines, the blanks, and the comments. Nothing
-    // there is no declaration yet, which is a state of its own: only
-    // an attribute that goes anywhere reads over blank lines.
+    // The attribute precedes a declaration: past the other attribute
+    // lines, the blanks, and the comments. Nothing there is no
+    // declaration yet, which is a state of its own: only an attribute
+    // that goes anywhere reads over blank lines.
     match declaration_below(&src[line_end.min(src.len())..]) {
         Some(word) => (Some(word), false),
 

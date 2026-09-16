@@ -1782,6 +1782,33 @@ mod tests {
         assert_eq!(target_of("@|\n"), None);
     }
 
+    /// A namespace member takes what its own declaration takes. The
+    /// visibility word comes first, and the body nests as deep as the
+    /// writer nests it.
+    #[test]
+    fn a_namespace_member_reads_its_own_target() {
+        let ns = "namespace T as\n  @|\n  public function go()\n\n  end\nend\n";
+        assert_eq!(target_of(ns), Some("function"));
+
+        let st = "namespace T as\n  @|\n  public struct P as\n    x: number\n  end\nend\n";
+        assert_eq!(target_of(st), Some("struct"));
+
+        let bind = "namespace T as\n  @|\n  private local count = 1\nend\n";
+        assert_eq!(target_of(bind), Some("local"));
+
+        // A struct inside a namespace still holds fields.
+        let field = "namespace T as\n  struct P as\n    @|\n    x: number\n  end\nend\n";
+        assert_eq!(target_of(field), Some("field"));
+
+        // A namespace inside a namespace nests the same way.
+        let deep =
+            "namespace T as\n  namespace U as\n    @|\n    public function go() end\n  end\nend\n";
+        assert_eq!(target_of(deep), Some("function"));
+
+        // A top-level function reads as it always did.
+        assert_eq!(target_of("@|\nfunction go()\n\nend\n"), Some("function"));
+    }
+
     /// A comment between the attribute and its declaration is no
     /// declaration. Both comment forms sit there, and a block comment
     /// runs over as many lines as it takes.

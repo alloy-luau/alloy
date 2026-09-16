@@ -1,6 +1,7 @@
 //! The `match` around the caret: its scrutinee, and the names its
 //! `case` arms already write.
 
+use super::Context;
 use super::strings::{block_closers, block_openers, is_word};
 
 /// The last whole-word occurrence of `word` in `text`.
@@ -55,6 +56,72 @@ fn scrutinee_of(line: &str) -> Option<String> {
     };
 
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The last value of a comma-separated head, past the commas a call
+/// or a literal inside it writes. The answer is None while a bracket
+/// stands open, since the caret is then inside the value.
+fn last_value(text: &str) -> Option<&str> {
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+
+            ')' | ']' | '}' => depth -= 1,
+
+            ',' if depth == 0 => start = i + 1,
+
+            _ => {}
+        }
+    }
+
+    (depth == 0).then(|| &text[start..])
+}
+
+/// The word the head of a `match` takes at the caret. `head` is the
+/// line up to the word the author types. `match e |` takes `as` and
+/// `with`; `match e as |` takes the name, which is the author's, so
+/// nothing belongs there; `match e as n |` takes `with` alone. A caret
+/// in the value itself reads None, so the scrutinee completes the way
+/// any expression does.
+pub(crate) fn head_word(head: &str, prefix: &str) -> Option<Context> {
+    // The value stands complete only once a space follows it.
+    if !head.ends_with(' ') {
+        return None;
+    }
+
+    let start = last_word_at(head, "match")? + "match".len();
+    let after = &head[start..];
+
+    // The `with` ends the head; past it the arms begin.
+    if last_word_at(after, "with").is_some() {
+        return None;
+    }
+
+    let value = last_value(after)?.trim();
+
+    if value.is_empty() {
+        return None;
+    }
+
+    let prefix = prefix.to_string();
+
+    match last_word_at(value, "as") {
+        // `match e as |`: the name is the author's.
+        Some(at) if value[at + "as".len()..].trim().is_empty() => Some(Context::Nothing),
+
+        Some(_) => Some(Context::MatchWith {
+            prefix,
+            aliased: true,
+        }),
+
+        None => Some(Context::MatchWith {
+            prefix,
+            aliased: false,
+        }),
+    }
 }
 
 /// The line the `match` around the caret opens on, as a byte offset,

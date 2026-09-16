@@ -1067,6 +1067,28 @@ impl State {
                 ));
             }
 
+            // `match e |`: the head opens the arms with `with`, and
+            // names the value with `as` first.
+            Context::MatchWith { prefix, aliased } => {
+                let from = offset - prefix.len();
+
+                if !aliased {
+                    items.push(word(
+                        "as",
+                        14,
+                        Some("Names the value for every arm: `match e as name with`.".to_string()),
+                        from,
+                    ));
+                }
+
+                items.push(word(
+                    "with",
+                    14,
+                    Some("Opens the arms of the match.".to_string()),
+                    from,
+                ));
+            }
+
             Context::AfterDo { prefix, filtered } => {
                 let from = offset - prefix.len();
                 items.push(word(

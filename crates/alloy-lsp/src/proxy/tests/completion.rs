@@ -111,6 +111,49 @@ pub(crate) fn destroy_and_after_reach_the_completion() {
         ["do"]
     );
 }
+/// The head of a `match` offers `as` and then `with`. Every position
+/// of it answered with the whole global scope.
+#[test]
+pub(crate) fn a_match_head_offers_as_and_with() {
+    assert_eq!(context_labels("match s \n", "match s "), ["as", "with"]);
+    assert_eq!(
+        context_labels("local x = match s \n", "match s "),
+        ["as", "with"]
+    );
+    assert_eq!(
+        context_labels("match a as left, b \n", "match a as left, b "),
+        ["as", "with"]
+    );
+    // A name stands there, so the `with` is the word left.
+    assert_eq!(
+        context_labels("match s as state \n", "match s as state "),
+        ["with"]
+    );
+    // The name after `as` is the author's.
+    assert!(context_labels("match s as \n", "match s as ").is_empty());
+
+    // The scrutinee is an expression, and so is the value after a
+    // comma: the child lists the scope there.
+    let none = |src: &str, head: &str| {
+        let at = src.rfind(head).expect("the head") + head.len();
+
+        assert_eq!(context::detect(src, at), None, "`{head}`");
+    };
+    none("local player = 1\nmatch pl\n", "match pl");
+    none("match a as left, \n", "match a as left, ");
+
+    // `match` is still a statement keyword the first word offers.
+    let (st, uri) = one_file("mat\n");
+    let mut result = json!([{ "label": "print", "kind": 3, "sortText": "4" }]);
+    st.keyword_first(uri, 0, 3, &mut result);
+    let labels: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(labels.contains(&"match"), "{labels:?}");
+}
 /// The labels the context at the end of `head` offers.
 fn context_labels(src: &str, head: &str) -> Vec<String> {
     let at = src.rfind(head).expect("the head") + head.len();

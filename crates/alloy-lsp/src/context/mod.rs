@@ -140,6 +140,10 @@ pub enum Context {
     /// puts a condition on it. `filtered` is true once a `where` is
     /// written, so only the `do` is left.
     AfterDo { prefix: String, filtered: bool },
+    /// `match e |`: the `with` that opens the arms, and the `as` that
+    /// names the value. `aliased` is true once a name stands there, so
+    /// only the `with` is left.
+    MatchWith { prefix: String, aliased: bool },
     /// `case |`: a variant of an enum, or `default`. `scrutinee` holds
     /// the text between the enclosing `match` and its `with`, when a
     /// `match` is open above the caret.
@@ -692,6 +696,11 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
                 filtered: head_words.contains(&"where"),
             });
         }
+    }
+
+    // `match e |`: the head takes `as` and then `with`.
+    if let Some(ctx) = matches::head_word(head, prefix) {
+        return Some(ctx);
     }
 
     // `$matches(value, |Busy(_))` takes a pattern, the way an arm does.
@@ -1819,6 +1828,54 @@ mod tests {
                 prefix: "Pi".to_string()
             })
         );
+    }
+
+    /// `match e as name with` names the value under match. The head
+    /// read as an expression, so the list was the whole global scope
+    /// and neither word came up.
+    #[test]
+    fn a_match_head_takes_as_and_with() {
+        let with = |aliased| {
+            Some(Context::MatchWith {
+                prefix: String::new(),
+                aliased,
+            })
+        };
+
+        assert_eq!(at("match s |"), with(false));
+        assert_eq!(at("    match s |"), with(false));
+        assert_eq!(at("local x = match s |"), with(false));
+        assert_eq!(at("return match s |"), with(false));
+        assert_eq!(at("match a as left, b |"), with(false));
+        // A name stands there, so the `with` is the word left.
+        assert_eq!(at("match s as state |"), with(true));
+        assert_eq!(at("match a as left, b as right |"), with(true));
+        // The word the author types filters the two.
+        assert_eq!(
+            at("match s wi|"),
+            Some(Context::MatchWith {
+                prefix: "wi".to_string(),
+                aliased: false,
+            })
+        );
+
+        // The name after `as` is the author's.
+        assert_eq!(at("match s as |"), Some(Context::Nothing));
+        assert_eq!(at("match s as sta|"), Some(Context::Nothing));
+
+        // The scrutinee itself is an expression, and so is the value
+        // after a comma.
+        assert_eq!(at("match pl|"), None);
+        assert_eq!(at("match |"), None);
+        assert_eq!(at("match a as left, |"), None);
+        assert_eq!(at("match player:Get(|"), None);
+        // A call and a struct literal carry commas of their own.
+        assert_eq!(at("match f(a, b) |"), with(false));
+        // The head ends at its `with`.
+        assert_eq!(at("match s with |"), None);
+        assert_eq!(at("match s with case X then |"), None);
+        // No `match` on the line: the caret is somewhere else.
+        assert_eq!(at("local m = 1 |"), None);
     }
 
     #[test]

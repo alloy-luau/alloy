@@ -523,6 +523,16 @@ pub fn complete(offset: u32) -> String {
                 items.push(word("after", "keyword", Some("`destroy x after n` waits `n` seconds, then destroys `x`.".to_string()), offset - prefix.len()));
             }
 
+            Context::MatchWith { prefix, aliased } => {
+                let from = offset - prefix.len();
+
+                if !aliased {
+                    items.push(word("as", "keyword", Some("Names the value for every arm: `match e as name with`.".to_string()), from));
+                }
+
+                items.push(word("with", "keyword", Some("Opens the arms of the match.".to_string()), from));
+            }
+
             Context::AfterDo { prefix, filtered } => {
                 let from = offset - prefix.len();
                 items.push(word("do", "keyword", Some("Opens the block the timer runs.".to_string()), from));

@@ -706,18 +706,26 @@ impl State {
                 continue;
             }
 
-            let one_line: String = fix
-                .replacement
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+            // A fix with no replacement deletes, so the title names
+            // what goes away: `Rewrite as ``` says nothing.
+            let (verb, text) = match fix.replacement.trim().is_empty() {
+                true => (
+                    "Remove",
+                    doc.source
+                        .get(fix.start as usize..fix.end as usize)
+                        .unwrap_or_default(),
+                ),
+
+                false => ("Rewrite as", fix.replacement.as_str()),
+            };
+            let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let shown = if one_line.chars().count() > 40 {
                 format!("{}…", one_line.chars().take(40).collect::<String>())
             } else {
                 one_line
             };
             actions.push(json!({
-                "title": format!("Rewrite as `{shown}` ({})", l.name),
+                "title": format!("{verb} `{shown}` ({})", l.name),
                 "kind": "quickfix",
                 "isPreferred": true,
                 "diagnostics": [{

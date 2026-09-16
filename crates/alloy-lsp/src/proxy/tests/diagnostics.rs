@@ -302,6 +302,52 @@ pub(crate) fn a_lint_directive_re_levels_one_document() {
         "an allowed lint still reports"
     );
 }
+/// An alias nothing reads draws the `unused_variable` lint, whose fix
+/// drops the ` as name`. The fix replaces with nothing, so the title
+/// read `Rewrite as ``` and said what goes away nowhere.
+#[test]
+pub(crate) fn a_fix_that_deletes_names_what_it_removes() {
+    let source = concat!(
+        "local function f(p: number): number\n",
+        "  match p as state with\n",
+        "    case 0 then\n",
+        "      return 1\n",
+        "    default\n",
+        "      return 0\n",
+        "  end\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(source);
+    let action = st
+        .lint_actions(uri, ((1, 0), (1, 20)))
+        .into_iter()
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .is_some_and(|t| t.contains("unused_variable"))
+        })
+        .expect("the unused alias offers a fix");
+
+    assert_eq!(
+        action["title"],
+        json!("Remove `as state` (unused_variable)")
+    );
+
+    // The edit takes the ` as state` out, and leaves `match p with`.
+    let edit = &action["edit"]["changes"][uri][0];
+    assert_eq!(edit["newText"], json!(""));
+
+    let line = source.lines().nth(1).expect("the head");
+    let from = edit["range"]["start"]["character"].as_u64().unwrap() as usize;
+    let to = edit["range"]["end"]["character"].as_u64().unwrap() as usize;
+
+    assert_eq!(edit["range"]["start"]["line"], json!(1));
+    assert_eq!(edit["range"]["end"]["line"], json!(1));
+    assert_eq!(
+        format!("{}{}", &line[..from], &line[to..]),
+        "  match p with"
+    );
+}
 #[test]
 pub(crate) fn preserve_keeps_the_quick_fix_off_a_line() {
     let plain = "local n = p and p.Name\n";

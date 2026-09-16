@@ -469,6 +469,43 @@ mod tests {
         .to_vec()
     }
 
+    /// `match e as name with` names the value. The alias is a local of
+    /// the match, so the proxy draws nothing on it and nothing on the
+    /// `as`: the grammar paints the word, and the child the name.
+    #[test]
+    fn a_match_alias_draws_no_token_of_its_own() {
+        const SRC: &str = "struct Pt as\n    x: number,\nend\n\nlocal function f(p: Pt): number\n    match p as pt with\n        case Pt { x } then\n            return pt.x\n    end\n\n    return 0\nend\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let drawn = alloy_tokens(&doc, &types, &[]);
+        let at = |needle: &str, word: &str| {
+            let (line, column) = position_of(SRC, SRC.find(needle).expect(needle));
+            let column = column + needle.find(word).expect(word) as u32;
+
+            drawn.iter().find(|t| t.0 == line && t.1 == column).copied()
+        };
+
+        // A name the proxy does draw, so the three below read as a
+        // rule and not as an empty answer.
+        let function = type_index(&types, "function").expect("the type");
+
+        assert_eq!(
+            at(" f(p: Pt)", "f").map(|t| t.3),
+            Some(function),
+            "{drawn:?}"
+        );
+
+        assert_eq!(at("match p as pt with", "as"), None, "{drawn:?}");
+        assert_eq!(at("match p as pt with", "pt"), None, "{drawn:?}");
+        assert_eq!(at("return pt.x", "pt"), None, "{drawn:?}");
+    }
+
     /// The emit gives a namespace member one flat name, `Ns_T`, so the
     /// child paints nothing on the word the source wrote for it. The
     /// declaration says what the member is.

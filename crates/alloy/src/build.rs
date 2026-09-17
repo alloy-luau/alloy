@@ -56,6 +56,45 @@ pub fn output_for(rel: &Path) -> Option<PathBuf> {
     Some(rel.with_file_name(format!("{stem}.luau")))
 }
 
+/// The relative require path from the directory of `from` to `to`,
+/// both relative to one root: `./x` for a sibling, `../` per level up.
+pub(crate) fn relative_require(from: &Path, to: &Path) -> String {
+    let from_dir: Vec<_> = from
+        .parent()
+        .map(|p| p.components().collect())
+        .unwrap_or_default();
+    let to_parts: Vec<_> = to.components().collect();
+    let common = from_dir
+        .iter()
+        .zip(&to_parts)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let ups = from_dir.len() - common;
+    let mut out = if ups == 0 {
+        ".".to_string()
+    } else {
+        vec![".."; ups].join("/")
+    };
+
+    for c in &to_parts[common..] {
+        out.push('/');
+        out.push_str(&c.as_os_str().to_string_lossy());
+    }
+
+    out
+}
+
+/// The path a module requires its siblings from: the file itself, and
+/// its folder for an `init.luau`. Luau reads `x/init.luau` as the
+/// module `x`, so its `./y` names a file beside `x`, not one inside it.
+pub(crate) fn module_base(path: &Path) -> PathBuf {
+    match path.file_stem().is_some_and(|s| s == "init") {
+        true => path.parent().unwrap_or(Path::new("")).to_path_buf(),
+
+        false => path.to_path_buf(),
+    }
+}
+
 /// Runs a build from the project root.
 pub fn run(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report> {
     let config = Config {
@@ -421,13 +460,11 @@ fn run_inner(
         // The runtime sits at the output root; a file requires it by a
         // relative path unless the project names one. Under a mount the
         // ship names the runtime's `@game/...` path instead.
-        let depth = rel.components().count().saturating_sub(1);
         let source_rel = build.input.join(&rel);
-        let by_file = if depth == 0 {
-            "./alloy".to_string()
-        } else {
-            format!("{}alloy", "../".repeat(depth))
-        };
+        let by_file = relative_require(
+            &module_base(&build.out.join(&rel_out)),
+            &build.out.join("alloy"),
+        );
         let (std_require, ship_std_require) = match &emit.std_require {
             Some(s) => (s.clone(), None),
 

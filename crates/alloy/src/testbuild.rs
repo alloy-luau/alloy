@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use alloy_syntax::ast::{Chunk, Expr, ImportKind, Stmt};
 use alloy_syntax::lexer::{Tok, TokKind};
 
+use crate::build::{module_base, relative_require};
 use crate::config::Config;
 use crate::{Diagnostic, EmitOptions};
 
@@ -373,34 +374,6 @@ pub fn slice(src: &str, toks: &[Tok], chunk: &Chunk) -> Option<String> {
     Some(joined)
 }
 
-/// The relative require path from the directory of `from` to `to`,
-/// both relative to one root: `./x` for a sibling, `../` per level up.
-fn relative_require(from: &Path, to: &Path) -> String {
-    let from_dir: Vec<_> = from
-        .parent()
-        .map(|p| p.components().collect())
-        .unwrap_or_default();
-    let to_parts: Vec<_> = to.components().collect();
-    let common = from_dir
-        .iter()
-        .zip(&to_parts)
-        .take_while(|(a, b)| a == b)
-        .count();
-    let ups = from_dir.len() - common;
-    let mut out = if ups == 0 {
-        ".".to_string()
-    } else {
-        vec![".."; ups].join("/")
-    };
-
-    for c in &to_parts[common..] {
-        out.push('/');
-        out.push_str(&c.as_os_str().to_string_lossy());
-    }
-
-    out
-}
-
 /// The spec's require target for a path the source requires, relative
 /// to the source: the built output when the target is an Alloy file,
 /// the file itself otherwise. `None` for a path that is not relative.
@@ -547,7 +520,10 @@ fn write_modules(
                     rewrite_requires(config, &tree, root, &source_rel, &module_rel, &out.ship);
 
                 if config.test.shim {
-                    text = with_shim(&text, &relative_require(&module_rel, &modules.join("shim")));
+                    text = with_shim(
+                        &text,
+                        &relative_require(&module_base(&module_rel), &modules.join("shim")),
+                    );
                 }
 
                 let target = dir.join(&rel_out);
@@ -630,6 +606,7 @@ fn normalize(path: &Path) -> PathBuf {
 
 /// Rewrites every relative or aliased `require` of an emitted text to
 /// the path from the spec to the target. The text keeps its line count.
+/// A spec named `init.luau` requires from its folder, as Luau reads it.
 fn rewrite_requires(
     config: &Config,
     tree: &crate::project::Tree,
@@ -640,7 +617,7 @@ fn rewrite_requires(
 ) -> String {
     crate::project::map_requires(text, |path| {
         target_for(config, tree, root, source_rel, path)
-            .map(|target| relative_require(spec_rel, &target))
+            .map(|target| relative_require(&module_base(spec_rel), &target))
     })
 }
 

@@ -324,3 +324,63 @@ fn erase_type_imports_drops_a_type_only_require() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/*
+Luau reads `x/init.luau` as the module `x`, so a `./y` in it names a
+file beside `x`, not one inside it. The build wrote the runtime require
+of an `init.aly` from the file's own folder, one folder too deep, and
+`alloy flux` then reported every std type the emit names as unknown.
+
+The require now starts at the folder Luau resolves it from.
+*/
+#[test]
+fn an_init_module_requires_the_runtime_from_the_folder_above_it() {
+    let dir = temp_project("init-runtime");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"build\"\n").unwrap();
+    fs::create_dir_all(dir.join("src/deep/deeper")).unwrap();
+    let source = "attribute tag on function\n\n@tag\nexport local function f() end\n";
+
+    for name in [
+        "src/init.aly",
+        "src/deep/init.aly",
+        "src/deep/deeper/init.aly",
+        "src/deep/plain.aly",
+    ] {
+        fs::write(dir.join(name), source).unwrap();
+    }
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    for (out, spec) in [
+        ("build/init.luau", "./build/alloy"),
+        ("build/deep/init.luau", "./alloy"),
+        ("build/deep/deeper/init.luau", "../alloy"),
+        ("build/deep/plain.luau", "../alloy"),
+    ] {
+        let text = fs::read_to_string(dir.join(out)).unwrap();
+        assert!(
+            text.contains(&format!("require(\"{spec}\")")),
+            "{out}: {text}"
+        );
+
+        // The folder Luau starts the require from: the file's own, and
+        // the one above it for an `init.luau`.
+        let folder = dir.join(out);
+        let folder = folder.parent().unwrap();
+        let folder = match out.ends_with("init.luau") {
+            true => folder.parent().unwrap(),
+
+            false => folder,
+        };
+
+        assert!(
+            folder.join(spec).with_extension("luau").is_file(),
+            "{out}: {spec} names no runtime"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}

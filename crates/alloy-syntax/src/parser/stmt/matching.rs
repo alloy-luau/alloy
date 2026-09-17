@@ -7,6 +7,18 @@ const TWO_DEFAULTS: &str =
     "a `default` arm cannot follow `default`; a `match` takes one `default` arm";
 const DEFAULT_ALONE: &str = "a `match` needs a `case` arm before `default`";
 const ALIAS_NEEDS_NAME: &str = "expected a name after `as`; write `match e as name with`";
+const STMT_ARM_TAKES_STATEMENT: &str = "a statement arm takes a statement; write `local x = match ... with` to read the arms as values";
+const EXPR_ARM_ONE_EXPRESSION: &str =
+    "an expression arm is one expression; a match in statement position takes a block";
+
+/// Whether an expression stands alone as a statement: a call, and the
+/// three words that wrap one. `expr_stmt` takes the same set.
+fn stands_alone(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Call { .. } | Expr::New { .. } | Expr::Try { .. } | Expr::Await { .. }
+    )
+}
 
 /// Every name a pattern binds, in order. A field with no pattern binds
 /// itself, and `...rest` binds the tail.
@@ -86,7 +98,7 @@ impl<'a> Parser<'a> {
                 let (patterns, guard) = self.arm_head()?;
                 self.check_alias_binds(&aliases, &patterns)?;
                 self.expect("then")?;
-                let block = self.match_block()?;
+                let block = self.arm_block()?;
                 arms.push(MatchArm {
                     patterns,
                     guard,
@@ -105,7 +117,7 @@ impl<'a> Parser<'a> {
                 }
 
                 self.bump();
-                default = Some(self.match_block()?);
+                default = Some(self.arm_block()?);
 
                 continue;
             }
@@ -300,6 +312,70 @@ impl<'a> Parser<'a> {
         r
     }
 
+    /// Whether the cursor stands where an arm ends: the next `case`,
+    /// the `default`, or the `end` of the match.
+    fn arm_ends(&self) -> bool {
+        self.at_end() || matches!(self.text(), "case" | "default" | "end")
+    }
+
+    /// Whether the whole arm body is one value, `case "a" then 5`. The
+    /// block reader takes the value for a broken statement and asks for
+    /// a name, so the arm reports the expectation itself.
+    ///
+    /// The read runs ahead and rewinds, so it costs one extra parse of
+    /// the first expression of every statement arm.
+    fn arm_is_value(&mut self) -> bool {
+        let save = self.pos;
+        let reports = self.diagnostics.len();
+        let edits = self.type_edits.len();
+        let names = self.type_names.len();
+        let value = matches!(self.expr(), Ok(e) if !stands_alone(&e)) && self.arm_ends();
+
+        self.pos = save;
+        self.diagnostics.truncate(reports);
+        self.type_edits.truncate(edits);
+        self.type_names.truncate(names);
+
+        value
+    }
+
+    /// The block of a statement arm. A value where the statement goes
+    /// reports once, and the read moves past the value so the rest of
+    /// the match still parses.
+    fn arm_block(&mut self) -> Result<Block, ParseError> {
+        if !self.arm_is_value() {
+            return self.match_block();
+        }
+
+        let start = self.pos;
+        self.bad_arm(STMT_ARM_TAKES_STATEMENT)?;
+        let _ = self.expr();
+        let span = TokSpan::new(start, self.pos);
+
+        Ok(Block {
+            stmts: vec![Stmt::Error(span)],
+            span,
+        })
+    }
+
+    /// Reports an expression arm that holds more than one expression,
+    /// and reads the statements behind the value. Their own reports go
+    /// with them: the arm has one message, and the `end` of the match
+    /// still closes.
+    fn check_expr_arm(&mut self) -> Result<(), ParseError> {
+        if self.arm_ends() {
+            return Ok(());
+        }
+
+        self.bad_arm(EXPR_ARM_ONE_EXPRESSION)?;
+
+        let reports = self.diagnostics.len();
+        let _ = self.match_block();
+        self.diagnostics.truncate(reports);
+
+        Ok(())
+    }
+
     /// The expression form: each arm is one expression.
     pub(in super::super) fn match_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
@@ -330,6 +406,7 @@ impl<'a> Parser<'a> {
                 self.check_alias_binds(&aliases, &patterns)?;
                 self.expect("then")?;
                 let value = self.expr()?;
+                self.check_expr_arm()?;
                 arms.push(MatchExprArm {
                     patterns,
                     guard,
@@ -349,6 +426,7 @@ impl<'a> Parser<'a> {
 
                 self.bump();
                 default = Some(Box::new(self.expr()?));
+                self.check_expr_arm()?;
 
                 continue;
             }

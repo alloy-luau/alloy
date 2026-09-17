@@ -94,6 +94,13 @@ const KIND_RULES: &[(&[&str], &str)] = &[
         &["is the alias of the match", "the alias of another value"],
         "SyntaxError",
     ),
+    // An arm that holds the other form: a value where a statement arm
+    // goes, and statements where an expression arm goes. The parser
+    // reports both, and no rule below reads either sentence.
+    (
+        &["arm takes a statement", "arm is one expression"],
+        "SyntaxError",
+    ),
     (&["`declare` takes", "`declare` belongs"], "DeclareError"),
     // A header the parser cannot read. The `trait` rule below would
     // read the word as a contract report.

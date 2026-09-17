@@ -702,3 +702,72 @@ fn two_values_of_a_head_cannot_share_a_name() {
     assert_eq!(&src[diagnostics[0].offset..diagnostics[0].offset + 1], "x");
     assert_eq!(src[..diagnostics[0].offset].matches('x').count(), 1);
 }
+
+/*
+An arm that holds the other form of a match reports once.
+
+A match is a statement or an expression by where it stands. A value in
+a statement arm read as a broken statement and asked for a name; two
+statements in an expression arm asked for `case`, `default`, or `end`.
+Each now names the form the arm takes, and the `end` of the match and
+of the function around it still close.
+*/
+#[test]
+fn an_arm_of_the_wrong_form_reports_once() {
+    for (src, message, at) in [
+        (
+            "match s with\n    case \"a\" then 5\n    default print(\"d\")\nend\n",
+            "a statement arm takes a statement; write `local x = match ... with` to read the arms as values",
+            "5",
+        ),
+        (
+            "function f()\n    match s with\n        case \"a\" then 5\n    end\n    print(\"after\")\nend\n",
+            "a statement arm takes a statement; write `local x = match ... with` to read the arms as values",
+            "5",
+        ),
+        (
+            "match s with\n    case \"a\" then print(\"a\")\n    default 5\nend\n",
+            "a statement arm takes a statement; write `local x = match ... with` to read the arms as values",
+            "5",
+        ),
+        (
+            "local v = match s with\n    case \"a\" then\n        print(\"a\")\n        2\n    default 0\nend\n",
+            "an expression arm is one expression; a match in statement position takes a block",
+            "2",
+        ),
+        (
+            "local v = match s with\n    case \"a\" then 1\n    default\n        print(\"d\")\n        0\nend\n",
+            "an expression arm is one expression; a match in statement position takes a block",
+            "0",
+        ),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "one report for {src:?}, got {diagnostics:?}"
+        );
+        assert_eq!(diagnostics[0].message, message, "for {src:?}");
+        assert!(
+            src[diagnostics[0].offset..].starts_with(at),
+            "the report sits on {at} for {src:?}"
+        );
+
+        let (errors, count) = lenient(src);
+        assert_eq!((errors, count), (0, 1), "for {src:?}");
+    }
+
+    // The arm a nested `end` closes goes with the report, so the match
+    // keeps its `default` and the file after it parses.
+    let (errors, diagnostics) = lenient(
+        "local v = match s with\n    case \"a\" then\n        print(\"a\")\n        if c then\n            print(\"b\")\n        end\n    default 0\nend\nprint(v)\n",
+    );
+    assert_eq!((errors, diagnostics), (0, 1));
+
+    // Both forms still parse clean.
+    let (errors, diagnostics) = lenient(
+        "match s with\n    case \"a\" then\n        print(\"a\")\n    default\n        print(\"d\")\nend\nlocal w = match s with\n    case \"a\" then 1\n    default 2\nend\nprint(w)\n",
+    );
+    assert_eq!((errors, diagnostics), (0, 0));
+}

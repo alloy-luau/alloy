@@ -58,7 +58,7 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
             return Some((start, end, text));
         }
 
-        return lookup(word).map(|text| (start, end, text));
+        return lookup(word).map(|text| (start, end, meaning(source, start, word, text)));
     }
 
     // The longest operator that covers the byte wins.
@@ -81,6 +81,86 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
     }
 
     best
+}
+
+/*
+The doc of a keyword, cut to the meaning the position reads.
+
+Two keywords write one paragraph per meaning. `default` is the fallback
+arm of a `match`, and it is also the one value `export default` sends
+out. `as` marks where a declaration body begins, and it also renames a
+name in an `import` or an `export` list. A position that names neither
+meaning keeps the whole doc, which is what `alloy doc` prints.
+*/
+fn meaning(source: &str, start: usize, word: &str, text: &'static str) -> &'static str {
+    let paragraph = |n: usize| text.split("\n\n").nth(n).unwrap_or(text);
+    let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let head = source[line_start..start].trim_end();
+
+    match word {
+        "default" if last_word(head) == "export" => paragraph(1),
+
+        "default" if crate::context::match_scrutinee(source, start).is_some() => paragraph(0),
+
+        // `import * as M` renames the whole module.
+        "as" if in_name_list(source, start) || head.ends_with('*') => paragraph(1),
+
+        "as" if opens_a_body(head) => paragraph(0),
+
+        _ => text,
+    }
+}
+
+/// The word a text ends with, empty when it ends in punctuation.
+fn last_word(text: &str) -> &str {
+    let end = text.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+
+    &text[end.len()..]
+}
+
+/// Whether a `{` stands open in front of the offset. The name list of
+/// an `import` or an `export` spans lines and holds no blank line, so
+/// the scan stops at one.
+fn in_name_list(source: &str, offset: usize) -> bool {
+    let mut depth = 0i32;
+
+    for line in source[..offset].rsplit('\n').take(16) {
+        if line.trim().is_empty() {
+            break;
+        }
+
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+    }
+
+    depth > 0
+}
+
+/// Whether the line opens a declaration, so its `as` marks where the
+/// members begin.
+fn opens_a_body(head: &str) -> bool {
+    for word in head.split_whitespace() {
+        if matches!(
+            word,
+            "export" | "public" | "private" | "local" | "declare" | "open"
+        ) {
+            continue;
+        }
+
+        return matches!(
+            word,
+            "struct"
+                | "trait"
+                | "impl"
+                | "enum"
+                | "interface"
+                | "namespace"
+                | "attribute"
+                | "class"
+        );
+    }
+
+    false
 }
 
 /// True when the byte at `offset` belongs to a word.
@@ -299,6 +379,59 @@ mod tests {
         // A method of that name is the method; the child answers.
         assert!(hover("bag:destroy()", 4).is_none());
         assert!(hover("function destroy(self) end", 9).is_none());
+    }
+
+    /// `default` writes one paragraph per meaning. The arm inside a
+    /// `match` reads the first, and `export default` reads the second.
+    #[test]
+    fn default_reads_the_meaning_of_its_position() {
+        let src = concat!(
+            "match color with\n",
+            "    case \"Red\" then 1\n",
+            "    default 0\n",
+            "end\n",
+            "export default f\n",
+        );
+
+        let at = src.find("    default").unwrap() + 4;
+        let text = hover(src, at).unwrap().2;
+        assert!(text.starts_with("The fallback arm"), "{text}");
+        assert!(!text.contains("export default expr"), "{text}");
+
+        let at = src.find("export default").unwrap() + "export ".len();
+        let text = hover(src, at).unwrap().2;
+        assert!(text.starts_with("After `export`"), "{text}");
+        assert!(!text.contains("fallback arm"), "{text}");
+    }
+
+    /// `as` opens a declaration body and renames a name in a list. A
+    /// `match` alias names neither meaning, so the whole doc stands.
+    #[test]
+    fn as_reads_the_meaning_of_its_position() {
+        let decl = "struct Vec2 as\n    x: number\nend\n";
+        let text = hover(decl, decl.find(" as").unwrap() + 1).unwrap().2;
+        assert!(text.starts_with("Marks where"), "{text}");
+
+        let list = "import { shade as tint } from \"./m\"\n";
+        let text = hover(list, list.find(" as").unwrap() + 1).unwrap().2;
+        assert!(text.starts_with("In `import"), "{text}");
+
+        let star = "import * as M from \"./m\"\n";
+        let text = hover(star, star.find(" as").unwrap() + 1).unwrap().2;
+        assert!(text.starts_with("In `import"), "{text}");
+
+        let alias = "match msg as m with\n    default 0\nend\n";
+        let text = hover(alias, alias.find(" as").unwrap() + 1).unwrap().2;
+        assert!(text.contains("Marks where"), "{text}");
+        assert!(text.contains("renames a name"), "{text}");
+    }
+
+    /// A keyword whose doc holds one meaning keeps all of it.
+    #[test]
+    fn one_meaning_keeps_the_whole_doc() {
+        let src = "read x: number\n";
+        let text = hover(src, 0).unwrap().2;
+        assert_eq!(text, lookup("read").unwrap());
     }
 
     #[test]

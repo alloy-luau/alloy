@@ -317,9 +317,15 @@ impl Server {
                 let (sl, sc) = position_of(&doc.source, start);
                 let (el, ec) = position_of(&doc.source, end);
                 // A std type: the overview, then the names a reader can
-                // hover on their own.
-                let text = alloy::docs::type_markdown(&doc.source[start..end])
-                    .unwrap_or_else(|| text.to_string());
+                // hover on their own. Only a type carries members, and
+                // `type_markdown` reads the whole doc of the key again,
+                // so a keyword cut to one meaning would grow back.
+                let word = &doc.source[start..end];
+                let text = match alloy::docs::member_names(word).is_empty() {
+                    true => text.to_string(),
+
+                    false => alloy::docs::type_markdown(word).unwrap_or_else(|| text.to_string()),
+                };
 
                 json!({
                     "contents": { "kind": "markdown", "value": text },

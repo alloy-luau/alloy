@@ -13,6 +13,7 @@ mod strings;
 mod types;
 
 use bodies::Body;
+pub(crate) use matches::match_scrutinee;
 pub(crate) use strings::code_of;
 use strings::last_word;
 

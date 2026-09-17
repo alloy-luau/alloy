@@ -1364,11 +1364,18 @@ impl<'s> Desugar<'s> {
         } else {
             value
         };
-        self.generate(start, &format!("local {name} = {value}"));
+        // A member of a namespace renders under the namespace's name,
+        // `Testing_tag`, and the table line puts it on the table. The
+        // name the runtime records stays the one the source wrote, so
+        // `Attributes.get` reads the same key whichever way a use
+        // spells the attribute.
+        let local = self.decl_name(a.name);
+
+        self.generate(start, &format!("local {local} = {value}"));
         self.blank_lines(start, self.byte_end(a.span));
 
         if a.exported {
-            self.exports.push((name.clone(), name));
+            self.exports.push((name, local));
         }
     }
 
@@ -1535,12 +1542,15 @@ impl<'s> Desugar<'s> {
         let mut tail = String::new();
 
         if let Some(f) = &fname {
+            // A namespace member renders under its own name,
+            // `Suite_case`, and the namespace table carries it. Every
+            // line that names the function reads that name; the source
+            // name binds nothing.
+            let rendered = name.map_or_else(|| f.clone(), |n| self.decl_name(n));
+
             if is_test {
-                // A namespace member renders under its own name, and the
-                // namespace table carries it: the test is `Suite.ns_case`
-                // to the reader and to the spec, `Suite_ns_case` to the
-                // line that registers it.
-                let rendered = name.map_or_else(|| f.clone(), |n| self.decl_name(n));
+                // The test is `Suite.ns_case` to the reader and to the
+                // spec, `Suite_ns_case` to the line that registers it.
                 let path = self.display_name(&rendered);
                 self.test_names
                     .push((path.clone(), body.is_async.is_some()));
@@ -1557,7 +1567,10 @@ impl<'s> Desugar<'s> {
 
             if !user.is_empty() {
                 let std = self.std();
-                tail.push_str(&format!(" {std}.attach({f}, {{ {} }})", user.join(", ")));
+                tail.push_str(&format!(
+                    " {std}.attach({rendered}, {{ {} }})",
+                    user.join(", ")
+                ));
             }
 
             if exported {

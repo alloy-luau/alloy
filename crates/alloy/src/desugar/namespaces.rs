@@ -1348,8 +1348,8 @@ pub(crate) struct MemberBinding {
     pub ty: bool,
     /// The member is a namespace of its own.
     pub nested: bool,
-    /// The emit renames the declaration. A macro and an attribute run
-    /// at compile time and keep the name the source wrote.
+    /// The emit renames the declaration. A macro runs at compile time
+    /// and keeps the name the source wrote.
     pub prefixed: bool,
 }
 
@@ -1411,8 +1411,8 @@ pub(crate) fn member_bindings(
             prefixed: false,
         }],
 
-        // A macro and an attribute run at compile time. Neither reaches
-        // the output, so neither takes a name of its own.
+        // A macro is source, not a value. It reaches no output, so it
+        // takes no name of its own and the table carries none.
         Stmt::Macro(d) => vec![MemberBinding {
             name: d.name,
             value: false,
@@ -1421,13 +1421,10 @@ pub(crate) fn member_bindings(
             prefixed: false,
         }],
 
-        Stmt::Attribute(d) => vec![MemberBinding {
-            name: d.name,
-            value: false,
-            ty: false,
-            nested: false,
-            prefixed: false,
-        }],
+        // An attribute declares a value the runtime reads:
+        // `Attributes.get(f, Ns.tag)`. It goes on the table as every
+        // other value member does.
+        Stmt::Attribute(d) => vec![binds(d.name, true, false)],
 
         _ => Vec::new(),
     }

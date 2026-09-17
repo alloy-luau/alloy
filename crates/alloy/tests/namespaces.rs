@@ -568,15 +568,54 @@ fn a_remote_takes_a_namespaced_struct() {
     );
 }
 
-/// A macro and an attribute run at compile time, so neither takes a
-/// name of its own and neither reaches the table.
+/// A macro is source, not a value, so it takes no name of its own and
+/// the table carries none.
 #[test]
-fn a_compile_time_member_keeps_its_own_name() {
+fn a_macro_member_keeps_its_own_name() {
     let out = clean(
         "namespace M as\n    macro twice(x)\n        x * 2\n    end\n    attribute tag(name: string) on field\nend\n\nprint($twice(2))\n",
     );
     assert!(out.contains("print(2 * 2)"), "{out}");
     assert!(!out.contains("M.twice"), "{out}");
+}
+
+/// An attribute is a value the runtime reads, so it renders under the
+/// namespace's name and lands on the table. The name it records stays
+/// the one the source wrote, so `Attributes.get` reads one key.
+#[test]
+fn an_attribute_member_takes_the_namespace_name() {
+    let out =
+        clean("namespace M as\n    attribute tag(name: string) on function\nend\n\nprint(M.tag)\n");
+    assert!(
+        out.contains("local M_tag = __alloy.attribute(\"tag\", { \"function\" }, { \"name\" })"),
+        "{out}"
+    );
+    assert!(out.contains("M.tag = M_tag"), "{out}");
+}
+
+/// A private attribute stays a local: the table never carries it, the
+/// way a private function goes.
+#[test]
+fn a_private_attribute_member_stays_off_the_table() {
+    let out = clean(
+        "namespace M as\n    private attribute tag on function\n\n    @tag\n    public function f()\n    end\nend\n\nprint(M.f)\n",
+    );
+    assert!(out.contains("local M_tag = __alloy.attribute"), "{out}");
+    assert!(!out.contains("M.tag = "), "{out}");
+}
+
+/// The attach line names the function the emit wrote, `M_f`. It named
+/// the source name, which binds nothing, and the checker called it an
+/// unknown global.
+#[test]
+fn an_attribute_attaches_to_the_rendered_function() {
+    let out = clean(
+        "namespace M as\n    attribute tag(n: number) on function\n\n    @tag(3)\n    public function f()\n    end\nend\n\nprint(M.f)\n",
+    );
+    assert!(
+        out.contains("__alloy.attach(M_f, { tag = { 3 } })"),
+        "{out}"
+    );
 }
 
 /// A namespace inside a function has nowhere to put its members: the

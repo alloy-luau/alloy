@@ -325,9 +325,15 @@ impl<'s> Desugar<'s> {
                     // An imported attribute keeps its targets in the
                     // module that declares it.
                     if !self.imported_names.contains(&name) {
-                        let message = format!(
-                            "no attribute named `{name}`; `attribute {name} on {target}` declares one"
-                        );
+                        // A namespace holds the name, so the report
+                        // names the path that reaches it.
+                        let message = self
+                            .ns_member_hint(&self.attr_decls, &name, "an attribute", '@')
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "no attribute named `{name}`; `attribute {name} on {target}` declares one"
+                                )
+                            });
                         self.diagnose(a.span, &message);
                     }
 

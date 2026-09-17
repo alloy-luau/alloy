@@ -833,14 +833,15 @@ impl<'s> Desugar<'s> {
             }
 
             _ => {
-                let message = match self.macro_path_error(&n) {
-                    Some(m) => m,
-
-                    None => format!(
-                        "unknown macro or intrinsic `${n}` with {} arguments",
-                        args.len()
-                    ),
-                };
+                let message = self
+                    .macro_path_error(&n)
+                    .or_else(|| self.ns_member_hint(&self.macros, &n, "a macro", '$'))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "unknown macro or intrinsic `${n}` with {} arguments",
+                            args.len()
+                        )
+                    });
                 self.diagnose(span, &message);
 
                 self.text_of(span).to_string()

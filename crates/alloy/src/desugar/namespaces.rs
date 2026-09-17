@@ -515,30 +515,59 @@ impl<'s> Desugar<'s> {
 
     /// What a compile-time name reads in a map of macros or of
     /// attributes. The innermost namespace under render wins, then a
-    /// name of the file, then any namespace that holds the bare name.
+    /// name of the file.
     ///
-    /// The last look keeps `$twice(2)` outside the namespace that
-    /// declares `twice`, which is how a namespaced macro read before
-    /// `$Ns.twice(2)` existed. A path names one member and takes none
-    /// of it.
+    /// A member of a namespace reads by its bare name inside the body
+    /// that declares it, and by its path from outside. There is no
+    /// last-resort scan for the bare name: two namespaces can declare
+    /// one name, and the map is a `HashMap`, so the winner followed
+    /// the hash order.
     pub(crate) fn scoped_decl<'m, T>(
         &self,
         map: &'m std::collections::HashMap<String, T>,
         name: &str,
     ) -> Option<&'m T> {
-        let keys = self.ns_scope_keys(name);
+        self.ns_scope_keys(name).iter().find_map(|k| map.get(k))
+    }
 
-        if let Some(hit) = keys.iter().find_map(|k| map.get(k)) {
-            return Some(hit);
-        }
-
+    /// The report a bare name earns when only a namespace declares it.
+    /// `kind` is `an attribute` or `a macro`, and `sigil` is what the
+    /// use writes in front of the path. `None` when no namespace holds
+    /// the name. Every namespace that declares it lands in the hint.
+    pub(crate) fn ns_member_hint<T>(
+        &self,
+        map: &std::collections::HashMap<String, T>,
+        name: &str,
+        kind: &str,
+        sigil: char,
+    ) -> Option<String> {
         if name.contains('.') {
             return None;
         }
 
         let tail = format!(".{name}");
+        let mut owners: Vec<&str> = map
+            .keys()
+            .filter_map(|k| k.strip_suffix(&tail))
+            .filter(|o| self.is_namespace_path(o))
+            .collect();
 
-        map.iter().find(|(k, _)| k.ends_with(&tail)).map(|(_, v)| v)
+        owners.sort_unstable();
+
+        if owners.is_empty() {
+            return None;
+        }
+
+        let paths: Vec<String> = owners
+            .iter()
+            .map(|o| format!("`{sigil}{o}.{name}`"))
+            .collect();
+
+        Some(format!(
+            "`{name}` is {kind} of {}; write {}",
+            super::list_names(&owners),
+            paths.join(" or ")
+        ))
     }
 
     /// Whether a dotted path names a namespace of this file:

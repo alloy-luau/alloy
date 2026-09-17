@@ -709,10 +709,28 @@ fn a_remote_takes_a_namespaced_struct() {
 #[test]
 fn a_macro_member_keeps_its_own_name() {
     let out = clean(
-        "namespace M as\n    macro twice(x)\n        x * 2\n    end\n    attribute tag(name: string) on field\nend\n\nprint($twice(2))\n",
+        "namespace M as\n    macro twice(x)\n        x * 2\n    end\n    attribute tag(name: string) on field\nend\n\nprint($M.twice(2))\n",
     );
     assert!(out.contains("print(2 * 2)"), "{out}");
     assert!(!out.contains("M.twice"), "{out}");
+}
+
+/// A member of a namespace reads by its path from outside. The bare
+/// name reaches none, and the report names every namespace that
+/// declares it, so the reader writes the path.
+#[test]
+fn a_bare_name_names_no_member_from_outside() {
+    let src = "namespace A as\n    macro twice(x)\n        x * 2\n    end\nend\n\nnamespace B as\n    macro twice(x)\n        x * 3\n    end\nend\n\nprint($twice(2))\n";
+    assert_eq!(
+        messages(src),
+        vec!["`twice` is a macro of `A` and `B`; write `$A.twice` or `$B.twice`"]
+    );
+
+    let attr = "namespace A as\n    attribute tag on function\nend\n\n@tag\nfunction f()\nend\n";
+    assert_eq!(
+        messages(attr),
+        vec!["`tag` is an attribute of `A`; write `@A.tag`"]
+    );
 }
 
 /// An attribute is a value the runtime reads, so it renders under the

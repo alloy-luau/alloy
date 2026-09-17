@@ -462,6 +462,9 @@ impl<'s> Desugar<'s> {
     `x is T` by the name on the right. A primitive tests `type`, a Roblox
     datatype tests `typeof`, an Instance class tests `IsA`, an enum tests
     the `EnumType`, and any other name is an Alloy struct's metatable.
+
+    A trait and an interface name no metatable, so `is` refuses them;
+    see `no_nominal_test`.
     */
     pub(crate) fn is_test(&mut self, expr: &Expr, name: TokSpan, negated: bool) -> String {
         let x = self.reusable(expr);
@@ -491,6 +494,12 @@ impl<'s> Desugar<'s> {
             format!("typeof({x}) == \"{n}\"")
         } else if self.enums.contains_key(&n) {
             format!("{n}.is({x})")
+        } else if let Some(message) = self.no_nominal_test(&n, expr) {
+            self.diagnose(name, &message);
+
+            // The metatable test would never be true, so the branch
+            // would be dead. `false` says that and reads as one.
+            "false".to_string()
         } else {
             format!("getmetatable({}) == {n}", self.any_cast(&x))
         };
@@ -500,6 +509,56 @@ impl<'s> Desugar<'s> {
         } else {
             format!("({test})")
         }
+    }
+
+    /// Why `x is T` cannot hold for this name, or `None` when it can.
+    ///
+    /// The metatable test needs a name a value carries. A trait is a
+    /// table of default methods, never a metatable, and an interface is
+    /// a shape with no value at all.
+    fn no_nominal_test(&self, n: &str, expr: &Expr) -> Option<String> {
+        let names = self.name_candidates(n);
+        let is_trait = names.iter().any(|k| self.trait_required.contains_key(k))
+            || self
+                .options
+                .import_trait_methods
+                .iter()
+                .any(|(t, _)| names.contains(t));
+
+        if is_trait {
+            return Some(format!(
+                "`{n}` is a trait; a value is never exactly a trait; name the type that implements it{}",
+                self.implementor_hint(&names, expr)
+            ));
+        }
+
+        let is_interface = names
+            .iter()
+            .any(|k| self.not_constructible.get(k.as_str()) == Some(&"interface"));
+
+        is_interface.then(|| {
+            format!(
+                "`{n}` is an interface; a value is never exactly an interface; name a struct that has its fields"
+            )
+        })
+    }
+
+    /// The tail that names a concrete target, ", `thing is Box`", when
+    /// this file writes an `impl Trait for Box` and the operand is a
+    /// plain name. An empty text otherwise.
+    fn implementor_hint(&self, names: &[String], expr: &Expr) -> String {
+        let Expr::Name(v) = expr else {
+            return String::new();
+        };
+        let Some((target, _)) = self
+            .impl_traits
+            .iter()
+            .find(|(_, met)| met.iter().any(|t| names.contains(t)))
+        else {
+            return String::new();
+        };
+
+        format!(", `{} is {target}`", self.text_of(*v))
     }
 
     /// The type of a `try` operand when the file declares it and it is
@@ -1412,6 +1471,8 @@ impl<'s> Desugar<'s> {
 
 #[cfg(test)]
 mod tests {
+    use crate::EmitOptions;
+
     fn messages(src: &str) -> Vec<String> {
         crate::compile(src)
             .unwrap()
@@ -1512,5 +1573,68 @@ mod tests {
             "{:?}",
             messages(src)
         );
+    }
+
+    /// `x is Drawable` emitted `getmetatable(x) == Drawable`. A value
+    /// carries its own struct for a metatable, never a trait and never
+    /// an interface, so the branch was dead and nothing said so.
+    #[test]
+    fn is_refuses_a_trait_and_an_interface() {
+        let src = "trait Drawable as\n    function draw(self): string\nend\n\nstruct Box as\n    width: number\nend\n\nimpl Drawable for Box as\n    function draw(self): string\n        return \"box\"\n    end\nend\n\nlocal function check(thing: unknown)\n    if thing is Drawable then print(1) end\n    if thing is not Sized then print(2) end\nend\nprint(check)\n\ninterface Sized as\n    width: number\nend\n";
+        assert_eq!(
+            messages(src),
+            vec![
+                "`Drawable` is a trait; a value is never exactly a trait; name the type that implements it, `thing is Box`".to_string(),
+                "`Sized` is an interface; a value is never exactly an interface; name a struct that has its fields".to_string(),
+            ]
+        );
+
+        let out = crate::compile(src).unwrap();
+
+        for text in [&out.ship, &out.check] {
+            assert!(!text.contains("getmetatable"), "{text}");
+        }
+    }
+
+    /// The same for a trait another module declares: the import index
+    /// carries the trait's methods, and the name is a value here, so
+    /// the metatable test compiled and never held.
+    #[test]
+    fn is_refuses_an_imported_trait() {
+        let options = EmitOptions {
+            import_trait_methods: vec![("Drawable".to_string(), Vec::new())],
+            import_types: vec![("./lib".to_string(), vec!["Drawable".to_string()])],
+            ..EmitOptions::default()
+        };
+        let src = "import { Drawable } from \"./lib\"\nlocal function check(thing: unknown)\n    print(thing is Drawable)\nend\nprint(check)\n";
+        let out = crate::compile_with(src, &options).expect("compiles");
+
+        assert_eq!(
+            out.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+            vec![
+                "`Drawable` is a trait; a value is never exactly a trait; name the type that implements it".to_string(),
+            ]
+        );
+        assert!(!out.ship.contains("getmetatable"), "{}", out.ship);
+    }
+
+    /// A struct keeps the metatable test, and the report lands on the
+    /// type name, not on the operand.
+    #[test]
+    fn is_keeps_the_metatable_test_for_a_struct() {
+        let src = "struct Box as\n    width: number\nend\nlocal function check(thing: unknown)\n    if thing is Box then print(thing.width) end\nend\nprint(check)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship.contains("getmetatable(thing) == Box"),
+            "{}",
+            out.ship
+        );
+
+        let bad = "trait Drawable as\n    function draw(self): string\nend\nlocal function check(thing: unknown)\n    print(thing is Drawable)\nend\nprint(check)\n";
+        let out = crate::compile(bad).unwrap();
+        let at = out.diagnostics.first().expect("one report");
+        assert_eq!(&bad[at.start as usize..at.end as usize], "Drawable");
     }
 }

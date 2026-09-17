@@ -1146,9 +1146,14 @@ impl<'s> Desugar<'s> {
 
                 // An interface field takes no visibility, so every one
                 // is public and a contract reads it that way.
+                //
+                // The kind lands here, not in the statement walk alone,
+                // so a body above the declaration reads it too: `is`
+                // refuses an interface wherever the file declares one.
                 Stmt::Interface(i) => {
                     let name = self.decl_name(i.name);
                     let fields = self.field_members(&i.fields, false);
+                    self.not_constructible.insert(name.clone(), "interface");
                     self.field_body.insert(name.clone(), i.span);
                     self.type_members.entry(name).or_default().extend(fields);
                 }

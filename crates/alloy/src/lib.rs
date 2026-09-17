@@ -1277,6 +1277,25 @@ mod tests {
     /// A struct the reader named `Test` still reports as a constructor
     /// problem. `test ` matches its name, so the narrower `new ` marker
     /// has to answer first.
+    /// A namespace member reached by its bare name reports its own
+    /// kind, whatever the author called it. `remote_ctl` would reach
+    /// the wire rule and `testatr` the test rule.
+    #[test]
+    fn a_namespace_member_keeps_its_kind_whatever_its_name() {
+        assert_eq!(
+            docs::kind_for("`remote_ctl` is an attribute of `zoo`; write `@zoo.remote_ctl`"),
+            "AttributeError"
+        );
+        assert_eq!(
+            docs::kind_for("`testatr` is an attribute of `testing`; write `@testing.testatr`"),
+            "AttributeError"
+        );
+        assert_eq!(
+            docs::kind_for("`test_it` is a macro of `testing`; write `$testing.test_it`"),
+            "MacroError"
+        );
+    }
+
     #[test]
     fn a_struct_named_test_keeps_the_constructor_kind() {
         assert_eq!(

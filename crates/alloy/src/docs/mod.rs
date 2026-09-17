@@ -77,6 +77,11 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // The removal report names a declaration kind, which the rules
     // below would read as the kind's own family.
     (&["`global` is removed"], "ImportError"),
+    // A member of a namespace reached by its bare name. The author's
+    // name sits in the report, so a name like `remote_ctl` or
+    // `testatr` would reach the wire or the test rule below.
+    (&["is an attribute of"], "AttributeError"),
+    (&["is a macro of"], "MacroError"),
     (&["needs `as` before its body"], "SyntaxError"),
     // The forms a Luau user writes from another language. Each names
     // the Alloy form, and the rules below would read the declaration

@@ -478,6 +478,75 @@ impl<'s> Desugar<'s> {
         None
     }
 
+    /// The path a member of the namespace under render is named by
+    /// from outside: `Testing.tag`, and `Outer.Inner.tag` through a
+    /// nested namespace. `None` at the top level.
+    pub(crate) fn ns_member_path(&self, name: &str) -> Option<String> {
+        let key = &self.ns_stack.last()?.key;
+        let info = self.namespaces.get(key)?;
+
+        Some(format!("{}.{name}", info.path))
+    }
+
+    /// The keys a compile-time name reads under, innermost first: a
+    /// member of the namespace under render, then a member of the one
+    /// around it, then a name of the file. A name the source wrote as
+    /// a path reads as written.
+    ///
+    /// A macro and an attribute are keyed by their path, so a member
+    /// named `tag` and a file-level `tag` stay two declarations.
+    pub(crate) fn ns_scope_keys(&self, name: &str) -> Vec<String> {
+        if name.contains('.') {
+            return vec![name.to_string()];
+        }
+
+        let mut out: Vec<String> = self
+            .ns_stack
+            .iter()
+            .rev()
+            .filter_map(|f| self.namespaces.get(&f.key))
+            .map(|i| format!("{}.{name}", i.path))
+            .collect();
+
+        out.push(name.to_string());
+
+        out
+    }
+
+    /// What a compile-time name reads in a map of macros or of
+    /// attributes. The innermost namespace under render wins, then a
+    /// name of the file, then any namespace that holds the bare name.
+    ///
+    /// The last look keeps `$twice(2)` outside the namespace that
+    /// declares `twice`, which is how a namespaced macro read before
+    /// `$Ns.twice(2)` existed. A path names one member and takes none
+    /// of it.
+    pub(crate) fn scoped_decl<'m, T>(
+        &self,
+        map: &'m std::collections::HashMap<String, T>,
+        name: &str,
+    ) -> Option<&'m T> {
+        let keys = self.ns_scope_keys(name);
+
+        if let Some(hit) = keys.iter().find_map(|k| map.get(k)) {
+            return Some(hit);
+        }
+
+        if name.contains('.') {
+            return None;
+        }
+
+        let tail = format!(".{name}");
+
+        map.iter().find(|(k, _)| k.ends_with(&tail)).map(|(_, v)| v)
+    }
+
+    /// Whether a dotted path names a namespace of this file:
+    /// `Outer.Inner` is the key `Outer_Inner`.
+    pub(crate) fn is_namespace_path(&self, path: &str) -> bool {
+        self.namespaces.contains_key(&path.replace('.', "_"))
+    }
+
     /// The rendered name a dotted path through the file's namespaces
     /// names: `Zoo.Lion` is `Zoo_Lion`, and `A.B.S` through a nested
     /// namespace is `A_B_S`. `None` when the head names no namespace,

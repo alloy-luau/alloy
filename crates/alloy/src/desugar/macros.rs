@@ -640,6 +640,18 @@ impl<'s> Desugar<'s> {
     }
 
     /// The intrinsics: a closed set, resolved by name.
+    /// The report a dotted macro name earns, when the path reaches no
+    /// macro. `None` for a bare name, which no namespace explains.
+    fn macro_path_error(&self, name: &str) -> Option<String> {
+        let (owner, member) = name.rsplit_once('.')?;
+
+        Some(match self.is_namespace_path(owner) {
+            true => format!("`{owner}` declares no macro `{member}`"),
+
+            false => format!("`{owner}` is no namespace, so `${name}` names no macro"),
+        })
+    }
+
     pub(crate) fn intrinsic(&mut self, name: TokSpan, args: &[Expr], span: TokSpan) -> String {
         let n = self.text_of(name).to_string();
         let at = self.byte_start(span);
@@ -821,13 +833,15 @@ impl<'s> Desugar<'s> {
             }
 
             _ => {
-                self.diagnose(
-                    span,
-                    &format!(
+                let message = match self.macro_path_error(&n) {
+                    Some(m) => m,
+
+                    None => format!(
                         "unknown macro or intrinsic `${n}` with {} arguments",
                         args.len()
                     ),
-                );
+                };
+                self.diagnose(span, &message);
 
                 self.text_of(span).to_string()
             }
@@ -857,6 +871,23 @@ mod tests {
         );
         assert!(messages("local m = $map[[\"sword\", 10]]\nprint(m)\n").is_empty());
         assert!(messages("local m = $map[]\nprint(m)\n").is_empty());
+    }
+
+    /// `$M.twice(2)` reads the macro of a namespace. A path that
+    /// reaches none names the path, not the intrinsic list.
+    #[test]
+    fn a_macro_path_reads_the_namespace() {
+        let src = "namespace M as\n    macro twice(x)\n        x * 2\n    end\nend\n\nprint($M.twice(2))\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+
+        let gone = src.replace("$M.twice(2)", "$M.nope(2)");
+        assert_eq!(messages(&gone), vec!["`M` declares no macro `nope`"]);
+
+        let head = "print($Nope.thing(1))\n";
+        assert_eq!(
+            messages(head),
+            vec!["`Nope` is no namespace, so `$Nope.thing` names no macro"]
+        );
     }
 
     /// A macro body compiles as a fragment of its own, so it needs the

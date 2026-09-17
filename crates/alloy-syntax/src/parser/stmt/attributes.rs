@@ -66,21 +66,18 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// The name of an attribute. `@M.icon` reads the module's
-    /// attribute through a path, which the grammar does not have; the
-    /// report at the dot names the import that does.
+    /// The name of an attribute, as one name or a dotted path.
+    /// `@Ns.tag` reads an attribute of a namespace, and
+    /// `@Outer.Inner.tag` reads one of a nested namespace. The compiler
+    /// resolves the path and reports one that reaches no attribute.
     fn attribute_name(&mut self) -> Result<TokSpan, ParseError> {
         let name = self.expect_name()?;
 
-        if self.at(".") && self.adjacent_prev() && self.name_at(1) {
-            let bare = self.text_at(1);
-
-            return Err(self.err(&format!(
-                "an attribute is used by its bare name; import it with `import {{ {bare} }} from ...`"
-            )));
+        while self.at(".") && self.adjacent_prev() && self.name_at(1) {
+            self.pos += 2;
         }
 
-        Ok(name)
+        Ok(TokSpan::new(name.start as usize, self.pos))
     }
 
     /// Reports if the token at the cursor touches the one before it.

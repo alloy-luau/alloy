@@ -530,6 +530,142 @@ fn an_attribute_that_misses_the_target_reports() {
     );
 }
 
+// --- 5b. a compile-time member by its path ----------------------------------
+
+/// `@M.tag(3)` outside the namespace reads the attribute the group
+/// declares. The attach table keys the data by the attribute's own
+/// name, so `Attributes.get` reads one key whichever way a use spells
+/// it.
+#[test]
+fn an_attribute_reads_by_its_path() {
+    let out = clean(
+        "namespace M as\n    attribute tag(n: number) on function\nend\n\n@M.tag(3)\nfunction f()\nend\n\nprint(f)\n",
+    );
+    assert!(out.contains("__alloy.attach(f, { tag = { 3 } })"), "{out}");
+}
+
+/// `@M.tag` with no arguments, and a nested path.
+#[test]
+fn a_nested_attribute_reads_by_its_path() {
+    let out = clean(
+        "namespace Outer as\n    namespace Inner as\n        attribute deep on function\n    end\nend\n\n@Outer.Inner.deep\nfunction f()\nend\n\nprint(f)\n",
+    );
+    assert!(out.contains("__alloy.attach(f, { deep = {  } })"), "{out}");
+}
+
+/// The target, the argument types and the contract all read through a
+/// path, the way they read a bare name.
+#[test]
+fn an_attribute_path_takes_every_check() {
+    let ns = "namespace M as\n    attribute tag(n: number) on function\nend\n\n";
+    let target = messages(&format!("{ns}@M.tag(1)\nstruct S as\n    x: number\nend\n"));
+    assert_eq!(target.len(), 1, "{target:?}");
+    assert!(
+        target[0].contains("`M.tag` has no meaning on a struct"),
+        "{target:?}"
+    );
+
+    let args = messages(&format!(
+        "{ns}@M.tag(\"x\")\nfunction f()\nend\n\nprint(f)\n"
+    ));
+    assert_eq!(args.len(), 1, "{args:?}");
+    assert!(
+        args[0].contains("takes number for `n`, string given"),
+        "{args:?}"
+    );
+}
+
+/// `$M.twice(2)` expands in place, and the expansion keeps the line
+/// count, which `clean` reads.
+#[test]
+fn a_macro_expands_by_its_path() {
+    let out = clean(
+        "namespace M as\n    macro twice(x)\n        x * 2\n    end\nend\n\nprint($M.twice(2))\n",
+    );
+    assert!(out.contains("print(2 * 2)"), "{out}");
+
+    let nested = clean(
+        "namespace Outer as\n    namespace Inner as\n        macro plus(x)\n            x + 1\n        end\n    end\nend\n\nprint($Outer.Inner.plus(4))\n",
+    );
+    assert!(nested.contains("print(4 + 1)"), "{nested}");
+}
+
+/// A path that names no namespace, and a namespace with no such
+/// member: one report, naming the path.
+#[test]
+fn a_path_that_reaches_nothing_reports() {
+    let head = messages("@Nope.tag\nfunction f()\nend\n\nprint(f)\n");
+    assert_eq!(head.len(), 1, "{head:?}");
+    assert_eq!(
+        head[0],
+        "`Nope` is no namespace, so `Nope.tag` names no attribute"
+    );
+
+    let member = messages(
+        "namespace M as\n    attribute tag on function\nend\n\n@M.nope\nfunction f()\nend\n\nprint(f)\n",
+    );
+    assert_eq!(member.len(), 1, "{member:?}");
+    assert_eq!(member[0], "`M` declares no attribute `nope`");
+
+    let mac = messages(
+        "namespace M as\n    macro twice(x)\n        x * 2\n    end\nend\n\nprint($M.nope(1))\n",
+    );
+    assert_eq!(mac.len(), 1, "{mac:?}");
+    assert_eq!(mac[0], "`M` declares no macro `nope`");
+
+    let bare = messages("print($Nope.thing(1))\n");
+    assert_eq!(bare.len(), 1, "{bare:?}");
+    assert_eq!(
+        bare[0],
+        "`Nope` is no namespace, so `$Nope.thing` names no macro"
+    );
+}
+
+/// A private member reached from outside says it is private, not that
+/// it is unknown.
+#[test]
+fn a_private_compile_time_member_reads_as_private() {
+    let attr = messages(
+        "namespace M as\n    private attribute tag on function\nend\n\n@M.tag\nfunction f()\nend\n\nprint(f)\n",
+    );
+    assert_eq!(attr.len(), 1, "{attr:?}");
+    assert_eq!(attr[0], "`tag` is private to `M`");
+
+    let mac = messages(
+        "namespace M as\n    private macro twice(x)\n        x * 2\n    end\nend\n\nprint($M.twice(2))\n",
+    );
+    assert_eq!(mac.len(), 1, "{mac:?}");
+    assert_eq!(mac[0], "`twice` is private to `M`");
+}
+
+/// A member and a name of the file that share a name stay two
+/// declarations: the body reads the member, the file reads its own.
+#[test]
+fn a_member_name_beats_a_file_name_inside_the_body() {
+    let out = clean(concat!(
+        "attribute tag(outer: string) on function\n",
+        "macro shout(x)\n    print(\"outer\", x)\nend\n\n",
+        "namespace M as\n",
+        "    attribute tag(inner: number) on function\n",
+        "    macro shout(x)\n        print(\"inner\", x)\n    end\n\n",
+        "    @tag(3)\n    public function m()\n    end\n\n",
+        "    public function go()\n        $shout(\"a\")\n    end\n",
+        "end\n\n",
+        "@tag(\"s\")\nfunction top()\nend\n\n",
+        "$shout(\"b\")\nprint(M.m, M.go, top)\n",
+    ));
+    assert!(out.contains("print(\"inner\", \"a\")"), "{out}");
+    assert!(out.contains("print(\"outer\", \"b\")"), "{out}");
+    assert!(
+        out.contains("__alloy.attach(M_m, { tag = { 3 } })"),
+        "{out}"
+    );
+    assert!(
+        out.contains("__alloy.attach(top, { tag = { \"s\" } })"),
+        "{out}"
+    );
+}
+
 // --- 6. the members a namespace takes ---------------------------------------
 
 /// A trait with a default body, inside a namespace.

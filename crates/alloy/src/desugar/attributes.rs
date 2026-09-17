@@ -55,6 +55,22 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
     })
 }
 
+/// The key an attribute's data takes in the table the runtime reads.
+/// A use through a path, `@Ns.tag`, names the same attribute as the
+/// bare `tag`, and `alloy.attribute` records the name the declaration
+/// wrote.
+///
+/// ponytail: one key per bare name, so two namespaces that declare the
+/// same name share it. A canonical path per attribute is the fix if a
+/// file ever needs both on one declaration.
+pub(crate) fn attr_key(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((_, last)) => last,
+
+        None => name,
+    }
+}
+
 /// The return type a trait method's signature declares. The signature
 /// starts at `(`; the type follows the closing `)` after a `:` or a
 /// `->`.
@@ -204,9 +220,22 @@ impl<'s> Desugar<'s> {
                     &members,
                 );
 
+                // A member reads a sibling attribute by its bare
+                // name, so the walk carries the namespace.
+                let key = crate::desugar::namespaces::key_of(
+                    self.ns_stack.last().map(|f| f.key.as_str()),
+                    &name,
+                );
+                self.ns_stack.push(crate::desugar::namespaces::NsFrame {
+                    key,
+                    scope: self.scope_depth(),
+                });
+
                 for m in &ns.members {
                     self.check_stmt_attrs(&m.stmt);
                 }
+
+                self.ns_stack.pop();
             }
 
             Stmt::Trait(t) => {
@@ -278,7 +307,15 @@ impl<'s> Desugar<'s> {
                 _ => {}
             }
 
-            let declared = self.attr_decls.get(&name).cloned();
+            // `@Ns.tag` reads an attribute of a namespace. A path that
+            // reaches none reports here and asks no more of the name.
+            if let Some(message) = self.attr_path_error(&name) {
+                self.diagnose(a.span, &message);
+
+                continue;
+            }
+
+            let declared = self.attr_decl_of(&name).cloned();
             let targets: Vec<String> = match (builtin_attr_targets(&name), &declared) {
                 (Some(t), _) => t.iter().map(|s| (*s).to_string()).collect(),
 
@@ -320,11 +357,51 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The declaration one attribute name reads. A member of the
+    /// namespace under render wins over a name of the file, and a
+    /// path names the member it writes.
+    pub(crate) fn attr_decl_of(&self, name: &str) -> Option<&AttrDecl> {
+        self.scoped_decl(&self.attr_decls, name)
+    }
+
+    /// The template one macro name reads, under the same rule as an
+    /// attribute.
+    pub(crate) fn macro_of(&self, name: &str) -> Option<&MacroRef> {
+        self.scoped_decl(&self.macros, name)
+    }
+
+    /// The report a dotted attribute name earns, when the path reaches
+    /// no attribute. `None` for a bare name and for a path that
+    /// resolves.
+    fn attr_path_error(&self, name: &str) -> Option<String> {
+        let (owner, member) = name.rsplit_once('.')?;
+
+        if self.attr_decl_of(name).is_some() {
+            return None;
+        }
+
+        let head = owner.split('.').next().unwrap_or(owner);
+
+        // A module keeps its attributes. One of its own comes in under
+        // its name, which is how every other import reads.
+        if self.imported_names.contains(head) {
+            return Some(format!(
+                "an attribute of a module is used by its bare name; import it with `import {{ {member} }} from ...`"
+            ));
+        }
+
+        Some(match self.is_namespace_path(owner) {
+            true => format!("`{owner}` declares no attribute `{member}`"),
+
+            false => format!("`{owner}` is no namespace, so `{name}` names no attribute"),
+        })
+    }
+
     /// Whether an attribute reaches a target. `check_attrs` reports the
     /// ones that do not; the emit leaves them out so the artifact holds
     /// no name the source never bound.
     pub(crate) fn attr_reaches(&self, name: &str, target: &str) -> bool {
-        match (builtin_attr_targets(name), self.attr_decls.get(name)) {
+        match (builtin_attr_targets(name), self.attr_decl_of(name)) {
             (Some(t), _) => t.contains(&target),
 
             (None, Some(d)) => d.targets.iter().any(|t| t == target),
@@ -342,8 +419,7 @@ impl<'s> Desugar<'s> {
     pub(crate) fn attr_args(&mut self, a: &Attr, name: &str) -> Vec<String> {
         let mut args: Vec<String> = a.args.iter().map(|e| self.render_to_string(e)).collect();
         let defaults = self
-            .attr_decls
-            .get(name)
+            .attr_decl_of(name)
             .map(|d| d.defaults.clone())
             .unwrap_or_default();
 
@@ -783,15 +859,20 @@ impl<'s> Desugar<'s> {
                         .collect();
                     let requires: Vec<Require> =
                         a.requires.iter().map(|c| self.require_of(c)).collect();
-                    self.attr_decls.insert(
-                        name,
-                        AttrDecl {
-                            targets,
-                            params,
-                            defaults,
-                            requires,
-                        },
-                    );
+                    let decl = AttrDecl {
+                        targets,
+                        params,
+                        defaults,
+                        requires,
+                    };
+
+                    // A member of a namespace is keyed by its path,
+                    // `Testing.tag`, so a file-level `tag` stays its
+                    // own declaration. `ns_scope_keys` reads the path
+                    // back for a bare name inside the body.
+                    let key = self.ns_member_path(&name).unwrap_or(name);
+
+                    self.attr_decls.insert(key, decl);
                 }
 
                 Stmt::Import(i) => match &i.kind {
@@ -1003,16 +1084,19 @@ impl<'s> Desugar<'s> {
                     let name = self.text_of(m.name).to_string();
                     let body = self.join_tokens(m.body.span);
                     let tail = m.tail.as_ref().map(|t| self.join_tokens(t.span()));
-                    self.macros.insert(
-                        name,
-                        MacroRef {
-                            params,
-                            defaults,
-                            variadic,
-                            body,
-                            tail,
-                        },
-                    );
+                    let mac = MacroRef {
+                        params,
+                        defaults,
+                        variadic,
+                        body,
+                        tail,
+                    };
+
+                    // A member of a namespace is keyed by its path,
+                    // `Testing.shout`, the way an attribute is.
+                    let key = self.ns_member_path(&name).unwrap_or(name);
+
+                    self.macros.insert(key, mac);
                 }
 
                 Stmt::Trait(t) => {
@@ -1207,7 +1291,7 @@ impl<'s> Desugar<'s> {
             || self.own_names.contains(head)
             || self.imported_names.contains(head)
             || self.namespaces.contains_key(head)
-            || self.attr_decls.contains_key(head)
+            || self.attr_decl_of(head).is_some()
             || self.is_local(head)
             || AMBIENT.contains(&head)
             || AMBIENT_TYPES.contains(&head)
@@ -1445,7 +1529,7 @@ impl<'s> Desugar<'s> {
 
                 Some(n) => {
                     let args = self.attr_args(a, n);
-                    user.push(format!("{n} = {{ {} }}", args.join(", ")));
+                    user.push(format!("{} = {{ {} }}", attr_key(n), args.join(", ")));
                 }
             }
         }

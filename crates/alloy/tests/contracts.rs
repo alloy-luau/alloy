@@ -30,9 +30,9 @@ fn clean(src: &str) {
 
 const LIFECYCLE: &str = "enum Lifecycle as\n    Init\n    Start\nend\n\n";
 
-/// `@M.icon` reads an attribute through a namespace import, which the
-/// grammar does not have. One report, at the dot, names the import
-/// that does; the parser does not go on to read `.icon` as the target.
+/// `@M.icon` reads an attribute of a module through a path. The
+/// grammar takes the path, because a namespace of the file answers to
+/// one; a module does not, and the report names the import that does.
 #[test]
 fn a_dotted_attribute_names_the_bare_import() {
     let got = one(
@@ -41,7 +41,7 @@ fn a_dotted_attribute_names_the_bare_import() {
 
     assert_eq!(
         got,
-        "an attribute is used by its bare name; import it with `import { icon } from ...`"
+        "an attribute of a module is used by its bare name; import it with `import { icon } from ...`"
     );
 }
 

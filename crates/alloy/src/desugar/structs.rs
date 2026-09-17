@@ -986,7 +986,11 @@ impl<'s> Desugar<'s> {
             }
 
             let args = self.attr_args(a, &name);
-            parts.push(format!("{name} = {{ {} }}", args.join(", ")));
+            parts.push(format!(
+                "{} = {{ {} }}",
+                super::attributes::attr_key(&name),
+                args.join(", ")
+            ));
         }
 
         format!("{{ {} }}", parts.join(", ")).replace("{  }", "{}")

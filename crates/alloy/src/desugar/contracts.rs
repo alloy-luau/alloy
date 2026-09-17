@@ -153,7 +153,7 @@ impl<'s> Desugar<'s> {
         for a in attrs {
             let Some(n) = a.name else { continue };
             let name = self.text_of(n).to_string();
-            let Some(decl) = self.attr_decls.get(&name).cloned() else {
+            let Some(decl) = self.attr_decl_of(&name).cloned() else {
                 continue;
             };
 

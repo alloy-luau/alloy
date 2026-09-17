@@ -335,7 +335,7 @@ impl<'s> Desugar<'s> {
             Expr::Macro { name, args, span } => {
                 let mname = self.text_of(*name).to_string();
 
-                if let Some(m) = self.macros.get(&mname).cloned() {
+                if let Some(m) = self.macro_of(&mname).cloned() {
                     let text = self.expand_macro(&m, &mname, args, *span);
                     self.generate(anchor, &text);
                 } else {

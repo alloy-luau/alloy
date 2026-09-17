@@ -321,6 +321,10 @@ const CORPUS: &[&str] = &[
     "export attribute server_only on function",
     "attribute icon(asset: string) on struct, enum, variant",
     "@server_only\nlocal function save(p) end",
+    // `@Ns.tag` reads an attribute of a namespace, and a nested
+    // namespace takes one more step.
+    "@Svc.tag\nfunction f() end",
+    "@Outer.Inner.tag(\"x\")\nfunction g() end",
     "@test\nfunction t() end",
     "@test\nasync function t2() end",
     "@icon(\"x\")\nenum Team as\n\t@icon(\"y\")\n\tRed\n\tBlue\nend",

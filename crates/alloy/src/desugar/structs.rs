@@ -1820,7 +1820,13 @@ impl<'s> Desugar<'s> {
     /// as an alias. A class, a primitive, and a datatype class refine on
     /// their own; `table` and `function` refine to the top types, which
     /// no index or call accepts, so those meet the value's own type.
+    ///
+    /// An alias narrows the way the name it spells does: `is` reads
+    /// through an alias, so the branch it opens has to agree.
     pub(crate) fn narrow_type(&self, name: &str, value: &str) -> Option<String> {
+        let alias = self.alias_head(name);
+        let name = alias.as_deref().unwrap_or(name);
+
         match name {
             "table" => return Some(format!("typeof({value}) & {{ [any]: any }}")),
 
@@ -2950,5 +2956,24 @@ mod tests {
             "{}",
             out.check
         );
+    }
+
+    /// `is` reads through a type alias, and the branch it opens has to
+    /// agree. `type B = Box` narrowed nothing, so a field read under
+    /// `if x is B` reported on `unknown` inside a branch that holds.
+    /// The else branch and the guard take the cast the same way.
+    #[test]
+    fn a_narrowing_test_reads_through_a_type_alias() {
+        let src = "struct Box as\n    width: number\nend\n\nenum Color as\n    Red\n    Blue\nend\n\ntype B = Box\ntype Hue = Color\n\nlocal function one(x: unknown)\n    if x is B then\n        print(x.width)\n    end\nend\n\nlocal function two(y: unknown)\n    if y is not Hue then\n        print(\"no\")\n    else\n        print(y)\n    end\nend\n\nlocal function three(z: unknown): number\n    if z is not B then\n        return 0\n    end\n\n    return z.width\nend\n\nprint(one, two, three)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "local x = ((x :: any) :: Box)",
+            "local y = ((y :: any) :: Color)",
+            "local z = ((z :: any) :: Box)",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
     }
 }

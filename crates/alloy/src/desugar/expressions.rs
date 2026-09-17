@@ -590,7 +590,7 @@ impl<'s> Desugar<'s> {
     /// A chain of aliases resolves no further than one step, so
     /// `type A = B` over another alias reports the way any name the
     /// file cannot resolve does.
-    fn alias_head(&self, n: &str) -> Option<String> {
+    pub(crate) fn alias_head(&self, n: &str) -> Option<String> {
         let head = plain_type_name(self.alias_values.get(n)?)?;
         let answered = PRIMITIVES.contains(&head)
             || head.starts_with("Enum.")

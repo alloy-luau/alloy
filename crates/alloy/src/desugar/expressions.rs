@@ -56,6 +56,18 @@ pub(crate) fn is_static_module(e: &Expr) -> bool {
             .all(|l| matches!(l, Link::Plain(Step::Field(_))))
 }
 
+/// A written type that is one plain name, `Box` or `Enum.Material`.
+/// Any other shape gives `None`: a record type, a union, a generic
+/// instantiation, a function type.
+fn plain_type_name(value: &str) -> Option<&str> {
+    let head = value.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    let rest = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+
+    (head && rest).then_some(value)
+}
+
 /// A source slice with every run of whitespace as one space, so it fits
 /// on the line the generated text sits on.
 pub(crate) fn one_line(text: &str) -> String {
@@ -465,6 +477,9 @@ impl<'s> Desugar<'s> {
 
     A trait and an interface name no metatable, so `is` refuses them;
     see `no_nominal_test`.
+
+    A type alias is a second spelling of one type, so the test reads
+    through it: `type B = Box` tests `Box`. See `alias_head`.
     */
     pub(crate) fn is_test(&mut self, expr: &Expr, name: TokSpan, negated: bool) -> String {
         let x = self.reusable(expr);
@@ -478,6 +493,10 @@ impl<'s> Desugar<'s> {
             };
         }
 
+        // One step through an alias, and only to a name the chain
+        // below answers. A trait's alias lands on the trait's report,
+        // since the resolve runs before the guard.
+        let n = self.alias_head(&n).unwrap_or(n);
         let test = if PRIMITIVES.contains(&n.as_str()) {
             format!("type({x}) == \"{n}\"")
         } else if let Some(item) = n.strip_prefix("Enum.") {
@@ -536,6 +555,12 @@ impl<'s> Desugar<'s> {
             ));
         }
 
+        if let Some(value) = self.alias_shape(n) {
+            return Some(format!(
+                "`{n}` is an alias of `{value}`; `is` has no test for that type; name a struct, an enum, or a primitive"
+            ));
+        }
+
         let kind = names
             .iter()
             .find_map(|k| self.not_constructible.get(k.as_str()).copied())?;
@@ -556,6 +581,37 @@ impl<'s> Desugar<'s> {
             // A trait answers above, through an index the prescan fills.
             _ => None,
         }
+    }
+
+    /// The name `x is T` tests when `T` is a type alias of this file:
+    /// one step, and only to a name the chain in `is_test` answers or
+    /// refuses. `None` leaves the name as the source writes it.
+    ///
+    /// A chain of aliases resolves no further than one step, so
+    /// `type A = B` over another alias reports the way any name the
+    /// file cannot resolve does.
+    fn alias_head(&self, n: &str) -> Option<String> {
+        let head = plain_type_name(self.alias_values.get(n)?)?;
+        let answered = PRIMITIVES.contains(&head)
+            || head.starts_with("Enum.")
+            || INSTANCE_CLASSES.contains(&head)
+            || DATATYPES.contains(&head)
+            || self.enums.contains_key(head)
+            || self.structs.contains(head)
+            || self.imported_names.contains(head)
+            || self.trait_required.contains_key(head)
+            || self.not_constructible.contains_key(head);
+
+        answered.then(|| head.to_string())
+    }
+
+    /// The value of an alias that names no type `is` can test: a record
+    /// type, a union, a generic instantiation. A value carries a name
+    /// for none of them, so the metatable test could never hold.
+    fn alias_shape(&self, n: &str) -> Option<&str> {
+        let value = self.alias_values.get(n)?;
+
+        plain_type_name(value).is_none().then_some(value.as_str())
     }
 
     /// The tail that names a concrete target, ", `thing is Box`", when
@@ -1675,5 +1731,73 @@ mod tests {
         let out = crate::compile(bad).unwrap();
         let at = out.diagnostics.first().expect("one report");
         assert_eq!(&bad[at.start as usize..at.end as usize], "Drawable");
+    }
+
+    /// `is` was the one construct that read a type alias as a type of
+    /// its own: `type B = Box` then `x is B` tested a name no value
+    /// carries. The test reads through the alias now, one step, to the
+    /// name the alias spells another way. `Below` sits under the use,
+    /// which the prescan sees.
+    #[test]
+    fn is_reads_through_a_type_alias() {
+        let src = "import { Crate } from \"./lib\"\n\nstruct Box as\n    width: number\nend\n\nenum Color as\n    Red\n    Blue\nend\n\ntype Num = number\ntype Vec = Vector3\ntype PartLike = Part\ntype Material = Enum.Material\ntype B = Box\ntype Hue = Color\ntype Crated = Crate\n\nlocal function probe(x: unknown)\n    print(x is Num)\n    print(x is Vec)\n    print(x is PartLike)\n    print(x is Material)\n    print(x is B)\n    print(x is Hue)\n    print(x is Crated)\n    print(x is Below)\n    print(x is not B)\nend\n\ntype Below = Box\n\nprint(probe)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+
+        let out = crate::compile(src).unwrap();
+
+        for want in [
+            "type(x) == \"number\"",
+            "typeof(x) == \"Vector3\"",
+            "typeof(x) == \"Instance\" and x:IsA(\"Part\")",
+            "typeof(x) == \"EnumItem\" and x.EnumType == Enum.Material",
+            "getmetatable(x) == Box",
+            "Color.is(x)",
+            "getmetatable(x) == Crate",
+            "not (getmetatable(x) == Box)",
+        ] {
+            assert!(out.ship.contains(want), "{want}\n{}", out.ship);
+        }
+    }
+
+    /// An alias of a shape has no nominal answer: no value carries the
+    /// name of a record type, a union, or one instantiation of a
+    /// generic. An alias of a trait and of an interface resolves first,
+    /// so each lands on the report the name itself gets.
+    #[test]
+    fn is_refuses_an_alias_with_no_nominal_test() {
+        let src = "struct Box as\n    width: number\nend\n\ntrait Drawable as\n    function draw(self): string\nend\n\ninterface Sized as\n    width: number\nend\n\nimpl Drawable for Box as\n    function draw(self): string\n        return \"box\"\n    end\nend\n\ntype Rec = { a: number }\ntype Either = number | string\ntype Holder = Box<number>\ntype Draw = Drawable\ntype Fits = Sized\n\nlocal function probe(x: unknown)\n    print(x is Rec)\n    print(x is Either)\n    print(x is Holder)\n    print(x is Draw)\n    print(x is Fits)\nend\n\nprint(probe)\n";
+        assert_eq!(
+            messages(src),
+            vec![
+                "`Rec` is an alias of `{ a: number }`; `is` has no test for that type; name a struct, an enum, or a primitive".to_string(),
+                "`Either` is an alias of `number | string`; `is` has no test for that type; name a struct, an enum, or a primitive".to_string(),
+                "`Holder` is an alias of `Box<number>`; `is` has no test for that type; name a struct, an enum, or a primitive".to_string(),
+                "`Drawable` is a trait; a value is never exactly a trait; name the type that implements it, `x is Box`".to_string(),
+                "`Sized` is an interface; a value is never exactly an interface; name a struct that has its fields".to_string(),
+            ]
+        );
+
+        let out = crate::compile(src).unwrap();
+
+        for text in [&out.ship, &out.check] {
+            assert!(!text.contains("getmetatable"), "{text}");
+        }
+    }
+
+    /// One step, not a walk: a chain of aliases needs a visited set to
+    /// stop a loop, and nobody would maintain one. `x is Chain` keeps
+    /// the name the source writes, and the checker reports it the way
+    /// it reports any name it cannot resolve.
+    #[test]
+    fn is_resolves_one_alias_and_no_further() {
+        let src = "struct Box as\n    width: number\nend\n\ntype B = Box\ntype Chain = B\n\nlocal function probe(x: unknown)\n    print(x is Chain)\nend\n\nprint(probe)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship.contains("getmetatable(x) == Chain"),
+            "{}",
+            out.ship
+        );
     }
 }

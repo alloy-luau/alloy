@@ -469,6 +469,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ret_types: Vec::new(),
         try_targets: Vec::new(),
         result_aliases: HashSet::new(),
+        alias_values: HashMap::new(),
         fn_ret_types: HashMap::new(),
         plain_fns: HashSet::new(),
         binding_types: HashMap::new(),
@@ -955,6 +956,10 @@ struct Desugar<'s> {
     /// Type aliases the file declares whose value is a `Result`, so a
     /// function that returns one still takes `try`.
     result_aliases: HashSet<String>,
+    /// The value each type alias of this file declares, as the source
+    /// writes it. `is` reads through it: an alias is a second spelling
+    /// of one type, not a type of its own.
+    alias_values: HashMap<String, String>,
     /// The return type each top-level function of this file declares.
     /// `try` reads it: an operand whose type is no Result is an error
     /// at the `try`, not at the `return` under it.

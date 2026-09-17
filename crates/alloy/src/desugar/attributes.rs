@@ -813,9 +813,18 @@ impl<'s> Desugar<'s> {
 
             if let Stmt::TypeAlias(t) = stmt
                 && let Some((_, value)) = self.text_of(t.span).split_once('=')
-                && value.trim_start().starts_with("Result")
             {
-                self.result_aliases.insert(self.decl_name(t.name));
+                let value = value.trim();
+                let name = self.decl_name(t.name);
+
+                if value.starts_with("Result") {
+                    self.result_aliases.insert(name.clone());
+                }
+
+                // The value lands here, not in the statement walk, so
+                // `is` reads through an alias declared below the use.
+                // See `alias_head`.
+                self.alias_values.insert(name, value.to_string());
             }
 
             let declared = match stmt {

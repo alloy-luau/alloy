@@ -514,10 +514,14 @@ impl<'s> Desugar<'s> {
     /// Why `x is T` cannot hold for this name, or `None` when it can.
     ///
     /// The metatable test needs a name a value carries. A trait is a
-    /// table of default methods, never a metatable, and an interface is
-    /// a shape with no value at all.
+    /// table of default methods, never a metatable; an interface is a
+    /// shape with no value at all; a remote is a channel and an
+    /// attribute is metadata. `new` refuses the same four names.
     fn no_nominal_test(&self, n: &str, expr: &Expr) -> Option<String> {
         let names = self.name_candidates(n);
+        // A trait reads from the prescan's own index, so a test above
+        // the declaration reports too, and from the import index, so a
+        // trait another module declares reports here.
         let is_trait = names.iter().any(|k| self.trait_required.contains_key(k))
             || self
                 .options
@@ -532,15 +536,26 @@ impl<'s> Desugar<'s> {
             ));
         }
 
-        let is_interface = names
+        let kind = names
             .iter()
-            .any(|k| self.not_constructible.get(k.as_str()) == Some(&"interface"));
+            .find_map(|k| self.not_constructible.get(k.as_str()).copied())?;
 
-        is_interface.then(|| {
-            format!(
+        match kind {
+            "interface" => Some(format!(
                 "`{n}` is an interface; a value is never exactly an interface; name a struct that has its fields"
-            )
-        })
+            )),
+
+            "remote" => Some(format!(
+                "`{n}` is a remote, a channel and not a type; `is` takes a type name"
+            )),
+
+            "attribute" => Some(format!(
+                "`{n}` is an attribute, metadata and not a type; `is` takes a type name"
+            )),
+
+            // A trait answers above, through an index the prescan fills.
+            _ => None,
+        }
     }
 
     /// The tail that names a concrete target, ", `thing is Box`", when
@@ -1586,6 +1601,30 @@ mod tests {
             vec![
                 "`Drawable` is a trait; a value is never exactly a trait; name the type that implements it, `thing is Box`".to_string(),
                 "`Sized` is an interface; a value is never exactly an interface; name a struct that has its fields".to_string(),
+            ]
+        );
+
+        let out = crate::compile(src).unwrap();
+
+        for text in [&out.ship, &out.check] {
+            assert!(!text.contains("getmetatable"), "{text}");
+        }
+    }
+
+    /// A remote and an attribute reached the metatable test too, and
+    /// each is a value at run time, so the Luau checker said nothing
+    /// either: the branch was dead and silent. The declarations sit
+    /// below the use, which the prescan sees and the statement walk
+    /// does not.
+    #[test]
+    fn is_refuses_a_remote_and_an_attribute() {
+        let src = "local function probe(x: unknown)\n    print(x is Hit)\n    print(x is tag)\nend\nprint(probe)\n\nattribute tag(name: string) on function\n\nremote Hit(id: string) from client\n";
+        assert_eq!(
+            messages(src),
+            vec![
+                "`Hit` is a remote, a channel and not a type; `is` takes a type name".to_string(),
+                "`tag` is an attribute, metadata and not a type; `is` takes a type name"
+                    .to_string(),
             ]
         );
 

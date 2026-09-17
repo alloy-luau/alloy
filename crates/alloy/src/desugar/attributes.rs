@@ -877,8 +877,22 @@ impl<'s> Desugar<'s> {
                     // own declaration. `ns_scope_keys` reads the path
                     // back for a bare name inside the body.
                     let key = self.ns_member_path(&name).unwrap_or(name);
-
+                    // The kind under the bare name the statement walk
+                    // uses, so `is` refuses the name above the
+                    // declaration too, and under the path, so
+                    // `x is Net.tag` refuses it as well. See
+                    // `no_nominal_test`.
+                    self.not_constructible
+                        .insert(self.text_of(a.name).to_string(), "attribute");
+                    self.not_constructible.insert(key.clone(), "attribute");
                     self.attr_decls.insert(key, decl);
+                }
+
+                // The same, for a channel. The prescan reads nothing
+                // else off a remote.
+                Stmt::Remote(r) => {
+                    self.not_constructible
+                        .insert(self.decl_name(r.name), "remote");
                 }
 
                 Stmt::Import(i) => match &i.kind {

@@ -384,3 +384,91 @@ fn an_init_module_requires_the_runtime_from_the_folder_above_it() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/*
+An author's relative import follows the same Luau rule as the runtime
+require. `import { g } from "./other"` in `src/init.aly` emitted
+`require("./other")`, which names a file beside the output folder, so
+`alloy flux` reported that the path names no module.
+
+The emit writes the path from the folder Luau resolves it from. Only an
+`init` module moves; every other file keeps the path the source wrote.
+*/
+#[test]
+fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
+    let dir = temp_project("init-import");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"build\"\n").unwrap();
+    fs::create_dir_all(dir.join("src/deep")).unwrap();
+    fs::write(
+        dir.join("src/other.aly"),
+        "export function g(): number\n    return 1\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/widget.alx"),
+        "export function w(): number\n    return 2\nend\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/legacy.luau"), "return { n = 3 }\n").unwrap();
+    fs::write(
+        dir.join("src/deep/sib.aly"),
+        "export function s(): number\n    return 4\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/init.aly"),
+        "import { g } from \"./other\"\nimport { w } from \"./widget\"\nimport legacy from \"./legacy\"\n\nprint(g(), w(), legacy.n)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/deep/init.aly"),
+        "import { s } from \"./sib\"\nimport { g } from \"../other\"\n\nprint(s(), g())\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/plain.aly"),
+        "import { g } from \"./other\"\n\nprint(g())\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    for (out, specs) in [
+        (
+            "build/init.luau",
+            ["./build/other", "./build/widget", "./build/legacy"].as_slice(),
+        ),
+        ("build/deep/init.luau", ["./deep/sib", "./other"].as_slice()),
+        // A file that is no `init` keeps the path the source wrote.
+        ("build/plain.luau", ["./other"].as_slice()),
+    ] {
+        let text = fs::read_to_string(dir.join(out)).unwrap();
+
+        for spec in specs {
+            assert!(
+                text.contains(&format!("require(\"{spec}\")")),
+                "{out}: {text}"
+            );
+
+            // The folder Luau starts the require from: the file's own,
+            // and the one above it for an `init.luau`.
+            let path = dir.join(out);
+            let folder = path.parent().unwrap();
+            let folder = match out.ends_with("init.luau") {
+                true => folder.parent().unwrap(),
+
+                false => folder,
+            };
+
+            assert!(
+                folder.join(spec).with_extension("luau").is_file(),
+                "{out}: {spec} names no module"
+            );
+        }
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}

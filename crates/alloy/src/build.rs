@@ -472,6 +472,7 @@ fn run_inner(
         };
         let options = EmitOptions {
             file_name: rel.to_string_lossy().into_owned(),
+            module_rel: build.out.join(&rel_out).to_string_lossy().into_owned(),
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
             ship_std_require,

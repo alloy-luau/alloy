@@ -60,6 +60,13 @@ pub struct EmitOptions {
     pub wait_timeout: Option<f64>,
     /// The path shown in `$dbg`, `$todo`, and `$unreachable` messages.
     pub file_name: String,
+    /// The emitted file's path, in the space its `require` paths are
+    /// written in: `build/init.luau`, `build/deep/x.luau`. Luau reads
+    /// `x/init.luau` as the module `x`, so a relative path in that file
+    /// names a file beside `x`; the emit writes the path from there.
+    /// Empty when the compile has no output path, and a relative path
+    /// then stays as the source wrote it.
+    pub module_rel: String,
     /// The string passed to `require` for the runtime.
     pub std_require: String,
     /// The ship artifact's runtime require when it differs: under a
@@ -276,6 +283,7 @@ impl Default for EmitOptions {
         Self {
             wait_timeout: None,
             file_name: "<input>".to_string(),
+            module_rel: String::new(),
             std_require: "@alloy".to_string(),
             ship_std_require: None,
             definitions: false,

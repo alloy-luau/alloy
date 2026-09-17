@@ -12,6 +12,54 @@ use super::*;
 pub(crate) const DEFAULT_LOCAL: &str = "_default";
 
 impl<'s> Desugar<'s> {
+    /// The quoted path a `require` of a module spec writes: a data
+    /// extension dropped, and a relative path moved to where Luau
+    /// resolves it from.
+    ///
+    /// Luau reads `x/init.luau` as the module `x`, so a `./y` in that
+    /// file names a file beside `x`, not one inside it. The emit writes
+    /// the path from the folder Luau starts at, the way the runtime
+    /// require does. A file that is not an `init`, and a compile with no
+    /// output path, keep the path the source wrote.
+    pub(crate) fn require_literal(&self, literal: &str) -> String {
+        let quoted = crate::data::strip_literal(literal);
+        let Some(q @ ('"' | '\'')) = quoted.chars().next() else {
+            return quoted;
+        };
+
+        if quoted.len() < 2 || !quoted.ends_with(q) {
+            return quoted;
+        }
+
+        match self.init_require(&quoted[1..quoted.len() - 1]) {
+            Some(moved) => format!("{q}{moved}{q}"),
+
+            None => quoted,
+        }
+    }
+
+    /// The path an `init` module requires a relative one by. `None` when
+    /// the emit is no `init`, or the path is not relative.
+    fn init_require(&self, path: &str) -> Option<String> {
+        if !path.starts_with("./") && !path.starts_with("../") {
+            return None;
+        }
+
+        let rel = std::path::Path::new(&self.options.module_rel);
+
+        if !rel.file_stem().is_some_and(|s| s == "init") {
+            return None;
+        }
+
+        let dir = rel.parent().unwrap_or(std::path::Path::new(""));
+        let target = crate::modules::normalize(&dir.join(path));
+
+        Some(crate::build::relative_require(
+            &crate::build::module_base(rel),
+            &target,
+        ))
+    }
+
     /// `import` becomes `require` plus locals or type aliases. A data
     /// path loses its extension: the build writes `data.json` as
     /// `data.luau`, and `require("./data")` finds it.
@@ -168,6 +216,9 @@ impl<'s> Desugar<'s> {
         // and the extension is what says the module is not Alloy's.
         let spec = self.text_of(i.path).to_string();
         let path = crate::data::strip_literal(&spec);
+        // What the `require` writes. `path` stays the key the module
+        // index is built under: the spec the source wrote.
+        let target = self.require_literal(&spec);
         let bare = spec.trim_matches(['"', '\'']);
 
         // `"game"` and `"game:Players"` name services, not modules, so
@@ -186,7 +237,7 @@ impl<'s> Desugar<'s> {
             // binds the whole module.
             ImportKind::Namespace(n, specs) => {
                 let name = self.text_of(*n).to_string();
-                let mut text = format!("local {name} = require({path})");
+                let mut text = format!("local {name} = require({target})");
                 let picked = self.spec_bindings(&path, &name, specs);
                 text.push_str(&picked);
                 self.generate(anchor, &text);
@@ -197,7 +248,7 @@ impl<'s> Desugar<'s> {
             ImportKind::Default(n) => {
                 let name = self.text_of(*n).to_string();
                 let suffix = self.default_suffix(&spec);
-                self.generate(anchor, &format!("local {name} = require({path}){suffix}"));
+                self.generate(anchor, &format!("local {name} = require({target}){suffix}"));
             }
 
             // `import M, { a } from "p"`: the default binds as `M`, and
@@ -209,10 +260,10 @@ impl<'s> Desugar<'s> {
                 // module's default is one field of its export table, so
                 // the table takes a name of its own.
                 let (temp, mut text) = match self.is_plain_module(&spec) {
-                    true => (base.clone(), format!("local {base} = require({path})")),
+                    true => (base.clone(), format!("local {base} = require({target})")),
 
                     false => {
-                        let temp = self.hoist_import(&path, anchor);
+                        let temp = self.hoist_import(&target, anchor);
                         let text = format!("local {base} = {temp}.default");
 
                         (temp, text)
@@ -234,7 +285,7 @@ impl<'s> Desugar<'s> {
                         .push((self.byte_start(i.span), self.byte_end(i.span)));
                 }
 
-                let temp = self.hoist_import(&path, anchor);
+                let temp = self.hoist_import(&target, anchor);
                 let text = self.spec_bindings(&path, &temp, specs);
                 self.generate(anchor, text.trim_start());
             }
@@ -247,7 +298,7 @@ impl<'s> Desugar<'s> {
                     self.ship_blanks
                         .push((self.byte_start(i.span), self.byte_end(i.span)));
                 }
-                let temp = self.hoist_import(&path, anchor);
+                let temp = self.hoist_import(&target, anchor);
                 let mut parts: Vec<String> = Vec::new();
 
                 for sp in specs {
@@ -658,8 +709,8 @@ impl<'s> Desugar<'s> {
             }
 
             Some(path) => {
-                let path = crate::data::strip_literal(self.text_of(path));
-                let temp = self.hoist_import(&path, anchor);
+                let target = self.require_literal(self.text_of(path));
+                let temp = self.hoist_import(&target, anchor);
                 let mut types = Vec::new();
 
                 for sp in &e.specs {

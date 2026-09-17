@@ -1088,6 +1088,9 @@ impl<'s> Desugar<'s> {
 
                 _ => self.args_text(args),
             };
+            // A relative path in an `init.luau` starts one folder up, as
+            // it does for an `import` statement.
+            let a = self.require_literal(&a);
             let a = if a.starts_with('(') {
                 a
             } else {

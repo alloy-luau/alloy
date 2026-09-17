@@ -1272,11 +1272,14 @@ pub(crate) fn a_name_in_a_nested_default_arm_reads_the_outer_binding() {
 }
 
 /*
-A destructuring binding and a hint that says nothing.
+A binding the desugar rewrites, and a hint that says nothing.
 
 `local { x, y } = t` lowers to `local _1 = t local x, y = _1.x, _1.y`.
-The whole line is generated text, so the filter dropped every hint on it
-and the names in the braces got none. The temp `_1` is nobody's name.
+The names the braces hold are the author's own, and the lowering writes
+each one again; the byte after each one is generated, so the map sends
+the hint to the head of the line. The temp `_1` is nobody's name.
+
+The braces take no annotation, so a moved hint keeps no edit.
 
 `unknown` and the checker's own `~nil` annotate nothing and tell the
 reader nothing, so neither belongs in the gutter.
@@ -1291,32 +1294,37 @@ fn a_destructuring_binding_gets_its_type_hints() {
     let after = |pat: &str, name: usize| (shadow.find(pat).expect(pat) + name) as u32;
     let hint = |character: u32, label: &str| json!({ "kind": 1, "label": label, "position": { "line": 1, "character": character } });
 
-    // The shadow writes both names again, and the temp beside them.
+    // `x` sits at column 8 of the source line and `y` at column 11.
     assert_eq!(
-        destructured_name(doc, &hint(after("x,", 1), ": number")).as_deref(),
-        Some("x")
+        name_end(doc, &hint(after("x,", 1), ": number")),
+        Some((1, 9))
     );
     assert_eq!(
-        destructured_name(doc, &hint(after("y =", 1), ": string")).as_deref(),
-        Some("y")
+        name_end(doc, &hint(after("y =", 1), ": string")),
+        Some((1, 12))
     );
-    assert_eq!(destructured_name(doc, &hint(after("_1", 2), ": { }")), None);
+    assert_eq!(name_end(doc, &hint(after("_1", 2), ": { }")), None);
 
-    // After the mapping every hint of the line sits on its first byte.
-    // The name each one carries says where it belongs.
+    // After the mapping every hint of the line sits on the head of it.
+    // The position each one carries says where it belongs.
+    let moved = |label: &str, character: u32| {
+        json!({
+            "kind": 1,
+            "label": label,
+            "position": { "line": 1, "character": 0 },
+            "textEdits": [{
+                "range": {
+                    "start": { "line": 1, "character": 0 },
+                    "end": { "line": 1, "character": 0 },
+                },
+                "newText": label,
+            }],
+            NAME_END: { "line": 1, "character": character },
+        })
+    };
     let mut hints = vec![
-        json!({
-            "kind": 1,
-            "label": ": number",
-            "position": { "line": 1, "character": 0 },
-            DESTRUCTURED: "x",
-        }),
-        json!({
-            "kind": 1,
-            "label": ": string",
-            "position": { "line": 1, "character": 0 },
-            DESTRUCTURED: "y",
-        }),
+        moved(": number", 9),
+        moved(": string", 12),
         // `for k, v in pairs(counts)` over an untyped record.
         json!({ "kind": 1, "label": ": ~nil", "position": { "line": 2, "character": 7 } }),
         json!({ "kind": 1, "label": ": unknown", "position": { "line": 2, "character": 10 } }),
@@ -1332,13 +1340,93 @@ fn a_destructuring_binding_gets_its_type_hints() {
         })
         .collect();
 
-    // `x` sits at column 8 of the source line and `y` at column 11.
     assert_eq!(
         places,
         [(": number".to_string(), 9), (": string".to_string(), 12)],
         "{hints:?}"
     );
-    assert!(!hints.iter().any(|h| h.get(DESTRUCTURED).is_some()));
+    assert!(!hints.iter().any(|h| h.get(NAME_END).is_some()));
+    // `local { x: number, y } = t` is not Alloy, so no hint inserts one.
+    assert!(
+        !hints.iter().any(|h| h.get("textEdits").is_some()),
+        "{hints:?}"
+    );
+}
+
+/*
+The alias of `match e as n with`, and the binding of `if local n = e`.
+
+Both emit a `local` of their own, whose name is the author's. The hint
+the child sends for it stands after that name, and the byte it sits on
+is generated, so the map would send it to the `match` or the `if`.
+
+`match e as n with` takes no annotation on the alias; `if local n = e`
+takes one on the binding, so that hint keeps its edit.
+*/
+#[test]
+fn a_rewritten_binding_hints_on_the_name_the_author_wrote() {
+    let src = "local function f(s: string): string\n  local test = match s as t with\n    case \"test\" then `{t}test`\n    default \"test\"\n  end\n  return test\nend\nlocal function g(a: string?): string\n  if local p = a then\n    return p\n  end\n  return \"none\"\nend\nprint(f, g)\n";
+    let (st, uri) = super::support::one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let at = |line: usize, pat: &str| {
+        let text = doc.shadow.lines().nth(line).expect("the lowered line");
+
+        (text.find(pat).expect(pat) + pat.len()) as u32
+    };
+    let hint = |line: u32, character: u32| {
+        json!({
+            "kind": 1,
+            "label": ": string",
+            "position": { "line": line, "character": character },
+            "textEdits": [{
+                "range": {
+                    "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": character },
+                },
+                "newText": ": string",
+            }],
+        })
+    };
+    // `t` stands at column 26 of the `match` line and `p` at column 11
+    // of the `if` line.
+    let alias = hint(1, at(1, ") local t"));
+    let binding = hint(8, at(8, "then local p"));
+
+    assert_eq!(name_end(doc, &alias), Some((1, 27)));
+    assert_eq!(name_end(doc, &binding), Some((8, 12)));
+
+    let mut hints = vec![alias, binding];
+
+    for h in hints.iter_mut() {
+        let (line, character) = name_end(doc, h).expect("the name");
+        h[NAME_END] = json!({ "line": line, "character": character });
+        // The map sends the hint to the head of the statement.
+        h["position"] = json!({ "line": line, "character": 2 });
+    }
+
+    clean_hints(&mut hints, doc);
+
+    assert_eq!(
+        position_of_value(&hints[0]["position"]),
+        Some((1, 27)),
+        "{:?}",
+        hints[0]
+    );
+    assert_eq!(
+        position_of_value(&hints[1]["position"]),
+        Some((8, 12)),
+        "{:?}",
+        hints[1]
+    );
+    // `match s as t: string with` is not Alloy; `if local p: string = a`
+    // is.
+    assert!(hints[0].get("textEdits").is_none(), "{:?}", hints[0]);
+    assert_eq!(
+        hints[1].pointer("/textEdits/0/range/start"),
+        Some(&json!({ "line": 8, "character": 12 })),
+        "{:?}",
+        hints[1]
+    );
 }
 
 /// `new Pair<<number, string>>` writes the arguments the print drops:

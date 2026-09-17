@@ -1342,23 +1342,28 @@ impl Server {
                                 let generated = offset
                                     .is_some_and(|o| doc.generated_offset(o.saturating_sub(1)));
 
-                                // A destructuring binding is generated
-                                // text end to end, and the names the
-                                // braces hold are the author's own. The
-                                // hint travels with the name it types
-                                // and moves onto it after the mapping,
-                                // which puts every hint of the line on
-                                // the line's first byte.
-                                if generated
-                                    && !error_type
-                                    && let Some(name) = destructured_name(doc, h)
-                                {
-                                    h[DESTRUCTURED] = json!(name);
-
-                                    return true;
+                                if error_type || generated {
+                                    return false;
                                 }
 
-                                !error_type && !generated
+                                // The desugar writes a `local` of its
+                                // own for a name the author gave: the
+                                // alias of `match e as n with`, the
+                                // binding of `if local n = e`, a name
+                                // inside `local { a, b } = t`. The byte
+                                // after the name is generated, so the
+                                // map would send the hint to the head
+                                // of the statement, which spells a
+                                // keyword. The hint carries the source
+                                // position, and the fold puts it there.
+                                if let Some((line, character)) = name_end(doc, h) {
+                                    h[NAME_END] = json!({
+                                        "line": line,
+                                        "character": character,
+                                    });
+                                }
+
+                                true
                             });
 
                             // A label the child sends in parts folds as

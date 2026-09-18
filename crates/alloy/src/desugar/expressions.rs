@@ -1496,10 +1496,11 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// Reports a child access over a receiver that is no `Instance`,
-    /// in the words the file wrote. `->` lowers to `FindFirstChild` and
-    /// `=>` lowers to `WaitForChild`, so the checker named a method the
-    /// author never typed. The report lands on the operator.
+    /// Reports the two mistakes a child access makes, in the words the
+    /// file wrote. `->` lowers to `FindFirstChild` and `=>` lowers to
+    /// `WaitForChild`, so the checker names a method the author never
+    /// typed; the check artifact also casts a child to `any`, which
+    /// hides a call on it. Both reports land on the operator.
     fn check_child_chain(&mut self, base: &Expr, links: &[Link<'_>]) {
         // Only the first link reads the base. A later child reads a
         // child, and a child is an `Instance`.
@@ -1523,6 +1524,26 @@ impl<'s> Desugar<'s> {
                     ),
                 );
             }
+        }
+
+        for pair in links.windows(2) {
+            let [
+                Link::Plain(Step::Child { name, wait })
+                | Link::Optional(Step::Child { name, wait }),
+                Link::Plain(Step::Call { method: None, .. })
+                | Link::Optional(Step::Call { method: None, .. }),
+            ] = pair
+            else {
+                continue;
+            };
+            let span = self.child_op_span(name);
+            self.diagnose(
+                span,
+                &format!(
+                    "`{}` gives an `Instance`; an `Instance` is not a function",
+                    child_op(*wait)
+                ),
+            );
         }
     }
 
@@ -1725,6 +1746,28 @@ mod tests {
         let src = "local function a(n: number)\n    print(n)\nend\nlocal function b(n)\n    print(n->X)\nend\nprint(a, b)\n";
 
         assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
+    /// `ins=>Foo(2)` calls the child. The check artifact casts a child
+    /// to `any`, so the checker saw no call on an `Instance` at all.
+    #[test]
+    fn a_call_on_a_child_reports() {
+        let src = "local ins = script\nprint(ins=>Foo(2), ins->Foo(2), ins=>Foo=>Bar(2))\n";
+
+        assert_eq!(
+            messages(src),
+            vec![
+                "`=>` gives an `Instance`; an `Instance` is not a function",
+                "`->` gives an `Instance`; an `Instance` is not a function",
+                "`=>` gives an `Instance`; an `Instance` is not a function",
+            ]
+        );
+
+        // A method call and an index read the child, which is what the
+        // operators are for.
+        let fine =
+            "local ins = script\nprint(ins=>Foo:IsA(\"Part\"), ins=>Foo[1], ins=>Foo.Name)\n";
+        assert!(messages(fine).is_empty(), "{:?}", messages(fine));
     }
 
     #[test]

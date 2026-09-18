@@ -317,7 +317,7 @@ fn reports(src: &str, name: &str) -> Option<Vec<String>> {
     // The runtime sits beside the artifact, which requires it by alias.
     std::fs::write(
         dir.join("alloy.luau"),
-        std::fs::read_to_string(root.join("std/alloy.luau")).unwrap(),
+        std::fs::read_to_string(root.join("alloy/std/alloy.luau")).unwrap(),
     )
     .unwrap();
     // Without this the analyzer runs nonstrict, and the require gives
@@ -570,7 +570,7 @@ fn an_exporting_module_returns_one_value_to_require() {
     std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
     std::fs::write(
         dir.join("alloy.luau"),
-        std::fs::read_to_string(root.join("std/alloy.luau")).unwrap(),
+        std::fs::read_to_string(root.join("alloy/std/alloy.luau")).unwrap(),
     )
     .unwrap();
 
@@ -639,7 +639,7 @@ fn a_returning_module_types_through_its_value() {
     std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
     std::fs::write(
         dir.join("alloy.luau"),
-        std::fs::read_to_string(root.join("std/alloy.luau")).unwrap(),
+        std::fs::read_to_string(root.join("alloy/std/alloy.luau")).unwrap(),
     )
     .unwrap();
 

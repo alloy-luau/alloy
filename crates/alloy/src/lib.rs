@@ -146,11 +146,11 @@ pub fn compile(src: &str) -> Result<Output, CompileError> {
 
 /// The runtime module, shipped with the compiler. The build writes it to
 /// the output root so the emitted `require` resolves.
-pub const RUNTIME: &str = include_str!("../../../std/alloy.luau");
+pub const RUNTIME: &str = include_str!("../std/alloy.luau");
 
 /// The engine doubles `alloy test` loads before a spec; see
 /// `std/shim.luau`.
-pub const SHIM: &str = include_str!("../../../std/shim.luau");
+pub const SHIM: &str = include_str!("../std/shim.luau");
 
 /// Compiles with the `[emit]` knobs of a project.
 pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileError> {

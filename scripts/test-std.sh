@@ -3,7 +3,7 @@
 #
 #   scripts/test-std.sh [lest arguments]
 #
-# The specs live in std/tests/*.spec.luau and require the runtime as
+# The specs live in crates/alloy/std/tests/*.spec.luau and require the runtime as
 # ../alloy. lest's native VM has no `task` and no `game`, so the runtime
 # takes its coroutine fallback there, and the specs cover that path.
 set -euo pipefail
@@ -16,5 +16,5 @@ if ! command -v lest >/dev/null; then
   exit 2
 fi
 
-cd "$root/std"
+cd "$root/crates/alloy/std"
 exec lest "$@"

@@ -15,7 +15,7 @@ out/
 build/
 
 # lest writes its framework here on each run
-std/.lest/
+crates/alloy/std/.lest/
 
 # The agent harness keeps worktrees here
 .claude/

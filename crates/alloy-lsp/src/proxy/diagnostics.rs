@@ -1196,7 +1196,7 @@ pub(crate) fn keep_diagnostic(
 
     // A half-typed member access leaves the checker with no name, and
     // it reports its own stand-in. The parser already names the gap.
-    if crate::shapes::names_only_the_emit(message) {
+    if alloy::shapes::names_only_the_emit(message) {
         return false;
     }
 
@@ -1206,8 +1206,8 @@ pub(crate) fn keep_diagnostic(
         .and_then(Value::as_u64)
         .and_then(|line| doc.source.lines().nth(line as usize))
         .is_some_and(|text| {
-            crate::shapes::names_the_emit_key(message, text)
-                || crate::shapes::duplicate_only_in_the_emit(message, text)
+            alloy::shapes::names_the_emit_key(message, text)
+                || alloy::shapes::duplicate_only_in_the_emit(message, text)
         })
     {
         return false;
@@ -1408,8 +1408,8 @@ pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
     if let Some(message) = d.get("message").and_then(Value::as_str) {
         let mut folded = json!(message);
         strip_std_prefix(&mut folded);
-        let text = crate::shapes::fold(folded.as_str().unwrap_or(message), &known);
-        d["message"] = json!(crate::shapes::friendly_text(&text));
+        let text = alloy::shapes::fold(folded.as_str().unwrap_or(message), &known);
+        d["message"] = json!(alloy::shapes::friendly_text(&text));
     }
 
     // A private method sits outside the struct's public table, so the
@@ -1635,7 +1635,7 @@ pub(crate) fn alloy_wording(
 
     // A `{ ... }` where an Array belongs: the checker answers with the
     // nineteen methods the table lacks, and the mistake is the bracket.
-    if let Some(hint) = crate::shapes::plain_table_hint(&body) {
+    if let Some(hint) = alloy::shapes::plain_table_hint(&body) {
         d["message"] = json!(format!("{kind}: {hint}"));
 
         return;

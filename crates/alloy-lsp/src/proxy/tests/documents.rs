@@ -181,7 +181,7 @@ pub(crate) fn a_hint_in_parts_folds_as_one_label() {
     }]);
     let joined = hint_label(&result[0]);
     result[0]["label"] = json!(joined);
-    crate::shapes::fold_value(&mut result, &crate::shapes::Known::default());
+    alloy::shapes::fold_value(&mut result, &alloy::shapes::Known::default());
     assert_eq!(result[0]["label"], ": Swinger");
 }
 #[test]
@@ -193,7 +193,7 @@ pub(crate) fn a_private_view_hint_folds_through_the_result_path() {
         "textEdits": [{ "range": { "start": { "line": 8, "character": 18 }, "end": { "line": 8, "character": 18 } }, "newText": ": Swinger & Swinger__private & { last: number, scope: Scope }" }]
     }]);
     strip_std_prefix(&mut result);
-    crate::shapes::fold_value(&mut result, &crate::shapes::Known::default());
+    alloy::shapes::fold_value(&mut result, &alloy::shapes::Known::default());
     assert_eq!(result[0]["label"], ": Swinger");
 }
 #[test]

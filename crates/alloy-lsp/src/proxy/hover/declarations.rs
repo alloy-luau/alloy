@@ -417,7 +417,7 @@ pub(crate) fn case_binding_span(
     doc: &Doc,
     line: usize,
     word: &str,
-    known: &crate::shapes::Known,
+    known: &alloy::shapes::Known,
 ) -> Option<(usize, usize)> {
     let lines: Vec<&str> = doc.source.lines().collect();
     let case_line = case_binding_line(&lines, line)?;
@@ -601,7 +601,7 @@ pub(crate) fn case_binding_text(
     line: usize,
     start: usize,
     word: &str,
-    known: &crate::shapes::Known,
+    known: &alloy::shapes::Known,
 ) -> Option<String> {
     let lines: Vec<&str> = doc.source.lines().collect();
     let case_line = case_binding_line(&lines, line)?;
@@ -663,7 +663,7 @@ pub(crate) fn case_pattern(line: &str) -> Option<String> {
 /// pattern reads the element type of what the match runs over.
 pub(crate) fn pattern_bindings(
     pattern: &str,
-    known: &crate::shapes::Known,
+    known: &alloy::shapes::Known,
     element: impl Fn() -> Option<String>,
 ) -> Vec<(String, String, String)> {
     let mut out = Vec::new();

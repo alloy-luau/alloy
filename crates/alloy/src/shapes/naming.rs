@@ -3,7 +3,7 @@
 //! enum's union, or one of the std containers by the members only it
 //! has.
 
-use alloy::declarations::Shape;
+use crate::declarations::Shape;
 
 use super::Known;
 use super::strings::{balanced_len, member_parts, members, type_len};

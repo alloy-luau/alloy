@@ -222,7 +222,7 @@ fn method_call_type(doc: &Doc, call: &str, offset: usize) -> Option<String> {
         crate::context::Declared::Init(init) => constructed_type(doc, init.strip_prefix("new ")?)?,
     };
     let (owner, owner_args) = match named.split_once('<') {
-        Some((o, a)) => (o, crate::shapes::top_level_parts(a.strip_suffix('>')?)),
+        Some((o, a)) => (o, alloy::shapes::top_level_parts(a.strip_suffix('>')?)),
 
         None => (named.as_str(), Vec::new()),
     };
@@ -261,8 +261,8 @@ fn method_call_type(doc: &Doc, call: &str, offset: usize) -> Option<String> {
         .zip(&owner_args)
         .map(|(p, a)| (p.to_string(), a.trim().to_string()))
         .collect();
-    let params = crate::shapes::top_level_parts(&head[spans.params.0 + 1..spans.params.1 - 1]);
-    let args = crate::shapes::top_level_parts(&list[1..len - 1]);
+    let params = alloy::shapes::top_level_parts(&head[spans.params.0 + 1..spans.params.1 - 1]);
+    let args = alloy::shapes::top_level_parts(&list[1..len - 1]);
     let typed = params
         .iter()
         .map(|p| p.trim())
@@ -276,7 +276,7 @@ fn method_call_type(doc: &Doc, call: &str, offset: usize) -> Option<String> {
         let mut pattern = pattern.trim().to_string();
 
         for (g, bound) in &bindings {
-            pattern = crate::shapes::replace_var(&pattern, g, bound);
+            pattern = alloy::shapes::replace_var(&pattern, g, bound);
         }
 
         if let Some(actual) = argument_type(doc, arg.trim(), offset) {
@@ -287,7 +287,7 @@ fn method_call_type(doc: &Doc, call: &str, offset: usize) -> Option<String> {
     let mut out = head[a..b].trim().to_string();
 
     for (g, bound) in &bindings {
-        out = crate::shapes::replace_var(&out, g, bound);
+        out = alloy::shapes::replace_var(&out, g, bound);
     }
 
     let unbound = impl_params
@@ -350,7 +350,7 @@ fn argument_type(doc: &Doc, arg: &str, offset: usize) -> Option<String> {
     if let Some((head, _)) = declaration_head(doc, arg) {
         let spans = head_spans(head, arg.len())?;
         let params: Vec<&str> =
-            crate::shapes::top_level_parts(&head[spans.params.0 + 1..spans.params.1 - 1])
+            alloy::shapes::top_level_parts(&head[spans.params.0 + 1..spans.params.1 - 1])
                 .into_iter()
                 .map(|p| p.split_once(':').map_or(p.trim(), |(_, t)| t.trim()))
                 .collect();
@@ -386,8 +386,8 @@ fn unify(pattern: &str, actual: &str, own: &[String], bindings: &mut Vec<(String
         && let Some(pl) = group_len(pattern, '(', ')')
         && let Some(al) = group_len(actual, '(', ')')
     {
-        let ps = crate::shapes::top_level_parts(&pattern[1..pl - 1]);
-        let r#as = crate::shapes::top_level_parts(&actual[1..al - 1]);
+        let ps = alloy::shapes::top_level_parts(&pattern[1..pl - 1]);
+        let r#as = alloy::shapes::top_level_parts(&actual[1..al - 1]);
 
         for (p, a) in ps.iter().zip(&r#as) {
             unify(p, a, own, bindings);
@@ -409,8 +409,8 @@ fn unify(pattern: &str, actual: &str, own: &[String], bindings: &mut Vec<(String
         && let Some(pa) = pa.strip_suffix('>')
         && let Some(aa) = aa.strip_suffix('>')
     {
-        let ps = crate::shapes::top_level_parts(pa);
-        let r#as = crate::shapes::top_level_parts(aa);
+        let ps = alloy::shapes::top_level_parts(pa);
+        let r#as = alloy::shapes::top_level_parts(aa);
 
         for (p, a) in ps.iter().zip(&r#as) {
             unify(p, a, own, bindings);
@@ -449,7 +449,7 @@ pub(crate) fn constructed_type(doc: &Doc, after_new: &str) -> Option<String> {
         .cloned()
         .collect();
 
-    Some(crate::shapes::fill_generic_defaults(&printed, &shapes))
+    Some(alloy::shapes::fill_generic_defaults(&printed, &shapes))
 }
 
 /// Whether a name in reach declares a struct. `shapes` reads the top
@@ -1584,7 +1584,7 @@ pub(crate) fn bind_receiver_arguments(
         return None;
     }
 
-    let args = crate::shapes::top_level_parts(args.strip_suffix('>')?);
+    let args = alloy::shapes::top_level_parts(args.strip_suffix('>')?);
     let declared = std::iter::once(&doc.source)
         .chain(doc.import_sources.iter())
         .map(|src| struct_generics(src, owner))
@@ -1618,7 +1618,7 @@ pub(crate) fn bind_receiver_arguments(
     let mut list = head[open..].to_string();
 
     for (p, a) in params.iter().zip(&args) {
-        list = crate::shapes::replace_var(&list, p, a.trim());
+        list = alloy::shapes::replace_var(&list, p, a.trim());
     }
 
     out.push_str(&list);

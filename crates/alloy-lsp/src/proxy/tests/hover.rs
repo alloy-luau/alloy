@@ -127,7 +127,7 @@ pub(crate) fn a_bound_on_a_local_reads_as_the_parameter() {
     let record = "{\n    read cmp: (self: any, other: number) -> number\n}";
     let branch = format!("(T & {record} & {record})");
     let printed = format!("```luau\nlocal best: {branch} | {branch}\n```");
-    let mut text = crate::shapes::fold(&printed, &st.known_shapes_at(Some(uri)));
+    let mut text = alloy::shapes::fold(&printed, &st.known_shapes_at(Some(uri)));
 
     assert_eq!(text, "```luau\nlocal best: (T & Ord)\n```");
 
@@ -684,10 +684,10 @@ fn every_hop_of_a_field_chain_names_its_owner() {
 /// the folded self type, `read`.
 #[test]
 fn a_chain_link_names_the_receiver_type() {
-    let known = crate::shapes::Known::default();
+    let known = alloy::shapes::Known::default();
     let text = "function w.xs:map(function(x: number) return x end):find(self: {read number}, f: (number, number) -> boolean): number?";
     assert_eq!(
-        crate::shapes::fold(text, &known),
+        alloy::shapes::fold(text, &known),
         "function Array:find(self: read number[], f: (number, number) -> boolean): number?"
     );
 }
@@ -1623,7 +1623,7 @@ fn a_cut_result_hint_reads_by_the_method_tables_arguments() {
         "position": { "line": line, "character": 7 },
         "textEdits": [],
     }]);
-    crate::shapes::fold_value(&mut hints, &st.known_shapes_at(Some(uri)));
+    alloy::shapes::fold_value(&mut hints, &st.known_shapes_at(Some(uri)));
     let hints = hints.as_array_mut().expect("hints");
     clean_hints(hints, doc);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1705,7 +1705,7 @@ fn a_const_table_hovers_as_its_record_at_the_declaration() {
     let doc = st.docs.get(uri).expect("doc");
     let printed = "```luau\nlocal SCHEMA: {\n    stats: {\n        strength: {\n            default: number,\n            kind: \"int\"\n        }\n    }\n}\n```";
     let text = restyle_hover(printed, doc, 0, 13).expect("restyled");
-    let text = crate::shapes::fold(&text, &st.known_shapes_at(Some(uri)));
+    let text = alloy::shapes::fold(&text, &st.known_shapes_at(Some(uri)));
 
     assert!(
         text.starts_with("```alloy\nexport const SCHEMA: {"),

@@ -133,17 +133,17 @@ fn a_type_slot_after_the_dot_lists_the_types() {
 #[test]
 fn the_fold_reads_a_namespaced_type_by_its_path() {
     let src = "namespace Math as\n    struct Vec2 as\n        x: number\n    end\nend\n";
-    let known = crate::shapes::Known {
+    let known = alloy::shapes::Known {
         namespaces: alloy::declarations::namespace_names(src),
         ..Default::default()
     };
     assert_eq!(
-        crate::shapes::fold("local v: Math_Vec2", &known),
+        alloy::shapes::fold("local v: Math_Vec2", &known),
         "local v: Math.Vec2"
     );
     // A whole word only: a name that begins with one keeps its own.
     assert_eq!(
-        crate::shapes::fold("local v: Math_Vec2Extra", &known),
+        alloy::shapes::fold("local v: Math_Vec2Extra", &known),
         "local v: Math_Vec2Extra"
     );
 }
@@ -205,7 +205,7 @@ fn a_constructed_namespace_struct_reads_by_its_path() {
     let (st, uri) = one_file(src);
     let doc = st.docs.get(uri).expect("doc");
     let mut hint = json!({ "label": [{ "value": ": " }, { "value": "Ns_T" }] });
-    crate::shapes::fold_value(&mut hint, &st.known_shapes_at(Some(uri)));
+    alloy::shapes::fold_value(&mut hint, &st.known_shapes_at(Some(uri)));
 
     assert_eq!(hint["label"][1]["value"], "Ns.T");
 
@@ -284,7 +284,7 @@ fn a_namespaced_struct_names_itself_over_a_shape_match() {
     let known = st.known_shapes_at(Some("file:///user.aly"));
     let printed = "```luau\nlocal v1: { @metatable t1, { x: number, y: number } }\n```";
 
-    assert!(!crate::shapes::fold(printed, &known).contains("P"));
+    assert!(!alloy::shapes::fold(printed, &known).contains("P"));
 
     let doc = &st.docs["file:///user.aly"];
 

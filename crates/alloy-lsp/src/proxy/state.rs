@@ -186,11 +186,11 @@ impl State {
     /// a shape print alike, and a fold names one the file declares or
     /// imports. A struct of a file the document does not import is no
     /// answer for it. With no document, the whole workspace.
-    pub(crate) fn known_shapes_at(&self, uri: Option<&str>) -> crate::shapes::Known {
+    pub(crate) fn known_shapes_at(&self, uri: Option<&str>) -> alloy::shapes::Known {
         let here = uri.and_then(|u| self.docs.get(u));
         let rest = self.docs.iter().filter(|(u, _)| Some(u.as_str()) != uri);
 
-        crate::shapes::Known {
+        alloy::shapes::Known {
             shapes: here
                 .into_iter()
                 .chain(rest.clone().map(|(_, d)| d).filter(|_| here.is_none()))

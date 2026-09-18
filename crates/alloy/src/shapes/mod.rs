@@ -13,7 +13,7 @@ mod receivers;
 mod results;
 mod strings;
 
-use alloy::declarations::Shape;
+use crate::declarations::Shape;
 use serde_json::Value;
 
 use arrays::{
@@ -33,10 +33,8 @@ use strings::{
     outside_angles, split_at_depth, split_union,
 };
 
-// `alloy-web`'s wasm build `#[path]`-includes this file too, and it
-// calls none of these; the checker's own diagnostics rewrite (in
-// `alloy-lsp` and in `alloy::typecheck`) is what uses them.
-#[allow(unused_imports)]
+// The diagnostics rewrite calls these, in `crate::typecheck` and in
+// `alloy-lsp`.
 pub use messages::{
     duplicate_only_in_the_emit, friendly_text, names_only_the_emit, names_the_emit_key,
     plain_table_hint, table_beside_array,
@@ -569,8 +567,9 @@ fn closing_angle(text: &str, open: usize) -> Option<usize> {
 }
 
 /// The comma-separated parts of an argument list, with the commas
-/// inside a nested list left alone.
-pub(crate) fn top_level_parts(text: &str) -> Vec<&str> {
+/// inside a nested list left alone. The language server restyles a
+/// hover with it.
+pub fn top_level_parts(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
@@ -2540,7 +2539,7 @@ mod tests {
         assert_eq!(fold(text, &Known::default()), ": Swinger");
         let known = Known {
             interfaces: Vec::new(),
-            shapes: alloy::declarations::shapes(
+            shapes: crate::declarations::shapes(
                 "export struct Swinger as\n    read requested: Signal<> = Signal.new()\n    private last: number = 0\n    private scope: Scope = Scope.new()\nend\n",
             ),
             namespaces: Vec::new(),

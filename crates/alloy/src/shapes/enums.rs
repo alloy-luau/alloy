@@ -2,7 +2,7 @@
 //! name, a payload as a tagged table. Both read back as the enum, and a
 //! tagged table the union fold could not pair still names its variant.
 
-use alloy::declarations::Shape;
+use crate::declarations::Shape;
 
 use super::Known;
 use super::strings::{balanced_len, enclosing_brace, group_start, member_len, members};

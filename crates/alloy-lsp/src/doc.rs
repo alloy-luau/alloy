@@ -52,10 +52,10 @@ pub struct Doc {
     pub import_shapes: Vec<alloy::declarations::Shape>,
     /// The interfaces the file declares, so a printed intersection
     /// reads by the name the source gave it.
-    pub interfaces: Vec<crate::shapes::Interface>,
+    pub interfaces: Vec<alloy::shapes::Interface>,
     /// The interfaces of the modules the file imports. A file names an
     /// interface it took from another module.
-    pub import_interfaces: Vec<crate::shapes::Interface>,
+    pub import_interfaces: Vec<alloy::shapes::Interface>,
     /// The declarations of the modules the file imports. A hover on an
     /// imported name reads them, so it answers before the workspace
     /// pass has opened the module.
@@ -343,7 +343,7 @@ impl Doc {
         self.namespace_ranges = alloy::declarations::namespace_ranges(text);
         self.bindings = alloy::declarations::bindings(text);
         self.shapes = alloy::declarations::shapes(text);
-        self.interfaces = crate::shapes::interfaces(text);
+        self.interfaces = alloy::shapes::interfaces(text);
         self.import_shapes =
             alloy::modules::import_shapes_for_file(std::path::Path::new(&options.file_name), text);
         self.import_sources =
@@ -358,7 +358,7 @@ impl Doc {
         self.import_interfaces = self
             .import_sources
             .iter()
-            .flat_map(|text| crate::shapes::interfaces(text))
+            .flat_map(|text| alloy::shapes::interfaces(text))
             .collect();
         self.import_decls = self
             .import_sources

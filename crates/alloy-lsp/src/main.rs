@@ -35,7 +35,6 @@ mod names;
 mod proxy;
 mod rpc;
 mod settings;
-mod shapes;
 mod tokens;
 
 use std::io::{BufReader, Write};

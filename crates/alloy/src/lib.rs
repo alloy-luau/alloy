@@ -5,10 +5,6 @@
 //! position map. It does not own a type solver; luau-lsp checks the emitted
 //! Luau.
 
-// `shapes.rs` names the crate as `alloy`, since the language server
-// includes it the same way. Inside the crate that name needs an alias.
-extern crate self as alloy;
-
 pub mod alx;
 pub mod build;
 pub mod config;
@@ -36,10 +32,8 @@ pub mod roblox_services;
 pub mod rojo;
 pub mod schema;
 /// The fold that turns the checker's printed types back into the names
-/// the source wrote. The language server owns the file; the CLI reads
-/// it so the terminal and the editor say the same thing.
-#[allow(dead_code)]
-#[path = "../../alloy-lsp/src/shapes/mod.rs"]
+/// the source wrote. The CLI and the language server both read it, so
+/// the terminal and the editor say the same thing.
 pub mod shapes;
 pub mod tables;
 pub mod target;

@@ -2,7 +2,7 @@
 //! nothing a reader can use, and a named one reads as the struct, the
 //! enum, or the variant it belongs to.
 
-use alloy::declarations::Shape;
+use crate::declarations::Shape;
 
 use super::Known;
 use super::naming::{is_tagged_variant, name_of_body};

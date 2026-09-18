@@ -14,14 +14,11 @@ mod keywords;
 #[allow(dead_code)]
 #[path = "../../alloy-lsp/src/names.rs"]
 mod names;
-#[allow(dead_code)]
-#[path = "../../alloy-lsp/src/shapes/mod.rs"]
-mod shapes;
 
 use std::cell::RefCell;
 
 use alloy::declarations::{Declaration, Shape};
-use alloy::{EmitOptions, Output};
+use alloy::{EmitOptions, Output, shapes};
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 

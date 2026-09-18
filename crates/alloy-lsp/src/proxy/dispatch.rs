@@ -1162,7 +1162,7 @@ impl Server {
                             }
 
                             text = fold_std_shapes(&text);
-                            text = crate::shapes::fold(&text, &st.known_shapes_at(ctx.as_deref()));
+                            text = alloy::shapes::fold(&text, &st.known_shapes_at(ctx.as_deref()));
 
                             // A module's table prints every member the
                             // solver inferred, and a function defined
@@ -1504,7 +1504,7 @@ impl Server {
                 strip_std_prefix(result);
                 // The checker prints a struct as its runtime table and a
                 // unit enum as a union of strings; the names go back.
-                crate::shapes::fold_value(result, &st.known_shapes_at(ctx.as_deref()));
+                alloy::shapes::fold_value(result, &st.known_shapes_at(ctx.as_deref()));
 
                 // The same variadic tail the hover drops: a member of a
                 // module reads `(...any) -> T` where the source wrote

@@ -35,6 +35,7 @@ done
 sed -i "s/\(alloy-syntax = { version = \)\"[^\"]*\"/\1\"$version\"/" crates/alloy/Cargo.toml crates/alloy-lsp/Cargo.toml
 sed -i "s/\(alloy-ingot = { version = \)\"[^\"]*\"/\1\"$version\"/" crates/alloy/Cargo.toml
 sed -i "s/\(package = \"alloy-luau\", version = \)\"[^\"]*\"/\1\"$version\"/" crates/alloy-lsp/Cargo.toml
+sed -i "s/\(package = \"alloy-luaux\", version = \)\"[^\"]*\"/\1\"$version\"/" crates/alloy/Cargo.toml
 cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace
 git add Cargo.toml crates/*/Cargo.toml Cargo.lock
 

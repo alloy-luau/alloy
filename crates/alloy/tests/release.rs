@@ -95,6 +95,72 @@ fn the_workspace_version_matches_the_crates() {
     assert_eq!(version, alloy::VERSION);
 }
 
+/// Every internal dependency names the workspace version. A path
+/// dependency that carries a stale version publishes a crate whose
+/// requirement does not match what the release put on crates.io.
+#[test]
+fn every_path_dependency_names_this_version() {
+    for name in guarded_crates() {
+        let manifest = read(&format!("crates/{name}/Cargo.toml"));
+
+        for line in manifest.lines() {
+            // An internal dependency names a path under `crates/`.
+            if !line.contains("path = \"../") || !line.contains("version = ") {
+                continue;
+            }
+
+            let version = line
+                .split("version = \"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("crates/{name}/Cargo.toml: {line}"));
+
+            assert_eq!(
+                version,
+                alloy::VERSION,
+                "crates/{name}/Cargo.toml names {version}, not {}: {line}",
+                alloy::VERSION
+            );
+        }
+    }
+}
+
+/// The release script bumps every one of those versions. A dependency
+/// the script does not name keeps the old number through a release.
+#[test]
+fn the_release_script_bumps_every_path_dependency() {
+    let script = read("scripts/release.sh");
+
+    for name in guarded_crates() {
+        let manifest = read(&format!("crates/{name}/Cargo.toml"));
+
+        for line in manifest.lines() {
+            if !line.contains("path = \"../") || !line.contains("version = ") {
+                continue;
+            }
+
+            // The dependency reads as `dep = {` or as `package = "dep"`.
+            let key = line
+                .split("package = \"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    line.split('=')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                });
+
+            assert!(
+                script.contains(&key),
+                "scripts/release.sh never names {key}, so crates/{name}/Cargo.toml keeps its old version"
+            );
+        }
+    }
+}
+
 /// The pattern `scripts/release.sh` holds its argument to.
 fn release_pattern() -> String {
     let script = read("scripts/release.sh");

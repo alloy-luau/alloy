@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-ingot"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-luau"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "alloy-ingot",
  "alloy-luaux",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-luau-lsp"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "alloy-luau",
  "alloy-syntax",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-luaux"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "full_moon",
  "globset",
@@ -55,11 +55,11 @@ dependencies = [
 
 [[package]]
 name = "alloy-syntax"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 
 [[package]]
 name = "alloy-web"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "alloy-luau",
  "alloy-syntax",

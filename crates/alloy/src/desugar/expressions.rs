@@ -68,6 +68,24 @@ fn plain_type_name(value: &str) -> Option<&str> {
     (head && rest).then_some(value)
 }
 
+/// The child operator a report quotes: `=>` waits, `->` finds.
+fn child_op(wait: bool) -> &'static str {
+    match wait {
+        true => "=>",
+
+        false => "->",
+    }
+}
+
+/// `a` or `an` for the type name a report quotes.
+fn article(ty: &str) -> &'static str {
+    match ty.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        true => "an",
+
+        false => "a",
+    }
+}
+
 /// A source slice with every run of whitespace as one space, so it fits
 /// on the line the generated text sits on.
 pub(crate) fn one_line(text: &str) -> String {
@@ -1165,6 +1183,7 @@ impl<'s> Desugar<'s> {
     */
     pub(crate) fn chain_parts(&mut self, e: &Expr) -> ChainParts {
         let (base, links) = flatten(e);
+        self.check_child_chain(base, &links);
         let timed_waits = self.options.wait_timeout.is_some();
         // A timed `WaitForChild` can return nil, so the link after it guards.
         let mut pending_guard = false;
@@ -1477,6 +1496,66 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// Reports a child access over a receiver that is no `Instance`,
+    /// in the words the file wrote. `->` lowers to `FindFirstChild` and
+    /// `=>` lowers to `WaitForChild`, so the checker named a method the
+    /// author never typed. The report lands on the operator.
+    fn check_child_chain(&mut self, base: &Expr, links: &[Link<'_>]) {
+        // Only the first link reads the base. A later child reads a
+        // child, and a child is an `Instance`.
+        if let Some(
+            Link::Plain(Step::Child { name, wait }) | Link::Optional(Step::Child { name, wait }),
+        ) = links.first()
+            && let Expr::Name(n) = base
+        {
+            let who = self.text_of(*n).to_string();
+            let ty = self.binding_types.get(&who).cloned().unwrap_or_default();
+
+            if !ty.is_empty() && self.not_instance(ty.trim_end_matches('?')) {
+                let verb = if *wait { "waits for" } else { "reads" };
+                let span = self.child_op_span(name);
+                self.diagnose(
+                    span,
+                    &format!(
+                        "`{}` {verb} a child of an `Instance`; `{who}` is {} `{ty}`",
+                        child_op(*wait),
+                        article(&ty)
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Whether a written type can never be an `Instance`. The types the
+    /// file names for certain answer here; a class, an `any`, a generic,
+    /// or an alias leaves the report to the checker.
+    fn not_instance(&self, ty: &str) -> bool {
+        self.known_type(ty)
+            || ty == "unknown"
+            || ty.starts_with('{')
+            || self.declared_fields(ty).is_some()
+    }
+
+    /// The `->` or `=>` token of a child access. The name follows the
+    /// operator, and `->[k]` puts a bracket between the two.
+    fn child_op_span(&self, name: &ChildName) -> TokSpan {
+        let at = match name {
+            ChildName::Name(s) | ChildName::Str(s) => s.start as usize,
+
+            ChildName::Computed(e) => e.span().start as usize,
+        };
+        let back = (1..=2)
+            .find(|b| {
+                at.checked_sub(*b)
+                    .and_then(|i| self.toks.get(i))
+                    .is_some_and(|t| matches!(t.text(self.src), "->" | "=>"))
+            })
+            .unwrap_or(1);
+        let op = at.saturating_sub(back);
+
+        TokSpan::new(op, op + 1)
+    }
+
     pub(crate) fn args_text(&mut self, args: &CallArgs) -> String {
         match args {
             CallArgs::Paren(list) => {
@@ -1608,6 +1687,44 @@ mod tests {
 
         let alias = "type R = Result<number, string>\nlocal function g(): R\n    local v = try Ok(1)\n    return Ok(v + 1)\nend\nprint(g)\n";
         assert!(messages(alias).is_empty(), "{:?}", messages(alias));
+    }
+
+    /// The lowering reads `FindFirstChild`, and the checker then named
+    /// a method the file never wrote. The compiler names the operator.
+    #[test]
+    fn a_child_operator_reports_its_own_receiver() {
+        let src = "struct Box as\n    width: number\nend\nlocal function t(n: number, s: string, b: Box, u: unknown, tbl: { x: number })\n    print(n->Foo, s->Foo, b->Foo, u->Foo, tbl->Foo, n=>Foo)\nend\nprint(t)\n";
+
+        assert_eq!(
+            messages(src),
+            vec![
+                "`->` reads a child of an `Instance`; `n` is a `number`",
+                "`->` reads a child of an `Instance`; `s` is a `string`",
+                "`->` reads a child of an `Instance`; `b` is a `Box`",
+                "`->` reads a child of an `Instance`; `u` is an `unknown`",
+                "`->` reads a child of an `Instance`; `tbl` is a `{ x: number }`",
+                "`=>` waits for a child of an `Instance`; `n` is a `number`",
+            ]
+        );
+    }
+
+    /// A receiver whose type this file cannot name stays with the
+    /// checker; a guess here would be a false report.
+    #[test]
+    fn a_child_operator_leaves_a_type_it_cannot_name() {
+        let src = "local function t(i: Instance, a: any, p: BasePart)\n    print(workspace->Map, i->Map, a->Map, p=>Map)\nend\nprint(t)\n";
+
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
+    /// A name the file binds a second time with no annotation types
+    /// nothing. The map of annotations is flat, so the parameter of one
+    /// function must not decide the same name in another.
+    #[test]
+    fn a_child_operator_reads_no_type_across_two_bindings() {
+        let src = "local function a(n: number)\n    print(n)\nend\nlocal function b(n)\n    print(n->X)\nend\nprint(a, b)\n";
+
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
     }
 
     #[test]

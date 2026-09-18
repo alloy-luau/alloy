@@ -2462,10 +2462,15 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// The annotation a binding carries, under its name. A name the
-    /// file binds twice with two types keeps neither.
+    /// The annotation a binding carries, under its name. The map is
+    /// flat, so a name the file binds twice keeps its type only when
+    /// both bindings write the same one. A binding with no annotation
+    /// blanks it: the name then stands for a type no reader knows.
     fn record_binding_type(&mut self, name: TokSpan, ty: Option<TokSpan>) {
         let Some(ty) = ty else {
+            let key = self.text_of(name).to_string();
+            self.binding_types.insert(key, String::new());
+
             return;
         };
         let key = self.text_of(name).to_string();

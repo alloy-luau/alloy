@@ -5,7 +5,7 @@ members = ["crates/alloy", "crates/alloy-syntax", "crates/alloy-lsp", "crates/al
 default-members = ["crates/alloy"]
 
 [workspace.package]
-version = "0.1.0-rc.6"
+version = "0.1.0-rc.7"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"

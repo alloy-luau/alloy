@@ -1795,10 +1795,10 @@ impl State {
 
 impl Server {
     /// side, or an import, where the child would list globals.
-    /// Whether the caret takes a field name of an object initializer.
-    /// The space after a comma continues the field list, so the trigger
-    /// answers there and nowhere else a space lands.
-    pub(crate) fn opens_a_field_list(&self, uri: &str, message: &Value) -> bool {
+    /// Whether the caret takes a list the space the author typed opens:
+    /// a field name of an object initializer after a comma, or the next
+    /// name of an import list. Nowhere else a space lands answers one.
+    pub(crate) fn opens_a_list(&self, uri: &str, message: &Value) -> bool {
         if !is_alloy_uri(uri) {
             return false;
         }
@@ -1814,7 +1814,7 @@ impl Server {
             return false;
         };
 
-        context::detect(&doc.source, offset).is_some_and(|c| fills_an_initializer(&c))
+        context::detect(&doc.source, offset).is_some_and(|c| takes_a_list(&c))
     }
 
     pub(crate) fn context_completion(&self, uri: &str, message: &Value, id: &Value) -> bool {
@@ -1878,10 +1878,11 @@ impl Server {
             return false;
         }
 
-        // `{` opens the field list of an object initializer. Every
-        // other `{`, a table literal, a type, or a markup hole, takes
-        // no list, so nothing pops up where the author writes a value.
-        if trigger == Some("{") && !fills_an_initializer(&ctx) {
+        // `{` opens the field list of an object initializer and the
+        // name list of an import. Every other `{`, a table literal, a
+        // type, or a markup hole, takes no list, so nothing pops up
+        // where the author writes a value.
+        if trigger == Some("{") && !takes_a_list(&ctx) {
             drop(st);
             self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": [] }));
 
@@ -1921,6 +1922,14 @@ pub(crate) fn fills_an_initializer(ctx: &context::Context) -> bool {
         ctx,
         context::Context::StructField { .. } | context::Context::InstanceField { .. }
     )
+}
+
+/// Whether a list belongs where the author typed a `{` or a space: the
+/// field list of an object initializer, and the name list of an
+/// import. Every other place takes no list, and one that opened there
+/// would take the next Enter.
+pub(crate) fn takes_a_list(ctx: &context::Context) -> bool {
+    fills_an_initializer(ctx) || matches!(ctx, context::Context::ImportNames { .. })
 }
 
 /// Removes the runtime's table from a type text, in every string of the
@@ -2218,7 +2227,27 @@ fn attribute_target_doc(target: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::attribute_target_doc;
+    use super::{attribute_target_doc, takes_a_list};
+    use crate::context;
+
+    /// A `{` and a space open the name list of an import, the way they
+    /// open the field list of an object initializer. Without it the
+    /// list answered Ctrl+Space alone.
+    #[test]
+    fn a_brace_and_a_space_open_an_import_list() {
+        let src = "import { a, b } from \"./m\"\nlocal t = { \n";
+        let at = |offset: usize| context::detect(src, offset).expect("a context");
+
+        // `import { a,| b }` and `import { a, b| }`.
+        assert!(takes_a_list(&at(11)));
+        assert!(takes_a_list(&at(14)));
+
+        // A table literal takes no list: one there would open where
+        // the author writes a value.
+        let value = src.len() - 1;
+
+        assert!(context::detect(src, value).is_none_or(|c| !takes_a_list(&c)));
+    }
 
     /// The parser accepts the words of `ATTRIBUTE_TARGETS`, and the
     /// completion offers them. A word with no line here would reach the

@@ -582,13 +582,13 @@ impl Server {
                 }
 
                 // A space triggers a completion for the field after the
-                // comma of an object initializer; every other space
-                // answers nothing, so no list opens where the author is
-                // typing words.
+                // comma of an object initializer, and for the next name
+                // of an import list; every other space answers nothing,
+                // so no list opens where the author is typing words.
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
                     && message.pointer("/params/context/triggerCharacter") == Some(&json!(" "))
-                    && !self.opens_a_field_list(&uri, &message)
+                    && !self.opens_a_list(&uri, &message)
                 {
                     self.respond(&id, json!([]));
 

@@ -160,8 +160,15 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
                 && name.contains('<')
                 && name.split('<').next() == Some(annotation)
         };
+        // `new Scheduler { phase = 3, data = nil }` prints as the record
+        // it holds, `{ data: nil, phase: number }`. The body annotates
+        // the binding, so the filter above keeps it, and it names none
+        // of what the reader wrote. The struct on the line does.
+        let prints_a_body = annotation.starts_with('{');
         let label = match (named && !on_self, from_source) {
-            (true, Some(name)) if restores_arguments(&name) => format!(": {name}"),
+            (true, Some(name)) if restores_arguments(&name) || prints_a_body => {
+                format!(": {name}")
+            }
 
             (true, _) => label,
 

@@ -36,6 +36,49 @@ pub(crate) fn the_mirror_config_names_the_runtime_and_the_mounts() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+/// Luau reads `src/init.luau` as the module `src`, so a relative
+/// require in it names a file beside `src`. The shadow of an `init.aly`
+/// writes the path from there. Without it the child resolves no module
+/// and every imported name reads as `unknown`.
+#[test]
+pub(crate) fn an_init_shadow_requires_a_sibling_through_its_folder() {
+    let dir = std::env::temp_dir().join(format!("alloy-init-require-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    std::fs::write(
+        dir.join("src/scheduler.aly"),
+        "export struct Plain as\n    phase: number,\nend\n",
+    )
+    .expect("scheduler.aly");
+
+    let st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let source = "import { Plain } from \"./scheduler\"\n\nlocal p = Plain\n";
+    let init = |name: &str| {
+        let (options, jsx) = st.options_for(&path_to_uri(&dir.join(name)));
+
+        Doc::new(source.to_string(), 1, &options, &jsx, None).shadow
+    };
+    let shadow = init("src/init.aly");
+
+    assert!(shadow.contains("require(\"./src/scheduler\")"), "{shadow}");
+
+    // A file that is no `init` keeps the path the source wrote.
+    let shadow = init("src/other.aly");
+
+    assert!(shadow.contains("require(\"./scheduler\")"), "{shadow}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An `impl` on a struct another file declares reaches the declaring
 /// file's check artifact, the way the project build feeds it. Without
 /// the index the child reports `Cannot add property` on the impl.

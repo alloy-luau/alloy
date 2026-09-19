@@ -434,6 +434,14 @@ impl State {
             }
         };
 
+        // Luau reads `x/init.luau` as the module `x`, so a relative
+        // require in it names a file beside `x`. The shadow of an
+        // `init.aly` sits at the same place in the mirror, so the mirror
+        // path is the space its requires are written in. Without it
+        // `init.aly` requires a file one folder too high, and every name
+        // it imports reads as `unknown`.
+        options.module_rel = self.mirror_path(&path).to_string_lossy().into_owned();
+
         // An `impl` on a struct another file declares attaches at run
         // time through the require, and the declaring file's artifact
         // declares the methods, so the type follows. `alloy build`

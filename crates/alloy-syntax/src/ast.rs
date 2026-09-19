@@ -163,6 +163,14 @@ pub enum Stmt {
     },
     /// `after seconds do ... end`, with an optional `where` filter.
     After(After),
+    /// `@cfg(server) f()`: an attribute on a plain statement. Only
+    /// `@cfg` has a meaning here, and it runs the statement where the
+    /// condition holds. The compiler reports any other attribute.
+    Attributed {
+        attrs: Vec<Attr>,
+        stmt: Box<Stmt>,
+        span: TokSpan,
+    },
     /// Tokens the lenient parser could not read. The span tiles the block
     /// like any statement, so the printer still reproduces the source.
     Error(TokSpan),
@@ -214,6 +222,7 @@ impl Stmt {
             | Stmt::Call(_, s)
             | Stmt::Delete { span: s, .. }
             | Stmt::Destroy { span: s, .. }
+            | Stmt::Attributed { span: s, .. }
             | Stmt::ExportDefault { span: s, .. } => *s,
 
             Stmt::Import(n) => n.span,

@@ -862,6 +862,19 @@ impl<'a> Parser<'a> {
             _ => {}
         }
 
+        // A plain statement under `@cfg(cond)`: the compiler guards it
+        // with the condition. A declaration reads below, so each one
+        // keeps its own form and its own report.
+        if !exported && !self.decl_starts_here() {
+            let inner = self.stmt()?;
+
+            return Ok(Stmt::Attributed {
+                attrs,
+                stmt: Box::new(inner),
+                span: TokSpan::new(start, self.pos),
+            });
+        }
+
         let is_async = if self.at("async") && self.text_at(1) == "function" {
             Some(TokSpan::new(self.bump(), self.pos))
         } else {
@@ -914,6 +927,28 @@ impl<'a> Parser<'a> {
         }
 
         Ok(stmt)
+    }
+
+    /// Whether a declaration starts at the cursor. An attribute over
+    /// anything else goes on the statement itself, so the word list is
+    /// what `attributed_stmt` reads below it.
+    fn decl_starts_here(&self) -> bool {
+        matches!(
+            self.text(),
+            "function"
+                | "local"
+                | "const"
+                | "class"
+                | "open"
+                | "macro"
+                | "attribute"
+                | "declare"
+                | "import"
+                | "export"
+                | "global"
+                | "async"
+                | "type"
+        )
     }
 
     /// Whether a declaration follows `global`, so the word is the

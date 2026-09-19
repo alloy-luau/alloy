@@ -1736,6 +1736,8 @@ pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
         // A namespace renders its members itself, one at a time, so the
         // stitch never reaches them.
         Stmt::Namespace(_) => Vec::new(),
+
+        Stmt::Attributed { stmt, .. } => stmt_children(stmt),
     }
 }
 
@@ -1810,6 +1812,9 @@ fn local_needs_rewrite(l: &Local) -> bool {
 fn stmt_needs_desugar(s: &Stmt) -> bool {
     match s {
         Stmt::Namespace(_) => return true,
+
+        // `@cfg` writes the guard, and any other attribute here reports.
+        Stmt::Attributed { .. } => return true,
 
         // The trailing expression of a `try do` or `async do` block:
         // the emit writes the `return` the source leaves out.

@@ -1,11 +1,18 @@
-local __alloy = require("@alloy") -- `@cfg` on a function opens the body with the check.
+local __alloy = require("@alloy") -- `@cfg` on a function with nothing to give returns where the
+-- condition fails.
 
 local function save(player: Player)
-    if not (__alloy.cfg.server()) then error("`save` is @cfg(server) and cannot run here", 2) end print(player)
+    if not (__alloy.cfg.server()) then return end print(player)
 end
 
 
-local function hud() if not ((__alloy.cfg.client() and not __alloy.cfg.studio())) then error("`hud` is @cfg(client and not studio) and cannot run here", 2) end
+local function hud() if not ((__alloy.cfg.client() and not __alloy.cfg.studio())) then return end
+end
+
+-- One that owes the caller a value raises instead.
+
+local function key(): string
+    if not (__alloy.cfg.server()) then error("`key` is @cfg(server) and cannot run here", 2) end return "store"
 end
 
 -- `@cfg` on a local reads the value only where it holds.
@@ -17,4 +24,13 @@ local verbose = (if (__alloy.cfg.studio() or __alloy.cfg.test()) then {
     level = 2,
 } else nil) :: typeof({ level = 2, })
 
-print(save, hud, store, verbose)
+-- `@cfg` on a statement skips the statement.
+
+if __alloy.cfg.server() then print(store) end
+
+
+if __alloy.cfg.client() then if verbose then
+    print(verbose)
+end end
+
+print(save, hud, key, store, verbose)

@@ -144,6 +144,8 @@ fn nested_blocks(stmt: &Stmt) -> Vec<&Block> {
 
         Stmt::Macro(m) => vec![&m.body],
 
+        Stmt::Attributed { stmt, .. } => nested_blocks(stmt),
+
         _ => Vec::new(),
     }
 }

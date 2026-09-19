@@ -71,6 +71,30 @@ pub(crate) fn attr_key(name: &str) -> &str {
     }
 }
 
+/// Whether a block hands a value back: a `return` with values in it.
+/// A nested function keeps its own returns, so the walk stops at one.
+fn block_returns_value(block: &Block) -> bool {
+    block.stmts.iter().any(stmt_returns_value)
+}
+
+fn stmt_returns_value(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return(r) => !r.values.is_empty(),
+
+        _ => stmt_children(s).iter().any(child_returns_value),
+    }
+}
+
+fn child_returns_value(c: &Child<'_>) -> bool {
+    match c {
+        Child::Block(b) => block_returns_value(b),
+
+        Child::Expr(e) => expr_children(e).iter().any(child_returns_value),
+
+        Child::Function(_) => false,
+    }
+}
+
 /// The return type a trait method's signature declares. The signature
 /// starts at `(`; the type follows the closing `)` after a `:` or a
 /// `->`.
@@ -1632,14 +1656,21 @@ impl<'s> Desugar<'s> {
             let what = fname
                 .as_deref()
                 .map_or("this function".to_string(), |f| format!("`{f}`"));
+            // A function with nothing to give does nothing on the other
+            // side; one that owes the caller a value says it cannot run
+            // there. A silent nil where the signature promises a value
+            // would fail somewhere else instead of naming the mistake.
+            let wrong_side = match self.returns_no_value(body) {
+                true => "return".to_string(),
+
+                false => format!(
+                    "error({}, 2)",
+                    luau_string(&format!("{what} is {text} and cannot run here"))
+                ),
+            };
             self.inserts.push((
                 at,
-                format!(
-                    "{}if not ({cond}) then error({}, 2) end{}",
-                    pad.0,
-                    luau_string(&format!("{what} is {text} and cannot run here")),
-                    pad.1
-                ),
+                format!("{}if not ({cond}) then {wrong_side} end{}", pad.0, pad.1),
             ));
         }
 
@@ -1699,6 +1730,87 @@ impl<'s> Desugar<'s> {
         if !tail.is_empty() {
             let end = self.byte_end(span);
             self.generate(end, &tail);
+        }
+    }
+
+    /*
+    `@cfg(cond) <statement>`: the statement runs where the condition
+    holds, and the other side skips it. A statement hands nobody a
+    value, so skipping it is what the author asked for.
+
+    The guard sits on the statement's own line, `if cond then f() end`,
+    so the line count of the file holds. Two `@cfg` lines on one
+    statement read as one condition, joined by `and`.
+    */
+    pub(crate) fn attributed_plain_stmt(&mut self, attrs: &[Attr], inner: &Stmt) {
+        let mut conds = Vec::new();
+
+        for a in attrs {
+            match a.name.map(|n| self.text_of(n)) {
+                Some("cfg") => match self.cfg_condition(&a.args) {
+                    Ok(cond) => conds.push(cond),
+
+                    Err(message) => self.diagnose(a.span, &message),
+                },
+
+                Some(n) => self.diagnose(
+                    a.span,
+                    &format!(
+                        "`@{n}` goes on a declaration; `@cfg` is the attribute a statement takes"
+                    ),
+                ),
+
+                None => self.diagnose(
+                    a.span,
+                    "`@cfg` is the attribute a statement takes; this one goes on a declaration",
+                ),
+            }
+
+            self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
+        }
+
+        // The copy starts where the last attribute ends, so the newline
+        // between it and the statement survives.
+        let after_attrs = attrs
+            .iter()
+            .map(|a| self.byte_end(a.span))
+            .max()
+            .unwrap_or(0);
+        let start = self.byte_start(inner.span());
+        let end = self.byte_end(inner.span());
+        self.copy(after_attrs, start);
+
+        if conds.is_empty() {
+            self.stmt(inner);
+
+            return;
+        }
+
+        self.generate(start, &format!("if {} then ", conds.join(" and ")));
+        self.stmt(inner);
+        self.generate(end, " end");
+    }
+
+    /// Whether a function hands its caller no value: it declares `()`
+    /// as its return type, or declares none and returns nothing. An
+    /// `async` function with no declared type resolves its future with
+    /// nil, so it reads the same way.
+    ///
+    /// A declared `nil` is not in the list: Luau reads a bare `return`
+    /// as `()`, so a skip there would report the type.
+    pub(crate) fn returns_no_value(&self, body: &FunctionBody) -> bool {
+        match body.ret_type {
+            Some(t) => {
+                let text: String = self
+                    .text_of(t)
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+
+                text == "()"
+            }
+
+            None => !block_returns_value(&body.block),
         }
     }
 

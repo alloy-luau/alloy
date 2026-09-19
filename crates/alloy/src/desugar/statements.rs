@@ -1215,6 +1215,10 @@ impl<'s> Desugar<'s> {
                 true,
             ),
 
+            Stmt::Attributed {
+                attrs, stmt: inner, ..
+            } => self.attributed_plain_stmt(attrs, inner),
+
             Stmt::Import(i) => self.import_stmt(i),
 
             Stmt::ExportList(e) => self.export_list(e),

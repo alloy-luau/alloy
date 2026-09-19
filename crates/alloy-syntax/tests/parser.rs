@@ -321,6 +321,10 @@ const CORPUS: &[&str] = &[
     "export attribute server_only on function",
     "attribute icon(asset: string) on struct, enum, variant",
     "@server_only\nlocal function save(p) end",
+    // `@cfg` on a statement, which the sweeps mutate and truncate.
+    "@cfg(server)\nstart_server()",
+    "@cfg(server)\nif ready then\n\tgo()\nend",
+    "@cfg(server)\n@cfg(not studio)\ngo()",
     // `@Ns.tag` reads an attribute of a namespace, and a nested
     // namespace takes one more step.
     "@Svc.tag\nfunction f() end",
@@ -1143,6 +1147,48 @@ end
         "attribute tag(name: string) on struct, enum
 ",
     );
+}
+
+/// `@cfg(cond)` on a plain statement. The statement keeps its own form
+/// under the attribute, and the tree still tiles the file.
+#[test]
+fn an_attribute_sits_on_a_statement() {
+    round_trip("@cfg(server)\nstart_server()\n");
+    round_trip("@cfg(server)\ntotal = total + 1\n");
+    round_trip("@cfg(server)\nlocal n = 1\nprint(n)\n");
+    round_trip("@cfg(server)\nreturn 1\n");
+    round_trip("@cfg(server)\nif ready then\n    go()\nend\n");
+    round_trip("@cfg(server)\nfor i = 1, 3 do\n    go(i)\nend\n");
+    round_trip("@cfg(server)\nfor _, v in t do\n    go(v)\nend\n");
+    round_trip("@cfg(server)\nwhile ready do\n    go()\nend\n");
+    round_trip("@cfg(server)\ndo\n    go()\nend\n");
+    round_trip("@cfg(server)\nlocal function go()\nend\nprint(go)\n");
+
+    // Two attributes on one statement, and two statements in a row.
+    round_trip("@cfg(server)\n@cfg(not studio)\ngo()\n");
+    round_trip("@cfg(server)\ngo()\n@cfg(client)\nstop()\n");
+
+    // Any other attribute parses here too; the compiler reports it.
+    round_trip("@derive(Clone)\ngo()\n");
+}
+
+/// The statement under the attribute stays the statement it is.
+#[test]
+fn a_statement_under_an_attribute_keeps_its_kind() {
+    use alloy_syntax::ast::Stmt;
+
+    let src = "@cfg(server)\nstart_server()\n";
+    let lexed = alloy_syntax::lexer::lex(src).unwrap();
+    let chunk = alloy_syntax::parser::parse(src, &lexed.toks).unwrap();
+    let [stmt] = &chunk.block.stmts[..] else {
+        panic!("expected one statement, found {}", chunk.block.stmts.len());
+    };
+    let Stmt::Attributed { attrs, stmt, .. } = stmt else {
+        panic!("expected an attributed statement, found {stmt:?}");
+    };
+
+    assert_eq!(attrs.len(), 1);
+    assert!(matches!(**stmt, Stmt::Call(..)), "{stmt:?}");
 }
 
 /// `requires` and `each` read as a keyword inside a contract body and as

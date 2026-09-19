@@ -150,24 +150,21 @@ fn enum_of_unit(unit: &str, known: &Known) -> Option<String> {
 /// the struct, and a field declared as a bare parameter names that
 /// parameter's argument. `Slotted` with no argument beats the table
 /// when a field leaves one unbound.
+///
+/// A struct whose `impl` writes only `new` has no method to print, so
+/// the fields stand alone.
 fn generic_struct_of_body(body: &str, known: &Known) -> Option<String> {
     if !body.starts_with('{') || balanced_len(body) != Some(body.len()) {
         return None;
     }
 
     let inner = body.get(1..body.len() - 1)?.trim();
-    let mut fields: Vec<(String, String)> = Vec::new();
-    let mut methods = 0usize;
+    let fields: Vec<(String, String)> = members(inner)
+        .into_iter()
+        .filter(|(_, value)| !value.trim_start().starts_with("(self:"))
+        .collect();
 
-    for (key, value) in members(inner) {
-        if value.trim_start().starts_with("(self:") {
-            methods += 1;
-        } else {
-            fields.push((key, value));
-        }
-    }
-
-    if methods == 0 || fields.is_empty() {
+    if fields.is_empty() {
         return None;
     }
 
@@ -228,12 +225,24 @@ fn struct_with_arguments(
         .map(|g| {
             decl.iter()
                 .zip(types)
-                .find(|((_, _), ty)| ty.trim() == g)
-                .and_then(|((f, _), _)| printed.iter().find(|(k, _)| k == f))
-                .map(|(_, v)| {
-                    let v = v.trim();
+                .find_map(|((f, _), ty)| {
+                    let ty = ty.trim();
+                    // `inner: T` reads the argument straight. `data: T?`
+                    // reads it through the `?` the print carries too.
+                    let through_option = ty.strip_suffix('?') == Some(g.as_str());
 
-                    name_of_body(v, known).unwrap_or_else(|| v.to_string())
+                    if !through_option && ty != g.as_str() {
+                        return None;
+                    }
+
+                    let v = printed.iter().find(|(k, _)| k == f)?.1.trim();
+                    let v = match through_option {
+                        true => v.strip_suffix('?')?,
+
+                        false => v,
+                    };
+
+                    Some(name_of_body(v, known).unwrap_or_else(|| v.to_string()))
                 })
                 .unwrap_or_default()
         })

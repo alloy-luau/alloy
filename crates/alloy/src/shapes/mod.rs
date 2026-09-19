@@ -2523,6 +2523,30 @@ mod tests {
         assert_eq!(fold(text, &known), "local held: Slotted<number>");
     }
 
+    /// A generic struct whose `impl` writes only `new` prints no method,
+    /// and the parameter may sit under a `?`. The fields still name the
+    /// struct, and the `?` still carries the argument.
+    #[test]
+    fn a_generic_struct_with_no_method_reads_by_its_fields() {
+        let known = Known {
+            interfaces: Vec::new(),
+            shapes: vec![Shape::Struct {
+                name: "Scheduler".into(),
+                fields: vec![("phase".into(), false), ("data".into(), false)],
+                generics: vec!["T".into()],
+                types: vec!["number".into(), "T?".into()],
+            }],
+            namespaces: Vec::new(),
+            tables: Vec::new(),
+        };
+        let text = "local g: {\n    data: unknown?,\n    phase: number\n}";
+        assert_eq!(fold(text, &known), "local g: Scheduler<unknown>");
+
+        // A call that pins the parameter reads the type it pins.
+        let text = "local g: {\n    data: string?,\n    phase: number\n}";
+        assert_eq!(fold(text, &known), "local g: Scheduler<string>");
+    }
+
     #[test]
     fn arrays_and_maps_read_by_name() {
         let text = "local xs: {t1} where t1 = { [number]: string, concat: (self: t1) -> t1, push: (self: t1) -> () }";

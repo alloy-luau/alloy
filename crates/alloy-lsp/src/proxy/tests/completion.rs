@@ -3130,3 +3130,43 @@ fn a_string_an_intrinsic_rewrote_lists_nothing() {
     // Outside every string the child answers as before.
     assert!(!string_left_behind(doc, 1, 3));
 }
+
+/// `import { ` with no `from` yet lists what every module of the
+/// project exports, each under the module it comes from, and the
+/// accept writes the `from` clause. With the module named, the list
+/// holds that module's exports alone.
+#[test]
+pub(crate) fn an_import_list_with_no_module_lists_the_project() {
+    let src = "import { \n";
+    let wheel = "export struct Cog as\n    teeth: number\nend\n";
+    let st = files(&[("file:///t.aly", src), ("file:///wheel.aly", wheel)]);
+    let items = |source: &str, at: usize| -> Vec<Value> {
+        let ctx = context::detect(source, at).expect("a context");
+
+        st.context_items("file:///t.aly", at, &ctx)
+    };
+    let open = items(src, src.find('\n').expect("the line end"));
+    let cog = open
+        .iter()
+        .find(|i| i["label"] == json!("Cog"))
+        .expect("the export of the other module");
+
+    assert_eq!(cog["detail"], json!("from \"./wheel\""));
+    assert_eq!(cog["textEdit"]["newText"], json!("Cog } from \"./wheel\""));
+
+    // The module is named: its own exports, with no clause to write.
+    let named = "import {  } from \"./wheel\"\n";
+    let st = files(&[("file:///t.aly", named), ("file:///wheel.aly", wheel)]);
+    let ctx = context::detect(named, named.find(" }").expect("the braces") + 1).expect("a context");
+    let listed = st.context_items(
+        "file:///t.aly",
+        named.find(" }").expect("the braces") + 1,
+        &ctx,
+    );
+    let cog = listed
+        .iter()
+        .find(|i| i["label"] == json!("Cog"))
+        .expect("the export of the named module");
+
+    assert_eq!(cog["textEdit"]["newText"], json!("Cog"));
+}

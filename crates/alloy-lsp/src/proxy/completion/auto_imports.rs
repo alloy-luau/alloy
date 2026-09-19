@@ -31,6 +31,36 @@ impl State {
         imports::auto_import_items(&doc.source, &path, &files, &prefix, &bound, &aliases)
     }
 
+    /// Every name the project's other modules export, with the spec
+    /// that reaches each one. An `import { }` list that names no
+    /// module yet reads them, so the reader picks a name first and the
+    /// accept writes the `from` clause.
+    pub(crate) fn project_exports(
+        &self,
+        uri: &str,
+        prefix: &str,
+    ) -> Vec<(String, imports::Export)> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return Vec::new();
+        };
+        let bound = markup_bound(&doc.source);
+        let files: Vec<(PathBuf, &[imports::Export])> = self
+            .docs
+            .iter()
+            .filter_map(|(u, d)| uri_to_path(u).map(|p| (p, d.exports.as_slice())))
+            .collect();
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let aliases = project_aliases(&dir, self.root.as_deref());
+
+        imports::auto_import_candidates(&doc.source, &path, &files, prefix, &bound, &aliases)
+            .into_iter()
+            .map(|(spec, export)| (spec, export.clone()))
+            .collect()
+    }
+
     /*
     Quick fixes for a name another module exports that this file does
     not import: one `import` line per module that has the name.

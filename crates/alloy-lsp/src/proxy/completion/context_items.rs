@@ -412,6 +412,72 @@ impl State {
                     ));
                 }
 
+                // What one export reads as in this list, or `None`
+                // for an export the list does not take. The default is
+                // not a name in braces; a bare `import X from` reads
+                // it. An `@` already written asks for the module's
+                // attributes alone, and an attribute is a value, so a
+                // type-only list holds none.
+                let listed = |e: &imports::Export| -> Option<String> {
+                    let dropped = e.is_default
+                        || (*type_only && !e.is_type)
+                        || (*sigil && !e.is_attribute)
+                        || (*type_only && e.is_attribute);
+
+                    match dropped {
+                        true => None,
+
+                        false => Some(match e.is_type && !*type_only {
+                            true => format!("type {}", e.name),
+
+                            false => e.written(),
+                        }),
+                    }
+                };
+
+                // `import { |` with no `from` yet: every name the
+                // project exports, each under the module it comes
+                // from. The accept writes the `from` clause, so the
+                // reader picks the name and the line finishes itself.
+                if spec.is_none() {
+                    let (start, end, close) = from_clause_at(&doc.source, offset);
+
+                    for (spec, e) in self.project_exports(uri, prefix) {
+                        let Some(label) = listed(&e) else {
+                            continue;
+                        };
+                        let clause = format!("{close} from \"{spec}\"");
+                        let mut item = word(&label, e.kind, None, from);
+                        item["detail"] = json!(format!("from \"{spec}\""));
+
+                        // One edit writes the name and the clause where
+                        // the clause starts at the caret. Two edits at
+                        // one offset have no order, so the text they
+                        // leave would be the client's guess.
+                        if start == offset {
+                            item["textEdit"] = json!({
+                                "range": range_value(
+                                    position_of(&doc.source, from),
+                                    position_of(&doc.source, end),
+                                ),
+                                "newText": format!("{label}{clause}"),
+                            });
+                        } else {
+                            item["additionalTextEdits"] = json!([{
+                                "range": range_value(
+                                    position_of(&doc.source, start),
+                                    position_of(&doc.source, end),
+                                ),
+                                "newText": clause,
+                            }]);
+                        }
+
+                        items.push(item);
+                    }
+
+                    return items;
+                }
+
                 if let Some(spec) = spec
                     && let Some(path) = uri_to_path(uri)
                     && let Some(dir) = path.parent()
@@ -453,27 +519,8 @@ impl State {
                     let decls = self.decls_of_target(resolved);
 
                     for e in &exports {
-                        if *type_only && !e.is_type {
+                        let Some(label) = listed(e) else {
                             continue;
-                        }
-
-                        // The default is not a name in braces; a bare
-                        // `import X from` reads it.
-                        if e.is_default {
-                            continue;
-                        }
-
-                        // `@` already written: the module's attributes
-                        // are the whole list. An attribute is a value,
-                        // so a type-only list holds none.
-                        if (*sigil && !e.is_attribute) || (*type_only && e.is_attribute) {
-                            continue;
-                        }
-
-                        let label = if e.is_type && !*type_only {
-                            format!("type {}", e.name)
-                        } else {
-                            e.written()
                         };
                         // The module's own declaration says what the
                         // name is, so the list reads `struct Profile`.
@@ -2121,6 +2168,26 @@ fn doc_sentence(text: &str) -> Option<String> {
         .lines()
         .next()
         .map(str::to_string)
+}
+
+/// Where the accept of a name in an `import { }` list writes the
+/// `from` clause: the range it replaces, and what goes in front of
+/// the `from` word, which closes the list when the line does not.
+fn from_clause_at(src: &str, offset: usize) -> (usize, usize, &'static str) {
+    let rest = src[offset..].split('\n').next().unwrap_or("");
+    let line_end = offset + rest.len();
+
+    match rest.find('}') {
+        // The editor closed the brace as the reader opened it: the
+        // name and the clause take the space up to it.
+        Some(i) if rest[..i].trim().is_empty() => (offset, offset + i + 1, " }"),
+
+        // The caret sits in the middle of the list, so the clause goes
+        // after the brace that closes it.
+        Some(i) => (offset + i + 1, offset + i + 1, ""),
+
+        None => (line_end, line_end, " }"),
+    }
 }
 
 /// The one-line documentation of an attribute target.

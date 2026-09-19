@@ -27,9 +27,11 @@ impl Server {
         // declared somewhere else; the child reads the emitted local
         // and calls it a `local`.
         let imported = || {
-            doc.import_sources
-                .iter()
-                .find_map(|text| remote_hover(text, &word).or_else(|| const_hover(text, &word)))
+            doc.import_sources.iter().find_map(|text| {
+                remote_hover(text, &word)
+                    .or_else(|| const_hover(text, &word))
+                    .or_else(|| function_hover(text, &word))
+            })
         };
         let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
         let quoted = doc.source[line_start..start].matches('"').count() % 2 == 1
@@ -178,6 +180,18 @@ pub(crate) fn const_hover(source: &str, word: &str) -> Option<String> {
     }
 
     None
+}
+
+/// The declaration of an exported function, with the comment above
+/// it. The emit binds the name here as a local, and the child types
+/// that local as `unknown`, so the module's own declaration answers.
+pub(crate) fn function_hover(source: &str, word: &str) -> Option<String> {
+    let (head, offset) = alloy::declarations::export_head(source, word)?;
+    let doc_text = alloy::declarations::doc_before(source, offset)
+        .map(|d| format!("\n\n{d}"))
+        .unwrap_or_default();
+
+    Some(format!("```alloy\n{head}\n```{doc_text}"))
 }
 
 /// What a `remote` declaration says: whether it answers, which sides

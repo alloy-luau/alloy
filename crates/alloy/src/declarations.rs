@@ -687,6 +687,76 @@ pub fn method_signature(
     ))
 }
 
+/// The head of a function as a hover reads it: the word, the name,
+/// its generics, its parameters, and the return type.
+pub fn head_of_function<'a>(
+    name: &str,
+    body: &alloy_syntax::ast::FunctionBody,
+    text: &impl Fn(TokSpan) -> &'a str,
+) -> String {
+    let word = match body.is_async {
+        Some(_) => "async function",
+
+        None => "function",
+    };
+    let generics = body.generics.map(text).unwrap_or("");
+    let params: Vec<String> = body.params.iter().map(|p| param_text(p, text)).collect();
+    let ret = match body.ret_type {
+        Some(t) => format!(": {}", text(t)),
+
+        None => String::new(),
+    };
+
+    format!("{word} {name}{generics}({}){ret}", params.join(", "))
+}
+
+/*
+The declaration an exported name writes, as a hover reads it: the
+keywords, the name, and the signature, with the byte offset of the
+declaration for the comment above it.
+
+A module the reader imports from declares the name; the emit binds it
+here as a local, and the child types that local as `unknown`. The
+module's own declaration is the answer.
+*/
+pub fn export_head(src: &str, name: &str) -> Option<(String, usize)> {
+    let parsed = alloy_syntax::parse_lenient(src, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
+    let start_of = |span: TokSpan| toks[span.start as usize].start as usize;
+
+    parsed.chunk.block.stmts.iter().find_map(|stmt| {
+        match stmt.under_default() {
+            Stmt::Function(f) if f.exported => {
+                let own = *f.path.first()?;
+
+                (f.path.len() == 1 && text(own) == name).then(|| {
+                    (
+                        format!("export {}", head_of_function(name, &f.body, &text)),
+                        start_of(f.span),
+                    )
+                })
+            }
+
+            // `export local function f()` and `export const function f()`.
+            Stmt::LocalFunction(f) if f.exported && text(f.name) == name => {
+                let word = match f.is_const {
+                    true => "const",
+
+                    false => "local",
+                };
+
+                Some((
+                    format!("export {word} {}", head_of_function(name, &f.body, &text)),
+                    start_of(f.span),
+                ))
+            }
+
+            _ => None,
+        }
+    })
+}
+
 fn member_signature(
     src: &str,
     toks: &[alloy_syntax::lexer::Tok],
@@ -704,19 +774,7 @@ fn member_signature(
         list.join(", ")
     };
     let function_head = |name: &str, body: &alloy_syntax::ast::FunctionBody| -> String {
-        let word = match body.is_async {
-            Some(_) => "async function",
-
-            None => "function",
-        };
-        let generics = body.generics.map(text).unwrap_or("");
-        let ret = match body.ret_type {
-            Some(t) => format!(": {}", text(t)),
-
-            None => String::new(),
-        };
-
-        format!("{word} {name}{generics}({}){ret}", params_of(&body.params))
+        head_of_function(name, body, &text)
     };
     let head = match m.stmt.under_default() {
         Stmt::Local(l) => {
@@ -843,6 +901,27 @@ pub(crate) fn literal_type<'a>(
         Expr::String(_) | Expr::InterpString(_) | Expr::Interp { .. } => Some("string".to_string()),
 
         Expr::True(_) | Expr::False(_) => Some("boolean".to_string()),
+
+        // `const ORIGIN = { x = 1, y = 2 }` is a record of what its
+        // values read as. One value with no literal type leaves the
+        // whole record unnamed: half a record reads worse than none.
+        Expr::Table { fields, .. } => {
+            let mut parts = Vec::new();
+
+            for field in fields {
+                let alloy_syntax::ast::TableField::Named { name, value } = field else {
+                    return None;
+                };
+
+                parts.push(format!("{}: {}", text(*name), literal_type(value, text)?));
+            }
+
+            (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(", ")))
+        }
+
+        // `const scheduler = new Sched { phase = 1 }` names its type
+        // outright, a dotted `new Ns.T { }` included.
+        Expr::New { name, .. } => Some(text(name.span()).to_string()),
 
         // `const size = Vector3.new(1, 2, 3)` names its own type.
         Expr::Call { func, method, .. } if method.is_none() => match func.as_ref() {
@@ -1916,5 +1995,34 @@ mod shape_tests {
             panic!("a struct");
         };
         assert_eq!(generics, &vec!["A".to_string(), "B = string".to_string()]);
+    }
+
+    /// A reader of another module sees the emitted local, which the
+    /// child types as `unknown`. The head of the declaration is the
+    /// answer, and a `const` carries the type its value names.
+    #[test]
+    fn an_exported_name_carries_its_head() {
+        let src = "export const scheduler = new Sched { phase = 1 }\nexport const ORIGIN = { x = 1, y = 2 }\nexport const NAME = \"main\"\nexport local function build(): Sched\n    return new Sched { phase = 2 }\nend\n\nexport async function poll(): number\n    return 1\nend\n";
+        let head = |name: &str| export_head(src, name).map(|(h, _)| h);
+
+        assert_eq!(binding_type(src, "scheduler").as_deref(), Some("Sched"));
+        assert_eq!(
+            binding_type(src, "ORIGIN").as_deref(),
+            Some("{ x: number, y: number }")
+        );
+        assert_eq!(binding_type(src, "NAME").as_deref(), Some("string"));
+        assert_eq!(
+            head("build").as_deref(),
+            Some("export local function build(): Sched")
+        );
+        assert_eq!(
+            head("poll").as_deref(),
+            Some("export async function poll(): number")
+        );
+
+        // A value no literal names leaves the type out, and a `const`
+        // is no function.
+        assert_eq!(binding_type("const seed = os.time()\n", "seed"), None);
+        assert_eq!(head("scheduler"), None);
     }
 }

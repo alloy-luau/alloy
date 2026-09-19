@@ -34,7 +34,8 @@ impl State {
     /// Every name the project's other modules export, with the spec
     /// that reaches each one. An `import { }` list that names no
     /// module yet reads them, so the reader picks a name first and the
-    /// accept writes the `from` clause.
+    /// accept writes the `from` clause. The modules are the open ones
+    /// and the ones an alias reaches.
     pub(crate) fn project_exports(
         &self,
         uri: &str,
@@ -47,18 +48,61 @@ impl State {
             return Vec::new();
         };
         let bound = markup_bound(&doc.source);
-        let files: Vec<(PathBuf, &[imports::Export])> = self
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let aliases = project_aliases(&dir, self.root.as_deref());
+        let reached = self.alias_modules(&dir, &aliases);
+        let mut files: Vec<(PathBuf, &[imports::Export])> = self
             .docs
             .iter()
             .filter_map(|(u, d)| uri_to_path(u).map(|p| (p, d.exports.as_slice())))
             .collect();
-        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let aliases = project_aliases(&dir, self.root.as_deref());
+
+        files.extend(reached.iter().map(|(p, e)| (p.clone(), e.as_slice())));
 
         imports::auto_import_candidates(&doc.source, &path, &files, prefix, &bound, &aliases)
             .into_iter()
             .map(|(spec, export)| (spec, export.clone()))
             .collect()
+    }
+
+    /// The modules an alias reaches that the workspace walk never
+    /// opened, each with its exports read from the disk. An alias can
+    /// name a folder outside the root, and a name a module there
+    /// exports is one the author can import. `best_spec` answers
+    /// nothing for a path a dot folder holds, so a package's own store
+    /// stays out of the list.
+    ///
+    /// ponytail: the walk runs per request. It answers one caret, the
+    /// `import { }` list, so it costs a folder read at a rare
+    /// position; cache it beside `project_impls` if a bigger list
+    /// calls it.
+    fn alias_modules(
+        &self,
+        from_dir: &Path,
+        aliases: &[(String, PathBuf)],
+    ) -> Vec<(PathBuf, Vec<imports::Export>)> {
+        let mut out: Vec<(PathBuf, Vec<imports::Export>)> = Vec::new();
+
+        for (_, alias_dir) in aliases {
+            let mut files = Vec::new();
+            let mut plain = Vec::new();
+            super::super::documents::walk(alias_dir, None, &mut files, &mut plain);
+
+            for file in files {
+                if self.docs.contains_key(&path_to_uri(&file))
+                    || out.iter().any(|(p, _)| *p == file)
+                    || imports::best_spec(from_dir, &imports::module_path(&file), aliases).is_none()
+                {
+                    continue;
+                }
+
+                let exports = imports::exports_of_file(&file, 0);
+
+                out.push((file, exports));
+            }
+        }
+
+        out
     }
 
     /*

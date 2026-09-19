@@ -3170,3 +3170,56 @@ pub(crate) fn an_import_list_with_no_module_lists_the_project() {
 
     assert_eq!(cog["textEdit"]["newText"], json!("Cog"));
 }
+
+/// The list reaches the folder an alias names, and never the store a
+/// package keeps beside it: `best_spec` answers nothing for a path a
+/// dot folder holds.
+#[test]
+pub(crate) fn an_alias_folder_is_in_the_list_and_its_dot_store_is_not() {
+    let dir = std::env::temp_dir().join(format!("alloy-alias-exports-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::create_dir_all(dir.join("packages/.ember")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[mount]\npkg = [\"packages\", \"@game/ReplicatedStorage/Packages\"]\n",
+    )
+    .expect("alloy.toml");
+    std::fs::write(
+        dir.join("packages/Widget.aly"),
+        "export function spin(n: number): number\n    return n\nend\n",
+    )
+    .expect("Widget.aly");
+    std::fs::write(
+        dir.join("packages/.ember/Hidden.aly"),
+        "export function stow(n: number): number\n    return n\nend\n",
+    )
+    .expect("Hidden.aly");
+
+    let src = "import { \n";
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let uri = path_to_uri(&dir.join("src/main.aly"));
+    let (options, jsx) = st.options_for(&uri);
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(src.to_string(), 1, &options, &jsx, None),
+    );
+
+    let names: Vec<(String, String)> = st
+        .project_exports(&uri, "")
+        .into_iter()
+        .map(|(spec, e)| (spec, e.name))
+        .collect();
+
+    assert!(
+        names.contains(&("@pkg/Widget".to_string(), "spin".to_string())),
+        "{names:?}"
+    );
+    assert!(!names.iter().any(|(_, name)| name == "stow"), "{names:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

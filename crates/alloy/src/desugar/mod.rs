@@ -137,6 +137,11 @@ pub struct EmitOptions {
     /// it carries a default, so `new Box { }` here reports the fields it
     /// leaves unset. See `crate::modules::import_struct_fields`.
     pub import_struct_fields: Vec<(String, Vec<(String, bool)>)>,
+    /// Per struct an imported module declares that writes a
+    /// constructor, the name of that `new` or `New`. A report of
+    /// `Box(1)` reads it, so it names the constructor. See
+    /// `crate::modules::import_struct_ctors`.
+    pub import_struct_ctors: Vec<(String, String)>,
     /// Per import spec, the structs the module keeps a private view of,
     /// `Name__all`. An `impl` of one here types `self` as the view, so
     /// it reaches the struct's private members. See
@@ -303,6 +308,7 @@ impl Default for EmitOptions {
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
             import_struct_fields: Vec::new(),
+            import_struct_ctors: Vec::new(),
             import_private_views: Vec::new(),
             plain_modules: Vec::new(),
             ambient_names: Vec::new(),

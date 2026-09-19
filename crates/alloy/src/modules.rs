@@ -1022,6 +1022,22 @@ pub fn import_struct_fields(
     keyed_by_local(source, from, aliases, &modules)
 }
 
+/// The constructor every struct a module the source imports declares
+/// writes: the struct's name with its `new` or `New`. The construction
+/// check reads it, so a report of `Box(1)` names the constructor the
+/// module wrote.
+pub fn import_struct_ctors(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, String)> {
+    let modules = module_decls(source, from, aliases, |text| {
+        crate::declarations::struct_ctors(text)
+    });
+
+    keyed_by_local(source, from, aliases, &modules)
+}
+
 /// The private fields of every struct a module the source imports
 /// declares: the struct's name with its private field names. The
 /// `private_access` lint reads a field of an imported struct through it.
@@ -1429,6 +1445,7 @@ impl crate::EmitOptions {
         self.import_enums = import_enums(source, from, aliases);
         self.import_privates = import_privates(source, from, aliases);
         self.import_struct_fields = import_struct_fields(source, from, aliases);
+        self.import_struct_ctors = import_struct_ctors(source, from, aliases);
         self.import_private_views = import_private_views(source, from, aliases);
         self.import_attributes = import_attributes(source, from, aliases);
         self.macros = import_macros(source, from, aliases);

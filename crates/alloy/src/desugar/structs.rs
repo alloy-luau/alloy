@@ -1348,7 +1348,7 @@ impl<'s> Desugar<'s> {
             // The report names the struct the way the source writes it:
             // an import alias, or a namespace path of any depth.
             let name = self.text_of(at).to_string();
-            let ctor = self.structs_with_new.get(&resolved).cloned();
+            let ctor = self.struct_ctor(&resolved);
             let message = match (raw, ctor) {
                 (true, Some(_)) => {
                     format!("`{name}` writes a constructor: construct it with `new {name}(...)`")
@@ -2118,6 +2118,19 @@ impl<'s> Desugar<'s> {
         known.then(|| path.to_string())
     }
 
+    /// The constructor a struct writes: the `new` or `New` of this
+    /// file's own `impl`, else the one a module it imports writes.
+    /// `None` for a struct that writes none.
+    fn struct_ctor(&self, name: &str) -> Option<String> {
+        self.structs_with_new.get(name).cloned().or_else(|| {
+            self.options
+                .import_struct_ctors
+                .iter()
+                .find(|(s, _)| s == name)
+                .map(|(_, ctor)| ctor.clone())
+        })
+    }
+
     /// The fields of a struct with whether each carries a default: this
     /// file's own declaration, else the shape a module it imports
     /// declares.
@@ -2602,6 +2615,49 @@ mod tests {
             foreign.check.contains("Part.new({ n = 1 })"),
             "{}",
             foreign.check
+        );
+    }
+
+    /// A call of an imported struct reads the module's `impl`: one
+    /// that writes a `new` reports the call to make, and one that
+    /// writes none keeps the wording that names the fields form. The
+    /// bare name and the star import read the same index.
+    #[test]
+    fn a_call_of_an_imported_struct_reads_its_constructor() {
+        let options = crate::EmitOptions {
+            import_struct_fields: vec![
+                ("Sched".to_string(), vec![("phase".to_string(), false)]),
+                ("Plain".to_string(), vec![("tag".to_string(), false)]),
+                ("M.Sched".to_string(), vec![("phase".to_string(), false)]),
+            ],
+            import_struct_ctors: vec![
+                ("Sched".to_string(), "new".to_string()),
+                ("M.Sched".to_string(), "new".to_string()),
+            ],
+            ..Default::default()
+        };
+        let run = |src: &str| -> Vec<String> {
+            crate::compile_with(src, &options)
+                .unwrap()
+                .diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect()
+        };
+
+        assert_eq!(
+            run("import { Sched } from \"./s\"\n\nprint(Sched(1))\n"),
+            vec!["`Sched(...)` is not a call: construct it with `new Sched(...)`"]
+        );
+        assert_eq!(
+            run("import * as M from \"./s\"\n\nprint(M.Sched(1))\n"),
+            vec!["`M.Sched(...)` is not a call: construct it with `new M.Sched(...)`"]
+        );
+        assert_eq!(
+            run("import { Plain } from \"./s\"\n\nprint(Plain(1))\n"),
+            vec![
+                "`Plain(...)` is not a constructor: construct it with `new Plain { ... }`, since `Plain` writes no `new`"
+            ]
         );
     }
 

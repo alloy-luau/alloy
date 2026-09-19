@@ -1736,6 +1736,79 @@ fn struct_fields_of(
     }
 }
 
+/// Every struct a source writes a constructor for: the struct's name
+/// with the `new` or `New` its `impl` declares. A check of a
+/// construction of a struct another module declares reads this, so a
+/// report names the constructor instead of saying the struct writes
+/// none.
+///
+/// A struct inside a namespace reads under both its names, the way
+/// `struct_fields_by_name` lists one.
+pub fn struct_ctors(src: &str) -> Vec<(String, String)> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        struct_ctors_of(src, toks, stmt, "", &mut out);
+    }
+
+    out
+}
+
+/// One statement's constructors, for `struct_ctors`: an `impl` under
+/// `path`, or the members of a `namespace` under the path it extends.
+fn struct_ctors_of(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    stmt: &Stmt,
+    path: &str,
+    out: &mut Vec<(String, String)>,
+) {
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
+
+    match stmt.under_default() {
+        // A trait `impl` writes the trait's methods, so a `new` there
+        // is the trait's, not the struct's constructor.
+        Stmt::Impl(i) if i.trait_name.is_none() => {
+            let Some(ctor) = i.methods.iter().find_map(|m| {
+                m.path
+                    .first()
+                    .map(|n| text(*n))
+                    .filter(|n| matches!(n.as_str(), "new" | "New"))
+            }) else {
+                return;
+            };
+            let name = text(i.target);
+
+            if path.is_empty() {
+                out.push((name, ctor));
+
+                return;
+            }
+
+            out.push((format!("{path}.{name}"), ctor.clone()));
+            out.push((format!("{}_{name}", path.replace('.', "_")), ctor));
+        }
+
+        Stmt::Namespace(ns) => {
+            let inner = match path.is_empty() {
+                true => text(ns.name),
+
+                false => format!("{path}.{}", text(ns.name)),
+            };
+
+            for m in &ns.members {
+                struct_ctors_of(src, toks, &m.stmt, &inner, out);
+            }
+        }
+
+        _ => {}
+    }
+}
+
 /// Whether a field can stay unset in `new Name { }`: it carries a
 /// default, or its type takes `nil`. `number?` and `nil | number` both
 /// read as optional; a missing key is `nil` at run time either way.

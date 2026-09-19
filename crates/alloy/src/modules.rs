@@ -9,12 +9,58 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 
 use alloy_syntax::ast::TokSpan;
 
 use crate::config::Config;
 
-/// The type names a source exports: `export struct X`, `export enum X`,
+/*
+The sources an editor holds, which the disk does not carry yet.
+
+Every index below reads the text of a module the file imports, and the
+disk has the text of the last save. A reader who edits a module and
+looks at an importer would see the module as it was saved, so a
+language server puts its open buffers here. A build writes none, and
+the map stays empty.
+*/
+static OPEN_SOURCES: OnceLock<RwLock<HashMap<PathBuf, String>>> = OnceLock::new();
+
+fn open_sources() -> &'static RwLock<HashMap<PathBuf, String>> {
+    OPEN_SOURCES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Puts the text an editor holds for a file in front of the disk.
+/// `None` takes it away again, and the file reads from the disk.
+pub fn set_open_source(path: &Path, text: Option<&str>) {
+    let key = normalize(path);
+    let Ok(mut open) = open_sources().write() else {
+        return;
+    };
+
+    match text {
+        Some(text) => open.insert(key, text.to_string()),
+
+        None => open.remove(&key),
+    };
+}
+
+/// The text of one module: the editor's buffer where it holds one,
+/// else the file on disk.
+fn module_text(path: &Path) -> std::io::Result<String> {
+    let held = open_sources()
+        .read()
+        .ok()
+        .and_then(|open| open.get(&normalize(path)).cloned());
+
+    match held {
+        Some(text) => Ok(text),
+
+        None => std::fs::read_to_string(path),
+    }
+}
+
+/// The type names a source exports: `export struct X`, `export enum X`,/// The type names a source exports: `export struct X`, `export enum X`,
 /// `export interface X`, `export trait X`, `export type X`, and
 /// `export class X`. A plain Luau module's `export type X` counts too.
 ///
@@ -413,7 +459,7 @@ pub fn import_trait_methods(
 
         seen.push(path.clone());
 
-        if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(text) = module_text(&path) {
             for (t, m) in exported_trait_methods(&text) {
                 if !m.is_empty() && !out.iter().any(|(n, _)| *n == t) {
                     out.push((t, m));
@@ -475,7 +521,7 @@ pub fn import_result_asyncs(
 
         seen.push(path.clone());
 
-        if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(text) = module_text(&path) {
             out.extend(exported_result_asyncs(&text));
         }
     }
@@ -511,7 +557,7 @@ pub fn import_trait_defaults(
 
         seen.push(path.clone());
 
-        if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(text) = module_text(&path) {
             for (t, d) in exported_trait_defaults(&text) {
                 if !d.is_empty() && !out.iter().any(|(n, _)| *n == t) {
                     out.push((t, d));
@@ -767,7 +813,7 @@ pub fn import_types(
         let types = cache
             .entry(path.clone())
             .or_insert_with(|| {
-                std::fs::read_to_string(&path)
+                module_text(&path)
                     .map(|t| exported_types(&t))
                     .unwrap_or_default()
             })
@@ -804,7 +850,7 @@ pub fn import_private_views(
         let views = cache
             .entry(path.clone())
             .or_insert_with(|| {
-                std::fs::read_to_string(&path)
+                module_text(&path)
                     .map(|t| crate::extensions::private_views(&t))
                     .unwrap_or_default()
             })
@@ -839,7 +885,7 @@ pub fn import_shapes(
 
         seen.push(path.clone());
 
-        if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(text) = module_text(&path) {
             out.extend(crate::declarations::shapes(&text));
         }
     }
@@ -948,7 +994,7 @@ fn module_decls<T>(
 
         seen.push(path.clone());
 
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(text) = module_text(&path) else {
             continue;
         };
 
@@ -1120,7 +1166,7 @@ pub fn import_attributes(
 
         seen.push(path.clone());
 
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(text) = module_text(&path) else {
             continue;
         };
 
@@ -1267,7 +1313,7 @@ pub fn import_macros(
             continue;
         };
         let found = exports.entry(path.clone()).or_insert_with(|| {
-            std::fs::read_to_string(&path)
+            module_text(&path)
                 .map(|t| module_macros(&t))
                 .unwrap_or_default()
         });
@@ -1421,7 +1467,7 @@ pub fn import_sources_for_file(path: &Path, source: &str) -> Vec<String> {
 
         seen.push(target.clone());
 
-        if let Ok(text) = std::fs::read_to_string(&target) {
+        if let Ok(text) = module_text(&target) {
             out.push(text);
         }
     }
@@ -1524,7 +1570,7 @@ pub fn plain_modules(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -
 
         let plain = crate::data::Format::of(&spec).is_some()
             || resolve(&spec, from, aliases).is_some_and(|p| match is_alloy(&p) {
-                true => std::fs::read_to_string(&p).is_ok_and(|t| returns_value(&t)),
+                true => module_text(&p).is_ok_and(|t| returns_value(&t)),
 
                 false => true,
             });
@@ -2184,7 +2230,7 @@ pub fn import_problems(
             Some(target) => exports
                 .entry(target.clone())
                 .or_insert_with(|| {
-                    std::fs::read_to_string(target)
+                    module_text(target)
                         .map(|t| Surface::of(&t))
                         .unwrap_or_default()
                 })
@@ -2978,6 +3024,43 @@ mod tests {
                 ("./plain".to_string(), vec!["P=".to_string()]),
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The editor holds a module the disk has not taken yet. Every
+    /// index reads the module's text, so a file that imports it would
+    /// read the last save and miss the edit.
+    #[test]
+    fn an_open_source_stands_in_front_of_the_disk() {
+        let dir = std::env::temp_dir().join(format!("alloy-open-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let module = dir.join("shapes.aly");
+        std::fs::write(&module, "export struct Saved as\n    a: number\nend\n").expect("module");
+
+        let main = dir.join("main.aly");
+        let src = "import { Saved } from \"./shapes\"\n";
+        let names = || -> Vec<String> {
+            import_types(src, &main, &[])
+                .into_iter()
+                .flat_map(|(_, types)| types)
+                .collect()
+        };
+
+        assert_eq!(names(), vec!["Saved".to_string()]);
+
+        set_open_source(
+            &module,
+            Some("export struct Edited as\n    a: number\nend\n"),
+        );
+
+        assert_eq!(names(), vec!["Edited".to_string()]);
+
+        // The buffer is gone: the disk answers again.
+        set_open_source(&module, None);
+
+        assert_eq!(names(), vec!["Saved".to_string()]);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -19,6 +19,10 @@ pub struct Server {
     /// Set by `shutdown` and `exit`: a pass over the workspace stops
     /// at its next file, and the poll thread stops ticking.
     pub(crate) stopping: std::sync::atomic::AtomicBool,
+    /// When each file was last edited. The pass that compiles the
+    /// files which import it reads the time, so a burst of keystrokes
+    /// costs one pass. See `schedule_import_refresh`.
+    pub(crate) edited: Mutex<HashMap<PathBuf, std::time::Instant>>,
 }
 
 impl Server {
@@ -42,6 +46,7 @@ impl Server {
             scan: Mutex::new(()),
             busy: std::sync::atomic::AtomicUsize::new(0),
             stopping: std::sync::atomic::AtomicBool::new(false),
+            edited: Mutex::new(HashMap::new()),
         }
     }
 
@@ -324,6 +329,13 @@ impl Server {
                         .and_then(Value::as_i64)
                         .unwrap_or(0);
                     self.change_doc(&uri, version, &changes);
+
+                    // The indexes of an importer read this file's
+                    // text, so an edit here reaches the importer only
+                    // when it compiles again.
+                    if let Some(path) = uri_to_path(&uri) {
+                        self.schedule_import_refresh(path);
+                    }
                 } else {
                     self.plain_changed(&uri, None, &changes);
                     self.forward_plain(message);

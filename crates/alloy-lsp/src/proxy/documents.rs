@@ -4,6 +4,11 @@ use super::capabilities::map_range_value;
 use super::navigation::{data_module_of, data_source_of};
 use super::*;
 
+/// How long an edit waits before the files that import it compile
+/// again. A reader types faster than this, so one pass covers a burst
+/// of keystrokes. See `Server::schedule_import_refresh`.
+const IMPORT_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
+
 impl State {
     pub(crate) fn fresh_id(&mut self) -> String {
         self.next_id += 1;
@@ -332,6 +337,10 @@ impl Server {
             }
 
             if let Some(path) = uri_to_path(uri) {
+                // The reader's text stands in front of the disk: a
+                // file that imports this one reads what the editor
+                // holds, not the last save.
+                alloy::modules::set_open_source(&path, Some(&doc.source));
                 st.write_mirror(&path, &doc.shadow);
             }
 
@@ -473,6 +482,7 @@ impl Server {
         doc.version = version;
 
         if let Some(path) = uri_to_path(uri) {
+            alloy::modules::set_open_source(&path, Some(&doc.source));
             options = options.imports_for_file(&path, &doc.source);
         }
 
@@ -550,6 +560,8 @@ impl Server {
         st.published.remove(uri);
 
         if let Some(path) = uri_to_path(uri) {
+            // The file is gone, and so is the text the editor held.
+            alloy::modules::set_open_source(&path, None);
             st.remove_mirror(&path);
         }
 
@@ -991,6 +1003,57 @@ impl Server {
             self.resend_doc(&uri);
             self.publish(&uri);
         }
+    }
+
+    /*
+    Compiles the files that import this one again, once the edits stop.
+
+    Every index an importer holds reads the text of the module it
+    imports, so an edit reaches the importer only when the importer
+    compiles again. One pass per keystroke would be one compile per
+    importing file, so the pass waits for a quiet moment. A save runs
+    the same pass at once.
+    */
+    pub(crate) fn schedule_import_refresh(self: &Arc<Self>, path: PathBuf) {
+        let waiting = {
+            let mut edited = self.edited.lock().expect("edited");
+
+            edited.insert(path.clone(), std::time::Instant::now())
+        };
+
+        // A pass already waits for this file, and it reads the time
+        // this edit wrote.
+        if waiting.is_some() {
+            return;
+        }
+
+        let server = Arc::clone(self);
+
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(IMPORT_REFRESH_WAIT);
+
+                let quiet = {
+                    let edited = server.edited.lock().expect("edited");
+
+                    match edited.get(&path) {
+                        Some(last) => last.elapsed() >= IMPORT_REFRESH_WAIT,
+
+                        None => true,
+                    }
+                };
+
+                if quiet {
+                    break;
+                }
+            }
+
+            server.edited.lock().expect("edited").remove(&path);
+
+            if !server.stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                server.refresh_importers(&[path]);
+            }
+        });
     }
 
     /// Asks the editor to report changes to every file the project

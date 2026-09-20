@@ -1039,4 +1039,19 @@ mod tests {
             "task.wait(1)\nlocal a = table.unpack(t)\n"
         );
     }
+
+    /// A loop head binds the name before the colon. The type after it
+    /// is a use of a type, so `unused_variable` leaves it alone; a
+    /// binding nothing reads still reports.
+    #[test]
+    fn a_loop_annotation_is_not_a_binding() {
+        let generic = "for _, a: Instance in t do\n    print(a)\nend\n";
+        assert_eq!(names_of(&lints_of(generic, &[])), Vec::<&str>::new());
+
+        let numeric = "for i: number = 1, 3 do\n    print(i)\nend\n";
+        assert_eq!(names_of(&lints_of(numeric, &[])), Vec::<&str>::new());
+
+        let unread = "for _, item: Instance in t do\n    print(1)\nend\n";
+        assert_eq!(names_of(&lints_of(unread, &[])), vec!["unused_variable"]);
+    }
 }

@@ -470,7 +470,7 @@ impl<'s> Scan<'s> {
 
     /// The exclusive end of the type annotation that starts at `from`:
     /// the `,`, `=`, `)` or `;` that closes it at depth zero.
-    fn annotation_end(&self, from: usize) -> usize {
+    pub(super) fn annotation_end(&self, from: usize) -> usize {
         let mut depth = 0i32;
         let mut j = from;
 

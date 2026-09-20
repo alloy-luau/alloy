@@ -654,6 +654,13 @@ impl<'s> Scan<'s> {
                     let mut j = i + 1;
 
                     while j < self.toks.len() && !matches!(self.t(j), "in" | "=" | "do") {
+                        // `for a: T in` binds `a`. The `T` after the
+                        // colon reads a type, so it is not a binding.
+                        if self.at(j, ":") {
+                            j = self.annotation_end(j + 1);
+                            continue;
+                        }
+
                         if self.is_name(j) {
                             names.push(j);
                         }

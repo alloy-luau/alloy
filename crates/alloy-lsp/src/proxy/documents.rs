@@ -663,12 +663,8 @@ impl Server {
 
             for path in plain {
                 if let Ok(text) = std::fs::read_to_string(&path) {
-                    let text = strict_config(&path, &root, text);
-                    let text = if path.file_name().is_some_and(|n| n == "sourcemap.json") {
-                        mirrored_sourcemap(&text, &input, out.as_deref(), &root)
-                    } else {
-                        text
-                    };
+                    let text =
+                        mirror_text(&path, &root, config.as_ref(), &input, out.as_deref(), text);
                     st.write_mirror(&path, &text);
 
                     // `alloy build` writes `sourcemap.json` at the root.
@@ -865,12 +861,21 @@ impl Server {
         let Some(root) = root else {
             return;
         };
-        let config =
+        let found =
             Config::find_within(&root, &root).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
-        let out = config
-            .as_ref()
-            .map(|(p, c)| p.parent().unwrap_or(&root).join(&c.build.out));
-        let config = config.map(|(_, c)| c);
+        let (input, out) = match &found {
+            Some((p, c)) => {
+                let base = p.parent().unwrap_or(&root).to_path_buf();
+
+                (
+                    normalize(&base.join(&c.build.input)),
+                    Some(base.join(&c.build.out)),
+                )
+            }
+
+            None => (normalize(&root), None),
+        };
+        let config = found.map(|(_, c)| c);
         let mut files = Vec::new();
         let mut plain = Vec::new();
         walk(&root, out.as_deref(), &mut files, &mut plain);
@@ -899,16 +904,41 @@ impl Server {
                 .collect()
         };
 
-        // What the mirror does not already hold, letter for letter.
+        // What the mirror does not already hold, letter for letter. The
+        // compare reads the text the pass writes, not the file itself:
+        // the pass rewrites some files on the way in, and a compare
+        // against the file reads those as changed on every tick.
         let changed: Vec<PathBuf> = {
             let st = self.state.lock().expect("state");
+            let from_tree = tree_sourcemap(&root, config.as_ref());
 
             plain
                 .into_iter()
                 .filter(|path| {
-                    let target = st.mirror_path(path);
+                    // The mirror's copies of these two are the proxy's
+                    // own: the mirrored `.config.luau` goes, so the
+                    // merged configuration is the one the child reads,
+                    // and the tree writes the sourcemap.
+                    if path.parent() == Some(root.as_path()) {
+                        match path.file_name().and_then(|n| n.to_str()) {
+                            Some(".config.luau") => return false,
 
-                    std::fs::read_to_string(&target).ok() != std::fs::read_to_string(path).ok()
+                            Some("sourcemap.json") if from_tree => return false,
+
+                            _ => {}
+                        }
+                    }
+
+                    let Ok(text) = std::fs::read_to_string(path) else {
+                        return true;
+                    };
+                    let want =
+                        mirror_text(path, &root, config.as_ref(), &input, out.as_deref(), text);
+
+                    std::fs::read_to_string(st.mirror_path(path))
+                        .ok()
+                        .as_deref()
+                        != Some(want.as_str())
                 })
                 .collect()
         };
@@ -1690,6 +1720,45 @@ pub(crate) fn mirrored_sourcemap(
     });
 
     serde_json::to_string(&json).unwrap_or_else(|_| text.to_string())
+}
+
+/// The text the workspace pass writes into the mirror for a plain
+/// file: the mirror's own Luau configuration for the root's `.luaurc`,
+/// a sourcemap whose paths name the shadows, and any other file as it
+/// is, with `strict` added where the root's configuration names no
+/// mode.
+///
+/// The rescan compares the mirror against this, not against the file
+/// on disk. A compare against the file reads every one of these as
+/// changed on every tick, and the pass then runs on every tick: it
+/// tells the child that its configuration and its sourcemap moved, and
+/// the child drops the types it had.
+pub(crate) fn mirror_text(
+    path: &Path,
+    root: &Path,
+    config: Option<&Config>,
+    input: &Path,
+    out: Option<&Path>,
+    text: String,
+) -> String {
+    if path.parent() == Some(root) && path.file_name().is_some_and(|n| n == ".luaurc") {
+        return mirror_luau_text(root, config);
+    }
+
+    let text = strict_config(path, root, text);
+
+    match path.file_name().is_some_and(|n| n == "sourcemap.json") {
+        true => mirrored_sourcemap(&text, input, out, root),
+
+        false => text,
+    }
+}
+
+/// Whether the pass writes the mirror's sourcemap from the tree. The
+/// mirror's copy then follows the tree, and the file the last build
+/// left at the root says nothing about it.
+pub(crate) fn tree_sourcemap(root: &Path, config: Option<&Config>) -> bool {
+    config.is_some_and(|c| !alloy::project::Tree::load(root, c).mounts.is_empty())
 }
 
 /// A Luau configuration file on its way into the mirror. One at the

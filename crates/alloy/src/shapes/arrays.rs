@@ -319,8 +319,9 @@ fn fold_array_alias_once(text: &mut String) {
             .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
 
         // The element carries its own arguments, `Result<Profile, any>`;
-        // a union or an intersection under the array keeps the form it
-        // came with, since `A | B[]` reads the other way.
+        // a union, an intersection, or an arrow under the array keeps
+        // the form it came with, since `A | B[]` and `(A) -> B[]` read
+        // the other way.
         match group_len(&text[inner_start - 1..], '<', '>') {
             Some(len)
                 if !prefixed && {
@@ -331,6 +332,7 @@ fn fold_array_alias_once(text: &mut String) {
                         && !outside_angles(elem, '|')
                         && !outside_angles(elem, '&')
                         && !outside_angles(elem, ',')
+                        && !outside_angles(elem, '-')
                 } =>
             {
                 let elem = text[inner_start..inner_start + len - 2].to_string();
@@ -389,6 +391,22 @@ mod tests {
         let mut text = ": Array<number | string>".to_string();
         fold_array_alias(&mut text);
         assert_eq!(text, ": Array<number | string>");
+    }
+
+    #[test]
+    fn an_arrow_under_the_array_keeps_the_alias() {
+        // `() -> ()[]` reads as a function that gives an array, and
+        // the paren fold then takes the empty pack: `() -> []`.
+        let mut text = ": Array<() -> ()>".to_string();
+        fold_array_alias(&mut text);
+        assert_eq!(text, ": Array<() -> ()>");
+        let mut text = ": Array<(number) -> string>".to_string();
+        fold_array_alias(&mut text);
+        assert_eq!(text, ": Array<(number) -> string>");
+        // An arrow inside the element's own arguments closes nothing.
+        let mut text = ": Array<HashMap<string, () -> ()>>".to_string();
+        fold_array_alias(&mut text);
+        assert_eq!(text, ": HashMap<string, () -> ()>[]");
     }
 
     #[test]

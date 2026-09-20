@@ -193,7 +193,16 @@ impl State {
             }
 
             Context::Macro { sigil, .. } => {
+                // `$expect` builds the runner's expectation object, so
+                // it exists under a `@test` alone. The compiler reports
+                // it anywhere else; the list leaves it out there.
+                let in_test = alloy::testbuild::encloses_test(&doc.source, offset);
+
                 for key in keywords::keys_with_prefix("$") {
+                    if key == "$expect" && !in_test {
+                        continue;
+                    }
+
                     items.push(word(
                         key,
                         14,

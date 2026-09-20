@@ -2487,6 +2487,65 @@ function alloy.test(name: string, f)
 	return f
 end
 
+--- One value under test, with the matchers of the test runner on it.
+--- Every matcher answers the expectation, so a chain reads left to
+--- right. The names are jest's, which is what lest writes, so the same
+--- source runs against either.
+export type Expectation<T> = {
+	toBe: (self: Expectation<T>, expected: T) -> Expectation<T>,
+	toNotBe: (self: Expectation<T>, expected: T) -> Expectation<T>,
+	toEqual: (self: Expectation<T>, expected: T) -> Expectation<T>,
+	toNotEqual: (self: Expectation<T>, expected: T) -> Expectation<T>,
+	toBeTruthy: (self: Expectation<T>) -> Expectation<T>,
+	toBeFalsy: (self: Expectation<T>) -> Expectation<T>,
+	toBeNil: (self: Expectation<T>) -> Expectation<T>,
+	toNotBeNil: (self: Expectation<T>) -> Expectation<T>,
+	toBeA: (self: Expectation<T>, type_name: string) -> Expectation<T>,
+	toContain: (self: Expectation<T>, item: any) -> Expectation<T>,
+	toHaveLength: (self: Expectation<T>, length: number) -> Expectation<T>,
+	toBeGreaterThan: (self: Expectation<T>, expected: number) -> Expectation<T>,
+	toBeGreaterThanOrEqual: (self: Expectation<T>, expected: number) -> Expectation<T>,
+	toBeLessThan: (self: Expectation<T>, expected: number) -> Expectation<T>,
+	toBeLessThanOrEqual: (self: Expectation<T>, expected: number) -> Expectation<T>,
+	toBeCloseTo: (self: Expectation<T>, expected: number, precision: number?) -> Expectation<T>,
+	toMatch: (self: Expectation<T>, pattern: string) -> Expectation<T>,
+	toThrow: (self: Expectation<T>, substring: string?) -> Expectation<T>,
+	toNotThrow: (self: Expectation<T>) -> Expectation<T>,
+	toMatchSnapshot: (self: Expectation<T>, hint: string?) -> Expectation<T>,
+}
+
+local runner_expect: ((any) -> any)? = nil
+
+--- The spec hands the runner's `expect` over before it registers a
+--- test, so `$expect` reaches the matchers of the runner the project
+--- configures and the emit names none of them.
+function alloy.set_expect(f: ((any) -> any)?)
+	runner_expect = f
+end
+
+--- `$expect(value)`. The runner builds the matchers as plain functions
+--- over the value; each one takes `self` here, so a spec calls it with
+--- a colon and the chain answers the same expectation.
+function alloy.expect<T>(value: T): Expectation<T>
+	local build = runner_expect
+
+	if build == nil then
+		error("$expect runs under the test runner alone; `alloy test` starts one", 2)
+	end
+
+	local matchers: any = build(value)
+	local wrapped: any = {}
+
+	for name, matcher in pairs(matchers) do
+		wrapped[name] = function(_, ...)
+			matcher(...)
+			return wrapped
+		end
+	end
+
+	return wrapped
+end
+
 --- What `delete` accepts: an Instance, a connection, or any table with
 --- one of the four methods.
 export type Deletable =

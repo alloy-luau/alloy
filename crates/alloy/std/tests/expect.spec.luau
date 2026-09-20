@@ -1,0 +1,36 @@
+--!nonstrict
+local Lest = require("@lest")
+local describe, it, expect = Lest.describe, Lest.it, Lest.expect
+local alloy = require("../alloy")
+
+describe("expect", function()
+	it("raises until a runner is bound", function()
+		alloy.set_expect(nil)
+		expect(function()
+			alloy.expect(1):toBe(1)
+		end).toThrow("test runner")
+	end)
+
+	it("takes the matchers of the runner", function()
+		alloy.set_expect(Lest.expect)
+		alloy.expect(100):toBe(100)
+		alloy.expect({ 1, 2, 3 }):toHaveLength(3)
+		alloy.expect(function()
+			error("locked")
+		end):toThrow("locked")
+	end)
+
+	it("answers itself, so a chain reads left to right", function()
+		alloy.set_expect(Lest.expect)
+		local e = alloy.expect(2)
+		expect(e:toBeGreaterThan(1)).toBe(e)
+		e:toBeLessThan(3):toBeA("number")
+	end)
+
+	it("carries the failure of a matcher out", function()
+		alloy.set_expect(Lest.expect)
+		expect(function()
+			alloy.expect(1):toBe(2)
+		end).toThrow("to be 2")
+	end)
+end)

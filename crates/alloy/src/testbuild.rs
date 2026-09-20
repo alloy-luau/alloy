@@ -52,6 +52,104 @@ pub fn modules_dir(config: &Config) -> PathBuf {
     config.test.out.join(MODULES)
 }
 
+/// The words a declaration may write in front of `function` or
+/// `namespace`.
+const LEAD_WORDS: &[&str] = &["export", "local", "global", "public", "private", "async"];
+
+/// True when `line` writes the `@test` attribute.
+fn writes_test_attr(line: &str) -> bool {
+    let mut rest = line;
+
+    while let Some(at) = rest.find("@test") {
+        let before = rest[..at].chars().next_back();
+        let after = rest[at + "@test".len()..].chars().next();
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+
+        if !before.is_some_and(word) && !after.is_some_and(word) {
+            return true;
+        }
+
+        rest = &rest[at + 1..];
+    }
+
+    false
+}
+
+/// True when the line declares a `function` or a `namespace`, past the
+/// attributes and the words that may lead one.
+fn opens_declaration(line: &str) -> bool {
+    let mut words = line
+        .split_whitespace()
+        .skip_while(|w| LEAD_WORDS.contains(w) || w.starts_with('@'));
+
+    matches!(words.next(), Some("function" | "namespace"))
+}
+
+/// The indent of a line, in characters.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/*
+True when the byte at `at` sits inside a `@test` function or a `@test`
+namespace. `$expect` needs one, and both the compiler and the editor
+ask this, so they offer and accept the intrinsic in the same places.
+
+The scan reads the lines above `at`. A line that starts further left
+than every line below it opens the block around that byte, so the walk
+keeps the smallest indent it has seen and looks only at the lines that
+go under it. A `function` or a `namespace` found that way is a test
+when `@test` sits on its line or on the lines right above it.
+*/
+pub fn encloses_test(src: &str, at: usize) -> bool {
+    let head = &src[..at.min(src.len())];
+    let lines: Vec<&str> = head
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+
+            !t.is_empty() && !t.starts_with("--")
+        })
+        .collect();
+    let mut level = usize::MAX;
+    let mut i = lines.len();
+
+    while i > 0 {
+        i -= 1;
+        let indent = indent_of(lines[i]);
+
+        if indent >= level {
+            continue;
+        }
+
+        level = indent;
+
+        if !opens_declaration(lines[i]) {
+            continue;
+        }
+
+        if writes_test_attr(lines[i]) {
+            return true;
+        }
+
+        // The attributes sit above the declaration, at its own indent.
+        let mut j = i;
+
+        while j > 0
+            && indent_of(lines[j - 1]) == indent
+            && lines[j - 1].trim_start().starts_with('@')
+        {
+            if writes_test_attr(lines[j - 1]) {
+                return true;
+            }
+
+            j -= 1;
+        }
+    }
+
+    false
+}
+
 /// The path of the spec for a source, relative to the test folder:
 /// `a/b.aly` becomes `a/b.spec.luau`.
 pub fn spec_for(rel: &Path) -> Option<PathBuf> {
@@ -503,6 +601,7 @@ fn write_modules(
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require: relative_require(&source_rel, &runtime),
             wait_timeout: config.emit.wait_timeout,
+            test_runner: config.test.lest,
             extensions: extensions.to_vec(),
             ..EmitOptions::default().imports(&source, &path, &aliases)
         };
@@ -676,6 +775,7 @@ pub fn spec(
         std_require: relative_require(source_rel, &runtime),
         tests: true,
         wait_timeout: config.emit.wait_timeout,
+        test_runner: config.test.lest,
         extensions: extensions.to_vec(),
         ..EmitOptions::default().imports(source, &root.join(source_rel), &aliases)
     };
@@ -706,9 +806,18 @@ pub fn spec(
         text.push('\n');
     }
 
-    text.push_str("\nlocal __lest = require(\"@lest\")\n");
+    // `LEST_ALIAS` is the one place that names the runner: the spec
+    // requires it here and hands its `expect` to the runtime, and
+    // `$expect` calls the runtime. A second runner is that name and an
+    // `expect(value)` of the same shape.
+    text.push_str(&format!(
+        "\nlocal __lest = require(\"@{}\")\n",
+        LEST_ALIAS.0
+    ));
     // `@cfg(test)` holds while the spec runs.
     text.push_str("__alloy.set_testing(true)\n");
+    // `$expect(v)` reaches the matchers through the runtime.
+    text.push_str("__alloy.set_expect(__lest.expect)\n");
     text.push_str(&format!(
         "__lest.describe({}, function()\n",
         luau_string(&name)

@@ -482,12 +482,16 @@ impl<'a> Parser<'a> {
         self.pattern_arg -= u32::from(pattern_arg);
         let args = args?;
         self.expect(")")?;
-
-        Ok(Expr::Macro {
+        let e = Expr::Macro {
             name,
             args,
             span: TokSpan::new(start, self.pos),
-        })
+        };
+
+        // `$expect(hp):toBe(100)` reads the way `(expect(hp)):toBe(100)`
+        // does. The call is a primary expression, so the suffix loop
+        // takes the chain from here.
+        self.suffix_chain(start, e)
     }
 
     pub(super) fn primary_expr(&mut self) -> Result<Expr, ParseError> {

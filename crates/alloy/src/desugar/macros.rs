@@ -729,6 +729,28 @@ impl<'s> Desugar<'s> {
 
             ("stringify", 1) => luau_string(&sources[0]),
 
+            // `$expect(value)` is the runner's expectation object, so
+            // every matcher is a method call on it. The object exists
+            // under the runner alone: outside a `@test` nothing builds
+            // one, and a project with no runner has none to build.
+            ("expect", 1) => {
+                if !crate::testbuild::encloses_test(self.src, at as usize) {
+                    self.diagnose(
+                        span,
+                        "`$expect` needs `@test` on the function or the namespace around it",
+                    );
+                } else if !self.options.test_runner {
+                    self.diagnose(
+                        span,
+                        "`$expect` needs a test runner; the project sets `[test] lest = false`",
+                    );
+                }
+
+                let std = self.std();
+
+                format!("{std}.expect({})", rendered[0])
+            }
+
             ("bnot", 1) => format!("bit32.bnot({})", rendered[0]),
 
             // `$matches(value, Pattern)`: the match with one arm, as a
@@ -872,6 +894,46 @@ mod tests {
         );
         assert!(messages("local m = $map[[\"sword\", 10]]\nprint(m)\n").is_empty());
         assert!(messages("local m = $map[]\nprint(m)\n").is_empty());
+    }
+
+    /// `$expect(v)` builds the runner's expectation object, so it
+    /// needs `@test` above it and a runner in the project. A helper a
+    /// test calls carries no `@test`, so it reports: nothing proves
+    /// only a test reaches it.
+    #[test]
+    fn expect_needs_a_test_and_a_runner() {
+        let test = "@test\nfunction case()\n    $expect(1):toBe(1)\nend\n";
+        assert!(messages(test).is_empty(), "{:?}", messages(test));
+        assert!(
+            crate::compile(test)
+                .unwrap()
+                .check
+                .contains("__alloy.expect(1):toBe(1)"),
+            "{}",
+            crate::compile(test).unwrap().check
+        );
+
+        let group = "@test namespace Suite as\n    public function case()\n        $expect(1):toBe(1)\n    end\n\n    private function helper()\n        $expect(2):toBe(2)\n    end\nend\n";
+        assert!(messages(group).is_empty(), "{:?}", messages(group));
+
+        let helper = "function helper()\n    $expect(1):toBe(1)\nend\n";
+        assert_eq!(
+            messages(helper),
+            vec!["`$expect` needs `@test` on the function or the namespace around it"]
+        );
+
+        let options = crate::EmitOptions {
+            test_runner: false,
+            ..crate::EmitOptions::default()
+        };
+        let out = crate::compile_with(test, &options).unwrap();
+        assert_eq!(
+            out.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>(),
+            vec!["`$expect` needs a test runner; the project sets `[test] lest = false`"]
+        );
     }
 
     /// `$M.twice(2)` reads the macro of a namespace. A path that

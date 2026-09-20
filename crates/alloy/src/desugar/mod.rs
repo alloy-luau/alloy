@@ -109,6 +109,9 @@ pub struct EmitOptions {
     /// Render the test artifact: a `@test` function stays in the output
     /// as a local, unregistered, for `alloy test` to call by name.
     pub tests: bool,
+    /// The project configures a test runner, `[test] lest`. Without one
+    /// `$expect` has nothing to call, so it reports.
+    pub test_runner: bool,
     /// Per import spec, the type names the module exports, so a value
     /// import of a struct or an enum binds the type too. See
     /// `crate::modules::import_types`.
@@ -301,6 +304,7 @@ impl Default for EmitOptions {
             foreign_privates: Vec::new(),
             thresholds: crate::lint::Thresholds::default(),
             tests: false,
+            test_runner: true,
             import_types: Vec::new(),
             import_enums: Vec::new(),
             import_trait_defaults: Vec::new(),

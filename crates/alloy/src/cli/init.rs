@@ -1,9 +1,10 @@
 //! `alloy init`: scaffolds `alloy.toml` and a Luau configuration.
 //!
-//! The command is non-interactive by default, so a script and a CI job
-//! read the same behaviour they read today. `--interactive` opens the
-//! wizard, `--yes` writes the recommended setup with no prompt, and
-//! `--non-interactive` forces the plain path over both.
+//! The command opens the wizard when a terminal runs it. A script, a
+//! pipe and a CI job have no terminal, so they get the plain path and
+//! read the same behaviour they read today. `--yes` writes the
+//! recommended setup with no prompt, and `--non-interactive` forces the
+//! plain path over both.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -15,9 +16,11 @@ use crate::cli::init_plan::{Answers, Kind, Manager, Runner, plan, presets};
 use crate::fail;
 use crate::ui::{self, Painter};
 
-/// The three paths of `alloy init`. `--non-interactive` is the
-/// strongest: it always writes today's two files, so a script that
-/// passes it reads one thing whatever else is on the line.
+/// The paths of `alloy init`. `--non-interactive` is the strongest: it
+/// always writes today's two files, so a script that passes it reads
+/// one thing whatever else is on the line. With no flag the wizard runs
+/// where a terminal can answer it, and the plain path runs where none
+/// can, so a pipe or a CI job never waits for an answer.
 pub(crate) fn init(args: &[String]) -> ExitCode {
     let has = |flag: &str| args.iter().any(|a| a == flag);
     let dir = Path::new(".");
@@ -30,7 +33,7 @@ pub(crate) fn init(args: &[String]) -> ExitCode {
         return recommended_init(dir);
     }
 
-    if has("--interactive") || has("-i") {
+    if has("--interactive") || has("-i") || std::io::stdin().is_terminal() {
         return wizard_init(dir);
     }
 
@@ -175,11 +178,12 @@ fn init_luau_config(dir: &Path, p: &Painter) -> bool {
     }
 }
 
-/// The wizard needs a terminal to draw on and keys to read. With colour
-/// off, or with stdin on a pipe, it does not open at all: a wizard in a
-/// script or in CI is a hang.
+/// The wizard needs a terminal to draw on and keys to read. With stdin
+/// on a pipe it does not open at all: a wizard in a script or in CI is
+/// a hang. Colour is not required, so `NO_COLOR` still gets the
+/// questions, in the plain style the `Painter` falls back to.
 fn can_prompt() -> bool {
-    ui::want_color() && std::io::stdin().is_terminal()
+    std::io::stdin().is_terminal()
 }
 
 /// The prompt colors, the `Painter` palette rather than the crate's
@@ -362,7 +366,7 @@ fn wizard_init(dir: &Path) -> ExitCode {
 
     if !can_prompt() {
         fail(
-            "--interactive needs a terminal and color; run `alloy init` for the non-interactive path",
+            "the wizard needs a terminal to read; run `alloy init --non-interactive` for the plain path, or `alloy init --yes` for the recommended setup",
         );
 
         return ExitCode::FAILURE;

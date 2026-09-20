@@ -455,7 +455,7 @@ pub(crate) fn plan(a: &Answers) -> Plan {
                 .to_string(),
         );
         plan.last = Some(
-            "this made a game; run `alloy init --interactive` again and answer no to make a package"
+            "this made a game; run `alloy init` again and answer no to make a package"
                 .to_string(),
         );
     }

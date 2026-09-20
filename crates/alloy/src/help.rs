@@ -89,20 +89,23 @@ strict mode and the @alloy alias; a folder that has one keeps it and
 gains only the mode and the alias it lacks. An existing alloy.toml is
 never overwritten.
 
-Bare `alloy init` asks nothing, so a script and a CI job read the same
-files they read today. `--interactive` opens a wizard instead. Its first
-question offers the recommended setup: a game, ember, lest, the temper
-preset, and strict mode. Answer no and it asks six questions, each one
-already on the recommended answer: the kind of project, its name, the
-package manager, the test runner, the style preset, and the language
-mode. It writes nothing until every question is answered, and ctrl-c
-leaves the folder as it was.
+`alloy init` in a terminal opens the wizard. Its first question offers
+the recommended setup: a game, ember, lest, the temper preset, and
+strict mode. Answer no and it asks six questions, each one already on
+the recommended answer: the kind of project, its name, the package
+manager, the test runner, the style preset, and the language mode. It
+writes nothing until every question is answered, and ctrl-c leaves the
+folder as it was.
 
-`--yes` writes that recommended setup with no prompt, for a bootstrap
+A script, a pipe and a CI job have no terminal to answer with, so they
+get the plain path and the two bare files, exactly as before. Pass
+`--non-interactive` to say so on purpose.
+
+`--yes` writes the recommended setup with no prompt, for a bootstrap
 script that wants the scaffold and not the two bare files.
 
 Options:
-  -i, --interactive     Open the wizard; needs a terminal and color
+  -i, --interactive     Open the wizard, even with color off
   -y, --yes             Write the recommended setup; asks nothing
   --non-interactive     Force the plain path; wins over both of the above
 

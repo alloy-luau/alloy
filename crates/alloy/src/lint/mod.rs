@@ -1233,8 +1233,20 @@ mod tests {
         assert_eq!(level_of(&lax, "optional_access"), Level::Warn);
 
         // `print` is ordinary in Luau, so strict leaves it alone and a
-        // project that wants it gone names it.
+        // project that wants it gone names it. A type alias reads as
+        // its own documentation, so `missing_doc_type` goes the same
+        // way while `missing_doc` rides with strict.
         assert_eq!(level_of(&strict, "print_debug"), Level::Allow);
+        assert_eq!(level_of(&strict, "missing_doc"), Level::Warn);
+        assert_eq!(level_of(&strict, "missing_doc_type"), Level::Allow);
+
+        let documents_types = LintConfig {
+            rules: [("missing_doc_type".to_string(), Level::Warn)]
+                .into_iter()
+                .collect(),
+            ..LintConfig::default()
+        };
+        assert_eq!(level_of(&documents_types, "missing_doc_type"), Level::Warn);
 
         let asked = LintConfig {
             rules: [("print_debug".to_string(), Level::Warn)]

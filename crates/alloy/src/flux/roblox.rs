@@ -512,7 +512,9 @@ impl<'s> Scan<'s> {
         }
     }
 
-    /// An `export` with no comment line right above it.
+    /// An `export` with no comment line right above it. A `type` alias
+    /// and an `interface` report under `missing_doc_type`, the rest
+    /// under `missing_doc`.
     fn missing_doc(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
             if !(self.at(i, "export") || self.at(i, "global")) || !self.statement_start(i) {
@@ -568,10 +570,18 @@ impl<'s> Scan<'s> {
                 j += 1;
             }
 
+            // A `type` alias and an `interface` say what they are in
+            // their own shape, so they answer to `missing_doc_type`,
+            // which no mode turns on.
+            let shapes = (i + 1..=j).any(|k| matches!(self.t(k), "type" | "interface"));
             let name = if self.is_name(j) { self.t(j) } else { "this" };
             self.lint(
                 out,
-                "missing_doc",
+                if shapes {
+                    "missing_doc_type"
+                } else {
+                    "missing_doc"
+                },
                 i,
                 j.min(self.toks.len() - 1),
                 format!("`{name}` is exported and has no comment above it; say what it is for"),
@@ -786,6 +796,23 @@ mod tests {
             all("-- Adds one.\nexport function f(): number\n    return 1\nend\n"),
             Vec::<&str>::new()
         );
+        // A type alias and an interface say what they are in their own
+        // shape, so they report under a name of their own, which
+        // `strict` leaves off. The other exports stay with `missing_doc`.
+        assert_eq!(
+            all("export type Label = string\n"),
+            vec!["missing_doc_type"]
+        );
+        assert_eq!(
+            all("export interface Shape as\n    area: number\nend\n"),
+            vec!["missing_doc_type"]
+        );
+        assert_eq!(
+            all("export struct Box as\n    width: number\nend\n"),
+            vec!["missing_doc"]
+        );
+        assert_eq!(all("export const N = 1\n"), vec!["missing_doc"]);
+
         // `export` on a namespace member exports nothing, and the build
         // says so; the lint does not call the member exported.
         assert_eq!(

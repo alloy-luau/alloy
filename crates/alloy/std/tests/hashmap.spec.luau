@@ -60,6 +60,16 @@ describe("HashMap", function()
 		expect(m:len()).toBe(0)
 		expect(m:get("a")).toBeNil()
 	end)
+
+	it("to_table gives the live table, so a write reaches the map", function()
+		local m = HashMap.from({ a = 1 })
+		local t = m:to_table()
+		expect(t).toEqual({ a = 1 })
+		t.b = 2
+		expect(m:get("b")).toBe(2)
+		-- The write skips the count, which `set` keeps.
+		expect(m:len()).toBe(1)
+	end)
 end)
 
 return nil

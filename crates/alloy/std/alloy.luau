@@ -769,6 +769,7 @@ export type Array<T> = {
 	reverse: (self: { read [number]: T }) -> Array<T>,
 	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array<T>,
 	join: (self: { read [number]: T }, sep: string?) -> string,
+	to_table: (self: { read [number]: T }) -> { T },
 }
 
 -- Luau rejects an alias that names itself with other arguments, so
@@ -798,6 +799,7 @@ export type Array2<T> = {
 	reverse: (self: { read [number]: T }) -> Array2<T>,
 	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array2<T>,
 	join: (self: { read [number]: T }, sep: string?) -> string,
+	to_table: (self: { read [number]: T }) -> { T },
 }
 
 export type Array3<T> = {
@@ -821,6 +823,7 @@ export type Array3<T> = {
 	reverse: (self: { read [number]: T }) -> Array3<T>,
 	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array3<T>,
 	join: (self: { read [number]: T }, sep: string?) -> string,
+	to_table: (self: { read [number]: T }) -> { T },
 }
 
 -- `read T[]`: the Array methods that do not mutate.
@@ -983,6 +986,13 @@ function Array.join(xs, sep: string?)
 	return table.concat(parts, sep or "")
 end
 
+-- `to_table` hands back the table the wrapper owns, never a copy.
+-- A write through the result reaches the collection. An array is
+-- its own table, so this one returns `self`.
+function Array.to_table(xs)
+	return xs
+end
+
 function Array.__tostring(self)
 	return show_list(self, "[", "]")
 end
@@ -1004,6 +1014,7 @@ export type HashMap<K, V> = {
 	entries: (self: HashMap<K, V>) -> () -> (K?, V?),
 	get_or_insert: (self: HashMap<K, V>, key: K, default: V) -> V,
 	clear: (self: HashMap<K, V>) -> (),
+	to_table: (self: HashMap<K, V>) -> { [K]: V },
 }
 
 local HashMap = {}
@@ -1092,6 +1103,11 @@ function HashMap.clear(self)
 	self._count = 0
 end
 
+-- A write through the result skips the count, so `len` goes wrong.
+function HashMap.to_table(self)
+	return self._items
+end
+
 function HashMap.__tostring(self)
 	local keys = sorted_keys(self._items)
 	if #keys == 0 then
@@ -1116,6 +1132,7 @@ export type Set<T> = {
 	intersection: (self: Set<T>, other: Set<T>) -> Set<T>,
 	difference: (self: Set<T>, other: Set<T>) -> Set<T>,
 	to_array: (self: Set<T>) -> Array<T>,
+	to_table: (self: Set<T>) -> { [T]: boolean },
 }
 
 -- Operator traits, as the shape a bound `T: Display` names.
@@ -1318,6 +1335,11 @@ function Set.to_array(self)
 		table.insert(out, v)
 	end
 	return setmetatable(out, Array)
+end
+
+-- A write through the result skips the count, so `len` goes wrong.
+function Set.to_table(self)
+	return self._items
 end
 
 function Set.__tostring(self)
@@ -1624,6 +1646,7 @@ export type Queue<T> = typeof(setmetatable({} :: {
 	is_empty: (self: Queue<T>) -> boolean,
 	clear: (self: Queue<T>) -> (),
 	to_array: (self: Queue<T>) -> Array<T>,
+	to_table: (self: Queue<T>) -> { T },
 }, {} :: { __iter: (self: any) -> () -> T? }))
 
 local Queue = {}
@@ -1687,6 +1710,12 @@ function Queue.to_array(self)
 	return setmetatable(out, Array)
 end
 
+-- The ring: the keys run from the head, which a pop moves up. Use
+-- `to_array` for a list that starts at 1.
+function Queue.to_table(self)
+	return self._items
+end
+
 function Queue.__iter(self)
 	local i = self._head - 1
 	return function()
@@ -1718,6 +1747,7 @@ export type Heap<T> = typeof(setmetatable({} :: {
 	is_empty: (self: Heap<T>) -> boolean,
 	clear: (self: Heap<T>) -> (),
 	to_array: (self: Heap<T>) -> Array<T>,
+	to_table: (self: Heap<T>) -> { T },
 }, {} :: { __iter: (self: any) -> () -> T? }))
 
 local Heap = {}
@@ -1802,6 +1832,12 @@ function Heap.to_array(self)
 	local out = table.clone(self._items)
 	table.sort(out, self._less)
 	return setmetatable(out, Array)
+end
+
+-- Heap order, not sorted order. A write through the result breaks
+-- the order that `pop` needs; `to_array` sorts a copy.
+function Heap.to_table(self)
+	return self._items
 end
 
 function Heap.__iter(self)
@@ -1927,6 +1963,7 @@ export type Iter<T> = typeof(setmetatable({} :: {
 	take_while: (self: Iter<T>, f: (T) -> boolean) -> Iter<T>,
 	chain: (self: Iter<T>, other: Iter<T>) -> Iter<T>,
 	collect: (self: Iter<T>) -> Array<T>,
+	to_table: (self: Iter<T>) -> { T },
 	for_each: (self: Iter<T>, f: (T) -> ()) -> (),
 	count: (self: Iter<T>) -> number,
 	any: (self: Iter<T>, f: (T) -> boolean) -> boolean,
@@ -1948,6 +1985,7 @@ export type Iter2<T> = typeof(setmetatable({} :: {
 	take_while: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter2<T>,
 	chain: (self: { next: (self: any) -> T? }, other: Iter2<T>) -> Iter2<T>,
 	collect: (self: { next: (self: any) -> T? }) -> Array<T>,
+	to_table: (self: { next: (self: any) -> T? }) -> { T },
 	for_each: (self: { next: (self: any) -> T? }, f: (T) -> ()) -> (),
 	count: (self: { next: (self: any) -> T? }) -> number,
 	any: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
@@ -1967,6 +2005,7 @@ export type Iter3<T> = typeof(setmetatable({} :: {
 	take_while: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter3<T>,
 	chain: (self: { next: (self: any) -> T? }, other: Iter3<T>) -> Iter3<T>,
 	collect: (self: { next: (self: any) -> T? }) -> Array<T>,
+	to_table: (self: { next: (self: any) -> T? }) -> { T },
 	for_each: (self: { next: (self: any) -> T? }, f: (T) -> ()) -> (),
 	count: (self: { next: (self: any) -> T? }) -> number,
 	any: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
@@ -2109,6 +2148,13 @@ function Iter.collect(self)
 		table.insert(out, value)
 	end
 	return setmetatable(out, Array)
+end
+
+-- An Iter wraps no table of its own, so `to_table` drains it into a
+-- new one: `collect` without the Array methods. The pull spends the
+-- iterator, so a second call gives an empty table.
+function Iter.to_table(self)
+	return setmetatable(self:collect(), nil)
 end
 
 function Iter.for_each(self, f)

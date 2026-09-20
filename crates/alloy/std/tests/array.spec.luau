@@ -95,6 +95,15 @@ describe("Array", function()
 		expect(xs:join(", ")).toBe("1, 2, 3")
 		expect(xs:join()).toBe("123")
 	end)
+
+	it("to_table gives the array itself, so a write reaches it", function()
+		local xs = Array.from({ 1, 2 })
+		local t = xs:to_table()
+		expect(t).toBe(xs)
+		t[3] = 3
+		expect(xs:len()).toBe(3)
+		expect(xs:last()).toBe(3)
+	end)
 end)
 
 return nil

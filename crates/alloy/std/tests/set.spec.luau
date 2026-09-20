@@ -45,6 +45,16 @@ describe("Set", function()
 		expect(xs:len()).toBe(1)
 		expect(xs:contains(5)).toBe(true)
 	end)
+
+	it("to_table gives the live table of keys, so a write reaches the set", function()
+		local s = Set.from({ 1 })
+		local t = s:to_table()
+		expect(t).toEqual({ [1] = true })
+		t[2] = true
+		expect(s:has(2)).toBe(true)
+		-- The write skips the count, which `add` keeps.
+		expect(s:len()).toBe(1)
+	end)
 end)
 
 return nil

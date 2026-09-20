@@ -82,4 +82,12 @@ describe("Iter", function()
 		end
 		expect(seen).toEqual({ 1, 3, 5, 7, 9, "a", "b", 1, 2, 3 })
 	end)
+
+	it("to_table drains the run into a plain table", function()
+		local run = Iter.range(1, 3)
+		expect(run:to_table()).toEqual({ 1, 2, 3 })
+		-- The pull spends the iterator.
+		expect(run:to_table()).toEqual({})
+		expect(getmetatable(Iter.from({ 1 }):to_table())).toBeNil()
+	end)
 end)

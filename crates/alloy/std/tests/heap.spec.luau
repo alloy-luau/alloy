@@ -60,4 +60,15 @@ describe("Heap", function()
 			last = v
 		end
 	end)
+
+	it("to_table gives the live table, in heap order", function()
+		local h = Heap.from({ 3, 1, 2 })
+		local t = h:to_table()
+		expect(t[1]).toBe(1)
+		expect(#t).toBe(3)
+		t[#t + 1] = 0
+		-- The write reaches the heap and skips the sift, so the order breaks.
+		expect(h:len()).toBe(4)
+		expect(h:peek()).toBe(1)
+	end)
 end)

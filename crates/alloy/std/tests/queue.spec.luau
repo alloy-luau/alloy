@@ -43,4 +43,15 @@ describe("Queue", function()
 		q:clear()
 		expect(q:len()).toBe(0)
 	end)
+
+	it("to_table gives the live ring, keyed from the front", function()
+		local q = Queue.from({ 1, 2 })
+		expect(q:to_table()).toEqual({ 1, 2 })
+		q:pop()
+		-- A pop moves the front up, so the keys no longer start at 1.
+		expect(q:to_table()[1]).toBeNil()
+		expect(q:to_table()[2]).toBe(2)
+		q:to_table()[2] = 9
+		expect(q:peek()).toBe(9)
+	end)
 end)

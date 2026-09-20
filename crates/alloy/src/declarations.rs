@@ -316,14 +316,20 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                 notes.push(format!("Implements {}.", list.join(", ")));
             }
 
-            // The methods read inside the block, one per line, the way
-            // a namespace reads its members.
-            if !methods.is_empty()
-                && let Some(end) = lines.iter().rposition(|l| l == "end")
-            {
-                for (k, line) in methods.iter().enumerate() {
-                    lines.insert(end + k, format!("    {line}"));
-                }
+            // The methods stand in a block of their own, under the
+            // declaration. A method is no field, so a body the source
+            // left empty reads empty here too.
+            if !methods.is_empty() {
+                let generics = lines
+                    .first()
+                    .and_then(|l| l.strip_suffix(" as"))
+                    .and_then(|l| l.split_once(name))
+                    .map_or(String::new(), |(_, tail)| tail.to_string());
+
+                lines.push(String::new());
+                lines.push(format!("impl {name}{generics} as"));
+                lines.extend(methods.iter().map(|line| format!("    {line}")));
+                lines.push("end".to_string());
             }
         }
 
@@ -1102,7 +1108,7 @@ mod tests {
         assert_eq!(d[0].name, "Vec2");
         assert_eq!(
             d[0].hover,
-            "```alloy\nexport struct Vec2 as\n    x: number\n    y: number = 0\n    public function len(self)\n    public function to_string(self)\nend\n```\n\nImplements `Display`."
+            "```alloy\nexport struct Vec2 as\n    x: number\n    y: number = 0\nend\n\nimpl Vec2 as\n    public function len(self)\n    public function to_string(self)\nend\n```\n\nImplements `Display`."
         );
     }
 

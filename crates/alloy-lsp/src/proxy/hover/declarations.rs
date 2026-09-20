@@ -26,10 +26,12 @@ impl Server {
         // An attribute or a macro is keyed by its sigil; a bare name that
         // an import bound finds it that way.
         let sigils = [format!("@{key}"), format!("${key}")];
-        // `local Point = 1` binds the name in this file. Another file
-        // may declare a `Point` of its own, and that declaration says
-        // nothing about the binding the caret sits on.
-        let bound_here = binds_a_value(&doc.bindings, &key);
+        // `local Point = 1` binds the name in this file, and
+        // `public function Test()` declares one. Another file may hold a
+        // `Point` or a `Test` of its own, and that declaration says
+        // nothing about the name the caret sits on.
+        let bound_here =
+            binds_a_value(&doc.bindings, &key) || declares_a_name_at(&doc.source, start);
         // A name inside an import list belongs to the module the spec
         // names. Another open file may export the same name, and its
         // declaration says nothing about this entry.
@@ -163,7 +165,7 @@ impl Server {
 
 /*
 The hover of a namespace member, with the methods of its `impl` blocks
-listed inside the block.
+in a block under the declaration.
 
 `summaries` keys its impl index by the bare name of a top level `impl`,
 so a member of a namespace finds none: the block stands inside the
@@ -176,7 +178,7 @@ fn with_member_methods(hover: &str, doc: &Doc, path: &str) -> String {
     };
     let mut lines: Vec<&str> = hover.lines().collect();
     // The block the hover opens with: a struct or an enum takes methods,
-    // and one that already lists them needs none.
+    // and one that already carries an `impl` block needs none.
     let opens = lines
         .get(1)
         .map(|l| l.trim_start().trim_start_matches("export "))
@@ -185,7 +187,7 @@ fn with_member_methods(hover: &str, doc: &Doc, path: &str) -> String {
         return hover.to_string();
     };
 
-    if !opens || lines[..end].iter().any(|l| l.contains("function ")) {
+    if !opens || lines.iter().any(|l| l.starts_with("impl ")) {
         return hover.to_string();
     }
 
@@ -195,8 +197,10 @@ fn with_member_methods(hover: &str, doc: &Doc, path: &str) -> String {
         return hover.to_string();
     }
 
-    let owned: Vec<String> = methods.iter().map(|m| format!("    {m}")).collect();
-    lines.splice(end..end, owned.iter().map(String::as_str));
+    let mut block = vec![String::new(), format!("impl {path} as")];
+    block.extend(methods.iter().map(|m| format!("    {m}")));
+    block.push("end".to_string());
+    lines.splice(end + 1..end + 1, block.iter().map(String::as_str));
 
     lines.join("\n")
 }

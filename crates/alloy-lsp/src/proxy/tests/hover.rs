@@ -1802,3 +1802,35 @@ fn a_key_of_a_const_table_hovers_as_its_entry() {
     );
     assert_eq!(record_entry(printed, &["y".to_string()]), None);
 }
+
+/// A method's name belongs to the file that declares it. Another file
+/// may declare a struct of the same spelling, and that declaration is
+/// no answer for the method: the child types the method itself.
+#[test]
+pub(crate) fn another_file_s_struct_is_no_method_hover() {
+    let state = super::support::files(&[
+        (
+            "file:///a.aly",
+            "struct Provider as\nend\n\nimpl Provider as\n    public function Test()\n    end\nend\n",
+        ),
+        ("file:///b.aly", "export struct Test as\nend\n"),
+    ]);
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(std::io::sink()),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+
+    let at = |line: u32, character: u32| {
+        json!({ "params": {
+            "textDocument": { "uri": "file:///a.aly" },
+            "position": { "line": line, "character": character },
+        } })
+    };
+
+    assert!(!server.declaration_hover("file:///a.aly", &at(4, 21), &json!(1)));
+    // The struct's own name still reads its declaration.
+    assert!(server.declaration_hover("file:///a.aly", &at(0, 8), &json!(1)));
+}

@@ -186,7 +186,7 @@ pub(crate) fn a_generic_struct_keeps_its_arguments() {
     );
     assert_eq!(
         hover_of(src, 5, 18, "local self: Slotted"),
-        "self: Slotted<T>"
+        "self: Slotted<T>\n```\nA parameter of `function get`."
     );
 }
 #[test]
@@ -278,7 +278,10 @@ pub(crate) fn a_foreign_impl_names_its_type() {
 pub(crate) fn a_parameter_is_not_a_local() {
     let src = "export function room(count: number): number\n    return count\nend\n";
 
-    assert_eq!(hover_of(src, 1, 12, "local count: number"), "count: number");
+    assert_eq!(
+        hover_of(src, 1, 12, "local count: number"),
+        "count: number\n```\nA parameter of `function room`."
+    );
     // A name the file declares with a keyword keeps its keyword.
     let bound = "local total = 1\nprint(total)\n";
     assert_eq!(
@@ -880,7 +883,10 @@ pub(crate) fn self_inside_a_trait_default_method_names_the_trait() {
         "end\n",
     );
 
-    assert_eq!(hover_of(src, 4, 25, "local self: any"), "self: Shape");
+    assert_eq!(
+        hover_of(src, 4, 25, "local self: any"),
+        "self: Shape\n```\nA parameter of `function describe`."
+    );
     // The `impl` below still names the struct it is for.
     assert_eq!(
         hover_of(src, 14, 20, "local self: any"),
@@ -1076,7 +1082,7 @@ fn an_untyped_parameter_drops_the_solver_s_letter() {
     // reader.
     assert_eq!(
         unlocal_parameter("```luau\nlocal b: a\n```", doc, 0, 22).as_deref(),
-        Some("```luau\nb\n```")
+        Some("```luau\nb\n```\nA parameter of `function add`.")
     );
 
     let mut hints = vec![

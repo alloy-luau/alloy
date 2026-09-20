@@ -1961,7 +1961,10 @@ fn names_the_owner(rest: &str, owner: &str) -> bool {
 }
 
 /// A parameter the child prints as a `local`. The two differ in what a
-/// reader may do to them, and the source says which this is.
+/// reader may do to them, and the source says which this is. The hover
+/// names the function the parameter belongs to, the way the hover at
+/// its declaration does; the comment the child appends there documents
+/// that function, not the parameter.
 pub(crate) fn unlocal_parameter(
     value: &str,
     doc: &Doc,
@@ -1969,7 +1972,7 @@ pub(crate) fn unlocal_parameter(
     character: u32,
 ) -> Option<String> {
     let (fence, rest) = value.split_once('\n')?;
-    let (body, tail) = rest.split_once("\n```")?;
+    let (body, _) = rest.split_once("\n```")?;
     let named = body.strip_prefix("local ")?;
     let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
@@ -1994,15 +1997,25 @@ pub(crate) fn unlocal_parameter(
         _ => named,
     };
 
-    doc.source
-        .lines()
-        .filter_map(|l| {
-            let open = l.find('(')?;
+    // The head the parameter belongs to is the nearest one above the
+    // caret that writes the name: a lower function of its own may take
+    // one by the same name.
+    let line_end = doc.source[end..]
+        .find('\n')
+        .map_or(doc.source.len(), |i| end + i);
+    let owner = doc.source[..line_end].lines().rev().find_map(|l| {
+        let open = l.find('(')?;
+        let name = function_name_of(&l[..open])?;
 
-            function_name_of(&l[..open]).map(|_| l[open..].to_string())
-        })
-        .any(|list| parameter_names(&list).iter().any(|(n, _)| n == word))
-        .then(|| format!("{fence}\n{text}\n```{tail}"))
+        parameter_names(&l[open..])
+            .iter()
+            .any(|(n, _)| n == word)
+            .then_some(name)
+    })?;
+
+    Some(format!(
+        "{fence}\n{text}\n```\nA parameter of `function {owner}`."
+    ))
 }
 
 /// `self` inside an `impl`, by the name the `impl` head writes.

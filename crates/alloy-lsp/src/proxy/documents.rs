@@ -1045,15 +1045,18 @@ impl Server {
     the same pass at once.
     */
     pub(crate) fn schedule_import_refresh(self: &Arc<Self>, path: PathBuf) {
-        let waiting = {
+        let alone = {
             let mut edited = self.edited.lock().expect("edited");
+            let alone = edited.is_empty();
+            edited.insert(path, std::time::Instant::now());
 
-            edited.insert(path.clone(), std::time::Instant::now())
+            alone
         };
 
-        // A pass already waits for this file, and it reads the time
-        // this edit wrote.
-        if waiting.is_some() {
+        // One thread waits for every edited file. A rename across the
+        // workspace edits a hundred files in one burst; a thread each
+        // is a hundred threads and a hundred passes over the documents.
+        if !alone {
             return;
         }
 
@@ -1063,25 +1066,37 @@ impl Server {
             loop {
                 std::thread::sleep(IMPORT_REFRESH_WAIT);
 
-                let quiet = {
-                    let edited = server.edited.lock().expect("edited");
+                // The files nobody has typed in since the last tick.
+                // They leave the map here, so a file edited again
+                // during the pass waits for the next one.
+                let quiet: Vec<PathBuf> = {
+                    let mut edited = server.edited.lock().expect("edited");
+                    let ready: Vec<PathBuf> = edited
+                        .iter()
+                        .filter(|(_, last)| last.elapsed() >= IMPORT_REFRESH_WAIT)
+                        .map(|(p, _)| p.clone())
+                        .collect();
 
-                    match edited.get(&path) {
-                        Some(last) => last.elapsed() >= IMPORT_REFRESH_WAIT,
-
-                        None => true,
+                    for path in &ready {
+                        edited.remove(path);
                     }
+
+                    ready
                 };
 
-                if quiet {
-                    break;
+                if server.stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
                 }
-            }
 
-            server.edited.lock().expect("edited").remove(&path);
+                if !quiet.is_empty() {
+                    server.refresh_importers(&quiet);
+                }
 
-            if !server.stopping.load(std::sync::atomic::Ordering::Relaxed) {
-                server.refresh_importers(&[path]);
+                // The map is read again under its own lock: an edit
+                // that arrives now finds it empty and starts a thread.
+                if server.edited.lock().expect("edited").is_empty() {
+                    return;
+                }
             }
         });
     }

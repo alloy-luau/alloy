@@ -558,6 +558,11 @@ impl Server {
         st.shadows.remove(&shadow);
         st.child_diagnostics.remove(uri);
         st.published.remove(uri);
+        // The document is gone, so no editor holds it. A name left in
+        // the set stands for the whole session, and a file written at
+        // that path again would get no shadow: the pass reads the set
+        // and leaves a file the editor holds to the editor.
+        st.editor_open.remove(uri);
 
         if let Some(path) = uri_to_path(uri) {
             // The file is gone, and so is the text the editor held.

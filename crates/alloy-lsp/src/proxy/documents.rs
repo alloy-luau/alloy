@@ -920,14 +920,24 @@ impl Server {
             plain
                 .into_iter()
                 .filter(|path| {
-                    // The mirror's copies of these two are the proxy's
-                    // own: the mirrored `.config.luau` goes, so the
-                    // merged configuration is the one the child reads,
-                    // and the tree writes the sourcemap.
                     if path.parent() == Some(root.as_path()) {
                         match path.file_name().and_then(|n| n.to_str()) {
-                            Some(".config.luau") => return false,
+                            // The mirror holds no `.config.luau`: its
+                            // `.luaurc` carries the merged
+                            // configuration, so that file is the one
+                            // an edit here has to move.
+                            Some(".config.luau") => {
+                                return std::fs::read_to_string(
+                                    st.mirror_path(&root.join(".luaurc")),
+                                )
+                                .ok()
+                                .as_deref()
+                                    != Some(mirror_luau_text(&root, config.as_ref()).as_str());
+                            }
 
+                            // The tree writes the mirror's sourcemap,
+                            // so the file the last build left says
+                            // nothing about it.
                             Some("sourcemap.json") if from_tree => return false,
 
                             _ => {}

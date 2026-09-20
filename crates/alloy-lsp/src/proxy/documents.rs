@@ -654,6 +654,19 @@ impl Server {
         // importer's require points into it, and the child resolves a
         // require against the files that are there.
         walk_dependencies(&root, config.as_ref(), &mut files, &mut plain);
+        // So does an alias folder outside the root, `pkg = "../Packages"`.
+        // The compiler resolves through it, so the mirror holds it too,
+        // or the child reports a require the build accepts. A target
+        // above the root is skipped: walking it walks the root again.
+        let root_n = normalize(&root);
+
+        for (_, target) in project_aliases(&root, Some(&root)) {
+            let target = normalize(&target);
+
+            if !target.starts_with(&root_n) && !root_n.starts_with(&target) && target.is_dir() {
+                walk(&target, out.as_deref(), &mut files, &mut plain);
+            }
+        }
         files.sort();
         files.dedup();
         log::took(&format!("scan: walked {} sources", files.len()), started);

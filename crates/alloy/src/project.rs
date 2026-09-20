@@ -94,7 +94,9 @@ impl Tree {
             }
         }
 
-        if !config.mount.is_empty() {
+        // An alias-only entry names no place, so a table of those alone
+        // is not a tree: the project file at the root still is.
+        if config.mount.values().any(|m| !m.alias_only()) {
             return Self {
                 name: config.project.name.clone(),
                 mounts: config

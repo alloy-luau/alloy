@@ -13,7 +13,7 @@ use std::sync::{OnceLock, RwLock};
 
 use alloy_syntax::ast::TokSpan;
 
-use crate::config::Config;
+use crate::config::{Config, Mount};
 
 /*
 The sources an editor holds, which the disk does not carry yet.
@@ -627,29 +627,70 @@ pub fn reserved_alias_message(alias: &ReservedAlias) -> String {
     )
 }
 
-/// One declaration of a reserved alias: the file it came from, the
-/// name, and what to say about it.
+/// One alias a project declares wrongly: the file it came from, the
+/// name, the diagnostic code, and what to say about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReservedAliasProblem {
+pub struct AliasProblem {
     pub file: PathBuf,
-    pub alias: &'static str,
+    pub alias: String,
+    pub code: &'static str,
     pub message: String,
 }
 
-/// Every reserved alias a project declares, each with the file that
+/// What a `.config.luau` reads when it writes a Luau key at the top
+/// level. The file declares nothing there, so every alias in it is
+/// absent and the report names the key to move.
+pub fn misplaced_key_message(key: &str) -> String {
+    format!(
+        "`{key}` sits at the top level. Luau reads `.config.luau` under a `luau` table, so this file declares nothing. Move the key into `luau = {{ ... }}`."
+    )
+}
+
+/// What an alias-only `[mount]` entry reads when no mount holds its
+/// folder. The build resolves the name and Roblox has no such
+/// instance, so the report comes before the build writes anything.
+pub fn unmounted_alias_message(name: &str, path: &str) -> String {
+    format!(
+        "`{path}` sits under no mount. `@{name}` resolves at build time and finds nothing at run time. Mount the folder, or give this entry a place."
+    )
+}
+
+/// What an alias-only `[mount]` entry reads when its path is no folder.
+/// An alias names a folder in every tool that reads one, the editor's
+/// child included, so a file or a missing path reports here.
+pub fn alias_folder_message(name: &str, path: &str) -> String {
+    format!("`{path}` is no folder. An alias names a folder, and `@{name}/x` reads a file in it.")
+}
+
+/// Every alias a project declares wrongly, each with the file that
 /// declares it. `alloy check` reports these, and so does the editor.
 ///
-/// The `[mount]` table reserves both names, since a mount serves as an
-/// alias. A Luau configuration reserves `game` alone.
-pub fn reserved_alias_problems(root: &Path, config: &Config) -> Vec<ReservedAliasProblem> {
+/// Two shapes are wrong. A reserved name never reaches the folder it
+/// named: the `[mount]` table reserves both names, since a mount serves
+/// as an alias, and a Luau configuration reserves `game` alone. An
+/// alias-only `[mount]` entry names a folder no mount carries, so the
+/// name resolves here and names nothing in the DataModel.
+pub fn alias_problems(root: &Path, config: &Config) -> Vec<AliasProblem> {
     let mut out = Vec::new();
-    let mut push = |file: PathBuf, alias: &'static ReservedAlias| {
-        out.push(ReservedAliasProblem {
+    let mut push = |file: PathBuf, alias: &str, code: &'static str, message: String| {
+        out.push(AliasProblem {
             file,
-            alias: alias.name,
-            message: reserved_alias_message(alias),
+            alias: alias.to_string(),
+            code,
+            message,
         });
     };
+
+    // A `.config.luau` that writes the keys above the `luau` table
+    // declares nothing, so the aliases in it reach no file. The parse
+    // then falls through to `.luaurc`, which hides the mistake.
+    let config_luau = root.join(".config.luau");
+
+    if let Ok(text) = std::fs::read_to_string(&config_luau)
+        && let Some(key) = crate::luau_config::misplaced_key(&text)
+    {
+        push(config_luau, key, "LuauConfig", misplaced_key_message(key));
+    }
 
     if let Some((path, luau)) = crate::luau_config::read_dir(root) {
         for (name, _) in &luau.aliases {
@@ -657,14 +698,50 @@ pub fn reserved_alias_problems(root: &Path, config: &Config) -> Vec<ReservedAlia
                 .iter()
                 .find(|a| a.name == name && !a.in_luau_config)
             {
-                push(path.clone(), alias);
+                push(
+                    path.clone(),
+                    alias.name,
+                    "ReservedAlias",
+                    reserved_alias_message(alias),
+                );
             }
         }
     }
 
     for name in config.mount.keys() {
         if let Some(alias) = RESERVED_ALIASES.iter().find(|a| a.name == name) {
-            push(root.join(crate::config::FILE_NAME), alias);
+            push(
+                root.join(crate::config::FILE_NAME),
+                alias.name,
+                "ReservedAlias",
+                reserved_alias_message(alias),
+            );
+        }
+    }
+
+    // An alias-only entry serves a name alone, so the check only
+    // matters while the mount names are aliases at all.
+    if config.project.mount_aliases && config.mount.values().any(Mount::alias_only) {
+        let tree = crate::project::Tree::load(root, config);
+
+        for (name, m) in &config.mount {
+            if !m.alias_only() {
+                continue;
+            }
+
+            let rel = m.0.replace('\\', "/");
+            let toml = root.join(crate::config::FILE_NAME);
+
+            if !root.join(&rel).is_dir() {
+                push(toml, name, "MountAlias", alias_folder_message(name, &m.0));
+            } else if crate::project::instance_path(&tree, Path::new(&rel)).is_none() {
+                push(
+                    toml,
+                    name,
+                    "MountAlias",
+                    unmounted_alias_message(name, &m.0),
+                );
+            }
         }
     }
 

@@ -107,6 +107,28 @@ pub fn parse_config_luau(text: &str) -> Option<LuauConfig> {
     })
 }
 
+/// The Luau key a `.config.luau` writes at the top level, outside the
+/// `luau` table. Luau reads the keys under `luau` alone, so a file that
+/// writes them higher declares nothing. `None` when the file has the
+/// `luau` table, or writes no key this reads.
+pub fn misplaced_key(text: &str) -> Option<&'static str> {
+    let parsed = alloy_syntax::parse_lenient(text, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let returned = parsed.chunk.block.stmts.iter().find_map(|s| match s {
+        Stmt::Return(r) => r.values.first(),
+
+        _ => None,
+    })?;
+
+    if field(text, toks, returned, "luau").is_some() {
+        return None;
+    }
+
+    ["aliases", "languagemode"]
+        .into_iter()
+        .find(|k| field(text, toks, returned, k).is_some())
+}
+
 /// The source text of a token span.
 /// The value of a named field of a table literal.
 fn field<'a>(src: &str, toks: &[Tok], table: &'a Expr, name: &str) -> Option<&'a Expr> {

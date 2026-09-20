@@ -867,12 +867,12 @@ pub(crate) fn alias_key_line(text: &str, alias: &str) -> Option<(u32, u32, u32)>
 }
 
 impl Server {
-    /// The reserved aliases of the project, as diagnostics on the file
+    /// The alias problems of the project, as diagnostics on the file
     /// that declares each one. The editor holds no document for
     /// `alloy.toml` or a Luau configuration, so the report goes to the
     /// file's own URI. Every pass republishes all three files, empty
     /// where nothing is wrong, so a renamed alias clears its report.
-    pub(crate) fn publish_reserved_aliases(&self) {
+    pub(crate) fn publish_alias_problems(&self) {
         let root = self.state.lock().expect("state").root.clone();
         let Some(root) = root else {
             return;
@@ -894,9 +894,9 @@ impl Server {
             }
         }
 
-        for problem in alloy::modules::reserved_alias_problems(&base, &config) {
+        for problem in alloy::modules::alias_problems(&base, &config) {
             let text = std::fs::read_to_string(&problem.file).unwrap_or_default();
-            let (line, start, end) = alias_key_line(&text, problem.alias).unwrap_or((0, 0, 0));
+            let (line, start, end) = alias_key_line(&text, &problem.alias).unwrap_or((0, 0, 0));
             by_file
                 .entry(problem.file.clone())
                 .or_default()
@@ -907,7 +907,7 @@ impl Server {
                     },
                     "severity": 1,
                     "source": "alloy",
-                    "code": "ReservedAlias",
+                    "code": problem.code,
                     "message": problem.message,
                 }));
         }

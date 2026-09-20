@@ -150,9 +150,36 @@ impl IngotSource {
 }
 
 /// One mount: the path on disk, relative to the root, and the DataModel
-/// location, `@game/Service/Folder`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// location, `@game/Service/Folder`. A bare string in place of the pair
+/// is the alias-only form: the path takes the alias and no location, so
+/// the folder has to sit under another mount already.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Mount(pub String, pub String);
+
+impl Mount {
+    /// Whether the entry names a path alone: an alias with no DataModel
+    /// location, for a folder another mount already carries.
+    pub fn alias_only(&self) -> bool {
+        self.1.is_empty()
+    }
+}
+
+impl<'de> Deserialize<'de> for Mount {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Placed(String, String),
+            AliasOnly(String),
+        }
+
+        Ok(match Raw::deserialize(d)? {
+            Raw::Placed(path, place) => Mount(path, place),
+
+            Raw::AliasOnly(path) => Mount(path, String::new()),
+        })
+    }
+}
 
 /// Where `alloy.luau` lands when neither `[project] runtime` nor the
 /// project file says.
@@ -940,6 +967,8 @@ mount_aliases = true
 # alias = [path, mount]: the folder at path lands at mount in the DataModel
 # shared = ["src/shared", "@game/ReplicatedStorage/Shared"]
 # server = ["src/server", "@game/ServerScriptService/Server"]
+# alias = path: a name for a folder another mount already carries
+# types = "src/shared/types"
 
 # [ingots]
 # an extension that ships as an executable: a path relative to this file,
@@ -1204,6 +1233,21 @@ mod tests {
         );
         assert_eq!(c.project.runtime, None);
         assert_eq!(c.project.runtime(), "@game/ReplicatedStorage/Alloy");
+    }
+
+    #[test]
+    fn a_bare_string_mount_is_an_alias_with_no_place() {
+        let c = Config::parse(
+            "[mount]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\ntypes = \"src/shared/types\"\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            c.mount["types"],
+            Mount("src/shared/types".into(), String::new())
+        );
+        assert!(c.mount["types"].alias_only());
+        assert!(!c.mount["shared"].alias_only());
     }
 
     #[test]

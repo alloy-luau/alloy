@@ -458,7 +458,7 @@ fn a_reserved_alias_is_an_error_that_names_its_file() {
     );
 
     let config = Config::load(&dir.join("alloy.toml")).unwrap();
-    let found = alloy::modules::reserved_alias_problems(&dir, &config);
+    let found = alloy::modules::alias_problems(&dir, &config);
     let said: Vec<(String, String)> = found
         .iter()
         .map(|p| {
@@ -512,7 +512,198 @@ fn the_reserved_names_leave_every_other_alias_alone() {
     let dir = mounted_root("no-reserved", true, true);
     let config = Config::load(&dir.join("alloy.toml")).unwrap();
 
-    assert!(alloy::modules::reserved_alias_problems(&dir, &config).is_empty());
+    assert!(alloy::modules::alias_problems(&dir, &config).is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// An alias-only `[mount]` entry: a bare string names a folder another
+/// mount already carries, and gives it an alias alone.
+#[test]
+fn an_alias_only_mount_resolves_and_adds_no_instance() {
+    let dir = std::env::temp_dir().join(format!("alloy-alias-only-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir,
+        "alloy.toml",
+        &format!("[build]\nin = \"src\"\nout = \"build\"\n{MOUNTS}types = \"src/shared/types\"\n"),
+    );
+    write(&dir, "src/shared/types/ids.aly", "export const LIMIT = 5\n");
+    write(
+        &dir,
+        "src/server/main.server.aly",
+        "import { LIMIT } from \"@types/ids\"\nprint(LIMIT)\n",
+    );
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+
+    assert!(config.mount["types"].alias_only());
+    assert!(alloy::modules::alias_problems(&dir, &config).is_empty());
+
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    // The ship require takes the place the `shared` mount gives the
+    // folder, so the alias needs no mount of its own.
+    let main = fs::read_to_string(dir.join("build/server/main.server.luau")).unwrap_or_default();
+
+    assert!(
+        main.contains("require(\"@game/ReplicatedStorage/Shared/types/ids\")"),
+        "{main}"
+    );
+
+    // The entry writes no node into the project file.
+    let project: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("default.project.json")).unwrap())
+            .unwrap();
+    let shared = &project["tree"]["ReplicatedStorage"]["Shared"];
+
+    assert_eq!(shared["$path"], "src/shared");
+    assert!(project["tree"]["ReplicatedStorage"]["types"].is_null());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// An alias-only entry whose folder no mount holds is an error: the
+/// name resolves here and names nothing in the DataModel.
+#[test]
+fn an_alias_only_mount_outside_every_mount_reports() {
+    let dir = std::env::temp_dir().join(format!("alloy-alias-loose-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir,
+        "alloy.toml",
+        &format!("[build]\nin = \"src\"\nout = \"build\"\n{MOUNTS}types = \"vendor/types\"\n"),
+    );
+    write(&dir, "vendor/types/ids.aly", "export const LIMIT = 5\n");
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let found = alloy::modules::alias_problems(&dir, &config);
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].code, "MountAlias");
+    assert!(
+        found[0]
+            .message
+            .starts_with("`vendor/types` sits under no mount.")
+    );
+
+    // `alloy check` reports it, so the build never writes a require
+    // that resolves to nothing in Roblox.
+    let report = alloy::build::check_project(&dir, &config).unwrap();
+
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|(_, m)| m.contains("sits under no mount")),
+        "{:?}",
+        report.failures
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// An alias names a folder: the editor's child reads one, so a path
+/// that names a file reports rather than resolving in one tool only.
+#[test]
+fn an_alias_only_mount_that_names_a_file_reports() {
+    let dir = std::env::temp_dir().join(format!("alloy-alias-file-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir,
+        "alloy.toml",
+        &format!(
+            "[build]\nin = \"src\"\nout = \"build\"\n{MOUNTS}types = \"src/shared/ids.aly\"\n"
+        ),
+    );
+    write(&dir, "src/shared/ids.aly", "export const LIMIT = 5\n");
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let found = alloy::modules::alias_problems(&dir, &config);
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].code, "MountAlias");
+    assert!(
+        found[0]
+            .message
+            .starts_with("`src/shared/ids.aly` is no folder.")
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A table of alias-only entries alone is no tree, so the project file
+/// at the root still describes one.
+#[test]
+fn alias_only_entries_alone_leave_the_project_file_as_the_tree() {
+    let dir = std::env::temp_dir().join(format!("alloy-alias-rojo-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    write(&dir, "default.project.json", PROJECT_JSON);
+    write(
+        &dir,
+        "alloy.toml",
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[mount]\ntypes = \"src/shared/types\"\n",
+    );
+    write(&dir, "src/shared/types/ids.aly", "export const LIMIT = 5\n");
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let tree = alloy::project::Tree::load(&dir, &config);
+
+    assert!(tree.project.is_some());
+    assert_eq!(
+        alloy::project::instance_path(&tree, Path::new("src/shared/types/ids.aly")).unwrap(),
+        vec!["ReplicatedStorage", "Shared", "types", "ids"]
+    );
+    assert!(alloy::modules::alias_problems(&dir, &config).is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A `.config.luau` that writes the keys above the `luau` table
+/// declares nothing, which reads as an alias that gives no
+/// intellisense. The report names the key to move.
+#[test]
+fn a_top_level_config_luau_key_reports_on_its_file() {
+    let dir = std::env::temp_dir().join(format!("alloy-top-level-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir,
+        "alloy.toml",
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    );
+    write(
+        &dir,
+        ".config.luau",
+        "return {\n    languagemode = \"strict\",\n    aliases = {\n        types = \"./src/shared/types\",\n    },\n}\n",
+    );
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let found = alloy::modules::alias_problems(&dir, &config);
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].code, "LuauConfig");
+    assert_eq!(found[0].alias, "aliases");
+    assert!(
+        found[0]
+            .message
+            .contains("Move the key into `luau = { ... }`.")
+    );
+
+    // The same file under `luau` is clean.
+    write(
+        &dir,
+        ".config.luau",
+        "return {\n    luau = {\n        aliases = {\n            types = \"./src/shared/types\",\n        },\n    },\n}\n",
+    );
+
+    assert!(alloy::modules::alias_problems(&dir, &config).is_empty());
 
     let _ = fs::remove_dir_all(&dir);
 }

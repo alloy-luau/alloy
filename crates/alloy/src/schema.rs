@@ -136,15 +136,24 @@ fn rule_key_schema(extra: &[String]) -> Value {
 
 fn mount_value() -> Value {
     json!({
-        "type": "array",
-        "description": "The path on disk, relative to this file, and the DataModel location as `@game/Service/Folder`. A `.server.` or `.client.` file name picks the script class; `init` names its directory.",
-        "items": [
-            { "type": "string", "description": "The folder on disk, relative to this file." },
-            { "type": "string", "description": "The DataModel location: `@game/Service/Folder`.", "pattern": "^@game/" }
+        "description": "A path and where it lands, or a path alone. The pair mounts the folder at a DataModel location; a `.server.` or `.client.` file name picks the script class, and `init` names its directory. A bare string is the alias-only form: the name serves as an alias for a folder another mount already carries, and the folder has to sit under one.",
+        "oneOf": [
+            {
+                "type": "array",
+                "description": "The folder on disk, relative to this file, and the DataModel location.",
+                "items": [
+                    { "type": "string", "description": "The folder on disk, relative to this file." },
+                    { "type": "string", "description": "The DataModel location: `@game/Service/Folder`.", "pattern": "^@game/" }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+            },
+            {
+                "type": "string",
+                "description": "A folder another mount already carries, relative to this file. The name is an alias for it and nothing else."
+            }
         ],
-        "minItems": 2,
-        "maxItems": 2,
-        "examples": [["src/server", "@game/ServerScriptService/Server"]]
+        "examples": [["src/server", "@game/ServerScriptService/Server"], "src/shared/types"]
     })
 }
 
@@ -660,7 +669,7 @@ pub const TABLES: &[Table] = &[
     },
     Table {
         name: "mount",
-        doc: "Where each folder lands in the DataModel: `alias = [path, mount]`. A tool that reads a Rojo or Argon project file needs no table here; Alloy reads `default.project.json`. A tool with its own format describes the tree here, and this table then wins over any project file. With it, `alloy build` also writes `default.project.json` over the sources.",
+        doc: "Where each folder lands in the DataModel: `alias = [path, mount]`. A tool that reads a Rojo or Argon project file needs no table here; Alloy reads `default.project.json`. A tool with its own format describes the tree here, and this table then wins over any project file. With it, `alloy build` also writes `default.project.json` over the sources. `alias = path`, a bare string, names a folder another mount already carries and gives it an alias alone.",
         keys: &[],
         open: Some(mount_value),
     },
@@ -1180,10 +1189,9 @@ mod tests {
             "src"
         );
         assert_eq!(s["properties"]["build"]["additionalProperties"], false);
-        assert_eq!(
-            s["properties"]["mount"]["additionalProperties"]["type"],
-            "array"
-        );
+        let mount = &s["properties"]["mount"]["additionalProperties"];
+        assert_eq!(mount["oneOf"][0]["type"], "array");
+        assert_eq!(mount["oneOf"][1]["type"], "string");
     }
 
     #[test]

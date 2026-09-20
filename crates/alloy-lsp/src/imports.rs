@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use alloy::config::QuoteStyle;
 use alloy_syntax::ast::{DefaultExport, Expr, Stmt};
 use alloy_syntax::lexer::TokKind;
 use serde_json::{Value, json};
@@ -512,21 +513,59 @@ fn list_import_line<'a>(src: &'a str, spec: &str) -> Option<(usize, &'a str)> {
     })
 }
 
+/// The quote a generated string takes: the project's `[fmt]
+/// quote_style`, over the imports the file already holds.
+///
+/// A `force` style wins outright, since the formatter rewrites every
+/// other quote on its next run. Under the rest the last import of the
+/// file decides, so a new line reads like the ones above it; a file
+/// with no import takes what the style prefers. `preserve` has no
+/// string of its own to preserve and falls back the same way, to the
+/// double quote the project default writes.
+pub fn quote_for(src: &str, style: QuoteStyle) -> char {
+    let preferred = match style {
+        QuoteStyle::ForceSingle | QuoteStyle::AutoPreferSingle => '\'',
+
+        _ => '"',
+    };
+
+    match style {
+        QuoteStyle::ForceDouble | QuoteStyle::ForceSingle => preferred,
+
+        _ => file_quote(src).unwrap_or(preferred),
+    }
+}
+
+/// The quote of the last import line of a file.
+fn file_quote(src: &str) -> Option<char> {
+    src.lines()
+        .filter(|line| line.trim_start().starts_with("import "))
+        .filter_map(|line| {
+            line.rfind(" from ")
+                .and_then(|at| line[at + " from ".len()..].trim_start().chars().next())
+                .filter(|c| *c == '"' || *c == '\'')
+        })
+        .next_back()
+}
+
 /// The import line as the completion detail and the quick fix title
 /// write it.
-pub fn import_shape(spec: &str, export: &Export) -> String {
+pub fn import_shape(spec: &str, export: &Export, quote: char) -> String {
+    let q = quote;
+
     if export.is_default {
-        format!("import {} from \"{spec}\"", export.name)
+        format!("import {} from {q}{spec}{q}", export.name)
     } else if export.is_type {
-        format!("import {{ type {} }} from \"{spec}\"", export.name)
+        format!("import {{ type {} }} from {q}{spec}{q}", export.name)
     } else {
-        format!("import {{ {} }} from \"{spec}\"", export.written())
+        format!("import {{ {} }} from {q}{spec}{q}", export.written())
     }
 }
 
 /// The edit that imports `export` from `spec` into `src`: a new name in
-/// an existing `import { ... } from "spec"` line, or a new line.
-pub fn import_edit(src: &str, spec: &str, export: &Export) -> Value {
+/// an existing `import { ... } from "spec"` line, which keeps the quotes
+/// it has, or a new line in `quote`.
+pub fn import_edit(src: &str, spec: &str, export: &Export, quote: char) -> Value {
     let item = if export.is_type {
         format!("type {}", export.name)
     } else {
@@ -557,10 +596,11 @@ pub fn import_edit(src: &str, spec: &str, export: &Export) -> Value {
         });
     }
 
+    let q = quote;
     let text = if export.is_default {
-        format!("import {} from \"{spec}\"\n", export.name)
+        format!("import {} from {q}{spec}{q}\n", export.name)
     } else {
-        format!("import {{ {item} }} from \"{spec}\"\n")
+        format!("import {{ {item} }} from {q}{spec}{q}\n")
     };
     let line = import_insertion_line(src);
 
@@ -573,12 +613,13 @@ pub fn import_edit(src: &str, spec: &str, export: &Export) -> Value {
 /// The edit that binds a whole module under `name`:
 /// `import * as Name from "spec"` on a new line. An Alloy module's
 /// value is its export table, and a bare name would read its default.
-pub fn namespace_import_edit(src: &str, spec: &str, name: &str) -> Value {
+pub fn namespace_import_edit(src: &str, spec: &str, name: &str, quote: char) -> Value {
     let line = import_insertion_line(src);
+    let q = quote;
 
     json!({
         "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 0 } },
-        "newText": format!("import * as {name} from \"{spec}\"\n"),
+        "newText": format!("import * as {name} from {q}{spec}{q}\n"),
     })
 }
 
@@ -691,6 +732,7 @@ pub fn auto_import_items(
     prefix: &str,
     bound: &HashSet<String>,
     aliases: &[(String, PathBuf)],
+    quote: char,
 ) -> Vec<Value> {
     auto_import_candidates(src, current, files, prefix, bound, aliases)
         .into_iter()
@@ -698,9 +740,9 @@ pub fn auto_import_items(
             json!({
                 "label": export.name,
                 "kind": export.kind,
-                "detail": format!("auto-import: {}", import_shape(&spec, export)),
+                "detail": format!("auto-import: {}", import_shape(&spec, export, quote)),
                 "sortText": format!("zz{}", export.name),
-                "additionalTextEdits": [import_edit(src, &spec, export)],
+                "additionalTextEdits": [import_edit(src, &spec, export, quote)],
             })
         })
         .collect()
@@ -888,7 +930,7 @@ pub fn imported_services(src: &str) -> HashSet<String> {
 /// other file takes a line of its own. A file still on the old
 /// spelling keeps it, so the edit adds no second list beside the one
 /// the file has.
-pub fn service_import_edit(src: &str, service: &str) -> Value {
+pub fn service_import_edit(src: &str, service: &str, quote: char) -> Value {
     let list_spec = src.lines().find_map(|line| {
         let t = line.trim();
 
@@ -912,6 +954,7 @@ pub fn service_import_edit(src: &str, service: &str) -> Value {
                 is_attribute: false,
                 kind: 9,
             },
+            quote,
         );
     }
 
@@ -919,7 +962,10 @@ pub fn service_import_edit(src: &str, service: &str) -> Value {
 
     json!({
         "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 0 } },
-        "newText": format!("import {service} from \"{}/{service}\"\n", alloy::game_import::ALIAS),
+        "newText": format!(
+            "import {service} from {quote}{}/{service}{quote}\n",
+            alloy::game_import::ALIAS
+        ),
     })
 }
 
@@ -1008,7 +1054,7 @@ namespace Inner as end
     #[test]
     fn a_whole_module_import_binds_under_a_name() {
         let src = "--!strict\nlocal x = 1\n";
-        let edit = namespace_import_edit(src, "./ui/panel", "Panel");
+        let edit = namespace_import_edit(src, "./ui/panel", "Panel", '"');
         assert_eq!(edit["newText"], "import * as Panel from \"./ui/panel\"\n");
     }
 
@@ -1043,12 +1089,62 @@ namespace Inner as end
             is_attribute: false,
             kind: 6,
         };
-        let edit = import_edit(src, "./m", &e);
+        let edit = import_edit(src, "./m", &e, '"');
         assert_eq!(edit["newText"], "import { a, b } from \"./m\"");
-        let edit = import_edit(src, "./n", &e);
+        let edit = import_edit(src, "./n", &e, '"');
         assert_eq!(edit["newText"], "import { b } from \"./n\"\n");
         assert_eq!(edit["range"]["start"]["line"], 2);
         assert_eq!(import_insertion_line("--!strict\nlocal x = 1\n"), 1);
+    }
+
+    /// The project's `quote_style` writes a generated import, and the
+    /// imports the file already holds win under every style but a
+    /// forced one.
+    #[test]
+    fn a_generated_import_takes_the_projects_quote() {
+        let bare = "--!strict\nlocal x = 1\n";
+        let single = "import { a } from './m'\nlocal x = 1\n";
+
+        assert_eq!(quote_for(bare, QuoteStyle::AutoPreferDouble), '"');
+        assert_eq!(quote_for(bare, QuoteStyle::AutoPreferSingle), '\'');
+        assert_eq!(quote_for(bare, QuoteStyle::Preserve), '"');
+        assert_eq!(quote_for(bare, QuoteStyle::ForceSingle), '\'');
+        assert_eq!(quote_for(bare, QuoteStyle::ForceDouble), '"');
+
+        // The file already answers the question a `force` style does
+        // not settle.
+        assert_eq!(quote_for(single, QuoteStyle::AutoPreferDouble), '\'');
+        assert_eq!(quote_for(single, QuoteStyle::Preserve), '\'');
+        assert_eq!(quote_for(single, QuoteStyle::ForceDouble), '"');
+
+        let e = Export {
+            name: "b".into(),
+            is_type: false,
+            is_default: false,
+            is_attribute: false,
+            kind: 6,
+        };
+
+        assert_eq!(
+            import_edit(bare, "./n", &e, '\'')["newText"],
+            "import { b } from './n'\n"
+        );
+        assert_eq!(import_shape("./n", &e, '\''), "import { b } from './n'");
+        assert_eq!(
+            namespace_import_edit(bare, "./n", "N", '\'')["newText"],
+            "import * as N from './n'\n"
+        );
+        assert_eq!(
+            service_import_edit(bare, "Players", '\'')["newText"],
+            "import Players from '@game/Players'\n"
+        );
+
+        // A name joins a list that is already there, and the line keeps
+        // the quotes it wrote.
+        assert_eq!(
+            import_edit(single, "./m", &e, '"')["newText"],
+            "import { a, b } from './m'"
+        );
     }
 
     #[test]

@@ -441,14 +441,15 @@ impl State {
                 // reader picks the name and the line finishes itself.
                 if spec.is_none() {
                     let (start, end, close) = from_clause_at(&doc.source, offset);
+                    let q = imports::quote_for(&doc.source, self.fmt_config(uri).quote_style);
 
                     for (spec, e) in self.project_exports(uri, prefix) {
                         let Some(label) = listed(&e) else {
                             continue;
                         };
-                        let clause = format!("{close} from \"{spec}\"");
+                        let clause = format!("{close} from {q}{spec}{q}");
                         let mut item = word(&label, e.kind, None, from);
-                        item["detail"] = json!(format!("from \"{spec}\""));
+                        item["detail"] = json!(format!("from {q}{spec}{q}"));
 
                         // One edit writes the name and the clause where
                         // the clause starts at the caret. Two edits at
@@ -1093,7 +1094,10 @@ impl State {
                 quote,
             } => {
                 let from = offset - prefix.len() - quote.map_or(0, char::len_utf8);
-                let q = quote.unwrap_or('"');
+                // The quote the reader opened, else the project's.
+                let q = quote.unwrap_or_else(|| {
+                    imports::quote_for(&doc.source, self.fmt_config(uri).quote_style)
+                });
 
                 for field in self.index_keys(uri, &doc.source, offset, receiver) {
                     let label = format!("{q}{}{q}", field.name);
@@ -2037,6 +2041,13 @@ impl State {
         attr: &str,
     ) -> Vec<(String, String, String)> {
         let detail = format!("takes `{element}` for `@{attr}`");
+        // A literal the item writes whole takes the project's quote;
+        // one the reader opened a quote for carries none.
+        let q = self
+            .docs
+            .get(uri)
+            .map(|d| imports::quote_for(&d.source, self.fmt_config(uri).quote_style))
+            .unwrap_or('"');
 
         if element.contains('"') || element.contains('\'') {
             return element
@@ -2052,7 +2063,7 @@ impl State {
                                 // of its own.
                                 Some(_) => text.to_string(),
 
-                                None => format!("\"{text}\""),
+                                None => format!("{q}{text}{q}"),
                             };
 
                             (text.to_string(), insert, detail.clone())

@@ -3171,6 +3171,80 @@ pub(crate) fn an_import_list_with_no_module_lists_the_project() {
     assert_eq!(cog["textEdit"]["newText"], json!("Cog"));
 }
 
+/// A generated import takes the project's `[fmt] quote_style`. The
+/// auto-import quick fix and the `from` clause of an import list both
+/// write it. A project that names no style writes the double quote,
+/// which is what the default says.
+#[test]
+pub(crate) fn a_generated_import_takes_the_projects_quote_style() {
+    for (name, table, q) in [
+        ("default", "", '"'),
+        ("single", "\n[fmt]\nquote_style = \"force-single\"\n", '\''),
+        ("double", "\n[fmt]\nquote_style = \"force-double\"\n", '"'),
+    ] {
+        let dir = std::env::temp_dir().join(format!("alloy-quote-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("alloy.toml"),
+            format!("[build]\nin = \"src\"\n{table}"),
+        )
+        .expect("alloy.toml");
+
+        let root = dir.to_string_lossy().into_owned();
+        let defs = format!("file://{root}/src/defs.aly");
+        let uses = format!("file://{root}/src/use.aly");
+        let list = format!("file://{root}/src/list.aly");
+        let open = "import { \n";
+        let st = files(&[
+            (&defs, "export struct Vec2 as\n    x: number\nend\n"),
+            (
+                &uses,
+                "local function make(): Vec2\n    return new Vec2 { x = 1 }\nend\n",
+            ),
+            (&list, open),
+        ]);
+        let report = json!({
+            "message": "TypeError: Unknown type 'Vec2'",
+            "range": { "start": { "line": 0, "character": 23 }, "end": { "line": 0, "character": 27 } },
+        });
+        let actions = st.import_actions(&uses, &[report]);
+
+        assert_eq!(actions.len(), 1, "{name}: {actions:?}");
+        assert_eq!(
+            actions[0]["title"],
+            json!(format!("Add `import {{ Vec2 }} from {q}./defs{q}`")),
+            "{name}"
+        );
+        assert_eq!(
+            actions[0]["edit"]["changes"][&uses][0]["newText"],
+            json!(format!("import {{ Vec2 }} from {q}./defs{q}\n")),
+            "{name}"
+        );
+
+        let at = open.find('\n').expect("the line end");
+        let ctx = context::detect(open, at).expect("a context");
+        let items = st.context_items(&list, at, &ctx);
+        let vec2 = items
+            .iter()
+            .find(|i| i["label"] == json!("Vec2"))
+            .unwrap_or_else(|| panic!("{name}: the export of the other module"));
+
+        assert_eq!(
+            vec2["detail"],
+            json!(format!("from {q}./defs{q}")),
+            "{name}"
+        );
+        assert_eq!(
+            vec2["textEdit"]["newText"],
+            json!(format!("Vec2 }} from {q}./defs{q}")),
+            "{name}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// The list reaches the folder an alias names, and never the store a
 /// package keeps beside it: `best_spec` answers nothing for a path a
 /// dot folder holds.

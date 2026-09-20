@@ -28,7 +28,9 @@ impl State {
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let aliases = project_aliases(&dir, self.root.as_deref());
 
-        imports::auto_import_items(&doc.source, &path, &files, &prefix, &bound, &aliases)
+        let quote = imports::quote_for(&doc.source, self.fmt_config(uri).quote_style);
+
+        imports::auto_import_items(&doc.source, &path, &files, &prefix, &bound, &aliases, quote)
     }
 
     /// Every name the project's other modules export, with the spec
@@ -129,6 +131,7 @@ impl State {
             .collect();
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let aliases = project_aliases(&dir, self.root.as_deref());
+        let quote = imports::quote_for(&doc.source, self.fmt_config(uri).quote_style);
         let mut seen: Vec<String> = Vec::new();
 
         for report in diagnostics {
@@ -161,7 +164,7 @@ impl State {
                     is_type: export.is_type || typed,
                     ..export.clone()
                 };
-                let shape = imports::import_shape(&spec, &export);
+                let shape = imports::import_shape(&spec, &export, quote);
 
                 if seen.contains(&shape) {
                     continue;
@@ -173,7 +176,7 @@ impl State {
                     "kind": "quickfix",
                     "isPreferred": true,
                     "diagnostics": [report],
-                    "edit": { "changes": { uri: [imports::import_edit(&doc.source, &spec, &export)] } },
+                    "edit": { "changes": { uri: [imports::import_edit(&doc.source, &spec, &export, quote)] } },
                 }));
             }
         }
@@ -211,6 +214,7 @@ impl State {
         let services = imports::imported_services(&doc.source);
         let source = doc.source.clone();
         let ignored = self.import_ignore_globs();
+        let quote = imports::quote_for(&source, self.fmt_config(uri).quote_style);
         let items = match result {
             Value::Array(v) => v,
 
@@ -238,7 +242,7 @@ impl State {
                     item["detail"] = json!(format!("game:GetService(\"{service}\")"));
                     item["insertText"] = json!(service);
                     item["additionalTextEdits"] =
-                        json!([imports::service_import_edit(&source, &service)]);
+                        json!([imports::service_import_edit(&source, &service, quote)]);
 
                     return true;
                 }
@@ -278,7 +282,7 @@ impl State {
             // returns one value, which is what a bare name takes.
             let is_alloy = file.extension().is_some_and(|e| e == "aly" || e == "alx");
             let edit = match is_alloy {
-                true => imports::namespace_import_edit(&source, &spec, &name),
+                true => imports::namespace_import_edit(&source, &spec, &name, quote),
 
                 false => imports::import_edit(
                     &source,
@@ -290,6 +294,7 @@ impl State {
                         is_attribute: false,
                         kind: 9,
                     },
+                    quote,
                 ),
             };
             item["label"] = json!(name);

@@ -31,8 +31,8 @@ pub fn defaults() -> Value {
 }
 
 /// The proxy's own editor options. The two helpers are on until the
-/// editor turns one off; the two deprecation filters are off until it
-/// turns one on.
+/// editor turns one off; the two deprecation filters and the arrow are
+/// off until it turns one on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Editor {
     /// Name the element the editor closes after the `>` that ends an
@@ -45,6 +45,9 @@ pub struct Editor {
     pub hide_roblox_deprecated: bool,
     /// Leave out what the source marks `@deprecated` as well.
     pub hide_all_deprecated: bool,
+    /// Write a function's return type hint as `-> T`, the way
+    /// `function f() -> T` spells it, rather than `: T`.
+    pub arrow_return_hints: bool,
 }
 
 impl Default for Editor {
@@ -54,6 +57,7 @@ impl Default for Editor {
             auto_end: true,
             hide_roblox_deprecated: false,
             hide_all_deprecated: false,
+            arrow_return_hints: false,
         }
     }
 }
@@ -69,6 +73,7 @@ pub fn editor(options: &Value, current: Editor) -> Editor {
         auto_end: flag("autoEnd", current.auto_end),
         hide_roblox_deprecated: flag("hideRobloxDeprecated", current.hide_roblox_deprecated),
         hide_all_deprecated: flag("hideAllDeprecated", current.hide_all_deprecated),
+        arrow_return_hints: flag("arrowReturnHints", current.arrow_return_hints),
     }
 }
 
@@ -147,6 +152,7 @@ pub fn from_editor(options: &Value) -> Value {
         o.remove("autoEnd");
         o.remove("hideRobloxDeprecated");
         o.remove("hideAllDeprecated");
+        o.remove("arrowReturnHints");
     }
 
     out
@@ -276,12 +282,26 @@ mod tests {
     fn the_proxys_own_options_stay_out_of_the_child_settings() {
         let s = from_editor(
             &json!({ "luauLsp": {}, "autoCloseTags": false, "autoEnd": false,
-                                     "hideRobloxDeprecated": true, "hideAllDeprecated": true }),
+                                     "hideRobloxDeprecated": true, "hideAllDeprecated": true,
+                                     "arrowReturnHints": true }),
         );
         assert!(s.get("autoCloseTags").is_none());
         assert!(s.get("autoEnd").is_none());
         assert!(s.get("hideRobloxDeprecated").is_none());
         assert!(s.get("hideAllDeprecated").is_none());
+        assert!(s.get("arrowReturnHints").is_none());
+    }
+
+    /// The return type hint reads `: T` until the editor asks for the
+    /// arrow, and a later change that names another key leaves it.
+    #[test]
+    fn the_arrow_return_hint_starts_off() {
+        let start = Editor::default();
+        assert!(!start.arrow_return_hints);
+        let on = editor(&json!({ "arrowReturnHints": true }), start);
+        assert!(on.arrow_return_hints);
+        assert_eq!(editor(&json!({ "autoEnd": true }), on), on);
+        assert!(!editor(&json!({ "arrowReturnHints": false }), on).arrow_return_hints);
     }
 
     /// Both filters start off, and a settings change that names one

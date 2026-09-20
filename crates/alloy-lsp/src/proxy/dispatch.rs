@@ -1536,6 +1536,10 @@ impl Server {
                     && let Some(hints) = result.as_array_mut()
                 {
                     clean_hints(hints, doc);
+                    // A return type reads `-> T` when the editor asks
+                    // for the arrow; `local x: T` has one spelling and
+                    // keeps the colon.
+                    arrow_returns(hints, doc, st.editor.arrow_return_hints);
                 }
 
                 if let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u)) {

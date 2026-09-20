@@ -90,6 +90,58 @@ fn takes_an_annotation(doc: &Doc, line: u32, character: u32) -> bool {
     matches!(head.split_whitespace().next_back(), Some("local" | "const"))
 }
 
+/// Writes a function's return type hint as `-> T` when the editor asks
+/// for the arrow. Off, every hint keeps the colon.
+///
+/// Alloy spells a return type both ways, `function f(): T` and
+/// `function f() -> T`, and a reader who writes the arrow wants the
+/// hint to read like the file. Only the return hint takes it: a
+/// variable and a parameter have one spelling, `local x: T` and
+/// `f(a: T)`, so they keep the colon. The child stands a return hint
+/// on the `)` that closes the parameters, which is what tells the
+/// three apart.
+///
+/// The label and the edit are one text, so an accepted hint writes
+/// what the gutter showed. The space in front is the hint's padding,
+/// which no edit carries.
+pub(crate) fn arrow_returns(hints: &mut [Value], doc: &Doc, on: bool) {
+    if !on {
+        return;
+    }
+
+    for h in hints.iter_mut() {
+        let Some(rest) = hint_label(h).strip_prefix(':').map(str::to_string) else {
+            continue;
+        };
+        let after_params = h
+            .get("position")
+            .and_then(position_of_value)
+            .is_some_and(|(l, c)| closes_a_parameter_list(doc, l, c));
+
+        if !after_params {
+            continue;
+        }
+
+        let text = format!("->{rest}");
+        h["label"] = json!(text);
+        h["paddingLeft"] = json!(true);
+
+        if h.pointer("/textEdits/0/newText").is_some() {
+            h["textEdits"][0]["newText"] = json!(text);
+        }
+    }
+}
+
+/// Whether a `)` stands right before a position: the parameter list of
+/// a function, which its return type follows.
+fn closes_a_parameter_list(doc: &Doc, line: u32, character: u32) -> bool {
+    doc.source
+        .lines()
+        .nth(line as usize)
+        .and_then(|text| text.chars().take(character as usize).last())
+        == Some(')')
+}
+
 /// The hints as the source can hold them. A parameter hint that names
 /// an emit slot goes. A type hint loses `@checked`, reads by the name
 /// its line gives when the print is unwritable, inserts nothing when no

@@ -964,6 +964,44 @@ fn a_method_on_an_instantiated_struct_carries_the_instantiation() {
 }
 
 /*
+Alloy spells a return type `function f(): T` and `function f() -> T`,
+and the arrow setting makes the hint read like the file. The return
+hint stands after the `)` of the parameters; a variable and a
+parameter hint stand after a name and keep the colon. The label and
+the edit stay one text.
+*/
+#[test]
+fn the_arrow_setting_reaches_the_return_hint_alone() {
+    let src = "local function add(a: number, b: number)\n    return a + b\nend\n\nlocal total = add(1, 2)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let hints = || {
+        vec![
+            json!({ "kind": 1, "label": ": number", "position": { "line": 0, "character": 40 },
+                    "textEdits": [{ "newText": ": number" }] }),
+            json!({ "kind": 1, "label": ": number", "position": { "line": 4, "character": 11 },
+                    "textEdits": [{ "newText": ": number" }] }),
+        ]
+    };
+
+    // Off, which is the default: both hints keep the colon.
+    let mut colon = hints();
+    arrow_returns(&mut colon, doc, false);
+    assert_eq!(hint_label(&colon[0]), ": number");
+    assert_eq!(hint_label(&colon[1]), ": number");
+
+    let mut arrow = hints();
+    arrow_returns(&mut arrow, doc, true);
+    assert_eq!(hint_label(&arrow[0]), "-> number");
+    assert_eq!(arrow[0]["textEdits"][0]["newText"], "-> number");
+    assert_eq!(arrow[0]["paddingLeft"], json!(true));
+
+    // The binding on line 4 takes `local total: number` and nothing
+    // else, so its hint is untouched.
+    assert_eq!(arrow[1], hints()[1]);
+}
+
+/*
 `$dbg(Point.new(1))`: the emit writes the argument as a string for the
 message and as code after it. A caret inside the inner call maps to
 the string, where the child sees no call to help with; the code copy

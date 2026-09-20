@@ -262,6 +262,7 @@ impl State {
         // One action per attribute and insertion point: a contract that
         // asks for a field and a method writes each where it belongs.
         let mut seen: Vec<(&str, u32)> = Vec::new();
+        let step = self.fmt_config(uri).indent_width;
 
         for gap in gaps {
             if seen.contains(&(gap.attr.as_str(), gap.insert_at)) {
@@ -279,7 +280,7 @@ impl State {
                 .iter()
                 .filter(|g| g.attr == gap.attr && g.insert_at == gap.insert_at)
                 .collect();
-            let text: String = mine.iter().map(|g| member_text(g)).collect();
+            let text: String = mine.iter().map(|g| member_text(g, step)).collect();
             let (el, ec) = position_of(&doc.source, gap.insert_at as usize);
             let at = json!({ "line": el, "character": ec.saturating_sub(gap.indent) });
             let names: Vec<String> = mine.iter().map(|g| g.member.clone()).collect();
@@ -1830,9 +1831,12 @@ declaration it goes in.
 A function takes its parameter list and an `end`; a field takes its type.
 The visibility goes in front when the clause asked for one, and the
 member reads as the plain member it is when the clause took either.
+
+`step` is `[fmt] indent_width`, so the text the fix writes is the text
+the formatter keeps.
 */
-fn member_text(gap: &alloy::desugar::ContractGap) -> String {
-    let pad = " ".repeat(gap.indent as usize + 4);
+fn member_text(gap: &alloy::desugar::ContractGap, step: usize) -> String {
+    let pad = " ".repeat(gap.indent as usize + step);
     let visibility = match gap.visibility.is_empty() {
         true => String::new(),
 
@@ -1860,7 +1864,7 @@ fn member_text(gap: &alloy::desugar::ContractGap) -> String {
     // type parameter. A value of the right type would be a lie the
     // author has to find later.
     let body = match declares_a_return(&params) {
-        true => format!("{pad}    error(\"todo\")\n"),
+        true => format!("{pad}{}error(\"todo\")\n", " ".repeat(step)),
 
         false => String::new(),
     };

@@ -794,7 +794,7 @@ mod tests {
     #[test]
     fn reindents_blocks() {
         let src = "local function f(x)\nif x then\nreturn 1\nelseif x == 2 then\nreturn 2\nelse\nreturn 3\nend\nend\n";
-        let want = "local function f(x)\n    if x then\n        return 1\n    elseif x == 2 then\n        return 2\n    else\n        return 3\n    end\nend\n";
+        let want = "local function f(x)\n  if x then\n    return 1\n  elseif x == 2 then\n    return 2\n  else\n    return 3\n  end\nend\n";
         assert_eq!(fmt(src), want);
     }
 
@@ -803,8 +803,8 @@ mod tests {
     /// keep what the source wrote.
     #[test]
     fn an_annotation_colon_takes_one_space_after() {
-        let src = "local x:number = 1\n\nfunction f(a:number, b :number):number\n    return a + b\nend\n\nstruct S as\n    y:number?\n    z : string\nend\n\nlocal function g<T : Show>(a : T) : T\n    return a\nend\n\nlocal m: { [string] : number } = {}\nlocal h : typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i : number = 1, 2 do\n    print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get \"s\", o, h, cb)\n";
-        let want = "local x: number = 1\n\nfunction f(a: number, b: number): number\n    return a + b\nend\n\nstruct S as\n    y: number?\n    z: string\nend\n\nlocal function g<T: Show>(a: T): T\n    return a\nend\n\nlocal m: { [string]: number } = {}\nlocal h: typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i: number = 1, 2 do\n    print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get(\"s\"), o, h, cb)\n";
+        let src = "local x:number = 1\n\nfunction f(a:number, b :number):number\n  return a + b\nend\n\nstruct S as\n  y:number?\n  z : string\nend\n\nlocal function g<T : Show>(a : T) : T\n  return a\nend\n\nlocal m: { [string] : number } = {}\nlocal h : typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i : number = 1, 2 do\n  print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get \"s\", o, h, cb)\n";
+        let want = "local x: number = 1\n\nfunction f(a: number, b: number): number\n  return a + b\nend\n\nstruct S as\n  y: number?\n  z: string\nend\n\nlocal function g<T: Show>(a: T): T\n  return a\nend\n\nlocal m: { [string]: number } = {}\nlocal h: typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i: number = 1, 2 do\n  print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get('s'), o, h, cb)\n";
         assert_eq!(fmt(src), want);
         assert_eq!(fmt(want), want);
     }
@@ -816,15 +816,15 @@ mod tests {
     #[test]
     fn a_visibility_word_opens_a_declaration_body() {
         let decls = [
-            "public struct T as\n        x: number\n    end",
-            "private struct T as\n        x: number\n    end",
-            "public enum E as\n        A\n        B\n    end",
-            "public function f()\n        return 1\n    end",
+            "public struct T as\n    x: number\n  end",
+            "private struct T as\n    x: number\n  end",
+            "public enum E as\n    A\n    B\n  end",
+            "public function f()\n    return 1\n  end",
             "private const K = 1",
         ];
 
         for decl in decls {
-            let want = format!("export namespace Ns as\n    {decl}\nend\n");
+            let want = format!("export namespace Ns as\n  {decl}\nend\n");
             let flat: String = want
                 .lines()
                 .map(str::trim_start)
@@ -841,8 +841,8 @@ mod tests {
     /// it: the branch bodies and the `else`.
     #[test]
     fn an_if_expression_indents_its_branches() {
-        let src = "local x = if a > 0 then\n\"big\"\nelse\n\"small\"\n";
-        let want = "local x = if a > 0 then\n    \"big\"\n    else\n    \"small\"\n";
+        let src = "local x = if a > 0 then\n'big'\nelse\n'small'\n";
+        let want = "local x = if a > 0 then\n  'big'\n  else\n  'small'\n";
         assert_eq!(fmt(src), want);
         assert_eq!(fmt(want), want);
     }
@@ -855,20 +855,20 @@ mod tests {
     fn a_long_if_expression_breaks_its_branches() {
         let a = "1111111111111111111111111111111111111111111111111";
         let b = "2222222222222222222222222222222222222222222222222222";
-        let branches = format!("if flag then\n        {a}\n        else\n        {b}");
+        let branches = format!("if flag then\n    {a}\n    else\n    {b}");
 
         let cases = [
             (
-                format!("local function g(): number\n    return if flag then {a} else {b}\nend\n"),
-                format!("local function g(): number\n    return {branches}\nend\n"),
+                format!("local function g(): number\n  return if flag then {a} else {b}\nend\n"),
+                format!("local function g(): number\n  return {branches}\nend\n"),
             ),
             (
                 format!("local t = {{ value = if flag then {a} else {b} }}\n"),
-                format!("local t = {{\n    value = {branches},\n}}\n"),
+                format!("local t = {{\n  value = {branches},\n}}\n"),
             ),
             (
                 format!("f(if flag then {a} else {b})\n"),
-                format!("f(\n    {branches}\n)\n"),
+                format!("f(\n  {branches}\n)\n"),
             ),
         ];
 
@@ -889,18 +889,19 @@ mod tests {
     /// segment of the string.
     #[test]
     fn an_if_expression_in_an_interpolation_hole_opens_no_block() {
-        let short = "function f(flag: boolean): string\n    return `x {if flag then \"a\" else \"b\"} y`\nend\n";
+        let short =
+            "function f(flag: boolean): string\n  return `x {if flag then 'a' else 'b'} y`\nend\n";
         assert_eq!(fmt(short), short);
         // The `end` of a file the old rule indented comes back.
-        assert_eq!(fmt(&short.replace("\nend\n", "\n    end\n")), short);
+        assert_eq!(fmt(&short.replace("\nend\n", "\n  end\n")), short);
 
-        let t = "\"longvalueherefortrueandthenmore\"";
-        let f = "\"longvaluehereforfalsealternativevalue\"";
+        let t = "'longvalueherefortrueandthenmore'";
+        let f = "'longvaluehereforfalsealternativevalue'";
         let long = format!(
-            "function g(flag: boolean): string\n    return `prefix {{if flag then {t} else {f}}} suffix`\nend\n"
+            "function g(flag: boolean): string\n  return `prefix {{if flag then {t} else {f}}} suffix`\nend\n"
         );
         let want = format!(
-            "function g(flag: boolean): string\n    return `prefix {{if flag then\n        {t}\n        else\n        {f}}} suffix`\nend\n"
+            "function g(flag: boolean): string\n  return `prefix {{if flag then\n    {t}\n    else\n    {f}}} suffix`\nend\n"
         );
         assert!(long.lines().any(|l| l.chars().count() > 100));
         assert_eq!(fmt(&long), want);
@@ -927,11 +928,11 @@ mod tests {
     #[test]
     fn a_table_that_fits_stays_on_one_line_and_one_that_does_not_breaks() {
         assert_eq!(
-            fmt("local t = {\n    a = 1,\n    b = 2 }\n"),
+            fmt("local t = {\n  a = 1,\n  b = 2 }\n"),
             "local t = { a = 1, b = 2 }\n"
         );
         let long = "local t = { alpha = 111111111111, beta = 222222222222, gamma = 333333333333, delta = 444444444444, epsilon = 5555 }\n";
-        let want = "local t = {\n    alpha = 111111111111,\n    beta = 222222222222,\n    gamma = 333333333333,\n    delta = 444444444444,\n    epsilon = 5555,\n}\n";
+        let want = "local t = {\n  alpha = 111111111111,\n  beta = 222222222222,\n  gamma = 333333333333,\n  delta = 444444444444,\n  epsilon = 5555,\n}\n";
         assert_eq!(fmt(long), want);
     }
 
@@ -941,16 +942,16 @@ mod tests {
     /// what asks for the alias form.
     #[test]
     fn a_service_import_keeps_its_form_and_its_order() {
-        let src = "import { RunService, Players } from \"@game\"\nimport TweenService from \"@game/TweenService\"\nimport { ReplicatedStorage as RS } from \"@game\"\n";
+        let src = "import { RunService, Players } from '@game'\nimport TweenService from '@game/TweenService'\nimport { ReplicatedStorage as RS } from '@game'\n";
         assert_eq!(fmt(src), src);
 
-        let old = "import { RunService, Players } from \"game\"\nimport TweenService from \"game:TweenService\"\n";
+        let old = "import { RunService, Players } from 'game'\nimport TweenService from 'game:TweenService'\n";
         assert_eq!(fmt(old), old);
     }
 
     #[test]
     fn a_magic_trailing_comma_keeps_a_group_expanded() {
-        let src = "local t = {\n    a = 1,\n    b = 2,\n}\n";
+        let src = "local t = {\n  a = 1,\n  b = 2,\n}\n";
         assert_eq!(fmt(src), src);
     }
 
@@ -958,19 +959,26 @@ mod tests {
     fn a_callback_argument_indents_once() {
         assert_eq!(
             fmt("foo(function()\nbar()\nend)\n"),
-            "foo(function()\n    bar()\nend)\n"
+            "foo(function()\n  bar()\nend)\n"
         );
     }
 
     #[test]
     fn quotes_follow_the_option() {
-        assert_eq!(fmt("local s = 'a'\n"), "local s = \"a\"\n");
-        assert_eq!(fmt("local s = 'say \"hi\"'\n"), "local s = 'say \"hi\"'\n");
+        // The default forces single quotes, and escapes a single
+        // quote the string holds.
+        assert_eq!(fmt("local s = \"a\"\n"), "local s = 'a'\n");
+        assert_eq!(fmt("local s = \"it's\"\n"), "local s = 'it\\'s'\n");
         let mut o = FmtConfig::default();
-        o.quote_style = QuoteStyle::ForceSingle;
+        o.quote_style = QuoteStyle::AutoPreferDouble;
         assert_eq!(
-            format_with("local s = \"it's\"\n", &o).unwrap(),
-            "local s = 'it\\'s'\n"
+            format_with("local s = 'a'\n", &o).unwrap(),
+            "local s = \"a\"\n"
+        );
+        // An `auto` style keeps the other quote instead of escaping.
+        assert_eq!(
+            format_with("local s = 'say \"hi\"'\n", &o).unwrap(),
+            "local s = 'say \"hi\"'\n"
         );
     }
 
@@ -978,11 +986,11 @@ mod tests {
     fn call_parentheses_follow_the_option() {
         assert_eq!(
             fmt("print \"x\"\nf { a = 1 }\n"),
-            "print(\"x\")\nf({ a = 1 })\n"
+            "print('x')\nf({ a = 1 })\n"
         );
         let mut o = FmtConfig::default();
         o.call_parentheses = CallParentheses::None;
-        assert_eq!(format_with("print(\"x\")\n", &o).unwrap(), "print \"x\"\n");
+        assert_eq!(format_with("print(\"x\")\n", &o).unwrap(), "print 'x'\n");
     }
 
     #[test]
@@ -997,8 +1005,8 @@ mod tests {
     /// the way a struct's does. A second pass changes nothing.
     #[test]
     fn a_generic_enum_formats_like_a_struct() {
-        let src = "enum Either<L, R = string> as\n  Left(L)\n    Right(R)\nend\n";
-        let want = "enum Either<L, R = string> as\n    Left(L)\n    Right(R)\nend\n";
+        let src = "enum Either<L, R = string> as\n  Left(L)\n  Right(R)\nend\n";
+        let want = "enum Either<L, R = string> as\n  Left(L)\n  Right(R)\nend\n";
         assert_eq!(fmt(src), want);
         assert_eq!(fmt(want), want);
         assert_eq!(
@@ -1019,11 +1027,11 @@ mod tests {
 
     #[test]
     fn a_map_literal_keeps_its_pairs_tight() {
-        let src = "local prices = $map[[\"sword\", 10], [\"pet\", 25]]\n";
+        let src = "local prices = $map[['sword', 10], ['pet', 25]]\n";
         assert_eq!(fmt(src), src);
         assert_eq!(
-            fmt("local s = $set[\"a\", \"b\"]\n"),
-            "local s = $set[\"a\", \"b\"]\n"
+            fmt("local s = $set['a', 'b']\n"),
+            "local s = $set['a', 'b']\n"
         );
         // A plain array of arrays keeps the array spacing.
         assert_eq!(
@@ -1034,7 +1042,7 @@ mod tests {
 
     #[test]
     fn a_file_that_does_not_parse_is_left_alone() {
-        let src = "local function alpha(n: number): number\n    if n > 0 then\n        return n\n    return 0\nend\n";
+        let src = "local function alpha(n: number): number\n  if n > 0 then\n    return n\n  return 0\nend\n";
         let e = format_file(src, &FmtConfig::default()).unwrap_err();
         assert!(e.starts_with(UNPARSED), "{e}");
         // A `.d.aly` writes `declare`, and still parses.
@@ -1048,17 +1056,17 @@ mod tests {
 
     #[test]
     fn import_lists_expand_on_a_trailing_comma_or_when_asked() {
-        let src = "import { world, pair, } from \"@pkg/jecs\"\nimport { x, y } from \"./m\"\nexport { x, y }\nprint(world, pair, x, y)\n";
+        let src = "import { world, pair, } from '@pkg/jecs'\nimport { x, y } from './m'\nexport { x, y }\nprint(world, pair, x, y)\n";
         assert_eq!(
             format(src).unwrap(),
-            "import {\n    world,\n    pair,\n} from \"@pkg/jecs\"\nimport { x, y } from \"./m\"\nexport { x, y }\nprint(world, pair, x, y)\n"
+            "import {\n  world,\n  pair,\n} from '@pkg/jecs'\nimport { x, y } from './m'\nexport { x, y }\nprint(world, pair, x, y)\n"
         );
 
         let mut o = FmtConfig::default();
         o.expand_imports = true;
         assert_eq!(
-            format_with("import a, { x, y } from \"./m\"\nimport { one } from \"./o\"\nexport { x, y }\nprint(a, x, y, one)\n", &o).unwrap(),
-            "import a, {\n    x,\n    y,\n} from \"./m\"\nimport { one } from \"./o\"\nexport {\n    x,\n    y,\n}\nprint(a, x, y, one)\n"
+            format_with("import a, { x, y } from './m'\nimport { one } from './o'\nexport { x, y }\nprint(a, x, y, one)\n", &o).unwrap(),
+            "import a, {\n  x,\n  y,\n} from './m'\nimport { one } from './o'\nexport {\n  x,\n  y,\n}\nprint(a, x, y, one)\n"
         );
     }
 
@@ -1067,10 +1075,10 @@ mod tests {
         let mut o = FmtConfig::default();
         o.sort_requires.enabled = true;
         o.sort_requires.grouping = RequireGrouping::ByKind;
-        let src = "import { b } from \"./b\"\nimport { a } from \"@pkg/a\"\nprint(a, b)\n";
+        let src = "import { b } from './b'\nimport { a } from '@pkg/a'\nprint(a, b)\n";
         assert_eq!(
             format_with(src, &o).unwrap(),
-            "import { a } from \"@pkg/a\"\nimport { b } from \"./b\"\nprint(a, b)\n"
+            "import { a } from '@pkg/a'\nimport { b } from './b'\nprint(a, b)\n"
         );
     }
 
@@ -1085,8 +1093,8 @@ mod tests {
     #[test]
     fn a_blank_line_at_the_edge_of_a_block_goes() {
         assert_eq!(
-            fmt("if x then\n\n    y()\n\nend\n"),
-            "if x then\n    y()\nend\n"
+            fmt("if x then\n\n  y()\n\nend\n"),
+            "if x then\n  y()\nend\n"
         );
     }
 
@@ -1095,7 +1103,7 @@ mod tests {
     #[test]
     fn a_class_body_indents_as_a_block() {
         let src = "class Critter\npublic hp: number\nfunction heal(self) end\nend\n";
-        let want = "class Critter\n    public hp: number\n    function heal(self) end\nend\n";
+        let want = "class Critter\n  public hp: number\n  function heal(self) end\nend\n";
         assert_eq!(fmt(src), want);
         assert_eq!(fmt(want), want);
         // The word is still a name where the parser reads one.
@@ -1108,7 +1116,7 @@ mod tests {
     #[test]
     fn match_arms_indent_once_and_bodies_twice() {
         let src = "match m with\ncase Ok(v) then\nprint(v)\ncase Err(e) then print(e)\ndefault\nprint(0)\nend\n";
-        let want = "match m with\n    case Ok(v) then\n        print(v)\n    case Err(e) then print(e)\n    default\n        print(0)\nend\n";
+        let want = "match m with\n  case Ok(v) then\n    print(v)\n  case Err(e) then print(e)\n  default\n    print(0)\nend\n";
         assert_eq!(fmt(src), want);
         // The hand-broken form keeps its lines.
         assert_eq!(fmt(want), want);
@@ -1121,13 +1129,13 @@ mod tests {
     /// nothing.
     #[test]
     fn a_long_one_line_match_breaks_its_arms() {
-        let a = "\"1111111111111111111111111111111111111111111\"";
-        let b = "\"2222222222222222222222222222222222222222222\"";
+        let a = "'1111111111111111111111111111111111111111111'";
+        let b = "'2222222222222222222222222222222222222222222'";
         let src = format!(
             "match n with case 0 then return {a} case 1 then return {b} default return 0 end\n"
         );
         let want = format!(
-            "match n with\n    case 0 then\n        return {a}\n    case 1 then\n        return {b}\n    default\n        return 0\nend\n"
+            "match n with\n  case 0 then\n    return {a}\n  case 1 then\n    return {b}\n  default\n    return 0\nend\n"
         );
         assert!(src.lines().any(|l| l.chars().count() > 100));
         assert_eq!(fmt(&src), want);
@@ -1135,8 +1143,7 @@ mod tests {
 
         // Two arms on a line break even under the width.
         let two = "match n with case 1 then f() case 2 then g() end\n";
-        let broken =
-            "match n with\n    case 1 then\n        f()\n    case 2 then\n        g()\nend\n";
+        let broken = "match n with\n  case 1 then\n    f()\n  case 2 then\n    g()\nend\n";
         assert_eq!(fmt(two), broken);
 
         // One arm that fits keeps its line.
@@ -1156,7 +1163,7 @@ mod tests {
     /// them; the output guard now rejects such a run as well.
     #[test]
     fn a_comment_inside_an_argument_list_keeps_its_line() {
-        let src = "print(\n    1, -- first\n    2, -- second\n    -- own line\n    3 -- last\n)\n";
+        let src = "print(\n  1, -- first\n  2, -- second\n  -- own line\n  3 -- last\n)\n";
         assert_eq!(fmt(src), src);
         // The same list written flat breaks the same way.
         let flat = "print(1, -- first\n2, -- second\n-- own line\n3 -- last\n)\n";
@@ -1168,7 +1175,7 @@ mod tests {
     #[test]
     fn output_that_does_not_parse_is_refused() {
         assert!(OUTPUT_UNPARSED.contains("the file is unchanged"));
-        assert!(parse_error("print(\n    1, -- first\n    2\n)\n").is_none());
+        assert!(parse_error("print(\n  1, -- first\n  2\n)\n").is_none());
     }
 
     #[test]
@@ -1186,7 +1193,7 @@ mod tests {
         let mut o = FmtConfig::default();
         o.collapse_simple_statement = Collapse::Always;
         assert_eq!(
-            format_with("if x then\n    return 1\nend\n", &o).unwrap(),
+            format_with("if x then\n  return 1\nend\n", &o).unwrap(),
             "if x then return 1 end\n"
         );
     }
@@ -1198,7 +1205,7 @@ mod tests {
         o.call_chains.min_calls = 3;
         assert_eq!(
             format_with("local v = xs:map(f):filter(g):reduce(h, 0)\n", &o).unwrap(),
-            "local v = xs:map(f)\n    :filter(g)\n    :reduce(h, 0)\n"
+            "local v = xs:map(f)\n  :filter(g)\n  :reduce(h, 0)\n"
         );
     }
 
@@ -1207,7 +1214,7 @@ mod tests {
     /// line of every file.
     #[test]
     fn crlf_round_trips() {
-        let src = "struct T as\r\n    x: number -- a note\r\nend\r\n\r\n--[[ long\r\ncomment ]]\r\nlocal t = new T { x = 1 }\r\nprint(t.x)\r\n";
+        let src = "struct T as\r\n  x: number -- a note\r\nend\r\n\r\n--[[ long\r\ncomment ]]\r\nlocal t = new T { x = 1 }\r\nprint(t.x)\r\n";
         assert_eq!(format(src).unwrap(), src);
         assert!(!format(src).unwrap().contains("\r\r"));
 
@@ -1245,16 +1252,16 @@ mod tests {
     #[test]
     fn an_impl_and_a_trait_header_gain_as() {
         assert_eq!(
-            format("impl Circle\n    function f(self) end\nend\n").unwrap(),
-            "impl Circle as\n    function f(self) end\nend\n"
+            format("impl Circle\n  function f(self) end\nend\n").unwrap(),
+            "impl Circle as\n  function f(self) end\nend\n"
         );
         assert_eq!(
-            format("impl Shape for Circle\n    function f(self) end\nend\n").unwrap(),
-            "impl Shape for Circle as\n    function f(self) end\nend\n"
+            format("impl Shape for Circle\n  function f(self) end\nend\n").unwrap(),
+            "impl Shape for Circle as\n  function f(self) end\nend\n"
         );
         assert_eq!(
-            format("impl Box<T>\n    function f(self) end\nend\n").unwrap(),
-            "impl Box<T> as\n    function f(self) end\nend\n"
+            format("impl Box<T>\n  function f(self) end\nend\n").unwrap(),
+            "impl Box<T> as\n  function f(self) end\nend\n"
         );
         assert_eq!(format("trait Empty end\n").unwrap(), "trait Empty as end\n");
         assert_eq!(format("impl Empty end\n").unwrap(), "impl Empty as end\n");
@@ -1264,7 +1271,7 @@ mod tests {
     /// one insertion per header, at the end of the header.
     #[test]
     fn the_header_rewrite_inserts_one_as_per_header() {
-        let src = "impl Circle\n    function f(self) end\nend\ntrait Shape\n    function a(self): number\nend\nimpl Shape for Circle as\nend\n";
+        let src = "impl Circle\n  function f(self) end\nend\ntrait Shape\n  function a(self): number\nend\nimpl Shape for Circle as\nend\n";
         let fixes = header_as_fixes(src);
         assert_eq!(fixes.len(), 2, "{fixes:?}");
         let (text, n) = crate::lint::apply_fixes(
@@ -1283,7 +1290,7 @@ mod tests {
         assert_eq!(n, 2);
         assert_eq!(
             text,
-            "impl Circle as\n    function f(self) end\nend\ntrait Shape as\n    function a(self): number\nend\nimpl Shape for Circle as\nend\n"
+            "impl Circle as\n  function f(self) end\nend\ntrait Shape as\n  function a(self): number\nend\nimpl Shape for Circle as\nend\n"
         );
         assert!(parse_error(&text).is_none(), "{text}");
         assert!(header_as_fixes(&text).is_empty());
@@ -1293,21 +1300,22 @@ mod tests {
     /// space on each side of the word.
     #[test]
     fn a_match_alias_stays_on_the_head_line() {
-        let src = "match s as state with\n    case Loading then print(state)\n    case Ready(n) then print(n, state)\nend\n";
+        let src = "match s as state with\n  case Loading then print(state)\n  case Ready(n) then print(n, state)\nend\n";
         assert_eq!(format(src).unwrap(), src);
         assert_eq!(format("match s   as    state with\ncase Loading then print(state)\ncase Ready(n) then print(n, state)\nend\n").unwrap(), src);
-        let two = "match a as left, b as right with\n    case Loading, Loading then print(left, right)\n    default print(left, right)\nend\n";
+        let two = "match a as left, b as right with\n  case Loading, Loading then print(left, right)\n  default print(left, right)\nend\n";
         assert_eq!(format(two).unwrap(), two);
-        let expr = "local v = match s as st with\n    case Loading then 0\n    default #tostring(st)\nend\n";
+        let expr =
+            "local v = match s as st with\n  case Loading then 0\n  default #tostring(st)\nend\n";
         assert_eq!(format(expr).unwrap(), expr);
     }
 
     /// A header that already reads `as` gains no second one.
     #[test]
     fn the_as_of_a_header_is_written_once() {
-        let src = "impl Shape for Circle as\n    function f(self) end\nend\n";
+        let src = "impl Shape for Circle as\n  function f(self) end\nend\n";
         assert_eq!(format(src).unwrap(), src);
-        let trait_src = "trait Shape as\n    function area(self): number\nend\n";
+        let trait_src = "trait Shape as\n  function area(self): number\nend\n";
         assert_eq!(format(trait_src).unwrap(), trait_src);
     }
 
@@ -1316,8 +1324,8 @@ mod tests {
         let mut o = FmtConfig::default();
         o.align_struct_fields = true;
         assert_eq!(
-            format_with("struct P as\n    x: number\n    name: string\nend\n", &o).unwrap(),
-            "struct P as\n    x:    number\n    name: string\nend\n"
+            format_with("struct P as\n  x: number\n  name: string\nend\n", &o).unwrap(),
+            "struct P as\n  x:    number\n  name: string\nend\n"
         );
     }
 

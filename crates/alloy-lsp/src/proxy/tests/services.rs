@@ -204,7 +204,7 @@ pub(crate) fn a_service_auto_import_writes_an_import_line() {
     assert_eq!(result[0]["detail"], "game:GetService(\"Players\")");
     assert_eq!(
         result[0]["additionalTextEdits"][0]["newText"],
-        "import Players from \"@game/Players\"\n"
+        "import Players from '@game/Players'\n"
     );
     assert_eq!(
         result[0]["additionalTextEdits"][0]["range"]["start"]["line"],
@@ -217,7 +217,7 @@ pub(crate) fn a_service_auto_import_writes_an_import_line() {
     st.rewrite_child_auto_imports(uri, &mut result);
     assert_eq!(
         result[0]["additionalTextEdits"][0]["newText"],
-        "import Players from \"@game/Players\"\n"
+        "import Players from '@game/Players'\n"
     );
     assert_eq!(
         result[0]["additionalTextEdits"][0]["range"]["start"]["line"],
@@ -446,7 +446,7 @@ pub(crate) fn the_auto_import_pass_drops_a_store_module() {
     assert_eq!(items[0]["detail"], "@pkg/vide");
     assert_eq!(
         items[0]["additionalTextEdits"][0]["newText"],
-        "import vide from \"@pkg/vide\"\n"
+        "import vide from '@pkg/vide'\n"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -245,7 +245,7 @@ pub const TABLES: &[Table] = &[
             unset(
                 "wait_timeout",
                 Ty::Number,
-                "Seconds passed to every `WaitForChild` that `=>` emits. Unset means no timeout: the engine waits forever and warns after five seconds. With a timeout the call can return nil, so `=>` guards like `->`.",
+                "Seconds passed to every `WaitForChild` that `=>` emits. Unset means no timeout: the engine waits forever and warns after five seconds. With a timeout the call can return nil, so `=>` guards like `->`. The file `alloy init` writes sets five seconds.",
             ),
             unset(
                 "std_require",
@@ -437,7 +437,7 @@ pub const TABLES: &[Table] = &[
             key(
                 "indent_width",
                 INT,
-                "4",
+                "2",
                 "Spaces per level, when `indent_type` is spaces.",
             ),
             key(
@@ -449,7 +449,7 @@ pub const TABLES: &[Table] = &[
                     "force-single",
                     "preserve",
                 ]),
-                r#""auto-prefer-double""#,
+                r#""force-single""#,
                 "The quotes of a string literal. An `auto` style keeps the other quote for a string that holds the preferred one; `force` escapes instead.",
             ),
             key(

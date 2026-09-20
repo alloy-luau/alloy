@@ -25,7 +25,7 @@ pub(crate) fn init(args: &[String]) -> ExitCode {
     let has = |flag: &str| args.iter().any(|a| a == flag);
     let dir = Path::new(".");
 
-    if has("--non-interactive") {
+    if has("--non-interactive") || has("-n") {
         return init_at(dir);
     }
 
@@ -276,11 +276,20 @@ fn ask(dir: &Path) -> Result<Option<Answers>, String> {
     let Some(name) = answered(
         Text::new("Project name?")
             .with_default(&folder)
-            .with_help_message("`[project] name`: the name in the project files Alloy writes")
+            .with_help_message(
+                "`[project] name`: the name in the project files Alloy writes. `.` is this folder",
+            )
             .prompt(),
     )?
     else {
         return Ok(None);
+    };
+    // `.` is what a reader types for "this folder", the way every other
+    // command reads it.
+    let name = if name.trim() == "." {
+        folder.clone()
+    } else {
+        name
     };
 
     let Some(manager) = answered(

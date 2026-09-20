@@ -548,12 +548,12 @@ pub(crate) fn a_contract_draws_an_action_that_writes_its_members() {
     };
     // The method goes in the `impl`, on the line of its `end`.
     let (at, text) = edit_of(&actions[0]);
-    assert_eq!(text, "    public function Start(self)\n    end\n");
+    assert_eq!(text, "  public function Start(self)\n  end\n");
     assert_eq!(src.lines().nth(at as usize), Some("end"));
 
     // The field goes in the struct, which is where the language keeps it.
     let (at, text) = edit_of(&actions[1]);
-    assert_eq!(text, "    private state: number\n");
+    assert_eq!(text, "  private state: number\n");
     assert_eq!(src.lines().nth(at as usize), Some("end"));
 
     // A range that holds no attribute draws nothing.
@@ -587,13 +587,13 @@ pub(crate) fn a_stub_with_a_return_type_returns() {
     assert_eq!(
         text,
         concat!(
-            "    function Stop(self): boolean\n",
-            "        error(\"todo\")\n",
-            "    end\n",
-            "    private function Tick(self, dt: number)\n",
-            "    end\n",
-            "    function On(self, cb: (number) -> ())\n",
-            "    end\n",
+            "  function Stop(self): boolean\n",
+            "    error(\"todo\")\n",
+            "  end\n",
+            "  private function Tick(self, dt: number)\n",
+            "  end\n",
+            "  function On(self, cb: (number) -> ())\n",
+            "  end\n",
         ),
         "{actions:#?}"
     );

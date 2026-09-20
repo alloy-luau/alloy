@@ -385,25 +385,27 @@ fn a_gap_says_what_to_write_and_where() {
     );
 }
 
-/// The members a gap names compile where the gap puts them.
+/// The members a gap names compile where the gap puts them, and the
+/// formatter keeps the text: the fix indents by `[fmt] indent_width`.
 #[test]
 fn the_members_a_gap_names_compile() {
     let src = concat!(
         "attribute service on impl as\n",
-        "    requires public function Start(self)\n",
-        "    requires private field state: number\n",
+        "  requires public function Start(self)\n",
+        "  requires private field state: number\n",
         "end\n\n",
-        "struct S as\n    x: number\nend\n\n",
+        "struct S as\n  x: number\nend\n\n",
         "@service\nimpl S as\nend\n\nprint(S)\n"
     );
     let out = compile(src);
     let mut text = src.to_string();
+    let step = alloy::config::FmtConfig::default().indent_width;
     let mut gaps = out.contract_gaps.clone();
     // From the bottom up, so an earlier offset still points at its byte.
     gaps.sort_by_key(|g| std::cmp::Reverse(g.insert_at));
 
     for gap in &gaps {
-        let pad = " ".repeat(gap.indent as usize + 4);
+        let pad = " ".repeat(gap.indent as usize + step);
         let member = match gap.kind.as_str() {
             "field" => format!("{pad}{} {}: {}\n", gap.visibility, gap.member, gap.shape),
 

@@ -1682,10 +1682,7 @@ fn an_attribute_contract_reaches_the_file_that_uses_it() {
         })
         .unwrap_or_else(|| panic!("no contract fix: {list:#?}"));
     let edit = &fix["edit"]["changes"][&uri][0];
-    assert_eq!(
-        edit["newText"],
-        "    public function Start(self)\n    end\n"
-    );
+    assert_eq!(edit["newText"], "  public function Start(self)\n  end\n");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2626,6 +2623,8 @@ fn the_global_removal_reports_and_the_fixes_migrate_it() {
         .expect("the report");
     assert!(said.starts_with("ImportError:"), "{said}");
     assert!(said.contains("`export local`"), "{said}");
+    // The report is the compiler's own text, which quotes the path the
+    // way it always has; only a generated edit reads `[fmt]`.
     assert!(said.contains("import { counter } from \"./a\""), "{said}");
 
     // The quick fix on the declaration rewrites the one word.
@@ -2699,7 +2698,7 @@ fn the_global_removal_reports_and_the_fixes_migrate_it() {
     let line = &add["edit"]["changes"][&b_uri][0];
     assert_eq!(
         line["newText"],
-        json!("import { counter } from \"./a\"\n"),
+        json!("import { counter } from './a'\n"),
         "{add}"
     );
 

@@ -1424,8 +1424,10 @@ pub(crate) fn an_index_before_a_guard_follows_the_branch() {
 }
 
 /// `profile["|` and `profile[|`: the keys the receiver's type names,
-/// each written with its quotes. `map[|` on an index signature names
-/// none, so the scope the child lists stands.
+/// each written with its quotes. A quote the author already opened
+/// wins; an open bracket takes the project's `[fmt] quote_style`.
+/// `map[|` on an index signature names none, so the scope the child
+/// lists stands.
 #[test]
 pub(crate) fn an_open_index_offers_the_keys_of_its_receiver() {
     let head = concat!(
@@ -1436,11 +1438,11 @@ pub(crate) fn an_open_index_offers_the_keys_of_its_receiver() {
     );
 
     for (line, want) in [
-        ("local v = profile[", vec!["\"name\"", "\"coins\""]),
+        ("local v = profile[", vec!["'name'", "'coins'"]),
         ("local v = profile[\"", vec!["\"name\"", "\"coins\""]),
         ("local v = profile[\"na", vec!["\"name\"", "\"coins\""]),
-        ("local v = po?[", vec!["\"name\"", "\"coins\""]),
-        ("local v = po![", vec!["\"name\"", "\"coins\""]),
+        ("local v = po?[", vec!["'name'", "'coins'"]),
+        ("local v = po![", vec!["'name'", "'coins'"]),
         ("local v = map[", vec![]),
         ("local v = profile[i + ", vec![]),
     ] {
@@ -1930,8 +1932,8 @@ pub(crate) fn an_attribute_argument_completes_its_own_literals() {
     assert_eq!(
         items(src, "names = [ "),
         [
-            ("init".to_string(), "\"init\"".to_string()),
-            ("start".to_string(), "\"start\"".to_string()),
+            ("init".to_string(), "'init'".to_string()),
+            ("start".to_string(), "'start'".to_string()),
         ]
     );
 
@@ -2427,7 +2429,7 @@ fn an_unresolved_namespace_member_offers_its_group() {
     assert_eq!(actions.len(), 1, "{actions:?}");
     assert_eq!(
         actions[0]["edit"]["changes"]["file:///use.aly"][0]["newText"],
-        json!("import { Geo } from \"./defs\"\n")
+        json!("import { Geo } from './defs'\n")
     );
 }
 
@@ -2454,7 +2456,7 @@ fn a_name_read_as_a_member_takes_the_value_import() {
     assert_eq!(actions.len(), 1, "{actions:?}");
     assert_eq!(
         actions[0]["edit"]["changes"]["file:///use.aly"][0]["newText"],
-        json!("import { Status } from \"./defs\"\n")
+        json!("import { Status } from './defs'\n")
     );
 }
 
@@ -2480,12 +2482,12 @@ pub(crate) fn an_unresolved_name_offers_the_import_that_binds_it() {
     assert_eq!(actions.len(), 1, "{actions:?}");
     assert_eq!(
         actions[0]["title"],
-        json!("Add `import { Vec2 } from \"./defs\"`")
+        json!("Add `import { Vec2 } from './defs'`")
     );
     assert_eq!(actions[0]["kind"], json!("quickfix"));
     assert_eq!(
         actions[0]["edit"]["changes"]["file:///use.aly"][0]["newText"],
-        json!("import { Vec2 } from \"./defs\"\n")
+        json!("import { Vec2 } from './defs'\n")
     );
 
     // `new Vec2 { }` reports a type with no struct behind it; the same
@@ -2495,7 +2497,7 @@ pub(crate) fn an_unresolved_name_offers_the_import_that_binds_it() {
     assert_eq!(actions.len(), 1, "{actions:?}");
     assert_eq!(
         actions[0]["title"],
-        json!("Add `import { Vec2 } from \"./defs\"`")
+        json!("Add `import { Vec2 } from './defs'`")
     );
 
     // A report that names nothing to import offers nothing.
@@ -2530,7 +2532,7 @@ pub(crate) fn an_unresolved_type_name_offers_the_type_import() {
     let unknown = "TypeError: Unknown type 'Point'";
     let fresh = json!({
         "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
-        "newText": "import { type Point } from \"./point\"\n",
+        "newText": "import { type Point } from './point'\n",
     });
 
     // A struct an annotation alone names imports as a type, on a fresh
@@ -2538,14 +2540,14 @@ pub(crate) fn an_unresolved_type_name_offers_the_type_import() {
     assert_eq!(
         fix("local p: Point = nil\nprint(p)\n", unknown),
         [(
-            "Add `import { type Point } from \"./point\"`".to_string(),
+            "Add `import { type Point } from './point'`".to_string(),
             fresh.clone()
         )]
     );
     // The file also constructs it: the value form binds the type too.
     assert_eq!(
         fix("local p: Point = new Point { x = 1 }\nprint(p)\n", unknown)[0].0,
-        "Add `import { Point } from \"./point\"`"
+        "Add `import { Point } from './point'`"
     );
     // A `new PointList` is another name.
     assert_eq!(
@@ -2554,14 +2556,14 @@ pub(crate) fn an_unresolved_type_name_offers_the_type_import() {
             unknown
         )[0]
         .0,
-        "Add `import { type Point } from \"./point\"`"
+        "Add `import { type Point } from './point'`"
     );
     // The module is imported already: the name joins that line.
     let src = "import { other } from \"./point\"\n\nlocal p: Point = nil\nprint(p, other)\n";
     assert_eq!(
         fix(src, unknown),
         [(
-            "Add `import { type Point } from \"./point\"`".to_string(),
+            "Add `import { type Point } from './point'`".to_string(),
             json!({
                 "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 31 } },
                 "newText": "import { other, type Point } from \"./point\"",
@@ -3151,8 +3153,8 @@ pub(crate) fn an_import_list_with_no_module_lists_the_project() {
         .find(|i| i["label"] == json!("Cog"))
         .expect("the export of the other module");
 
-    assert_eq!(cog["detail"], json!("from \"./wheel\""));
-    assert_eq!(cog["textEdit"]["newText"], json!("Cog } from \"./wheel\""));
+    assert_eq!(cog["detail"], json!("from './wheel'"));
+    assert_eq!(cog["textEdit"]["newText"], json!("Cog } from './wheel'"));
 
     // The module is named: its own exports, with no clause to write.
     let named = "import {  } from \"./wheel\"\n";
@@ -3173,12 +3175,12 @@ pub(crate) fn an_import_list_with_no_module_lists_the_project() {
 
 /// A generated import takes the project's `[fmt] quote_style`. The
 /// auto-import quick fix and the `from` clause of an import list both
-/// write it. A project that names no style writes the double quote,
+/// write it. A project that names no style writes the single quote,
 /// which is what the default says.
 #[test]
 pub(crate) fn a_generated_import_takes_the_projects_quote_style() {
     for (name, table, q) in [
-        ("default", "", '"'),
+        ("default", "", '\''),
         ("single", "\n[fmt]\nquote_style = \"force-single\"\n", '\''),
         ("double", "\n[fmt]\nquote_style = \"force-double\"\n", '"'),
     ] {

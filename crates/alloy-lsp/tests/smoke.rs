@@ -292,7 +292,7 @@ fn scenario(child: &std::path::Path) {
         .find(|i| i["label"] == "HELLO")
         .unwrap_or_else(|| panic!("no auto-import item; {} items", items.len()));
     assert_eq!(
-        auto["additionalTextEdits"][0]["newText"], "import { HELLO } from \"./lib\"\n",
+        auto["additionalTextEdits"][0]["newText"], "import { HELLO } from './lib'\n",
         "{auto}"
     );
 

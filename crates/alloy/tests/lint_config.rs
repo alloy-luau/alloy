@@ -153,7 +153,7 @@ fn nothing_recommended_leaves_every_lint_silent() {
 fn a_preserving_formatter_reflows_nothing_and_keeps_the_quotes() {
     let c = parse("[fmt]\nrecommended = false\n");
     let long = format!(
-        "local t = {{ a = 'one', b = 'two', c = '{}' }}\nprint(t)\n",
+        "local t = {{ a = \"one\", b = \"two\", c = \"{}\" }}\nprint(t)\n",
         "x".repeat(120)
     );
 
@@ -168,7 +168,7 @@ fn a_preserving_formatter_reflows_nothing_and_keeps_the_quotes() {
     // The recommended layout breaks the same line and rewrites the quotes.
     let reflowed = alloy::fmt::format_file(&long, &Config::default().fmt).unwrap();
     assert!(reflowed.lines().count() > long.lines().count());
-    assert!(reflowed.contains("\"one\""));
+    assert!(reflowed.contains("'one'"));
 }
 
 #[test]
@@ -261,10 +261,20 @@ fn a_markup_lint_reads_the_rules_table_and_the_file_directive() {
 
 // --- 4. the file `alloy init` writes ---------------------------------------
 
+/// The template is the defaults plus one opinion: `wait_timeout`. A
+/// second opinion that creeps into the file fails the equality below.
 #[test]
-fn the_template_parses_back_to_the_defaults() {
+fn the_template_holds_one_opinion_and_the_defaults() {
     let c = parse(alloy::config::TEMPLATE);
-    assert_eq!(c, Config::default());
+    let mut want = Config::default();
+
+    assert_eq!(
+        want.emit.wait_timeout, None,
+        "the Rust default waits forever"
+    );
+    want.emit.wait_timeout = Some(5.0);
+
+    assert_eq!(c, want);
     assert!(c.deprecations().is_empty());
     assert!(alloy::lint::unknown_names(&c.lint).is_empty());
 

@@ -91,8 +91,8 @@ pub(crate) const TEMPER: &str = "\
 recommended = true
 column_width = 100
 indent_type = \"spaces\"
-indent_width = 4
-quote_style = \"auto-prefer-double\"
+indent_width = 2
+quote_style = \"force-single\"
 
 [lint]
 recommended = true
@@ -348,7 +348,7 @@ fn alloy_toml(a: &Answers) -> String {
          artifact = \"ship\"\n\
          \n\
          [emit]\n\
-         # wait_timeout = 5\n\
+         wait_timeout = 5\n\
          # std_require = \"@alloy\"\n\
          # erase_type_imports = false\n\
          \n",
@@ -362,6 +362,9 @@ fn alloy_toml(a: &Answers) -> String {
     });
     out.push_str("shim = true\n\n[project]\n");
     out.push_str(&format!("name = \"{}\"\n", a.name.replace('"', "\\\"")));
+    // The place the runtime lands. It is the default either way; the
+    // wizard writes it so the author sees the name and can move it.
+    out.push_str(&format!("runtime = \"{}\"\n", config::DEFAULT_RUNTIME));
 
     if game {
         out.push_str("sourcemap = true\nsource_of_truth = true\nmount_aliases = true\n\n");

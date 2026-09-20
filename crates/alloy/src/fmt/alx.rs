@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn children_go_on_their_own_lines() {
-        let src = "return (\n    <Frame>\n        <UICorner />\n        <TextLabel>{a}</TextLabel>\n    </Frame>\n)\n";
+        let src = "return (\n  <Frame>\n    <UICorner />\n    <TextLabel>{a}</TextLabel>\n  </Frame>\n)\n";
         assert_eq!(fmt(src), src);
     }
 
@@ -655,9 +655,9 @@ mod tests {
     /// shape, even when it would fit on one line.
     #[test]
     fn a_parenthesized_return_keeps_its_lines() {
-        let src = "local function Badge(props: { title: string })\n    return (\n        <TextLabel Text={props.title} />\n    )\nend\n";
+        let src = "local function Badge(props: { title: string })\n  return (\n    <TextLabel Text={props.title} />\n  )\nend\n";
         assert_eq!(fmt(src), src);
-        let one = "local function Badge(props: { title: string })\n    return (<TextLabel Text={props.title} />)\nend\n";
+        let one = "local function Badge(props: { title: string })\n  return (<TextLabel Text={props.title} />)\nend\n";
         assert_eq!(fmt(one), one);
     }
 
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn a_multi_line_hole_keeps_its_lines() {
-        let src = "return (\n    <TextButton\n        Activated={function()\n            go()\n        end}\n    >\n        {name} x{count}\n    </TextButton>\n)\n";
+        let src = "return (\n  <TextButton\n    Activated={function()\n      go()\n    end}\n  >\n    {name} x{count}\n  </TextButton>\n)\n";
         assert_eq!(fmt(src), src);
     }
 
@@ -694,15 +694,15 @@ mod tests {
     #[test]
     fn a_wide_tag_breaks_its_attributes() {
         let src = "local x = <Frame Size={UDim2.fromScale(1, 1)} BackgroundTransparency={1} Position={UDim2.fromScale(0.5, 0.5)} AnchorPoint={Vector2.new(0.5, 0.5)} />\n";
-        let want = "local x = <Frame\n    Size={UDim2.fromScale(1, 1)}\n    BackgroundTransparency={1}\n    Position={UDim2.fromScale(0.5, 0.5)}\n    AnchorPoint={Vector2.new(0.5, 0.5)}\n/>\n";
+        let want = "local x = <Frame\n  Size={UDim2.fromScale(1, 1)}\n  BackgroundTransparency={1}\n  Position={UDim2.fromScale(0.5, 0.5)}\n  AnchorPoint={Vector2.new(0.5, 0.5)}\n/>\n";
         assert_eq!(fmt(src), want);
         let mut o = FmtConfig::default();
         o.alx.attribute_per_line = false;
-        let want = "local x = <Frame\n    Size={UDim2.fromScale(1, 1)} BackgroundTransparency={1} Position={UDim2.fromScale(0.5, 0.5)}\n    AnchorPoint={Vector2.new(0.5, 0.5)}\n/>\n";
+        let want = "local x = <Frame\n  Size={UDim2.fromScale(1, 1)} BackgroundTransparency={1} Position={UDim2.fromScale(0.5, 0.5)}\n  AnchorPoint={Vector2.new(0.5, 0.5)}\n/>\n";
         assert_eq!(format_alx(src, &o).unwrap(), want);
         let mut o = FmtConfig::default();
         o.alx.bracket_same_line = true;
-        let want = "local x = <Frame\n    Size={UDim2.fromScale(1, 1)}\n    BackgroundTransparency={1}\n    Position={UDim2.fromScale(0.5, 0.5)}\n    AnchorPoint={Vector2.new(0.5, 0.5)} />\n";
+        let want = "local x = <Frame\n  Size={UDim2.fromScale(1, 1)}\n  BackgroundTransparency={1}\n  Position={UDim2.fromScale(0.5, 0.5)}\n  AnchorPoint={Vector2.new(0.5, 0.5)} />\n";
         assert_eq!(format_alx(src, &o).unwrap(), want);
     }
 
@@ -711,10 +711,10 @@ mod tests {
     /// it. The span map reads the line count, so it never moves.
     #[test]
     fn a_multi_line_attribute_keeps_the_tag_on_its_line() {
-        let src = "return (\n    <TextButton Activated={function()\n        go()\n    end}>\n        {name}\n    </TextButton>\n)\n";
+        let src = "return (\n  <TextButton Activated={function()\n    go()\n  end}>\n    {name}\n  </TextButton>\n)\n";
         assert_eq!(fmt(src), src);
         assert_eq!(fmt(src).lines().count(), src.lines().count());
-        let closed = "local x = <Frame Size={function()\n    go()\nend} />\n";
+        let closed = "local x = <Frame Size={function()\n  go()\nend} />\n";
         assert_eq!(fmt(closed).lines().count(), closed.lines().count());
     }
 

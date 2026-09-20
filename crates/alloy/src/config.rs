@@ -302,8 +302,8 @@ impl Default for FmtConfig {
             column_width: 100,
             line_endings: LineEndings::Input,
             indent_type: IndentType::Spaces,
-            indent_width: 4,
-            quote_style: QuoteStyle::AutoPreferDouble,
+            indent_width: 2,
+            quote_style: QuoteStyle::ForceSingle,
             leading_zero: LeadingZero::Add,
             call_parentheses: CallParentheses::Always,
             space_after_function_names: FunctionNameSpace::Never,
@@ -866,6 +866,9 @@ pub struct Emit {
     /// Seconds passed to every `WaitForChild` that `=>` emits. Unset means
     /// no timeout: the engine waits forever and warns after five seconds.
     /// With a timeout the call can return nil, so `=>` guards like `->`.
+    /// The default is unset, so a project that never wrote the key keeps
+    /// the non-optional `=>`. `TEMPLATE` writes five seconds, so a new
+    /// project gets the guarded form.
     pub wait_timeout: Option<f64>,
     /// The string emitted code passes to `require` for the runtime. The
     /// default is the `@alloy` alias; the build writes the runtime next to
@@ -917,9 +920,11 @@ impl Default for Build {
 /// The file name the CLI looks for.
 pub const FILE_NAME: &str = "alloy.toml";
 
-/// A default file, written by `alloy init`. Every value here is a
-/// default, so the file says what the project can change and changes
-/// nothing yet.
+/// The file `alloy init` writes. Every value here is a default but
+/// one: `wait_timeout` is the opinion the template holds, so a new
+/// project gets a five second `WaitForChild` and `=>` reads as
+/// optional. A project that leaves the key out waits forever, which
+/// is what `Emit::wait_timeout` defaults to.
 pub const TEMPLATE: &str = r#"#:schema .alloy/alloy.schema.json
 [build]
 in = "src"
@@ -929,7 +934,7 @@ clean = false
 artifact = "ship"
 
 [emit]
-# wait_timeout = 5
+wait_timeout = 5
 # std_require = "@alloy"
 # erase_type_imports = false
 
@@ -937,8 +942,8 @@ artifact = "ship"
 recommended = true
 column_width = 100
 indent_type = "spaces"
-indent_width = 4
-quote_style = "auto-prefer-double"
+indent_width = 2
+quote_style = "force-single"
 
 [lint]
 recommended = true
@@ -1264,9 +1269,20 @@ mod tests {
         assert_eq!(c.ingot["a"]["prefix"].as_str(), Some("tw-"));
     }
 
+    /// The template writes one value that is not a default, and the
+    /// test names it: a new project waits five seconds for a child.
+    /// Every other key still has to match, so a second opinion that
+    /// creeps into the file fails here.
     #[test]
-    fn the_template_parses_to_the_defaults() {
+    fn the_template_holds_one_opinion_and_the_defaults() {
         let c = Config::parse(TEMPLATE, Path::new("alloy.toml")).unwrap();
-        assert_eq!(c, Config::default());
+
+        assert_eq!(c.emit.wait_timeout, Some(5.0));
+        assert_eq!(Emit::default().wait_timeout, None);
+
+        let mut want = Config::default();
+        want.emit.wait_timeout = Some(5.0);
+
+        assert_eq!(c, want);
     }
 }

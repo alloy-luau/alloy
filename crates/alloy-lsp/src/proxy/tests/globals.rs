@@ -84,13 +84,13 @@ fn a_name_that_was_global_offers_its_import() {
     let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
     assert_eq!(
         titles,
-        ["Add `import { counter } from \"./a\"`"],
+        ["Add `import { counter } from './a'`"],
         "{actions:?}"
     );
     let edit = &actions[0]["edit"]["changes"]["file:///b.aly"][0];
     assert_eq!(
         edit["newText"],
-        json!("import { counter } from \"./a\"\n"),
+        json!("import { counter } from './a'\n"),
         "{actions:?}"
     );
 }

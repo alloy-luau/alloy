@@ -694,8 +694,8 @@ pub const LINTS: &[LintInfo] = &[
         name: "implicit_any",
         group: Group::Pedantic,
         default: Level::Allow,
-        summary: "a named function parameter with no type",
-        detail: "Pedantic. A parameter of a named function with no annotation is `any` to the checker, and every use of it goes unchecked. Write the type. A callback passed as an argument is exempt: the checker infers its parameters from the callee.",
+        summary: "a named function parameter, or an empty array literal, with no type",
+        detail: "Pedantic. A parameter of a named function with no annotation is `any` to the checker, and every use of it goes unchecked. Write the type. A callback passed as an argument is exempt: the checker infers its parameters from the callee.\n\nA binding of an empty `[ ]` is the same case: `local xs = []` names no element type, so the checker reads `any[]`. Write `local xs: T[] = []`. A position that carries the type stays silent: an annotated binding, an argument of a typed parameter, a `return` of a declared return type, and a struct field default.",
     },
     LintInfo {
         name: "missing_return_type",
@@ -730,7 +730,14 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Pedantic,
         default: Level::Allow,
         summary: "an exported declaration with no comment above it",
-        detail: "Pedantic. An `export` is the interface of the module. A comment line right above it, `--` or `---`, says what it is for; the language server shows it on hover.",
+        detail: "Pedantic. An `export` is the interface of the module. A comment line right above it, `--` or `---`, says what it is for; the language server shows it on hover. An exported `type` alias and an exported `interface` answer to `missing_doc_type` instead, which is off.",
+    },
+    LintInfo {
+        name: "missing_doc_type",
+        group: Group::Pedantic,
+        default: Level::Allow,
+        summary: "an exported `type` alias or `interface` with no comment above it",
+        detail: "Pedantic, and `strict` leaves it alone: a type alias and an interface say what they are in their own shape, while a function or a const does not, so `missing_doc` exempts the two and this lint covers them. A project that documents every export as well writes `[lint.rules] missing_doc_type = \"warn\"`. A struct, an enum, a function, a const, and a remote stay with `missing_doc`.",
     },
     LintInfo {
         name: "import_order",
@@ -866,9 +873,10 @@ pub fn level_of(config: &LintConfig, name: &str) -> Level {
     }
 
     match info {
-        // `print` is ordinary in Luau, and a project that wants it gone
-        // says so by name. Strict carries the rest of the group.
-        Some(l) if l.name == "print_debug" && listed(config, name).is_none() => l.default,
+        // `print` is ordinary in Luau, and a type alias says what it is
+        // in its own shape: a project that wants either reported says so
+        // by name. Strict carries the rest of the group.
+        Some(l) if matches!(l.name, "print_debug" | "missing_doc_type") => l.default,
         Some(l) if l.group == Group::Pedantic && config.strict => Level::Warn,
         _ if !config.recommended => Level::Allow,
         Some(l) => l.default,
@@ -1159,6 +1167,51 @@ mod tests {
         assert_eq!(
             cut("import * as m, { a } from \"./m\"\nprint(m.z)\n"),
             "import * as m from \"./m\"\nprint(m.z)\n"
+        );
+    }
+
+    /// `local xs = []` names no element type, so `implicit_any` fires
+    /// on the binding. A position that carries the type is silent.
+    #[test]
+    fn an_empty_array_with_no_type_is_an_implicit_any() {
+        let src = concat!(
+            "struct Hub as\n",
+            "    systems: number[] = []\n",
+            "end\n",
+            "function take(xs: number[])\n",
+            "    print(xs)\n",
+            "end\n",
+            "function make(): number[]\n",
+            "    return []\n",
+            "end\n",
+            "local a = []\n",
+            "local b: number[] = []\n",
+            "local filled = [1, 2]\n",
+            "local nested = [[], []]\n",
+            "take([])\n",
+            "print(a, b, filled, nested, make(), Hub)\n",
+        );
+        let out = crate::compile(src).unwrap();
+        let hits: Vec<(&str, &str)> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "implicit_any")
+            .map(|l| (l.name, &src[l.start as usize..l.end as usize]))
+            .collect();
+
+        // `a` and `nested` only: the annotation, the typed parameter,
+        // the declared return, and the struct field all name the type.
+        assert_eq!(
+            hits,
+            vec![("implicit_any", "a"), ("implicit_any", "nested")],
+            "{:?}",
+            out.lints
+        );
+
+        // Pedantic, so a project without `strict` never sees it.
+        assert_eq!(
+            level_of(&LintConfig::default().without_strict(), "implicit_any"),
+            Level::Allow
         );
     }
 

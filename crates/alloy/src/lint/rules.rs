@@ -627,6 +627,48 @@ pub fn run(
         }
     }
 
+    // implicit_any on a binding whose only value is an array literal
+    // with an empty `[ ]` in it. Nothing writes the element type, so
+    // the checker reads `any[]`.
+    for i in 0..toks.len() {
+        if text(i) != "local" {
+            continue;
+        }
+
+        // One name, then the `=`: `local xs, ys = ...` names no single
+        // binding for the message.
+        let name = i + 1;
+
+        if toks.get(name).map(|t| t.kind) != Some(TokKind::Ident)
+            || toks.get(name + 1).map(|t| t.text(src)) != Some("=")
+            || toks.get(name + 2).map(|t| t.text(src)) != Some("[")
+        {
+            continue;
+        }
+
+        let Some(close) = matching(src, toks, name + 2) else {
+            continue;
+        };
+
+        // An empty `[ ]` anywhere in the literal: `[]` itself, and the
+        // inner ones of `[[], []]`.
+        if !(name + 2..close).any(|k| text(k) == "[" && text(k + 1) == "]") {
+            continue;
+        }
+
+        lints.push(Lint {
+            name: "implicit_any",
+            start: toks[name].start,
+            end: toks[name].end,
+            message: format!(
+                "`{}` has an empty array literal and no type, so its elements are `any`; write `{}: T[]`",
+                text(name),
+                text(name)
+            ),
+            fix: None,
+        });
+    }
+
     // optional_access: a `T?` parameter indexed with nothing guarding it.
     for f in &fns {
         let Some(end) = f.end else { continue };

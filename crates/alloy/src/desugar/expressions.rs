@@ -220,8 +220,10 @@ impl<'s> Desugar<'s> {
             }
 
             Expr::Array { items, span } => {
-                // An empty literal has no element type; the check artifact
-                // lets the annotation on the left decide it.
+                // An empty literal has no element type. The check artifact
+                // casts it to `Array<any>`, so the binding still reads as
+                // an array. An annotation on the left still wins: `any`
+                // accepts every element type.
                 let cast = self.options.check && items.is_empty();
                 let std = self.std();
                 let open_text = if cast {
@@ -234,7 +236,12 @@ impl<'s> Desugar<'s> {
                 let close = self.toks[span.end as usize - 1].start;
                 let children: Vec<Child<'_>> = items.iter().map(Child::Expr).collect();
                 self.stitch_between(open, close, &children);
-                self.generate(close, if cast { "}) :: any)" } else { "})" });
+                let close_text = if cast {
+                    format!("}}) :: {}Array<any>)", self.type_std())
+                } else {
+                    "})".to_string()
+                };
+                self.generate(close, &close_text);
             }
 
             Expr::Table { fields, span }
@@ -1652,6 +1659,65 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    /// An empty `[ ]` carries `Array<any>` in the check artifact, so a
+    /// binding of one reads as an array and not as `any`. Every typed
+    /// position keeps the type it writes.
+    #[test]
+    fn an_empty_array_literal_types_as_an_array() {
+        let src = concat!(
+            "struct Hub as\n",
+            "    systems: number[] = []\n",
+            "end\n",
+            "function take(xs: number[])\n",
+            "    print(xs)\n",
+            "end\n",
+            "function make(): number[]\n",
+            "    return []\n",
+            "end\n",
+            "local a = []\n",
+            "local b: number[] = []\n",
+            "local filled = [1, 2]\n",
+            "local nested = [[], []]\n",
+            "take([])\n",
+            "print(a, b, filled, nested, make(), Hub)\n",
+        );
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        // The struct default, the return, the two bindings, the two of
+        // the nested literal, and the argument.
+        assert_eq!(
+            out.check
+                .matches("(__alloy.Array.from({}) :: __alloy.Array<any>)")
+                .count(),
+            7,
+            "{}",
+            out.check
+        );
+        // The annotation on the left still decides the element type.
+        assert!(
+            out.check
+                .contains("local b: __alloy.Array<number> = (__alloy.Array.from({})"),
+            "{}",
+            out.check
+        );
+        // A literal with items infers its own element type, with no cast.
+        assert!(
+            out.check
+                .contains("local filled = __alloy.Array.from({1, 2})"),
+            "{}",
+            out.check
+        );
+        // The ship artifact carries no cast at all.
+        let ship = crate::compile(src).unwrap().ship;
+
+        assert!(!ship.contains("Array<any>"), "{ship}");
     }
 
     /// `bnot a` shipped as written: the text scan that routes a

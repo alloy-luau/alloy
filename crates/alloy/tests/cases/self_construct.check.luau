@@ -24,7 +24,7 @@ do
 	end
 end
 
-local Held = {} Held.__index = Held function Held.__new<T>(f: { items: __alloy.Array<T>? }): Held<T> if f.items == nil then f.items = (__alloy.Array.from({}) :: any) end return (setmetatable(f, Held) :: any) end
+local Held = {} Held.__index = Held function Held.__new<T>(f: { items: __alloy.Array<T>? }): Held<T> if f.items == nil then f.items = (__alloy.Array.from({}) :: __alloy.Array<any>) end return (setmetatable(f, Held) :: any) end
 
  type Held<T> = { items: __alloy.Array<T> } Held.__tostring = function(s) return __alloy.show_struct("Held", s, { "items" }) end
 

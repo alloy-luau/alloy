@@ -239,6 +239,32 @@ pub(crate) fn a_private_view_hint_folds_through_the_result_path() {
     alloy::shapes::fold_value(&mut result, &alloy::shapes::Known::default());
     assert_eq!(result[0]["label"], ": Swinger");
 }
+/// The gutter on `local xs = []` reads `any[]`, not `any`: the check
+/// artifact casts the empty literal to `Array<any>`, and the fold
+/// writes the sugar the source has.
+#[test]
+pub(crate) fn an_empty_array_hint_reads_as_an_array() {
+    let (st, uri) = one_file("local xs = []\nprint(xs)\n");
+    let doc = st.docs.get(uri).expect("doc");
+
+    assert!(
+        doc.shadow.contains(":: __alloy.Array<any>"),
+        "{}",
+        doc.shadow
+    );
+
+    let mut result = json!([{
+        "position": { "line": 0, "character": 8 },
+        "kind": 1,
+        "label": ": __alloy.Array<any>",
+        "textEdits": [{ "range": { "start": { "line": 0, "character": 8 }, "end": { "line": 0, "character": 8 } }, "newText": ": __alloy.Array<any>" }]
+    }]);
+    strip_std_prefix(&mut result);
+    alloy::shapes::fold_value(&mut result, &alloy::shapes::Known::default());
+
+    assert_eq!(result[0]["label"], ": any[]");
+    assert_eq!(result[0]["textEdits"][0]["newText"], ": any[]");
+}
 #[test]
 pub(crate) fn declaration_files_stay_out_of_the_child() {
     assert!(!child_sees("file:///w/globals.d.aly"));

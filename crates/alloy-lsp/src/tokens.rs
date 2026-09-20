@@ -55,6 +55,15 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
             continue;
         }
 
+        // The child reads the array shorthand `{ T }` as a table with an
+        // implicit `[number]` index, and gives that index a token at the
+        // brace with the width of the word `number`. The span covers
+        // punctuation and half of the type behind it, so an arrow there
+        // loses the color of its `>`. A name never opens on a brace.
+        if doc.shadow[first..].starts_with('{') {
+            continue;
+        }
+
         let (sl, sc) = doc.to_source(l, s);
         tokens.push((sl, sc, len, kind, mods));
     }
@@ -800,6 +809,63 @@ mod tests {
         let source_line = src.lines().nth(5).unwrap();
         let x_col = source_line.find(".x").unwrap() as u64 + 1;
         assert_eq!(out, vec![5, x_col, 1, 9, 0]);
+    }
+
+    /// The child reads the array shorthand `{ T }` as a table with an
+    /// implicit `[number]` index. It gives that index a token at the
+    /// brace, six units wide, which is the width of the word `number`.
+    /// The brace names no type, so the token goes and the names stay. A
+    /// nested shorthand carries one such token per brace.
+    #[test]
+    fn a_type_token_that_opens_on_a_brace_goes() {
+        const SRC: &str = concat!(
+            "local function f(x: { number }) -> ()\nend\n",
+            "local function g(y: { { number } }) -> ()\nend\n",
+        );
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let kind = type_index(&types, "type").expect("the type");
+        // The child's answer over the shadow: a token on each brace of a
+        // shorthand and one on each name, all six units wide.
+        let plain = doc.shadow.find("{ number }").expect("the type");
+        let nested = doc.shadow.find("{ { number } }").expect("the nested type");
+        let spots = [plain, plain + 2, nested, nested + 2, nested + 4];
+        let mut data = Vec::new();
+        let (mut pl, mut pc) = (0u32, 0u32);
+
+        for at in spots {
+            let (l, c) = position_of(&doc.shadow, at);
+            let dl = l - pl;
+            let dc = if dl > 0 { c } else { c - pc };
+            data.extend_from_slice(&[u64::from(dl), u64::from(dc), 6, kind, 0]);
+            (pl, pc) = (l, c);
+        }
+
+        let out = remap(&data, &doc, &types, &[]);
+        let mut drawn: Vec<(&str, u32, u32)> = Vec::new();
+        let (mut line, mut column) = (0u32, 0u32);
+
+        for t in out.chunks_exact(5) {
+            line += t[0] as u32;
+            column = match t[0] > 0 {
+                true => t[1] as u32,
+
+                false => column + t[1] as u32,
+            };
+
+            if t[3] == kind {
+                let at = offset_of(SRC, line, column).expect("the offset");
+                drawn.push((&SRC[at..at + t[2] as usize], line, column));
+            }
+        }
+
+        assert_eq!(drawn, [("number", 0, 22), ("number", 2, 24)], "{drawn:?}");
     }
 
     /// An `.alx` file with no markup maps like any other: the tokens

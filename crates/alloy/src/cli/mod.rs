@@ -7,6 +7,7 @@ pub(crate) mod flux;
 pub(crate) mod fmt;
 pub(crate) mod ingot;
 pub(crate) mod init;
+pub(crate) mod init_plan;
 pub(crate) mod lint;
 mod lint_support;
 pub(crate) mod self_cmd;

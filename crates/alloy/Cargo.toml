@@ -31,6 +31,9 @@ toml = { version = "1", features = ["preserve_order"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 dirs = "6"
 terminal_size = "0.4"
+# The prompts of `alloy init --interactive`. Pinned: the wizard styles
+# itself with the crate's render config, which moves between releases.
+inquire = { version = "0.9.4", default-features = false, features = ["crossterm"] }
 
 [lints]
 workspace = true

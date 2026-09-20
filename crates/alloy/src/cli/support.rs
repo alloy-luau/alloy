@@ -121,7 +121,7 @@ fn flags_of(command: &str) -> Option<Vec<&'static str>> {
         "test" => [BUILD, &["--run", "--coverage", "--filter", "--watch"]].concat(),
         "fmt" => vec!["--check", "--config"],
         "doc" => vec!["--json"],
-        "init" => vec![],
+        "init" => vec!["--interactive", "--yes", "--non-interactive"],
         "self" => vec!["--dir", "--version", "--dry-run"],
         "ingot" => vec!["--lint", "--output", "--format", "--hover", "--complete"],
 

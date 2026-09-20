@@ -81,13 +81,35 @@ Options of run:
 ";
 
 pub const INIT_TEXT: &str = "\
-Usage: alloy init
+Usage: alloy init [options]
 
 Writes alloy.toml and one Luau configuration in the current folder. A
 folder with neither .config.luau nor .luaurc gets a .config.luau with
 strict mode and the @alloy alias; a folder that has one keeps it and
 gains only the mode and the alias it lacks. An existing alloy.toml is
 never overwritten.
+
+Bare `alloy init` asks nothing, so a script and a CI job read the same
+files they read today. `--interactive` opens a wizard instead. Its first
+question offers the recommended setup: a game, ember, lest, the temper
+preset, and strict mode. Answer no and it asks six questions, each one
+already on the recommended answer: the kind of project, its name, the
+package manager, the test runner, the style preset, and the language
+mode. It writes nothing until every question is answered, and ctrl-c
+leaves the folder as it was.
+
+`--yes` writes that recommended setup with no prompt, for a bootstrap
+script that wants the scaffold and not the two bare files.
+
+Options:
+  -i, --interactive     Open the wizard; needs a terminal and color
+  -y, --yes             Write the recommended setup; asks nothing
+  --non-interactive     Force the plain path; wins over both of the above
+
+The wizard lists three style presets, anneal, temper, and forge, plus
+every preset file in ~/.alloy/presets and .alloy/presets. A preset is a
+TOML file holding a [fmt] table and a [lint] table, and its file name is
+the name shown. `alloy doc init` explains all of it.
 ";
 
 pub const BUILD_TEXT: &str = "\

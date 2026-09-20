@@ -101,9 +101,9 @@ fn takes_an_annotation(doc: &Doc, line: u32, character: u32) -> bool {
 /// on the `)` that closes the parameters, which is what tells the
 /// three apart.
 ///
-/// The label and the edit are one text, so an accepted hint writes
-/// what the gutter showed. The space in front is the hint's padding,
-/// which no edit carries.
+/// The label reads `-> T` and the gutter spaces it with the hint's
+/// padding. An edit carries no padding, so the edit writes ` -> T`:
+/// accepting the hint leaves the space the language spells.
 pub(crate) fn arrow_returns(hints: &mut [Value], doc: &Doc, on: bool) {
     if !on {
         return;
@@ -126,8 +126,12 @@ pub(crate) fn arrow_returns(hints: &mut [Value], doc: &Doc, on: bool) {
         h["label"] = json!(text);
         h["paddingLeft"] = json!(true);
 
+        // The gutter takes its space from the padding, which no edit
+        // carries. An accepted hint writes source, where the space in
+        // front of the arrow is what the language spells, so the edit
+        // holds one of its own.
         if h.pointer("/textEdits/0/newText").is_some() {
-            h["textEdits"][0]["newText"] = json!(text);
+            h["textEdits"][0]["newText"] = json!(format!(" {text}"));
         }
     }
 }

@@ -973,8 +973,9 @@ fn a_method_on_an_instantiated_struct_carries_the_instantiation() {
 Alloy spells a return type `function f(): T` and `function f() -> T`,
 and the arrow setting makes the hint read like the file. The return
 hint stands after the `)` of the parameters; a variable and a
-parameter hint stand after a name and keep the colon. The label and
-the edit stay one text.
+parameter hint stand after a name and keep the colon. The gutter
+spaces the label with the hint's padding, and the edit writes a space
+of its own.
 */
 #[test]
 fn the_arrow_setting_reaches_the_return_hint_alone() {
@@ -999,7 +1000,7 @@ fn the_arrow_setting_reaches_the_return_hint_alone() {
     let mut arrow = hints();
     arrow_returns(&mut arrow, doc, true);
     assert_eq!(hint_label(&arrow[0]), "-> number");
-    assert_eq!(arrow[0]["textEdits"][0]["newText"], "-> number");
+    assert_eq!(arrow[0]["textEdits"][0]["newText"], " -> number");
     assert_eq!(arrow[0]["paddingLeft"], json!(true));
 
     // The binding on line 4 takes `local total: number` and nothing

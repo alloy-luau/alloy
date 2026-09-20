@@ -1085,9 +1085,14 @@ pub(crate) fn parameter_names(list: &str) -> Vec<(String, bool)> {
     let mut start = 0;
     let mut parts: Vec<&str> = Vec::new();
 
+    let mut last = ' ';
+
     for (k, c) in inner.char_indices() {
         match c {
             '(' | '{' | '[' | '<' => depth += 1,
+            // The `>` of an arrow closes no bracket: `(f: () -> (), n)`
+            // binds two names.
+            '>' if last == '-' => {}
             ')' | '}' | ']' | '>' => depth -= 1,
             ',' if depth == 0 => {
                 parts.push(&inner[start..k]);
@@ -1095,6 +1100,8 @@ pub(crate) fn parameter_names(list: &str) -> Vec<(String, bool)> {
             }
             _ => {}
         }
+
+        last = c;
     }
 
     parts.push(&inner[start..]);
@@ -1973,11 +1980,15 @@ pub(crate) fn unlocal_parameter(
 ) -> Option<String> {
     let (fence, rest) = value.split_once('\n')?;
     let (body, _) = rest.split_once("\n```")?;
-    let named = body.strip_prefix("local ")?;
+    // A parameter the source gave a function type prints as a
+    // declaration of its own: the body stands, the comment under it
+    // does not.
+    let local = body.strip_prefix("local ");
+    let named = local.or_else(|| body.strip_prefix("function "))?;
     let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
 
-    if !named.starts_with(word) || !named[word.len()..].starts_with(':') {
+    if !named.starts_with(word) || !named[word.len()..].starts_with([':', '(']) {
         return None;
     }
 
@@ -1991,10 +2002,10 @@ pub(crate) fn unlocal_parameter(
     // not even agree with the one the signature gives `b`. The parameter
     // then reads as the source wrote it.
     let scope = declared_type_parameters(&doc.source);
-    let text = match named.split_once(": ") {
+    let text = match local.and_then(|named| named.split_once(": ")) {
         Some((name, ty)) if undeclared_variable(ty, &scope) => name,
 
-        _ => named,
+        _ => local.unwrap_or(body),
     };
 
     // The head the parameter belongs to is the nearest one above the

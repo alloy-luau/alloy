@@ -792,6 +792,15 @@ mod tests {
     }
 
     #[test]
+    fn a_negation_holds_its_operand() {
+        assert_eq!(
+            format("local b: ~ nil|~string = 1\ntype N = ~(number | string)\nif a ~= b then end\n")
+                .unwrap(),
+            "local b: ~nil | ~string = 1\ntype N = ~(number | string)\nif a ~= b then end\n"
+        );
+    }
+
+    #[test]
     fn preserving_keeps_open_groups_and_calls_take_their_space() {
         assert_eq!(
             format("local function f(...) return ... end\n").unwrap(),

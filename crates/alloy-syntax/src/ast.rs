@@ -77,6 +77,9 @@ pub enum TypeEdit {
     /// A std type name used bare in a type: `Result<T, E>`, `Future<T>`,
     /// `Array<T>`, `HashMap<K, V>`, `Set<T>`. Emit qualifies it.
     AmbientName(TokSpan),
+    /// `~T`: the leading `~` tokens and the type they negate. More than
+    /// one `~` is a double negation, which the compiler reports.
+    Negation { tildes: TokSpan, operand: TokSpan },
     /// `{ [K in keyof T]: V }`: the whole table type span, the key name,
     /// the source type name, the value shape, and the value's modifier.
     Mapped {

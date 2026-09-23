@@ -458,11 +458,19 @@ fn types(node: &Value) -> Vec<&str> {
     }
 }
 
+/// The values a node takes by name: its own `enum`, else those of its
+/// `oneOf` or `anyOf` branches, so a level that may also be a table
+/// still lists its words.
 fn enum_values(node: &Value) -> Vec<&Value> {
-    node.get("enum")
-        .and_then(Value::as_array)
-        .map(|v| v.iter().collect())
-        .unwrap_or_default()
+    match node.get("enum").and_then(Value::as_array) {
+        Some(values) => values.iter().collect(),
+
+        None => branches(node)
+            .into_iter()
+            .filter_map(|b| b.get("enum").and_then(Value::as_array))
+            .flatten()
+            .collect(),
+    }
 }
 
 /// How a type reads in a list or a hover: `string`, `"a" | "b"`, `list`.
@@ -615,22 +623,36 @@ pub fn completions(schema: &Value, site: &Site) -> Vec<Value> {
 }
 
 fn key_items(node: &Value, present: &[String]) -> Vec<Value> {
-    let Some(props) = node.get("properties").and_then(Value::as_object) else {
-        return Vec::new();
-    };
+    let mut keys: Vec<(String, &Value)> = node
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|p| p.iter().map(|(k, v)| (k.clone(), v)).collect())
+        .unwrap_or_default();
 
-    props
-        .iter()
+    // A table with open keys may name the ones it knows under
+    // `propertyNames`; each takes the shape of every other key.
+    if let (Some(names), Some(shape)) = (
+        node.get("propertyNames"),
+        node.get("additionalProperties").filter(|a| a.is_object()),
+    ) {
+        for name in enum_values(names).into_iter().filter_map(Value::as_str) {
+            if !keys.iter().any(|(k, _)| k == name) {
+                keys.push((name.to_string(), shape));
+            }
+        }
+    }
+
+    keys.into_iter()
         .enumerate()
         .filter(|(_, (k, _))| !present.contains(k))
         .map(|(n, (k, child))| {
-            let written = alloy::data::luau_key(k);
+            let written = alloy::data::luau_key(&k);
 
             json!({
                 "label": k,
                 "kind": 10,
                 "detail": type_label(child),
-                "documentation": { "kind": "markdown", "value": documentation(k, child) },
+                "documentation": { "kind": "markdown", "value": documentation(&k, child) },
                 "insertText": format!("{written} = {}", value_snippet(child)),
                 "insertTextFormat": 2,
                 "filterText": k,
@@ -1090,6 +1112,51 @@ mod tests {
         );
         let labels: Vec<&str> = flag.iter().filter_map(|i| i["label"].as_str()).collect();
         assert_eq!(labels, ["true", "false"]);
+    }
+
+    /// `[lint.rules]` names its lints under `properties`, and each takes
+    /// a level; an ingot's lint passes through `propertyNames`.
+    #[test]
+    fn the_lint_rules_complete_their_names_and_levels() {
+        let keys = completions(
+            &schema(),
+            &at("export default { lint = { rules = { | } } }\n").unwrap(),
+        );
+        let raw = keys
+            .iter()
+            .find(|i| i["label"] == "raw_require")
+            .expect("raw_require");
+        assert!(
+            raw["documentation"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Default: `warn`"),
+            "{raw}"
+        );
+        assert_eq!(
+            raw["insertText"],
+            "raw_require = ${1|\"allow\",\"warn\",\"deny\"|}"
+        );
+        assert!(keys.iter().any(|i| i["label"] == "pedantic"), "the groups");
+        assert!(keys.iter().any(|i| i["label"] == "alx"), "the markup table");
+
+        let levels = completions(
+            &schema(),
+            &at("export default { lint = { rules = { raw_require = | } } }\n").unwrap(),
+        );
+        let labels: Vec<&str> = levels.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert_eq!(labels, ["\"allow\"", "\"warn\"", "\"deny\""]);
+
+        let problems: Vec<String> = check(&schema(), "export default { lint = { rules = { raw_require = \"alow\", my_ingot_lint = \"warn\" } } }\n")
+            .into_iter()
+            .map(|p| p.message)
+            .collect();
+        assert_eq!(
+            problems,
+            [
+                "`raw_require` takes one of \"allow\", \"warn\", \"deny\"; `\"alow\"` is none of them"
+            ]
+        );
     }
 
     #[test]

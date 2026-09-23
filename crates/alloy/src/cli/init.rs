@@ -71,6 +71,26 @@ fn recommended_init(dir: &Path) -> ExitCode {
     write_plan(dir, &answers, &p)
 }
 
+/// Writes the schema that the `#:schema` line of `alloy.toml` names, so
+/// the editor finds it before the first build. The build rewrites it
+/// with the ingots' tables.
+fn write_schema(dir: &Path, p: &Painter) {
+    let path = dir.join(".alloy/alloy.schema.json");
+
+    if path.exists() {
+        return;
+    }
+
+    let text =
+        serde_json::to_string_pretty(&alloy::schema::project(&[])).unwrap_or_default() + "\n";
+    let written =
+        std::fs::create_dir_all(dir.join(".alloy")).and_then(|()| std::fs::write(&path, text));
+
+    if written.is_ok() {
+        println!("{}", p.wrote(".alloy/alloy.schema.json"));
+    }
+}
+
 /// Writes `alloy.toml` and one Luau configuration. A folder with
 /// neither file gets a `.config.luau` with strict mode and the `@alloy`
 /// alias. A folder that already has `.config.luau` or `.luaurc` keeps
@@ -91,6 +111,7 @@ fn init_at(dir: &Path) -> ExitCode {
     }
 
     println!("{}", p.wrote(&path.display().to_string()));
+    write_schema(dir, &p);
 
     if !init_luau_config(dir, &p) {
         return ExitCode::FAILURE;
@@ -442,6 +463,8 @@ fn write_plan(dir: &Path, answers: &Answers, p: &Painter) -> ExitCode {
 
         println!("{}", p.wrote(&rel.display().to_string()));
     }
+
+    write_schema(dir, p);
 
     // The folder has a Luau configuration already: it keeps it, and
     // gains the mode and the alias it lacks.

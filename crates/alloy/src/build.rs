@@ -790,11 +790,11 @@ fn run_inner(
         std::fs::create_dir_all(parent)?;
     }
 
+    // A rebuild with the same ingots leaves the file and says nothing.
     if std::fs::read_to_string(&schema_path).ok().as_deref() != Some(schema_text.as_str()) {
         std::fs::write(&schema_path, &schema_text)?;
+        report.project_files.push(schema_rel);
     }
-
-    report.project_files.push(schema_rel);
 
     if build.clean && out.is_dir() {
         let mut outputs = Vec::new();

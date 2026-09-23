@@ -8,6 +8,7 @@
 pub mod alx;
 pub mod build;
 pub mod config;
+pub mod config_aly;
 pub mod data;
 pub mod declarations;
 pub mod desugar;

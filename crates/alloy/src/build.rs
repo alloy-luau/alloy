@@ -434,7 +434,7 @@ fn run_inner(
     for p in &ingots.problems {
         report
             .failures
-            .push((ingots.root.join(crate::config::FILE_NAME), p.to_string()));
+            .push((Config::file_of(&ingots.root), p.to_string()));
     }
 
     for path in sources {
@@ -1009,8 +1009,8 @@ impl Deps {
     }
 
     fn build(&mut self, root: &Path, write: bool, keep: bool) -> Result<Dep, String> {
-        let config = Config::load(&root.join(crate::config::FILE_NAME))
-            .map_err(|e| format!("its alloy.toml does not load: {e}"))?;
+        let config = Config::load(&Config::file_of(root))
+            .map_err(|e| format!("its configuration does not load: {e}"))?;
         // The importer's root, for the path a message shows.
         let importer = self.stack.last().cloned().unwrap_or_default();
         let report = run_with(root, &config, write, keep, self).map_err(|e| e.to_string())?;
@@ -1500,7 +1500,7 @@ fn skipped_dir(path: &Path, top: bool, written: &[PathBuf]) -> bool {
     (name.starts_with('.') && name != ".ember")
         || matches!(name.as_str(), "node_modules" | "target")
         || (!top && written.contains(&normalize_path(path)))
-        || (!top && path.join(crate::config::FILE_NAME).is_file())
+        || (!top && Config::file_in(path).is_some())
 }
 
 /// Every plain Luau file under a directory, recursively: what a require

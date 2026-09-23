@@ -73,7 +73,7 @@ fn install(only: Option<&str>, refresh: bool) -> ExitCode {
     let word = if refresh { "update" } else { "install" };
     let Some(config_path) = Config::find(Path::new(".")) else {
         fail(&format!(
-            "`alloy ingot {word}` needs an alloy.toml; none is here or above"
+            "`alloy ingot {word}` needs an alloy.toml or a .config.aly; neither is here or above"
         ));
 
         return ExitCode::FAILURE;

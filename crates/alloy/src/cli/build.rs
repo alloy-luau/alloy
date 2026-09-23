@@ -52,7 +52,10 @@ pub(crate) fn build(args: &[String]) -> ExitCode {
 /// sources still moves the sourcemap and the build project, so the
 /// build must run again.
 pub(crate) fn watch_roots(root: &Path, config: &Config) -> Vec<PathBuf> {
-    let mut roots = vec![root.join(&config.build.input), root.join(config::FILE_NAME)];
+    let mut roots = vec![
+        root.join(&config.build.input),
+        config::Config::file_of(root),
+    ];
     let tree = alloy::project::Tree::load(root, config);
 
     // A change in a project an import leads into rebuilds it here.

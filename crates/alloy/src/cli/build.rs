@@ -251,10 +251,13 @@ fn build_one(path: &str, args: &[String]) -> ExitCode {
 
     let text = if want_check { &out.check } else { &out.ship };
 
-    match option(args, "--out") {
-        // A file with an error is not written, as in a project build.
-        Some(_) if !out.diagnostics.is_empty() => {}
+    // A file with an error is not written, as in a project build, and
+    // stdout is where it is written without `--out`.
+    if !out.diagnostics.is_empty() {
+        return ExitCode::FAILURE;
+    }
 
+    match option(args, "--out") {
         Some(dir) => {
             let rel = Path::new(path)
                 .file_name()
@@ -280,11 +283,7 @@ fn build_one(path: &str, args: &[String]) -> ExitCode {
         None => print!("{text}"),
     }
 
-    if out.diagnostics.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

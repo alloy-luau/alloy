@@ -536,6 +536,7 @@ const SHIM_NAMES: &[&str] = &[
     "UDim",
     "UDim2",
     "NumberRange",
+    "Random",
     "Enum",
     "Instance",
     "task",

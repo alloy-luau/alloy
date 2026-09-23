@@ -317,7 +317,9 @@ impl<'s> Desugar<'s> {
                     let aliases = self.namespace_type_aliases(&path, &name, &local, &temp);
 
                     if aliases.is_empty() || self.module_exports_type(&path, &name) {
-                        parts.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
+                        let word = self.type_word(&local);
+
+                        parts.push(format!("{word} {local}{args} = {temp}.{name}{type_args}"));
                     }
 
                     parts.extend(aliases);
@@ -338,6 +340,19 @@ impl<'s> Desugar<'s> {
     forms that take a list share the body, so a name, a type, and a
     namespace alias lower the same way in each.
     */
+    /// The word an imported type's alias takes: `export type` when the
+    /// file re-exports the name under its own name, and `type`
+    /// otherwise. Luau has no re-export for an alias, and a second
+    /// definition of the name is a redefinition, so the alias the
+    /// import already writes is the one that goes out.
+    fn type_word(&self, local: &str) -> &'static str {
+        match self.export_listed_types.contains(local) {
+            true => "export type",
+
+            false => "type",
+        }
+    }
+
     fn spec_bindings(&mut self, path: &str, temp: &str, specs: &[ImportSpec]) -> String {
         let mut names = Vec::new();
         let mut values = Vec::new();
@@ -361,13 +376,15 @@ impl<'s> Desugar<'s> {
             let args = self.module_type_params(path, &name);
             let type_args = type_arguments(&args);
 
+            let word = self.type_word(&local);
+
             if sp.is_type || self.module_exports_type_only(path, &name) {
-                types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
+                types.push(format!("{word} {local}{args} = {temp}.{name}{type_args}"));
             } else {
                 // A struct or an enum is a value and a type; the type
                 // comes along when the module exports one.
                 if self.module_exports_type(path, &name) {
-                    types.push(format!("type {local}{args} = {temp}.{name}{type_args}"));
+                    types.push(format!("{word} {local}{args} = {temp}.{name}{type_args}"));
                 }
 
                 // The declaring file's check artifact exports the full
@@ -557,13 +574,11 @@ impl<'s> Desugar<'s> {
         let value = |v: &mut Vec<String>, span: TokSpan| v.push(self.text_of(span).to_string());
 
         match stmt.under_default() {
+            // A destructured local binds through its fields, and each
+            // of those names is a binding of the module too.
             Stmt::Local(l) => {
-                for b in &l.names {
-                    match b.destructure {
-                        Some(_) => {}
-
-                        None => value(values, b.name),
-                    }
+                for name in super::statements::local_names(l) {
+                    value(values, name);
                 }
             }
 
@@ -672,8 +687,14 @@ impl<'s> Desugar<'s> {
                         .map(|a| self.text_of(a).to_string())
                         .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(&name).to_string());
                     // A type of this file: an interface or an alias
-                    // holds no value, a struct or an enum holds one.
-                    let file_type = self.file_types.get(&name).copied();
+                    // holds no value, a struct or an enum holds one. A
+                    // type the file imports goes out the same way; a
+                    // barrel module sends on what it took in.
+                    let file_type = self
+                        .file_types
+                        .get(&name)
+                        .or_else(|| self.imported_types.get(&name))
+                        .copied();
 
                     // A type is no value: the module sends it out as an
                     // alias, not as a field of the export table. A
@@ -709,6 +730,7 @@ impl<'s> Desugar<'s> {
             }
 
             Some(path) => {
+                let spec = crate::data::strip_literal(self.text_of(path));
                 let target = self.require_literal(self.text_of(path));
                 let temp = self.hoist_import(&target, anchor);
                 let mut types = Vec::new();
@@ -719,10 +741,21 @@ impl<'s> Desugar<'s> {
                         .alias
                         .map(|a| self.text_of(a).to_string())
                         .unwrap_or(name.clone());
+                    // A generic type carries its parameters on: the
+                    // alias reads the bare name otherwise.
+                    let args = self.module_type_params(&spec, &name);
+                    let type_args = type_arguments(&args);
+                    let alias = format!("export type {exported}{args} = {temp}.{name}{type_args}");
 
-                    if e.type_only || sp.is_type {
-                        types.push(format!("export type {exported} = {temp}.{name}"));
+                    if e.type_only || sp.is_type || self.module_exports_type_only(&spec, &name) {
+                        types.push(alias);
                     } else {
+                        // A struct or an enum is a value and a type,
+                        // and the list sends both on.
+                        if self.module_exports_type(&spec, &name) {
+                            types.push(alias);
+                        }
+
                         self.exports.push((exported, format!("{temp}.{name}")));
                     }
                 }
@@ -813,8 +846,10 @@ impl<'s> Desugar<'s> {
 
     /// `export local x = 1` becomes `local x = 1` and exports `x`.
     pub(crate) fn exported_local(&mut self, span: TokSpan, l: &Local) {
-        for b in &l.names {
-            let name = self.text_of(b.name).to_string();
+        // A destructure binds its fields, not the `{ ... }` it is
+        // written as: the table sends each of those names out.
+        for name in super::statements::local_names(l) {
+            let name = self.text_of(name).to_string();
             self.exports.push((name.clone(), name));
         }
 

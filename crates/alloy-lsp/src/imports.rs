@@ -102,10 +102,8 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
     for stmt in &parsed.chunk.block.stmts {
         match stmt {
             Stmt::Local(l) if l.exported => {
-                for b in &l.names {
-                    if b.destructure.is_none() {
-                        push(name_of(b.name), false, false, false, 6);
-                    }
+                for name in alloy::desugar::statements::local_names(l) {
+                    push(name_of(name), false, false, false, 6);
                 }
             }
 

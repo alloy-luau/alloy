@@ -3593,24 +3593,28 @@ fn bound_names(stmt: &Stmt) -> Vec<TokSpan> {
     match stmt.under_default() {
         Stmt::Function(f) if f.path.len() == 1 => vec![f.path[0]],
         Stmt::LocalFunction(f) => vec![f.name],
-        // A destructured local binds each name it names: the rename
-        // when there is one, else the field; every array item.
-        Stmt::Local(l) => l
-            .names
-            .iter()
-            .flat_map(|b| match &b.destructure {
-                None => vec![b.name],
-
-                Some(Destructure::Table(fields)) => {
-                    fields.iter().map(|f| f.rename.unwrap_or(f.field)).collect()
-                }
-
-                Some(Destructure::Array { items, rest }) => {
-                    items.iter().copied().chain(*rest).collect()
-                }
-            })
-            .collect(),
+        Stmt::Local(l) => local_names(l),
 
         _ => Vec::new(),
     }
+}
+
+/// The names a `local` binds. A destructured one binds each name it
+/// names: the rename when there is one, else the field; every array
+/// item, and the rest.
+pub fn local_names(l: &Local) -> Vec<TokSpan> {
+    l.names
+        .iter()
+        .flat_map(|b| match &b.destructure {
+            None => vec![b.name],
+
+            Some(Destructure::Table(fields)) => {
+                fields.iter().map(|f| f.rename.unwrap_or(f.field)).collect()
+            }
+
+            Some(Destructure::Array { items, rest }) => {
+                items.iter().copied().chain(*rest).collect()
+            }
+        })
+        .collect()
 }

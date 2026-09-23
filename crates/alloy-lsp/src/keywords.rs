@@ -477,5 +477,8 @@ mod tests {
         assert!(hover("a + b", 2).is_none());
         assert!(is_word_at("a + b", 0));
         assert!(!is_word_at("a + b", 2));
+        // The caret right after a name is on it; `+` is on nothing.
+        assert!(is_word_caret("a + b", 1));
+        assert!(!is_word_caret("a + b", 2));
     }
 }

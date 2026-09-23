@@ -316,6 +316,58 @@ pub(crate) fn a_rename_of_an_imported_name_reaches_every_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The caret at the end of a name is on that name: the column typing
+/// it leaves. The rename there writes what the caret one column left
+/// writes, in every file, and definition and hover read the word too.
+#[test]
+pub(crate) fn a_caret_at_the_end_of_a_name_reads_the_word() {
+    let (st, dir) = project("word-end");
+    let uri = |rel: &str| format!("file://{}", dir.join("src").join(rel).display());
+    let edits_at = |rel: &str, offset: usize| match st.name_target(&uri(rel), offset) {
+        Some(Target::Export(file, name)) => {
+            rows(&st.export_rename(&file, &name, "release").expect("rename"))
+        }
+
+        other => panic!("{rel} at {offset}: {other:?}"),
+    };
+    let every_file = [
+        "m.aly 12:13-20 -> release",
+        "other.aly 0:9-16 -> release",
+        "star.aly 4:13-20 -> release",
+        "use.aly 0:9-16 -> release",
+        "use.aly 10:26-33 -> release",
+        "use.aly 12:23-30 -> release",
+    ];
+    // The declaration `export const version = 3`, and a use of the
+    // imported name, each at the byte after the name.
+    let declaration = MODULE.find("version = 3").expect("declaration") + "version".len();
+    let use_site = USER.find("n = version").expect("use") + "n = version".len();
+
+    for (rel, end) in [("m.aly", declaration), ("use.aly", use_site)] {
+        assert_eq!(edits_at(rel, end), every_file, "{rel}");
+        assert_eq!(edits_at(rel, end), edits_at(rel, end - 1), "{rel}");
+    }
+
+    // Go to definition answers for the same caret.
+    let definition = st.import_name_definition(&uri("use.aly"), USER, use_site);
+
+    assert!(definition.is_some());
+    assert_eq!(
+        definition,
+        st.import_name_definition(&uri("use.aly"), USER, use_site - 1)
+    );
+
+    // Hover reads the caret through `Caret`, which every hover of a
+    // declaration, a field, and a macro shares.
+    let line = USER[..use_site].matches('\n').count() as u32;
+    let column = (use_site - USER[..use_site].rfind('\n').map_or(0, |i| i + 1)) as u32;
+    let caret = Caret::at(USER, line, column).expect("the word the hover reads");
+
+    assert_eq!(&USER[caret.start..caret.end], "version");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The emit writes the `local` of a star import itself, so the child
 /// points at generated text. The import line binds the name.
 #[test]

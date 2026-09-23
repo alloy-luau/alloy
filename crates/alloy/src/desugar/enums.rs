@@ -734,7 +734,17 @@ impl<'s> Desugar<'s> {
             }
 
             Pattern::Path(span) => {
-                let text = self.text_of(*span).to_string();
+                // `Kind.A` inside the namespace that declares `Kind`
+                // renders under the namespace's name, `Geo_Kind.A`.
+                let written: String = self.text_of(*span).split_whitespace().collect();
+                let text = match written
+                    .split_once('.')
+                    .and_then(|(head, v)| Some((self.ns_member_name(head)?, v)))
+                {
+                    Some((e, v)) => format!("{e}.{v}"),
+
+                    None => written.clone(),
+                };
                 out.tests.push(format!("{path} == {text}"));
             }
 
@@ -1150,6 +1160,9 @@ impl<'s> Desugar<'s> {
         }
 
         let missing: Vec<&str> = missing.iter().map(|v| v.as_str()).collect();
+
+        // The reader knows `Geo_Kind` as `Geo.Kind`.
+        let e = self.display_name(&e);
 
         format!(
             "this match is not exhaustive: `{e}` has no arm for {}; add {} or a `default` arm",

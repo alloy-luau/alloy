@@ -1170,6 +1170,16 @@ impl<'s> Desugar<'s> {
                         continue;
                     }
 
+                    // The serializer writes what a type names, and `~T`
+                    // names what a value is not.
+                    if self.has_negation(f.ty) {
+                        let ty = self.text_of(f.ty).to_string();
+                        let message = format!(
+                            "a struct that derives Serialize writes each field's type: `{fname}` has type `{ty}`, a negation; name the types it holds, or mark it @skip"
+                        );
+                        self.diagnose(f.ty, &message);
+                    }
+
                     let key = f
                         .attributes
                         .iter()

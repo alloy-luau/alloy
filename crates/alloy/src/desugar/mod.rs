@@ -432,6 +432,11 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         TypeEdit::AmbientName(span) => (toks[span.start as usize].start, u32::MAX),
 
         TypeEdit::Mapped { table, .. } => (toks[table.start as usize].start, 0),
+
+        TypeEdit::Negation { tildes, operand } => (
+            toks[tildes.start as usize].start,
+            u32::MAX - toks[operand.end as usize - 1].end,
+        ),
     });
 
     let mut d = Desugar {
@@ -539,6 +544,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         self_prologue: None,
         not_constructible: HashMap::new(),
         mapped_used: Vec::new(),
+        uses_neg: false,
         namespaces: HashMap::new(),
         member_names: HashMap::new(),
         ns_stack: Vec::new(),
@@ -595,6 +601,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.scan_reduce_inserts(&chunk.block);
     d.scan_static_checks(&chunk.block);
     d.check_await_spots(&chunk.block);
+    d.check_negations();
 
     // Leading trivia, the block, trailing trivia: the printer's shape. The
     // std require, when the file needs one, goes on the first line after
@@ -637,6 +644,13 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         );
         prefix_len = line.len() as u32;
         d.generate(insert_at, &line);
+    }
+
+    if d.uses_neg {
+        d.generate(
+            insert_at,
+            "type function __neg(t) return types.negationof(t) end ",
+        );
     }
 
     for kind in d.mapped_used.clone() {
@@ -1129,6 +1143,8 @@ struct Desugar<'s> {
     test_names: Vec<(String, bool)>,
     /// Mapped-type shapes used, each needing one type function declared.
     mapped_used: Vec<&'static str>,
+    /// A `~T` in the file: the first line declares `__neg`.
+    uses_neg: bool,
     /// Expansions so far, for the unique names of a body's locals.
     macro_serial: u32,
     /// True while a macro call that stands alone as a statement
@@ -2412,6 +2428,10 @@ impl<'s> Desugar<'s> {
             TypeEdit::Mapped { table, .. } => {
                 self.byte_start(*table) >= start && self.byte_end(*table) <= end
             }
+
+            TypeEdit::Negation { tildes, operand } => {
+                self.byte_start(*tildes) >= start && self.byte_end(*operand) <= end
+            }
         });
 
         let edit = match edit {
@@ -2449,6 +2469,26 @@ impl<'s> Desugar<'s> {
                 let text = self.mapped_type(key, source, modifier, optional);
                 self.generate(ts, &text);
                 self.copy(te, end);
+
+                return;
+            }
+
+            // `~T` is `__neg<T>`: Luau's parser has no negation, and its
+            // type function library builds one. The function sits in the
+            // file itself: one exported from the runtime reaches another
+            // module unchecked, and the negation would accept anything.
+            Some(TypeEdit::Negation { tildes, operand }) => {
+                let (ts, os, oe) = (
+                    self.byte_start(tildes),
+                    self.byte_start(operand),
+                    self.byte_end(operand),
+                );
+                self.r.copy(start, ts);
+                self.uses_neg = true;
+                self.generate(ts, "__neg<");
+                self.copy(os, oe);
+                self.generate(oe, ">");
+                self.copy(oe, end);
 
                 return;
             }
@@ -2528,6 +2568,10 @@ impl<'s> Desugar<'s> {
 
                     TypeEdit::Mapped { table, .. } => {
                         (self.byte_start(*table), self.byte_end(*table))
+                    }
+
+                    TypeEdit::Negation { tildes, operand } => {
+                        (self.byte_start(*tildes), self.byte_end(*operand))
                     }
                 };
 

@@ -1144,6 +1144,29 @@ impl<'s> Desugar<'s> {
                     .trim()
                     .to_string();
 
+                // A negation bound: `<T: ~nil>` takes any `T` but nil.
+                if let Some(negated) = part.trim().strip_prefix('~') {
+                    let negated = negated.trim();
+                    let message = if negated.starts_with('~') {
+                        Some(format!(
+                            "`~{negated}` negates twice; write `{}`",
+                            negated.trim_start_matches('~')
+                        ))
+                    } else {
+                        self.unnegatable(negated).map(|kind| {
+                            format!(
+                                "`~{negated}` negates a {kind} type, which Luau cannot negate; negate a primitive, a singleton, a class, or a union of them"
+                            )
+                        })
+                    };
+
+                    if let Some(message) = message {
+                        hits.push((g, message));
+                    }
+
+                    continue;
+                }
+
                 if head.is_empty()
                     || super::attributes::BUILTIN_BOUNDS.contains(&head.as_str())
                     || self.knows_type(&head)

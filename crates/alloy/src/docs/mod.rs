@@ -74,6 +74,8 @@ pub fn section_kinds(number: &str) -> Vec<&'static str> {
 /// first match wins, from the most specific wording to the least.
 const KIND_RULES: &[(&[&str], &str)] = &[
     (&["internal:"], "InternalError"),
+    // A negation the analyzer cannot build, said before it tries.
+    (&["negates twice", "luau cannot negate"], "TypeError"),
     // The removal report names a declaration kind, which the rules
     // below would read as the kind's own family.
     (&["`global` is removed"], "ImportError"),

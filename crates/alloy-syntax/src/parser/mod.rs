@@ -536,8 +536,9 @@ be one of them: not a local, a parameter, a plain function, or a bare
 expression. After `.` or `:` each is a field, so `t.impl` stays valid.
 
 Six words are left. Each one opens a declaration that no expression
-resembles, and no Roblox file names a local after one, so the reservation
-costs a user nothing. `attribute`, `trait`, and `namespace` also name the
+resembles. Roblox code does name a local `remote`, and such a file must
+rename it; the reservation is a decision of 2026-09-04, taken for a
+simple grammar. `attribute`, `trait`, and `namespace` also name the
 target of an `attribute ... on` list, where the word must read as itself.
 
 Words with a meaning only inside a construct, `client`, `from`, `as`,

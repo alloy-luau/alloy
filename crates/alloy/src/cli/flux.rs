@@ -134,6 +134,9 @@ fn flux_once(args: &[String]) -> ExitCode {
     let mut type_errors = 0;
     let mut type_warnings = 0;
     let mut type_denied = 0;
+    // The errors the checker printed: a lint that says the same thing
+    // of the same file is not printed a second time.
+    let mut said: Vec<(PathBuf, String)> = Vec::new();
     let typecheck = config.flux.typecheck && !args.iter().any(|a| a == "--no-typecheck");
 
     if typecheck {
@@ -165,6 +168,7 @@ fn flux_once(args: &[String]) -> ExitCode {
                         .map_or(&empty, |(_, d)| d);
                     let level = if d.is_error() {
                         type_errors += 1;
+                        said.push((d.rel.clone(), d.message.clone()));
 
                         Level::Error
                     } else {
@@ -224,6 +228,10 @@ fn flux_once(args: &[String]) -> ExitCode {
         (0, report.lints.clone())
     };
     let rewrites = rewrites + header_rewrites;
+    let remaining: Vec<_> = remaining
+        .into_iter()
+        .filter(|(rel, l)| !said.iter().any(|(r, m)| r == rel && *m == l.message))
+        .collect();
     let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
     offer_fixes(&input, &report.lints, &lint_config, fix, "flux");
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");

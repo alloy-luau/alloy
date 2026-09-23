@@ -372,16 +372,24 @@ impl<'s> Scan<'s> {
             }
 
             let inner = self.slice(i + 2, close).trim();
-            self.lint(
-                out,
-                "legacy_iterator",
-                i,
-                close,
-                format!(
-                    "`in {call}({inner})` is `in {inner}`; Luau iterates a table without a wrapper"
+            // `ipairs` stops at the first nil and skips the hash part,
+            // so only the author knows `in xs` visits the same keys.
+            let (message, fix) = match call {
+                "pairs" => (
+                    format!(
+                        "`in pairs({inner})` is `in {inner}`; Luau iterates a table without a wrapper"
+                    ),
+                    Some(inner.to_string()),
                 ),
-                Some(inner.to_string()),
-            );
+
+                _ => (
+                    format!(
+                        "`in ipairs({inner})` is `in {inner}` on an array with no holes; Luau iterates a table without a wrapper"
+                    ),
+                    None,
+                ),
+            };
+            self.lint(out, "legacy_iterator", i, close, message, fix);
         }
     }
 
@@ -971,9 +979,10 @@ mod tests {
             fixed("for k, v in pairs(t) do end\n"),
             "for k, v in t do end\n"
         );
+        // `ipairs` stops at a hole, so its rewrite is the author's.
         assert_eq!(
             fixed("for i, v in ipairs(t.list) do end\n"),
-            "for i, v in t.list do end\n"
+            "for i, v in ipairs(t.list) do end\n"
         );
     }
 

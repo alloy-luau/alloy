@@ -429,11 +429,26 @@ pub fn run(
         .filter_map(|(i, _)| st.ends[i].map(|e| (i, e)))
         .collect();
 
+    // `impl Trait for X as`: the ranges whose methods a trait types.
+    let trait_impls: Vec<(usize, usize)> = impl_ranges
+        .iter()
+        .filter(|(a, _)| {
+            text(*a) == "impl"
+                && (a + 1..toks.len())
+                    .take_while(|&j| text(j) != "as")
+                    .any(|j| text(j) == "for")
+        })
+        .copied()
+        .collect();
+
     // Every function.
     let mut fns: Vec<Fn> = Vec::new();
 
     for (i, t) in toks.iter().enumerate() {
-        if t.text(src) != "function" || matches!(i.checked_sub(1).map(text), Some("." | ":")) {
+        // A `type function` takes types, which Luau lets no one annotate.
+        if t.text(src) != "function"
+            || matches!(i.checked_sub(1).map(text), Some("." | ":" | "type"))
+        {
             continue;
         }
 
@@ -612,8 +627,13 @@ pub fn run(
             }
         }
 
-        if named && !f.has_return_type && (f.exported || f.in_impl) {
-            let name_tok = *f.path.last().unwrap_or(&f.at);
+        let name_tok = *f.path.last().unwrap_or(&f.at);
+        // A metamethod's shape is Luau's, and a trait impl's method
+        // takes the return type its trait declares.
+        let answered = text(name_tok).starts_with("__")
+            || trait_impls.iter().any(|(a, b)| *a < f.at && f.at < *b);
+
+        if named && !f.has_return_type && (f.exported || f.in_impl) && !answered {
             lints.push(Lint {
                 name: "missing_return_type",
                 start: toks[name_tok].start,

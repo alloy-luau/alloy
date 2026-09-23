@@ -495,7 +495,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "`pairs` or `ipairs` around a `for ... in` table",
-        detail: "Flux. Luau iterates a table without a wrapper, arrays in order and then the rest, and honors `__iter`. `pairs` and `ipairs` add a call and hide the metamethod. `alloy flux --fix` removes them.",
+        detail: "Flux. Luau iterates a table without a wrapper, arrays in order and then the rest, and honors `__iter`. `pairs` and `ipairs` add a call and hide the metamethod. `alloy flux --fix` removes `pairs`. It leaves `ipairs`, which stops at the first nil and skips the hash part, so the rewrite is the author's choice.",
     },
     LintInfo {
         name: "manual_floor_div",

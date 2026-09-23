@@ -134,6 +134,26 @@ fn answers_version(binary: &Path) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// The oldest luau-lsp that checks the lowered Alloy clean. 1.68.0
+/// finds no one type for an array rest, `local [head, ...rest] = xs`.
+const MIN_LUAU_LSP: (u32, u32, u32) = (1, 69, 0);
+
+/// A note when the analyzer is older than [`MIN_LUAU_LSP`].
+fn old_analyzer_note(binary: &Path) -> Option<String> {
+    let out = Command::new(binary).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let version = text.split_whitespace().last()?.trim_start_matches('v');
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().ok());
+    let found = (parts.next()??, parts.next()??, parts.next()??);
+    let (a, b, c) = MIN_LUAU_LSP;
+
+    (found < MIN_LUAU_LSP).then(|| {
+        format!(
+            "luau-lsp {version} is older than {a}.{b}.{c}; update it, or the check can report errors the code does not have"
+        )
+    })
+}
+
 /// Why a run that reported nothing failed, if it did. The analyzer's
 /// own progress lines are not trouble; anything else it said is, and so
 /// is a non-zero exit with nothing to say.
@@ -308,6 +328,10 @@ pub fn analyze(
     let Some(binary) = find_luau_lsp(&config.flux) else {
         return Err("luau-lsp is not on the PATH; `[flux] luau_lsp` names the binary, `typecheck = false` skips the check".to_string());
     };
+
+    if let Some(note) = old_analyzer_note(&binary) {
+        analysis.notes.push(note);
+    }
 
     let root_abs = normalize(&std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()));
     let placed: Vec<(PathBuf, &str)> = deps

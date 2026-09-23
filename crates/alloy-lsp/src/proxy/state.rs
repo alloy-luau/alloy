@@ -235,7 +235,34 @@ impl State {
             return;
         }
 
-        self.write_mirror(&root.join(".luaurc"), &mirror_luau_text(root, Some(config)));
+        let text = mirror_luau_text(root, Some(config));
+        self.write_mirror(&root.join(".luaurc"), &text);
+
+        // `in = "../examples"`: the sources sit beside the root, not
+        // under it, so no configuration above them sets the mode, and
+        // the child checks them non-strict. They take the root's, with
+        // each alias rebased from the input folder.
+        let input = alloy::modules::normalize(&root.join(&config.build.input));
+
+        if !input.starts_with(root)
+            && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            if let Some(aliases) = value
+                .get_mut("aliases")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                for (_, path) in aliases.iter_mut() {
+                    if let Some(rel) = path.as_str().filter(|p| !Path::new(p).is_absolute()) {
+                        let target = alloy::modules::normalize(&root.join(rel));
+                        *path = serde_json::json!(crate::imports::relative_spec(&input, &target));
+                    }
+                }
+            }
+
+            let text = serde_json::to_string_pretty(&value).unwrap_or_default() + "\n";
+            self.write_mirror(&input.join(".luaurc"), &text);
+        }
+
         self.luau_configs.borrow_mut().insert(root.to_path_buf());
     }
 
@@ -421,8 +448,16 @@ impl State {
         let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         // The climb stops at the workspace root: a sibling project
-        // under the same parent must not lend its configuration.
-        let config = self.config_at(&dir);
+        // under the same parent must not lend its configuration. A file
+        // under the root's `in`, `../examples`, answers to the root, as
+        // it does for `alloy build`.
+        let config = self.config_at(&dir).or_else(|| {
+            let root = self.root.as_deref()?;
+            let found = self.config_at(root)?;
+            let input = normalize(&root.join(&found.1.build.input));
+
+            path.starts_with(&input).then_some(found)
+        });
         let file_name = path.to_string_lossy().into_owned();
         let definitions = file_name.ends_with(".d.aly");
         let config_dir = config

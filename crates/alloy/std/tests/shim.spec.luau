@@ -6,6 +6,23 @@ local typeof, Vector3, Color3, UDim2, Enum, Instance, task, game, workspace =
 	shim.typeof, shim.Vector3, shim.Color3, shim.UDim2, shim.Enum, shim.Instance, shim.task, shim.game, shim.workspace
 
 describe("shim", function()
+	it("rolls a seeded Random the same way twice", function()
+		local Random = shim.Random
+		local a, b = Random.new(42), Random.new(42)
+		expect(typeof(a)).toBe("Random")
+		for _ = 1, 5 do
+			expect(a:NextNumber()).toBe(b:NextNumber())
+		end
+		for _ = 1, 50 do
+			local n = a:NextInteger(3, 5)
+			expect(n >= 3 and n <= 5 and n == math.floor(n)).toBe(true)
+			local x = a:NextNumber(10, 20)
+			expect(x >= 10 and x < 20).toBe(true)
+		end
+		local c = a:Clone()
+		expect(c:NextNumber()).toBe(a:NextNumber())
+	end)
+
 	it("fills the engine globals on a plain VM", function()
 		expect(typeof(Vector3.new(1, 2, 3))).toBe("Vector3")
 		expect((Vector3.new(1, 2, 3) + Vector3.one).Magnitude > 3).toBe(true)

@@ -18,6 +18,7 @@ if game ~= nil then
 		UDim = UDim,
 		UDim2 = UDim2,
 		NumberRange = NumberRange,
+		Random = Random,
 		Enum = Enum,
 		Instance = Instance,
 		task = task,
@@ -304,6 +305,43 @@ NumberRange.__index = NumberRange
 
 function NumberRange.new(min, max)
 	return mark(table.freeze(setmetatable({ Min = min, Max = max or min }, NumberRange)), "NumberRange")
+end
+
+-- ---------------------------------------------------------------------------
+-- Random: the engine's generator, seeded, so a test can pin its rolls.
+-- ---------------------------------------------------------------------------
+
+local Random = {}
+Random.__index = Random
+
+-- Park and Miller's generator: the state stays below 2^31, so every step
+-- is exact in a double.
+local MODULUS = 2147483647
+
+function Random.new(seed)
+	local state = math.floor(seed or os.clock() * 1000000) % MODULUS
+	if state <= 0 then
+		state += MODULUS - 1
+	end
+	return mark(setmetatable({ state = state }, Random), "Random")
+end
+
+local function step(self)
+	self.state = (self.state * 16807) % MODULUS
+	return self.state / MODULUS
+end
+
+function Random:NextNumber(min, max)
+	local lo, hi = min or 0, max or 1
+	return lo + step(self) * (hi - lo)
+end
+
+function Random:NextInteger(min, max)
+	return min + math.floor(step(self) * (max - min + 1))
+end
+
+function Random:Clone()
+	return mark(setmetatable({ state = self.state }, Random), "Random")
 end
 
 -- ---------------------------------------------------------------------------
@@ -795,6 +833,7 @@ shim.Color3 = Color3
 shim.UDim = UDim
 shim.UDim2 = UDim2
 shim.NumberRange = NumberRange
+shim.Random = Random
 shim.Enum = Enum
 shim.Instance = Instance
 shim.task = task

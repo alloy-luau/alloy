@@ -532,8 +532,28 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // The attributes above the export belong to it, so the
+            // comment sits above them: `@timeout(5)` under the doc.
+            let mut top = i;
+
+            loop {
+                let name_at = match top.checked_sub(1).map(|k| self.t(k)) {
+                    Some(")") => self.opener(top - 1).and_then(|o| o.checked_sub(1)),
+
+                    Some(_) => Some(top - 1),
+
+                    None => None,
+                };
+
+                match name_at {
+                    Some(n) if n > 0 && self.is_name(n) && self.t(n - 1) == "@" => top = n - 1,
+
+                    _ => break,
+                }
+            }
+
             // The line above ends in a comment: documented.
-            let gap = self.gap_before(i);
+            let gap = self.gap_before(top);
             let above = gap.trim_end_matches([' ', '\t']);
             let above = above.strip_suffix('\n').unwrap_or(above);
             let last_line = above.rsplit('\n').next().unwrap_or("");
@@ -812,6 +832,10 @@ mod tests {
             vec!["missing_doc"]
         );
         assert_eq!(all("export const N = 1\n"), vec!["missing_doc"]);
+        assert_eq!(
+            all("-- Asks.\n@timeout(5)\n@unreliable\nexport remote Ping() from client\n"),
+            Vec::<&str>::new()
+        );
 
         // `export` on a namespace member exports nothing, and the build
         // says so; the lint does not call the member exported.

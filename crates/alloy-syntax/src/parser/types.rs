@@ -113,12 +113,38 @@ impl<'a> Parser<'a> {
             self.bump();
         }
 
-        self.type_suffixed()?;
+        self.type_negated()?;
 
         while self.at("|") || self.at("&") {
             self.bump();
-            self.type_suffixed()?;
+            self.type_negated()?;
         }
+
+        Ok(())
+    }
+
+    /// `~T`: every value that is not a `T`. The `~` binds tighter than
+    /// `|` and `&` and looser than a suffix, so `~T[]` negates the array.
+    /// A type never stands left of `~=`, which lexes as one token, so a
+    /// lone `~` here is always the negation.
+    fn type_negated(&mut self) -> Result<(), ParseError> {
+        let start = self.pos;
+
+        while self.at("~") {
+            self.bump();
+        }
+
+        if self.pos == start {
+            return self.type_suffixed();
+        }
+
+        let tildes = TokSpan::new(start, self.pos);
+        let operand_start = self.pos;
+        self.type_suffixed()?;
+        self.type_edits.push(TypeEdit::Negation {
+            tildes,
+            operand: TokSpan::new(operand_start, self.pos),
+        });
 
         Ok(())
     }

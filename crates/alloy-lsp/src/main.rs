@@ -43,6 +43,10 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 
 fn main() -> ExitCode {
+    alloy_syntax::parser::run_with_deep_stack(run)
+}
+
+fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
@@ -247,7 +251,7 @@ fn main() -> ExitCode {
     if let Some(child_err) = child.stderr.take() {
         let tail = Arc::clone(&stderr_tail);
 
-        std::thread::spawn(move || {
+        alloy_syntax::parser::spawn_deep(move || {
             for line in BufReader::new(child_err).lines().map_while(Result::ok) {
                 eprintln!("{line}");
 
@@ -268,7 +272,7 @@ fn main() -> ExitCode {
     // Child -> editor on its own thread.
     let reader_server = Arc::clone(&server);
     let child_name = child_path.clone();
-    let _reader = std::thread::spawn(move || {
+    let _reader = alloy_syntax::parser::spawn_deep(move || {
         let mut reader = BufReader::new(child_out);
 
         loop {
@@ -314,7 +318,7 @@ fn main() -> ExitCode {
     // The project's folders on their own thread: an editor that sends
     // no watcher notification still hears about a package install.
     let poll_server = Arc::clone(&server);
-    std::thread::spawn(move || poll_server.poll_files());
+    alloy_syntax::parser::spawn_deep(move || poll_server.poll_files());
 
     // Editor -> child on the main thread, the first message included.
     if !server.handle_client(first) {

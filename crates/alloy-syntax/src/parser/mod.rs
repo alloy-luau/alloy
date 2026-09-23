@@ -52,11 +52,48 @@ pub struct ParseOptions {
     pub max_depth: u32,
 }
 
+/// The `max_depth` a default `ParseOptions` takes. A program whose
+/// threads carry a large stack raises it once, with
+/// [`run_with_deep_stack`], and every parse then accepts nesting as
+/// deep as Luau's own parser does.
+static DEFAULT_DEPTH: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(DEFAULT_MAX_DEPTH);
+
+/// Luau's own parser stops at a recursion depth of 1000.
+pub const LUAU_MAX_DEPTH: u32 = 1_000;
+
+/// The stack of a thread that parses at [`LUAU_MAX_DEPTH`]. A debug
+/// build spends up to 32 KiB of stack per level, so 1000 levels fit
+/// with room to spare. The stack is reserved address space; only the
+/// pages a parse touches are committed.
+pub const DEEP_STACK: usize = 256 << 20;
+
+/// Spawns a thread with [`DEEP_STACK`].
+pub fn spawn_deep<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    std::thread::Builder::new()
+        .stack_size(DEEP_STACK)
+        .spawn(f)
+        .expect("a thread")
+}
+
+/// Runs `main` on a thread with [`DEEP_STACK`] and raises the default
+/// depth to Luau's. Every thread of the program that parses must then
+/// come from [`spawn_deep`].
+pub fn run_with_deep_stack<T: Send + 'static>(main: impl FnOnce() -> T + Send + 'static) -> T {
+    DEFAULT_DEPTH.store(LUAU_MAX_DEPTH, std::sync::atomic::Ordering::Relaxed);
+
+    spawn_deep(main)
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
 impl Default for ParseOptions {
     fn default() -> Self {
         Self {
             definitions: false,
-            max_depth: DEFAULT_MAX_DEPTH,
+            max_depth: DEFAULT_DEPTH.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }

@@ -46,6 +46,10 @@ fn command_help(text: &str) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    alloy_syntax::parser::run_with_deep_stack(run)
+}
+
+fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // An option the command does not take does nothing: the run reads as

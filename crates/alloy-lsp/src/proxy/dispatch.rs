@@ -234,7 +234,7 @@ impl Server {
                 // `didOpen`, and every request after it, until the
                 // last file, so they run on their own thread.
                 let scanner = Arc::clone(self);
-                std::thread::spawn(move || scanner.open_shadows(files));
+                alloy_syntax::parser::spawn_deep(move || scanner.open_shadows(files));
             }
 
             Some("shutdown") => {

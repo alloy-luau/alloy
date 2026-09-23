@@ -1090,7 +1090,7 @@ impl Server {
 
         let server = Arc::clone(self);
 
-        std::thread::spawn(move || {
+        alloy_syntax::parser::spawn_deep(move || {
             loop {
                 std::thread::sleep(IMPORT_REFRESH_WAIT);
 

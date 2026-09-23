@@ -889,15 +889,126 @@ pub fn import_types(
         };
         let types = cache
             .entry(path.clone())
-            .or_insert_with(|| {
-                module_text(&path)
-                    .map(|t| exported_types(&t))
-                    .unwrap_or_default()
-            })
+            .or_insert_with(|| module_types(&path, aliases, BARREL_DEPTH))
             .clone();
 
         if !types.is_empty() {
             out.push((spec, types));
+        }
+    }
+
+    out
+}
+
+/// How many modules a re-export is followed through. A barrel of a
+/// barrel is rare, a cycle of them is a mistake, and the walk reads a
+/// file per step.
+const BARREL_DEPTH: u8 = 4;
+
+/// The types a module sends out under names of its own: the ones it
+/// declares, and the ones it passes on from another module. Where
+/// those came from reads from the module's own folder, so the walk
+/// takes its path and not just its text.
+fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<String> {
+    let Ok(source) = module_text(path) else {
+        return Vec::new();
+    };
+    let mut out = exported_types(&source);
+
+    if depth == 0 {
+        return out;
+    }
+
+    let mut inner: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (name, exported, spec) in reexports(&source) {
+        let types = inner.entry(spec.clone()).or_insert_with(|| {
+            resolve(&spec, path, aliases)
+                .filter(|target| target != path)
+                .map(|target| module_types(&target, aliases, depth - 1))
+                .unwrap_or_default()
+        });
+        let Some(entry) = types.iter().find(|e| type_head(e) == name) else {
+            continue;
+        };
+        let marker = match type_only(entry) {
+            true => "=",
+
+            false => "",
+        };
+
+        out.push(format!("{exported}{}{marker}", type_args(entry)));
+    }
+
+    out
+}
+
+/// What a module passes on from another: the name that module knows it
+/// by, the name it goes out under here, and the spec that names it. A
+/// barrel writes `export { Point } from "./model"`, or imports `Point`
+/// and names it in an `export { ... }` list of its own.
+fn reexports(source: &str) -> Vec<(String, String, String)> {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    if !source.contains("export") {
+        return Vec::new();
+    }
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: TokSpan| span.text(source, toks).to_string();
+    let bare = |span: TokSpan| text(span).trim_matches(['"', '\'']).to_string();
+    // What each import binds here, with the module it came from and
+    // the name that module knows it by.
+    let mut bound: Vec<(String, String, String)> = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::Import(i) = stmt else {
+            continue;
+        };
+        let specs = match &i.kind {
+            ImportKind::Named(v)
+            | ImportKind::TypeOnly(v)
+            | ImportKind::Both(_, v)
+            | ImportKind::Namespace(_, v) => v,
+
+            ImportKind::Default(_) => continue,
+        };
+
+        for sp in specs {
+            let name = text(sp.name);
+            let local = sp.alias.map(text).unwrap_or_else(|| name.clone());
+
+            bound.push((local, bare(i.path), name));
+        }
+    }
+
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::ExportList(list) = stmt else {
+            continue;
+        };
+
+        for sp in &list.specs {
+            let name = text(sp.name);
+            let exported = text(sp.alias.unwrap_or(sp.name));
+
+            match list.from {
+                Some(from) => out.push((name, exported, bare(from))),
+
+                None => {
+                    if let Some((_, spec, from_name)) = bound.iter().find(|(l, _, _)| *l == name) {
+                        out.push((from_name.clone(), exported, spec.clone()));
+                    }
+                }
+            }
         }
     }
 

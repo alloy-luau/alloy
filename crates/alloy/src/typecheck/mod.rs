@@ -119,7 +119,38 @@ pub fn find_luau_lsp(config: &FluxConfig) -> Option<PathBuf> {
         dirs.push(home.join(".ember/bin"));
     }
 
-    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+    dirs.into_iter()
+        .map(|d| d.join(name))
+        .find(|p| p.is_file() && answers_version(p))
+}
+
+/// Whether a candidate is the analyzer and not a stand-in for it: a
+/// toolchain manager leaves a shim under the name that fails every run
+/// when the tool is not in its manifest, `--version` first.
+fn answers_version(binary: &Path) -> bool {
+    Command::new(binary)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Why a run that reported nothing failed, if it did. The analyzer's
+/// own progress lines are not trouble; anything else it said is, and so
+/// is a non-zero exit with nothing to say.
+fn analyzer_trouble(status: &std::process::ExitStatus, stderr: &str) -> Option<String> {
+    const NOISE: [&str; 4] = ["WARNING:", "[WARN]", "[INFO]", "[TRACE]"];
+
+    match stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !NOISE.iter().any(|n| l.starts_with(n)))
+    {
+        Some(line) => Some(line.to_string()),
+
+        None => {
+            (!status.success()).then(|| format!("it exited with {}", status.code().unwrap_or(-1)))
+        }
+    }
 }
 
 const TYPES_URL: &str = "https://luau-lsp.pages.dev/type-definitions";
@@ -541,8 +572,21 @@ pub fn analyze(
     let output = cmd
         .output()
         .map_err(|e| format!("cannot run {}: {e}", binary.display()))?;
-    let text = String::from_utf8_lossy(&output.stdout).into_owned()
-        + &String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let text = String::from_utf8_lossy(&output.stdout).into_owned() + &stderr;
+
+    // The analyzer exits 1 when it reports a diagnostic, so the exit
+    // code alone says nothing. A run that read no report and had
+    // trouble is a binary that cannot analyze, and a clean project
+    // reads the same way: the check has to say so instead.
+    if !text.lines().any(|line| parse_line(line).is_some())
+        && let Some(trouble) = analyzer_trouble(&output.status, &stderr)
+    {
+        return Err(format!(
+            "{} failed and reported nothing: {trouble}; `[flux] luau_lsp` or ALLOY_LUAU_LSP names the binary, `typecheck = false` skips the check",
+            binary.display()
+        ));
+    }
 
     let known = known_shapes(files);
     // The aliases a message names a folder through, read once.

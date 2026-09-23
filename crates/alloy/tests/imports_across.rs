@@ -265,13 +265,16 @@ fn flux_sees_the_other_project_and_types_the_import() {
     );
     assert!(!dir.join("shared/build").exists(), "flux writes nothing");
 
-    let Ok(analysis) =
-        alloy::typecheck::analyze(&root, &config, &report.checks, &report.dep_artifacts)
-    else {
+    // Only a machine without a working luau-lsp skips: an analyzer that
+    // runs and says nothing is the bug, not a reason to pass.
+    if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
         eprintln!("skipped: luau-lsp is not installed");
 
         return;
-    };
+    }
+
+    let analysis = alloy::typecheck::analyze(&root, &config, &report.checks, &report.dep_artifacts)
+        .expect("the type check runs");
     let errors: Vec<String> = analysis
         .diagnostics
         .iter()

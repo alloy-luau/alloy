@@ -168,6 +168,13 @@ pub fn is_word_at(source: &str, offset: usize) -> bool {
     source.as_bytes().get(offset).is_some_and(|b| is_word(*b))
 }
 
+/// True when the caret at `offset` sits on a word: the byte there
+/// belongs to one, or the caret stands right after a word's last byte,
+/// the position left by typing the name, where `word_range` reads it.
+pub fn is_word_caret(source: &str, offset: usize) -> bool {
+    is_word_at(source, offset) || (offset > 0 && is_word_at(source, offset - 1))
+}
+
 /// The byte range of the word at `offset`.
 pub fn word_range(source: &str, offset: usize) -> (usize, usize) {
     word_at(source.as_bytes(), offset)

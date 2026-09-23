@@ -37,10 +37,10 @@ mod rpc;
 mod settings;
 mod tokens;
 
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -225,7 +225,7 @@ fn main() -> ExitCode {
         .args(&child_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
@@ -240,6 +240,24 @@ fn main() -> ExitCode {
 
     let child_in = child.stdin.take().expect("piped");
     let child_out = child.stdout.take().expect("piped");
+    // The child's stderr still goes to ours; the last line of it names
+    // what went wrong when the child dies.
+    let stderr_tail = Arc::new(Mutex::new(String::new()));
+
+    if let Some(child_err) = child.stderr.take() {
+        let tail = Arc::clone(&stderr_tail);
+
+        std::thread::spawn(move || {
+            for line in BufReader::new(child_err).lines().map_while(Result::ok) {
+                eprintln!("{line}");
+
+                if !line.trim().is_empty() {
+                    *tail.lock().expect("stderr tail") = line;
+                }
+            }
+        });
+    }
+
     let server = Arc::new(proxy::Server::new(
         Box::new(child_in),
         Box::new(std::io::stdout()),
@@ -249,6 +267,7 @@ fn main() -> ExitCode {
 
     // Child -> editor on its own thread.
     let reader_server = Arc::clone(&server);
+    let child_name = child_path.clone();
     let _reader = std::thread::spawn(move || {
         let mut reader = BufReader::new(child_out);
 
@@ -265,6 +284,28 @@ fn main() -> ExitCode {
                 }
             }
         }
+
+        // The child is gone and every request the editor has out with
+        // it. A shutdown expects this; otherwise the editor hears what
+        // died and restarts the server, instead of waiting forever.
+        if reader_server.stopping.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+
+        let last = stderr_tail.lock().expect("stderr tail").clone();
+        let text = match last.is_empty() {
+            true => format!("luau-lsp ({child_name}) exited"),
+
+            false => format!("luau-lsp ({child_name}) exited: {last}"),
+        };
+
+        log::error(&text);
+        reader_server.to_client(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "window/showMessage",
+            "params": { "type": 1, "message": text },
+        }));
+        std::process::exit(1);
     });
 
     // The project's folders on their own thread: an editor that sends
@@ -294,6 +335,11 @@ fn main() -> ExitCode {
             }
         }
     }
+
+    // The editor is done with us, so the child's own exit is expected.
+    server
+        .stopping
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     // The child gets a second to leave on its own; a child still
     // loading its definitions never answered the shutdown, and the

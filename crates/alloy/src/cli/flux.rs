@@ -198,7 +198,17 @@ fn flux_once(args: &[String]) -> ExitCode {
                 }
             }
 
-            Err(e) => eprintln!("{}", p.warn(&format!("type check skipped: {e}"))),
+            // No analyzer installed is a skip, as it is in CI; one that
+            // ran and failed leaves the run with no type check at all,
+            // and a clean report would be a lie.
+            Err(e) => {
+                if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+                    eprintln!("{}", p.warn(&format!("type check skipped: {e}")));
+                } else {
+                    eprintln!("{}", p.fail(&format!("type check failed: {e}")));
+                    type_errors += 1;
+                }
+            }
         }
     }
 

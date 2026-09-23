@@ -200,9 +200,10 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
         let on_self = position.is_some_and(|(l, c)| self_parameter(doc, l, c));
         let from_source = position.and_then(|(l, c)| source_type(doc, l, c));
 
-        // `unknown` says nothing about the binding, and `~nil` is the
-        // checker's own spelling for a negation Alloy never writes. An
-        // empty gutter is quieter than a hint with no content.
+        // `unknown` says nothing about the binding, and neither does
+        // `~nil`, the key the checker gives a loop over an untyped table.
+        // An empty gutter is quieter than a hint with no content. A
+        // narrower negation, `~number`, stays: the source can write it.
         if matches!(annotation, "unknown" | "~nil") && from_source.is_none() {
             return false;
         }
@@ -362,9 +363,8 @@ pub(crate) fn writable_type(text: &str) -> bool {
         // `_1` and `_2` are the payload slots of a tagged enum.
         && !text.contains("_1:")
         && !text.contains("_2:")
-        // `~nil` negates a type; Alloy writes no negation. The checker's
-        // own type functions, `intersect<T, ~nil>`, carry it.
-        && !text.contains('~')
+        // `~nil` is a type Alloy writes, but the checker's own type
+        // functions, `intersect<T, ~nil>`, have no source form.
         && !text.contains("intersect<")
         && !text.contains("union<")
         // A type pack, `...any`, annotates no binding.

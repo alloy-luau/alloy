@@ -624,6 +624,20 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         return Some(Context::Nothing);
     }
 
+    // `local v: ~|`, `<T: ~|>`, `number | ~|`: a negation takes a
+    // type. A lone `~` stands in a type alone; `~=` is its own token.
+    if let Some(before) = head.trim_end().strip_suffix('~')
+        && before
+            .trim_end_matches('~')
+            .trim_end()
+            .ends_with([':', '|', '&', '<', '(', ',', '=', '>'])
+    {
+        return Some(Context::TypeSlot {
+            prefix: prefix.to_string(),
+            prefers: Prefers::Any,
+        });
+    }
+
     // A word a type, a constructor, or a variant goes after.
     let head_words: Vec<&str> = head.split_whitespace().collect();
 
@@ -1104,6 +1118,21 @@ mod tests {
                 prefers: Prefers::Any,
             })
         );
+    }
+
+    /// A negation takes a type, in a binding, a union, and a bound.
+    #[test]
+    fn a_negation_is_a_type_slot() {
+        let slot = |prefix: &str| {
+            Some(Context::TypeSlot {
+                prefix: prefix.to_string(),
+                prefers: Prefers::Any,
+            })
+        };
+        assert_eq!(at("local v: ~|"), slot(""));
+        assert_eq!(at("local v: number & ~Str|"), slot("Str"));
+        assert_eq!(at("local function f<T: ~n|"), slot("n"));
+        assert_ne!(at("if a ~|"), slot(""));
     }
 
     #[test]

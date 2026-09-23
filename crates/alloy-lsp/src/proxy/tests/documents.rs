@@ -610,6 +610,7 @@ pub(crate) fn an_emit_slot_is_no_parameter_hint() {
 #[test]
 pub(crate) fn a_type_the_source_cannot_write() {
     assert!(writable_type("number[]"));
+    assert!(writable_type("~number"));
     assert!(!writable_type("(@checked (string) -> string)?"));
     assert!(!writable_type("t1 where t1 = { }"));
     assert!(!writable_type("*error-type*"));

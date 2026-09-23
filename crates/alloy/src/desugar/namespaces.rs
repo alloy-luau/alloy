@@ -123,6 +123,8 @@ impl<'s> Desugar<'s> {
             }
         }
 
+        self.scan_imported_types(&block.stmts);
+
         for stmt in &block.stmts {
             let Stmt::ExportList(list) = stmt else {
                 continue;
@@ -131,13 +133,15 @@ impl<'s> Desugar<'s> {
             for spec in &list.specs {
                 let name = self.text_of(spec.name).to_string();
 
-                // `export { T }` of a type the file declares: Luau has
-                // no re-export for an alias, and `export type T = T` is
-                // a cycle. The declaration takes the word instead, and
+                // `export { T }` of a type the file declares or
+                // imports: Luau has no re-export for an alias, and
+                // `export type T = T` is a cycle. The declaration, or
+                // the import's own alias, takes the word instead, and
                 // a struct or an enum sends its type out with its value.
                 if list.from.is_none()
                     && spec.alias.is_none()
-                    && self.file_types.contains_key(&name)
+                    && (self.file_types.contains_key(&name)
+                        || self.imported_types.contains_key(&name))
                 {
                     self.export_listed_types.insert(name.clone());
                 }
@@ -233,6 +237,44 @@ impl<'s> Desugar<'s> {
                     rendered,
                     name_tok: span.start,
                 });
+            }
+        }
+    }
+
+    /// The types the file imports, under the name they bind here. A
+    /// module that re-exports one of them sends the type on, and the
+    /// import's own alias is where the `export` word goes.
+    fn scan_imported_types(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            let Stmt::Import(i) = stmt else {
+                continue;
+            };
+            let path = crate::data::strip_literal(self.text_of(i.path));
+            let (specs, type_only) = match &i.kind {
+                ImportKind::Named(v) | ImportKind::Both(_, v) | ImportKind::Namespace(_, v) => {
+                    (v, false)
+                }
+
+                ImportKind::TypeOnly(v) => (v, true),
+
+                ImportKind::Default(_) => continue,
+            };
+
+            for sp in specs {
+                let name = self.text_of(sp.name).to_string();
+                let local = sp
+                    .alias
+                    .map(|a| self.text_of(a).to_string())
+                    .unwrap_or_else(|| name.clone());
+                let is_type = type_only || sp.is_type || self.module_exports_type(&path, &name);
+
+                if !is_type {
+                    continue;
+                }
+
+                let value =
+                    !(type_only || sp.is_type || self.module_exports_type_only(&path, &name));
+                self.imported_types.insert(local, value);
             }
         }
     }

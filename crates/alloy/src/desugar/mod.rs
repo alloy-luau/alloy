@@ -36,7 +36,7 @@ mod macros;
 mod modules;
 pub(crate) mod namespaces;
 mod remotes;
-mod statements;
+pub mod statements;
 mod structs;
 mod types;
 
@@ -537,7 +537,14 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         export_listed: HashSet::new(),
         export_listed_types: HashSet::new(),
         file_types: HashMap::new(),
+        imported_types: HashMap::new(),
         type_name_spans: chunk.type_names.clone(),
+        non_value_spans: {
+            let mut spans = Vec::new();
+            stmts_non_value_spans(&chunk.block.stmts, &mut spans);
+
+            spans
+        },
     };
 
     for (name, decl) in &options.import_attributes {
@@ -1150,6 +1157,10 @@ struct Desugar<'s> {
     /// The types the top level declares without `export`, and whether
     /// each is a value too: a struct is, an interface is not.
     file_types: HashMap<String, bool>,
+    /// The types the file imports, under the name they bind here, and
+    /// whether each is a value too. An `export { ... }` list may send
+    /// one of them on, and a barrel module is nothing else.
+    imported_types: HashMap<String, bool>,
     /// The next function header takes `local`: a namespace member never
     /// leaks into the file, and a plain `function f()` would be a Luau
     /// global. The attributed path reads it, since the modifier goes
@@ -1166,6 +1177,10 @@ struct Desugar<'s> {
     /// A namespace's type renders under its own name, so the copy has
     /// to know where each name sits.
     type_name_spans: Vec<TokSpan>,
+    /// The spans that name a member, not a value: types, struct fields,
+    /// enum variants. The hoist scan reads tokens, and a name in there
+    /// is no use of the declaration below it.
+    non_value_spans: Vec<TokSpan>,
 }
 
 /// One instance method an `impl` block writes, in spans, so the type
@@ -1745,6 +1760,66 @@ pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
     }
 }
 
+/// The token span of everything under these statements that names a
+/// member instead of a value: a type, a struct field, an enum variant.
+/// `{ start: () -> () }`, `coins: number`, and `Begin` write a name the
+/// shape owns, and no runtime read of that name is in there.
+fn stmts_non_value_spans(stmts: &[Stmt], out: &mut Vec<TokSpan>) {
+    for s in stmts {
+        let mut bare = s.under_default();
+
+        while let Stmt::Attributed { stmt, .. } = bare {
+            bare = stmt.under_default();
+        }
+
+        match bare {
+            Stmt::TypeAlias(t) => out.push(t.span),
+
+            Stmt::Struct(d) => out.extend(d.fields.iter().flat_map(|f| [f.name, f.ty])),
+
+            Stmt::Enum(d) => out.extend(
+                d.variants
+                    .iter()
+                    .flat_map(|v| std::iter::once(v.name).chain(v.payload.iter().copied())),
+            ),
+
+            Stmt::Local(l) => out.extend(l.names.iter().filter_map(|b| b.ty)),
+
+            // A namespace renders its members itself, so the child walk
+            // skips them; the members still hold types.
+            Stmt::Namespace(ns) => {
+                for m in &ns.members {
+                    stmts_non_value_spans(std::slice::from_ref(&m.stmt), out);
+                }
+            }
+
+            _ => {}
+        }
+
+        for c in stmt_children(s) {
+            child_non_value_spans(c, out);
+        }
+    }
+}
+
+fn child_non_value_spans(c: Child<'_>, out: &mut Vec<TokSpan>) {
+    match c {
+        Child::Expr(e) => {
+            for c in expr_children(e) {
+                child_non_value_spans(c, out);
+            }
+        }
+
+        Child::Block(b) => stmts_non_value_spans(&b.stmts, out),
+
+        Child::Function(f) => {
+            out.extend(f.params.iter().filter_map(|p| p.ty));
+            out.extend(f.ret_type);
+            stmts_non_value_spans(&f.block.stmts, out);
+        }
+    }
+}
+
 /// The token span of every function body under these statements. A use
 /// inside one runs after the declaration it reads.
 fn stmts_function_spans(stmts: &[Stmt], out: &mut Vec<TokSpan>) {
@@ -2039,6 +2114,9 @@ impl<'s> Desugar<'s> {
             })
             .collect();
 
+        // The names declared so far.
+        let mut declared: Vec<&str> = Vec::new();
+
         for s in &block.stmts {
             let (name, decl, kind) = match s {
                 Stmt::Struct(d) => (d.name, d.span, "struct"),
@@ -2055,7 +2133,17 @@ impl<'s> Desugar<'s> {
             };
             let name = self.text_of(name);
             let is_fn = kind == "function";
+            // A use between two declarations of one name reads the
+            // earlier one, which is valid Luau; only the first
+            // declaration can sit below its use.
+            let earlier = declared.contains(&name);
             let mut deferred = false;
+
+            declared.push(name);
+
+            if earlier {
+                continue;
+            }
 
             let reads = |k: usize| self.reads_name(k, name, is_fn);
             // A macro that calls another macro expands what that one
@@ -2128,9 +2216,11 @@ impl<'s> Desugar<'s> {
     ///
     /// A field, `x.Point`, and a type, `p: Point`, read no value; the
     /// alias is in scope over the whole block. A declaration head of
-    /// the name is the duplicate check's. A function name also sits in
-    /// method calls, `o:tag()`, in nested heads, and in keys,
-    /// `{ tag = 1 }`.
+    /// the name is the duplicate check's. A method call, `o:tag()`, a
+    /// key, `{ tag = 1 }`, and an assignment target, `tag = 1`, name a
+    /// slot of something else, whatever the declaration below is. A
+    /// member of a type or of a declaration, `{ tag: () -> () }`, names
+    /// no value at all.
     pub(crate) fn reads_name(&self, k: usize, name: &str, is_fn: bool) -> bool {
         let t = self.toks[k];
         let before = if k > 0 {
@@ -2142,10 +2232,16 @@ impl<'s> Desugar<'s> {
 
         t.kind == TokKind::Ident
             && t.text(self.src) == name
-            && !(is_fn && (matches!(before, "function" | "local" | ":") || after == "="))
+            && after != "="
+            && !(is_fn && matches!(before, "function" | "local"))
+            && !self
+                .non_value_spans
+                .iter()
+                .any(|s| (s.start..s.end).contains(&(k as u32)))
             && !matches!(
                 before,
-                "." | "struct"
+                "." | ":"
+                    | "struct"
                     | "enum"
                     | "namespace"
                     | "impl"

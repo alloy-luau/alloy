@@ -703,7 +703,18 @@ pub fn auto_import_candidates<'a>(
             continue;
         }
 
-        let Some(spec) = best_spec(from_dir, &module_path(path), aliases) else {
+        // A module the file already imports keeps the spec written for
+        // it, `./shapes` and not `@src/shapes`, so the name joins that
+        // line instead of a second import of the same module.
+        let module = module_path(path);
+        let written = taken.iter().find(|s| {
+            alloy::modules::resolve(s, current, aliases)
+                .is_some_and(|r| module_path(&r) == module || r == module)
+        });
+        let Some(spec) = written
+            .cloned()
+            .or_else(|| best_spec(from_dir, &module, aliases))
+        else {
             continue;
         };
 
@@ -1075,6 +1086,33 @@ namespace Inner as end
             lexical(Path::new("/w/a"), "../b/c"),
             PathBuf::from("/w/b/c")
         );
+    }
+
+    /// A module the file imports by a relative spec keeps that spec,
+    /// though an alias reaches it too: the name joins the line.
+    #[test]
+    fn an_auto_import_keeps_the_spec_the_file_wrote() {
+        let dir = std::env::temp_dir().join(format!("alloy-auto-spec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let shapes = dir.join("src/shapes.aly");
+        std::fs::write(&shapes, "export struct Vec2 as\n    x: number\nend\n").unwrap();
+        let main = dir.join("src/main.aly");
+        let src = "import { Msg } from \"./shapes\"\n";
+        let exports = vec![Export {
+            name: "Vec2".into(),
+            is_type: false,
+            is_default: false,
+            is_attribute: false,
+            kind: 7,
+        }];
+        let files = vec![(shapes.clone(), exports.as_slice())];
+        let aliases = vec![("src".to_string(), dir.join("src"))];
+        let found = auto_import_candidates(src, &main, &files, "Ve", &HashSet::new(), &aliases);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "./shapes");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

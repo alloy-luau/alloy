@@ -192,11 +192,16 @@ fn run() -> ExitCode {
         .unwrap_or_else(|| "R15".to_string());
     let mut injected = std::collections::HashSet::new();
 
+    let mut given: Vec<PathBuf> = Vec::new();
+
     for path in &definitions {
         match prepare_definitions(path).and_then(|p| {
             extensions::apply(&p, &exts, &rig, &mut injected, workspace_root.as_deref())
         }) {
-            Ok(p) => child_args.push(format!("--definitions={}", p.display())),
+            Ok(p) => {
+                child_args.push(format!("--definitions={}", p.display()));
+                given.push(p);
+            }
 
             Err(e) => log::error(&format!("definitions {}: {e}", path.display())),
         }
@@ -268,6 +273,7 @@ fn run() -> ExitCode {
         exts,
         docs.map(PathBuf::from),
     ));
+    server.state.lock().expect("state").definitions = given;
 
     // Child -> editor on its own thread.
     let reader_server = Arc::clone(&server);

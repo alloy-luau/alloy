@@ -94,6 +94,9 @@ pub(crate) struct State {
     /// proxy answers the object initializer itself, so it reads the
     /// same text the child shows after a `.`.
     pub(crate) api_docs: Option<PathBuf>,
+    /// The definitions files the child reads. A datatype member such as
+    /// `CFrame:inverse` is marked `@deprecated` there and not in the docs.
+    pub(crate) definitions: Vec<PathBuf>,
     /// The `@roblox/globaltype/Class.Member` entries of that file, read
     /// once on the first list that needs one. The file is 7 MB, so a
     /// read at startup would cost every session that never opens a
@@ -283,6 +286,43 @@ impl State {
                 }
 
                 names.insert(entry.to_string());
+            }
+        }
+
+        // `@deprecated` on its own line marks the member on the next.
+        for path in &self.definitions {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let mut owner = "";
+            let mut marked = false;
+
+            for line in text.lines().map(str::trim) {
+                if let Some(rest) = line
+                    .strip_prefix("declare extern type ")
+                    .or_else(|| line.strip_prefix("declare class "))
+                {
+                    owner = rest.split_whitespace().next().unwrap_or("");
+                } else if line == "@deprecated" {
+                    marked = true;
+
+                    continue;
+                } else if marked {
+                    let member = line
+                        .strip_prefix("function ")
+                        .unwrap_or(line)
+                        .split(['(', ':'])
+                        .next()
+                        .unwrap_or("")
+                        .trim();
+
+                    if !member.is_empty() {
+                        names.insert(member.to_string());
+                        names.insert(format!("{owner}.{member}"));
+                    }
+                }
+
+                marked = false;
             }
         }
 

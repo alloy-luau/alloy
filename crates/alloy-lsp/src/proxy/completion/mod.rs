@@ -124,7 +124,32 @@ impl State {
             return;
         }
 
-        let decls = self.decls_in_scope(uri);
+        // `Shapes.Msg.`: an enum reached through `import * as Shapes`
+        // is the module's own, which the file's scope does not list.
+        let qualifier: String = before_dot[..before_dot.len() - enum_name.len()]
+            .strip_suffix('.')
+            .map(|q| {
+                let start = q
+                    .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map_or(0, |i| i + 1);
+
+                q[start..].to_string()
+            })
+            .unwrap_or_default();
+        let decls = match !qualifier.is_empty() && doc.source.contains(&format!("* as {qualifier}"))
+        {
+            true => {
+                let prefix = format!("{enum_name}.");
+
+                self.docs
+                    .values()
+                    .flat_map(|d| d.decls.iter())
+                    .filter(|d| d.name == enum_name || d.name.starts_with(&prefix))
+                    .collect()
+            }
+
+            false => self.decls_in_scope(uri),
+        };
         let is_enum = decls.iter().any(|d| {
             d.name == enum_name && d.hover.lines().nth(1).is_some_and(|l| l.contains("enum "))
         });

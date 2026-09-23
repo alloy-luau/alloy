@@ -625,7 +625,7 @@ pub(crate) fn a_method_finds_the_impl_that_writes_it() {
 /// alone; the declaration carries `private` and the struct.
 #[test]
 fn a_field_at_a_use_reads_its_declaration() {
-    let src = "struct S as\n    x: number\n    private secret: number\nend\n\nimpl S as\n    function f(self): number\n        return self.secret + self.x\n    end\nend\n\nlocal s = new S { x = 1, secret = 2 }\n\nprint(s.x)\n";
+    let src = "struct S as\n    x: number\n    private secret: number\nend\n\nimpl S as\n    function f(self): number\n        return self.secret + self.x\n    end\nend\n\nlocal s = new S { x = 1, secret = 2 }\n\nprint(s.x)\nprint(s?.x)\n";
     let (st, uri) = one_file(src);
     let doc = st.docs.get(uri).expect("doc");
     let at = |needle: &str| {
@@ -643,6 +643,14 @@ fn a_field_at_a_use_reads_its_declaration() {
     // A local bound by a constructor names the struct too.
     let (start, end) = at("s.x)");
     let (start, end) = (start + 2, end - 1);
+    assert_eq!(
+        used_field_hover(&st, doc, start, end).as_deref(),
+        Some("```alloy\nx: number\n```\nA field of `struct S`.")
+    );
+
+    // `?.` reads the same field.
+    let (start, end) = at("s?.x)");
+    let (start, end) = (start + 3, end - 1);
     assert_eq!(
         used_field_hover(&st, doc, start, end).as_deref(),
         Some("```alloy\nx: number\n```\nA field of `struct S`.")

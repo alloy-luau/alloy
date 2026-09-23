@@ -542,7 +542,9 @@ fn call_return(doc: &Doc, init: &str) -> Option<String> {
 /// `impl` block around a `self`, else what the receiver's own
 /// declaration says. `p.x` and `p:m()` read the same receiver.
 pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> {
+    // `p?.x` reads the same receiver as `p.x`.
     let receiver_head = doc.source[..at].trim_end();
+    let receiver_head = receiver_head.strip_suffix('?').unwrap_or(receiver_head);
 
     if !receiver_head.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
         return None;

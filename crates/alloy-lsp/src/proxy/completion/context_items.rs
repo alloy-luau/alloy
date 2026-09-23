@@ -1525,11 +1525,26 @@ impl State {
     /// What a declared name is, from the head line of its hover. A type
     /// alias stands for what it names.
     pub(crate) fn kind_of_name(&self, uri: &str, name: &str) -> MatchKind {
-        let Some(d) = self
-            .decls_in_scope(uri)
-            .into_iter()
-            .find(|d| d.name == name)
-        else {
+        // `Shapes.Msg` through `import * as Shapes`: the module's `Msg`.
+        let star = name.split_once('.').filter(|(q, _)| {
+            self.docs
+                .get(uri)
+                .is_some_and(|d| d.source.contains(&format!("* as {q}")))
+        });
+        let found = match star {
+            Some((_, member)) => self
+                .docs
+                .values()
+                .flat_map(|d| d.decls.iter())
+                .find(|d| d.name == member),
+
+            None => self
+                .decls_in_scope(uri)
+                .into_iter()
+                .find(|d| d.name == name),
+        };
+        let name = star.map_or(name, |(_, member)| member);
+        let Some(d) = found else {
             return MatchKind::Unknown;
         };
         let head = d.hover.lines().nth(1).unwrap_or("");
@@ -1584,6 +1599,17 @@ impl State {
         if head.is_empty() || !t[head.len()..].starts_with('.') {
             return MatchKind::Unknown;
         }
+
+        // `Shapes.Msg.Move(1)`: the enum sits one step past the alias.
+        let second: String = t[head.len() + 1..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let head = match self.kind_of_name(uri, &format!("{head}.{second}")) {
+            MatchKind::Enum(_) if !second.is_empty() => format!("{head}.{second}"),
+
+            _ => head,
+        };
 
         match self.kind_of_name(uri, &head) {
             MatchKind::Enum(name) => MatchKind::Enum(name),

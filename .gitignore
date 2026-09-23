@@ -13,6 +13,7 @@ out/
 
 # Alloy output
 build/
+.alloy/
 
 # lest writes its framework here on each run
 crates/alloy/std/.lest/

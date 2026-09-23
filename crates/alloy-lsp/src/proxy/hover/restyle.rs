@@ -951,7 +951,7 @@ pub(crate) fn lowers_a_block(text: &str, doc: &Doc, line: u32, character: u32) -
         return false;
     };
 
-    if !keywords::is_word_at(&doc.source, offset) {
+    if !keywords::is_word_caret(&doc.source, offset) {
         return true;
     }
 

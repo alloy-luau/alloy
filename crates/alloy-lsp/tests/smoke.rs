@@ -307,3 +307,58 @@ fn scenario(child: &std::path::Path) {
     drop(stdin);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A child that spawns and dies takes every pending request with it.
+/// The editor hears what died and sees the server stop, instead of
+/// waiting forever on its `initialize`.
+#[cfg(unix)]
+#[test]
+fn a_child_that_exits_is_reported_and_stops_the_server() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-dead-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("broken-luau-lsp");
+    std::fs::write(&script, "#!/bin/sh\necho 'no such build' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut server = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_alloy-lsp"))
+            .arg("--luau-lsp")
+            .arg(&script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let rx = messages(server.0.stdout.take().unwrap());
+    let mut seen = Vec::new();
+
+    write(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": std::process::id(),
+            "rootUri": format!("file://{}", dir.display()), "capabilities": {} } }),
+    );
+
+    let note = loop {
+        let m = next(&rx, &mut seen);
+
+        if m["method"] == "window/showMessage" {
+            break m;
+        }
+    };
+
+    assert_eq!(note["params"]["type"], json!(1), "{note}");
+    let text = note["params"]["message"].as_str().unwrap_or_default();
+
+    assert!(text.contains("broken-luau-lsp"), "{text}");
+    assert!(text.contains("no such build"), "{text}");
+
+    let status = server.0.wait().unwrap();
+
+    assert!(!status.success(), "{status}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -168,7 +168,7 @@ impl Caret {
     pub(crate) fn at(source: &str, line: u32, character: u32) -> Option<Self> {
         let offset = offset_of(source, line, character)?;
 
-        if !keywords::is_word_at(source, offset) {
+        if !keywords::is_word_caret(source, offset) {
             return None;
         }
 

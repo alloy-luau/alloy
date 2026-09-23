@@ -339,7 +339,7 @@ impl Server {
             // A replaced word such as a struct name has a home in the
             // shadow: on the same line when the emit kept it there, else
             // where the declaration landed. The child answers there.
-            None if keywords::is_word_at(&doc.source, offset) => {
+            None if keywords::is_word_caret(&doc.source, offset) => {
                 let (start, end) = keywords::word_range(&doc.source, offset);
                 let word = &doc.source[start..end];
 

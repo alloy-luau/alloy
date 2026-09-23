@@ -358,7 +358,7 @@ impl Server {
             return true;
         }
 
-        if !keywords::is_word_at(&doc.source, offset) {
+        if !keywords::is_word_caret(&doc.source, offset) {
             return false;
         }
 
@@ -569,7 +569,7 @@ impl State {
         source: &str,
         offset: usize,
     ) -> Option<(PathBuf, String)> {
-        if !keywords::is_word_at(source, offset) {
+        if !keywords::is_word_caret(source, offset) {
             return None;
         }
 
@@ -774,7 +774,7 @@ impl State {
             return Some(found.clone());
         }
 
-        if !keywords::is_word_at(source, offset) {
+        if !keywords::is_word_caret(source, offset) {
             return None;
         }
 
@@ -922,7 +922,7 @@ impl State {
         // they would edit every same-named name in the file. A name this
         // file exports at the caret is the module's, and those walks
         // answer for it.
-        if keywords::is_word_at(source, offset) {
+        if keywords::is_word_caret(source, offset) {
             let (s, e) = keywords::word_range(source, offset);
             let word = &source[s..e];
             let declares = export_span(source, word) == Some((s, e))
@@ -976,7 +976,7 @@ impl State {
         }
 
         if let Some(file) = uri_to_path(uri)
-            && keywords::is_word_at(source, offset)
+            && keywords::is_word_caret(source, offset)
         {
             let (s, e) = keywords::word_range(source, offset);
             let word = source[s..e].to_string();
@@ -1553,7 +1553,7 @@ impl State {
             ))
         };
 
-        let at_word = keywords::is_word_at(&doc.source, offset)
+        let at_word = keywords::is_word_caret(&doc.source, offset)
             .then(|| keywords::word_range(&doc.source, offset));
 
         // A rename onto the name the caret already carries writes
@@ -1742,7 +1742,7 @@ impl State {
         let doc = self.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
 
-        if !keywords::is_word_at(&doc.source, offset) {
+        if !keywords::is_word_caret(&doc.source, offset) {
             return None;
         }
 
@@ -2494,7 +2494,7 @@ pub(crate) fn data_definition(source: &str, offset: usize, dir: &Path) -> Option
         // is the child's to find.
         let is_statement = line.trim_start().starts_with("import ");
 
-        if !is_statement || at >= reference.start as usize || !keywords::is_word_at(line, at) {
+        if !is_statement || at >= reference.start as usize || !keywords::is_word_caret(line, at) {
             return None;
         }
 

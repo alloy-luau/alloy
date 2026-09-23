@@ -709,6 +709,17 @@ impl<'s> Formatter<'s> {
             return true;
         }
 
+        // A preserving run reflows no line: a group the author opened
+        // onto its own lines stays open.
+        if !self.options.recommended
+            && self
+                .items
+                .get(open + 1)
+                .is_some_and(|i| i.newlines_before > 0)
+        {
+            return true;
+        }
+
         if self.options.expand_imports && elements.len() > 1 && self.is_import_list(open) {
             return true;
         }

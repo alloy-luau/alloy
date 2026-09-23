@@ -792,6 +792,27 @@ mod tests {
     }
 
     #[test]
+    fn preserving_keeps_open_groups_and_calls_take_their_space() {
+        assert_eq!(
+            format("local function f(...) return ... end\n").unwrap(),
+            "local function f(...) return ... end\n"
+        );
+
+        let src = "print(\n    1,\n    2\n)\n";
+        assert_eq!(
+            format_with(src, &FmtConfig::preserving().for_source(src)).unwrap(),
+            src
+        );
+
+        let mut calls = FmtConfig::default();
+        calls.space_after_function_names = crate::config::FunctionNameSpace::Calls;
+        assert_eq!(
+            format_with("local function f(x) return x end\nf(1)\n", &calls).unwrap(),
+            "local function f(x) return x end\nf (1)\n"
+        );
+    }
+
+    #[test]
     fn reindents_blocks() {
         let src = "local function f(x)\nif x then\nreturn 1\nelseif x == 2 then\nreturn 2\nelse\nreturn 3\nend\nend\n";
         let want = "local function f(x)\n  if x then\n    return 1\n  elseif x == 2 then\n    return 2\n  else\n    return 3\n  end\nend\n";

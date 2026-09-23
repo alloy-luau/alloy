@@ -143,7 +143,7 @@ impl<'s> Formatter<'s> {
         }
 
         // A spread or a rest binding: `...rest`.
-        if at == "..." && b.is_ident() {
+        if at == "..." && b.is_ident() && !b.is_keyword_here() {
             return false;
         }
 
@@ -199,7 +199,11 @@ impl<'s> Formatter<'s> {
                     );
                 }
 
-                return false;
+                return bt == "("
+                    && matches!(
+                        self.options.space_after_function_names,
+                        FunctionNameSpace::Always | FunctionNameSpace::Calls
+                    );
             }
 
             if at == ")" || at == "]" || at == "}" || a.is_string() {

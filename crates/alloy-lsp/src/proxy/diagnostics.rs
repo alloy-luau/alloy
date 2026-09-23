@@ -809,6 +809,18 @@ impl State {
     pub(crate) fn full_diagnostics(&self, uri: &str, child: Vec<Value>) -> Vec<Value> {
         let mut diagnostics = self.alloy_diagnostics(uri);
         diagnostics.extend(child);
+
+        // A config exports tables the schema documents, so the lint for
+        // an export with no comment says nothing there.
+        if crate::config_aly::is_config(uri) {
+            diagnostics.retain(|d| {
+                !d.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.starts_with("missing_doc"))
+            });
+            diagnostics.extend(self.config_diagnostics(uri));
+        }
+
         collapse_diagnostics(&mut diagnostics);
 
         if let Some(doc) = self.docs.get(uri) {

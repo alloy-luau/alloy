@@ -23,6 +23,7 @@
 
 mod block_end;
 mod components;
+mod config_aly;
 mod context;
 mod doc;
 mod extensions;

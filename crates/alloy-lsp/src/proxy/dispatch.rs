@@ -417,14 +417,13 @@ impl Server {
                     // The configuration decides how every file
                     // compiles, so the state forgets what it read of
                     // the disk and the next compile reads it again.
-                    if uri.ends_with("/alloy.toml")
-                        || uri.ends_with("/.luaurc")
-                        || uri.ends_with("/luaux.toml")
-                    {
+                    let config_file = uri.ends_with("/alloy.toml") || uri.ends_with("/.config.aly");
+
+                    if config_file || uri.ends_with("/.luaurc") || uri.ends_with("/luaux.toml") {
                         self.state.lock().expect("state").forget_disk();
                     }
 
-                    if uri.ends_with("/alloy.toml") {
+                    if config_file {
                         self.load_ingots();
                     }
 
@@ -577,6 +576,15 @@ impl Server {
                 if m == "textDocument/hover"
                     && let Some(id) = message.get("id").cloned()
                     && self.ingot_hover(&uri, &message, &id)
+                {
+                    return true;
+                }
+
+                // A `.config.aly` table answers from the schema of
+                // `alloy.toml`, before any rule about spaces or quotes.
+                if crate::config_aly::is_config(&uri)
+                    && let Some(id) = message.get("id").cloned()
+                    && self.config_answer(m, &uri, &message, &id)
                 {
                     return true;
                 }

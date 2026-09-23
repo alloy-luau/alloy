@@ -1043,3 +1043,30 @@ fn a_compile_stop_carries_its_book_code() {
             .is_some_and(|h| !h.is_empty())
     );
 }
+
+/// A `.config.aly` reports the keys the schema does not take, then what
+/// its load says, and no export there asks for a comment.
+#[test]
+fn a_config_file_reports_its_keys_and_its_load() {
+    let messages = |src: &str| -> Vec<String> {
+        let st = super::support::files(&[("file:///p/.config.aly", src)]);
+
+        st.full_diagnostics("file:///p/.config.aly", Vec::new())
+            .iter()
+            .filter_map(|d| d["message"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    assert_eq!(
+        messages("export const build = { outt = \"dist\" }\n"),
+        ["`outt` is no key of `build`; did you mean `out`?"]
+    );
+    assert_eq!(
+        messages("local n = nil\nexport default { fmt = { indent_width = n + 1 } }\n")
+            .iter()
+            .map(|m| m.split(':').next().unwrap_or("").to_string())
+            .collect::<Vec<_>>(),
+        ["the config does not load"]
+    );
+    assert!(messages("export const build = { out = \"dist\" }\n").is_empty());
+}

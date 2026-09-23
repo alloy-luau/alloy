@@ -3348,3 +3348,58 @@ fn contextual_words_and_a_new_chain() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `.config.aly` completes, documents, and checks its keys from the
+/// schema `alloy.toml` validates against, through the running server.
+#[test]
+fn a_config_file_completes_from_the_schema() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-config-aly-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let src = "local mode = \"release\"\n\nexport default {\n    build = {\n        out = \"dist\",\n        \n    },\n    fmt = { quote_style =  },\n    buld = {},\n}\n";
+    let file = dir.join(".config.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+
+    // The unknown key reports, with the name it meant.
+    let diags = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("buld")));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d == "`buld` is no key of the config; did you mean `build`?"),
+        "{diags:?}"
+    );
+
+    // A key slot in `build` lists its keys, and not the one written.
+    let items = s.completion_items(&uri, 5, 8);
+    let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+    assert!(labels.contains(&"in"), "{labels:?}");
+    assert!(labels.contains(&"exclude"), "{labels:?}");
+    assert!(!labels.contains(&"out"), "{labels:?}");
+    assert!(!labels.contains(&"mode"), "a local is no key: {labels:?}");
+    let input = items.iter().find(|i| i["label"] == "in").unwrap();
+    assert_eq!(input["insertText"], "[\"in\"] = \"${1:src}\"");
+
+    // A value lists the choices the schema names.
+    let values = s.completion_labels(&uri, 7, 26);
+    assert!(values.iter().any(|v| v == "\"force-single\""), "{values:?}");
+
+    // A hover on a key reads the schema.
+    let text = s.hover(&uri, 4, 9);
+    assert!(text.contains("build.out: string"), "{text}");
+    assert!(text.contains("The output root"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

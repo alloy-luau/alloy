@@ -90,6 +90,9 @@ pub(crate) struct State {
     pub(crate) configs: std::cell::RefCell<HashMap<PathBuf, Option<Project>>>,
     /// The roots whose `.luaurc` the mirror already holds.
     pub(crate) luau_configs: std::cell::RefCell<HashSet<PathBuf>>,
+    /// The last load of each open `.config.aly`: the source it ran and
+    /// its failure. A publish runs often, and the load runs the file.
+    pub(crate) config_loads: std::cell::RefCell<HashMap<String, (String, Option<String>)>>,
     /// The Roblox API docs the child was started with, `--docs`. The
     /// proxy answers the object initializer itself, so it reads the
     /// same text the child shows after a `.`.

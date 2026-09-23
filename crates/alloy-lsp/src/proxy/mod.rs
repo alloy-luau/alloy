@@ -13,6 +13,7 @@
 
 mod capabilities;
 mod completion;
+mod config_file;
 mod diagnostics;
 mod dispatch;
 mod documents;

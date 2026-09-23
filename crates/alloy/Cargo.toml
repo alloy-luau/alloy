@@ -34,6 +34,7 @@ terminal_size = "0.4"
 # The prompts of `alloy init --interactive`. Pinned: the wizard styles
 # itself with the crate's render config, which moves between releases.
 inquire = { version = "0.9.4", default-features = false, features = ["crossterm"] }
+mlua = { version = "0.11.6", features = ["luau"] }
 
 [lints]
 workspace = true

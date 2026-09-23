@@ -711,7 +711,7 @@ pub fn alias_problems(root: &Path, config: &Config) -> Vec<AliasProblem> {
     for name in config.mount.keys() {
         if let Some(alias) = RESERVED_ALIASES.iter().find(|a| a.name == name) {
             push(
-                root.join(crate::config::FILE_NAME),
+                crate::config::Config::file_of(root),
                 alias.name,
                 "ReservedAlias",
                 reserved_alias_message(alias),
@@ -730,7 +730,7 @@ pub fn alias_problems(root: &Path, config: &Config) -> Vec<AliasProblem> {
             }
 
             let rel = m.0.replace('\\', "/");
-            let toml = root.join(crate::config::FILE_NAME);
+            let toml = crate::config::Config::file_of(root);
 
             if !root.join(&rel).is_dir() {
                 push(toml, name, "MountAlias", alias_folder_message(name, &m.0));

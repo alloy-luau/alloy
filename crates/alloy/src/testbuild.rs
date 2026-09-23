@@ -865,9 +865,14 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
     let ingots = crate::ingot::Ingots::load(root, config);
 
     for p in &ingots.problems {
-        report
-            .failures
-            .push((PathBuf::from(crate::config::FILE_NAME), p.to_string()));
+        report.failures.push((
+            PathBuf::from(
+                Config::file_of(root)
+                    .file_name()
+                    .unwrap_or(crate::config::FILE_NAME.as_ref()),
+            ),
+            p.to_string(),
+        ));
     }
 
     // Extensions are project wide, as in the build: a call by an

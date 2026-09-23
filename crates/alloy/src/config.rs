@@ -1009,6 +1009,9 @@ pub const CONFIG_LUAU_TEMPLATE: &str = r#"return {
 pub enum ConfigError {
     Read(PathBuf, std::io::Error),
     Parse(PathBuf, toml::de::Error),
+    /// A `.config.aly` that did not run, or gave a table that does not
+    /// fit: the message says which.
+    Script(PathBuf, String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -1017,6 +1020,12 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Read(p, e) => write!(f, "cannot read {}: {e}", p.display()),
 
             ConfigError::Parse(p, e) => write!(f, "{}: {e}", p.display()),
+
+            ConfigError::Script(p, e) if e.starts_with(&p.display().to_string()) => {
+                write!(f, "{e}")
+            }
+
+            ConfigError::Script(p, e) => write!(f, "{}: {e}", p.display()),
         }
     }
 }
@@ -1087,11 +1096,57 @@ impl Config {
             .collect()
     }
 
+    /// Reads `alloy.toml`, or runs `.config.aly`: the file's extension
+    /// says which.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        if path.extension().is_some_and(|e| e == "aly") {
+            let table = crate::config_aly::evaluate(path)
+                .map_err(|e| ConfigError::Script(path.to_path_buf(), e))?;
+
+            return Self::from_table(table, path);
+        }
+
         let text =
             std::fs::read_to_string(path).map_err(|e| ConfigError::Read(path.to_path_buf(), e))?;
 
         Self::parse(&text, path)
+    }
+
+    /// A configuration from the table a `.config.aly` gives. It reads
+    /// as `alloy.toml` reads, key for key.
+    pub fn from_table(table: toml::Table, path: &Path) -> Result<Self, ConfigError> {
+        let script =
+            |e: toml::de::Error| ConfigError::Script(path.to_path_buf(), e.message().to_string());
+        let mut config: Self = toml::Value::Table(table.clone())
+            .try_into()
+            .map_err(script)?;
+
+        if !config.fmt.recommended {
+            let written = table
+                .get("fmt")
+                .and_then(|v| v.as_table())
+                .cloned()
+                .unwrap_or_default();
+
+            config.fmt = over_preserving(&written);
+        }
+
+        Ok(config)
+    }
+
+    /// The configuration file of a folder, or the `alloy.toml` path a
+    /// report names when the folder holds none.
+    pub fn file_of(dir: &Path) -> PathBuf {
+        Self::file_in(dir).unwrap_or_else(|| dir.join(FILE_NAME))
+    }
+
+    /// The configuration file of a folder: `alloy.toml`, else
+    /// `.config.aly`. A folder with both reads `alloy.toml`.
+    pub fn file_in(dir: &Path) -> Option<PathBuf> {
+        [FILE_NAME, crate::config_aly::FILE_NAME]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|p| p.is_file())
     }
 
     /// The markup config of the project: the `[alx]` table when it
@@ -1123,7 +1178,7 @@ impl Config {
         Ok(markup)
     }
 
-    /// Finds `alloy.toml` in `start` or the nearest ancestor. The project
+    /// Finds `alloy.toml` or `.config.aly` in `start` or the nearest ancestor. The project
     /// root is the directory that holds it, and every path in the file is
     /// relative to that root.
     pub fn find(start: &Path) -> Option<PathBuf> {
@@ -1132,10 +1187,8 @@ impl Config {
         let mut dir = Some(start.as_path());
 
         while let Some(d) = dir {
-            let candidate = d.join(FILE_NAME);
-
-            if candidate.is_file() {
-                return Some(candidate);
+            if let Some(found) = Self::file_in(d) {
+                return Some(found);
             }
 
             dir = d.parent();
@@ -1144,7 +1197,7 @@ impl Config {
         None
     }
 
-    /// The nearest `alloy.toml` at or above `start`, with the walk
+    /// The nearest configuration file at or above `start`, with the walk
     /// stopped at `stop`. The language server passes the workspace root
     /// as `stop`, so one project never reads the configuration of
     /// another that shares a parent directory.
@@ -1154,10 +1207,8 @@ impl Config {
         let mut dir = Some(start.as_path());
 
         while let Some(d) = dir {
-            let candidate = d.join(FILE_NAME);
-
-            if candidate.is_file() {
-                return Some(candidate);
+            if let Some(found) = Self::file_in(d) {
+                return Some(found);
             }
 
             if d == stop {

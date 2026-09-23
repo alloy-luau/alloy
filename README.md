@@ -52,6 +52,10 @@ alloy init          # alloy.toml, .luaurc, .config.luau
 alloy build -W      # compile src into build, again on every change
 ```
 
+A project may write its configuration in Alloy instead of TOML: a
+`.config.aly` that exports the same tables, and runs its code on load.
+`alloy doc config` shows the three forms.
+
 The [releases](https://github.com/alloy-luau/alloy/releases) carry a zip
 per platform with both binaries. The
 [VS Code extension](https://github.com/alloy-luau/extensions) starts

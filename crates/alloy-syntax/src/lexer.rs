@@ -319,6 +319,11 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
             b'0'..=b'9' => {
                 let start = i;
                 i = scan_number(b, i);
+
+                if !well_formed_number(&src[start..i]) {
+                    err!(start, "malformed number `{}`", &src[start..i]);
+                }
+
                 toks.push(Tok {
                     kind: TokKind::Number,
                     start: start as u32,
@@ -330,6 +335,11 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
                 // `.5` is a number. Every other dot is an operator.
                 let start = i;
                 i = scan_number(b, i);
+
+                if !well_formed_number(&src[start..i]) {
+                    err!(start, "malformed number `{}`", &src[start..i]);
+                }
+
                 toks.push(Tok {
                     kind: TokKind::Number,
                     start: start as u32,
@@ -533,6 +543,38 @@ fn try_long_bracket(b: &[u8], pos: usize) -> LongBracket {
     one.
     */
     LongBracket::Unterminated
+}
+
+/// Whether a scanned number is one Luau reads: `0x` hex, `0b` binary,
+/// or a decimal with an optional fraction and exponent, `_` anywhere
+/// after the first digit, and the `i` suffix. `0o17`, `1e`, and `0x`
+/// are not, and Luau would report them in the emit.
+fn well_formed_number(text: &str) -> bool {
+    let text = text.strip_suffix('i').unwrap_or(text);
+    let digits = |s: &str, ok: fn(char) -> bool| {
+        s.chars().any(|c| c != '_') && s.chars().all(|c| c == '_' || ok(c))
+    };
+
+    if let Some(rest) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        return digits(rest, |c| c.is_ascii_hexdigit());
+    }
+
+    if let Some(rest) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+        return digits(rest, |c| c == '0' || c == '1');
+    }
+
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(at) => (&text[..at], Some(&text[at + 1..])),
+
+        None => (text, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let decimal = |c: char| c.is_ascii_digit();
+    let mantissa_ok = (digits(whole, decimal) || whole.is_empty())
+        && (fraction.is_empty() || digits(fraction, decimal))
+        && (!whole.is_empty() || !fraction.is_empty());
+
+    mantissa_ok && exponent.is_none_or(|e| digits(e.strip_prefix(['+', '-']).unwrap_or(e), decimal))
 }
 
 fn scan_number(b: &[u8], mut i: usize) -> usize {
@@ -801,6 +843,19 @@ mod tests {
 
         assert!(matches!(toks[0].kind, TokKind::Str { .. }));
         assert_eq!(toks[1].kind, TokKind::Ident);
+    }
+
+    #[test]
+    fn malformed_numbers_report() {
+        for bad in ["0o17", "1exp", "0x", "1e", "0b12", "1f", "1.2.3"] {
+            assert!(lex(bad).is_err(), "{bad}");
+        }
+
+        for good in [
+            "1", "1.", ".5", "1e10", "1E-3", "0xFF_FF", "0b1010i", "1_000", "3i", "2.5e+2",
+        ] {
+            assert!(lex(good).is_ok(), "{good}");
+        }
     }
 
     #[test]

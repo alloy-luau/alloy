@@ -326,13 +326,41 @@ fn normalize(path: &Path) -> PathBuf {
 /// names, and drops the extension of a data path, `./x.json`, since the
 /// build writes it as `x.luau`. The text keeps its line count: a
 /// replacement holds no newline.
-pub fn rewrite_requires(tree: &Tree, text: &str) -> String {
-    map_requires(text, |path| {
-        let replaced = path.strip_prefix('@').and_then(|p| {
-            let (alias, tail) = p.split_once('/').unwrap_or((p, ""));
+///
+/// `source` is the file's path from the root. A relative require that
+/// leaves the file's mount becomes an instance path too, since the
+/// folders on disk and the instances past a mount differ; `@alloy` is
+/// the runtime's place.
+pub fn rewrite_requires(tree: &Tree, source: &Path, text: &str) -> String {
+    let from = crate::build::module_base(source);
+    let from = from.parent().unwrap_or(Path::new(""));
+    let home = tree.holder(source).map(|(m, _)| m as *const Mounted);
 
-            resolve_alias(tree, alias, tail)
-        });
+    map_requires(text, |path| {
+        let replaced = match path.strip_prefix('@') {
+            Some("alloy") if !tree.runtime.is_empty() => {
+                Some(format!("@game/{}", tree.runtime.join("/")))
+            }
+
+            Some(p) => {
+                let (alias, tail) = p.split_once('/').unwrap_or((p, ""));
+
+                resolve_alias(tree, alias, tail)
+            }
+
+            None if path.starts_with("./") || path.starts_with("../") => {
+                let target = normalize(&from.join(crate::data::strip_spec(path)));
+                let there = tree.holder(&target).map(|(m, _)| m as *const Mounted);
+
+                match home.is_some() && there.is_some() && home != there {
+                    true => place_of(tree, &target).map(|p| format!("@game/{}", p.join("/"))),
+
+                    false => None,
+                }
+            }
+
+            None => None,
+        };
 
         Some(crate::data::strip_spec(replaced.as_deref().unwrap_or(path)).to_string())
     })
@@ -750,7 +778,7 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
     fn an_alias_require_becomes_a_game_path() {
         let t = mounted();
         let text = "local jecs = require(\"@pkg/jecs\") local u = require(\"@shared/util\") local x = require(\"./x\")";
-        let out = rewrite_requires(&t, text);
+        let out = rewrite_requires(&t, Path::new(""), text);
         assert_eq!(
             out,
             "local jecs = require(\"@game/ReplicatedStorage/Packages/jecs\") local u = require(\"@game/ReplicatedStorage/Shared/util\") local x = require(\"./x\")"
@@ -758,12 +786,13 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         assert_eq!(
             rewrite_requires(
                 &Tree::default(),
+                Path::new(""),
                 "local d = require(\"./data.json\") local c = require('../cfg.toml')\n"
             ),
             "local d = require(\"./data\") local c = require('../cfg')\n"
         );
         assert_eq!(
-            rewrite_requires(&t, "require(\"@shared/b\")"),
+            rewrite_requires(&t, Path::new(""), "require(\"@shared/b\")"),
             "require(\"@game/ReplicatedStorage/Shared/b\")"
         );
         // A data path under an alias keeps the module name.
@@ -977,9 +1006,21 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
     fn an_alias_resolves_through_the_luau_configuration() {
         let dir = temp("alias-luaurc");
         let t = with_project_file(&dir);
+        // A relative require that leaves its mount, and the runtime's
+        // alias, write instance paths; one inside the mount stays.
+        let main = Path::new("src/client/main.aly");
         assert_eq!(
             rewrite_requires(
                 &t,
+                main,
+                "require(\"../shared/util\") require(\"./ui\") require(\"@alloy\")"
+            ),
+            "require(\"@game/ReplicatedStorage/Shared/util\") require(\"./ui\") require(\"@game/ReplicatedStorage/Alloy\")"
+        );
+        assert_eq!(
+            rewrite_requires(
+                &t,
+                Path::new(""),
                 "require(\"@shared/economy\") require(\"@pkg/jecs\") require(\"@shared/data/config.json\") require(\"@lest/core\")"
             ),
             "require(\"@game/ReplicatedStorage/Shared/economy\") require(\"@game/ReplicatedStorage/Packages/jecs\") require(\"@game/ReplicatedStorage/Shared/data/config\") require(\"@lest/core\")"
@@ -1005,7 +1046,7 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         );
         let t = Tree::load(&dir, &Config::default());
         assert_eq!(
-            rewrite_requires(&t, "require(\"@shared/util\")"),
+            rewrite_requires(&t, Path::new(""), "require(\"@shared/util\")"),
             "require(\"@game/ReplicatedStorage/Shared/util\")"
         );
         // No mount table and no `[project] runtime`: the default place.

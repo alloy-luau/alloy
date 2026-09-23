@@ -290,18 +290,18 @@ fn run_inner(
     // module: the second write overwrites the first, and
     // `require("./reg")` could not say which one it meant either. The
     // report names both, the way it does for a data file.
+    // A plain `.luau` or `.lua` copies under its own name, and a source
+    // of its stem writes the same module.
     let mut builds: HashMap<PathBuf, PathBuf> = HashMap::new();
 
-    for path in &sources {
+    for path in sources.iter().chain(&plain) {
         let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
 
         if exclude.is_match(&rel) {
             continue;
         }
 
-        let Some(out_rel) = output_for(&rel) else {
-            continue;
-        };
+        let out_rel = output_for(&rel).unwrap_or_else(|| rel.with_extension("luau"));
 
         match builds.get(&out_rel) {
             Some(owner) => report.diagnostics.push((
@@ -708,7 +708,7 @@ fn run_inner(
 
         // Roblox reads no `.luaurc`: an `@alias` require in the ship
         // artifact becomes the `@game/...` instance path.
-        let ship = crate::project::rewrite_requires(&tree, &compiled.ship);
+        let ship = crate::project::rewrite_requires(&tree, &source_rel, &compiled.ship);
         let text = match build.artifact {
             Artifact::Ship => &ship,
 

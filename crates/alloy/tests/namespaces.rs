@@ -1316,3 +1316,23 @@ fn a_bare_construction_inside_the_namespace_reads_the_raw_constructor() {
         "{messages:?}"
     );
 }
+
+/// Inside its namespace an enum reads by its own name in a `match`, as
+/// it does in a value: the arms resolve, and the tests name the rendered
+/// enum. A missing arm names the enum by its path.
+#[test]
+fn a_match_inside_a_namespace_reads_the_enum_by_its_own_name() {
+    let src = "namespace N as\n    public enum Kind as\n        A\n        B(number)\n    end\n    public function f(k: Kind): number\n        return match k with\n            case Kind.A then 1\n            case Kind.B(n) then n\n        end\n    end\nend\nprint(N.f(N.Kind.A))\n";
+    let out = alloy::compile_with(src, &alloy::EmitOptions::default()).unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(out.ship.contains("== N_Kind.A"), "{}", out.ship);
+    assert!(!out.ship.contains("== Kind.A"), "{}", out.ship);
+
+    let missing = src.replace("            case Kind.B(n) then n\n", "");
+    let out = alloy::compile_with(&missing, &alloy::EmitOptions::default()).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        ["this match is not exhaustive: `N.Kind` has no arm for `B`; add it or a `default` arm"]
+    );
+}

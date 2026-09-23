@@ -1024,7 +1024,10 @@ impl<'s> Desugar<'s> {
         // here, so the enum index keys it by the path the source writes,
         // the way `import_struct_fields` keys a struct member.
         let rendered = self.namespace_path_name(head);
-        let name = [rendered.as_deref(), Some(head)]
+        // Inside its namespace an enum reads by its own name, `Kind`,
+        // which renders as `Geo_Kind`.
+        let member = self.ns_member_name(head);
+        let name = [rendered.as_deref(), member.as_deref(), Some(head)]
             .into_iter()
             .flatten()
             .find(|n| self.enums.contains_key(*n))?;

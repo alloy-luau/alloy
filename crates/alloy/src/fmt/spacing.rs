@@ -142,6 +142,12 @@ impl<'s> Formatter<'s> {
             return false;
         }
 
+        // A type negation holds its operand: `~number`, `~(a | b)`. A
+        // lone `~` is always one; `~=` lexes as a token of its own.
+        if at == "~" {
+            return false;
+        }
+
         // A spread or a rest binding: `...rest`.
         if at == "..." && b.is_ident() && !b.is_keyword_here() {
             return false;

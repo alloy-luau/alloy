@@ -611,7 +611,8 @@ mod tests {
             config::CONFIG_LUAU_TEMPLATE
         );
 
-        // Nothing else: no src, no .gitignore, no manifest.
+        // Nothing else but the schema alloy.toml names: no src, no
+        // .gitignore, no manifest.
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .expect("the folder")
             .filter_map(Result::ok)
@@ -621,7 +622,11 @@ mod tests {
 
         assert_eq!(
             names,
-            vec![".config.luau".to_string(), "alloy.toml".to_string()]
+            vec![
+                ".alloy".to_string(),
+                ".config.luau".to_string(),
+                "alloy.toml".to_string()
+            ]
         );
 
         let _ = std::fs::remove_dir_all(&dir);

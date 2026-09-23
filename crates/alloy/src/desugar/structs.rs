@@ -83,6 +83,21 @@ impl<'s> Desugar<'s> {
             self.diagnose(i.target, &message);
         }
 
+        // Each variant keeps its name in the field `tag`, so a method
+        // of that name is shadowed on every value.
+        if self.enums.contains_key(&target_name) {
+            for m in &i.methods {
+                if let Some(&n) = m.path.last()
+                    && self.text_of(n) == "tag"
+                {
+                    self.diagnose(
+                        n,
+                        "an enum method cannot be named `tag`; each variant keeps its name in the field `tag`",
+                    );
+                }
+            }
+        }
+
         // A trait of the namespace this `impl` sits in is keyed under
         // the namespace's prefix, `Group_Greeter`; the source writes
         // `Greeter`. The resolved name reads the contract, and the emit
@@ -684,6 +699,26 @@ impl<'s> Desugar<'s> {
             }
 
             if let Some(dv) = &f.default {
+                // The constructor fills a default before the struct
+                // exists, so a sibling field's name reads a global.
+                let span = dv.span();
+
+                for k in span.start as usize..span.end as usize {
+                    let word = self.toks[k].text(self.src);
+                    let sibling = st.fields.iter().any(|g| self.text_of(g.name) == word);
+
+                    if sibling
+                        && !self.own_names.contains(word)
+                        && !self.imported_names.contains(word)
+                        && self.reads_name(k, word, false)
+                    {
+                        let message = format!(
+                            "a default cannot read the field `{word}`; the constructor fills defaults before the fields exist"
+                        );
+                        self.diagnose(TokSpan::new(k, k + 1), &message);
+                    }
+                }
+
                 self.expected_generic = generic_head(&ty);
                 let v = self.render_to_string(dv);
                 self.expected_generic = None;
@@ -798,9 +833,10 @@ impl<'s> Desugar<'s> {
         };
         self.generate(start, &header);
 
-        // Field lines carry only their trivia. The range starts at the
-        // attributes, so an attribute line above `struct` keeps its newline.
-        self.blank_lines(start, end_tok.start);
+        // Field lines carry only their trivia, comments kept. The range
+        // starts at the attributes, so an attribute line above `struct`
+        // keeps its newline.
+        self.blank_keeping_comments(start, end_tok.start);
 
         // Derives and attributes on the `end` line.
         let mut tail = type_line;
@@ -939,6 +975,53 @@ impl<'s> Desugar<'s> {
         }
 
         out
+    }
+
+    /// Copies the lines in a range as blank lines, keeping the newlines
+    /// and the comments between the tokens.
+    fn blank_keeping_comments(&mut self, start: u32, end: u32) {
+        let spans: Vec<(u32, u32)> = self
+            .toks
+            .iter()
+            .filter(|t| t.start >= start && t.end <= end)
+            .map(|t| (t.start, t.end))
+            .collect();
+        let mut cursor = start;
+
+        for (a, b) in spans.into_iter().chain([(end, end)]) {
+            let gap = &self.src[cursor as usize..a as usize];
+            let mut i = 0;
+
+            while i < gap.len() {
+                let at = cursor + i as u32;
+
+                if gap[i..].starts_with("--") {
+                    let long = gap[i + 2..]
+                        .strip_prefix('[')
+                        .map(|r| r.bytes().take_while(|&c| c == b'=').count())
+                        .filter(|&n| gap[i + 3 + n..].starts_with('['))
+                        .and_then(|n| {
+                            let close = format!("]{}]", "=".repeat(n));
+
+                            gap[i..].find(&close).map(|e| i + e + close.len())
+                        });
+                    let stop = long
+                        .or_else(|| gap[i..].find('\n').map(|e| i + e))
+                        .unwrap_or(gap.len());
+                    self.copy(at, cursor + stop as u32);
+                    i = stop;
+                } else {
+                    if gap.as_bytes()[i] == b'\n' {
+                        self.copy(at, at + 1);
+                    }
+
+                    i += 1;
+                }
+            }
+
+            self.blank_lines(a, b);
+            cursor = b;
+        }
     }
 
     /// Copies the lines in a range as blank lines, keeping the newlines.
@@ -1092,10 +1175,25 @@ impl<'s> Desugar<'s> {
                         .iter()
                         .find(|a| a.name.map(|n| self.text_of(n) == "rename").unwrap_or(false))
                         .and_then(|a| a.args.first())
-                        .map(|e| self.text_of(e.span()).trim_matches('"').to_string())
+                        .map(|e| {
+                            let text = self.text_of(e.span());
+
+                            text.get(1..text.len().saturating_sub(1))
+                                .filter(|_| text.starts_with(['"', '\'']))
+                                .unwrap_or(text)
+                                .to_string()
+                        })
                         .unwrap_or(fname.clone());
+                    // A key that is no Luau name, `regen-per-second` or
+                    // `end`, goes in brackets on both sides.
+                    let key = crate::data::luau_key(&key);
+                    let read = match key.starts_with('[') {
+                        true => format!("t{key}"),
+
+                        false => format!("t.{key}"),
+                    };
                     to.push(format!("{key} = self.{fname}"));
-                    from.push(format!("{fname} = t.{key}"));
+                    from.push(format!("{fname} = {read}"));
                 }
 
                 // `serialize` is the name the `Serialize` bound asks

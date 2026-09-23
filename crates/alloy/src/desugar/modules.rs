@@ -31,6 +31,18 @@ impl<'s> Desugar<'s> {
             return quoted;
         }
 
+        // The build writes `thing.aly` as `thing.luau`, and a require
+        // names a module with no extension: `./thing.aly` is `./thing`.
+        let inner = &quoted[1..quoted.len() - 1];
+        let quoted = match [".aly", ".alx", ".luau"]
+            .iter()
+            .find_map(|ext| inner.strip_suffix(ext))
+        {
+            Some(bare) => format!("{q}{bare}{q}"),
+
+            None => quoted,
+        };
+
         match self.init_require(&quoted[1..quoted.len() - 1]) {
             Some(moved) => format!("{q}{moved}{q}"),
 

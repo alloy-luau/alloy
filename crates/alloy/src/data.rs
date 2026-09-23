@@ -546,7 +546,7 @@ const LUAU_KEYWORDS: &[&str] = &[
 ];
 
 /// A table key: bare when it is a name Luau accepts, else in brackets.
-fn luau_key(key: &str) -> String {
+pub(crate) fn luau_key(key: &str) -> String {
     let mut chars = key.chars();
     let is_name = chars
         .next()

@@ -1573,7 +1573,15 @@ impl<'s> Desugar<'s> {
                     } else {
                         let args: Vec<String> =
                             a.args.iter().map(|e| self.render_to_string(e)).collect();
-                        upstream.push(format!("@[{n}({})]", args.join(", ")));
+
+                        // Luau reads the message of `@deprecated` from a
+                        // table: `@[deprecated {reason = "..."}]`.
+                        match n {
+                            "deprecated" => upstream
+                                .push(format!("@[deprecated {{reason = {}}}]", args.join(", "))),
+
+                            _ => upstream.push(format!("@[{n}({})]", args.join(", "))),
+                        }
                     }
                 }
 

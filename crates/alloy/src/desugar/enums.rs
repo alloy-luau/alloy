@@ -347,6 +347,26 @@ impl<'s> Desugar<'s> {
             self.diagnose(e.name, "an `enum` needs at least one variant");
         }
 
+        // `E.is` is the enum's type test, and a second variant of one
+        // name would overwrite the first constructor.
+        let mut seen: Vec<&str> = Vec::new();
+
+        for v in &e.variants {
+            let variant = self.text_of(v.name);
+
+            if variant == "is" {
+                self.diagnose(
+                    v.name,
+                    "a variant cannot be named `is`; the enum's type test `E.is(v)` takes that name",
+                );
+            } else if seen.contains(&variant) {
+                let message = format!("`{variant}` is already a variant of this enum");
+                self.diagnose(v.name, &message);
+            }
+
+            seen.push(variant);
+        }
+
         let union = match types.is_empty() {
             true => "never".to_string(),
 
@@ -522,7 +542,7 @@ impl<'s> Desugar<'s> {
         ename: &str,
         anchor: u32,
     ) -> String {
-        self.temp_next += 1;
+        self.bump_temp();
         let name = format!("_v{}", self.temp_next);
         let cast = self.render_side(|d| {
             d.generate(anchor, "(");
@@ -604,7 +624,7 @@ impl<'s> Desugar<'s> {
                 }
 
                 None => {
-                    self.temp_next += 1;
+                    self.bump_temp();
                     let index = self.temp_next;
                     self.generate(anchor, &format!("_m{index}"));
                     paths.push(format!("_m{index}"));
@@ -1787,7 +1807,7 @@ impl<'s> Desugar<'s> {
 
                         (name, ty, Some(*n))
                     } else {
-                        self.temp_next += 1;
+                        self.bump_temp();
                         let temp = format!("_c{}", self.temp_next);
                         tests.push(temp.clone());
                         prior.push(temp.clone());
@@ -1798,7 +1818,7 @@ impl<'s> Desugar<'s> {
                 }
 
                 pat => {
-                    self.temp_next += 1;
+                    self.bump_temp();
                     let temp = format!("_c{}", self.temp_next);
                     let mut c = Compiled::default();
                     self.compile_pattern(pat, &temp, &mut c);

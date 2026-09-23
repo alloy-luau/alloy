@@ -841,7 +841,10 @@ impl<'s> Desugar<'s> {
     pub(crate) fn check_bound_calls(&mut self, block: &Block) {
         if self.fn_bounds.is_empty()
             && self.method_bounds.is_empty()
-            && !self.impl_methods.keys().any(|t| self.is_unit_enum(t))
+            && !self
+                .impl_methods
+                .keys()
+                .any(|t| self.unit_variant(t).is_some())
         {
             return;
         }
@@ -895,6 +898,16 @@ impl<'s> Desugar<'s> {
 
     /// Whether this file declares `name` as an enum with no payload: a
     /// string union at runtime.
+    /// The first variant of the enum with no payload, a string at
+    /// runtime.
+    fn unit_variant(&self, name: &str) -> Option<&str> {
+        self.enum_decls
+            .get(name)?
+            .iter()
+            .find(|(_, n)| *n == 0)
+            .map(|(v, _)| v.as_str())
+    }
+
     fn is_unit_enum(&self, name: &str) -> bool {
         self.enum_decls
             .get(name)
@@ -979,19 +992,19 @@ impl<'s> Desugar<'s> {
         if let (Some(m), Expr::Name(n)) = (method, &**func)
             && let Some(ty) = annotated.get(self.text_of(*n))
             && let target = ty.trim_end_matches('?')
-            && self.is_unit_enum(target)
+            && let Some(unit) = self.unit_variant(target)
             && self
                 .impl_methods
                 .get(target)
                 .is_some_and(|ms| ms.contains(self.text_of(*m)))
         {
             let (m, recv) = (self.text_of(*m), self.text_of(*n));
-            hits.push((
-                e.span(),
-                format!(
-                    "`{target}` is a unit enum, a string at runtime; call `{target}.{m}({recv})`"
-                ),
-            ));
+            let what = match self.is_unit_enum(target) {
+                true => format!("`{target}` is a unit enum, a string at runtime"),
+
+                false => format!("`{target}.{unit}` is a unit variant, a string at runtime"),
+            };
+            hits.push((e.span(), format!("{what}; call `{target}.{m}({recv})`")));
 
             return;
         }

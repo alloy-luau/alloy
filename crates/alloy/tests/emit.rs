@@ -1,0 +1,82 @@
+//! The emit of shapes that once built clean and shipped wrong Luau.
+
+fn ship(src: &str) -> String {
+    let out = alloy::compile_with(src, &alloy::EmitOptions::default()).unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    out.ship
+}
+
+fn messages(src: &str) -> Vec<String> {
+    alloy::compile_with(src, &alloy::EmitOptions::default())
+        .unwrap()
+        .diagnostics
+        .into_iter()
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn a_rename_that_is_no_name_goes_in_brackets() {
+    let out = ship(
+        "@derive(Serialize)\nstruct P as\n    @rename('regen-per-second')\n    regen: number\n    @rename(\"end\")\n    stop: number\nend\n",
+    );
+    assert!(out.contains("[\"regen-per-second\"] = self.regen"), "{out}");
+    assert!(out.contains("regen = t[\"regen-per-second\"]"), "{out}");
+    assert!(out.contains("[\"end\"] = self.stop"), "{out}");
+}
+
+#[test]
+fn an_enum_reports_the_names_its_emit_takes() {
+    assert_eq!(
+        messages("enum E as\n    is(number)\n    Other\nend\n"),
+        vec!["a variant cannot be named `is`; the enum's type test `E.is(v)` takes that name"]
+    );
+    assert_eq!(
+        messages("enum E as\n    A\n    A\nend\n"),
+        vec!["`A` is already a variant of this enum"]
+    );
+    assert_eq!(
+        messages(
+            "enum Ev as\n    Hit\nend\nimpl Ev as\n    function tag(self)\n        return 1\n    end\nend\n"
+        ),
+        vec![
+            "an enum method cannot be named `tag`; each variant keeps its name in the field `tag`"
+        ]
+    );
+}
+
+#[test]
+fn a_temp_skips_the_names_the_source_uses() {
+    let out = ship("local _1 = 5\nlocal t = {}\nlocal x = t?.a ?? 0\nprint(_1, x)\n");
+    assert_eq!(out.matches("local _1").count(), 1, "{out}");
+}
+
+#[test]
+fn a_default_that_reads_a_field_reports() {
+    assert_eq!(
+        messages("struct P as\n    w: number = 1\n    h: number = w * 3\nend\n"),
+        vec![
+            "a default cannot read the field `w`; the constructor fills defaults before the fields exist"
+        ]
+    );
+    assert!(
+        messages("local w = 2\nstruct P as\n    w: number = 1\n    h: number = w * 3\nend\n")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_deprecated_message_goes_in_the_reason_table() {
+    let out = ship("@deprecated(\"use g\")\nlocal function f() end\nf()\n");
+    assert!(out.contains("@[deprecated {reason = \"use g\"}]"), "{out}");
+}
+
+#[test]
+fn a_method_call_on_a_mixed_enum_names_the_string_variant() {
+    assert_eq!(
+        messages(
+            "enum State as\n    Idle\n    Running(number)\nend\nimpl State as\n    function label(self): string\n        return \"x\"\n    end\nend\nlocal function describe(s: State): string\n    return s:label()\nend\nprint(describe(State.Idle))\n"
+        ),
+        vec!["`State.Idle` is a unit variant, a string at runtime; call `State.label(s)`"]
+    );
+}

@@ -340,7 +340,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@deprecated",
-        "```alloy\n@deprecated(message: string)\n\n@deprecated\nfunction old() end\n```\nLuau's own: a call to the function is a lint. Passes through to the emit.",
+        "```alloy\n@deprecated(message: string)\n\n@deprecated\nfunction old() end\n```\nLuau's own: a call to the function is a lint. The emit writes the message as Luau reads it, `@[deprecated {reason = message}]`.",
     ),
     (
         "@inline",

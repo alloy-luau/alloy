@@ -453,6 +453,17 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         struct_wire: HashMap::new(),
         struct_at: HashMap::new(),
         temp_next: 0,
+        taken_temps: toks
+            .iter()
+            .filter_map(|t| {
+                let text = t.text(src).strip_prefix('_')?;
+                let digits = text.trim_start_matches(['m', 'v', 'c']);
+
+                (digits.len() + 1 >= text.len())
+                    .then(|| digits.parse().ok())
+                    .flatten()
+            })
+            .collect(),
         declared: Vec::new(),
         no_hoist: 0,
         chain_anchor: 0,
@@ -913,6 +924,9 @@ struct Desugar<'s> {
     struct_at: HashMap<String, u32>,
     /// The next temp index inside the statement under render.
     temp_next: u32,
+    /// The temp numbers the source already names, `local _1 = 5`. The
+    /// emit skips them, so a temp never shadows a user local.
+    taken_temps: Vec<u32>,
     /// Per open block: the temp indices already declared in it, and in
     /// every block around it, since an inner block sees outer locals.
     declared: Vec<Vec<u32>>,
@@ -2716,6 +2730,17 @@ impl<'s> Desugar<'s> {
 
     // --- blocks and statements --------------------------------------------
 
+    /// The next temp number the source does not name.
+    fn bump_temp(&mut self) -> u32 {
+        loop {
+            self.temp_next += 1;
+
+            if !self.taken_temps.contains(&self.temp_next) {
+                return self.temp_next;
+            }
+        }
+    }
+
     fn temp_declared(&self, index: u32) -> bool {
         self.declared[self.barrier..]
             .iter()
@@ -2767,7 +2792,7 @@ impl<'s> Desugar<'s> {
             return format!("({value})");
         }
 
-        self.temp_next += 1;
+        self.bump_temp();
         let index = self.temp_next;
         self.hoists.push(Hoist::Temp {
             index,
@@ -2782,6 +2807,11 @@ impl<'s> Desugar<'s> {
     /// type is the module's and a type alias through it resolves.
     fn hoist_import(&mut self, path: &str, anchor: u32) -> String {
         self.import_next += 1;
+
+        while self.taken_temps.contains(&self.import_next) {
+            self.import_next += 1;
+        }
+
         let name = format!("_m{}", self.import_next);
         self.hoists.push(Hoist::Fresh {
             name: name.clone(),
@@ -2828,7 +2858,7 @@ impl<'s> Desugar<'s> {
             return self.hoist_text(value, anchor);
         }
 
-        self.temp_next += 1;
+        self.bump_temp();
         let index = self.temp_next;
         self.hoists.push(Hoist::Temp {
             index,

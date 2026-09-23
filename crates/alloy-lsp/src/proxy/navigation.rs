@@ -1786,6 +1786,121 @@ impl State {
         }
     }
 
+    /// The edits a rename makes in the files that import a module: each
+    /// import entry, each use an entry without an alias binds, `M.name`
+    /// under a module binding, and a re-export, whose importers follow.
+    #[allow(clippy::too_many_arguments)]
+    fn importer_edits(
+        &self,
+        module_uri: &str,
+        module: &Path,
+        name: &str,
+        new_name: &str,
+        group: Option<&str>,
+        is_type: bool,
+        changes: &mut Map<String, Value>,
+        seen: &mut Vec<PathBuf>,
+    ) {
+        let mut barrels: Vec<(String, PathBuf)> = Vec::new();
+
+        for (u, d) in &self.docs {
+            if *u == module_uri {
+                continue;
+            }
+
+            let reaches = |spec: &str| {
+                self.resolve_spec(u, spec)
+                    .map(|p| imports::module_path(&p))
+                    .is_some_and(|p| p == *module)
+            };
+            let mine: Vec<ImportEntry> = import_entries(&d.source)
+                .into_iter()
+                .filter(|it| it.name == name && reaches(&it.spec))
+                .collect();
+            let mut holders: Vec<String> = module_bindings(&d.source)
+                .into_iter()
+                .filter(|(_, spec)| reaches(spec))
+                .map(|(bound, _)| bound)
+                .collect();
+
+            if let Some(group) = group {
+                holders = self.namespace_heads(u, &d.source, module, group);
+            }
+
+            let mut edits: Vec<Value> = Vec::new();
+
+            // An entry with no alias binds the name itself, so every
+            // use of it in the file is this name. An ambient file names
+            // the type with no entry at all.
+            let plain =
+                mine.iter().any(|it| it.alias_at.is_none()) || (is_type && u.ends_with(".d.aly"));
+
+            for it in &mine {
+                edits.push(text_edit(&d.source, it.name_at.0, it.name_at.1, new_name));
+            }
+
+            // `export { X } from "./m"` sends the name on. Without an
+            // alias the barrel now exports the new name, so its own
+            // importers follow.
+            for it in reexport_entries(&d.source)
+                .iter()
+                .filter(|it| it.name == name && reaches(&it.spec))
+            {
+                edits.push(text_edit(&d.source, it.name_at.0, it.name_at.1, new_name));
+
+                if it.alias_at.is_none()
+                    && let Some(path) = uri_to_path(u)
+                {
+                    barrels.push((u.clone(), imports::module_path(&path)));
+                }
+            }
+
+            if plain {
+                for (s, e) in name_uses(&d.source, name) {
+                    edits.push(text_edit(&d.source, s, e, new_name));
+                }
+            }
+
+            for (s, e) in member_uses(&d.source, &holders, name) {
+                edits.push(text_edit(&d.source, s, e, new_name));
+            }
+
+            edits.sort_by_key(|e| {
+                (
+                    e["range"]["start"]["line"].as_u64().unwrap_or(0),
+                    e["range"]["start"]["character"].as_u64().unwrap_or(0),
+                )
+            });
+            edits.dedup();
+
+            if !edits.is_empty() {
+                match changes.get_mut(u).and_then(Value::as_array_mut) {
+                    Some(held) => held.extend(edits),
+
+                    None => {
+                        changes.insert(u.clone(), json!(edits));
+                    }
+                }
+            }
+        }
+
+        for (barrel_uri, barrel) in barrels {
+            if !seen.contains(&barrel) {
+                seen.push(barrel.clone());
+                self.importer_edits(
+                    &barrel_uri,
+                    &barrel,
+                    name,
+                    new_name,
+                    None,
+                    is_type,
+                    changes,
+                    seen,
+                );
+            }
+        }
+    }
+
     /// The whole rename of one name a module exports, as a workspace
     /// edit: the declaration and every use in the module, then each
     /// file that imports it. An entry with an alias keeps the alias and
@@ -1823,64 +1938,17 @@ impl State {
             }
         }
 
-        for (u, d) in &self.docs {
-            if *u == module_uri {
-                continue;
-            }
-
-            let reaches = |spec: &str| {
-                self.resolve_spec(u, spec)
-                    .map(|p| imports::module_path(&p))
-                    .is_some_and(|p| p == module)
-            };
-            let mine: Vec<ImportEntry> = import_entries(&d.source)
-                .into_iter()
-                .filter(|it| it.name == name && reaches(&it.spec))
-                .collect();
-            let mut holders: Vec<String> = module_bindings(&d.source)
-                .into_iter()
-                .filter(|(_, spec)| reaches(spec))
-                .map(|(bound, _)| bound)
-                .collect();
-
-            if let Some(group) = &group {
-                holders = self.namespace_heads(u, &d.source, &module, group);
-            }
-
-            let mut edits: Vec<Value> = Vec::new();
-
-            // An entry with no alias binds the name itself, so every
-            // use of it in the file is this name. An ambient file names
-            // the type with no entry at all.
-            let plain =
-                mine.iter().any(|it| it.alias_at.is_none()) || (is_type && u.ends_with(".d.aly"));
-
-            for it in &mine {
-                edits.push(text_edit(&d.source, it.name_at.0, it.name_at.1, new_name));
-            }
-
-            if plain {
-                for (s, e) in name_uses(&d.source, name) {
-                    edits.push(text_edit(&d.source, s, e, new_name));
-                }
-            }
-
-            for (s, e) in member_uses(&d.source, &holders, name) {
-                edits.push(text_edit(&d.source, s, e, new_name));
-            }
-
-            edits.sort_by_key(|e| {
-                (
-                    e["range"]["start"]["line"].as_u64().unwrap_or(0),
-                    e["range"]["start"]["character"].as_u64().unwrap_or(0),
-                )
-            });
-            edits.dedup();
-
-            if !edits.is_empty() {
-                changes.insert(u.clone(), json!(edits));
-            }
-        }
+        let mut seen = vec![module.clone()];
+        self.importer_edits(
+            &module_uri,
+            &module,
+            name,
+            new_name,
+            group.as_deref(),
+            is_type,
+            &mut changes,
+            &mut seen,
+        );
 
         // A `M.name` read inside the module itself, through its own
         // import of another file, is someone else's name; the walk over
@@ -2824,6 +2892,18 @@ pub(crate) struct ImportEntry {
 /// `import` to the `from` of the same statement and not to the end of
 /// the line.
 pub(crate) fn import_entries(src: &str) -> Vec<ImportEntry> {
+    list_entries(src, &["import "])
+}
+
+/// Every name an `export { ... } from` list of the file sends on. The
+/// file binds none of them; a rename edits the list.
+pub(crate) fn reexport_entries(src: &str) -> Vec<ImportEntry> {
+    list_entries(src, &["export {", "export type {"])
+}
+
+/// The entries of the lists whose statements start with one of `heads`
+/// and name a module with `from`.
+fn list_entries(src: &str, heads: &[&str]) -> Vec<ImportEntry> {
     let mut out = Vec::new();
     let mut line_start = 0;
 
@@ -2831,7 +2911,7 @@ pub(crate) fn import_entries(src: &str) -> Vec<ImportEntry> {
         let here = line_start;
         line_start += line.len();
 
-        if !line.trim_start().starts_with("import ") {
+        if !heads.iter().any(|h| line.trim_start().starts_with(h)) {
             continue;
         }
 

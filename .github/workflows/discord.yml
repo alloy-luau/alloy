@@ -1,8 +1,10 @@
 # Posts an embed to Discord for each push, and for each pull request
 # that opens, closes, or merges. The other Alloy repositories call this
 # file, so the embed looks the same in all of them. Each repository
-# names its webhook in the DISCORD_WEBHOOK variable; a repository
-# without one skips the job.
+# names its webhook in a DISCORD_WEBHOOK secret or variable; a
+# repository with neither posts nothing. The secret wins: the log of a
+# public repository shows a variable's value to everyone, and a leaked
+# webhook lets anyone post to the channel.
 #
 # pull_request_target runs with the base repository's variables, so a
 # pull request from a fork also posts. The job never checks out the
@@ -19,20 +21,24 @@ on:
     inputs:
       webhook:
         type: string
-        required: true
+        required: false
+        default: ""
 
 permissions: {}
 
 jobs:
   notify:
-    if: (inputs.webhook || vars.DISCORD_WEBHOOK) != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v7
         env:
-          WEBHOOK: ${{ inputs.webhook || vars.DISCORD_WEBHOOK }}
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK || inputs.webhook || vars.DISCORD_WEBHOOK }}
         with:
           script: |
+            if (!process.env.WEBHOOK) {
+              return
+            }
+
             const e = context.payload
             const repo = e.repository
             const cut = (text, n) => (text.length > n ? `${text.slice(0, n - 3).trimEnd()}...` : text)

@@ -916,6 +916,18 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
         }])
     );
 
+    // A double negation says the type the long way.
+    let (st, uri) = one_file("local n: ~~number = 1\nprint(n)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `number`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 0, "character": 9 }, "end": { "line": 0, "character": 17 } },
+            "newText": "number",
+        }])
+    );
+
     // A match with no arm for `Move` and `Quit`: one arm each, above
     // the `end`, with a hole per payload value.
     let src = "enum M as\n    Join(string)\n    Move(number, number)\n    Quit\nend\n\nlocal function show(m: M)\n    match m with\n        case M.Join(n) then print(n)\n    end\nend\n\nshow(M.Quit)\n";

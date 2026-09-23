@@ -352,6 +352,14 @@ impl State {
                         "newText": "new ",
                     }]),
                 ))
+            } else if let Some((wrote, simple)) = double_negation_fix(&d.message)
+                && doc.source.get(start..end) == Some(wrote)
+            {
+                // `~~number` reads `number`: the report spans the type.
+                Some((
+                    format!("Write `{simple}`"),
+                    json!([{ "range": at, "newText": simple }]),
+                ))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
             } else {
@@ -2223,4 +2231,16 @@ impl State {
         });
         actions.extend(mine);
     }
+}
+
+/// The written type and its simple form, from the report of a double
+/// negation: "`~~number` negates twice; write `number`".
+fn double_negation_fix(message: &str) -> Option<(&str, &str)> {
+    let rest = message.strip_prefix('`')?;
+    let (wrote, rest) = rest.split_once('`')?;
+    let simple = rest
+        .strip_prefix(" negates twice; write `")?
+        .strip_suffix('`')?;
+
+    Some((wrote, simple))
 }

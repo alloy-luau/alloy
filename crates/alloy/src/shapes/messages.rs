@@ -113,14 +113,100 @@ pub fn plain_table_hint(message: &str) -> Option<String> {
 /// A checker message as a reader should get it: a failed bound reads as
 /// a bound, and the tail that walks the emitted shape goes.
 pub fn friendly_text(message: &str) -> String {
-    let text = bound_failure(message)
+    let text = negated_bound(message)
+        .or_else(|| bound_failure(message))
         .or_else(|| pack_mismatch(message))
         .or_else(|| unsolved_generic(message))
         .or_else(|| solver_gave_up(message))
         .unwrap_or_else(|| cut_explanation(message));
     let text = without_import_temp(&text);
+    let text = negation_failure(&text).unwrap_or_else(|| without_neg(&text));
 
     table_beside_array(&text).unwrap_or(text)
+}
+
+/// `<T: ~nil>` makes the parameter `T & ~nil`, and a `nil` argument
+/// reads `Expected this to be 'nil & ~nil', but got 'nil'`. The fold
+/// would print both sides as `nil`, so the report names the bound.
+fn negated_bound(message: &str) -> Option<String> {
+    let want = message
+        .split("Expected this to be '")
+        .nth(1)?
+        .split('\'')
+        .next()?;
+    let got = message.split("but got '").nth(1)?.split('\'').next()?;
+    // `~number | string` is a union with one negated member; the report
+    // is Luau's own there.
+    if want.contains(" | ") && !want.starts_with("~(") {
+        return None;
+    }
+
+    let negated = want
+        .split(" & ")
+        .find_map(|part| part.trim().strip_prefix('~'))
+        .or_else(|| {
+            want.split(" & ")
+                .find_map(|p| p.trim().strip_prefix("__neg<")?.strip_suffix('>'))
+        })?;
+
+    Some(format!(
+        "`{got}` does not fit: the type asks for `~{negated}`, so it takes anything but `{negated}`"
+    ))
+}
+
+/// `~T` lowers to `__neg<T>`. The analyzer mostly prints the reduced
+/// `~T`; where it prints the call, the reader reads what they wrote.
+fn without_neg(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+
+    while let Some(at) = rest.find("__neg<") {
+        out.push_str(&rest[..at]);
+        let inner = &rest[at + "__neg<".len()..];
+        let mut depth = 1;
+        let close = inner.char_indices().find_map(|(i, c)| {
+            match c {
+                '<' => depth += 1,
+
+                '>' if !inner[..i].ends_with('-') => depth -= 1,
+
+                _ => {}
+            }
+
+            (depth == 0).then_some(i)
+        });
+
+        let Some(close) = close else {
+            out.push_str(&rest[at..]);
+
+            return out;
+        };
+
+        out.push('~');
+        out.push_str(&inner[..close]);
+        rest = &inner[close + 1..];
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// Luau's negation fails on a table or a function type, and its report
+/// names the type function the compiler wrote.
+fn negation_failure(message: &str) -> Option<String> {
+    if !message.contains("'__neg' type function errored") {
+        return None;
+    }
+
+    let kind = message
+        .split("cannot perform negation on `")
+        .nth(1)?
+        .split('`')
+        .next()?;
+
+    Some(format!(
+        "`~` negates a {kind} type, which Luau cannot negate; negate a primitive, a singleton, a class, or a union of them"
+    ))
 }
 
 /// The local an import emits, `_m1`, in front of a name the message
@@ -318,6 +404,26 @@ fn cut_explanation(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_negation_report_names_what_it_excludes() {
+        assert_eq!(
+            super::friendly_text("Expected this to be 'nil & ~nil', but got 'nil'; "),
+            "`nil` does not fit: the type asks for `~nil`, so it takes anything but `nil`"
+        );
+        assert_eq!(
+            super::friendly_text("Expected this to be '__neg<string>', but got 'string'"),
+            "`string` does not fit: the type asks for `~string`, so it takes anything but `string`"
+        );
+        assert!(
+            super::friendly_text("Expected this to be '~number | string', but got 'boolean'")
+                .contains("~number | string")
+        );
+        assert!(
+            super::friendly_text("'__neg' type function errored at runtime: [string \"__neg\"]:2: types.negationof: cannot perform negation on `table` type")
+                .starts_with("`~` negates a table type")
+        );
+    }
+
     use super::*;
 
     #[test]

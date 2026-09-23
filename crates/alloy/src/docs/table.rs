@@ -17,6 +17,10 @@ pub const TABLE: &[(&str, &str)] = &[
         "```alloy\na ??= b\n```\nAssigns `b` to `a` when `a` is nil. An index on the left runs once.\n\nEmits `if a == nil then a = b end`.",
     ),
     (
+        "~",
+        "```alloy\nlocal v: ~nil = 1\nlocal function label<T: ~nil>(x: T): string\n```\nType negation: `~T` is every value that is not a `T`. It reads in a binding, a parameter, a return, a field, a type alias, a union, an intersection, a generic argument, and a bound. `~` binds tighter than `|` and `&`, so `~number | string` is `(~number) | string`, and `~(number | string)` negates the union.\n\nLuau negates a primitive, a singleton, a class, or a union of them. A table or a function type reports, and so does `~~T`, which the quick fix rewrites to `T`. A remote parameter and a field of a struct that derives Serialize take no negation, because a layout names what a value is.\n\nThe emit writes `__neg<T>`, and the first line declares it as a type function over `types.negationof`. The checker enforces it in strict mode and prints it as `~T`. Start with `~nil`: a negation says what a value is not, and nothing about what it is.",
+    ),
+    (
         "??",
         "```alloy\na ?? b\n```\nNil coalescing: `a` when it is not nil, else `b`. Unlike `or`, `false` passes through.",
     ),

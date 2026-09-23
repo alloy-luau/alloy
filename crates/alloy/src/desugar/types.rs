@@ -340,6 +340,100 @@ pub(crate) fn group_len(text: &str, open: char, close: char) -> Option<usize> {
 }
 
 impl<'s> Desugar<'s> {
+    /// The negations of the file, checked once before either artifact
+    /// renders: a second `~`, and an operand Luau cannot negate. Luau's
+    /// `types.negationof` fails on a table or a function type, and its
+    /// report names the lowering, so the compiler says it first.
+    pub(crate) fn check_negations(&mut self) {
+        let negations: Vec<(TokSpan, TokSpan)> = self
+            .type_edits
+            .iter()
+            .filter_map(|e| match e {
+                alloy_syntax::ast::TypeEdit::Negation { tildes, operand } => {
+                    Some((*tildes, *operand))
+                }
+
+                _ => None,
+            })
+            .collect();
+
+        for (tildes, operand) in negations {
+            let text = self.text_of(operand).trim().to_string();
+            let count = tildes.end - tildes.start;
+
+            if count > 1 {
+                let written = format!("{}{text}", "~".repeat(count as usize));
+                let simple = match count % 2 {
+                    0 => text.clone(),
+
+                    _ => format!("~{text}"),
+                };
+                let message = format!("`{written}` negates twice; write `{simple}`");
+                self.diagnose(
+                    TokSpan::new(tildes.start as usize, operand.end as usize),
+                    &message,
+                );
+
+                continue;
+            }
+
+            if let Some(kind) = self.unnegatable(&text) {
+                let message = format!(
+                    "`~{text}` negates a {kind} type, which Luau cannot negate; negate a primitive, a singleton, a class, or a union of them"
+                );
+                self.diagnose(
+                    TokSpan::new(tildes.start as usize, operand.end as usize),
+                    &message,
+                );
+            }
+        }
+    }
+
+    /// Whether a type span holds a `~`.
+    pub(crate) fn has_negation(&self, span: TokSpan) -> bool {
+        self.type_edits.iter().any(|e| {
+            matches!(e, alloy_syntax::ast::TypeEdit::Negation { tildes, operand }
+                if tildes.start >= span.start && operand.end <= span.end)
+        })
+    }
+
+    /// The kind of an operand that is plainly a table or a function type.
+    pub(crate) fn unnegatable(&self, text: &str) -> Option<&'static str> {
+        let head = text.split('<').next().unwrap_or(text).trim();
+
+        if text.starts_with('{')
+            || text.ends_with("[]")
+            || matches!(
+                head,
+                "Array" | "ReadArray" | "WriteArray" | "HashMap" | "Set" | "Future" | "Result"
+            )
+            || self.structs.contains(head)
+        {
+            return Some("table");
+        }
+
+        // An arrow outside every bracket makes the whole operand a
+        // function type: `() -> ()`, `(number) -> string`.
+        let mut depth = 0i32;
+        let bytes = text.as_bytes();
+
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'(' | b'{' | b'[' | b'<' => depth += 1,
+
+                b')' | b'}' | b']' | b'>' if !(b == b'>' && i > 0 && bytes[i - 1] == b'-') => {
+                    depth -= 1
+                }
+
+                b'-' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => return Some("function"),
+
+                _ => {}
+            }
+        }
+
+        None
+    }
+
     /// The std table, marking the file as needing the require.
     pub(crate) fn std(&mut self) -> &'static str {
         self.uses_std = true;

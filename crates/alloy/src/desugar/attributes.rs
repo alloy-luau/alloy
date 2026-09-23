@@ -1287,6 +1287,13 @@ impl<'s> Desugar<'s> {
                 let part = part.trim();
                 let name = part.split('<').next().unwrap_or(part).trim();
 
+                // `<T: ~nil>`: the parameter takes `T & ~nil`.
+                if let Some(negated) = part.strip_prefix('~') {
+                    self.uses_neg = true;
+
+                    return format!("__neg<{}>", negated.trim());
+                }
+
                 if BUILTIN.contains(&name) && !self.traits.contains_key(name) {
                     format!("{}.{part}", self.std())
                 } else {

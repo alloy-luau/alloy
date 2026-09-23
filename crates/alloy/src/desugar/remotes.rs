@@ -291,6 +291,18 @@ impl<'s> Desugar<'s> {
             let Some(ty) = p.ty else { continue };
             let text = self.text_of(ty).to_string();
 
+            // The layout packs what a type names, and `~T` names what a
+            // value is not.
+            if self.has_negation(ty) {
+                let pname = self.text_of(p.name).to_string();
+                let message = format!(
+                    "a remote packs no negation: parameter `{pname}` has type `{text}`; name the types it carries"
+                );
+                self.diagnose(ty, &message);
+
+                continue;
+            }
+
             if let Some((field, bad, why)) = self.offender_of(&text) {
                 let pname = self.text_of(p.name).to_string();
                 let what = match field {

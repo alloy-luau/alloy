@@ -199,10 +199,22 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     let mut diagnostics: Vec<Diagnostic> = parsed
         .diagnostics
         .iter()
-        .map(|e| Diagnostic {
-            start: e.offset as u32,
-            end: e.offset as u32,
-            message: e.message.clone(),
+        .map(|e| {
+            // A parse error names an offset; the range covers the token
+            // there, so the editor underlines a word and not a point.
+            let at = e.offset as u32;
+            let end = parsed
+                .lexed
+                .toks
+                .iter()
+                .find(|t| t.start <= at && at < t.end)
+                .map_or(at, |t| t.end);
+
+            Diagnostic {
+                start: at,
+                end,
+                message: e.message.clone(),
+            }
         })
         .collect();
 

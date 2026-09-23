@@ -640,9 +640,10 @@ pub const BOM: &str = "\u{feff}";
 pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
     let before = &src[..offset.min(src.len())];
     let line = before.matches('\n').count() + 1;
-    let col = before.rsplit('\n').next().map_or(0, str::len);
+    // A column counts characters, as the editor draws them, not bytes.
+    let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count());
     let mark = match line == 1 && src.starts_with(BOM) {
-        true => BOM.len(),
+        true => 1,
 
         false => 0,
     };
@@ -655,6 +656,11 @@ mod tests {
     /// A leading byte order mark is no character the editor draws, so a
     /// column on the first line counts from after it. The report read
     /// column 10 where the editor showed 7.
+    #[test]
+    fn a_column_counts_characters() {
+        assert_eq!(super::line_col("local s = \"héé\" x", 16), (1, 15));
+    }
+
     #[test]
     fn a_byte_order_mark_leaves_the_first_column() {
         let src = "\u{feff}local x = 1\nlocal y = 2\n";

@@ -117,6 +117,61 @@ fn rule_value() -> Value {
     })
 }
 
+/// The known keys of `[lint.rules]`, each with what it names: the
+/// groups, the lints with their summaries, and the markup lints under
+/// `alx`. The editor documents a key from here, in `alloy.toml` and in
+/// `.config.aly` alike; `propertyNames` still lets any other name pass.
+fn rule_properties() -> Value {
+    let level = |text: String| {
+        json!({
+            "type": "string",
+            "enum": ["allow", "warn", "deny"],
+            "description": text,
+        })
+    };
+    let mut props = serde_json::Map::new();
+
+    for g in Group::ALL {
+        props.insert(
+            g.name().to_string(),
+            level(format!("The `{}` group: {}.", g.name(), g.summary())),
+        );
+    }
+
+    props.insert(
+        LUAU_GROUP.to_string(),
+        level("The `luau` group: the type checker's own reports.".to_string()),
+    );
+
+    for l in LINTS {
+        props.insert(
+            l.name.to_string(),
+            level(format!("{}. Default: `{}`.", l.summary, l.default.name())),
+        );
+    }
+
+    let alx: serde_json::Map<String, Value> = crate::lint::ALX_LINTS
+        .iter()
+        .map(|l| {
+            (
+                l.name.to_string(),
+                level(format!("{}. Default: `{}`.", l.summary, l.default.name())),
+            )
+        })
+        .collect();
+    props.insert(
+        crate::lint::ALX_PREFIX.trim_end_matches('.').to_string(),
+        json!({
+            "type": "object",
+            "description": "The levels of the markup lints.",
+            "properties": alx,
+            "additionalProperties": level("The level of one markup lint.".to_string()),
+        }),
+    );
+
+    Value::Object(props)
+}
+
 /// The key completion of `[lint.rules]`: the known names first, and
 /// any string after them, so a lint newer than the schema still
 /// passes.
@@ -909,6 +964,7 @@ pub fn schema() -> Value {
 
     if let Some(rules) = root.pointer_mut("/properties/lint/properties/rules") {
         rules["propertyNames"] = rule_key_schema(&[]);
+        rules["properties"] = rule_properties();
     }
 
     root
@@ -986,6 +1042,7 @@ pub fn project(manifests: &[&crate::ingot::Manifest]) -> Value {
 
     if let Some(rules) = root.pointer_mut("/properties/lint/properties/rules") {
         rules["propertyNames"] = rule_key_schema(&names);
+        rules["properties"] = rule_properties();
     }
 
     root

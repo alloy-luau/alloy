@@ -178,6 +178,12 @@ fn project(name: &str) -> (State, std::path::PathBuf) {
         ("use.aly", USER),
         ("other.aly", ALIASED),
         ("star.aly", STARRED),
+        // A barrel sends the name on, and a file imports it from there.
+        ("barrel.aly", "export { version } from \"./m\"\n"),
+        (
+            "via.aly",
+            "import { version } from \"./barrel\"\nprint(version)\n",
+        ),
     ] {
         let path = dir.join("src").join(rel);
         std::fs::write(&path, src).expect(rel);
@@ -286,12 +292,15 @@ pub(crate) fn a_rename_of_an_imported_name_reaches_every_file() {
     assert_eq!(
         rows(&edit),
         [
+            "barrel.aly 0:9-16 -> release",
             "m.aly 12:13-20 -> release",
             "other.aly 0:9-16 -> release",
             "star.aly 4:13-20 -> release",
             "use.aly 0:9-16 -> release",
             "use.aly 10:26-33 -> release",
             "use.aly 12:23-30 -> release",
+            "via.aly 0:9-16 -> release",
+            "via.aly 1:6-13 -> release",
         ]
     );
 
@@ -331,12 +340,15 @@ pub(crate) fn a_caret_at_the_end_of_a_name_reads_the_word() {
         other => panic!("{rel} at {offset}: {other:?}"),
     };
     let every_file = [
+        "barrel.aly 0:9-16 -> release",
         "m.aly 12:13-20 -> release",
         "other.aly 0:9-16 -> release",
         "star.aly 4:13-20 -> release",
         "use.aly 0:9-16 -> release",
         "use.aly 10:26-33 -> release",
         "use.aly 12:23-30 -> release",
+        "via.aly 0:9-16 -> release",
+        "via.aly 1:6-13 -> release",
     ];
     // The declaration `export const version = 3`, and a use of the
     // imported name, each at the byte after the name.

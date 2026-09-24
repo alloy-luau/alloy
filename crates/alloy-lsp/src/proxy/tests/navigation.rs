@@ -908,6 +908,88 @@ fn a_field_rename_reaches_the_constructor_and_the_declaration() {
     assert_eq!(edits, [(1, 4), (8, 22), (12, 13)], "{result}");
 }
 
+/// A field's rename reaches a parameter pattern of its struct: the
+/// entry reads the field under the new name and keeps its local.
+#[test]
+fn a_field_rename_reaches_a_parameter_pattern() {
+    const SRC: &str = concat!(
+        "struct Point as\n",
+        "    --- Across.\n",
+        "    x: number\n",
+        "end\n",
+        "\n",
+        "local function draw({ x }: Point): number\n",
+        "    return x\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let mut result = json!({
+        "changes": {
+            uri: [
+                { "range": range_value((2, 4), (2, 5)), "newText": "across" },
+            ],
+        },
+    });
+    st.mend_field_rename(uri, 2, 4, &mut result);
+
+    let edits: Vec<(u64, u64, String)> = result["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .map(|e| {
+            (
+                e["range"]["start"]["line"].as_u64().expect("line"),
+                e["range"]["start"]["character"].as_u64().expect("column"),
+                e["newText"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        edits,
+        [
+            (2, 4, "across".to_string()),
+            (5, 22, "across = x".to_string())
+        ],
+        "{result}"
+    );
+}
+
+/// A field rename stays with its struct: a file that declares another
+/// type under the name keeps its patterns and its keys, and a file that
+/// imports the struct gets them.
+#[test]
+fn a_field_rename_leaves_a_same_named_type_alone() {
+    let st = super::support::files(&[
+        (
+            "file:///p.aly",
+            "export struct Point as\n    x: number\nend\nlocal function a({ x }: Point): number\n    return x\nend\n",
+        ),
+        (
+            "file:///user.aly",
+            "import { Point } from \"./p\"\nlocal function b({ x }: Point): number\n    return x\nend\n",
+        ),
+        (
+            "file:///other.aly",
+            "type Point = { x: number }\nlocal function c({ x }: Point): number\n    return x\nend\nlocal q: Point = { x = 0 }\n",
+        ),
+    ]);
+    let edits = st
+        .field_edits("Point", "x", "across")
+        .expect("the field edits");
+    let files: Vec<&str> = edits["changes"]
+        .as_object()
+        .expect("changes")
+        .keys()
+        .map(String::as_str)
+        .collect();
+
+    assert!(files.contains(&"file:///p.aly"), "{edits}");
+    assert!(files.contains(&"file:///user.aly"), "{edits}");
+    assert!(!files.contains(&"file:///other.aly"), "{edits}");
+    assert!(edits.to_string().contains("across = x"), "{edits}");
+}
+
 /// The references answer for a field read gets the same mend: the
 /// child's location on the struct's `end` goes, and the declaration
 /// and the constructor key join the read.

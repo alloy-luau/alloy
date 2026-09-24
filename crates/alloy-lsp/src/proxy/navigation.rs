@@ -1405,6 +1405,15 @@ impl State {
                 .map(|(s, e)| text_edit(&d.source, s, e, &new_name))
                 .collect();
 
+            // A parameter pattern of the type reads the field too.
+            if super::patterns::reaches_struct(d, &owner) {
+                mine.extend(
+                    super::patterns::pattern_field_edits(&d.source, &owner, &name, &new_name)
+                        .into_iter()
+                        .map(|(s, e, text)| text_edit(&d.source, s, e, &text)),
+                );
+            }
+
             let Some(list) = changes.get_mut(u).and_then(Value::as_array_mut) else {
                 if !mine.is_empty() {
                     mine.sort_by_key(sort_key);
@@ -1694,9 +1703,20 @@ impl State {
         let mut changes: Map<String, Value> = Map::new();
 
         for (u, d) in &self.docs {
+            // A parameter pattern of the struct reads the field too.
+            let patterns = match super::patterns::reaches_struct(d, owner) {
+                true => super::patterns::pattern_field_edits(&d.source, owner, name, new_name),
+
+                false => Vec::new(),
+            };
             let edits: Vec<Value> = field_sites(self, d, owner, name)
                 .into_iter()
                 .map(|(s, e)| text_edit(&d.source, s, e, new_name))
+                .chain(
+                    patterns
+                        .into_iter()
+                        .map(|(s, e, text)| text_edit(&d.source, s, e, &text)),
+                )
                 .collect();
 
             if !edits.is_empty() {
@@ -2334,6 +2354,11 @@ fn bound_at(src: &str, name: &str) -> Option<(String, usize)> {
 /// receiver of that type. A receiver whose type the source does not
 /// say names no struct, so it stays as it is.
 fn field_sites(st: &State, doc: &Doc, owner: &str, name: &str) -> Vec<(usize, usize)> {
+    // A file with a type of its own under the name holds another field.
+    if !super::patterns::reaches_struct(doc, owner) {
+        return Vec::new();
+    }
+
     let mut out = constructor_keys(&doc.source, owner, name);
     out.extend(field_declaration(&doc.source, owner, name));
 

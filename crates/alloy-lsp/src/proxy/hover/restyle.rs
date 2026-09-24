@@ -1683,6 +1683,10 @@ pub(crate) fn restyle_signatures(result: &mut Value, doc: &Doc, line: u32, chara
         else {
             continue;
         };
+        // A caller passes one value for a pattern, so its type stands in
+        // the list.
+        let typed = alloy::desugar::signature_with_pattern_types(rebuilt);
+        let rebuilt = typed.as_deref().unwrap_or(rebuilt);
 
         if rebuilt == label {
             continue;

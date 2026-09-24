@@ -522,6 +522,36 @@ pub(crate) fn type_only_module_hints(hints: &mut Vec<Value>, doc: &Doc, path: &s
     }
 }
 
+/// A hover on the name of a module binding whose module exports types
+/// alone. The child prints the module's value, `{}`, and the types are
+/// what the binding holds, as the hint lists them.
+pub(crate) fn type_only_module_hover(
+    text: &str,
+    doc: &Doc,
+    path: &std::path::Path,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let source_line = doc.source.lines().nth(line as usize)?;
+    let (name_end, spec) = module_binding(source_line)?;
+
+    if character as usize > name_end || !text.contains(": {}") {
+        return None;
+    }
+
+    let (_, exports) = alloy::modules::type_only_exports(path, &spec)?;
+    let names: Vec<String> = exports
+        .iter()
+        .map(|e| match e.interface {
+            true => format!("interface {}", e.name),
+
+            false => format!("type {}", e.name),
+        })
+        .collect();
+
+    Some(text.replacen(": {}", &format!(": {{ {} }}", names.join(", ")), 1))
+}
+
 /// `: { type Id, interface Named }` as label parts. Each name links to
 /// its declaration, and the editor shows the hover there and follows the
 /// definition found there. A tooltip would show the doc twice. The names
@@ -577,7 +607,8 @@ fn type_only_label(uri: &str, exports: &[alloy::modules::TypeExport]) -> Value {
 }
 
 /// The end of the name a line binds a module to, and the spec it
-/// names: `import * as M from "spec"` or `local M = require("spec")`.
+/// names: `import * as M from "spec"`, or `local M = require("spec")`
+/// and its `const` form.
 fn module_binding(line: &str) -> Option<(usize, String)> {
     let name_at = |rest: &str| {
         rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))
@@ -597,12 +628,15 @@ fn module_binding(line: &str) -> Option<(usize, String)> {
         return (len > 0).then(|| ("import * as ".len() + len, spec));
     }
 
-    let rest = line.strip_prefix("local ")?;
+    let keyword = ["local ", "const "]
+        .into_iter()
+        .find(|k| line.starts_with(k))?;
+    let rest = &line[keyword.len()..];
     let len = name_at(rest);
     let call = rest[len..].trim_start().strip_prefix('=')?.trim_start();
     let spec = quoted(call.strip_prefix("require(")?)?;
 
-    (len > 0).then(|| ("local ".len() + len, spec))
+    (len > 0).then(|| (keyword.len() + len, spec))
 }
 
 #[cfg(test)]
@@ -620,12 +654,51 @@ mod type_only_tests {
             Some((9, "../shared/shapes".to_string()))
         );
         assert_eq!(
+            read("const Raw = require(\"./x\")"),
+            Some((9, "./x".to_string()))
+        );
+        assert_eq!(
             read("  local Raw = require(\"./x\")"),
             None,
             "top of a line only"
         );
         assert_eq!(read("import { Id } from \"./x\""), None);
         assert_eq!(read("local x = f(\"./x\")"), None);
+    }
+
+    /// The child prints a module of types alone as `{}`. The hover on
+    /// the binding's name lists the types, as the hint does.
+    #[test]
+    fn a_type_only_module_hovers_as_its_types() {
+        let dir = std::env::temp_dir().join(format!("alloy-type-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("types.aly"),
+            "export type Id = string\n\nexport interface Named as\n  name: string\nend\n",
+        )
+        .expect("module");
+        let src = "const T = require(\"./types\")\nprint(T)\n";
+        let main = dir.join("main.aly");
+        let doc = crate::doc::Doc::new(
+            src.to_string(),
+            1,
+            &alloy::EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let hover = |character: u32| {
+            super::type_only_module_hover("```alloy\nconst T: {}\n```", &doc, &main, 0, character)
+        };
+
+        assert_eq!(
+            hover(6).as_deref(),
+            Some("```alloy\nconst T: { type Id, interface Named }\n```")
+        );
+        // The spec is no part of the name.
+        assert_eq!(hover(20), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

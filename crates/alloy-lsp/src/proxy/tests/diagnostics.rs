@@ -975,7 +975,7 @@ pub(crate) fn a_missing_remote_member_names_the_remote() {
         "message": "TypeError: Key 'nope' not found in table 'Remote'",
     });
     let raw = d["message"].as_str().unwrap().to_string();
-    alloy_wording(&mut d, &st.docs[uri], &[], &raw);
+    alloy_wording(&mut d, &st.docs[uri], None, &[], &raw);
 
     assert_eq!(d["message"], "TypeError: remote `Damage` has no `nope`");
 }
@@ -1001,7 +1001,7 @@ pub(crate) fn a_remote_typo_keeps_its_suggestion_and_its_fix() {
         "severity": 1,
         "message": "TypeError: Key 'fier' not found in table 'Remote'",
     });
-    alloy_wording(&mut d, &st.docs[uri], &[], raw);
+    alloy_wording(&mut d, &st.docs[uri], None, &[], raw);
 
     assert_eq!(
         d["message"],

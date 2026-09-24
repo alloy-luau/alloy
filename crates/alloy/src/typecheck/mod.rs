@@ -923,6 +923,18 @@ pub fn analyze(
         d.message = friendly_type_message(&d.message, &reach, source, d.col);
 
         if let Some(text) = whole
+            && let Some(message) = crate::modules::missing_import_message(
+                &d.message,
+                &root.join(&config.build.input).join(&d.rel),
+                text,
+            )
+        {
+            d.message = message;
+
+            continue;
+        }
+
+        if let Some(text) = whole
             && let Some((message, at)) = rewrite_emitted_name(&d.message, text, d.line)
         {
             d.message = message;

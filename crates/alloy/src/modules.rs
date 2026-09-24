@@ -1826,8 +1826,6 @@ pub fn import_that_exports(path: &Path, source: &str, name: &str) -> Option<Stri
 pub struct TypeExport {
     pub name: String,
     pub interface: bool,
-    /// The comment above the declaration, as Markdown.
-    pub doc: Option<String>,
     /// The line and UTF-16 column of the name in the module.
     pub at: (u32, u32),
 }
@@ -1851,16 +1849,13 @@ pub fn type_only_exports(from: &Path, spec: &str) -> Option<(PathBuf, Vec<TypeEx
     let source = module_text(&target).ok()?;
     let parsed = alloy_syntax::parse_lenient(&source, Default::default()).ok()?;
     let toks = &parsed.lexed.toks;
-    let export = |span: TokSpan, interface: bool, documented: bool| {
+    let export = |span: TokSpan, interface: bool| {
         let offset = toks[span.start as usize].start as usize;
         let line_start = source[..offset].rfind('\n').map_or(0, |n| n + 1);
 
         TypeExport {
             name: span.text(&source, toks).to_string(),
             interface,
-            doc: documented
-                .then(|| crate::declarations::doc_before(&source, offset))
-                .flatten(),
             at: (
                 source[..offset].matches('\n').count() as u32,
                 source[line_start..offset].encode_utf16().count() as u32,
@@ -1871,17 +1866,16 @@ pub fn type_only_exports(from: &Path, spec: &str) -> Option<(PathBuf, Vec<TypeEx
 
     for stmt in &parsed.chunk.block.stmts {
         match stmt {
-            Stmt::TypeAlias(d) if d.exported => out.push(export(d.name, false, true)),
+            Stmt::TypeAlias(d) if d.exported => out.push(export(d.name, false)),
 
-            Stmt::Interface(d) if d.exported => out.push(export(d.name, true, true)),
+            Stmt::Interface(d) if d.exported => out.push(export(d.name, true)),
 
             // `export type { A }` sends types on; a plain list sends values.
-            // The comment above the list is not the doc of one name.
             Stmt::ExportList(list) if list.type_only => {
                 out.extend(
                     list.specs
                         .iter()
-                        .map(|sp| export(sp.alias.unwrap_or(sp.name), false, false)),
+                        .map(|sp| export(sp.alias.unwrap_or(sp.name), false)),
                 );
             }
 
@@ -2866,7 +2860,7 @@ mod tests {
             |name: &str, src: &str| std::fs::write(dir.join("src").join(name), src).unwrap();
         write(
             "shapes.aly",
-            "--- The key of a row\nexport type Id = number\nexport interface Named as\n    name: string\nend\nexport type Label = string\n",
+            "export type Id = number\nexport interface Named as\n    name: string\nend\nexport type Label = string\n",
         );
         write(
             "contracts.aly",
@@ -2900,9 +2894,7 @@ mod tests {
         );
         let (target, shapes) = super::type_only_exports(&main, "./shapes").unwrap();
         assert!(target.ends_with("shapes.aly"), "{}", target.display());
-        assert_eq!(shapes[0].doc.as_deref(), Some("The key of a row"));
-        assert_eq!(shapes[0].at, (1, 12));
-        assert_eq!(shapes[1].doc, None);
+        assert_eq!(shapes[0].at, (0, 12));
         assert_eq!(exports("./mixed"), None);
         assert_eq!(exports("./returns"), None);
         assert_eq!(exports("./missing"), None);

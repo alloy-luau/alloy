@@ -517,7 +517,7 @@ impl<'s> Scan<'s> {
         // `local { a, b = c } = t` and `local [ x, ...rest ] = t` bind
         // the names the pattern holds, not one name of their own.
         if matches!(self.t(j), "{" | "[") {
-            return self.pattern_names(j);
+            return self.pattern_names(j).0;
         }
 
         while self.is_name(j) {
@@ -560,11 +560,15 @@ impl<'s> Scan<'s> {
     /// is the local, the one on the left is the field it reads. `[ x,
     /// ...rest ]` binds `x` and `rest`. A nested pattern hands its own
     /// names up the same way.
-    fn pattern_names(&self, open: usize) -> Vec<usize> {
+    ///
+    /// `{ a: T }` binds `a`, and `T` is a type. The second value is the
+    /// token that closes the pattern.
+    fn pattern_names(&self, open: usize) -> (Vec<usize>, usize) {
         let mut out = Vec::new();
         let mut depth = 0i32;
+        let mut j = open;
 
-        for j in open..self.toks.len() {
+        while j < self.toks.len() {
             match self.t(j) {
                 "{" | "[" => depth += 1,
 
@@ -576,13 +580,46 @@ impl<'s> Scan<'s> {
                     }
                 }
 
+                ":" => {
+                    j = self.annotation_end(j + 1);
+
+                    continue;
+                }
+
                 _ if self.is_name(j) && !self.at(j + 1, "=") => out.push(j),
+
+                _ => {}
+            }
+
+            j += 1;
+        }
+
+        (out, j)
+    }
+
+    /// Whether the name at `n`, in the binding that starts at `from`, is
+    /// a shorthand entry of a table pattern, `{ a, b }`. The name is the
+    /// field it reads, so a rename has to keep the field: `b = _b`.
+    fn shorthand_entry(&self, from: usize, n: usize) -> bool {
+        if !matches!(self.prev(n), "{" | ",") {
+            return false;
+        }
+
+        let mut depth = 0;
+
+        for j in (from..n).rev() {
+            match self.t(j) {
+                "}" | "]" | ")" => depth += 1,
+
+                "{" | "[" | "(" if depth == 0 => return self.at(j, "{"),
+
+                "{" | "[" | "(" => depth -= 1,
 
                 _ => {}
             }
         }
 
-        out
+        false
     }
 
     /// Whether the name at `n` appears again after token `from`.
@@ -661,6 +698,15 @@ impl<'s> Scan<'s> {
                             continue;
                         }
 
+                        // `for _, { a = q } in` binds `q`, and `a` is
+                        // the field it reads.
+                        if matches!(self.t(j), "{" | "[") {
+                            let (bound, close) = self.pattern_names(j);
+                            names.extend(bound);
+                            j = close + 1;
+                            continue;
+                        }
+
                         if self.is_name(j) {
                             names.push(j);
                         }
@@ -734,6 +780,11 @@ impl<'s> Scan<'s> {
                 } else {
                     ("unused_variable", "read")
                 };
+                let fix = match self.shorthand_entry(i, n) {
+                    true => format!("{name} = _{name}"),
+
+                    false => format!("_{name}"),
+                };
 
                 self.lint(
                     out,
@@ -741,7 +792,7 @@ impl<'s> Scan<'s> {
                     n,
                     n,
                     format!("`{name}` is never {verb}; prefix it with `_` or remove it"),
-                    Some(format!("_{name}")),
+                    Some(fix),
                 );
             }
         }

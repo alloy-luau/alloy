@@ -1310,6 +1310,11 @@ pub(crate) fn a_variant_signature_splits_into_its_payload_types() {
     );
     assert!(payload_types("Msg.Quit").is_empty());
     assert!(payload_types("Msg.Unit()").is_empty());
+    // A return type in parentheses, and an arrow inside a parameter.
+    assert_eq!(
+        payload_types("function f(cb: (n: number) -> (), b: string): ()"),
+        vec!["cb: (n: number) -> ()", "b: string"]
+    );
 }
 #[test]
 pub(crate) fn a_colon_call_drops_the_receiver() {

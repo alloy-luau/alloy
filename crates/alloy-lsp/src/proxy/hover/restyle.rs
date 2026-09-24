@@ -1684,9 +1684,11 @@ pub(crate) fn restyle_signatures(result: &mut Value, doc: &Doc, line: u32, chara
             continue;
         };
         // A caller passes one value for a pattern, so its type stands in
-        // the list.
+        // the list, in place of the pattern or of the temp the emit wrote.
         let typed = alloy::desugar::signature_with_pattern_types(rebuilt);
         let rebuilt = typed.as_deref().unwrap_or(rebuilt);
+        let plain = crate::proxy::patterns::without_pattern_temps(rebuilt, &doc.source);
+        let rebuilt = plain.as_deref().unwrap_or(rebuilt);
 
         if rebuilt == label {
             continue;

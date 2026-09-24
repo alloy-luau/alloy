@@ -973,6 +973,27 @@ pub(crate) fn a_generated_name_keeps_its_width() {
     assert_eq!(range, range_value((6, 13), (6, 21)), "{line}");
 }
 
+/// A report inside a macro expansion maps to the `$` the expansion is
+/// anchored at, so the editor underlined the sigil alone. The range now
+/// covers the call.
+#[test]
+pub(crate) fn a_range_in_a_macro_expansion_covers_the_call() {
+    let src = "macro clamp01(x)\n    math.clamp(x, 0, 1)\nend\n\nlocal a = $clamp01(\"text\")\nprint(a)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).unwrap();
+    let (line, text) = doc
+        .shadow
+        .lines()
+        .enumerate()
+        .find(|(_, l)| l.contains("\"text\""))
+        .expect("the expansion");
+    let at = text.find("\"text\"").expect("the argument") as u32;
+    let mut range = range_value((line as u32, at), (line as u32, at + 6));
+    super::super::capabilities::map_range_value(&mut range, doc);
+
+    assert_eq!(range, range_value((4, 10), (4, 26)), "{}", doc.shadow);
+}
+
 /// A mirror another root left behind a week ago goes at initialize; a
 /// fresh one and the session's own stay.
 #[test]

@@ -16,9 +16,58 @@ pub(crate) fn map_range_value(value: &mut Value, doc: &Doc) {
             doc.to_source(el, ec)
         };
         let end = if end < start { start } else { end };
-        let end = spelled_end(doc, (sl, sc), (el, ec), start).unwrap_or(end);
+        let end = spelled_end(doc, (sl, sc), (el, ec), start)
+            .or_else(|| macro_call_end(doc, (sl, sc), start))
+            .unwrap_or(end);
         *value = range_value(start, end);
     }
+}
+
+/// The end of a macro call a range in its expansion maps to. The
+/// expansion is generated text anchored at the `$`, so a report inside
+/// it would underline the sigil alone; the whole call is what it reads.
+fn macro_call_end(doc: &Doc, (sl, sc): (u32, u32), start: (u32, u32)) -> Option<(u32, u32)> {
+    if !doc.generated_at(sl, sc) {
+        return None;
+    }
+
+    let at = offset_of(&doc.source, start.0, start.1)?;
+    let rest = doc.source[at..].strip_prefix('$')?;
+    let name = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(rest.len());
+    let open = at + 1 + name;
+
+    if name == 0 || !doc.source[open..].starts_with('(') {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+
+    for (i, c) in doc.source[open..].char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+
+            (Some(_), _) => {}
+
+            (None, '"' | '\'' | '`') => quote = Some(c),
+
+            (None, '(' | '[' | '{') => depth += 1,
+
+            (None, ')' | ']' | '}') => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(position_of(&doc.source, open + i + 1));
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// The end of a generated name the source spells at its anchor:

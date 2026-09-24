@@ -153,6 +153,24 @@ fn exported_namespace_types(source: &str) -> Vec<String> {
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
+        // `export default struct P` sends the type out under its own
+        // name. The `default` entry says which one a bare import binds.
+        if let Stmt::ExportDefault {
+            value: alloy_syntax::ast::DefaultExport::Decl(inner),
+            ..
+        } = stmt
+            && let Stmt::Struct(alloy_syntax::ast::StructDecl { name, generics, .. })
+            | Stmt::Enum(alloy_syntax::ast::EnumDecl { name, generics, .. }) = inner.as_ref()
+        {
+            let params = generics
+                .map(|g| type_params(text(g).trim_start()))
+                .unwrap_or_default();
+            out.push(format!("{}{params}", text(*name)));
+            out.push(format!("{DEFAULT_ENTRY}{}{params}", text(*name)));
+
+            continue;
+        }
+
         // An entry the line scan wrote already, for `export struct`.
         let (name, generics, exported, marker) = match stmt.under_default() {
             Stmt::Namespace(ns) => {
@@ -273,6 +291,16 @@ pub fn type_params(text: &str) -> String {
 
         false => format!("<{}>", names.join(", ")),
     }
+}
+
+/// What a type entry opens with when it names the type an `export
+/// default` sends out. The space keeps it from reading as a name.
+const DEFAULT_ENTRY: &str = "default ";
+
+/// The type entry of a module's `export default struct` or `enum`,
+/// among the entries of its types.
+pub fn default_type(entries: &[String]) -> Option<&str> {
+    entries.iter().find_map(|e| e.strip_prefix(DEFAULT_ENTRY))
 }
 
 /// The name a type entry carries, without its parameter list.
@@ -928,16 +956,26 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
                 .map(|target| module_types(&target, aliases, depth - 1))
                 .unwrap_or_default()
         });
-        let Some(entry) = types.iter().find(|e| type_head(e) == name) else {
-            continue;
-        };
-        let marker = match type_only(entry) {
-            true => "=",
+        // A namespace sends its members on too, `Geo_Vec` as `G_Vec`.
+        let members = format!("{name}_");
 
-            false => "",
-        };
+        for entry in types.iter() {
+            let head = type_head(entry);
+            let renamed = match head.strip_prefix(&members) {
+                Some(rest) => format!("{exported}_{rest}"),
 
-        out.push(format!("{exported}{}{marker}", type_args(entry)));
+                None if head == name => exported.clone(),
+
+                None => continue,
+            };
+            let marker = match type_only(entry) {
+                true => "=",
+
+                false => "",
+            };
+
+            out.push(format!("{renamed}{}{marker}", type_args(entry)));
+        }
     }
 
     out
@@ -1105,6 +1143,16 @@ fn named_specs(
         let Stmt::Import(node) = stmt else {
             continue;
         };
+        let spec = text(node.path);
+        let Some(path) = resolve(spec.trim_matches(['"', '\'']), from, aliases) else {
+            continue;
+        };
+
+        // A bare import binds the module's `default`, see `sent_decls`.
+        if let ImportKind::Default(n) | ImportKind::Both(n, _) = &node.kind {
+            out.push((path.clone(), "default".to_string(), text(*n)));
+        }
+
         let specs = match &node.kind {
             ImportKind::Named(list)
             | ImportKind::Both(_, list)
@@ -1112,10 +1160,6 @@ fn named_specs(
             | ImportKind::TypeOnly(list) => list,
 
             ImportKind::Default(_) => continue,
-        };
-        let spec = text(node.path);
-        let Some(path) = resolve(spec.trim_matches(['"', '\'']), from, aliases) else {
-            continue;
         };
 
         for sp in specs {
@@ -1162,7 +1206,7 @@ fn star_locals(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Vec<
 
 /// Every declaration of one kind that the modules a source imports
 /// make, module by module, in import order. A module reads once.
-fn module_decls<T>(
+fn module_decls<T: Clone>(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
@@ -1185,11 +1229,88 @@ fn module_decls<T>(
         let Ok(text) = module_text(&path) else {
             continue;
         };
+        let decls = sent_decls(&path, &text, aliases, &read, BARREL_DEPTH);
 
-        out.push((path, read(&text)));
+        out.push((path, decls));
     }
 
     out
+}
+
+/*
+The declarations a module sends out, under the names it sends them out
+as: its own, the ones a barrel passes on from another module, and its
+`export default` declaration once more as `default`.
+
+A namespace member reads under its path, `Geo.Vec`, so a barrel that
+passes `Geo` on as `G` passes `G.Vec` too.
+*/
+fn sent_decls<T: Clone>(
+    path: &Path,
+    text: &str,
+    aliases: &[(String, PathBuf)],
+    read: &impl Fn(&str) -> Vec<(String, T)>,
+    depth: u8,
+) -> Vec<(String, T)> {
+    let mut out = read(text);
+
+    if let Some(name) = default_decl(text)
+        && let Some((_, payload)) = out.iter().find(|(n, _)| *n == name)
+    {
+        out.push(("default".to_string(), payload.clone()));
+    }
+
+    if depth == 0 {
+        return out;
+    }
+
+    for (name, exported, spec) in reexports(text) {
+        let Some(target) = resolve(&spec, path, aliases).filter(|t| t != path) else {
+            continue;
+        };
+        let Ok(inner) = module_text(&target) else {
+            continue;
+        };
+        let members = format!("{name}.");
+
+        for (decl, payload) in sent_decls(&target, &inner, aliases, read, depth - 1) {
+            let renamed = match decl.strip_prefix(&members) {
+                Some(rest) => format!("{exported}.{rest}"),
+
+                None if decl == name => exported.clone(),
+
+                None => continue,
+            };
+
+            out.push((renamed, payload));
+        }
+    }
+
+    out
+}
+
+/// The name of the declaration a module's `export default` makes: a
+/// struct, an enum, or a function.
+fn default_decl(source: &str) -> Option<String> {
+    use alloy_syntax::ast::{DefaultExport, Stmt};
+
+    if !source.contains("default") {
+        return None;
+    }
+
+    let parsed = alloy_syntax::parse_lenient(source, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+
+    parsed.chunk.block.stmts.iter().find_map(|s| match s {
+        Stmt::ExportDefault {
+            value: DefaultExport::Decl(inner),
+            ..
+        } => inner
+            .declared_name()
+            .map(|n| n.text(source, toks).to_string()),
+
+        _ => None,
+    })
 }
 
 /// Keys the declarations of the imported modules by every name this
@@ -1231,8 +1352,9 @@ fn keyed_by_local<T: Clone>(
         }
     }
 
+    // `default` is a key a bare import reads through, not a name.
     for (_, decls) in modules {
-        for (name, payload) in decls {
+        for (name, payload) in decls.iter().filter(|(n, _)| n != "default") {
             push(name.clone(), payload);
         }
     }
@@ -1470,7 +1592,7 @@ pub fn import_macros(
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<crate::MacroSource> {
-    use alloy_syntax::ast::{ImportKind, Stmt};
+    use alloy_syntax::ast::{ExportList, ImportKind, Stmt};
 
     let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
         return Vec::new();
@@ -1481,30 +1603,38 @@ pub fn import_macros(
     let mut exports: HashMap<PathBuf, Vec<crate::MacroSource>> = HashMap::new();
 
     for stmt in &parsed.chunk.block.stmts {
-        let Stmt::Import(node) = stmt else {
-            continue;
-        };
-        let specs = match &node.kind {
-            ImportKind::Named(list)
-            | ImportKind::Both(_, list)
-            | ImportKind::Namespace(_, list) => list,
+        // `export { sq } from "./m"` names the macro too. The barrel
+        // then knows `sq` is no value its table can carry.
+        let (specs, spec_path) = match stmt {
+            Stmt::Import(node) => match &node.kind {
+                ImportKind::Named(list)
+                | ImportKind::Both(_, list)
+                | ImportKind::Namespace(_, list) => (list, node.path),
 
-            ImportKind::Default(_) | ImportKind::TypeOnly(_) => continue,
+                ImportKind::Default(_) | ImportKind::TypeOnly(_) => continue,
+            },
+
+            Stmt::ExportList(ExportList {
+                specs,
+                from: Some(from),
+                type_only: false,
+                ..
+            }) => (specs, *from),
+
+            _ => continue,
         };
 
         if specs.is_empty() {
             continue;
         }
 
-        let spec = text(node.path);
+        let spec = text(spec_path);
         let Some(path) = resolve(spec.trim_matches(['"', '\'']), from, aliases) else {
             continue;
         };
-        let found = exports.entry(path.clone()).or_insert_with(|| {
-            module_text(&path)
-                .map(|t| module_macros(&t))
-                .unwrap_or_default()
-        });
+        let found = exports
+            .entry(path.clone())
+            .or_insert_with(|| sent_macros(&path, aliases, BARREL_DEPTH));
 
         for sp in specs {
             if sp.is_type || sp.is_attribute {
@@ -1532,6 +1662,46 @@ pub fn import_macros(
             if !out.iter().any(|had| had.name == m.name) {
                 out.push(m.clone());
             }
+        }
+    }
+
+    out
+}
+
+/// The macros a module sends out: its own, and the ones a barrel passes
+/// on from another module under the name it gives them. A private macro
+/// of that module comes along hidden, since an expansion may call it.
+fn sent_macros(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<crate::MacroSource> {
+    let Ok(text) = module_text(path) else {
+        return Vec::new();
+    };
+    let mut out = module_macros(&text);
+
+    if depth == 0 {
+        return out;
+    }
+
+    for (name, exported, spec) in reexports(&text) {
+        let Some(target) = resolve(&spec, path, aliases).filter(|t| t != path) else {
+            continue;
+        };
+
+        for m in sent_macros(&target, aliases, depth - 1) {
+            let sent = match (m.hidden, m.name == name) {
+                (false, true) => crate::MacroSource {
+                    name: exported.clone(),
+                    ..m
+                },
+
+                (true, _) => m,
+
+                (false, false) => continue,
+            };
+
+            // The barrel imported the macro, so its own list read it
+            // hidden; the pass-on is what the importer calls.
+            out.retain(|had| had.name != sent.name);
+            out.push(sent);
         }
     }
 
@@ -1572,6 +1742,19 @@ pub fn module_macros(source: &str) -> Vec<crate::MacroSource> {
         out
     };
     let mut out = Vec::new();
+    // `macro sq(x) ... end` and `export { sq }` below it export it.
+    let listed: Vec<String> = parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ExportList(list) if list.from.is_none() => Some(list),
+
+            _ => None,
+        })
+        .flat_map(|list| list.specs.iter().map(|sp| text(sp.name)))
+        .collect();
 
     for stmt in &parsed.chunk.block.stmts {
         let Stmt::Macro(m) = stmt else {
@@ -1582,7 +1765,7 @@ pub fn module_macros(source: &str) -> Vec<crate::MacroSource> {
 
         out.push(crate::MacroSource {
             name: text(m.name),
-            hidden: !m.exported,
+            hidden: !m.exported && !listed.contains(&text(m.name)),
             params: named().map(|p| text(p.name)).collect(),
             defaults: named()
                 .map(|p| p.default.as_ref().map(|d| join(d.span())))

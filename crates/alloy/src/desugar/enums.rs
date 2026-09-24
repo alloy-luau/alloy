@@ -524,6 +524,14 @@ impl<'s> Desugar<'s> {
             return name.to_string();
         }
 
+        // `import * as Sh` binds the module, and `Sh.Shape` is a type
+        // path Luau reads through it.
+        if let Some((head, rest)) = name.split_once('.')
+            && self.star_modules.contains(head)
+        {
+            return format!("{head}.{}", rest.replace('.', "_"));
+        }
+
         self.ns_path_name(name)
             .unwrap_or_else(|| name.replace('.', "_"))
     }
@@ -2623,6 +2631,27 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(!out.check.contains(":: M_Opt"), "{}", out.check);
         assert!(!out.check.contains(":: M.Opt"), "{}", out.check);
+    }
+
+    /// `import * as Sh` binds the module, so the cast of a match over
+    /// `Sh.Shape` reads the type through it. `Sh_Shape` names nothing.
+    #[test]
+    fn a_star_imported_enum_casts_through_the_module() {
+        let options = EmitOptions {
+            import_enums: vec![(
+                "Sh.Shape".to_string(),
+                vec![("Circle".to_string(), 1), ("Dot".to_string(), 0)],
+            )],
+            import_types: vec![("./shapes".to_string(), vec!["Shape".to_string()])],
+            check: true,
+            ..EmitOptions::default()
+        };
+        let src = "import * as Sh from \"./shapes\"\nlocal function f(s: Sh.Shape): number\n    return match s with\n        case Sh.Shape.Circle(r) then r\n        case Sh.Shape.Dot then 0\n    end\nend\nprint(f)\n";
+        let out = crate::compile_with(src, &options).expect("compiles");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.check.contains(":: Sh.Shape"), "{}", out.check);
+        assert!(!out.check.contains("Sh_Shape"), "{}", out.check);
     }
 
     /// A static call of a method an imported enum's impl writes,

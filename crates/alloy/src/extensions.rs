@@ -210,6 +210,9 @@ fn flat_stmts<'a>(
         stmts.iter().rev().map(|s| (String::new(), s)).collect();
 
     while let Some((prefix, stmt)) = stack.pop() {
+        // `export default struct P` declares `P` like any other.
+        let stmt = stmt.under_default();
+
         if let Stmt::Namespace(ns) = stmt {
             let head = format!("{prefix}{}_", text(ns.name));
 

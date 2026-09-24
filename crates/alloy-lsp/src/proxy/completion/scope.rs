@@ -318,7 +318,7 @@ impl State {
                 || self
                     .definition_sources
                     .iter()
-                    .any(|(_, source)| path_to_uri(source) == u);
+                    .any(|(_, segment)| path_to_uri(&segment.source) == u);
             // The export list of the file names what a hover does not:
             // an attribute's hover opens with `@name(...)`, and a name
             // an `export { }` list sends out has no `export` in front.

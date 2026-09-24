@@ -54,6 +54,96 @@ pub fn doc_before(src: &str, offset: usize) -> Option<String> {
     Some(lines.join("\n").trim().to_string())
 }
 
+/// One `.d.aly` inside the merged definitions file: the file, and the
+/// zero-based line its text starts on there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Segment {
+    pub source: std::path::PathBuf,
+    pub first_line: usize,
+}
+
+/// The compiled `.d.aly` files of a project as definitions files, each
+/// part as its path, its artifact, and its source. Luau-lsp loads its
+/// definitions in no set order, each against the globals before it, so
+/// a type one file names from another was unknown, and that dropped the
+/// whole file. Files that name each other merge into one, where order
+/// does not matter. A file that names no other stays apart, so its
+/// mistake drops no other file.
+pub fn merge_definitions(
+    parts: &[(std::path::PathBuf, String, String)],
+) -> Vec<(String, Vec<Segment>)> {
+    let declared: Vec<Vec<String>> = parts
+        .iter()
+        .map(|(_, _, s)| summaries(s, true).into_iter().map(|d| d.name).collect())
+        .collect();
+    let words: Vec<std::collections::HashSet<&str>> = parts
+        .iter()
+        .map(|(_, _, s)| {
+            s.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .collect()
+        })
+        .collect();
+    let names = |i: usize, j: usize| declared[j].iter().any(|n| words[i].contains(n.as_str()));
+    // Each part's group, as the lowest part it reaches.
+    let mut group: Vec<usize> = (0..parts.len()).collect();
+
+    // ponytail: a quadratic pass per join, fine for the few files a
+    // project declares; a union-find if one ever holds hundreds.
+    let mut joined = true;
+
+    while joined {
+        joined = false;
+
+        for i in 0..parts.len() {
+            for j in 0..parts.len() {
+                if group[i] != group[j] && (names(i, j) || names(j, i)) {
+                    let (low, high) = (group[i].min(group[j]), group[i].max(group[j]));
+                    group
+                        .iter_mut()
+                        .filter(|g| **g == high)
+                        .for_each(|g| *g = low);
+                    joined = true;
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<(usize, String, Vec<Segment>)> = Vec::new();
+
+    for (i, (source, part, _)) in parts.iter().enumerate() {
+        let at = match out.iter().position(|(g, _, _)| *g == group[i]) {
+            Some(at) => at,
+
+            None => {
+                out.push((group[i], String::new(), Vec::new()));
+                out.len() - 1
+            }
+        };
+        let (_, text, segments) = &mut out[at];
+        segments.push(Segment {
+            source: source.clone(),
+            first_line: text.matches('\n').count(),
+        });
+        text.push_str(part);
+
+        if !part.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+
+    out.into_iter().map(|(_, t, s)| (t, s)).collect()
+}
+
+/// The file a zero-based line of the merged definitions file came
+/// from, and the line in that file.
+pub fn segment_at(segments: &[Segment], line: usize) -> Option<(&Segment, usize)> {
+    segments
+        .iter()
+        .rev()
+        .find(|s| s.first_line <= line)
+        .map(|s| (s, line - s.first_line))
+}
+
 /// Every struct, interface, enum, trait, type alias, class, and, in a
 /// definition file, every `declare` at the top level. A struct
 /// or enum lists the traits it implements and its methods from the
@@ -1107,6 +1197,38 @@ fn param_text<'a>(p: &alloy_syntax::ast::Param, text: &impl Fn(TokSpan) -> &'a s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Luau-lsp loads definitions files in no set order, so a type one
+    /// `.d.aly` named from another was unknown. Files that name each
+    /// other merge into one, each line still names its file, and a file
+    /// that names no other stays apart.
+    #[test]
+    fn declaration_files_that_name_each_other_merge() {
+        let part = |path: &str, text: &str| {
+            (
+                std::path::PathBuf::from(path),
+                text.to_string(),
+                text.to_string(),
+            )
+        };
+        let parts = vec![
+            part("a.d.aly", "declare function make(): Save\n"),
+            part("b.d.aly", "declare other: number\n"),
+            part("z.d.aly", "export type Save = { coins: number }"),
+        ];
+        let merged = merge_definitions(&parts);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            merged[0].0,
+            "declare function make(): Save\nexport type Save = { coins: number }\n"
+        );
+        assert_eq!(merged[1].0, "declare other: number\n");
+        assert_eq!(
+            segment_at(&merged[0].1, 1).map(|(s, l)| (s.source.clone(), l)),
+            Some(("z.d.aly".into(), 0))
+        );
+    }
 
     /// A jump to a declared global landed on `declare f`, the first
     /// letters of the statement, and not on the name.

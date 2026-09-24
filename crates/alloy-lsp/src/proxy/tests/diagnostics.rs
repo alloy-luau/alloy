@@ -1114,9 +1114,10 @@ pub(crate) fn a_child_edit_over_generated_text_is_dropped() {
 }
 
 /// The child reports a definitions file it cannot load on the file it
-/// read: a compiled copy under the temp folder that no editor shows. A
+/// read: the merged copy under the temp folder that no editor shows. A
 /// mistyped name in a `.d.aly` was silent. The report now lands on the
-/// `.d.aly`, and the popup names it.
+/// `.d.aly` its line came from, on that file's own line, and the popup
+/// names the `.d.aly` files.
 #[test]
 fn a_definitions_report_lands_on_the_declaration_file() {
     use super::documents::Recorder;
@@ -1128,14 +1129,23 @@ fn a_definitions_report_lands_on_the_declaration_file() {
         Vec::new(),
         None,
     );
-    let read = PathBuf::from("/tmp/defs/g-1.d.luau");
-    let source = PathBuf::from("/w/src/g.d.aly");
-    server
-        .state
-        .lock()
-        .expect("state")
-        .definition_sources
-        .push((read.clone(), source.clone()));
+    let read = PathBuf::from("/tmp/defs/declared.d.luau");
+    let g = PathBuf::from("/w/src/g.d.aly");
+    let h = PathBuf::from("/w/src/h.d.aly");
+
+    {
+        let mut st = server.state.lock().expect("state");
+
+        for (source, first_line) in [(&g, 0), (&h, 2)] {
+            st.definition_sources.push((
+                read.clone(),
+                alloy::declarations::Segment {
+                    source: source.clone(),
+                    first_line,
+                },
+            ));
+        }
+    }
 
     server.handle_child(json!({
         "jsonrpc": "2.0",
@@ -1143,7 +1153,7 @@ fn a_definitions_report_lands_on_the_declaration_file() {
         "params": {
             "uri": path_to_uri(&read),
             "diagnostics": [{
-                "range": { "start": { "line": 0, "character": 29 }, "end": { "line": 0, "character": 34 } },
+                "range": { "start": { "line": 3, "character": 29 }, "end": { "line": 3, "character": 34 } },
                 "message": "TypeError: Unknown type 'strin'",
             }],
         },
@@ -1155,14 +1165,30 @@ fn a_definitions_report_lands_on_the_declaration_file() {
     }));
 
     let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+    let published: Vec<Value> = sent
+        .split("Content-Length")
+        .filter_map(|m| m.find('{').map(|at| &m[at..]))
+        .filter_map(|m| serde_json::from_str(m).ok())
+        .filter(|m: &Value| m["method"] == "textDocument/publishDiagnostics")
+        .collect();
+    let on = |path: &Path| {
+        published
+            .iter()
+            .find(|m| m["params"]["uri"] == json!(path_to_uri(path)))
+            .map(|m| m["params"]["diagnostics"].clone())
+    };
 
-    assert!(sent.contains(&path_to_uri(&source)), "{sent}");
-    assert!(sent.contains("Unknown type 'strin'"), "{sent}");
-    assert!(
-        sent.contains("Failed to read definitions file /w/src/g.d.aly."),
+    assert_eq!(on(&g), Some(json!([])), "{sent}");
+    assert_eq!(
+        on(&h).and_then(|d| d[0]["range"]["start"]["line"].as_u64()),
+        Some(1),
         "{sent}"
     );
-    assert!(!sent.contains("g-1.d.luau"), "{sent}");
+    assert!(
+        sent.contains("Failed to read definitions file /w/src/g.d.aly, /w/src/h.d.aly."),
+        "{sent}"
+    );
+    assert!(!sent.contains("declared.d.luau"), "{sent}");
 }
 
 /// The schema takes any string as a lint name, so `unused_varible` was

@@ -3380,8 +3380,11 @@ fn a_loaded_declaration_file_is_in_every_scope() {
         ),
     );
     st.definition_sources.push((
-        PathBuf::from("/tmp/defs/g-1.d.luau"),
-        PathBuf::from("/src/g.d.aly"),
+        PathBuf::from("/tmp/defs/declared.d.luau"),
+        alloy::declarations::Segment {
+            source: PathBuf::from("/src/g.d.aly"),
+            first_line: 0,
+        },
     ));
 
     let names: Vec<&str> = st

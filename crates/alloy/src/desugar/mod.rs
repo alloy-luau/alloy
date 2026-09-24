@@ -2541,6 +2541,19 @@ impl<'s> Desugar<'s> {
 
                 if self.is_local(&name) || self.declared_types.contains(&name) {
                     self.r.copy(ns, ne);
+                } else if self.options.definitions {
+                    // Luau loads a definitions file on its own, with no
+                    // require, and one unknown type drops the whole file.
+                    let fix = match name.as_str() {
+                        "Array" => "write `T[]` or `{ T }`",
+
+                        _ => "write the type out",
+                    };
+                    let message = format!(
+                        "`{name}` is a type of the Alloy std, and a definitions file cannot reach the std; {fix}"
+                    );
+                    self.diagnose(span, &message);
+                    self.r.copy(ns, ne);
                 } else if let Some((table, after)) = self.mapped_over_declared(span, end) {
                     self.generate(ns, &table);
                     self.copy(after, end);
@@ -2615,6 +2628,18 @@ impl<'s> Desugar<'s> {
         let br_e = self.byte_end(brackets);
 
         self.r.copy(start, edit_start);
+
+        // A host gives a plain table, with no std metatable behind it,
+        // so a definitions file writes the Luau array type.
+        if self.options.definitions {
+            let read = modifier.is_some_and(|m| self.text_of(m) == "read");
+            self.generate(edit_start, if read { "{ read [number]: " } else { "{ " });
+            self.copy(op_s, op_e);
+            self.generate(op_e, " }");
+            self.copy(br_e, end);
+
+            return;
+        }
 
         match modifier {
             Some(m) => {

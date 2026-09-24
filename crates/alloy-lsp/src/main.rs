@@ -9,8 +9,9 @@
 //!
 //! - `--luau-lsp <path>`: the child binary. Default: `ALLOY_LUAU_LSP`,
 //!   then `luau-lsp` on the PATH.
-//! - `--definitions <path>`: a definitions file for the child; a `.d.aly`
-//!   compiles to `.d.luau` in the cache directory first. A relative path
+//! - `--definitions <path>`: a definitions file for the child. The
+//!   `.d.aly` files compile into `.d.luau` files in the cache directory,
+//!   and the ones that name each other share one. A relative path
 //!   reads from the workspace root. Repeatable. The project's own list
 //!   joins them: every `.d.aly` under `[build] in` and each
 //!   `[flux] definitions` entry, the list `alloy flux` reads. Every
@@ -208,21 +209,19 @@ fn run() -> ExitCode {
     let mut injected = std::collections::HashSet::new();
 
     let mut given: Vec<PathBuf> = Vec::new();
-    // The file the child reads for each `.d.aly`, and the `.d.aly`: a
-    // report on the one goes to the other.
-    let mut sources: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // The files the child reads for the `.d.aly` files, with the line
+    // each one starts on: a report on the one goes to the other.
+    let mut sources: Vec<(PathBuf, alloy::declarations::Segment)> = Vec::new();
+    let (declared, plain): (Vec<PathBuf>, Vec<PathBuf>) = definitions
+        .into_iter()
+        .partition(|p| p.to_string_lossy().ends_with(".d.aly"));
+    let merged = merge_declared(&declared, workspace_root.as_deref());
 
-    for path in &definitions {
-        match prepare_definitions(path, workspace_root.as_deref()).and_then(|p| {
-            extensions::apply(&p, &exts, &rig, &mut injected, workspace_root.as_deref())
-        }) {
+    for (path, segments) in plain.into_iter().map(|p| (p, Vec::new())).chain(merged) {
+        match extensions::apply(&path, &exts, &rig, &mut injected, workspace_root.as_deref()) {
             Ok(p) => {
                 child_args.push(format!("--definitions={}", p.display()));
-
-                if path.to_string_lossy().ends_with(".d.aly") {
-                    sources.push((p.clone(), path.clone()));
-                }
-
+                sources.extend(segments.into_iter().map(|s| (p.clone(), s)));
                 given.push(p);
             }
 
@@ -494,34 +493,56 @@ fn workspace_files(root: &Path, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
     found
 }
 
-/// A definitions file the child can read: a `.d.aly` compiles to a
-/// `.d.luau` in the workspace's cache directory; anything else passes
-/// as is. The name carries the whole path, so `client/types.d.aly` and
-/// `server/types.d.aly` write two files.
-fn prepare_definitions(path: &Path, root: Option<&Path>) -> Result<PathBuf, String> {
-    let name = path.to_string_lossy();
+/// Every `.d.aly` compiled, and merged into definitions files in the
+/// workspace's cache folder, with the line each one starts on. The
+/// child loads its definitions in no set order, so the files that name
+/// each other share one file. A file that does not compile stays out,
+/// and the log says why.
+fn merge_declared(
+    paths: &[PathBuf],
+    root: Option<&Path>,
+) -> Vec<(PathBuf, Vec<alloy::declarations::Segment>)> {
+    let mut parts = Vec::new();
 
-    if !name.ends_with(".d.aly") {
-        return Ok(path.to_path_buf());
+    for path in paths {
+        let compiled = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|source| {
+                let options = alloy::EmitOptions {
+                    file_name: path.to_string_lossy().into_owned(),
+                    definitions: true,
+                    ..alloy::EmitOptions::default()
+                };
+
+                alloy::compile_with(&source, &options)
+                    .map(|out| (out.check, source))
+                    .map_err(|e| e.to_string())
+            });
+
+        match compiled {
+            Ok((check, source)) => parts.push((path.clone(), check, source)),
+
+            Err(e) => log::error(&format!("definitions {}: {e}", path.display())),
+        }
     }
 
-    let source = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let options = alloy::EmitOptions {
-        file_name: name.into_owned(),
-        definitions: true,
-        ..alloy::EmitOptions::default()
-    };
-    let out = alloy::compile_with(&source, &options).map_err(|e| e.to_string())?;
     let dir = extensions::cache_dir(root);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let stem = path
-        .file_name()
-        .map(|n| n.to_string_lossy().replace(".d.aly", ""))
-        .unwrap_or_else(|| "definitions".to_string());
-    let target = dir.join(format!("{stem}-{}.d.luau", proxy::root_key(Some(path))));
-    std::fs::write(&target, out.check).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
 
-    Ok(target)
+    for (i, (text, segments)) in alloy::declarations::merge_definitions(&parts)
+        .into_iter()
+        .enumerate()
+    {
+        let target = dir.join(format!("declared-{i}.d.luau"));
+
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, text)) {
+            Ok(()) => out.push((target, segments)),
+
+            Err(e) => log::error(&format!("definitions {}: {e}", target.display())),
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -529,9 +550,9 @@ mod tests {
     use super::*;
 
     /// Two `.d.aly` of one file name wrote one compiled copy, and the
-    /// second overwrote the first.
+    /// second overwrote the first. Each now reaches the child.
     #[test]
-    fn two_declaration_files_of_one_name_compile_to_two_copies() {
+    fn two_declaration_files_of_one_name_both_reach_the_child() {
         let dir = std::env::temp_dir().join(format!("alloy-defs-name-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("client")).unwrap();
@@ -547,20 +568,25 @@ mod tests {
         )
         .unwrap();
 
-        let client = prepare_definitions(&dir.join("client/types.d.aly"), Some(&dir)).unwrap();
-        let server = prepare_definitions(&dir.join("server/types.d.aly"), Some(&dir)).unwrap();
+        let paths = [
+            dir.join("client/types.d.aly"),
+            dir.join("server/types.d.aly"),
+        ];
+        let merged = merge_declared(&paths, Some(&dir));
+        let texts: Vec<String> = merged
+            .iter()
+            .map(|(p, _)| std::fs::read_to_string(p).unwrap())
+            .collect();
 
-        assert_ne!(client, server);
-        assert!(
-            std::fs::read_to_string(&client)
-                .unwrap()
-                .contains("client_fn")
+        assert_eq!(
+            texts,
+            ["declare client_fn: number\n", "declare server_fn: number\n"]
         );
-        assert!(
-            std::fs::read_to_string(&server)
-                .unwrap()
-                .contains("server_fn")
-        );
+        assert_eq!(merged[1].1[0].source, paths[1]);
+
+        for (p, _) in &merged {
+            let _ = std::fs::remove_file(p);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

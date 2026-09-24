@@ -552,6 +552,10 @@ impl<'s> Desugar<'s> {
         }
 
         if let Some(inner) = text.strip_suffix("[]") {
+            if self.options.definitions {
+                return format!("{{ {} }}", self.lower_type(inner));
+            }
+
             let std = self.type_std();
 
             return format!("{std}Array<{}>", self.lower_type(inner));

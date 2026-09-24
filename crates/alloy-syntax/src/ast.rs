@@ -932,6 +932,9 @@ never rewrites.
 */
 #[derive(Debug)]
 pub struct Declare {
+    /// The pattern parameters of every signature the declaration
+    /// holds, `{ x, y }: Point`, in source order.
+    pub patterns: Vec<Binding>,
     pub span: TokSpan,
 }
 

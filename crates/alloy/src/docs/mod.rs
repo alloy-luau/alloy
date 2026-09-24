@@ -78,7 +78,10 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     (&["negates twice", "luau cannot negate"], "TypeError"),
     // A name after the rest of a pattern: the parser's report, which
     // the struct rule below would read by its word `fields`.
-    (&["takes the fields that are left"], "SyntaxError"),
+    (
+        &["takes the fields that are left", "`...rest` takes no type"],
+        "SyntaxError",
+    ),
     // A parameter pattern whose type is missing, doubled, partial, or
     // optional. A field its struct lacks reads as the struct literal's
     // report of the same words.

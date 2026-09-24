@@ -14,6 +14,7 @@ use crate::render::Renderer;
 use super::enums::same_type_text;
 use super::modules::type_arguments;
 use super::remotes::WIRE_WIDTHS;
+use super::statements::{Piece, is_string_index_table};
 use super::types::{generic_head, names_other_args, strip_bounds};
 use super::*;
 
@@ -1277,6 +1278,14 @@ impl<'s> Desugar<'s> {
         let mut cursor = self.byte_end(t.name);
 
         for m in &t.methods {
+            self.check_param_names(&m.params);
+
+            for p in &m.params {
+                if let Some(d) = &p.destructure {
+                    self.check_param_pattern(p.name, p.ty, p.default.is_some(), d);
+                }
+            }
+
             let ms = self.byte_start(m.span);
             self.blank_lines(cursor, ms);
 
@@ -1284,7 +1293,7 @@ impl<'s> Desugar<'s> {
                 Some(body) => {
                     // `function name(params): R` becomes `function Trait.name(params): R`.
                     let mname = self.text_of(m.name).to_string();
-                    let mut sig = self.signature_text(m.signature);
+                    let (mut sig, prologue) = self.signature_text(m);
 
                     // An untyped `self` is the trait's own interface in
                     // the check artifact. The default body then reads
@@ -1300,6 +1309,7 @@ impl<'s> Desugar<'s> {
                     }
 
                     self.generate(ms, &format!("function {name}.{mname}{sig}"));
+                    self.write_pieces(self.byte_end(m.signature), &prologue);
                     let body_start = self.block_start_or(&body.block, self.byte_end(m.span));
                     self.copy(self.byte_end(m.signature), body_start);
                     self.block(&body.block);
@@ -1320,23 +1330,68 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// A signature span with `->` written as `:`.
-    pub(crate) fn signature_text(&mut self, sig: TokSpan) -> String {
-        let mut out = String::new();
+    /// A default method's signature as Luau: the return arrow is `:`,
+    /// the types copy through the type edits, and each pattern is a
+    /// temp. The prologue opens the patterns after the signature.
+    pub(crate) fn signature_text(&mut self, m: &TraitMethod) -> (String, Vec<Vec<Piece>>) {
+        let sig = m.signature;
+        let mut side = Renderer::new(self.src);
+        std::mem::swap(&mut self.r, &mut side);
+        let mut cursor = self.byte_start(sig);
+        let mut prologue = Vec::new();
+        let mut n = 0;
 
-        for i in sig.start..sig.end {
-            let tok = self.toks[i as usize];
-            let text = tok.text(self.src);
+        for p in &m.params {
+            let Some(d) = &p.destructure else {
+                continue;
+            };
+            let (ps, pe) = (self.byte_start(p.name), self.byte_end(p.name));
+            self.copy(cursor, ps);
+            let temp = self.pattern_temp(&mut n);
+            self.generate(ps, &temp);
+            self.blank_lines(ps, pe);
 
-            if i > sig.start {
-                let prev = self.toks[i as usize - 1];
-                out.push_str(&self.src[prev.end as usize..tok.start as usize]);
+            if p.ty.is_none() {
+                let shape = self.pattern_shape(d).unwrap_or("any".to_string());
+                self.generate(pe, &format!(": {shape}"));
             }
 
-            out.push_str(if text == "->" { ":" } else { text });
+            let rest_type =
+                p.ty.map(|t| self.copy_type_to_string(t).trim().to_string())
+                    .filter(|t| is_string_index_table(t));
+            prologue.push(self.destructure_pieces(d, &temp, rest_type.as_deref()));
+            cursor = pe;
         }
 
-        out
+        // The return arrow follows the `)` that closes the parameters;
+        // an arrow inside a parameter's function type stays.
+        let mut depth = 0;
+        let close = (sig.start..sig.end).find(|&i| {
+            match self.toks[i as usize].text(self.src) {
+                "(" => depth += 1,
+
+                ")" => depth -= 1,
+
+                _ => {}
+            }
+
+            depth == 0
+        });
+
+        if let Some(close) = close
+            && close + 1 < sig.end
+            && self.toks[close as usize + 1].text(self.src) == "->"
+        {
+            let arrow = self.toks[close as usize + 1];
+            self.copy(cursor, arrow.start);
+            self.generate(arrow.start, ":");
+            cursor = arrow.end;
+        }
+
+        self.copy(cursor, self.byte_end(sig));
+        std::mem::swap(&mut self.r, &mut side);
+
+        (side.finish().0, prologue)
     }
 
     pub(crate) fn trait_method_type(&mut self, m: &TraitMethod) -> String {
@@ -1346,7 +1401,16 @@ impl<'s> Desugar<'s> {
         for p in &m.params {
             let pname = self.text_of(p.name).to_string();
 
-            if pname == "self" {
+            // The caller passes one value for a pattern, so the type
+            // names no parameter.
+            if let Some(d) = &p.destructure {
+                let ty = match p.ty {
+                    Some(t) => self.copy_type_to_string(t).trim().to_string(),
+
+                    None => self.pattern_shape(d).unwrap_or("any".to_string()),
+                };
+                params.push(ty);
+            } else if pname == "self" {
                 params.push("self: any".to_string());
             } else if p.is_vararg {
                 let ty =

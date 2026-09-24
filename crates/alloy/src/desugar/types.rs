@@ -284,14 +284,11 @@ pub(crate) fn split_top_level(text: &str, sep: char) -> Vec<&str> {
     let mut from = 0;
 
     for (i, c) in text.char_indices() {
-        match c {
-            '{' | '(' | '<' | '[' => depth += 1,
-            '}' | ')' | '>' | ']' => depth -= 1,
-            c if c == sep && depth == 0 => {
-                parts.push(&text[from..i]);
-                from = i + c.len_utf8();
-            }
-            _ => {}
+        depth += depth_step(text, i, c);
+
+        if c == sep && depth == 0 {
+            parts.push(&text[from..i]);
+            from = i + c.len_utf8();
         }
     }
 
@@ -300,16 +297,26 @@ pub(crate) fn split_top_level(text: &str, sep: char) -> Vec<&str> {
     parts
 }
 
+/// The change of bracket depth at the char `c` at byte `i` of a type
+/// text. The `>` of `->` closes nothing.
+pub(crate) fn depth_step(text: &str, i: usize, c: char) -> i32 {
+    match c {
+        '{' | '(' | '<' | '[' => 1,
+
+        '>' if text[..i].ends_with('-') => 0,
+
+        '}' | ')' | '>' | ']' => -1,
+
+        _ => 0,
+    }
+}
+
 /// The byte offset of `needle` outside every bracket group, or `None`.
 pub(crate) fn top_level_find(text: &str, needle: &str) -> Option<usize> {
     let mut depth = 0i32;
 
     for (i, c) in text.char_indices() {
-        match c {
-            '{' | '(' | '<' | '[' => depth += 1,
-            '}' | ')' | '>' | ']' => depth -= 1,
-            _ => {}
-        }
+        depth += depth_step(text, i, c);
 
         if depth == 0 && text[i..].starts_with(needle) {
             return Some(i);

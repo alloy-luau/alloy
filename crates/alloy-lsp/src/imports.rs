@@ -793,12 +793,15 @@ fn map_path(path: &Path, renames: &[Rename]) -> PathBuf {
     path.to_path_buf()
 }
 
-/// The edits that keep every relative import and require right after
-/// the renames, keyed by the file's new URI. A file that moved has its
-/// own specs re-based too.
+/// The edits that keep every import and require right after the
+/// renames, keyed by the file's new URI. A file that moved has its own
+/// relative specs re-based too. `aliases` gives the aliases a folder
+/// sees: an `@alias/...` spec keeps its alias while the target stays
+/// under the alias's folder.
 pub fn rename_edits(
     docs: &[(String, PathBuf, String)],
     renames: &[Rename],
+    aliases: &dyn Fn(&Path) -> Vec<(String, PathBuf)>,
 ) -> HashMap<String, Vec<Value>> {
     let mut out: HashMap<String, Vec<Value>> = HashMap::new();
 
@@ -811,6 +814,7 @@ pub fn rename_edits(
         };
         let toks = &lexed.toks;
         let mut edits = Vec::new();
+        let mut seen: Option<Vec<(String, PathBuf)>> = None;
 
         for (i, tok) in toks.iter().enumerate() {
             let TokKind::Str {
@@ -830,12 +834,34 @@ pub fn rename_edits(
 
             let spec = &src[inner_start as usize..inner_end as usize];
 
-            if !(spec.starts_with("./") || spec.starts_with("../")) {
-                continue;
-            }
+            let new_spec = if let Some(rest) = spec.strip_prefix('@') {
+                let (name, tail) = rest.split_once('/').unwrap_or((rest, ""));
+                let known = seen.get_or_insert_with(|| aliases(old_dir));
+                let Some((_, dir)) = known.iter().find(|(a, _)| a == name) else {
+                    continue;
+                };
 
-            let target = map_path(&lexical(old_dir, spec), renames);
-            let new_spec = relative_spec(new_dir, &target);
+                // A move of the alias's own folder is for its
+                // configuration to follow, not for every import.
+                if map_path(dir, renames) != *dir {
+                    continue;
+                }
+
+                let target = map_path(&lexical(dir, tail), renames);
+
+                match target.strip_prefix(dir) {
+                    Ok(rest) if rest.as_os_str().is_empty() => format!("@{name}"),
+
+                    Ok(rest) => format!("@{name}/{}", rest.to_string_lossy().replace('\\', "/")),
+
+                    Err(_) => best_spec(new_dir, &target, known)
+                        .unwrap_or_else(|| relative_spec(new_dir, &target)),
+                }
+            } else if spec.starts_with("./") || spec.starts_with("../") {
+                relative_spec(new_dir, &map_path(&lexical(old_dir, spec), renames))
+            } else {
+                continue;
+            };
 
             if new_spec == spec {
                 continue;
@@ -1201,7 +1227,7 @@ namespace Inner as end
             old: PathBuf::from("/w/lib/b.aly"),
             new: PathBuf::from("/w/src/deep/b.aly"),
         }];
-        let edits = rename_edits(&docs, &renames);
+        let edits = rename_edits(&docs, &renames, &|_| Vec::new());
         assert_eq!(
             edits["file:///w/a.aly"][0]["newText"], "./src/deep/b",
             "{edits:?}"
@@ -1211,5 +1237,49 @@ namespace Inner as end
             "{edits:?}"
         );
         assert_eq!(edits.len(), 2);
+    }
+
+    /// A spec through a `.luaurc` alias keeps the alias while the target
+    /// stays under the alias's folder, and takes the best spec when it
+    /// leaves. A move of the alias's own folder is the configuration's.
+    #[test]
+    fn a_rename_keeps_an_alias_spec() {
+        let docs = vec![(
+            "file:///w/a.aly".to_string(),
+            PathBuf::from("/w/a.aly"),
+            "import { x } from \"@src/game/util\"\nlocal u = require(\"@src/game/util\")\n"
+                .to_string(),
+        )];
+        let aliases = |_: &Path| vec![("src".to_string(), PathBuf::from("/w/src"))];
+        let spec_after = |old: &str, new: &str| {
+            let renames = vec![Rename {
+                old: PathBuf::from(old),
+                new: PathBuf::from(new),
+            }];
+            let edits = rename_edits(&docs, &renames, &aliases);
+
+            edits
+                .get("file:///w/a.aly")
+                .map(|e| {
+                    e.iter()
+                        .map(|e| e["newText"].as_str().unwrap_or("").to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+
+        assert_eq!(
+            spec_after("/w/src/game/util.aly", "/w/src/game/helpers.aly"),
+            ["@src/game/helpers", "@src/game/helpers"]
+        );
+        assert_eq!(
+            spec_after("/w/src/game", "/w/src/core"),
+            ["@src/core/util", "@src/core/util"]
+        );
+        assert_eq!(
+            spec_after("/w/src/game/util.aly", "/w/lib/util.aly"),
+            ["./lib/util", "./lib/util"]
+        );
+        assert!(spec_after("/w/src", "/w/source").is_empty());
     }
 }

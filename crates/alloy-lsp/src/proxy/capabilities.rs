@@ -50,7 +50,8 @@ fn spelled_end(
 
 /// The child's capabilities, as the editor should see them: no
 /// formatting of a shadow, semantic tokens whole and never by range or
-/// delta, and rename follow-up for Alloy files.
+/// delta, and rename follow-up for Alloy files and the Luau modules
+/// they import.
 pub(crate) fn edit_capabilities(message: &mut Value) {
     let Some(caps) = message
         .pointer_mut("/result/capabilities")
@@ -152,7 +153,7 @@ pub(crate) fn edit_capabilities(message: &mut Value) {
             json!({
                 "didRename": {
                     "filters": [
-                        { "pattern": { "glob": "**/*.{aly,alx}", "matches": "file" } },
+                        { "pattern": { "glob": "**/*.{aly,alx,luau,lua}", "matches": "file" } },
                         { "pattern": { "glob": "**", "matches": "folder" } }
                     ]
                 }

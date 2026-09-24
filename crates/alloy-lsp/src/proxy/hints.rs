@@ -501,23 +501,10 @@ pub(crate) fn type_only_module_hints(hints: &mut Vec<Value>, doc: &Doc, path: &s
         let Some((name_end, spec)) = module_binding(line) else {
             continue;
         };
-        let Some(exports) = alloy::modules::type_only_exports(path, &spec) else {
+        let Some((target, exports)) = alloy::modules::type_only_exports(path, &spec) else {
             continue;
         };
         let (line_no, character) = (n as u32, line[..name_end].encode_utf16().count() as u32);
-        let entries: Vec<String> = exports
-            .iter()
-            .map(|(name, interface)| match interface {
-                true => format!("interface {name}"),
-
-                false => format!("type {name}"),
-            })
-            .collect();
-        let label = format!(": {{ {} }}", entries.join(", "));
-        let tooltip =
-            std::iter::once("A module that exports only types and interfaces:\n".to_string())
-                .chain(entries.iter().map(|e| format!("\n- `{e}`")))
-                .collect::<String>();
 
         hints.retain(|h| {
             h.get("position")
@@ -527,15 +514,71 @@ pub(crate) fn type_only_module_hints(hints: &mut Vec<Value>, doc: &Doc, path: &s
                 })
         });
 
-        let mut hint = json!({
+        hints.push(json!({
             "position": { "line": line_no, "character": character },
-            "label": label,
+            "label": type_only_label(&path_to_uri(&target), &exports),
             "kind": 1,
-            "tooltip": { "kind": "markdown", "value": tooltip },
-        });
-        truncate_hint(&mut hint, &label);
-        hints.push(hint);
+        }));
     }
+}
+
+/// `: { type Id, interface Named }` as label parts. Each name shows the
+/// doc of its declaration and links to it. The names past the length
+/// every hint keeps are listed on the `...` part.
+fn type_only_label(uri: &str, exports: &[alloy::modules::TypeExport]) -> Value {
+    let mut parts = vec![json!({ "value": ": { " })];
+    let mut length = 4;
+    let mut hidden = String::new();
+
+    for (i, e) in exports.iter().enumerate() {
+        let entry = match e.interface {
+            true => format!("interface {}", e.name),
+
+            false => format!("type {}", e.name),
+        };
+
+        if !hidden.is_empty() || (i > 0 && length + entry.len() + 4 > 72) {
+            hidden += &format!("\n- `{entry}`");
+
+            continue;
+        }
+
+        if i > 0 {
+            parts.push(json!({ "value": ", " }));
+            length += 2;
+        }
+
+        length += entry.len();
+        let (line, character) = e.at;
+        let end = character + e.name.encode_utf16().count() as u32;
+        let mut part = json!({
+            "value": entry,
+            "location": {
+                "uri": uri,
+                "range": {
+                    "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": end },
+                },
+            },
+        });
+
+        if let Some(doc) = &e.doc {
+            part["tooltip"] = json!({ "kind": "markdown", "value": doc });
+        }
+
+        parts.push(part);
+    }
+
+    if !hidden.is_empty() {
+        parts.push(json!({
+            "value": ", ...",
+            "tooltip": { "kind": "markdown", "value": format!("Also exports:\n{hidden}") },
+        }));
+    }
+
+    parts.push(json!({ "value": " }" }));
+
+    Value::Array(parts)
 }
 
 /// The end of the name a line binds a module to, and the spec it
@@ -588,5 +631,51 @@ mod type_only_tests {
         );
         assert_eq!(read("import { Id } from \"./x\""), None);
         assert_eq!(read("local x = f(\"./x\")"), None);
+    }
+
+    #[test]
+    fn a_type_only_label_documents_each_name_and_cuts_the_rest() {
+        use alloy::modules::TypeExport;
+
+        let export = |name: &str, interface: bool, doc: Option<&str>| TypeExport {
+            name: name.to_string(),
+            interface,
+            doc: doc.map(str::to_string),
+            at: (2, 12),
+        };
+        let label = super::type_only_label(
+            "file:///a.aly",
+            &[
+                export("Id", false, Some("The key of a row")),
+                export("Named", true, None),
+            ],
+        );
+        let parts = label.as_array().unwrap();
+
+        assert_eq!(
+            super::hint_label(&serde_json::json!({ "label": label })),
+            ": { type Id, interface Named }"
+        );
+        assert_eq!(parts[1]["tooltip"]["value"], "The key of a row");
+        assert_eq!(parts[1]["tooltip"]["kind"], "markdown");
+        assert_eq!(parts[1]["location"]["range"]["end"]["character"], 14);
+        assert!(parts[3].get("tooltip").is_none());
+
+        let long: Vec<TypeExport> = (0..12)
+            .map(|i| export(&format!("LongTypeName{i}"), false, None))
+            .collect();
+        let label = super::type_only_label("file:///a.aly", &long);
+        let text = super::hint_label(&serde_json::json!({ "label": label }));
+        let parts = label.as_array().unwrap();
+        let more = &parts[parts.len() - 2];
+
+        assert!(text.chars().count() <= 72, "{text}");
+        assert!(text.ends_with(", ... }"), "{text}");
+        assert!(
+            more["tooltip"]["value"]
+                .as_str()
+                .unwrap()
+                .ends_with("\n- `type LongTypeName11`")
+        );
     }
 }

@@ -1183,6 +1183,7 @@ impl Server {
 
                             text = fold_std_shapes(&text);
                             text = alloy::shapes::fold(&text, &st.known_shapes_at(ctx.as_deref()));
+                            text = colon_without_self(&text);
 
                             // A module's table prints every member the
                             // solver inferred, and a function defined
@@ -1906,5 +1907,89 @@ impl Server {
 
         drop(st);
         self.to_client(&message);
+    }
+}
+
+/// `function Item:cost(self: Item): number` names `self` twice: the `:`
+/// already takes it, as a call with `:` passes it. The signature drops
+/// the parameter, the way the declaration `function Item:cost()` reads.
+fn colon_without_self(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let Some(rest) = line.strip_prefix("function ") else {
+                return line.to_string();
+            };
+            let Some(open) = rest.find('(') else {
+                return line.to_string();
+            };
+
+            if !rest[..open].contains(':') {
+                return line.to_string();
+            }
+
+            let args = &rest[open + 1..];
+            let after_self = args
+                .strip_prefix("self")
+                .filter(|a| a.starts_with([':', ',', ')']));
+            let Some(after) = after_self else {
+                return line.to_string();
+            };
+            // Past the type of `self`: the next `,` or `)` at depth 0.
+            let mut depth = 0i32;
+            let mut cut = None;
+
+            for (i, c) in after.char_indices() {
+                match c {
+                    '(' | '{' | '<' | '[' => depth += 1,
+
+                    ')' | '}' | '>' | ']' if depth > 0 => depth -= 1,
+
+                    ',' | ')' if depth == 0 => {
+                        cut = Some((i, c));
+                        break;
+                    }
+
+                    _ => {}
+                }
+            }
+
+            match cut {
+                Some((i, ',')) => {
+                    format!("function {}({}", &rest[..open], after[i + 1..].trim_start())
+                }
+
+                Some((i, _)) => format!("function {}({}", &rest[..open], &after[i..]),
+
+                None => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if text.ends_with('\n') { "\n" } else { "" }
+}
+
+#[cfg(test)]
+mod colon_tests {
+    #[test]
+    fn a_colon_signature_names_self_once() {
+        let clean = super::colon_without_self;
+
+        assert_eq!(
+            clean("```alloy\nfunction Item:cost(self: Item): number\n```"),
+            "```alloy\nfunction Item:cost(): number\n```"
+        );
+        assert_eq!(
+            clean("function Item:scale(self: Item, by: number): number"),
+            "function Item:scale(by: number): number"
+        );
+        assert_eq!(
+            clean("function Box<T>:map(self: Box<T>, f: (T) -> T): Box<T>"),
+            "function Box<T>:map(f: (T) -> T): Box<T>"
+        );
+        // A `.` function takes `self` as an argument, and keeps it.
+        assert_eq!(
+            clean("function Item.cost(self: Item): number"),
+            "function Item.cost(self: Item): number"
+        );
     }
 }

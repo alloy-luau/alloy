@@ -396,16 +396,63 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// Whether a type span holds a `~`.
+    /// Whether a type span holds a `~`, or names an alias of this file
+    /// that holds one.
     pub(crate) fn has_negation(&self, span: TokSpan) -> bool {
         self.type_edits.iter().any(|e| {
             matches!(e, alloy_syntax::ast::TypeEdit::Negation { tildes, operand }
                 if tildes.start >= span.start && operand.end <= span.end)
-        })
+        }) || self.names_negation(self.text_of(span), 0)
+    }
+
+    /// Whether a type text names an alias that negates, `depth` aliases
+    /// down. The depth stops a cycle.
+    fn names_negation(&self, text: &str, depth: u32) -> bool {
+        depth < 8
+            && text
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .filter_map(|w| self.alias_values.get(w))
+                .any(|v| v.contains('~') || self.names_negation(v, depth + 1))
     }
 
     /// The kind of an operand that is plainly a table or a function type.
     pub(crate) fn unnegatable(&self, text: &str) -> Option<&'static str> {
+        self.unnegatable_in(text, 0)
+    }
+
+    /// `unnegatable` through groups, unions, intersections, `?`, and the
+    /// aliases of this file, `depth` aliases down.
+    fn unnegatable_in(&self, text: &str, depth: u32) -> Option<&'static str> {
+        let text = text.trim();
+
+        if top_level_find(text, "->").is_some() {
+            return Some("function");
+        }
+
+        if text.starts_with('(') && group_len(text, '(', ')') == Some(text.len()) {
+            return self.unnegatable_in(&text[1..text.len() - 1], depth);
+        }
+
+        let members: Vec<&str> = split_top_level(text, '|')
+            .into_iter()
+            .flat_map(|m| split_top_level(m, '&'))
+            .collect();
+
+        if members.len() > 1 {
+            return members.iter().find_map(|m| self.unnegatable_in(m, depth));
+        }
+
+        if let Some(t) = text.strip_suffix('?') {
+            return self.unnegatable_in(t, depth);
+        }
+
+        // An alias names its value; the depth stops a cycle.
+        if depth < 8
+            && let Some(value) = self.alias_values.get(text)
+        {
+            return self.unnegatable_in(value, depth + 1);
+        }
+
         let head = text.split('<').next().unwrap_or(text).trim();
 
         if text.starts_with('{')
@@ -417,25 +464,6 @@ impl<'s> Desugar<'s> {
             || self.structs.contains(head)
         {
             return Some("table");
-        }
-
-        // An arrow outside every bracket makes the whole operand a
-        // function type: `() -> ()`, `(number) -> string`.
-        let mut depth = 0i32;
-        let bytes = text.as_bytes();
-
-        for (i, &b) in bytes.iter().enumerate() {
-            match b {
-                b'(' | b'{' | b'[' | b'<' => depth += 1,
-
-                b')' | b'}' | b']' | b'>' if !(b == b'>' && i > 0 && bytes[i - 1] == b'-') => {
-                    depth -= 1
-                }
-
-                b'-' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => return Some("function"),
-
-                _ => {}
-            }
         }
 
         None

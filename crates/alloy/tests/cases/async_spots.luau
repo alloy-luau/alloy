@@ -1,5 +1,5 @@
-local __alloy = require("@alloy") -- Where an `await` may stand: the forms that own their thread.
-local function rank(n: number): __alloy.Future<number> return __alloy.future(function(): number
+-- Where an `await` may stand: the forms that own their thread.
+local __alloy = require("@alloy") local function rank(n: number): __alloy.Future<number> return __alloy.future(function(): number
     return n
 end) end
 

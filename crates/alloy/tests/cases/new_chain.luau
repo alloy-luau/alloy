@@ -1,5 +1,5 @@
-local __alloy = require("@alloy") -- A constructor chains: a method call, a field, and a chain of both.
-local Thing = {} Thing.__index = Thing setmetatable(Thing, { __call = function(_, f)  return setmetatable(f, Thing) end }) function Thing.new(f) return Thing(f) end
+-- A constructor chains: a method call, a field, and a chain of both.
+local __alloy = require("@alloy") local Thing = {} Thing.__index = Thing setmetatable(Thing, { __call = function(_, f)  return setmetatable(f, Thing) end }) function Thing.new(f) return Thing(f) end
 
  type Thing = typeof(setmetatable({} :: { n: number }, Thing)) Thing.__tostring = function(s) return __alloy.show_struct("Thing", s, { "n" }) end
 

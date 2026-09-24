@@ -54,8 +54,19 @@ impl Resolver {
         // parse_fallible so a file that is invalid for unrelated reasons still
         // yields whatever bindings it can. A missing binding degrades to a
         // "no such element" error, never to a silent miscompile.
-        let parsed = full_moon::parse_fallible(blanked_source, full_moon::LuaVersion::luau());
-        collector.visit_ast(parsed.ast());
+        //
+        // Alloy patch: `~T` is Alloy's type negation, and full_moon panics
+        // on it inside a table type. A space keeps the offsets, and `~=`
+        // stays. Any other panic costs the bindings, not the process.
+        let luau = blank_negations(blanked_source);
+        let parsed = std::panic::catch_unwind(|| {
+            full_moon::parse_fallible(&luau, full_moon::LuaVersion::luau())
+        });
+
+        if let Ok(parsed) = &parsed {
+            collector.visit_ast(parsed.ast());
+        }
+
         // Alloy patch: the caller's bindings join the parsed ones.
         collector.names.extend(config.extra_bound.iter().cloned());
 
@@ -185,6 +196,22 @@ fn suggestion(candidates: &[&'static str]) -> Option<String> {
         [one] => Some(format!("did you mean {one}?")),
         [rest @ .., last] => Some(format!("did you mean {} or {last}?", rest.join(", "))),
     }
+}
+
+/// The source with each `~` that is no `~=` as a space.
+fn blank_negations(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        out.push(if c == '~' && chars.peek() != Some(&'=') {
+            ' '
+        } else {
+            c
+        });
+    }
+
+    out
 }
 
 /// Replaces every LuauX region with same-length filler so the result parses as
@@ -387,6 +414,14 @@ mod tests {
             "{:?}",
             error.help
         );
+    }
+
+    /// full_moon panics on a negation inside a table type.
+    #[test]
+    fn a_negation_in_a_table_type_keeps_the_bindings() {
+        let resolver = resolver("type T = { t: ~nil }\nlocal Card = 1\nprint(Card ~= 2)");
+
+        assert!(resolver.bound().contains("Card"));
     }
 
     #[test]

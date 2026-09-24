@@ -1,5 +1,5 @@
-local __alloy = require("@alloy") -- `$matches` tests a pattern; `@derive(Ord)` compares field by field.
-local V = {} V.__index = V setmetatable(V, { __call = function(_, f)  return setmetatable(f, V) end }) function V.new(f) return V(f) end
+-- `$matches` tests a pattern; `@derive(Ord)` compares field by field.
+local __alloy = require("@alloy") local V = {} V.__index = V setmetatable(V, { __call = function(_, f)  return setmetatable(f, V) end }) function V.new(f) return V(f) end
 
 
 

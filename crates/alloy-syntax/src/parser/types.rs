@@ -41,6 +41,15 @@ impl<'a> Parser<'a> {
                     return Err(self.err("write `> =` here, `>=` reads as one operator"));
                 }
 
+                // A default is a type, so `~nil` and `number[]` there
+                // lower. A pack's default, `T... = ...`, stays as written.
+                "=" if depth == 1 && self.toks[self.pos - 1].text(self.src) != "..." => {
+                    self.bump();
+                    self.type_()?;
+
+                    continue;
+                }
+
                 _ => {}
             }
 

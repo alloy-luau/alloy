@@ -1,6 +1,6 @@
-local __alloy = require("@alloy") -- A `try` inside a `try do` block leaves the block through the block's
+-- A `try` inside a `try do` block leaves the block through the block's
 -- `fail`, so the block's own `return` decides the value type.
-local function parse(s: string): __alloy.Result<number, string>
+local __alloy = require("@alloy") local function parse(s: string): __alloy.Result<number, string>
     return __alloy.Ok(1)
 end
 

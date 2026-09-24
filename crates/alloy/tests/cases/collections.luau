@@ -1,5 +1,5 @@
-local __alloy = require("@alloy") -- `$set` and `$map` build the std collections; `[[` opens a nested array.
-local tags = __alloy.Set.from({ "a", "b" })
+-- `$set` and `$map` build the std collections; `[[` opens a nested array.
+local __alloy = require("@alloy") local tags = __alloy.Set.from({ "a", "b" })
 local prices = __alloy.HashMap.from({ ["sword"] = 10, ["pet"] = 25 } :: { [string]: number })
 local grid = __alloy.Array.from({ __alloy.Array.from({ 1, 2 }), __alloy.Array.from({ 3, 4 }) })
 local note = [=[a long string keeps its leveled form]=]

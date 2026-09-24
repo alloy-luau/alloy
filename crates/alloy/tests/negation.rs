@@ -26,7 +26,7 @@ fn a_negation_lowers_to_the_file_type_function() {
     let out = ship(src);
     let first = out.lines().next().unwrap_or("");
     assert!(
-        first.contains("type function __neg(t) return types.negationof(t) end"),
+        first.contains("type function __neg(t) local function each(u)"),
         "{out}"
     );
     assert!(first.contains("local a: __neg<number> = \"text\""), "{out}");
@@ -57,6 +57,17 @@ fn a_negation_bound_intersects_the_parameter() {
 }
 
 /// A file with no negation declares nothing.
+/// A generic default is a type, so its negation lowers.
+#[test]
+fn a_negation_in_a_generic_default_lowers() {
+    let out =
+        ship("type D<T = ~nil, U... = ...string> = { v: T }\nlocal d: D = { v = 1 }\nprint(d)\n");
+    assert!(
+        out.contains("type D<T = __neg<nil>, U... = ...string> = { v: T }"),
+        "{out}"
+    );
+}
+
 #[test]
 fn a_file_without_negation_declares_no_function() {
     assert!(!ship("local a: number = 1\nprint(a ~= 2)\n").contains("__neg"));
@@ -100,6 +111,48 @@ fn the_negations_luau_cannot_build_report() {
     );
 }
 
+/// A union member or an alias that is a table reports too, with the
+/// operand the author wrote.
+#[test]
+fn a_table_behind_a_union_or_an_alias_reports() {
+    let cannot = |text: &str, kind: &str| {
+        format!(
+            "`~{text}` negates a {kind} type, which Luau cannot negate; negate a primitive, a singleton, a class, or a union of them"
+        )
+    };
+    let rec = "type Rec = { x: number }\ntype Fn = () -> ()\n";
+
+    assert_eq!(
+        messages(&format!("{rec}local n: ~(number | Rec) = 1\nprint(n)\n")),
+        vec![cannot("(number | Rec)", "table")]
+    );
+    assert_eq!(
+        messages(&format!("{rec}local n: ~Rec = 1\nprint(n)\n")),
+        vec![cannot("Rec", "table")]
+    );
+    assert_eq!(
+        messages(&format!("{rec}local n: ~(string | Fn) = 1\nprint(n)\n")),
+        vec![cannot("(string | Fn)", "function")]
+    );
+    assert!(
+        messages(&format!(
+            "{rec}local n: ~(number | string) = true\nprint(n)\n"
+        ))
+        .is_empty()
+    );
+}
+
+/// Luau reads `--!strict` only above the first token, so the header
+/// goes below a plain comment too.
+#[test]
+fn the_header_goes_below_every_leading_comment() {
+    let out = ship("-- header\n--!strict\nlocal b: ~number = \"five\"\nprint(b)\n");
+    let lines: Vec<&str> = out.lines().collect();
+
+    assert_eq!(&lines[..2], ["-- header", "--!strict"], "{out}");
+    assert!(lines[2].starts_with("type function __neg"), "{out}");
+}
+
 /// A layout packs what a type names, and a negation names what a value
 /// is not.
 #[test]
@@ -114,6 +167,13 @@ fn a_wire_type_takes_no_negation() {
         messages("@derive(Serialize)\nstruct P as\n    id: ~nil\nend\n"),
         vec![
             "a struct that derives Serialize writes each field's type: `id` has type `~nil`, a negation; name the types it holds, or mark it @skip"
+        ]
+    );
+    // An alias that negates is a negation too.
+    assert_eq!(
+        messages("type NotNil = ~nil\nremote Ping(v: NotNil) from client\n"),
+        vec![
+            "a remote packs no negation: parameter `v` has type `NotNil`; name the types it carries"
         ]
     );
     // A field the serializer skips may hold one.
@@ -165,6 +225,50 @@ fn the_checker_enforces_a_negation() {
             "7: `nil` does not fit: the type asks for `~nil`, so it takes anything but `nil`",
         ],
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A table inside a negated union errors in the type function. Luau
+/// crashes on it otherwise, and the crash drops every check of the file.
+#[test]
+fn a_table_in_a_negated_union_keeps_the_file_checked() {
+    use std::fs;
+
+    let dir = std::env::temp_dir().join(format!("alloy-negation-union-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.aly"),
+        "--!strict\nlocal r = { x = 1 }\nlocal a: ~(string | typeof(r)) = 1\nlocal z: number = \"not a number\"\nprint(a, z)\n",
+    )
+    .unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+
+    if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    }
+
+    let analysis = alloy::typecheck::analyze(&dir, &config, &report.checks, &report.dep_artifacts)
+        .expect("the type check runs");
+    let lines: Vec<usize> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| d.line)
+        .collect();
+
+    assert!(lines.contains(&3), "{:?}", analysis.diagnostics);
+    assert!(lines.contains(&4), "{:?}", analysis.diagnostics);
 
     let _ = fs::remove_dir_all(&dir);
 }

@@ -1,6 +1,6 @@
-local __alloy = require("@alloy") -- An `impl` inside a namespace targets the namespace's own struct, and
+-- An `impl` inside a namespace targets the namespace's own struct, and
 -- a `match` over its enum reads the variant with no prefix.
-local Shapes = {}
+local __alloy = require("@alloy") local Shapes = {}
     local Shapes_Circle = {} Shapes_Circle.__index = Shapes_Circle setmetatable(Shapes_Circle, { __call = function(_, f)  return setmetatable(f, Shapes_Circle) end }) function Shapes_Circle.new(f) return Shapes_Circle(f) end
 
  type Shapes_Circle = typeof(setmetatable({} :: { r: number }, Shapes_Circle)) Shapes_Circle.__tostring = function(s) return __alloy.show_struct("Shapes.Circle", s, { "r" }) end Shapes.Circle = Shapes_Circle

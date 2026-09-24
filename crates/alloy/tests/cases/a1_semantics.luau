@@ -1,6 +1,6 @@
-local __alloy = require("@alloy") -- Golden case for the compiler-semantics sweep: a payload enum with an
+-- Golden case for the compiler-semantics sweep: a payload enum with an
 -- impl, a generic struct, an exhaustive match statement, and a spread.
-local Shape = {} Shape.__index = Shape
+local __alloy = require("@alloy") local Shape = {} Shape.__index = Shape
     function Shape.Circle(_1) return setmetatable({ tag = "Circle", _1 = _1 }, Shape) end
     function Shape.Rect(_1, _2) return setmetatable({ tag = "Rect", _1 = _1, _2 = _2 }, Shape) end
 function Shape.is(v) return (type(v) == "table" and getmetatable(v) == Shape) end Shape.__tostring = function(v) return __alloy.show_variant("Shape", v) end type Shape = typeof(setmetatable({} :: { tag: "Circle", _1: number }, Shape)) | typeof(setmetatable({} :: { tag: "Rect", _1: number, _2: number }, Shape))

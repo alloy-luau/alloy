@@ -1,6 +1,6 @@
-local __alloy = require("@alloy") -- `@cfg` on a function with nothing to give returns where the
+-- `@cfg` on a function with nothing to give returns where the
 -- condition fails.
-
+local __alloy = require("@alloy") 
 local function save(player: Player)
     if not (__alloy.cfg.server()) then return end print(player)
 end

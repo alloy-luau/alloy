@@ -1552,6 +1552,10 @@ impl Server {
                 }
             }
 
+            if method == "textDocument/signatureHelp" {
+                parameter_labels_as_text(result);
+            }
+
             // The editor never sees the runtime's table: `__alloy.Future<T>`
             // reads `Future<T>`, and `__alloy_string.trim` reads `string.trim`.
             if ctx.is_some()
@@ -1689,6 +1693,8 @@ impl Server {
                         {
                             *result = help;
                         }
+
+                        parameter_labels_as_offsets(result);
                     }
                 }
 
@@ -1970,6 +1976,69 @@ impl Server {
     }
 }
 
+/// The parameters of every signature, each as the text of its label.
+/// The child gives UTF-16 offsets into its own label, and the passes
+/// that shorten the label would leave them pointing past its end.
+fn parameter_labels_as_text(result: &mut Value) {
+    for sig in result
+        .get_mut("signatures")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let label: Vec<u16> = sig["label"].as_str().unwrap_or("").encode_utf16().collect();
+
+        for p in sig
+            .get_mut("parameters")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            let span = p["label"]
+                .as_array()
+                .and_then(|a| Some((a.first()?.as_u64()? as usize, a.get(1)?.as_u64()? as usize)));
+
+            if let Some((s, e)) = span
+                && let Some(part) = label.get(s..e)
+            {
+                p["label"] = json!(String::from_utf16_lossy(part));
+            }
+        }
+    }
+}
+
+/// The parameters back as UTF-16 offsets into the final label, found
+/// in order after its `(`, so the editor marks the active one exactly.
+/// A text the label no longer holds stays text.
+fn parameter_labels_as_offsets(result: &mut Value) {
+    for sig in result
+        .get_mut("signatures")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let label = sig["label"].as_str().unwrap_or("").to_string();
+        let mut from = label.find('(').map_or(0, |i| i + 1);
+        let units = |bytes: usize| label[..bytes].encode_utf16().count();
+
+        for p in sig
+            .get_mut("parameters")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            let Some(text) = p["label"].as_str().filter(|t| !t.is_empty()) else {
+                continue;
+            };
+
+            if let Some(at) = label[from..].find(text).map(|i| from + i) {
+                from = at + text.len();
+                p["label"] = json!([units(at), units(from)]);
+            }
+        }
+    }
+}
+
 /// The child's "Prefix 'x' with '_'" where the `unused_variable` lint
 /// offers "Rewrite as `_x`" already: two entries for one change.
 fn drop_child_prefix_fixes(actions: &mut Vec<Value>) {
@@ -2051,6 +2120,40 @@ fn colon_without_self(text: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
         + if text.ends_with('\n') { "\n" } else { "" }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use serde_json::json;
+
+    /// The folds shorten the label; the parameters follow it.
+    #[test]
+    fn parameter_offsets_follow_a_shortened_label() {
+        let long = "function area(s: {tag: \"Circle\"} | {tag: \"Dot\"}, n: number): number";
+        let mut help = json!({ "signatures": [{
+            "label": long,
+            "parameters": [{ "label": [14, 47] }, { "label": [49, 58] }],
+        }] });
+        super::parameter_labels_as_text(&mut help);
+
+        assert_eq!(
+            help["signatures"][0]["parameters"][0]["label"],
+            "s: {tag: \"Circle\"} | {tag: \"Dot\"}"
+        );
+
+        help["signatures"][0]["label"] = json!("function area(s: Shape, n: number): number");
+        help["signatures"][0]["parameters"][0]["label"] = json!("s: Shape");
+        super::parameter_labels_as_offsets(&mut help);
+
+        assert_eq!(
+            help["signatures"][0]["parameters"][0]["label"],
+            json!([14, 22])
+        );
+        assert_eq!(
+            help["signatures"][0]["parameters"][1]["label"],
+            json!([24, 33])
+        );
+    }
 }
 
 #[cfg(test)]

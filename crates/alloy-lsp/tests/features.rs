@@ -1449,7 +1449,8 @@ fn enum_variants_complete_as_members_and_payloads_take_types() {
     );
     let sig = &help["signatures"][0];
     assert_eq!(sig["label"], "Msg.Move(number)", "{help}");
-    assert_eq!(sig["parameters"][0]["label"], "number", "{help}");
+    // The parameter points into the label: `number`.
+    assert_eq!(sig["parameters"][0]["label"], json!([9, 15]), "{help}");
 
     // Inside `Move(`: types, and no `assert`.
     let labels = s.completion_labels(&uri, 1, 9);

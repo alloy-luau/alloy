@@ -7,7 +7,7 @@
 //! them, so the module's side effects stay out of the test VM. The
 //! slice keeps the source's lines, so a failure points at the real one.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use alloy_syntax::ast::{Chunk, Expr, ImportKind, Stmt};
@@ -151,7 +151,8 @@ pub fn encloses_test(src: &str, at: usize) -> bool {
 }
 
 /// The path of the spec for a source, relative to the test folder:
-/// `a/b.aly` becomes `a/b.spec.luau`.
+/// `a/b.aly` becomes `a/b.spec.luau`. A source already named for its
+/// tests, `b.spec.aly` or `b.test.aly`, keeps one `.spec`.
 pub fn spec_for(rel: &Path) -> Option<PathBuf> {
     let name = rel.file_name()?.to_str()?;
     let stem = name.strip_suffix(".aly")?;
@@ -159,6 +160,11 @@ pub fn spec_for(rel: &Path) -> Option<PathBuf> {
     if stem.ends_with(".d") {
         return None;
     }
+
+    let stem = stem
+        .strip_suffix(".spec")
+        .or_else(|| stem.strip_suffix(".test"))
+        .unwrap_or(stem);
 
     Some(rel.with_file_name(format!("{stem}.spec.luau")))
 }
@@ -894,6 +900,8 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
         }
     }
 
+    let mut spec_owners: HashMap<PathBuf, PathBuf> = HashMap::new();
+
     for path in crate::build::sources(&input, &written)? {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
 
@@ -905,6 +913,24 @@ pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report>
             continue;
         };
         let source = std::fs::read_to_string(&path)?;
+
+        // `b.aly` and `b.spec.aly` both name `b.spec.luau`; a second
+        // write would drop the first file's tests.
+        if source.lines().any(writes_test_attr)
+            && let Some(first) = spec_owners.insert(spec_rel.clone(), rel.clone())
+        {
+            report.failures.push((
+                rel.clone(),
+                format!(
+                    "{} and {} both write the spec {}; rename one",
+                    config.build.input.join(&first).display(),
+                    config.build.input.join(&rel).display(),
+                    config.test.out.join(&spec_rel).display(),
+                ),
+            ));
+
+            continue;
+        }
         let source_rel = config.build.input.join(&rel);
 
         let built = match spec(
@@ -1213,6 +1239,14 @@ mod tests {
             Some(PathBuf::from("a/b.spec.luau"))
         );
         assert_eq!(spec_for(Path::new("g.d.aly")), None);
+        assert_eq!(
+            spec_for(Path::new("a/loot.spec.aly")),
+            Some(PathBuf::from("a/loot.spec.luau"))
+        );
+        assert_eq!(
+            spec_for(Path::new("loot.test.aly")),
+            Some(PathBuf::from("loot.spec.luau"))
+        );
     }
 
     #[test]

@@ -127,6 +127,8 @@ const CORPUS: &[&str] = &[
     "local t = {1; 2; 3;}",
     "local t = {a = 1, [f()] = 2, 3,}",
     "local t = {nested = {deep = {1}}}",
+    // An array literal is a positional field; only `] =` opens a key.
+    "local t = {[1, 2], [a], [f(x)] = 1}",
     // --- types ---
     "local x: number = 1",
     "local x: string? = nil",

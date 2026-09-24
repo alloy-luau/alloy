@@ -12,6 +12,9 @@ use alloy_syntax::lexer::{Tok, TokKind};
 use crate::render::{Edit, SpanMap, apply_edits};
 use crate::{CompileError, Diagnostic, EmitOptions, Output};
 
+/// The lint name of luaux's one warning, as `[lint.rules]` writes it.
+pub const STATIC_CONDITIONAL_CHILD: &str = "alx.static_conditional_child";
+
 /// One `.alx` compile: the Alloy output of the lowered text, plus the
 /// text itself for a caller that maps positions.
 pub struct AlxOutput {
@@ -83,6 +86,23 @@ pub fn compile_alx(
     // A component is a function a tag names, `<Row />`, so its name
     // is PascalCase by the markup's own rule.
     output.lints.retain(|l| l.name != "pascal_case_function");
+
+    // A lint message may quote the lowered text. Where it quotes a
+    // markup region, the reader sees the markup they wrote instead.
+    for l in &mut output.lints {
+        for r in &compiled.regions {
+            let written = &lowered[r.out_start..r.out_end];
+
+            if l.message.contains(written) {
+                let own = src[r.src_start..r.src_end]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                l.message = l.message.replace(written, &own);
+            }
+        }
+    }
+
     // A rewrite carries a range of its own, and the lowering moves
     // every byte after the first tag. Without this the rewrite lands at
     // the wrong offset and writes over the author's code.
@@ -104,14 +124,22 @@ pub fn compile_alx(
         output.diagnostics.push(d);
     }
 
+    // luaux warns only for a warn-level markup lint; `deny` comes back as
+    // an error above. A diagnostic is an error and fails the build, so the
+    // warning goes out as a lint, which the `[lint]` table levels.
     for w in compiled.warnings {
-        output.diagnostics.push(Diagnostic {
+        output.lints.push(crate::lint::Lint {
+            name: STATIC_CONDITIONAL_CHILD,
             start: w.offset as u32,
             end: (w.offset + w.length) as u32,
-            message: markup_message(&w.message, w.help.as_deref()),
+            message: markup_message(&w.message, w.help.as_deref())
+                .trim_start_matches("markup: ")
+                .to_string(),
+            fix: None,
         });
     }
 
+    output.lints.sort_by_key(|l| (l.start, l.name));
     output.diagnostics.sort_by_key(|d| d.start);
 
     // With the lowering in front of it the map speaks the author's own
@@ -509,15 +537,51 @@ fn literal_type(value: &luaux::markup::AttributeValue) -> Option<&'static str> {
         AttributeValue::Expression(e) => e.trim(),
     };
 
-    if text.starts_with('"') || text.starts_with('\'') || text.starts_with('`') {
-        return Some("string");
+    // One literal token, read by the lexer: `"a" == b` starts with a
+    // quote and is a comparison, and `inf` parses as a number and is a
+    // name.
+    let toks = alloy_syntax::lexer::lex(text).ok()?.toks;
+
+    if let [minus, number] = &toks[..]
+        && minus.text(text) == "-"
+    {
+        return (number.kind == TokKind::Number).then_some("number");
     }
 
-    if text == "true" || text == "false" {
-        return Some("boolean");
-    }
+    match &toks[..] {
+        [t] => match t.kind {
+            TokKind::Str { .. } | TokKind::InterpStr => Some("string"),
 
-    text.parse::<f64>().is_ok().then_some("number")
+            TokKind::Number => Some("number"),
+
+            TokKind::Ident if matches!(t.text(text), "true" | "false") => Some("boolean"),
+
+            _ => None,
+        },
+
+        // An interpolated string with holes, when its tail ends the text.
+        [head, .., tail] if head.kind == TokKind::InterpHead => {
+            let mut depth = 0i32;
+
+            for t in &toks {
+                match t.kind {
+                    TokKind::InterpHead => depth += 1,
+
+                    TokKind::InterpTail => depth -= 1,
+
+                    _ => {}
+                }
+
+                if depth == 0 && !std::ptr::eq(t, tail) {
+                    return None;
+                }
+            }
+
+            Some("string")
+        }
+
+        _ => None,
+    }
 }
 
 /// The props a component declares, from the record its parameter names.
@@ -1114,6 +1178,53 @@ mod tests {
         assert!(!crate::lint::fix_applies(src, &moved));
     }
 
+    /// A lint message quotes the markup the author wrote, not the
+    /// calls it lowers to.
+    #[test]
+    fn a_lint_message_quotes_the_markup() {
+        let src = "local function create(n: string): any return n end\nlocal function Panel()\n    local e = <Frame Name=\"x\">\n        <TextLabel />\n    </Frame>\n    return e\nend\nreturn Panel\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+        let lint = out
+            .lints
+            .iter()
+            .find(|l| l.name == "local_then_return")
+            .expect("the lint");
+
+        assert!(!lint.message.contains("create("), "{}", lint.message);
+        assert!(
+            lint.message
+                .contains("<Frame Name=\"x\"> <TextLabel /> </Frame>"),
+            "{}",
+            lint.message
+        );
+    }
+
+    /// A warn-level markup lint is a lint. As a diagnostic it was an
+    /// error, and the build skipped the file.
+    #[test]
+    fn a_built_once_child_is_a_lint_not_an_error() {
+        let src = "local function create(n: string): any return n end\nreturn <Frame>{if a then <TextLabel /> else nil}</Frame>\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        let lint = out
+            .lints
+            .iter()
+            .find(|l| l.name == STATIC_CONDITIONAL_CHILD)
+            .expect("the lint");
+
+        assert_eq!(lint.start as usize, src.find("{if").unwrap());
+    }
+
     #[test]
     fn the_scan_sees_alloy_bindings() {
         let names = bound_names(
@@ -1318,6 +1429,30 @@ return Panel\n";
             ],
             "{messages:?}"
         );
+    }
+
+    /// Only a whole literal has a type the check can name. A comparison
+    /// that starts with a quote is a boolean, and `inf` is a name.
+    #[test]
+    fn a_literal_is_one_token() {
+        use luaux::markup::AttributeValue::Expression;
+
+        let ty = |e: &str| literal_type(&Expression(e.to_string()));
+
+        assert_eq!(ty("\"a\""), Some("string"));
+        assert_eq!(ty("`a{b}c`"), Some("string"));
+        assert_eq!(ty("-1.5"), Some("number"));
+        assert_eq!(ty("true"), Some("boolean"));
+
+        for e in [
+            "\"admin\" == props.role",
+            "inf",
+            "nan",
+            "`a` .. `b{c}`",
+            "-x",
+        ] {
+            assert_eq!(ty(e), None, "{e}");
+        }
     }
 
     #[test]

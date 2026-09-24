@@ -1069,14 +1069,10 @@ pub fn run(
             let mut depth = 0i32;
             let mut given = 1usize;
 
-            for k in i + 2..close {
-                let tt = text(k);
+            for t in &toks[i + 2..close] {
+                depth += depth_step(t, src);
 
-                if tt.ends_with('(') || tt.ends_with('[') || tt.ends_with('{') {
-                    depth += 1;
-                } else if matches!(tt, ")" | "]" | "}") {
-                    depth -= 1;
-                } else if tt == "," && depth == 0 {
+                if depth == 0 && t.text(src) == "," {
                     given += 1;
                 }
             }
@@ -1325,18 +1321,34 @@ fn matching(src: &str, toks: &[Tok], open: usize) -> Option<usize> {
     let mut depth = 0i32;
 
     for (i, t) in toks.iter().enumerate().skip(open) {
-        let text = t.text(src);
+        let step = depth_step(t, src);
+        depth += step;
 
-        if text.ends_with('(') || text.ends_with('[') || text.ends_with('{') {
-            depth += 1;
-        } else if matches!(text, ")" | "]" | "}") {
-            depth -= 1;
-
-            if depth == 0 {
-                return Some(i);
-            }
+        if step < 0 && depth == 0 {
+            return Some(i);
         }
     }
 
     None
+}
+
+/// How a token moves the bracket depth. The text of a string is no
+/// bracket. An interpolated string opens with its head and closes with
+/// its tail, so a comma in a hole stays inside it.
+fn depth_step(t: &Tok, src: &str) -> i32 {
+    let text = t.text(src);
+
+    match t.kind {
+        TokKind::InterpHead => 1,
+
+        TokKind::InterpTail => -1,
+
+        TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpMid => 0,
+
+        _ if text.ends_with('(') || text.ends_with('[') || text.ends_with('{') => 1,
+
+        _ if matches!(text, ")" | "]" | "}") => -1,
+
+        _ => 0,
+    }
 }

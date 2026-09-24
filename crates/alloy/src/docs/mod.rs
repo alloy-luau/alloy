@@ -393,6 +393,30 @@ mod tests {
         }
     }
 
+    /// The config blocks of the markup topic are configs a project can
+    /// copy: each one loads and lowers.
+    #[test]
+    fn every_markup_config_block_loads() {
+        let text = super::lookup("topic:markup").expect("the topic");
+        let blocks: Vec<&str> = text
+            .split("```toml\n")
+            .skip(1)
+            .filter_map(|b| b.split("```").next())
+            .filter(|b| b.contains("[alx."))
+            .collect();
+
+        assert_eq!(blocks.len(), 3);
+
+        for block in blocks {
+            let config = crate::config::Config::parse(block, std::path::Path::new("alloy.toml"))
+                .unwrap_or_else(|e| panic!("{e}\n{block}"));
+            config
+                .alx
+                .to_markup()
+                .unwrap_or_else(|e| panic!("{e}\n{block}"));
+        }
+    }
+
     #[test]
     fn a_dotted_topic_names_one_member() {
         assert_eq!(

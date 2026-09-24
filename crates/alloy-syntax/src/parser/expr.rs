@@ -894,7 +894,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let value = self.sub_expr(UNARY_PRIORITY)?;
                 fields.push(TableField::Spread(value));
-            } else if self.at("[") {
+            } else if self.at("[") && self.opens_key() {
                 self.bump();
                 let key = self.expr()?;
                 self.expect("]")?;
@@ -920,6 +920,34 @@ impl<'a> Parser<'a> {
             fields,
             span: TokSpan::new(start, self.pos),
         })
+    }
+
+    /// Whether the `[` at the cursor opens a key, `[k] = v`. Its `]`
+    /// followed by anything but `=` closes an array literal, which is a
+    /// positional field: `{ [a, b] }`.
+    fn opens_key(&self) -> bool {
+        let mut depth = 0i32;
+
+        for n in 0.. {
+            match self.text_at(n) {
+                // The end of the file: the key reads it and reports.
+                "" => return true,
+
+                "[" | "(" | "{" => depth += 1,
+
+                "]" | ")" | "}" => {
+                    depth -= 1;
+
+                    if depth == 0 {
+                        return self.text_at(n + 1) == "=";
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        true
     }
 
     /// After `...` in a table: a spread when an expression follows on the

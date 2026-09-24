@@ -27,6 +27,15 @@ fn a_rule_names_a_lint_a_group_or_a_markup_lint() {
         alloy::lint::alx_level_of(&c.lint, "static_conditional_child"),
         Level::Deny
     );
+    // The compile reports the markup lint under its full name.
+    assert_eq!(
+        level_of(&c.lint, "alx.static_conditional_child"),
+        Level::Deny
+    );
+    assert_eq!(
+        alloy::lint::group_name("alx.static_conditional_child"),
+        "alx"
+    );
 
     let markup = c.markup(Path::new(".")).unwrap();
     assert_eq!(
@@ -213,8 +222,9 @@ fn a_written_key_applies_over_the_preserving_layout() {
     );
 }
 
-/// A markup lint fires as an error under the table backend, so a
-/// project of one `.alx` file shows what silences it.
+/// A markup lint fires under the table backend, so a project of one
+/// `.alx` file shows what silences it. The result holds each error, then
+/// each lint as `lint: <name>: <message>`.
 fn markup_project(name: &str, toml: &str, source: &str) -> Vec<String> {
     let dir = std::env::temp_dir().join(format!("alloy-alx-lint-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -228,6 +238,12 @@ fn markup_project(name: &str, toml: &str, source: &str) -> Vec<String> {
         .diagnostics
         .iter()
         .map(|(_, d)| d.message.clone())
+        .chain(
+            report
+                .lints
+                .iter()
+                .map(|(_, l)| format!("lint: {}: {}", l.name, l.message)),
+        )
         .collect();
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -239,8 +255,15 @@ fn a_markup_lint_reads_the_rules_table_and_the_file_directive() {
     const FACTORY: &str = "[alx.factory]\nbackend = \"table\"\ncreate = \"create\"\n";
     const UI: &str = "import create from \"./create\"\n\nlocal function View(props: { open: boolean })\n    return (\n        <Frame>\n            {if props.open then <TextLabel /> else nil}\n        </Frame>\n    )\nend\n\nreturn View\n";
 
+    // At its default level it is a warning: a lint, not an error that
+    // fails the build.
     let loud = markup_project("loud", FACTORY, UI);
-    assert!(loud.iter().any(|m| m.contains("built once")), "{loud:?}");
+    assert!(
+        loud.iter()
+            .any(|m| m.starts_with("lint: alx.static_conditional_child: this child is built once")),
+        "{loud:?}"
+    );
+    assert!(!loud.iter().any(|m| m.starts_with("markup:")), "{loud:?}");
 
     // The rules table silences it for the project.
     let quiet = markup_project(

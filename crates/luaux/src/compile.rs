@@ -8,7 +8,7 @@ use crate::backend::{Backend, EmitContext, EmitError};
 use crate::config::{Config, LintLevel};
 use crate::lexer::{LexError, Lexer};
 use crate::lint;
-use crate::markup::{self, Attribute, AttributeValue, Child, Element, Fragment, Node};
+use crate::markup::{self, Attribute, AttributeValue, Child, Element, Fragment, Node, Span};
 use crate::markup_scan::Scanner;
 use crate::resolve::{blank_luaux_regions, Resolver};
 use std::fmt;
@@ -302,7 +302,7 @@ fn compile_with(
 
         let (mut node, end) = markup::parse_node(source, token.start)?;
         compile_embedded(
-            &mut node, backend, resolver, level, warnings, errors, helpers,
+            &mut node, source, backend, resolver, level, warnings, errors, helpers,
         )?;
 
         out.push_str(&source[cursor..token.start]);
@@ -368,6 +368,56 @@ pub fn compile_verified(
     Ok((output, warnings))
 }
 
+/// Compiles the text of one `{ }` hole on its own, then moves what that
+/// compile reports from offsets into the hole to offsets into `source`.
+/// Alloy patch: without the move, an error in nested markup lands at the
+/// start of the file.
+#[allow(clippy::too_many_arguments)]
+fn compile_hole(
+    expression: &str,
+    source: &str,
+    span: Span,
+    backend: &dyn Backend,
+    resolver: &Resolver,
+    level: LintLevel,
+    warnings: &mut Vec<Warning>,
+    errors: &mut Vec<CompileError>,
+    helpers: &mut crate::backend::Helpers,
+) -> Result<String, CompileError> {
+    // The parser keeps the hole's text trimmed, and the `{` is the first
+    // one in the span: a spread and a child start with it, and an
+    // attribute name holds none.
+    let open = source[span.start..]
+        .find('{')
+        .map_or(span.start, |at| span.start + at + 1);
+    let inner = &source[open..];
+    let base = open + inner.len() - inner.trim_start().len();
+    let (errors_before, warnings_before) = (errors.len(), warnings.len());
+    let compiled = compile_with(
+        expression,
+        backend,
+        resolver,
+        level,
+        warnings,
+        errors,
+        helpers,
+        &mut Vec::new(),
+    );
+
+    for error in &mut errors[errors_before..] {
+        error.offset += base;
+    }
+
+    for warning in &mut warnings[warnings_before..] {
+        warning.offset += base;
+    }
+
+    compiled.map_err(|mut error| {
+        error.offset += base;
+        error
+    })
+}
+
 /// Compiles LuauX appearing inside captured Luau expressions.
 ///
 /// Expressions are held verbatim, so nested LuauX is still source text at this
@@ -379,6 +429,7 @@ pub fn compile_verified(
 /// patch: they go nowhere, and each nested call takes a scratch list.
 fn compile_embedded(
     node: &mut Node,
+    source: &str,
     backend: &dyn Backend,
     resolver: &Resolver,
     level: LintLevel,
@@ -387,11 +438,11 @@ fn compile_embedded(
     helpers: &mut crate::backend::Helpers,
 ) -> Result<(), CompileError> {
     match node {
-        Node::Element(element) => {
-            compile_element(element, backend, resolver, level, warnings, errors, helpers)
-        }
+        Node::Element(element) => compile_element(
+            element, source, backend, resolver, level, warnings, errors, helpers,
+        ),
         Node::Fragment(fragment) => compile_fragment(
-            fragment, backend, resolver, level, warnings, errors, helpers,
+            fragment, source, backend, resolver, level, warnings, errors, helpers,
         ),
     }
 }
@@ -399,6 +450,7 @@ fn compile_embedded(
 #[allow(clippy::too_many_arguments)]
 fn compile_element(
     element: &mut Element,
+    source: &str,
     backend: &dyn Backend,
     resolver: &Resolver,
     level: LintLevel,
@@ -408,45 +460,25 @@ fn compile_element(
 ) -> Result<(), CompileError> {
     for attribute in &mut element.attributes {
         match attribute {
-            Attribute::Spread { expression, .. } => {
-                *expression = compile_with(
-                    expression,
-                    backend,
-                    resolver,
-                    level,
-                    warnings,
-                    errors,
-                    helpers,
-                    &mut Vec::new(),
+            Attribute::Spread { expression, span } => {
+                *expression = compile_hole(
+                    expression, source, *span, backend, resolver, level, warnings, errors, helpers,
                 )?;
             }
-            Attribute::Named { value, .. } => {
+            Attribute::Named { value, span, .. } => {
                 if let AttributeValue::Expression(expression) = value {
-                    *expression = compile_with(
-                        expression,
-                        backend,
-                        resolver,
-                        level,
-                        warnings,
-                        errors,
+                    *expression = compile_hole(
+                        expression, source, *span, backend, resolver, level, warnings, errors,
                         helpers,
-                        &mut Vec::new(),
                     )?;
                 }
             }
             // An inferred name comes from a dotted path, which cannot contain
             // markup — but the walk stays exhaustive rather than assuming that,
             // so relaxing the inference rule later cannot quietly skip a region.
-            Attribute::Inferred { expression, .. } => {
-                *expression = compile_with(
-                    expression,
-                    backend,
-                    resolver,
-                    level,
-                    warnings,
-                    errors,
-                    helpers,
-                    &mut Vec::new(),
+            Attribute::Inferred { expression, span } => {
+                *expression = compile_hole(
+                    expression, source, *span, backend, resolver, level, warnings, errors, helpers,
                 )?;
             }
         }
@@ -454,6 +486,7 @@ fn compile_element(
 
     compile_children(
         &mut element.children,
+        source,
         backend,
         resolver,
         level,
@@ -466,6 +499,7 @@ fn compile_element(
 #[allow(clippy::too_many_arguments)]
 fn compile_fragment(
     fragment: &mut Fragment,
+    source: &str,
     backend: &dyn Backend,
     resolver: &Resolver,
     level: LintLevel,
@@ -495,6 +529,7 @@ fn compile_fragment(
 
     compile_children(
         &mut fragment.children,
+        source,
         backend,
         resolver,
         level,
@@ -507,6 +542,7 @@ fn compile_fragment(
 #[allow(clippy::too_many_arguments)]
 fn compile_children(
     children: &mut [Child],
+    source: &str,
     backend: &dyn Backend,
     resolver: &Resolver,
     level: LintLevel,
@@ -516,9 +552,9 @@ fn compile_children(
 ) -> Result<(), CompileError> {
     for child in children {
         match child {
-            Child::Node(node) => {
-                compile_embedded(node, backend, resolver, level, warnings, errors, helpers)?
-            }
+            Child::Node(node) => compile_embedded(
+                node, source, backend, resolver, level, warnings, errors, helpers,
+            )?,
             Child::Expression { expression, span } => {
                 // §11.1 runs on the original text, where LuauX is still `<...>`.
                 if level != LintLevel::Off {
@@ -544,15 +580,8 @@ fn compile_children(
                     }
                 }
 
-                *expression = compile_with(
-                    expression,
-                    backend,
-                    resolver,
-                    level,
-                    warnings,
-                    errors,
-                    helpers,
-                    &mut Vec::new(),
+                *expression = compile_hole(
+                    expression, source, *span, backend, resolver, level, warnings, errors, helpers,
                 )?;
                 // Rule 2 — checked after compiling, so nested LuauX has already
                 // become ordinary Luau and the expression parses.
@@ -617,6 +646,38 @@ mod tests {
             Some(help) => format!("{} — {help}", error.message),
             None => error.message,
         }
+    }
+
+    /// A hole compiles on its own text. What that compile reports still
+    /// points into the file, not at the start of it.
+    #[test]
+    fn a_report_inside_a_hole_points_into_the_file() {
+        let at = |source: &str, needle: &str| source.find(needle).unwrap();
+
+        let source = format!(
+            "{BINDING}local e = <Frame>\n  {{f(function() return <Menu /> end)}}\n</Frame>"
+        );
+        let compiled = compile_recovering(&source, &Table, test_config()).unwrap();
+        assert_eq!(compiled.errors[0].offset, at(&source, "<Menu"));
+
+        let source = format!("{BINDING}local e = <Frame Name={{ <Menuu /> }} />");
+        let compiled = compile_recovering(&source, &Table, test_config()).unwrap();
+        assert_eq!(compiled.errors[0].offset, at(&source, "<Menuu"));
+
+        // A parse error stops the compile, and it moves the same way.
+        let source = format!("{BINDING}local e = <Frame>{{f(<Frame></Framex>)}}</Frame>");
+        let error = compile_recovering(&source, &Table, test_config()).unwrap_err();
+        assert_eq!(error.offset, at(&source, "</Framex"));
+
+        let source = format!("{BINDING}local e = <Frame>{{f(<>hi</>)}}</Frame>");
+        let error = compile_recovering(&source, &Table, test_config()).unwrap_err();
+        assert_eq!(error.offset, at(&source, "hi"));
+
+        let source = format!(
+            "{BINDING}local e = <Frame>{{function() return <Frame>{{if a then <Frame /> else nil}}</Frame> end}}</Frame>"
+        );
+        let compiled = compile_recovering(&source, &Table, test_config()).unwrap();
+        assert_eq!(compiled.warnings[0].offset, at(&source, "{if"));
     }
 
     #[test]

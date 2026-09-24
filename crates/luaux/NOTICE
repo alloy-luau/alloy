@@ -1,6 +1,6 @@
 This crate is a fork of luaux 0.2.0 (crates.io, revision dad67d6), part of
 luau-xml, published under the MIT license. Alloy carries it as a path
-dependency with six patches:
+dependency with nine patches:
 
 - `Config.extra_bound`: names the caller knows are bound, so a component
   declared with Alloy syntax resolves. Alloy's parser supplies them.
@@ -14,6 +14,13 @@ dependency with six patches:
 - `\<` is a text escape, so a Roblox RichText tag can be written as text.
 - An element with literal text may hold expressions beside element children:
   the text settles that each expression is part of it.
+- A report from inside a `{ }` hole points into the file, not at its start.
+  An unclosed tag reports at the tag and names it.
+- The class table keeps the properties the API dump tags Hidden, such as
+  `TextLabel.Font`, and drops the NotScriptable ones.
+  `scripts/generate_api_tables.py` writes it.
+- `roblox::is_deprecated_on` answers for one class, so completion can leave
+  out a deprecated property.
 
 Every other line is upstream luaux. Upstream fixes land here by re-applying
 the patches on the new revision.

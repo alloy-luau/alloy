@@ -848,7 +848,7 @@ pub fn hover(
             } else if roblox::is_event(class, name) {
                 format!("`{name}`: event of `{class}`. The value is the handler.")
             } else if roblox::has_property(class, name) {
-                let deprecated = if roblox::is_deprecated(name) {
+                let deprecated = if roblox::is_deprecated_on(class, name) {
                     " Deprecated."
                 } else {
                     ""
@@ -1042,8 +1042,13 @@ pub fn completions(
                 return items;
             }
 
+            // A deprecated property still compiles, and the list offers
+            // only the current spelling.
             for prop in roblox::properties(class) {
-                if prop.starts_with(prefix.as_str()) && !taken.contains(prop) {
+                if prop.starts_with(prefix.as_str())
+                    && !taken.contains(prop)
+                    && !roblox::is_deprecated_on(class, prop)
+                {
                     items.push(json!({
                         "label": prop,
                         "kind": 10,
@@ -1601,6 +1606,34 @@ mod tests {
             .collect();
 
         assert_eq!(props, ["title".to_string(), "count".to_string()]);
+    }
+
+    /// A property a script sets is offered, and a deprecated one is not:
+    /// `Font` stays, `FontSize` and `TextWrap` go.
+    #[test]
+    fn a_roblox_tag_offers_current_properties() {
+        let labels = |prefix: &str| -> Vec<String> {
+            completions(
+                &Spot::AttributeSlot {
+                    class: "TextLabel".into(),
+                    prefix: prefix.to_string(),
+                    existing: vec![],
+                },
+                &HashSet::new(),
+                "",
+                &[],
+                &[],
+            )
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or_default().to_string())
+            .collect()
+        };
+        let font = labels("Font");
+
+        assert!(font.contains(&"Font".to_string()), "{font:?}");
+        assert!(font.contains(&"FontFace".to_string()), "{font:?}");
+        assert!(!font.contains(&"FontSize".to_string()), "{font:?}");
+        assert!(!labels("TextW").contains(&"TextWrap".to_string()));
     }
 
     /// `ClassName` is on no Roblox class, so the tag lists it only when

@@ -96,8 +96,21 @@ impl Alx {
     pub fn to_markup(&self) -> Result<luaux::Config, String> {
         let text = toml::to_string(self).map_err(|e| e.to_string())?;
 
-        luaux::Config::parse(&text)
-            .map_err(|e| format!("[alx]: {}", e.message.trim_start_matches("luaux.toml: ")))
+        luaux::Config::parse(&text).map_err(|e| {
+            let message = e.message.trim_start_matches("luaux.toml: ");
+            // luaux names its own tables; alloy.toml holds them under `[alx]`.
+            let message = ["factory", "elements", "properties", "lints", "build"]
+                .iter()
+                .fold(message.to_string(), |m, t| {
+                    m.replace(&format!("[{t}]"), &format!("[alx.{t}]"))
+                });
+
+            match message.starts_with("[alx.") {
+                true => message,
+
+                false => format!("[alx]: {message}"),
+            }
+        })
     }
 }
 

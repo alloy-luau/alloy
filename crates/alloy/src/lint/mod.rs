@@ -854,6 +854,10 @@ pub fn listed(config: &LintConfig, key: &str) -> Option<Level> {
 /// and `recommended` decides the floor, which is each lint's own
 /// default when it is on and `allow` when it is off.
 pub fn level_of(config: &LintConfig, name: &str) -> Level {
+    if let Some(markup) = name.strip_prefix(ALX_PREFIX) {
+        return alx_level_of(config, markup);
+    }
+
     if let Some((ingot, _)) = name.split_once('/') {
         let ext = external().into_iter().find(|l| l.name == name);
 
@@ -898,6 +902,10 @@ pub fn alx_level_of(config: &LintConfig, name: &str) -> Level {
 /// The group of a lint by name; the type checker's lints are `luau`,
 /// and an ingot's lints are the ingot's name.
 pub fn group_name(name: &str) -> &'static str {
+    if name.starts_with(ALX_PREFIX) {
+        return "alx";
+    }
+
     if let Some((ingot, _)) = name.split_once('/') {
         return intern(ingot);
     }
@@ -1039,6 +1047,13 @@ mod tests {
         assert_eq!(
             names(
                 "local function heal(who: string, amount: number): number\n    return amount\nend\nprint(heal(\"a\", 10))\n"
+            ),
+            Vec::<&str>::new()
+        );
+        // The `{` of an interpolated string closes with its tail.
+        assert_eq!(
+            names(
+                "local function make(name: string, props: {}): {}\n    return props\nend\nlocal n = 1\nprint({ make(\"a\", { Text = `n: {n}` }), 1 })\n"
             ),
             Vec::<&str>::new()
         );

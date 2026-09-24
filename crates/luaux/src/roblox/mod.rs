@@ -47,6 +47,15 @@ pub fn is_deprecated(member: &str) -> bool {
     DEPRECATED.binary_search(&member).is_ok()
 }
 
+/// Whether Roblox deprecates this member on this class or an ancestor.
+///
+/// Alloy patch: [`is_deprecated`] answers for the name on any class, and
+/// `Transparency` is deprecated on one class and current on `BasePart`.
+/// Completion asks about one class, so it asks here.
+pub fn is_deprecated_on(class: &str, member: &str) -> bool {
+    ancestry(class).any(|info| info.deprecated.contains(&member))
+}
+
 /// Whether the name is a class that `Instance.new` can create — i.e. usable as
 /// an intrinsic element.
 pub fn is_class(name: &str) -> bool {
@@ -269,6 +278,26 @@ mod tests {
     fn read_only_properties_are_not_settable() {
         // ContentText is ReadOnly, so assigning it would fail at runtime.
         assert!(!has_property("TextLabel", "ContentText"));
+    }
+
+    /// The dump tags these Hidden, which only hides them in the Studio
+    /// property panel. A script sets them.
+    #[test]
+    fn hidden_properties_are_settable() {
+        assert!(has_property("TextLabel", "Font"));
+        assert!(has_property("TextButton", "Font"));
+        assert!(has_property("Part", "Position"));
+        assert!(has_property("Part", "Orientation"));
+        // NotScriptable: only Studio sets it.
+        assert!(!has_property("Model", "Scale"));
+    }
+
+    #[test]
+    fn deprecation_is_per_class() {
+        assert!(is_deprecated_on("TextLabel", "TextWrap"));
+        assert!(is_deprecated_on("TextLabel", "FontSize"));
+        assert!(!is_deprecated_on("TextLabel", "Font"));
+        assert!(!is_deprecated_on("Part", "Transparency"));
     }
 
     #[test]

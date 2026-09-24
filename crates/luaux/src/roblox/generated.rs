@@ -1,10 +1,11 @@
-//! Generated from the Roblox API dump — do not edit.
+//! Generated from the Roblox API dump. Do not edit.
 //!
 //! Regenerate with `python3 scripts/generate_api_tables.py api-dump.json`.
 //!
 //! Members are the ones each class *declares*; inheritance is resolved by
 //! walking `superclass` at lookup time (see the parent module). Properties are
-//! filtered to those a script can actually assign: no ReadOnly, no security.
+//! filtered to those a script can assign: no ReadOnly, no NotScriptable, no
+//! security. `deprecated` names the class's own members Roblox deprecates.
 
 pub struct ClassInfo {
     pub name: &'static str,
@@ -12,6 +13,7 @@ pub struct ClassInfo {
     pub creatable: bool,
     pub properties: &'static [&'static str],
     pub events: &'static [&'static str],
+    pub deprecated: &'static [&'static str],
 }
 
 pub static CLASSES: &[ClassInfo] = &[
@@ -21,6 +23,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["AccessoryType"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AccessoryDescription",
@@ -38,6 +41,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Scale",
         ],
         events: &[],
+        deprecated: &["Puffiness"],
     },
     ClassInfo {
         name: "AccountService",
@@ -45,13 +49,21 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["MagicLoginEvent"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Accoutrement",
         superclass: "Instance",
         creatable: true,
-        properties: &["AttachmentPoint"],
+        properties: &[
+            "AttachmentForward",
+            "AttachmentPoint",
+            "AttachmentPos",
+            "AttachmentRight",
+            "AttachmentUp",
+        ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AchievementService",
@@ -59,6 +71,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ActivityHistoryEventService",
@@ -66,6 +79,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["WriteActivityHistoryEventFromStudio"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Actor",
@@ -73,6 +87,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AdGui",
@@ -85,6 +100,15 @@ pub static CLASSES: &[ClassInfo] = &[
             "FallbackImageContent",
         ],
         events: &["adGuiStateChanged"],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "AdPlacement",
+        superclass: "Instance",
+        creatable: true,
+        properties: &["ActivationInstance", "AdFormat", "PlacementId"],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AdPortal",
@@ -92,6 +116,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AdService",
@@ -108,6 +133,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "VideoAdClosed",
             "adGuiRegisterUI",
         ],
+        deprecated: &["VideoAdClosed"],
     },
     ClassInfo {
         name: "AdvancedDragger",
@@ -115,6 +141,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AirController",
@@ -123,6 +150,7 @@ pub static CLASSES: &[ClassInfo] = &[
         properties: &[
             "BalanceMaxTorque",
             "BalanceSpeed",
+            "LinearImpulse",
             "MaintainAngularMomentum",
             "MaintainLinearMomentum",
             "MoveMaxForce",
@@ -130,6 +158,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TurnSpeedFactor",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AlignOrientation",
@@ -150,6 +179,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SecondaryAxis",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AlignPosition",
@@ -169,6 +199,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "RigidityEnabled",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnalyticsService",
@@ -176,6 +207,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &["ApiKey"],
     },
     ClassInfo {
         name: "AngularVelocity",
@@ -188,6 +220,31 @@ pub static CLASSES: &[ClassInfo] = &[
             "RelativeTo",
         ],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "AnimatedImage",
+        superclass: "GuiBase",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "AnimatedImageService",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "AnimatedImageTrack",
+        superclass: "Object",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Animation",
@@ -195,6 +252,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["AnimationContent", "AnimationId"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationClip",
@@ -202,6 +260,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Loop", "Priority"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationClipProvider",
@@ -209,6 +268,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationConstraint",
@@ -225,6 +285,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Transform",
         ],
         events: &[],
+        deprecated: &["C0", "C1", "Part0", "Part1"],
     },
     ClassInfo {
         name: "AnimationController",
@@ -232,6 +293,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["AnimationPlayed"],
+        deprecated: &["AnimationPlayed"],
     },
     ClassInfo {
         name: "AnimationFromVideoCreatorService",
@@ -239,6 +301,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationFromVideoCreatorStudioService",
@@ -246,6 +309,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationGraphDefinition",
@@ -253,13 +317,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationImportData",
         superclass: "BaseImportData",
         creatable: false,
-        properties: &[],
+        properties: &["ForceNewVersion", "VersionedAssetId"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationNode",
@@ -267,6 +333,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationNodeDefinition",
@@ -274,6 +341,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["NodeType"],
         events: &["InputPinsChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationRigData",
@@ -281,13 +349,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationStreamTrack",
         superclass: "Instance",
         creatable: false,
-        properties: &[],
+        properties: &["Priority"],
         events: &["Stopped"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnimationTrack",
@@ -301,6 +371,23 @@ pub static CLASSES: &[ClassInfo] = &[
             "ParameterChanged",
             "Stopped",
         ],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "AnimationValueNodeDefinition",
+        superclass: "Instance",
+        creatable: true,
+        properties: &["NodeType"],
+        events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "AnimationValueOutputDefinition",
+        superclass: "Instance",
+        creatable: true,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Animator",
@@ -312,6 +399,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "AnimationPlayedCoreScript",
             "AnimationStreamTrackPlayed",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Annotation",
@@ -319,6 +407,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["RequestCompleted", "RequestInitiated"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AnnotationsService",
@@ -334,6 +423,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ServerLoadAnnotations",
             "ServerLoadResolvedAnnotations",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AppAgeSignalsService",
@@ -341,6 +431,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AppLifecycleObserverService",
@@ -355,6 +446,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OnStart",
             "OnUnhide",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AppRatingPromptService",
@@ -362,6 +454,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnGameLeft"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AppStorageService",
@@ -369,6 +462,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AppUpdateService",
@@ -376,6 +470,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ArcHandles",
@@ -389,6 +484,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "MouseEnter",
             "MouseLeave",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetCounterService",
@@ -396,6 +492,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetDeliveryProxy",
@@ -403,6 +500,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Interface", "Port", "StartServer"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetImportService",
@@ -410,6 +508,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["SingleFileChanged", "StartSingleMeshImport"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetImportSession",
@@ -417,6 +516,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetManagerService",
@@ -428,6 +528,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ImportSessionFinished",
             "ImportSessionStarted",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetPatchSettings",
@@ -435,6 +536,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["ContentId", "OutputPath", "PatchId"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetQualityService",
@@ -442,6 +544,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetService",
@@ -452,9 +555,9 @@ pub static CLASSES: &[ClassInfo] = &[
             "AudioMetadataFailedResponse",
             "AudioMetadataRequest",
             "AudioMetadataResponse",
-            "OpenCreateResultModal",
             "OpenPublishResultModal",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AssetSoundEffect",
@@ -462,6 +565,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Atmosphere",
@@ -469,6 +573,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Color", "Decay", "Density", "Glare", "Haze", "Offset"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AtmosphereSensor",
@@ -476,6 +581,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Attachment",
@@ -484,13 +590,19 @@ pub static CLASSES: &[ClassInfo] = &[
         properties: &[
             "Axis",
             "CFrame",
+            "Orientation",
+            "Position",
+            "Rotation",
             "SecondaryAxis",
             "Visible",
             "WorldAxis",
             "WorldCFrame",
+            "WorldOrientation",
+            "WorldPosition",
             "WorldSecondaryAxis",
         ],
         events: &[],
+        deprecated: &["Rotation", "WorldRotation"],
     },
     ClassInfo {
         name: "AudioAnalyzer",
@@ -498,6 +610,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["SpectrumEnabled", "WindowSize"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioChannelMixer",
@@ -505,6 +618,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Layout"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioChannelSplitter",
@@ -512,6 +626,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Layout"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioChorus",
@@ -519,6 +634,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Bypass", "Depth", "Mix", "Rate"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioCompressor",
@@ -533,6 +649,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Threshold",
         ],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioDeviceInput",
@@ -540,6 +657,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["AccessType", "Muted", "Player", "Volume"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioDeviceOutput",
@@ -547,6 +665,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Player"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioDistortion",
@@ -554,6 +673,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Bypass", "Level"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioEcho",
@@ -568,6 +688,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WetLevel",
         ],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioEmitter",
@@ -586,6 +707,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SimulationFidelity",
         ],
         events: &["WiringChanged"],
+        deprecated: &["SimulationFidelity"],
     },
     ClassInfo {
         name: "AudioEqualizer",
@@ -593,6 +715,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Bypass", "HighGain", "LowGain", "MidGain", "MidRange"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioFader",
@@ -600,6 +723,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Bypass", "Volume"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioFilter",
@@ -607,6 +731,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Bypass", "FilterType", "Frequency", "Gain", "Q"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioFlanger",
@@ -614,6 +739,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Bypass", "Depth", "Mix", "Rate"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioFocusService",
@@ -626,6 +752,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OnDeafenVoiceAudio",
             "OnUndeafenVoiceAudio",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioGate",
@@ -633,6 +760,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Attack", "Bypass", "Release", "Threshold"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioLimiter",
@@ -640,6 +768,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Bypass", "MaxLevel", "Release"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioListener",
@@ -656,6 +785,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SimulationFidelity",
         ],
         events: &["WiringChanged"],
+        deprecated: &["SimulationFidelity"],
     },
     ClassInfo {
         name: "AudioPages",
@@ -663,6 +793,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioPitchShifter",
@@ -670,6 +801,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Bypass", "Pitch", "WindowSize"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioPlayer",
@@ -677,6 +809,8 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[
             "Asset",
+            "AssetId",
+            "AudioContent",
             "AutoLoad",
             "AutoPlay",
             "LoopRegion",
@@ -687,6 +821,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Volume",
         ],
         events: &["Ended", "Looped", "WiringChanged"],
+        deprecated: &["AssetId"],
     },
     ClassInfo {
         name: "AudioRecorder",
@@ -694,6 +829,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioReverb",
@@ -715,6 +851,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WetLevel",
         ],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioSearchParams",
@@ -732,6 +869,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Title",
         ],
         events: &[],
+        deprecated: &["AudioSubtype"],
     },
     ClassInfo {
         name: "AudioSpeechToText",
@@ -739,12 +877,14 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Enabled", "Text"],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioTextToSpeech",
         superclass: "Instance",
         creatable: true,
         properties: &[
+            "AutoLocalize",
             "Looping",
             "Pitch",
             "PlaybackSpeed",
@@ -755,6 +895,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Volume",
         ],
         events: &["Ended", "Looped", "WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AudioTremolo",
@@ -770,6 +911,21 @@ pub static CLASSES: &[ClassInfo] = &[
             "Square",
         ],
         events: &["WiringChanged"],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "AudioWindSynthesizer",
+        superclass: "Instance",
+        creatable: true,
+        properties: &[
+            "Enabled",
+            "PositionInstance",
+            "PositionType",
+            "Profile",
+            "Volume",
+        ],
+        events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AuroraScriptObject",
@@ -777,6 +933,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["FrameId", "LODLevel", "PriorFrameInvoked"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarAbilityRules",
@@ -784,6 +941,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarAccessoryRules",
@@ -791,6 +949,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarAnimationRules",
@@ -798,6 +957,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarBodyRules",
@@ -805,6 +965,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarChatService",
@@ -812,6 +973,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarClothingRules",
@@ -819,6 +981,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarCollisionRules",
@@ -826,6 +989,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarCreationService",
@@ -841,6 +1005,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UgcValidationFailure",
             "UgcValidationSuccess",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarEditorService",
@@ -865,6 +1030,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PromptSetFavoriteCompleted",
             "PromptUpdateOutfitCompleted",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarImportService",
@@ -872,6 +1038,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarRules",
@@ -879,6 +1046,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "AvatarSettings",
@@ -886,6 +1054,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["RefreshPluginState"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Backpack",
@@ -893,6 +1062,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BackpackItem",
@@ -900,6 +1070,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["TextureContent", "TextureId"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BadgeService",
@@ -907,6 +1078,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["BadgeAwarded", "OnBadgeAwarded"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BallSocketConstraint",
@@ -923,6 +1095,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UpperAngle",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BanHistoryPages",
@@ -930,6 +1103,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BaseCoreGuiConfiguration",
@@ -937,6 +1111,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Enabled"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BaseImportData",
@@ -944,6 +1119,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["ImportName", "ShouldImport"],
         events: &["StatusRemoved", "StatusReported"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BasePart",
@@ -954,8 +1130,14 @@ pub static CLASSES: &[ClassInfo] = &[
             "AssemblyAngularVelocity",
             "AssemblyLinearVelocity",
             "AudioCanCollide",
+            "BackParamA",
+            "BackParamB",
             "BackSurface",
+            "BackSurfaceInput",
+            "BottomParamA",
+            "BottomParamB",
             "BottomSurface",
+            "BottomSurfaceInput",
             "BrickColor",
             "CFrame",
             "CanCollide",
@@ -966,21 +1148,40 @@ pub static CLASSES: &[ClassInfo] = &[
             "CollisionGroupId",
             "Color",
             "CustomPhysicalProperties",
+            "Elasticity",
             "EnableFluidForces",
+            "Friction",
+            "FrontParamA",
+            "FrontParamB",
             "FrontSurface",
+            "FrontSurfaceInput",
+            "LeftParamA",
+            "LeftParamB",
             "LeftSurface",
+            "LeftSurfaceInput",
+            "LocalTransparencyModifier",
             "Locked",
             "Massless",
             "Material",
             "MaterialVariant",
+            "Orientation",
             "PivotOffset",
+            "Position",
             "Reflectance",
+            "RightParamA",
+            "RightParamB",
             "RightSurface",
+            "RightSurfaceInput",
             "RootPriority",
+            "RotVelocity",
             "Rotation",
             "Size",
+            "TopParamA",
+            "TopParamB",
             "TopSurface",
+            "TopSurfaceInput",
             "Transparency",
+            "Velocity",
             "brickColor",
         ],
         events: &[
@@ -990,6 +1191,36 @@ pub static CLASSES: &[ClassInfo] = &[
             "TouchEnded",
             "Touched",
         ],
+        deprecated: &[
+            "BackParamA",
+            "BackParamB",
+            "BackSurfaceInput",
+            "BottomParamA",
+            "BottomParamB",
+            "BottomSurfaceInput",
+            "CollisionGroupId",
+            "Elasticity",
+            "Friction",
+            "FrontParamA",
+            "FrontParamB",
+            "FrontSurfaceInput",
+            "LeftParamA",
+            "LeftParamB",
+            "LeftSurfaceInput",
+            "LocalSimulationTouched",
+            "OutfitChanged",
+            "RightParamA",
+            "RightParamB",
+            "RightSurfaceInput",
+            "RotVelocity",
+            "SpecificGravity",
+            "StoppedTouching",
+            "TopParamA",
+            "TopParamB",
+            "TopSurfaceInput",
+            "Velocity",
+            "brickColor",
+        ],
     },
     ClassInfo {
         name: "BasePlayerGui",
@@ -997,6 +1228,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BaseRemoteEvent",
@@ -1004,6 +1236,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BaseScript",
@@ -1011,6 +1244,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Disabled", "Enabled", "LinkedSource"],
         events: &[],
+        deprecated: &["LinkedSource"],
     },
     ClassInfo {
         name: "BaseWrap",
@@ -1018,6 +1252,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["VerticesModified"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Beam",
@@ -1034,6 +1269,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "FaceCamera",
             "LightEmission",
             "LightInfluence",
+            "LocalTransparencyModifier",
             "Segments",
             "Texture",
             "TextureContent",
@@ -1046,6 +1282,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ZOffset",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BevelMesh",
@@ -1053,6 +1290,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BillboardGui",
@@ -1078,6 +1316,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "StudsOffsetWorldSpace",
         ],
         events: &[],
+        deprecated: &["DistanceLowerLimit", "DistanceUpperLimit"],
     },
     ClassInfo {
         name: "BinaryStringValue",
@@ -1085,6 +1324,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["Changed"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BindableEvent",
@@ -1092,6 +1332,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["Event"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BindableFunction",
@@ -1099,6 +1340,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BlockMesh",
@@ -1106,6 +1348,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BloomEffect",
@@ -1113,6 +1356,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Intensity", "Size", "Threshold"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BlurEffect",
@@ -1120,6 +1364,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Size"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BodyAngularVelocity",
@@ -1133,6 +1378,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "maxTorque",
         ],
         events: &[],
+        deprecated: &["angularvelocity", "maxTorque"],
     },
     ClassInfo {
         name: "BodyColors",
@@ -1153,6 +1399,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TorsoColor3",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BodyForce",
@@ -1160,6 +1407,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Force", "force"],
         events: &[],
+        deprecated: &["force"],
     },
     ClassInfo {
         name: "BodyGyro",
@@ -1167,6 +1415,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["CFrame", "D", "MaxTorque", "P", "cframe", "maxTorque"],
         events: &[],
+        deprecated: &["cframe", "maxTorque"],
     },
     ClassInfo {
         name: "BodyMover",
@@ -1174,6 +1423,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BodyPartDescription",
@@ -1181,6 +1431,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["AssetId", "BodyPart", "Color", "HeadShape", "Instance"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BodyPosition",
@@ -1188,6 +1439,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["D", "MaxForce", "P", "Position", "maxForce", "position"],
         events: &["ReachedTarget"],
+        deprecated: &["maxForce", "position"],
     },
     ClassInfo {
         name: "BodyThrust",
@@ -1195,6 +1447,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Force", "Location", "force", "location"],
         events: &[],
+        deprecated: &["force", "location"],
     },
     ClassInfo {
         name: "BodyVelocity",
@@ -1202,6 +1455,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["MaxForce", "P", "Velocity", "maxForce", "velocity"],
         events: &[],
+        deprecated: &["maxForce", "velocity"],
     },
     ClassInfo {
         name: "Bone",
@@ -1209,6 +1463,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Transform"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BoolValue",
@@ -1216,6 +1471,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "BoxHandleAdornment",
@@ -1223,6 +1479,19 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Shading", "Size"],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "BranchService",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[
+            "MergeStateChanged",
+            "MergeStateCleared",
+            "MergeStatusChanged",
+        ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Breakpoint",
@@ -1230,6 +1499,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BrickColorValue",
@@ -1237,6 +1507,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "BrowserService",
@@ -1249,6 +1520,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "BrowserWindowWillNavigate",
             "JavaScriptCallback",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BubbleChatConfiguration",
@@ -1261,6 +1533,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "BubbleDuration",
             "BubblesSpacing",
             "Enabled",
+            "Font",
             "FontFace",
             "LocalPlayerStudsOffset",
             "MaxBubbles",
@@ -1272,6 +1545,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "VerticalStudsOffset",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BubbleChatMessageProperties",
@@ -1286,6 +1560,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextSize",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BugReporterService",
@@ -1293,6 +1568,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["BugReportRequested"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BulkImportService",
@@ -1300,6 +1576,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["AssetImported", "BulkImportFinished", "BulkImportStarted"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "BuoyancySensor",
@@ -1307,6 +1584,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["FullySubmerged", "TouchingSurface"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CFrameValue",
@@ -1314,6 +1592,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "CSGDictionaryService",
@@ -1321,6 +1600,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CacheableContentProvider",
@@ -1328,6 +1608,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "CallingService",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &["OnCallingRemoved", "OnCallingStateChange"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CalloutService",
@@ -1335,6 +1624,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Camera",
@@ -1344,6 +1634,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "CFrame",
             "CameraSubject",
             "CameraType",
+            "CoordinateFrame",
             "DiagonalFieldOfView",
             "FieldOfView",
             "FieldOfViewMode",
@@ -1355,6 +1646,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "focus",
         ],
         events: &["FirstPersonTransition", "InterpolationFinished"],
+        deprecated: &["CoordinateFrame", "focus"],
     },
     ClassInfo {
         name: "CanvasGroup",
@@ -1362,6 +1654,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["GroupColor3", "GroupTransparency"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Capture",
@@ -1369,6 +1662,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CaptureService",
@@ -1389,6 +1683,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UserVideoCaptureStartFailed",
             "VideoCaptureInProgress",
         ],
+        deprecated: &["CaptureSaved"],
     },
     ClassInfo {
         name: "CapturesPages",
@@ -1396,6 +1691,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CapturesViewConfiguration",
@@ -1403,6 +1699,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Open"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CatalogPages",
@@ -1410,6 +1707,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ChangeHistoryService",
@@ -1422,6 +1720,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OnRedo",
             "OnUndo",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ChangeHistoryStreamingService",
@@ -1434,6 +1733,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SendReparentInstanceFromStudio",
             "SendTerrainChangeFromStudio",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ChannelSelectorSoundEffect",
@@ -1441,6 +1741,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Channel"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ChannelTabsConfiguration",
@@ -1459,6 +1760,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextStrokeTransparency",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CharacterAppearance",
@@ -1466,6 +1768,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CharacterMesh",
@@ -1481,6 +1784,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OverlayTextureId",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Chat",
@@ -1494,6 +1798,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ReconcileCommunicationAccessCompleted",
             "TimeoutChatAttempt",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ChatInputBarConfiguration",
@@ -1515,6 +1820,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextStrokeTransparency",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ChatWindowConfiguration",
@@ -1527,6 +1833,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "FontFace",
             "HeightScale",
             "HorizontalAlignment",
+            "TextChannelDisplayMode",
             "TextColor3",
             "TextSize",
             "TextStrokeColor3",
@@ -1535,6 +1842,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WidthScale",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ChatWindowMessageProperties",
@@ -1549,6 +1857,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextStrokeTransparency",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ChorusSoundEffect",
@@ -1556,6 +1865,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Depth", "Mix", "Rate"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ClickDetector",
@@ -1569,6 +1879,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "RightMouseClick",
             "mouseClick",
         ],
+        deprecated: &["mouseClick"],
     },
     ClassInfo {
         name: "ClientReplicator",
@@ -1576,6 +1887,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["RCCProfilerDataComplete", "StatsReceived"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ClientStorageService",
@@ -1583,6 +1895,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ClimbController",
@@ -1595,6 +1908,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "MoveMaxForce",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Clothing",
@@ -1602,6 +1916,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Color3"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CloudCRUDService",
@@ -1609,6 +1924,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CloudExecutionService",
@@ -1616,6 +1932,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CloudLocalizationTable",
@@ -1623,6 +1940,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Clouds",
@@ -1630,6 +1948,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Color", "Cover", "Density", "Enabled"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ClusterPacketCache",
@@ -1637,13 +1956,25 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Collaborator",
         superclass: "Instance",
         creatable: false,
-        properties: &[],
+        properties: &[
+            "CFrame",
+            "CollaboratorColor",
+            "CollaboratorColor3",
+            "CurDocGUID",
+            "CurScriptLineNumber",
+            "IsIdle",
+            "Status",
+            "UserId",
+            "Username",
+        ],
         events: &[],
+        deprecated: &["CollaboratorColor"],
     },
     ClassInfo {
         name: "CollaboratorsService",
@@ -1659,6 +1990,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ServerMultiGetCanCollaborateRequested",
             "ToggleSelectionHighlightsSignal",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CollectionService",
@@ -1666,6 +1998,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ItemAdded", "ItemRemoved", "TagAdded", "TagRemoved"],
+        deprecated: &["ItemAdded", "ItemRemoved"],
     },
     ClassInfo {
         name: "Color3Value",
@@ -1673,6 +2006,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "ColorCorrectionEffect",
@@ -1680,6 +2014,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Brightness", "Contrast", "Saturation", "TintColor"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ColorGradingEffect",
@@ -1687,6 +2022,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["TonemapperPreset"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CommerceService",
@@ -1701,6 +2037,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PromptCommerceProductPurchaseRequested",
             "PurchaseBrowserClosed",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CompositeValueCurve",
@@ -1708,6 +2045,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["CurveType"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CompressorSoundEffect",
@@ -1722,6 +2060,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Threshold",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ConeHandleAdornment",
@@ -1729,6 +2068,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Height", "Hollow", "Radius", "Shading"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ConfigService",
@@ -1736,6 +2076,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ConfigSnapshot",
@@ -1743,6 +2084,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["UpdateAvailable"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Configuration",
@@ -1750,6 +2092,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ConfigureServerService",
@@ -1757,6 +2100,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ConnectivityService",
@@ -1764,6 +2108,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Constraint",
@@ -1771,6 +2116,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Attachment0", "Attachment1", "Color", "Enabled", "Visible"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ContentProvider",
@@ -1778,6 +2124,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["AssetFetchFailed"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ContextActionService",
@@ -1793,6 +2140,15 @@ pub static CLASSES: &[ClassInfo] = &[
             "LocalToolEquipped",
             "LocalToolUnequipped",
         ],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "ControlState",
+        superclass: "Instance",
+        creatable: true,
+        properties: &["Owner"],
+        events: &["OnStateChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Controller",
@@ -1800,6 +2156,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ButtonChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ControllerBase",
@@ -1807,6 +2164,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["BalanceRigidityEnabled", "MoveSpeedFactor"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ControllerManager",
@@ -1824,6 +2182,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UpDirection",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ControllerPartSensor",
@@ -1840,6 +2199,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SensorMode",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ControllerSensor",
@@ -1847,6 +2207,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ControllerService",
@@ -1854,6 +2215,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CookiesService",
@@ -1861,6 +2223,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CoreGui",
@@ -1868,6 +2231,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["UserGuiRenderingChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CoreGuiConfiguration",
@@ -1879,6 +2243,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SelfViewConfiguration",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CorePackages",
@@ -1886,6 +2251,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CoreScript",
@@ -1893,6 +2259,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CoreScriptDebuggingManagerHelper",
@@ -1900,6 +2267,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CoreScriptSyncService",
@@ -1907,6 +2275,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CornerWedgePart",
@@ -1914,6 +2283,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CreationDBService",
@@ -1921,6 +2291,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CreatorStoreService",
@@ -1928,6 +2299,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CrossDMScriptChangeListener",
@@ -1935,6 +2307,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["GuidLineContentsChanged", "GuidNameChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CurveAnimation",
@@ -1942,6 +2315,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CustomEvent",
@@ -1949,6 +2323,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["ReceiverConnected", "ReceiverDisconnected"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CustomEventReceiver",
@@ -1956,6 +2331,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Source"],
         events: &["EventConnected", "EventDisconnected", "SourceValueChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CustomLog",
@@ -1963,6 +2339,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CustomSoundEffect",
@@ -1970,6 +2347,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CylinderHandleAdornment",
@@ -1977,6 +2355,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Angle", "Height", "InnerRadius", "Radius", "Shading"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CylinderMesh",
@@ -1984,6 +2363,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "CylindricalConstraint",
@@ -2007,6 +2387,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UpperAngle",
         ],
         events: &[],
+        deprecated: &["SoftlockAngularServoUponReachingTarget"],
     },
     ClassInfo {
         name: "DataModel",
@@ -2021,9 +2402,29 @@ pub static CLASSES: &[ClassInfo] = &[
             "ScreenshotReady",
             "ScreenshotSavedToAlbum",
             "ServerLifecycleChanged",
+            "ServerLowMemoryWarning",
             "ServerRestartScheduled",
             "UniverseMetadataLoaded",
         ],
+        deprecated: &[
+            "AllowedGearTypeChanged",
+            "GearGenreSetting",
+            "IsPioneerBuild",
+            "ItemChanged",
+            "PioneerSource",
+            "VIPServerId",
+            "VIPServerOwnerId",
+            "lighting",
+            "workspace",
+        ],
+    },
+    ClassInfo {
+        name: "DataModelDiff",
+        superclass: "Object",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataModelMesh",
@@ -2031,13 +2432,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Offset", "Scale", "VertexColor"],
         events: &[],
-    },
-    ClassInfo {
-        name: "DataModelPatchService",
-        superclass: "Instance",
-        creatable: false,
-        properties: &[],
-        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataModelSession",
@@ -2048,6 +2443,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "CurrentDataModelTypeAboutToChange",
             "CurrentDataModelTypeChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStore",
@@ -2055,6 +2451,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreGetOptions",
@@ -2062,6 +2459,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["UseCache"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreIncrementOptions",
@@ -2069,6 +2467,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreInfo",
@@ -2076,6 +2475,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreKey",
@@ -2083,6 +2483,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreKeyInfo",
@@ -2090,6 +2491,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreKeyPages",
@@ -2097,6 +2499,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreListingPages",
@@ -2104,6 +2507,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreObjectVersionInfo",
@@ -2111,6 +2515,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreOptions",
@@ -2118,6 +2523,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["AllScopes"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStorePages",
@@ -2125,6 +2531,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreService",
@@ -2132,6 +2539,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &["LegacyNamingScheme"],
     },
     ClassInfo {
         name: "DataStoreSetOptions",
@@ -2139,6 +2547,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DataStoreVersionPages",
@@ -2146,6 +2555,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Debris",
@@ -2153,6 +2563,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["MaxItems"],
         events: &[],
+        deprecated: &["MaxItems"],
     },
     ClassInfo {
         name: "DebugSettings",
@@ -2160,6 +2571,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggablePluginWatcher",
@@ -2167,6 +2579,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggerBreakpoint",
@@ -2180,6 +2593,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "isContextDependentBreakpoint",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggerConnection",
@@ -2193,6 +2607,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Paused",
             "Resumed",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggerConnectionManager",
@@ -2200,6 +2615,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ConnectionEnded", "ConnectionStarted", "FocusChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggerLuaResponse",
@@ -2207,6 +2623,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggerManager",
@@ -2214,6 +2631,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["DebuggerAdded", "DebuggerRemoved"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggerUIService",
@@ -2221,6 +2639,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ExpressionAdded", "ExpressionsCleared"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggerVariable",
@@ -2228,6 +2647,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DebuggerWatch",
@@ -2235,6 +2655,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Expression"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Decal",
@@ -2245,6 +2666,9 @@ pub static CLASSES: &[ClassInfo] = &[
             "Color3",
             "ColorMap",
             "ColorMapContent",
+            "EmissiveStrength",
+            "EmissiveTint",
+            "LocalTransparencyModifier",
             "Rotation",
             "Shiny",
             "Specular",
@@ -2256,6 +2680,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ZIndex",
         ],
         events: &[],
+        deprecated: &["Shiny", "Specular"],
     },
     ClassInfo {
         name: "DeferredAssetManagerService",
@@ -2263,6 +2688,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["PrefetchDownloadStatusChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DepthOfFieldEffect",
@@ -2275,6 +2701,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "NearIntensity",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DesignFoundationsService",
@@ -2282,6 +2709,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DeviceDisplayService",
@@ -2289,6 +2717,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DeviceIdService",
@@ -2296,6 +2725,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Dialog",
@@ -2314,6 +2744,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TriggerOffset",
         ],
         events: &["DialogChoiceSelected"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DialogChoice",
@@ -2326,6 +2757,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UserDialog",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DigitsRigDescription",
@@ -2375,6 +2807,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ThumbSize",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DisplayWakeLock",
@@ -2382,6 +2815,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DistortionSoundEffect",
@@ -2389,6 +2823,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Level"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DockWidgetPluginGui",
@@ -2396,13 +2831,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DoubleConstrainedValue",
         superclass: "ValueBase",
         creatable: true,
-        properties: &["MaxValue", "MinValue", "Value"],
+        properties: &["ConstrainedValue", "MaxValue", "MinValue", "Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "DraftsService",
@@ -2417,6 +2854,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "EditorsListChanged",
             "UpdateStatusChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DragDetector",
@@ -2452,6 +2890,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WorldSecondaryAxis",
         ],
         events: &["DragContinue", "DragEnd", "DragStart"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Dragger",
@@ -2459,6 +2898,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DraggerService",
@@ -2482,6 +2922,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ShowPivotIndicator",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "DynamicRotate",
@@ -2489,6 +2930,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["BaseAngle"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EchoSoundEffect",
@@ -2496,6 +2938,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Delay", "DryLevel", "Feedback", "WetLevel"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EditableImage",
@@ -2503,6 +2946,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EditableMesh",
@@ -2510,6 +2954,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EditableService",
@@ -2517,6 +2962,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EditorSourceService",
@@ -2524,6 +2970,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EncodingService",
@@ -2531,6 +2978,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EqualizerSoundEffect",
@@ -2538,6 +2986,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["HighGain", "LowGain", "MidGain"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EulerRotationCurve",
@@ -2545,6 +2994,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["RotationOrder"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "EventIngestService",
@@ -2552,6 +3002,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExampleV2Service",
@@ -2559,6 +3010,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnPolo"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExecutedRemoteCommand",
@@ -2566,6 +3018,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ReceivedUpdate"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExperienceAuthService",
@@ -2573,6 +3026,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OpenAuthPrompt"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExperienceInviteOptions",
@@ -2585,6 +3039,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PromptMessage",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExperienceNotificationService",
@@ -2592,6 +3047,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OptInPromptClosed", "PromptOptInRequested"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExperienceService",
@@ -2605,6 +3061,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PlaceJoinStateChanged",
             "QueuePositionChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExperienceStateCaptureService",
@@ -2612,6 +3069,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ItemSelectedInCaptureMode"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExperienceStateRecordingService",
@@ -2619,6 +3077,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["PlaybackStatusUpdated"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExplorerFilter",
@@ -2626,6 +3085,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExplorerFilterAutocompleter",
@@ -2633,6 +3093,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ExplorerServiceVisibilityService",
@@ -2640,6 +3101,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Explosion",
@@ -2650,11 +3112,21 @@ pub static CLASSES: &[ClassInfo] = &[
             "BlastRadius",
             "DestroyJointRadiusPercent",
             "ExplosionType",
+            "LocalTransparencyModifier",
             "Position",
             "TimeScale",
             "Visible",
         ],
         events: &["Hit"],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "ExternalIdentityService",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FaceAnimatorService",
@@ -2662,13 +3134,66 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["TrackerError", "TrackerPrompt"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FaceControls",
         superclass: "Instance",
         creatable: true,
-        properties: &[],
+        properties: &[
+            "ChinRaiser",
+            "ChinRaiserUpperLip",
+            "Corrugator",
+            "EyesLookDown",
+            "EyesLookLeft",
+            "EyesLookRight",
+            "EyesLookUp",
+            "FlatPucker",
+            "Funneler",
+            "JawDrop",
+            "JawLeft",
+            "JawRight",
+            "LeftBrowLowerer",
+            "LeftCheekPuff",
+            "LeftCheekRaiser",
+            "LeftDimpler",
+            "LeftEyeClosed",
+            "LeftEyeUpperLidRaiser",
+            "LeftInnerBrowRaiser",
+            "LeftLipCornerDown",
+            "LeftLipCornerPuller",
+            "LeftLipStretcher",
+            "LeftLowerLipDepressor",
+            "LeftNoseWrinkler",
+            "LeftOuterBrowRaiser",
+            "LeftUpperLipRaiser",
+            "LipPresser",
+            "LipsTogether",
+            "LowerLipSuck",
+            "MouthLeft",
+            "MouthRight",
+            "Pucker",
+            "RightBrowLowerer",
+            "RightCheekPuff",
+            "RightCheekRaiser",
+            "RightDimpler",
+            "RightEyeClosed",
+            "RightEyeUpperLidRaiser",
+            "RightInnerBrowRaiser",
+            "RightLipCornerDown",
+            "RightLipCornerPuller",
+            "RightLipStretcher",
+            "RightLowerLipDepressor",
+            "RightNoseWrinkler",
+            "RightOuterBrowRaiser",
+            "RightUpperLipRaiser",
+            "TongueDown",
+            "TongueOut",
+            "TongueUp",
+            "UpperLipSuck",
+        ],
         events: &["InternalFacsOverrideChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FaceInstance",
@@ -2676,6 +3201,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Face"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FacialAgeEstimationService",
@@ -2683,6 +3209,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FacialAnimationRecordingService",
@@ -2690,6 +3217,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FacialAnimationStreamingServiceStats",
@@ -2697,6 +3225,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FacialAnimationStreamingServiceV2",
@@ -2704,6 +3233,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FacialAnimationStreamingSubsessionStats",
@@ -2711,6 +3241,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FacsImportData",
@@ -2718,6 +3249,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Feature",
@@ -2725,6 +3257,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["FaceId", "InOut", "LeftRight", "TopBottom"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FeatureRestrictionManager",
@@ -2738,6 +3271,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ShowFeatureInterventionDetailsV2",
             "TimeoutChatAttempt",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "File",
@@ -2745,6 +3279,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FileManagerService",
@@ -2752,6 +3287,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FileMesh",
@@ -2759,6 +3295,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["MeshContent", "MeshId", "TextureContent", "TextureId"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FileSyncReplicationService",
@@ -2766,6 +3303,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Fire",
@@ -2775,12 +3313,14 @@ pub static CLASSES: &[ClassInfo] = &[
             "Color",
             "Enabled",
             "Heat",
+            "LocalTransparencyModifier",
             "SecondaryColor",
             "Size",
             "TimeScale",
             "size",
         ],
         events: &[],
+        deprecated: &["size"],
     },
     ClassInfo {
         name: "Flag",
@@ -2788,6 +3328,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["TeamColor"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FlagStand",
@@ -2795,6 +3336,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["TeamColor"],
         events: &["FlagCaptured"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FlagStandService",
@@ -2802,6 +3344,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FlangeSoundEffect",
@@ -2809,6 +3352,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Depth", "Mix", "Rate"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FloatCurve",
@@ -2816,6 +3360,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FloorWire",
@@ -2832,6 +3377,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WireRadius",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FluidForceSensor",
@@ -2839,6 +3385,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FlyweightService",
@@ -2846,13 +3393,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Folder",
         superclass: "Instance",
         creatable: true,
-        properties: &[],
+        properties: &["IconTint"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ForceField",
@@ -2860,13 +3409,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Visible"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FormFactorPart",
         superclass: "BasePart",
         creatable: false,
-        properties: &["FormFactor"],
+        properties: &["FormFactor", "formFactor"],
         events: &[],
+        deprecated: &["FormFactor", "formFactor"],
     },
     ClassInfo {
         name: "Frame",
@@ -2874,6 +3425,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Style"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FriendPages",
@@ -2881,6 +3433,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FriendService",
@@ -2888,6 +3441,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["FriendsUpdated"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "FunctionalTest",
@@ -2895,6 +3449,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Description"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GamePassService",
@@ -2902,6 +3457,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GameSettings",
@@ -2909,6 +3465,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["VideoRecordingChangeRequest"],
+        deprecated: &["VideoCaptureEnabled"],
     },
     ClassInfo {
         name: "GamepadService",
@@ -2916,6 +3473,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["GamepadThumbstick1Changed"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GeneratedFolder",
@@ -2923,6 +3481,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GenerationService",
@@ -2930,6 +3489,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GenericChallengeService",
@@ -2943,6 +3503,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ChallengeLoadedEvent",
             "ChallengeRequiredEvent",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GenericSettings",
@@ -2950,6 +3511,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Geometry",
@@ -2957,6 +3519,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GeometryService",
@@ -2964,6 +3527,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GetTextBoundsParams",
@@ -2971,6 +3535,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Font", "RichText", "Size", "Text", "Width"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GlobalDataStore",
@@ -2978,6 +3543,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GlobalSettings",
@@ -2985,6 +3551,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Glue",
@@ -2992,6 +3559,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["F0", "F1", "F2", "F3"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GongService",
@@ -2999,6 +3567,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GroundController",
@@ -3018,6 +3587,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TurnSpeedFactor",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GroupImportData",
@@ -3025,6 +3595,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Anchored", "ImportAsModelAsset", "InsertInWorkspace"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GroupService",
@@ -3032,6 +3603,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ShowJoinPrompt"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GuiBase",
@@ -3039,6 +3611,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GuiBase2d",
@@ -3046,6 +3619,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[
             "AutoLocalize",
+            "Localize",
             "RootLocalizationTable",
             "SelectionBehaviorDown",
             "SelectionBehaviorLeft",
@@ -3054,13 +3628,15 @@ pub static CLASSES: &[ClassInfo] = &[
             "SelectionGroup",
         ],
         events: &["SelectionChanged"],
+        deprecated: &["Localize"],
     },
     ClassInfo {
         name: "GuiBase3d",
         superclass: "GuiBase",
         creatable: false,
-        properties: &["Color3", "Transparency", "Visible"],
+        properties: &["Color", "Color3", "Transparency", "Visible"],
         events: &[],
+        deprecated: &["Color"],
     },
     ClassInfo {
         name: "GuiButton",
@@ -3084,6 +3660,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "MouseButton2Up",
             "SecondaryActivated",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GuiLabel",
@@ -3091,6 +3668,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GuiMain",
@@ -3098,6 +3676,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "GuiObject",
@@ -3107,8 +3686,10 @@ pub static CLASSES: &[ClassInfo] = &[
             "Active",
             "AnchorPoint",
             "AutomaticSize",
+            "BackgroundColor",
             "BackgroundColor3",
             "BackgroundTransparency",
+            "BorderColor",
             "BorderColor3",
             "BorderMode",
             "BorderSizePixel",
@@ -3128,6 +3709,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SelectionOrder",
             "Size",
             "SizeConstraint",
+            "Transparency",
             "Visible",
             "ZIndex",
         ],
@@ -3151,6 +3733,14 @@ pub static CLASSES: &[ClassInfo] = &[
             "TouchSwipe",
             "TouchTap",
         ],
+        deprecated: &[
+            "BackgroundColor",
+            "BorderColor",
+            "DragBegin",
+            "DragStopped",
+            "Draggable",
+            "Transparency",
+        ],
     },
     ClassInfo {
         name: "GuiService",
@@ -3158,6 +3748,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[
             "AutoSelectGuiEnabled",
+            "CoreGuiNavigationEnabled",
             "GuiNavigationEnabled",
             "SelectedObject",
             "TouchControlsEnabled",
@@ -3181,9 +3772,16 @@ pub static CLASSES: &[ClassInfo] = &[
             "OpenStyleEditor",
             "PurchasePromptShown",
             "SafeZoneOffsetsChanged",
+            "ScrollStateChanged",
             "ShowLeaveConfirmation",
             "SpecialKeyPressed",
             "UiMessageChanged",
+        ],
+        deprecated: &[
+            "BrowserWindowClosed",
+            "ErrorMessageChanged",
+            "IsModalDialog",
+            "IsWindows",
         ],
     },
     ClassInfo {
@@ -3192,6 +3790,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HSRDataContentProvider",
@@ -3199,6 +3798,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HandleAdornment",
@@ -3217,6 +3817,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "MouseEnter",
             "MouseLeave",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Handles",
@@ -3230,6 +3831,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "MouseEnter",
             "MouseLeave",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HandlesBase",
@@ -3237,6 +3839,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HapticEffect",
@@ -3244,6 +3847,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Looped", "Position", "Radius", "Type"],
         events: &["Ended"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HapticService",
@@ -3251,6 +3855,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HarmonyService",
@@ -3258,6 +3863,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Hat",
@@ -3265,6 +3871,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HeapProfilerService",
@@ -3272,6 +3879,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnNewData"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HeatmapQueryService",
@@ -3279,6 +3887,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HeatmapService",
@@ -3286,6 +3895,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HeightmapImporterService",
@@ -3293,6 +3903,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["ColormapHasUnknownPixels", "ProgressUpdate"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HiddenSurfaceRemovalAsset",
@@ -3300,6 +3911,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Highlight",
@@ -3315,6 +3927,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OutlineTransparency",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HingeConstraint",
@@ -3337,6 +3950,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UpperAngle",
         ],
         events: &[],
+        deprecated: &["SoftlockServoUponReachingTarget"],
     },
     ClassInfo {
         name: "Hint",
@@ -3344,6 +3958,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Hole",
@@ -3351,6 +3966,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Hopper",
@@ -3358,6 +3974,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HopperBin",
@@ -3365,6 +3982,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Active", "BinType"],
         events: &["Deselected", "Selected"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HttpRbxApiService",
@@ -3372,6 +3990,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HttpRequest",
@@ -3379,6 +3998,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HttpService",
@@ -3386,6 +4006,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Humanoid",
@@ -3407,6 +4028,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Jump",
             "JumpHeight",
             "JumpPower",
+            "LeftLeg",
             "MaxHealth",
             "MaxSlopeAngle",
             "NameDisplayDistance",
@@ -3414,8 +4036,10 @@ pub static CLASSES: &[ClassInfo] = &[
             "PlatformStand",
             "RequiresNeck",
             "RigType",
+            "RightLeg",
             "Sit",
             "TargetPoint",
+            "Torso",
             "UseJumpPower",
             "WalkSpeed",
             "WalkToPart",
@@ -3449,6 +4073,18 @@ pub static CLASSES: &[ClassInfo] = &[
             "Swimming",
             "Touched",
         ],
+        deprecated: &[
+            "AnimationPlayed",
+            "CollisionType",
+            "CustomStatusAdded",
+            "CustomStatusRemoved",
+            "LeftLeg",
+            "RightLeg",
+            "StatusAdded",
+            "StatusRemoved",
+            "Torso",
+            "maxHealth",
+        ],
     },
     ClassInfo {
         name: "HumanoidController",
@@ -3456,13 +4092,13 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HumanoidDescription",
         superclass: "Instance",
         creatable: true,
         properties: &[
-            "AccessoryBlob",
             "BackAccessory",
             "BodyTypeScale",
             "ClimbAnimation",
@@ -3505,6 +4141,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WidthScale",
         ],
         events: &["EmotesChanged", "EquippedEmotesChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "HumanoidRigDescription",
@@ -3623,6 +4260,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WaistTposeAdjustment",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "IKControl",
@@ -3642,6 +4280,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Weight",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ILegacyStudioBridge",
@@ -3649,6 +4288,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "IXPService",
@@ -3660,6 +4300,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OnCreatorLayerLoadingStatusChanged",
             "OnUserLayerLoadingStatusChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ImageButton",
@@ -3683,6 +4324,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TileSize",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ImageHandleAdornment",
@@ -3690,6 +4332,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Image", "ImageContent", "Size"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ImageLabel",
@@ -3709,6 +4352,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TileSize",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ImageScreenCaptureService",
@@ -3716,6 +4360,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ImportSession",
@@ -3723,6 +4368,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["UploadComplete", "UploadProgress"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "IncrementalPatchBuilder",
@@ -3737,18 +4383,20 @@ pub static CLASSES: &[ClassInfo] = &[
             "ZstdCompression",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InputAction",
         superclass: "Instance",
         creatable: true,
-        properties: &["Enabled", "Type"],
+        properties: &["DisplayName", "Enabled", "Type"],
         events: &[
             "InputBindingsChanged",
             "Pressed",
             "Released",
             "StateChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InputActionLabel",
@@ -3767,6 +4415,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextYAlignment",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InputBinding",
@@ -3797,6 +4446,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Vector3Scale",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InputContext",
@@ -3804,6 +4454,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Enabled", "Priority", "Sink"],
         events: &["InputActionsChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InputObject",
@@ -3817,6 +4468,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UserInputType",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InsertService",
@@ -3824,12 +4476,20 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["AllowInsertFreeModels"],
         events: &[],
+        deprecated: &["AllowInsertFreeModels"],
     },
     ClassInfo {
         name: "Instance",
         superclass: "Object",
         creatable: false,
-        properties: &["Archivable", "Capabilities", "Name", "Parent", "Sandboxed"],
+        properties: &[
+            "Archivable",
+            "Capabilities",
+            "Name",
+            "Parent",
+            "Sandboxed",
+            "archivable",
+        ],
         events: &[
             "AncestryChanged",
             "AttributeChanged",
@@ -3841,6 +4501,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "StyledPropertiesChanged",
             "childAdded",
         ],
+        deprecated: &["DataCost", "archivable", "childAdded"],
     },
     ClassInfo {
         name: "InstanceAdornment",
@@ -3848,6 +4509,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Adornee"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InstanceExtensionsService",
@@ -3855,6 +4517,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InstanceFileSyncService",
@@ -3862,13 +4525,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["StatusChanged", "SyncingCollaboratorsChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "IntConstrainedValue",
         superclass: "ValueBase",
         creatable: true,
-        properties: &["MaxValue", "MinValue", "Value"],
+        properties: &["ConstrainedValue", "MaxValue", "MinValue", "Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "IntValue",
@@ -3876,6 +4541,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
+    },
+    ClassInfo {
+        name: "IntentService",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InternalMessagingService",
@@ -3883,6 +4557,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InternalMessagingServiceVerifier",
@@ -3890,6 +4565,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "IntersectOperation",
@@ -3897,6 +4573,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "InventoryPages",
@@ -3904,6 +4581,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "JointImportData",
@@ -3911,13 +4589,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "JointInstance",
         superclass: "Instance",
         creatable: false,
-        properties: &["C0", "C1", "Enabled", "Part0", "Part1"],
+        properties: &["C0", "C1", "Enabled", "Part0", "Part1", "part1"],
         events: &[],
+        deprecated: &["part1"],
     },
     ClassInfo {
         name: "JointsService",
@@ -3925,6 +4605,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "KeyboardService",
@@ -3932,6 +4613,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Keyframe",
@@ -3939,6 +4621,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Time"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "KeyframeMarker",
@@ -3946,6 +4629,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "KeyframeSequence",
@@ -3953,6 +4637,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "KeyframeSequenceProvider",
@@ -3960,6 +4645,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LanguageService",
@@ -3967,6 +4653,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LayerCollector",
@@ -3974,6 +4661,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Enabled", "ResetOnSpawn", "ZIndexBehavior"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LegacyStudioBridge",
@@ -3981,6 +4669,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Light",
@@ -3988,6 +4677,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Brightness", "Color", "Enabled", "Shadows"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Lighting",
@@ -4002,19 +4692,21 @@ pub static CLASSES: &[ClassInfo] = &[
             "EnvironmentDiffuseScale",
             "EnvironmentSpecularScale",
             "ExposureCompensation",
-            "ExtendLightRangeTo120",
             "FogColor",
             "FogEnd",
             "FogStart",
             "GeographicLatitude",
             "GlobalShadows",
+            "LightingStyle",
             "OutdoorAmbient",
             "Outlines",
+            "PrioritizeLightingQuality",
             "ShadowColor",
             "ShadowSoftness",
             "TimeOfDay",
         ],
         events: &["LightingChanged"],
+        deprecated: &["Outlines", "ShadowColor"],
     },
     ClassInfo {
         name: "LineForce",
@@ -4028,6 +4720,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ReactionForceEnabled",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LineHandleAdornment",
@@ -4035,6 +4728,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Length", "Thickness"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LinearVelocity",
@@ -4057,6 +4751,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "VelocityConstraintMode",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LinkingService",
@@ -4064,6 +4759,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnLuaUrl"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LiveScriptingService",
@@ -4071,6 +4767,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LiveSyncService",
@@ -4078,6 +4775,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["SyncStatusChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LocalDebuggerConnection",
@@ -4085,6 +4783,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LocalScript",
@@ -4092,6 +4791,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LocalStorageService",
@@ -4099,6 +4799,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ItemWasSet", "StoreWasCleared"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LocalizationService",
@@ -4106,20 +4807,23 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["AutoTranslateWillRun"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LocalizationTable",
         superclass: "Instance",
         creatable: true,
-        properties: &["SourceLocaleId"],
+        properties: &["DevelopmentLanguage", "Root", "SourceLocaleId"],
         events: &[],
+        deprecated: &["DevelopmentLanguage", "Root"],
     },
     ClassInfo {
         name: "LodDataEntity",
         superclass: "Instance",
         creatable: false,
-        properties: &[],
+        properties: &["EntityLodEnabled"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LodDataService",
@@ -4127,6 +4831,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LogReporterService",
@@ -4134,6 +4839,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LogService",
@@ -4148,6 +4854,15 @@ pub static CLASSES: &[ClassInfo] = &[
             "ServerHttpResultOut",
             "ServerMessageOut",
         ],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "Logger",
+        superclass: "Object",
+        creatable: false,
+        properties: &[],
+        events: &["MessageOut"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LoginService",
@@ -4155,6 +4870,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["LoginFailed", "LoginSucceeded"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LuaSettings",
@@ -4162,6 +4878,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LuaSourceContainer",
@@ -4169,6 +4886,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LuaWebService",
@@ -4176,6 +4894,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LuauExpression",
@@ -4183,6 +4902,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LuauExpressionService",
@@ -4190,6 +4910,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "LuauScriptAnalyzerService",
@@ -4197,6 +4918,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MLModelDeliveryService",
@@ -4204,6 +4926,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MLService",
@@ -4211,6 +4934,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MLSession",
@@ -4218,6 +4942,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MakeupDescription",
@@ -4225,6 +4950,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["AssetId", "Instance", "MakeupType", "Order"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ManualGlue",
@@ -4232,6 +4958,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ManualSurfaceJointInstance",
@@ -4239,6 +4966,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ManualWeld",
@@ -4246,6 +4974,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MarkerCurve",
@@ -4253,6 +4982,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MarketplaceService",
@@ -4269,6 +4999,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OpenShopRequested",
             "PrepareCollectiblesPurchaseRequested",
             "PromptBulkPurchaseFinished",
+            "PromptBulkPurchaseRefreshed",
             "PromptBulkPurchaseRequested",
             "PromptBulkPurchaseRequestedV2",
             "PromptBundlePurchaseFinished",
@@ -4292,11 +5023,13 @@ pub static CLASSES: &[ClassInfo] = &[
             "PromptRobuxTransferSubscriptionUpsellRequested",
             "PromptSubscriptionPurchaseFinished",
             "PromptSubscriptionPurchaseRequested",
+            "RefreshBulkPurchaseRequested",
             "RobuxTransferCompleted",
             "ServerPurchaseVerification",
             "ThirdPartyPurchaseFinished",
             "UserSubscriptionStatusChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MatchmakingService",
@@ -4304,6 +5037,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MaterialGenerationService",
@@ -4311,6 +5045,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MaterialImportData",
@@ -4329,6 +5064,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "RoughnessVersionedAssetId",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MaterialService",
@@ -4336,6 +5072,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["MaterialFillToolEnabledChanged", "OverrideStatusChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MaterialVariant",
@@ -4350,6 +5087,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "StudsPerTile",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MemStorageConnection",
@@ -4357,6 +5095,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MemStorageService",
@@ -4364,6 +5103,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "MemoryStoreDistributedCounter",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MemoryStoreHashMap",
@@ -4371,6 +5119,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MemoryStoreHashMapPages",
@@ -4378,6 +5127,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MemoryStoreQueue",
@@ -4385,6 +5135,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MemoryStoreService",
@@ -4392,6 +5143,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MemoryStoreSortedMap",
@@ -4399,6 +5151,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MeshContentProvider",
@@ -4406,6 +5159,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MeshImportData",
@@ -4426,6 +5180,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "VersionedAssetId",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MeshPart",
@@ -4433,6 +5188,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["DoubleSided", "TextureContent", "TextureID"],
         events: &[],
+        deprecated: &["HasJointOffset", "JointOffset"],
     },
     ClassInfo {
         name: "Message",
@@ -4440,6 +5196,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Text"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MessageBusConnection",
@@ -4447,6 +5204,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MessageBusService",
@@ -4454,6 +5212,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MessagingService",
@@ -4461,6 +5220,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MetaBreakpoint",
@@ -4468,6 +5228,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MetaBreakpointContext",
@@ -4475,6 +5236,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MetaBreakpointManager",
@@ -4487,6 +5249,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "MetaBreakpointRemoved",
             "MetaBreakpointSetChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MicroProfilerService",
@@ -4494,13 +5257,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["DataChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Model",
         superclass: "PVInstance",
         creatable: true,
-        properties: &["ModelStreamingMode", "PrimaryPart", "Scale", "WorldPivot"],
+        properties: &["ModelStreamingMode", "PrimaryPart", "WorldPivot"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ModerationService",
@@ -4508,6 +5273,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ModuleScript",
@@ -4515,6 +5281,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["LinkedSource", "Source"],
         events: &[],
+        deprecated: &["LinkedSource"],
+    },
+    ClassInfo {
+        name: "MomentsService",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Motor",
@@ -4522,13 +5297,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["CurrentAngle", "DesiredAngle", "MaxVelocity"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Motor6D",
         superclass: "Motor",
         creatable: true,
-        properties: &[],
+        properties: &["Transform"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MotorFeature",
@@ -4536,6 +5313,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Mouse",
@@ -4555,6 +5333,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WheelForward",
             "keyDown",
         ],
+        deprecated: &["KeyDown", "KeyUp", "hit", "keyDown", "target"],
     },
     ClassInfo {
         name: "MouseService",
@@ -4562,6 +5341,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["MouseEnterStudioViewport", "MouseLeaveStudioViewport"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "MultipleDocumentInterfaceInstance",
@@ -4569,6 +5349,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["DataModelSessionEnded", "DataModelSessionStarted"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NegateOperation",
@@ -4576,6 +5357,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NetworkClient",
@@ -4583,6 +5365,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ConnectionAccepted", "ConnectionFailed"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NetworkMarker",
@@ -4590,6 +5373,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Received"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NetworkPeer",
@@ -4597,6 +5381,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NetworkReplicator",
@@ -4604,6 +5389,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NetworkServer",
@@ -4611,6 +5397,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NetworkSettings",
@@ -4626,6 +5413,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ShowActiveAnimationAsset",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NoCollisionConstraint",
@@ -4633,6 +5421,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Enabled", "Part0", "Part1"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Noise",
@@ -4640,6 +5429,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NonReplicatedCSGDictionaryService",
@@ -4647,6 +5437,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NotificationService",
@@ -4661,6 +5452,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "RobloxConnectionChanged",
             "RobloxEventReceived",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NumberPose",
@@ -4668,6 +5460,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "NumberValue",
@@ -4675,6 +5468,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "Object",
@@ -4682,6 +5476,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Changed"],
+        deprecated: &["className"],
     },
     ClassInfo {
         name: "ObjectValue",
@@ -4689,6 +5484,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "OmniRecommendationsService",
@@ -4696,6 +5492,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "OpenCloudApiV1",
@@ -4703,6 +5500,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "OpenCloudService",
@@ -4710,6 +5508,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "OperationGraph",
@@ -4717,6 +5516,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "OrderedDataStore",
@@ -4724,6 +5524,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "OutfitPages",
@@ -4731,6 +5532,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "OutputLink",
@@ -4738,6 +5540,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PVAdornment",
@@ -4745,13 +5548,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Adornee"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PVInstance",
         superclass: "Instance",
         creatable: false,
-        properties: &["Origin", "Pivot Offset"],
+        properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PackageLink",
@@ -4759,13 +5564,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PackageService",
         superclass: "Instance",
         creatable: false,
         properties: &[],
-        events: &[],
+        events: &["OverrideStateChanged", "OverridesCleared"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PackageUIService",
@@ -4773,6 +5580,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnConvertToPackageResult", "OnOpenConvertToPackagePlugin"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Packages",
@@ -4780,6 +5588,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Pages",
@@ -4787,6 +5596,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Pants",
@@ -4794,6 +5604,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["PantsTemplate", "PantsTemplateContent"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ParabolaAdornment",
@@ -4801,6 +5612,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Part",
@@ -4808,6 +5620,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Shape"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PartAdornment",
@@ -4815,13 +5628,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Adornee"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PartOperation",
         superclass: "TriangleMeshPart",
         creatable: true,
-        properties: &["UsePartColor"],
+        properties: &["RenderFidelity", "SmoothingAngle", "UsePartColor"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PartOperationAsset",
@@ -4829,6 +5644,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ParticleEmitter",
@@ -4852,6 +5668,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Lifetime",
             "LightEmission",
             "LightInfluence",
+            "LocalTransparencyModifier",
             "LockedToPart",
             "Orientation",
             "Rate",
@@ -4875,6 +5692,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ZOffset",
         ],
         events: &[],
+        deprecated: &["VelocitySpread"],
     },
     ClassInfo {
         name: "PartyEmulatorService",
@@ -4882,6 +5700,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ConfigurationChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PatchBundlerFileWatch",
@@ -4889,6 +5708,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PatchMapping",
@@ -4896,6 +5716,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["FlattenTree", "PatchId", "TargetPath"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Path",
@@ -4903,6 +5724,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Blocked", "Unblocked"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Path2D",
@@ -4910,6 +5732,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Closed", "Color3", "Thickness", "Visible", "ZIndex"],
         events: &["ControlPointChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Path3D",
@@ -4917,6 +5740,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["ControlPointChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PathfindingLink",
@@ -4924,6 +5748,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Attachment0", "Attachment1", "IsBidirectional", "Label"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PathfindingModifier",
@@ -4931,6 +5756,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Label", "PassThrough"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PathfindingService",
@@ -4938,6 +5764,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["EmptyCutoff"],
         events: &[],
+        deprecated: &["EmptyCutoff"],
     },
     ClassInfo {
         name: "PausedState",
@@ -4945,6 +5772,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PausedStateBreakpoint",
@@ -4952,6 +5780,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PausedStateException",
@@ -4959,6 +5788,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PerformanceControlService",
@@ -4966,6 +5796,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PermissionsService",
@@ -4973,6 +5804,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PhysicsService",
@@ -4980,6 +5812,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PhysicsSettings",
@@ -4987,13 +5820,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PinShortcutService",
         superclass: "Instance",
         creatable: false,
         properties: &[],
-        events: &[],
+        events: &["OnPinExperienceCompleted"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PitchShiftSoundEffect",
@@ -5001,6 +5836,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Octave"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlaceAssetIdsService",
@@ -5008,6 +5844,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlaceStatsService",
@@ -5015,6 +5852,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlacesService",
@@ -5022,6 +5860,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Plane",
@@ -5029,6 +5868,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlaneConstraint",
@@ -5036,6 +5876,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Platform",
@@ -5043,6 +5884,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlatformCloudStorageService",
@@ -5050,6 +5892,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlatformFriendsService",
@@ -5057,6 +5900,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlatformLibraries",
@@ -5064,6 +5908,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Player",
@@ -5085,6 +5930,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "DevTouchCameraMode",
             "DevTouchMovementMode",
             "DisplayName",
+            "FrustumStreaming",
             "HasVerifiedBadge",
             "HealthDisplayDistance",
             "NameDisplayDistance",
@@ -5111,6 +5957,14 @@ pub static CLASSES: &[ClassInfo] = &[
             "SimulationRadiusChanged",
             "StreamingPinComplete",
         ],
+        deprecated: &[
+            "AppearanceDidLoad",
+            "CharacterAppearance",
+            "DataComplexity",
+            "DataComplexityLimit",
+            "DataReady",
+            "userId",
+        ],
     },
     ClassInfo {
         name: "PlayerData",
@@ -5118,6 +5972,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerDataRecord",
@@ -5125,6 +5980,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Changed", "Flushed", "Loaded"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerDataRecordConfig",
@@ -5132,6 +5988,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerDataService",
@@ -5139,6 +5996,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["LoadFailureBehavior"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerEmulatorService",
@@ -5146,6 +6004,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerGui",
@@ -5153,6 +6012,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["ScreenOrientation", "SelectionImageObject"],
         events: &["TopbarTransparencyChangedSignal"],
+        deprecated: &["TopbarTransparencyChangedSignal"],
     },
     ClassInfo {
         name: "PlayerHydrationService",
@@ -5160,6 +6020,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerListConfiguration",
@@ -5167,6 +6028,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Open"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerMouse",
@@ -5174,6 +6036,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerScripts",
@@ -5186,6 +6049,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TouchCameraMovementModeRegistered",
             "TouchMovementModeRegistered",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PlayerViewService",
@@ -5193,17 +6057,13 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Players",
         superclass: "Instance",
         creatable: false,
-        properties: &[
-            "BanningEnabled",
-            "CharacterAutoLoads",
-            "RespawnTime",
-            "UseStrafingAnimations",
-        ],
+        properties: &["CharacterAutoLoads", "RespawnTime"],
         events: &[
             "FriendRequestEvent",
             "PlayerAdded",
@@ -5216,6 +6076,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PromptAgeCheckRequested",
             "UserSubscriptionStatusChanged",
         ],
+        deprecated: &["NumPlayers", "localPlayer", "numPlayers"],
     },
     ClassInfo {
         name: "Plugin",
@@ -5230,6 +6091,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ViewportDragEntered",
             "ViewportDragLeft",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginAction",
@@ -5237,6 +6099,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["Triggered"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginCapabilities",
@@ -5244,6 +6107,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginConnection",
@@ -5251,6 +6115,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginConnectionService",
@@ -5258,6 +6123,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Connected"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginDebugService",
@@ -5265,6 +6131,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginDragEvent",
@@ -5272,6 +6139,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginGui",
@@ -5292,6 +6160,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WindowFocusReleased",
             "WindowFocused",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginGuiService",
@@ -5299,6 +6168,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginManagementService",
@@ -5306,6 +6176,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginManager",
@@ -5313,6 +6184,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginManagerInterface",
@@ -5320,6 +6192,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginMenu",
@@ -5327,6 +6200,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Icon", "Title"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginMouse",
@@ -5334,6 +6208,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["DragEnter"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginPolicyService",
@@ -5341,6 +6216,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginToolbar",
@@ -5348,6 +6224,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PluginToolbarButton",
@@ -5355,6 +6232,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["ClickableWhenViewportHidden", "Enabled", "Icon"],
         events: &["Click", "DropdownClick"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PointLight",
@@ -5362,6 +6240,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Range"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PointsService",
@@ -5369,6 +6248,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["PointsAwarded"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PolicyService",
@@ -5376,6 +6256,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PopLatencyService",
@@ -5383,6 +6264,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Pose",
@@ -5390,6 +6272,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["CFrame", "MaskWeight"],
         events: &[],
+        deprecated: &["MaskWeight"],
     },
     ClassInfo {
         name: "PoseBase",
@@ -5397,6 +6280,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["EasingDirection", "EasingStyle", "Weight"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PostEffect",
@@ -5404,6 +6288,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Enabled"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Preloaded",
@@ -5411,6 +6296,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PrismaticConstraint",
@@ -5418,6 +6304,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ProceduralBehaviorSchedulerService",
@@ -5425,6 +6312,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ProceduralModel",
@@ -5432,6 +6320,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Generator", "Size"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ProcessInstancePhysicsService",
@@ -5439,6 +6328,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ProximityPrompt",
@@ -5471,6 +6361,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TriggerEnded",
             "Triggered",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ProximityPromptService",
@@ -5487,6 +6378,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PromptTriggerEnded",
             "PromptTriggered",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PublishService",
@@ -5494,6 +6386,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "PyramidHandleAdornment",
@@ -5501,6 +6394,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Height", "Shading", "Sides", "Size"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "QWidgetPluginGui",
@@ -5508,13 +6402,28 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "QueueService",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RTAnimationTracker",
         superclass: "Instance",
         creatable: true,
-        properties: &[],
+        properties: &[
+            "Active",
+            "EnableFallbackAudioInput",
+            "SessionName",
+            "TrackerType",
+        ],
         events: &["TrackerError", "TrackerPrompt"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RayValue",
@@ -5522,6 +6431,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "RbxAnalyticsService",
@@ -5529,13 +6439,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RealtimeMedia",
         superclass: "Instance",
         creatable: true,
         properties: &[],
-        events: &["OnMessage", "WiringChanged"],
+        events: &["AudioInputRequested", "OnMessage", "WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RecommendationPages",
@@ -5543,6 +6455,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RecommendationService",
@@ -5550,6 +6463,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadata",
@@ -5557,6 +6471,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataCallbacks",
@@ -5564,6 +6479,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataClass",
@@ -5576,6 +6492,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PreferredParent",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataClasses",
@@ -5583,6 +6500,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataEnum",
@@ -5590,6 +6508,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataEnumItem",
@@ -5597,6 +6516,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataEnums",
@@ -5604,6 +6524,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataEvents",
@@ -5611,6 +6532,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataFunctions",
@@ -5618,6 +6540,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataItem",
@@ -5642,6 +6565,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UINumTicks",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataMember",
@@ -5649,6 +6573,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataProperties",
@@ -5656,6 +6581,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionMetadataYieldFunctions",
@@ -5663,6 +6589,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReflectionService",
@@ -5670,6 +6597,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RelativeGui",
@@ -5677,6 +6605,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RemoteCommandService",
@@ -5684,6 +6613,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RemoteCursorService",
@@ -5691,6 +6621,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RemoteDebuggerServer",
@@ -5698,6 +6629,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RemoteEvent",
@@ -5705,6 +6637,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["OnClientEvent", "OnServerEvent"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RemoteFunction",
@@ -5712,6 +6645,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RenderSettings",
@@ -5719,6 +6653,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RenderingTest",
@@ -5731,7 +6666,9 @@ pub static CLASSES: &[ClassInfo] = &[
             "ComparisonPsnrThreshold",
             "Description",
             "FieldOfView",
+            "Orientation",
             "PerfTest",
+            "Position",
             "QualityAuto",
             "QualityLevel",
             "RenderingTestFrameCount",
@@ -5740,6 +6677,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Timeout",
         ],
         events: &["TestFramesCountdownAboutToStart"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReplicatedFirst",
@@ -5751,6 +6689,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "FinishedReplicating",
             "RemoveDefaultLoadingGuiSignal",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReplicatedStorage",
@@ -5758,6 +6697,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RequestOrchestratorService",
@@ -5776,6 +6716,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OperationCoalesced",
             "OperationEnqueued",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ReverbSoundEffect",
@@ -5783,6 +6724,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["DecayTime", "Density", "Diffusion", "DryLevel", "WetLevel"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RibbonNotificationService",
@@ -5795,6 +6737,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "NotificationReadFromRibbon",
             "ToggleNotificationTray",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RigidConstraint",
@@ -5802,6 +6745,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RobloxPluginGuiService",
@@ -5809,6 +6753,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RobloxReplicatedStorage",
@@ -5816,6 +6761,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RobloxSerializableInstance",
@@ -5823,6 +6769,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RobloxServerStorage",
@@ -5830,6 +6777,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RocketPropulsion",
@@ -5849,6 +6797,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TurnP",
         ],
         events: &["ReachedTarget"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RodConstraint",
@@ -5862,6 +6811,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Thickness",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RolloutValidation",
@@ -5869,6 +6819,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RolloutValidationService",
@@ -5876,6 +6827,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RomarkRbxAnalyticsService",
@@ -5883,6 +6835,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RomarkService",
@@ -5890,6 +6843,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RootImportData",
@@ -5917,12 +6871,12 @@ pub static CLASSES: &[ClassInfo] = &[
             "ScaleUnit",
             "UseSceneOriginAsPivot",
             "UsesCages",
-            "ValidateUgcBody",
             "VersionedAssetId",
             "WorldForward",
             "WorldUp",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RopeConstraint",
@@ -5939,6 +6893,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WinchTarget",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Rotate",
@@ -5946,6 +6901,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RotateP",
@@ -5953,6 +6909,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RotateV",
@@ -5960,6 +6917,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RotationCurve",
@@ -5967,6 +6925,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RtMessagingService",
@@ -5974,6 +6933,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RunService",
@@ -5992,6 +6952,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Rollback",
             "Stepped",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RunningAverageItemDouble",
@@ -5999,6 +6960,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RunningAverageItemInt",
@@ -6006,6 +6968,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RunningAverageTimeIntervalItem",
@@ -6013,6 +6976,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RuntimeContentService",
@@ -6024,6 +6988,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "RuntimeContentQuery",
             "RuntimeContentShare",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "RuntimeScriptService",
@@ -6031,6 +6996,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SafetyService",
@@ -6038,6 +7004,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ScreenshotContentReady", "ScreenshotUploaded"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SceneAnalysisService",
@@ -6045,6 +7012,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScreenGui",
@@ -6058,6 +7026,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ScreenInsets",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScreenshotCapture",
@@ -6065,6 +7034,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScreenshotHud",
@@ -6076,11 +7046,19 @@ pub static CLASSES: &[ClassInfo] = &[
             "CameraButtonPosition",
             "CloseButtonPosition",
             "CloseWhenScreenshotTaken",
+            "ExperienceNameOverlayEnabled",
             "HideCoreGuiForCaptures",
             "HidePlayerGuiForCaptures",
+            "OverlayFont",
+            "UsernameOverlayEnabled",
             "Visible",
         ],
         events: &[],
+        deprecated: &[
+            "ExperienceNameOverlayEnabled",
+            "OverlayFont",
+            "UsernameOverlayEnabled",
+        ],
     },
     ClassInfo {
         name: "Script",
@@ -6088,6 +7066,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Source"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptBuilder",
@@ -6095,6 +7074,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptChangeService",
@@ -6108,6 +7088,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ScriptFullNameChanged",
             "ScriptSourceChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptCloneWatcher",
@@ -6115,6 +7096,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptCloneWatcherHelper",
@@ -6122,6 +7104,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptCommitService",
@@ -6129,6 +7112,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptContext",
@@ -6136,6 +7120,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Error", "ErrorDetailed"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptDebugger",
@@ -6150,6 +7135,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WatchAdded",
             "WatchRemoved",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptDebuggerService",
@@ -6157,6 +7143,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Resumed"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptDocument",
@@ -6164,6 +7151,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["SelectionChanged", "ViewportChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptEditorService",
@@ -6175,6 +7163,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextDocumentDidClose",
             "TextDocumentDidOpen",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptProfilerService",
@@ -6182,6 +7171,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnNewData"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptRegistrationService",
@@ -6189,6 +7179,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptRuntime",
@@ -6196,6 +7187,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "ScriptScannerService",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScriptService",
@@ -6203,6 +7203,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ScrollingFrame",
@@ -6229,6 +7230,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "VerticalScrollBarPosition",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Seat",
@@ -6236,6 +7238,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Disabled"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Selection",
@@ -6243,13 +7246,20 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["SelectionChanged", "SelectionChangedThisFrame"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SelectionBox",
         superclass: "InstanceAdornment",
         creatable: true,
-        properties: &["LineThickness", "SurfaceColor3", "SurfaceTransparency"],
+        properties: &[
+            "LineThickness",
+            "SurfaceColor",
+            "SurfaceColor3",
+            "SurfaceTransparency",
+        ],
         events: &[],
+        deprecated: &["SurfaceColor"],
     },
     ClassInfo {
         name: "SelectionHighlightManager",
@@ -6257,6 +7267,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SelectionLasso",
@@ -6264,6 +7275,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Humanoid"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SelectionPartLasso",
@@ -6271,6 +7283,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Part"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SelectionPointLasso",
@@ -6278,13 +7291,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Point"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SelectionSphere",
         superclass: "PVAdornment",
         creatable: true,
-        properties: &["SurfaceColor3", "SurfaceTransparency"],
+        properties: &["SurfaceColor", "SurfaceColor3", "SurfaceTransparency"],
         events: &[],
+        deprecated: &["SurfaceColor"],
     },
     ClassInfo {
         name: "SelfViewConfiguration",
@@ -6292,6 +7307,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Open"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SensorBase",
@@ -6299,6 +7315,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["UpdateType"],
         events: &["OnSensorOutputChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SerializationService",
@@ -6306,6 +7323,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ServerReplicator",
@@ -6313,13 +7331,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ServerScriptService",
         superclass: "Instance",
         creatable: false,
-        properties: &["LoadStringEnabled"],
+        properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ServerStorage",
@@ -6327,6 +7347,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ServiceProvider",
@@ -6334,6 +7355,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Close", "CloseLate", "ServiceAdded", "ServiceRemoving"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ServiceVisibilityService",
@@ -6341,6 +7363,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ServiceVisibilityChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SessionCheckService",
@@ -6348,6 +7371,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SessionService",
@@ -6355,6 +7379,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["SessionChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SharedTableRegistry",
@@ -6362,6 +7387,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Shirt",
@@ -6369,6 +7395,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["ShirtTemplate", "ShirtTemplateContent"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ShirtGraphic",
@@ -6376,6 +7403,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Color3", "Graphic", "TextureContent"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SkateboardController",
@@ -6383,6 +7411,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["AxisChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SkateboardPlatform",
@@ -6396,6 +7425,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "equipped",
             "unequipped",
         ],
+        deprecated: &["equipped", "unequipped"],
     },
     ClassInfo {
         name: "Skin",
@@ -6403,6 +7433,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["SkinColor"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Sky",
@@ -6432,6 +7463,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SunTextureId",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SlidingBallConstraint",
@@ -6454,6 +7486,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Velocity",
         ],
         events: &[],
+        deprecated: &["SoftlockServoUponReachingTarget"],
     },
     ClassInfo {
         name: "SlimAnimationDataEntity",
@@ -6461,6 +7494,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SlimAnimationReplicationService",
@@ -6468,6 +7502,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SlimContentProvider",
@@ -6475,6 +7510,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SlimDebugSettings",
@@ -6482,6 +7518,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SlimReplicationService",
@@ -6489,6 +7526,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SlimService",
@@ -6496,6 +7534,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Smoke",
@@ -6504,12 +7543,14 @@ pub static CLASSES: &[ClassInfo] = &[
         properties: &[
             "Color",
             "Enabled",
+            "LocalTransparencyModifier",
             "Opacity",
             "RiseVelocity",
             "Size",
             "TimeScale",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SmoothVoxelsUpgraderService",
@@ -6517,6 +7558,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Status"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Snap",
@@ -6524,13 +7566,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
-    },
-    ClassInfo {
-        name: "SnippetService",
-        superclass: "Instance",
-        creatable: false,
-        properties: &[],
-        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SocialService",
@@ -6552,6 +7588,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ShowPromptFeedbackUnavailable",
             "ShowPromptRsvpToEvent",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SolidModelContentProvider",
@@ -6559,6 +7596,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Sound",
@@ -6566,6 +7604,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[
             "AcousticSimulationEnabled",
+            "AudioContent",
             "EmitterSize",
             "LoopRegion",
             "Looped",
@@ -6588,6 +7627,13 @@ pub static CLASSES: &[ClassInfo] = &[
         events: &[
             "DidLoop", "Ended", "Loaded", "Paused", "Played", "Resumed", "Stopped",
         ],
+        deprecated: &[
+            "EmitterSize",
+            "MaxDistance",
+            "MinDistance",
+            "Pitch",
+            "isPlaying",
+        ],
     },
     ClassInfo {
         name: "SoundEffect",
@@ -6595,6 +7641,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Enabled", "Priority"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SoundGroup",
@@ -6602,6 +7649,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Volume"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SoundService",
@@ -6620,7 +7668,6 @@ pub static CLASSES: &[ClassInfo] = &[
             "RespectFilteringEnabled",
             "ReverbEnabled",
             "RolloffScale",
-            "VolumetricAudio",
         ],
         events: &[
             "AudioInstanceAdded",
@@ -6630,6 +7677,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OpenAudioEqualizerEditorSignal",
             "OpenDirectionalCurveEditorSignal",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SoundShimService",
@@ -6637,13 +7685,21 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Sparkles",
         superclass: "Instance",
         creatable: true,
-        properties: &["Enabled", "SparkleColor", "TimeScale"],
+        properties: &[
+            "Color",
+            "Enabled",
+            "LocalTransparencyModifier",
+            "SparkleColor",
+            "TimeScale",
+        ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SpawnLocation",
@@ -6657,6 +7713,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TeamColor",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SpawnerService",
@@ -6664,6 +7721,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SpecialMesh",
@@ -6671,6 +7729,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["MeshType"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SphereHandleAdornment",
@@ -6678,6 +7737,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Radius", "Shading"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SpotLight",
@@ -6685,6 +7745,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Angle", "Face", "Range"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SpringConstraint",
@@ -6703,6 +7764,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Thickness",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StackFrame",
@@ -6710,6 +7772,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StandalonePluginScripts",
@@ -6717,6 +7780,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StandardPages",
@@ -6724,6 +7788,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "StandardQueue",
+        superclass: "Instance",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StartPageService",
@@ -6735,6 +7808,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "LocalGamesFromRegistryUpdatedSignal",
             "RecentApiGamesFromRegistryUpdatedSignal",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StarterCharacterScripts",
@@ -6742,6 +7816,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StarterGear",
@@ -6749,20 +7824,19 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StarterGui",
         superclass: "BasePlayerGui",
         creatable: false,
         properties: &[
-            "ClipsDescendantsSupportsRotation",
             "ResetPlayerGuiOnSpawn",
-            "RtlTextSupport",
             "ScreenOrientation",
             "ShowDevelopmentGui",
-            "VirtualCursorMode",
         ],
         events: &["CoreGuiChangedSignal"],
+        deprecated: &["ResetPlayerGuiOnSpawn"],
     },
     ClassInfo {
         name: "StarterPack",
@@ -6770,6 +7844,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StarterPlayer",
@@ -6787,22 +7862,20 @@ pub static CLASSES: &[ClassInfo] = &[
             "CharacterUseJumpPower",
             "CharacterWalkSpeed",
             "ClassicDeath",
-            "CreateDefaultPlayerModule",
             "DevCameraOcclusionMode",
             "DevComputerCameraMovementMode",
             "DevComputerMovementMode",
             "DevTouchCameraMovementMode",
             "DevTouchMovementMode",
-            "EnableDynamicHeads",
             "EnableMouseLockOption",
             "HealthDisplayDistance",
             "LoadCharacterAppearance",
-            "LoadCharacterLayeredClothing ",
             "LuaCharacterController",
             "NameDisplayDistance",
             "UserEmotesEnabled",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StarterPlayerScripts",
@@ -6810,6 +7883,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StartupMessageService",
@@ -6817,6 +7891,23 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "StateMachineDefinition",
+        superclass: "Instance",
+        creatable: true,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "StateMachineTransitionDefinition",
+        superclass: "Instance",
+        creatable: true,
+        properties: &["From", "Priority", "To"],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Stats",
@@ -6824,6 +7915,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &["HeartbeatTimeMs", "PhysicsStepTimeMs"],
     },
     ClassInfo {
         name: "StatsItem",
@@ -6831,6 +7923,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Status",
@@ -6838,6 +7931,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StopWatchReporter",
@@ -6845,6 +7939,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StringValue",
@@ -6852,6 +7947,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "Studio",
@@ -6859,6 +7955,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ThemeChanged"],
+        deprecated: &["UI Theme"],
     },
     ClassInfo {
         name: "StudioActionOverride",
@@ -6866,6 +7963,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Triggered"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioAssetService",
@@ -6879,6 +7977,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OnSaveToRoblox",
             "OnUGCSubmitCompleted",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioAttachment",
@@ -6892,6 +7991,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TargetAnchorPoint",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioCallout",
@@ -6899,6 +7999,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioCameraService",
@@ -6913,6 +8014,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ShowCameraSpeed",
             "UpdateUI",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioCaptureService",
@@ -6920,6 +8022,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioData",
@@ -6927,6 +8030,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioDeviceEmulatorService",
@@ -6934,13 +8038,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["CurrentDeviceIdChanged", "OrientationChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioDeviceSimulatorService",
         superclass: "Instance",
         creatable: false,
         properties: &[],
-        events: &["ConfigurationChanged", "SimulatorRegistryChanged"],
+        events: &["ConfigurationChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioObjectBase",
@@ -6948,6 +8054,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioPublishService",
@@ -6961,6 +8068,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OnPublishAttempt",
             "OnSaveOrPublishPlaceToRoblox",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioScreenshotCapture",
@@ -6968,6 +8076,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioScriptDebugEventListener",
@@ -6975,6 +8084,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioSdkService",
@@ -6982,6 +8092,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioService",
@@ -6999,6 +8110,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PromptTransformPluginCheckEnable",
             "SaveLocallyAsComplete",
         ],
+        deprecated: &["DrawConstraintsOnTop"],
     },
     ClassInfo {
         name: "StudioTestService",
@@ -7006,6 +8118,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioTheme",
@@ -7013,6 +8126,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioUserService",
@@ -7020,6 +8134,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioWidget",
@@ -7027,6 +8142,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StudioWidgetsService",
@@ -7034,6 +8150,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StyleBase",
@@ -7041,6 +8158,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["StyleRulesChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StyleDerive",
@@ -7048,6 +8166,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Priority", "StyleSheet"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StyleLink",
@@ -7055,6 +8174,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["StyleSheet"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StyleQuery",
@@ -7062,6 +8182,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StyleRule",
@@ -7069,6 +8190,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Priority", "Selector"],
         events: &["StyleRulePropertyChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StyleSheet",
@@ -7076,6 +8198,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "StylingService",
@@ -7083,6 +8206,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SunRaysEffect",
@@ -7090,6 +8214,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Intensity", "Spread"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SurfaceAppearance",
@@ -7103,6 +8228,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ResampleMode",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SurfaceGui",
@@ -7121,6 +8247,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ZOffset",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SurfaceGuiBase",
@@ -7128,6 +8255,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["Active", "Adornee", "Face"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SurfaceLight",
@@ -7135,6 +8263,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Angle", "Face", "Range"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SurfaceSelection",
@@ -7142,6 +8271,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["TargetSurface"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SwimController",
@@ -7155,6 +8285,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "RollSpeedFactor",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "SyncScriptBuilder",
@@ -7168,6 +8299,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "RawBytecode",
         ],
         events: &[],
+        deprecated: &["RawBytecode"],
     },
     ClassInfo {
         name: "SystemThemeService",
@@ -7175,6 +8307,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnLuaThemeUpdated"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TaskScheduler",
@@ -7182,6 +8315,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["ThreadPoolConfig"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Team",
@@ -7194,6 +8328,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TeamColor",
         ],
         events: &["PlayerAdded", "PlayerRemoved"],
+        deprecated: &["AutoColorCharacters", "Score"],
     },
     ClassInfo {
         name: "TeamCreateData",
@@ -7201,6 +8336,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TeamCreatePublishService",
@@ -7208,6 +8344,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["TeamCreateErrorStatus"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TeamCreateService",
@@ -7215,6 +8352,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Teams",
@@ -7222,6 +8360,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TelemetryService",
@@ -7229,6 +8368,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TeleportAsyncResult",
@@ -7236,6 +8376,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TeleportOptions",
@@ -7243,10 +8384,13 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[
             "ReservedServerAccessCode",
+            "ReservedServerId",
             "ServerInstanceId",
             "ShouldReserveServer",
+            "VipServerId",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TeleportService",
@@ -7260,6 +8404,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ReconnectTeleportInitFailed",
             "TeleportInitFailed",
         ],
+        deprecated: &["CustomizedTeleportUI"],
     },
     ClassInfo {
         name: "TemporaryCageMeshProvider",
@@ -7267,6 +8412,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TemporaryScriptService",
@@ -7274,22 +8420,21 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Terrain",
         superclass: "BasePart",
         creatable: false,
         properties: &[
-            "Decoration",
-            "GrassLength",
-            "MaterialColors",
             "WaterColor",
             "WaterReflectance",
             "WaterTransparency",
             "WaterWaveSize",
             "WaterWaveSpeed",
         ],
-        events: &[],
+        events: &["GridBackendReloadRequired"],
+        deprecated: &["IsSmooth"],
     },
     ClassInfo {
         name: "TerrainDetail",
@@ -7303,6 +8448,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "StudsPerTile",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TerrainIterateOperation",
@@ -7310,6 +8456,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Ready"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TerrainModifyOperation",
@@ -7317,6 +8464,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Ready"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TerrainReadOperation",
@@ -7324,6 +8472,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Ready"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TerrainRegion",
@@ -7331,6 +8480,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &["IsSmooth"],
     },
     ClassInfo {
         name: "TerrainWriteOperation",
@@ -7338,6 +8488,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TestCase",
@@ -7345,6 +8496,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TestService",
@@ -7363,6 +8515,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Timeout",
         ],
         events: &["ServerCollectConditionalResult", "ServerCollectResult"],
+        deprecated: &["Is30FpsThrottleEnabled"],
     },
     ClassInfo {
         name: "TextBox",
@@ -7371,6 +8524,7 @@ pub static CLASSES: &[ClassInfo] = &[
         properties: &[
             "ClearTextOnFocus",
             "CursorPosition",
+            "Font",
             "FontFace",
             "FontSize",
             "LineHeight",
@@ -7383,6 +8537,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SelectionStart",
             "ShowNativeInput",
             "Text",
+            "TextColor",
             "TextColor3",
             "TextDirection",
             "TextEditable",
@@ -7398,6 +8553,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextYAlignment",
         ],
         events: &["FocusLost", "Focused", "ReturnPressedFromOnScreenKeyboard"],
+        deprecated: &["FontSize", "TextColor", "TextWrap"],
     },
     ClassInfo {
         name: "TextBoxService",
@@ -7405,12 +8561,14 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextButton",
         superclass: "GuiButton",
         creatable: true,
         properties: &[
+            "Font",
             "FontFace",
             "FontSize",
             "LineHeight",
@@ -7418,6 +8576,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OpenTypeFeatures",
             "RichText",
             "Text",
+            "TextColor",
             "TextColor3",
             "TextDirection",
             "TextScaled",
@@ -7432,20 +8591,23 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextYAlignment",
         ],
         events: &[],
+        deprecated: &["FontSize", "TextColor", "TextWrap"],
     },
     ClassInfo {
         name: "TextChannel",
         superclass: "Instance",
         creatable: true,
-        properties: &[],
+        properties: &["AddPlayersOnJoin"],
         events: &["MessageReceived"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextChannelWindow",
         superclass: "GuiObject",
         creatable: true,
-        properties: &["Target"],
+        properties: &["FontFace", "Target", "UseDefaultFont"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextChatCommand",
@@ -7458,6 +8620,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "SecondaryAlias",
         ],
         events: &["Triggered"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextChatConfigurations",
@@ -7465,6 +8628,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextChatMessage",
@@ -7484,6 +8648,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Translation",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextChatMessageProperties",
@@ -7491,6 +8656,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["PrefixText", "Text", "Translation"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextChatService",
@@ -7511,6 +8677,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UniverseChatMessageReceived",
             "UserMessageIntentSent",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextFilterResult",
@@ -7518,6 +8685,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextFilterTranslatedResult",
@@ -7525,6 +8693,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextGenerator",
@@ -7532,12 +8701,14 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Seed", "SystemPrompt", "Temperature", "TopP"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextLabel",
         superclass: "GuiLabel",
         creatable: true,
         properties: &[
+            "Font",
             "FontFace",
             "FontSize",
             "LineHeight",
@@ -7545,6 +8716,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "OpenTypeFeatures",
             "RichText",
             "Text",
+            "TextColor",
             "TextColor3",
             "TextDirection",
             "TextScaled",
@@ -7559,6 +8731,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TextYAlignment",
         ],
         events: &[],
+        deprecated: &["FontSize", "TextColor", "TextWrap"],
     },
     ClassInfo {
         name: "TextService",
@@ -7566,6 +8739,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextSource",
@@ -7573,6 +8747,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &["CanSend"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Texture",
@@ -7585,6 +8760,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "StudsPerTileV",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextureGenerationPartGroup",
@@ -7592,6 +8768,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextureGenerationService",
@@ -7599,6 +8776,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["GenerationNotificationSignal", "PreviewNotificationSignal"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TextureGenerationUnwrappingRequest",
@@ -7606,6 +8784,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ThirdPartyUserService",
@@ -7613,6 +8792,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["ActiveUserSignedOut"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ThreadState",
@@ -7620,6 +8800,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TimerService",
@@ -7627,6 +8808,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ToastNotificationService",
@@ -7634,6 +8816,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Tool",
@@ -7643,11 +8826,16 @@ pub static CLASSES: &[ClassInfo] = &[
             "CanBeDropped",
             "Enabled",
             "Grip",
+            "GripForward",
+            "GripPos",
+            "GripRight",
+            "GripUp",
             "ManualActivationOnly",
             "RequiresHandle",
             "ToolTip",
         ],
         events: &["Activated", "Deactivated", "Equipped", "Unequipped"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Torque",
@@ -7655,6 +8843,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["RelativeTo", "Torque"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TorsionSpringConstraint",
@@ -7663,6 +8852,7 @@ pub static CLASSES: &[ClassInfo] = &[
         properties: &[
             "Coils",
             "Damping",
+            "LimitEnabled",
             "LimitsEnabled",
             "MaxAngle",
             "MaxTorque",
@@ -7671,6 +8861,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Stiffness",
         ],
         events: &[],
+        deprecated: &["LimitEnabled"],
     },
     ClassInfo {
         name: "TotalCountTimeIntervalItem",
@@ -7678,6 +8869,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TouchInputService",
@@ -7685,6 +8877,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TouchTransmitter",
@@ -7692,6 +8885,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TraceRouteService",
@@ -7699,6 +8893,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TracerService",
@@ -7706,6 +8901,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TrackerLodController",
@@ -7718,6 +8914,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "VideoMode",
         ],
         events: &["UpdateState"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TrackerStreamAnimation",
@@ -7725,6 +8922,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Trail",
@@ -7740,6 +8938,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Lifetime",
             "LightEmission",
             "LightInfluence",
+            "LocalTransparencyModifier",
             "MaxLength",
             "MinLength",
             "Texture",
@@ -7750,6 +8949,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "WidthScale",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Translator",
@@ -7757,6 +8957,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TremoloSoundEffect",
@@ -7764,13 +8965,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Depth", "Duty", "Frequency"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TriangleMeshPart",
         superclass: "BasePart",
         creatable: false,
-        properties: &[],
+        properties: &["CollisionFidelity", "FluidFidelity"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TrussPart",
@@ -7778,6 +8981,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Style"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TutorialService",
@@ -7785,6 +8989,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Tween",
@@ -7792,6 +8997,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TweenBase",
@@ -7799,6 +9005,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Completed"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "TweenService",
@@ -7806,6 +9013,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UGCAvatarService",
@@ -7813,6 +9021,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UGCValidationService",
@@ -7820,6 +9029,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIAspectRatioConstraint",
@@ -7827,6 +9037,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["AspectRatio", "AspectType", "DominantAxis"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIBase",
@@ -7834,6 +9045,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIComponent",
@@ -7841,6 +9053,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIConstraint",
@@ -7848,6 +9061,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UICorner",
@@ -7861,6 +9075,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TopRightRadius",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIDragDetector",
@@ -7891,6 +9106,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UIDragSpeedAxisMapping",
         ],
         events: &["DragContinue", "DragEnd", "DragStart"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIDragDetectorService",
@@ -7898,6 +9114,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIFlexItem",
@@ -7905,6 +9122,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["FlexMode", "GrowRatio", "ItemLineAlignment", "ShrinkRatio"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIGradient",
@@ -7921,6 +9139,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Type",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIGridLayout",
@@ -7933,6 +9152,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "StartCorner",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIGridStyleLayout",
@@ -7945,6 +9165,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "VerticalAlignment",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UILayout",
@@ -7952,6 +9173,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIListLayout",
@@ -7965,6 +9187,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Wraps",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIPadding",
@@ -7972,6 +9195,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["PaddingBottom", "PaddingLeft", "PaddingRight", "PaddingTop"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIPageLayout",
@@ -7989,6 +9213,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TweenTime",
         ],
         events: &["PageEnter", "PageLeave", "Stopped"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIScale",
@@ -7996,6 +9221,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Scale"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIShadow",
@@ -8005,13 +9231,16 @@ pub static CLASSES: &[ClassInfo] = &[
             "BlurRadius",
             "Color",
             "Enabled",
+            "Inset",
             "Mode",
             "Offset",
+            "ShowBehindParent",
             "Spread",
             "Transparency",
             "ZIndex",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UISizeConstraint",
@@ -8019,6 +9248,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["MaxSize", "MinSize"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UIStroke",
@@ -8037,6 +9267,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "ZIndex",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UITableLayout",
@@ -8049,6 +9280,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "Padding",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UITextSizeConstraint",
@@ -8056,6 +9288,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["MaxTextSize", "MinTextSize"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UnionOperation",
@@ -8063,6 +9296,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UniqueIdLookupService",
@@ -8070,6 +9304,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UniversalConstraint",
@@ -8077,6 +9312,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["LimitsEnabled", "MaxAngle", "Radius", "Restitution"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UnreliableRemoteEvent",
@@ -8084,6 +9320,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["OnClientEvent", "OnServerEvent"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UnvalidatedAssetService",
@@ -8091,6 +9328,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UserGameSettings",
@@ -8114,6 +9352,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "PerformanceStatsVisibleChanged",
             "StudioModeChanged",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UserInputService",
@@ -8157,6 +9396,12 @@ pub static CLASSES: &[ClassInfo] = &[
             "WindowFocusReleased",
             "WindowFocused",
         ],
+        deprecated: &[
+            "LegacyInputEventsEnabled",
+            "ModalEnabled",
+            "UserCFrameChanged",
+            "UserHeadCFrame",
+        ],
     },
     ClassInfo {
         name: "UserService",
@@ -8164,6 +9409,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UserSettings",
@@ -8171,6 +9417,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "UserStorageService",
@@ -8178,6 +9425,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VRService",
@@ -8198,6 +9446,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "UserCFrameChanged",
             "UserCFrameEnabled",
         ],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VRStatusService",
@@ -8205,6 +9454,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ValueBase",
@@ -8212,6 +9462,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ValueCurve",
@@ -8219,6 +9470,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Vector3Curve",
@@ -8226,6 +9478,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Vector3Value",
@@ -8233,6 +9486,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Value"],
         events: &["Changed", "changed"],
+        deprecated: &["changed"],
     },
     ClassInfo {
         name: "VectorForce",
@@ -8240,6 +9494,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["ApplyAtCenterOfMass", "Force", "RelativeTo"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VehicleController",
@@ -8247,6 +9502,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VehicleSeat",
@@ -8264,6 +9520,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TurnSpeed",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VelocityMotor",
@@ -8271,6 +9528,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["CurrentAngle", "DesiredAngle", "Hole", "MaxVelocity"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VersionControlService",
@@ -8278,6 +9536,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoCapture",
@@ -8285,6 +9544,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoCaptureService",
@@ -8292,6 +9552,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["DevicesChanged", "Error", "Started", "Stopped"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoDeviceInput",
@@ -8299,6 +9560,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Active", "CameraId", "CaptureQuality"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoDisplay",
@@ -8314,13 +9576,16 @@ pub static CLASSES: &[ClassInfo] = &[
             "VideoTransparency",
         ],
         events: &["WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoFrame",
         superclass: "GuiObject",
         creatable: true,
         properties: &[
+            "InternalVideoUsage",
             "Looped",
+            "MaximumResolution",
             "Playing",
             "RollOffMaxDistance",
             "RollOffMinDistance",
@@ -8331,19 +9596,23 @@ pub static CLASSES: &[ClassInfo] = &[
             "Volume",
         ],
         events: &["DidLoop", "Ended", "Loaded", "Paused", "Played"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoPlayer",
         superclass: "Instance",
         creatable: true,
         properties: &[
+            "InternalVideoUsage",
             "Looping",
+            "MaximumResolution",
             "PlaybackSpeed",
             "TimePosition",
             "VideoContent",
             "Volume",
         ],
         events: &["DidEnd", "DidLoop", "PlayFailed", "WiringChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoSampler",
@@ -8351,6 +9620,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoScreenCaptureService",
@@ -8358,6 +9628,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VideoService",
@@ -8365,6 +9636,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["GameStreamingResolutionReady"],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "ViewportCamera",
+        superclass: "Camera",
+        creatable: true,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "ViewportFrame",
@@ -8379,6 +9659,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "LightDirection",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VirtualInput",
@@ -8386,6 +9667,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VirtualInputManager",
@@ -8393,6 +9675,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &["PlaybackCompleted", "RecordingCompleted"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VirtualUser",
@@ -8400,6 +9683,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VisibilityCheckDispatcher",
@@ -8407,6 +9691,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Visit",
@@ -8414,6 +9699,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VisualizationMode",
@@ -8421,6 +9707,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VisualizationModeCategory",
@@ -8428,6 +9715,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VisualizationModeService",
@@ -8435,6 +9723,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VoiceChatInternal",
@@ -8448,6 +9737,12 @@ pub static CLASSES: &[ClassInfo] = &[
             "StateChanged",
             "TempSetMicMutedToggleMic",
         ],
+        deprecated: &[
+            "ParticipantsStateChanged",
+            "PlayerMicActivitySignalChange",
+            "StateChanged",
+            "VoiceChatState",
+        ],
     },
     ClassInfo {
         name: "VoiceChatService",
@@ -8455,6 +9750,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["VoiceChatStatsCollected"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "VoxelBuffer",
@@ -8462,6 +9758,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WebSocketClient",
@@ -8469,6 +9766,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Closed", "MessageReceived", "Opened"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WebSocketService",
@@ -8476,6 +9774,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WebStreamClient",
@@ -8483,6 +9782,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["Closed", "Error", "MessageReceived", "Opened"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WebViewService",
@@ -8490,6 +9790,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnJavaScriptCall", "OnWindowClosed"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WedgePart",
@@ -8497,6 +9798,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Weld",
@@ -8504,6 +9806,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WeldConstraint",
@@ -8511,6 +9814,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Enabled", "Part0", "Part1"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WindowProtocolService",
@@ -8518,6 +9822,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &["OnWindowStateChanged"],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Wire",
@@ -8530,6 +9835,7 @@ pub static CLASSES: &[ClassInfo] = &[
             "TargetName",
         ],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WireframeHandleAdornment",
@@ -8537,6 +9843,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["Scale", "Thickness"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "Workspace",
@@ -8546,46 +9853,17 @@ pub static CLASSES: &[ClassInfo] = &[
             "AirDensity",
             "AirTurbulenceIntensity",
             "AllowThirdPartySales",
-            "AvatarUnificationMode",
             "ClientAnimatorThrottling",
             "CurrentCamera",
             "DistributedGameTime",
-            "EnableSLIMAvatars",
-            "FluidForces",
             "GlobalWind",
             "Gravity",
-            "IKControlConstraintSupport",
-            "ImprovedAnimationConstraint",
-            "ImprovedPhysicsReplication",
             "InsertPoint",
-            "LayeredClothingCacheOptimizations",
-            "MeshPartHeadsAndAccessories",
-            "MeshStreamingAndImprovedLods",
-            "ModelStreamingBehavior",
-            "NextGenerationReplication",
-            "PathfindingUseImprovedSearch",
-            "PhysicsSteppingMethod",
-            "PlayerCharacterDestroyBehavior",
-            "PlayerScriptsUseInputActionSystem",
-            "PredictiveStreamingMode",
-            "PrimalPhysicsSolver",
-            "RejectCharacterDeletions",
-            "RenderingCacheOptimizations",
-            "ReplicateInstanceDestroySetting",
             "Retargeting",
-            "SandboxedInstanceMode",
-            "SignalBehavior",
-            "StreamOutBehavior",
-            "StreamingIntegrityMode",
-            "StreamingMinRadius",
-            "StreamingTargetRadius",
-            "TouchEventsUseCollisionGroups",
-            "TouchesUseCollisionGroups",
-            "UseFixedSimulation",
-            "UseNewLuauTypeSolver",
-            "ValidateEnabledProximityPrompt",
+            "StreamingAdaptiveRadius",
         ],
         events: &["PersistentLoaded"],
+        deprecated: &["FilteringEnabled", "InterpolationThrottling"],
     },
     ClassInfo {
         name: "WorkspaceAnnotation",
@@ -8593,13 +9871,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WorldModel",
         superclass: "WorldRoot",
         creatable: true,
-        properties: &[],
+        properties: &["UseWorkspaceCollisionGroups"],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WorldRoot",
@@ -8607,6 +9887,15 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
+    },
+    ClassInfo {
+        name: "WrapContentProvider",
+        superclass: "CacheableContentProvider",
+        creatable: false,
+        properties: &[],
+        events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WrapDeformMeshProvider",
@@ -8614,6 +9903,7 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: false,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WrapDeformer",
@@ -8621,27 +9911,23 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &[],
         events: &[],
+        deprecated: &[],
     },
     ClassInfo {
         name: "WrapLayer",
         superclass: "BaseWrap",
         creatable: true,
-        properties: &[
-            "AutoSkin",
-            "Color",
-            "DebugMode",
-            "Enabled",
-            "Order",
-            "Puffiness",
-        ],
+        properties: &["AutoSkin", "Enabled", "Order", "Puffiness"],
         events: &[],
+        deprecated: &["Puffiness", "ShrinkFactor"],
     },
     ClassInfo {
         name: "WrapTarget",
         superclass: "BaseWrap",
         creatable: true,
-        properties: &["Color", "DebugMode"],
+        properties: &[],
         events: &[],
+        deprecated: &["Stiffness"],
     },
     ClassInfo {
         name: "WrapTextureTransfer",
@@ -8649,12 +9935,13 @@ pub static CLASSES: &[ClassInfo] = &[
         creatable: true,
         properties: &["ReferenceCageMeshContent", "UVMaxBound", "UVMinBound"],
         events: &[],
+        deprecated: &[],
     },
 ];
 
 /// Member names Roblox marks deprecated, sorted.
 ///
-/// Roblox keeps old spellings alongside modern ones — `brickColor` beside
+/// Roblox keeps old spellings alongside modern ones: `brickColor` beside
 /// `BrickColor`, `childAdded` beside `ChildAdded`. Those pairs differ only by
 /// case, so any casing normalisation merges them, and this list is what breaks
 /// the tie (see docs/adr/0001-casing-key.md).
@@ -8717,6 +10004,7 @@ pub static DEPRECATED: &[&str] = &[
     "InterpolationThrottling",
     "Is30FpsThrottleEnabled",
     "IsModalDialog",
+    "IsPioneerBuild",
     "IsSmooth",
     "IsWindows",
     "ItemAdded",
@@ -8748,6 +10036,7 @@ pub static DEPRECATED: &[&str] = &[
     "Part1",
     "ParticipantsStateChanged",
     "PhysicsStepTimeMs",
+    "PioneerSource",
     "Pitch",
     "PlayerMicActivitySignalChange",
     "Puffiness",
@@ -8782,6 +10071,7 @@ pub static DEPRECATED: &[&str] = &[
     "TopSurfaceInput",
     "TopbarTransparencyChangedSignal",
     "Torso",
+    "Transparency",
     "UI Theme",
     "UserCFrameChanged",
     "UserHeadCFrame",

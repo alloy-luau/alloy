@@ -128,7 +128,7 @@ impl<'a> Parser<'a> {
 
         if self.at(">") {
             self.pos += 1;
-            let children = self.parse_children()?;
+            let children = self.parse_children(start, "")?;
             self.expect("</", "closing `</>` for fragment")?;
             self.skip_whitespace();
             self.expect(">", "`>` to close fragment")?;
@@ -153,7 +153,7 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(">", "`>` or `/>`")?;
-        let children = self.parse_children()?;
+        let children = self.parse_children(start, &name.as_written())?;
 
         let closing = self.pos;
         self.expect("</", "closing tag")?;
@@ -386,12 +386,15 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_children(&mut self) -> Result<Vec<Child>, ParseError> {
+    /// Reads the children of the tag `name` that opens at `open`. The end
+    /// of the file is far from the mistake, so an unclosed tag reports at
+    /// the tag itself.
+    fn parse_children(&mut self, open: usize, name: &str) -> Result<Vec<Child>, ParseError> {
         let mut children = Vec::new();
 
         loop {
             if self.byte().is_none() {
-                return self.err("unclosed element");
+                return self.error_at(format!("<{name}> has no closing </{name}>"), open);
             }
 
             if self.at("<!--") {
@@ -853,6 +856,17 @@ mod tests {
     fn reports_unclosed_element() {
         assert!(parse_node("<Frame>", 0).is_err());
         assert!(parse_node("<Frame", 0).is_err());
+    }
+
+    /// The end of the file is far from the mistake. The report sits on
+    /// the tag no one closed, and names it.
+    #[test]
+    fn an_unclosed_tag_reports_at_the_tag() {
+        let src = "<Frame>\n  <TextLabel Text=\"a\" />\n  <UIPadding>\n\nreturn x\n";
+        let error = parse_node(src, 0).expect_err("should fail");
+
+        assert_eq!(error.offset, src.find("<UIPadding").unwrap());
+        assert!(error.message.contains("<UIPadding>"), "{}", error.message);
     }
 
     #[test]

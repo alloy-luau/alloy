@@ -415,14 +415,6 @@ pub fn compile_file(
 
     if let Some(layer) = layer {
         if let Some(map) = layer.map {
-            // The built-once warning is about the author's markup. A
-            // child an ingot wrapped in a call is built once by design,
-            // and the author has no text there to change.
-            out.diagnostics.retain(|d| {
-                !(map.is_generated(d.start)
-                    && d.message.starts_with("markup: this child is built once"))
-            });
-
             // Everything the compile placed sits in the transformed text;
             // the author reads positions in their own.
             for d in &mut out.diagnostics {
@@ -431,7 +423,8 @@ pub fn compile_file(
             }
 
             // A lint is about the author's code: one inside the text an
-            // ingot wrote has no line to point at.
+            // ingot wrote has no line to point at. This covers the
+            // built-once markup lint on a child an ingot wrapped.
             out.lints.retain(|l| !map.is_generated(l.start));
 
             // A fix over transformed bytes cannot apply to the

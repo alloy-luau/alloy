@@ -1099,13 +1099,23 @@ impl Config {
     }
 
     /// Every lint level that names no lint: the `[lint.rules]` keys and
-    /// the deprecated lists. An ingot's `<ingot>/<lint>` stands, since
-    /// the ingot registers it after this file is read.
+    /// the deprecated lists. An ingot's `<ingot>/<lint>` and its name
+    /// stand, since the ingot registers them after this file is read.
+    /// An `[ingot.<name>]` table for an ingot `[ingots]` lacks reports too.
     pub fn unknown_rules(&self) -> Vec<String> {
         crate::lint::unknown_names(&self.lint)
             .iter()
-            .filter(|name| !name.contains('/'))
+            // An ingot's name is the group of its lints.
+            .filter(|name| !name.contains('/') && !self.ingots.contains_key(*name))
             .map(|name| unknown_rule_message(name))
+            .chain(
+                self.ingot
+                    .keys()
+                    .filter(|name| !self.ingots.contains_key(*name))
+                    .map(|name| {
+                        format!("`[ingot.{name}]` sets options, and `[ingots]` names no `{name}`")
+                    }),
+            )
             .collect()
     }
 
@@ -1286,6 +1296,17 @@ mod tests {
             known.unknown_rules().is_empty(),
             "{:?}",
             known.unknown_rules()
+        );
+
+        // An ingot's name is a group. An options table for an ingot
+        // `[ingots]` does not name is a typo.
+        let ingots = parse(
+            "[ingots]\nsilk = \"ingots/silk\"\n\n[ingot.slik]\nx = 1\n\n[lint.rules]\nsilk = \"allow\"\n",
+        );
+
+        assert_eq!(
+            ingots.unknown_rules(),
+            vec!["`[ingot.slik]` sets options, and `[ingots]` names no `slik`"]
         );
     }
 

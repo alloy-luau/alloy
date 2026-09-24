@@ -264,3 +264,262 @@ fn a_missing_release_ingot_names_the_install_command() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A scriptable ingot for the host's failure paths: it answers each
+/// hook from its options, can crash or print on stdout, and its hover
+/// names the ingots its init listed.
+#[cfg(unix)]
+const PROBE: &str = r#"#!/usr/bin/env python3
+import sys, json, struct
+inp, out = sys.stdin.buffer, sys.stdout.buffer
+init = {}
+def wr(v):
+    b = json.dumps(v).encode()
+    out.write(struct.pack("<I", len(b)) + b)
+    out.flush()
+while True:
+    h = inp.read(4)
+    if len(h) < 4:
+        break
+    r = json.loads(inp.read(struct.unpack("<I", h)[0]))
+    op, o = r["op"], init.get("options", {})
+    if op == "init":
+        init = r
+        wr({"ok": True})
+    elif op == o.get("crash_on") and "crash" in r["source"]:
+        sys.exit(3)
+    elif op == o.get("print_on"):
+        out.write(b"debug: a line\n")
+        out.flush()
+    elif op == "transform":
+        wr({"ok": True, "edits": json.loads(o["edits"])})
+    elif op == "lint":
+        wr({"ok": True, "findings": json.loads(o["findings"])})
+    elif op == "hover":
+        wr({"ok": True, "hover": {"contents": json.dumps(init["ingots"])}})
+    elif op == "complete":
+        wr({"ok": True, "items": [], "merge": True, "class": "TextLabel"})
+    else:
+        wr({"ok": True})
+"#;
+
+/// Writes the probe ingot `name` and loads it with `[ingots]` and
+/// `[ingot.<name>]` lines of its own.
+#[cfg(unix)]
+fn probe(name: &str, source: &str, options: &str) -> Ingots {
+    let dir = probe_dir(name);
+    let text = format!(
+        "[ingots]\n{name} = {}\n\n[ingot.{name}]\n{options}\n",
+        source.replace("DIR", &format!("{:?}", dir.display().to_string()))
+    );
+    let config = Config::parse(&text, Path::new("alloy.toml")).unwrap();
+
+    Ingots::load(&std::env::temp_dir(), &config)
+}
+
+/// The folder of the probe ingot `name`, written fresh.
+#[cfg(unix)]
+fn probe_dir(name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("alloy-probe-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("probe.py"), PROBE).unwrap();
+    std::fs::set_permissions(dir.join("probe.py"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.join("ingot.toml"),
+        format!(
+            "name = \"{name}\"\napi = 1\nbinary = \"probe.py\"\nhooks = [\"transform\", \"lint\", \"hover\", \"complete\"]\n\n[options]\nedits = \"[]\"\nfindings = \"[]\"\ncrash_on = \"\"\nprint_on = \"\"\n\n[lints.probe_lint]\ndefault = \"warn\"\nsummary = \"a probe lint\"\n"
+        ),
+    )
+    .unwrap();
+
+    dir
+}
+
+/// An ingot's offsets may fall inside a character. The reports move to
+/// the character's start; they panicked the CLI and the editor.
+#[cfg(unix)]
+#[test]
+fn a_span_inside_a_character_does_not_panic() {
+    let src = "local t = \"\u{e9}\"\nprint(t)\n";
+    let inside = src.find('\u{e9}').unwrap() + 1;
+    let ingots = probe(
+        "splitter",
+        "DIR",
+        &format!(
+            "edits = '[[{inside}, {inside}, \"x\"]]'\nfindings = '[{{\"lint\": \"probe_lint\", \"span\": [{inside}, {}]}}]'",
+            inside + 1
+        ),
+    );
+    assert!(ingots.problems.is_empty(), "{:?}", ingots.problems);
+    let out = alloy::compile_file("a.aly", src, &Default::default(), None, Some(&ingots)).unwrap();
+
+    for (start, end) in out
+        .diagnostics
+        .iter()
+        .map(|d| (d.start, d.end))
+        .chain(out.lints.iter().map(|l| (l.start, l.end)))
+    {
+        assert!(src.is_char_boundary(start as usize), "{start}");
+        assert!(src.is_char_boundary(end as usize), "{end}");
+    }
+
+    assert!(out.lints.iter().any(|l| l.name == "splitter/probe_lint"));
+    assert!(!out.diagnostics.is_empty(), "the edit is refused");
+}
+
+/// `lints = { name = false }` silences the lint wherever a level is
+/// read, and `--@alloy-ignore` silences an ingot's lint on its line.
+#[cfg(unix)]
+#[test]
+fn an_ingot_lint_meets_the_switches_and_the_directives() {
+    let ingots = probe(
+        "quiet",
+        "{ path = DIR, lints = { probe_lint = false } }",
+        "",
+    );
+    assert!(ingots.problems.is_empty(), "{:?}", ingots.problems);
+    assert_eq!(
+        alloy::lint::level_of(&Default::default(), "quiet/probe_lint"),
+        alloy::lint::Level::Allow
+    );
+
+    let src = "local a = 1\n--@alloy-ignore\nlocal b = 2\nprint(a, b)\n";
+    let ignored = src.find("local b").unwrap();
+    let ingots = probe(
+        "ignored",
+        "DIR",
+        &format!(
+            "findings = '[{{\"lint\": \"probe_lint\", \"span\": [0, 5]}}, {{\"lint\": \"probe_lint\", \"span\": [{ignored}, {}]}}]'",
+            ignored + 5
+        ),
+    );
+    let out = alloy::compile_file("a.aly", src, &Default::default(), None, Some(&ingots)).unwrap();
+    let starts: Vec<u32> = out
+        .lints
+        .iter()
+        .filter(|l| l.name == "ignored/probe_lint")
+        .map(|l| l.start)
+        .collect();
+
+    assert_eq!(starts, vec![0], "{:?}", out.lints);
+
+    // A switch the manifest does not declare is a typo.
+    let typo = probe("typo", "{ path = DIR, lints = { nope = false } }", "");
+    assert!(
+        typo.problems[0].message.contains("`nope`"),
+        "{:?}",
+        typo.problems
+    );
+}
+
+/// A crash costs the file it happened on: the next request starts the
+/// ingot again. The report names the exit status, and text on stdout
+/// reads as that at once, not as a 20 second wait.
+#[cfg(unix)]
+#[test]
+fn a_crashed_ingot_restarts_and_says_why() {
+    let ingots = probe("crasher", "DIR", "crash_on = \"transform\"");
+    let options = Default::default();
+    let crashed = alloy::compile_file("a.aly", "local crash = 1\n", &options, None, Some(&ingots));
+    let crashed = crashed.unwrap();
+
+    assert_eq!(crashed.diagnostics.len(), 1, "{:?}", crashed.diagnostics);
+    assert!(
+        crashed.diagnostics[0].message.contains("exit status: 3"),
+        "{:?}",
+        crashed.diagnostics
+    );
+
+    let next =
+        alloy::compile_file("b.aly", "local b = 1\n", &options, None, Some(&ingots)).unwrap();
+    assert!(next.diagnostics.is_empty(), "{:?}", next.diagnostics);
+
+    let printer = probe("printer", "DIR", "print_on = \"transform\"");
+    let started = std::time::Instant::now();
+    let out =
+        alloy::compile_file("a.aly", "local a = 1\n", &options, None, Some(&printer)).unwrap();
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert!(
+        out.diagnostics[0].message.contains("stdout"),
+        "{:?}",
+        out.diagnostics
+    );
+}
+
+/// A completion reply with no items still asks for the host's list,
+/// completed as the class it names.
+#[cfg(unix)]
+#[test]
+fn an_empty_completion_still_asks_for_the_host_list() {
+    let ingots = probe("completer", "DIR", "");
+    let completed = ingots.complete("a.alx", "local e = <card />\n", 15, None);
+
+    assert!(completed.items.is_empty());
+    assert!(completed.merge);
+    assert_eq!(completed.class.as_deref(), Some("TextLabel"));
+}
+
+/// Init names the ingots that loaded, not every key of `[ingots]`.
+#[cfg(unix)]
+#[test]
+fn init_names_only_the_ingots_that_loaded() {
+    let ingots = probe("lister", "DIR\nmissing = \"nowhere\"", "");
+
+    assert_eq!(ingots.problems.len(), 1, "{:?}", ingots.problems);
+
+    let hover = ingots.hover("a.aly", "local a = 1\n", 0).expect("a hover");
+    assert_eq!(hover["contents"], "[\"lister\"]");
+}
+
+/// `alloy ingot run` reads the nearest project: its options and root
+/// reach the ingot. A refused edit fails the run.
+#[cfg(unix)]
+#[test]
+fn ingot_run_reads_the_project() {
+    let ingot = probe_dir("runner");
+    let root = std::env::temp_dir().join(format!("alloy-ingot-run-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.aly"), "local a = 1\nprint(a)\n").unwrap();
+    let run = |edits: &str| {
+        std::fs::write(
+            root.join("alloy.toml"),
+            format!(
+                "[ingots]\nrunner = {:?}\n\n[ingot.runner]\nedits = '{edits}'\n",
+                ingot.display().to_string()
+            ),
+        )
+        .unwrap();
+
+        std::process::Command::new(env!("CARGO_BIN_EXE_alloy"))
+            .args(["ingot", "run", &ingot.display().to_string(), "src/main.aly"])
+            .current_dir(&root)
+            .output()
+            .expect("alloy runs")
+    };
+
+    let out = run("[[6, 7, \"b\"]]");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "local b = 1\nprint(a)\n"
+    );
+
+    let out = run("[[0, 0, \"\\n\"]]");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("main.aly:1:1"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

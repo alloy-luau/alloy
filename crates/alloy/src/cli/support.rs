@@ -179,6 +179,22 @@ fn search_dir(args: &[String], cwd: &Path) -> PathBuf {
 /// `alloy.toml` above the named path, else the one above the working
 /// directory, else the defaults in the working directory.
 pub(crate) fn project(args: &[String]) -> Result<(PathBuf, Config), String> {
+    let (root, config) = find_project(args)?;
+
+    for line in config
+        .deprecations()
+        .into_iter()
+        .chain(config.unknown_rules())
+    {
+        eprintln!("{}", Painter::for_stderr().warn(&line));
+    }
+
+    Ok((root, config))
+}
+
+/// [`project`] without the warnings, for a caller that reads the config
+/// again while a watch runs.
+pub(crate) fn find_project(args: &[String]) -> Result<(PathBuf, Config), String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let dir = search_dir(args, &cwd);
 
@@ -206,14 +222,6 @@ pub(crate) fn project(args: &[String]) -> Result<(PathBuf, Config), String> {
                     config.build.input.display(),
                     root.display()
                 ));
-            }
-
-            for line in config
-                .deprecations()
-                .into_iter()
-                .chain(config.unknown_rules())
-            {
-                eprintln!("{}", Painter::for_stderr().warn(&line));
             }
 
             Ok((root, config))

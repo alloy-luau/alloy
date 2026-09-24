@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use alloy::config::{self, Config};
 
 use crate::cli::support::{
-    apply_build_options, compile_file, is_source, line_col, option, positionals, print_diagnostics,
-    project,
+    apply_build_options, compile_file, find_project, is_source, line_col, option, positionals,
+    print_diagnostics, project,
 };
 use crate::ui::{self, Level, Painter};
 use crate::{fail, usage};
@@ -19,7 +19,7 @@ pub(crate) fn build(args: &[String]) -> ExitCode {
     match positional.first() {
         Some(file) if is_source(file) => {
             if watch {
-                watch_loop(&[PathBuf::from(file)], || build_one(file, args))
+                watch_loop(|| vec![PathBuf::from(file)], || build_one(file, args))
             } else {
                 build_one(file, args)
             }
@@ -30,21 +30,28 @@ pub(crate) fn build(args: &[String]) -> ExitCode {
             usage()
         }
 
-        None if watch => {
-            let roots = match project(args) {
-                Ok((root, config)) => watch_roots(&root, &config),
-
-                Err(e) => {
-                    fail(&e);
-                    return ExitCode::FAILURE;
-                }
-            };
-
-            watch_loop(&roots, || build_project(args))
-        }
+        None if watch => watch_project(args, || build_project(args)),
 
         None => build_project(args),
     }
+}
+
+/// Watches the project of `args`. The roots are read again after each
+/// change, so a new `[build] in` or a new ingot is followed.
+pub(crate) fn watch_project(args: &[String], run: impl Fn() -> ExitCode) -> ExitCode {
+    if let Err(e) = project(args) {
+        fail(&e);
+
+        return ExitCode::FAILURE;
+    }
+
+    let roots = || {
+        find_project(args)
+            .map(|(root, config)| watch_roots(&root, &config))
+            .unwrap_or_default()
+    };
+
+    watch_loop(roots, run)
 }
 
 /// What watch mode polls: the sources, `alloy.toml`, the project file,
@@ -63,6 +70,29 @@ pub(crate) fn watch_roots(root: &Path, config: &Config) -> Vec<PathBuf> {
 
     if let Some(project) = &tree.project {
         roots.push(root.join(&project.file));
+    }
+
+    // An ingot's manifest and binary. A cargo build writes the binary
+    // under `target`, which the folder walk skips, so each place the
+    // host looks is a root of its own.
+    for (name, source) in &config.ingots {
+        let table = source.table();
+        let dir = match &table.path {
+            Some(p) => root.join(p),
+
+            None => match alloy::ingot::fetch::resolve(root, name, &table) {
+                Ok(dir) => dir,
+
+                Err(_) => continue,
+            },
+        };
+        let manifest = dir.join(alloy::ingot::manifest::FILE_NAME);
+
+        if let Ok(m) = alloy::ingot::Manifest::load(&manifest) {
+            roots.extend(alloy::ingot::binary_places(&dir, &m.binary_name()));
+        }
+
+        roots.push(manifest);
     }
 
     let out = root.join(&config.build.out);
@@ -132,24 +162,41 @@ fn tree_stamp(roots: &[PathBuf]) -> (usize, Option<std::time::SystemTime>) {
 
 /// Runs `build` now and again after every change under the roots,
 /// polled four times a second, until ctrl-c.
-pub(crate) fn watch_loop(roots: &[PathBuf], build: impl Fn() -> ExitCode) -> ExitCode {
+pub(crate) fn watch_loop(
+    roots: impl Fn() -> Vec<PathBuf>,
+    build: impl Fn() -> ExitCode,
+) -> ExitCode {
     let p = Painter::for_stderr();
-    let shown: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
-    let mut stamp = tree_stamp(roots);
+    let announce = |roots: &[PathBuf]| {
+        let shown: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+        eprintln!(
+            "{}",
+            p.note(&format!("watching {} (ctrl-c to stop)", shown.join(", ")))
+        );
+    };
+    let mut current = roots();
+    let mut stamp = tree_stamp(&current);
     build();
-    eprintln!(
-        "{}",
-        p.note(&format!("watching {} (ctrl-c to stop)", shown.join(", ")))
-    );
+    announce(&current);
 
     loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
-        let now = tree_stamp(roots);
+        let now = tree_stamp(&current);
 
         if now != stamp {
             // A save often lands as two writes; the second one settles.
             std::thread::sleep(std::time::Duration::from_millis(60));
-            stamp = tree_stamp(roots);
+
+            // The change may be to the config. A config that does not
+            // load keeps the roots it had.
+            let next = roots();
+
+            if !next.is_empty() && next != current {
+                current = next;
+                announce(&current);
+            }
+
+            stamp = tree_stamp(&current);
             eprintln!();
             build();
         }
@@ -335,6 +382,28 @@ mod tests {
         .expect("the file");
         let roots = watch_roots(&dir, &config);
         assert!(!roots.contains(&dir.join("build/alloy.luau")));
+
+        // An ingot's manifest and every place its binary may be. The
+        // folder walk skips `target`, where cargo writes the binary.
+        std::fs::create_dir_all(dir.join("ingots/pc")).expect("the folder");
+        std::fs::write(
+            dir.join("ingots/pc/ingot.toml"),
+            "name = \"pc\"\napi = 1\nhooks = [\"transform\"]\n",
+        )
+        .expect("the manifest");
+        std::fs::write(
+            dir.join("alloy.toml"),
+            "[build]\nin = \"src\"\n\n[ingots]\npc = \"ingots/pc\"\n",
+        )
+        .expect("the file");
+        let config = Config::load(&dir.join("alloy.toml")).expect("the config");
+        let roots = watch_roots(&dir, &config);
+        assert!(roots.contains(&dir.join("ingots/pc/ingot.toml")));
+        assert!(
+            roots
+                .iter()
+                .any(|r| r.starts_with(dir.join("ingots/pc/target/debug")))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

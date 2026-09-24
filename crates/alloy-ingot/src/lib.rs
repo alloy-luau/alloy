@@ -7,6 +7,9 @@
 //! of your ingot and give it to [`serve`]. The function loops until the
 //! host closes the pipe.
 //!
+//! Stdout carries the frames, so a `println!` breaks the pipe and the
+//! host stops the ingot. Write logs to stderr with `eprintln!`.
+//!
 //! ```no_run
 //! use alloy_ingot::{serve, Edit, File, Handler};
 //!
@@ -761,12 +764,23 @@ fn error_reply(why: String) -> Vec<u8> {
         .expect("a reply always serializes")
 }
 
-/// Reads one length prefixed frame, or `None` at end of file.
+/// The largest frame either side reads. Text on the pipe, such as a
+/// `println!` in an ingot, reads as a length far over it: four ASCII
+/// bytes make a length of hundreds of megabytes.
+pub const MAX_FRAME: usize = 64 << 20;
+
+/// Reads one length prefixed frame, or `None` at end of file or at a
+/// length over [`MAX_FRAME`].
 pub fn read_frame(input: &mut impl Read) -> Option<Vec<u8>> {
     let mut len = [0u8; 4];
     input.read_exact(&mut len).ok()?;
+    let len = u32::from_le_bytes(len) as usize;
 
-    let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
+    if len > MAX_FRAME {
+        return None;
+    }
+
+    let mut body = vec![0u8; len];
     input.read_exact(&mut body).ok()?;
 
     Some(body)
@@ -872,6 +886,32 @@ mod tests {
 
         assert!(r.contains(r#""ok":false"#), "{r}");
         assert!(r.contains("does not lint"), "{r}");
+    }
+
+    /// A line of text reads as a length of about 1.9 GB. The read gave
+    /// up at once rather than wait for bytes that never come.
+    #[test]
+    fn text_on_the_pipe_is_not_a_frame() {
+        /// A pipe that holds one line of text and then blocks, which
+        /// here is a panic.
+        struct Printed(&'static [u8]);
+
+        impl Read for Printed {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!self.0.is_empty(), "the read waited for a body");
+                let n = buf.len().min(self.0.len());
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+
+                Ok(n)
+            }
+        }
+
+        let mut framed = Vec::new();
+        write_frame(&mut framed, b"{}");
+
+        assert_eq!(read_frame(&mut framed.as_slice()), Some(b"{}".to_vec()));
+        assert_eq!(read_frame(&mut Printed(b"debu")), None);
     }
 
     #[test]

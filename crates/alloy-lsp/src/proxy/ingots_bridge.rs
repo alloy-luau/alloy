@@ -243,10 +243,6 @@ impl Server {
             return false;
         };
 
-        if items.is_empty() {
-            return false;
-        }
-
         // The ingot asked for the markup list too: an HTML tag slot also
         // takes the components, and its attributes the properties of the
         // class the tag becomes.
@@ -258,6 +254,11 @@ impl Server {
             && let Some(host) = st.markup_completion(uri, offset, completed.class.as_deref())
         {
             items = merged(items, host, completed.hide_roblox);
+        }
+
+        // Nothing from the ingot or the markup list: the child answers.
+        if items.is_empty() {
+            return false;
         }
 
         drop(st);

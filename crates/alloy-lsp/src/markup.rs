@@ -1022,8 +1022,10 @@ pub fn completions(
                 }
 
                 // The framework reads `key` itself, so a tag may set it
-                // on any component and no declaration lists it.
-                for prop in alloy::alx::FREE_PROPS {
+                // on any component and no declaration lists it. The
+                // ingot that reads `ClassName` offers it above; with no
+                // such ingot, nothing reads it.
+                for prop in alloy::alx::FREE_PROPS.iter().filter(|p| **p == "key") {
                     if prop.starts_with(prefix.as_str())
                         && !taken.contains(prop)
                         && !from_ingots.contains(prop)
@@ -1555,11 +1557,11 @@ mod tests {
             &[],
             &[],
         );
-        // The declared prop, then the two the markup reads itself.
-        assert_eq!(items.len(), 3);
+        // The declared prop, then `key`, which the markup reads itself.
+        // `ClassName` comes only from an ingot that reads it.
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0]["label"], "label");
         assert_eq!(items[1]["label"], "key");
-        assert_eq!(items[2]["label"], "ClassName");
     }
 
     /// An imported component declares its props in its own module, so

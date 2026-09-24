@@ -69,7 +69,9 @@ Commands:
                   is \"^\"; a pinned version stays where it is
   info <dir>      Print what the ingot in <dir> declares
   run <dir> <file> [options]
-                  Push one file through the ingot and print the result
+                  Push one file through the ingot and print the result.
+                  The nearest alloy.toml gives the options and the root.
+                  The exit is 1 when the host refuses an edit
 
 Options of run:
   --lint          Print the lint findings instead of the transform

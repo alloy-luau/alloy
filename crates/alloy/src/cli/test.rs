@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::cli::build::{watch_loop, watch_roots};
+use crate::cli::build::watch_project;
 use crate::cli::support::{line_col, option, positionals, print_diagnostics, project};
 use crate::fail;
 use crate::ui::{self, Level, Painter};
@@ -27,16 +27,7 @@ fn find_lest() -> Option<PathBuf> {
 
 pub(crate) fn test_cmd(args: &[String]) -> ExitCode {
     if args.iter().any(|a| a == "--watch" || a == "-W") {
-        let roots = match project(args) {
-            Ok((root, config)) => watch_roots(&root, &config),
-
-            Err(e) => {
-                fail(&e);
-                return ExitCode::FAILURE;
-            }
-        };
-
-        return watch_loop(&roots, || test_once(args));
+        return watch_project(args, || test_once(args));
     }
 
     test_once(args)

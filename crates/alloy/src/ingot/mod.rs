@@ -121,17 +121,34 @@ impl Ingots {
             ..Ingots::default()
         };
 
-        for (name, source) in &config.ingots {
+        let mut started = Vec::new();
+
+        for name in config.ingots.keys() {
             match Ingot::load(root, name, config) {
-                Ok(ingot) => out.list.push(ingot),
+                Ok(pair) => started.push(pair),
 
                 Err(message) => out.problems.push(Problem {
                     ingot: name.clone(),
                     message,
                 }),
             }
+        }
 
-            let _ = source;
+        // Init names the ingots that started, so an ingot never counts
+        // on one that failed to load.
+        let names: Vec<String> = started.iter().map(|(i, _)| i.name.clone()).collect();
+
+        for (ingot, mut init) in started {
+            init["ingots"] = json!(names);
+
+            match ingot.process.as_ref().map(|p| p.init(init)) {
+                Some(Err(e)) => out.problems.push(Problem {
+                    ingot: ingot.name.clone(),
+                    message: format!("init failed: {e}"),
+                }),
+
+                _ => out.list.push(ingot),
+            }
         }
 
         out
@@ -216,7 +233,14 @@ impl Ingots {
 
                     None => (e.edit.start, e.edit.end),
                 };
-                diagnostics.push(problem(owner, &e.message, start, end));
+                // A refused edit may split a character, and a report at
+                // its offsets would slice inside one.
+                diagnostics.push(problem(
+                    owner,
+                    &e.message,
+                    on_char(source, start),
+                    on_char(source, end),
+                ));
             }
 
             text = next;
@@ -266,15 +290,16 @@ impl Ingots {
                         }
 
                         let (start, end) = span_of(&f["span"]).unwrap_or((0, 0));
-                        let len = source.len() as u32;
+                        let start = on_char(source, start);
+                        let end = on_char(source, end).max(start);
                         let fix = edits_of(&json!([f["fix"]]))
                             .into_iter()
                             .next()
                             .map(|e| Fix::new(source, e.start, e.end, e.text));
                         out.lints.push(Lint {
                             name: crate::lint::intern(&format!("{}/{lint}", ingot.name)),
-                            start: start.min(len),
-                            end: end.min(len),
+                            start,
+                            end,
                             message: f["message"].as_str().unwrap_or("").to_string(),
                             fix,
                         });
@@ -382,15 +407,14 @@ impl Ingots {
                 let items = reply["items"].as_array().cloned().unwrap_or_default();
                 let flag = |key: &str| reply[key].as_bool() == Some(true);
 
+                // The flags count with no items too: an ingot may ask for
+                // the host's list alone, completed as another class.
                 out.incomplete |= flag("incomplete");
-
-                if !items.is_empty() {
-                    out.merge |= flag("merge");
-                    out.hide_roblox |= flag("hide_roblox");
-                    out.class = out
-                        .class
-                        .or_else(|| reply["class"].as_str().map(str::to_string));
-                }
+                out.merge |= flag("merge");
+                out.hide_roblox |= flag("hide_roblox");
+                out.class = out
+                    .class
+                    .or_else(|| reply["class"].as_str().map(str::to_string));
 
                 out.items.extend(items);
             }
@@ -507,7 +531,9 @@ impl Ingots {
 }
 
 impl Ingot {
-    fn load(root: &Path, name: &str, config: &Config) -> Result<Ingot, String> {
+    /// Starts the ingot, and gives back the init request to send once
+    /// every ingot has started.
+    fn load(root: &Path, name: &str, config: &Config) -> Result<(Ingot, Value), String> {
         let table = config.ingots[name].table();
         let dir = match (&table.path, &table.repo) {
             (Some(p), _) => root.join(p),
@@ -550,34 +576,48 @@ impl Ingot {
             .unwrap_or(0);
 
         // The lints register before the levels resolve, so `[lint]`
-        // names them by `<ingot>/<lint>` or by the ingot's name.
+        // names them by `<ingot>/<lint>` or by the ingot's name. The
+        // `lints` switches of `[ingots]` replace the manifest's default:
+        // every report reads the level through `level_of`, so a switch
+        // that only reached the init left the finding at its old level.
         let external: Vec<ExternalLint> = manifest
             .lints
             .iter()
             .map(|(lint, decl)| ExternalLint {
                 name: crate::lint::intern(&format!("{name}/{lint}")),
                 group: crate::lint::intern(name),
-                default: level_from(&decl.default),
+                default: match (table.lints.get(lint), level_from(&decl.default)) {
+                    (Some(false), _) => Level::Allow,
+
+                    (Some(true), Level::Allow) => Level::Warn,
+
+                    (_, level) => level,
+                },
                 summary: decl.summary.clone(),
                 detail: decl.detail.clone(),
             })
             .collect();
         crate::lint::register_external(name, external);
 
-        let mut lint_levels = BTreeMap::new();
-
-        for lint in manifest.lints.keys() {
-            let full = format!("{name}/{lint}");
-            let level = match table.lints.get(lint) {
-                Some(false) => Level::Allow,
-                Some(true) => match crate::lint::level_of(&config.lint, &full) {
-                    Level::Allow => Level::Warn,
-                    l => l,
-                },
-                None => crate::lint::level_of(&config.lint, &full),
-            };
-            lint_levels.insert(lint.clone(), level);
+        if let Some(lint) = table
+            .lints
+            .keys()
+            .find(|l| !manifest.lints.contains_key(*l))
+        {
+            return Err(format!(
+                "`lints` switches `{lint}`, which the manifest does not declare"
+            ));
         }
+
+        let lint_levels: BTreeMap<String, Level> = manifest
+            .lints
+            .keys()
+            .map(|lint| {
+                let level = crate::lint::level_of(&config.lint, &format!("{name}/{lint}"));
+
+                (lint.clone(), level)
+            })
+            .collect();
 
         let mut options = manifest.options.clone();
 
@@ -601,21 +641,20 @@ impl Ingot {
             "options": serde_json::to_value(&options).unwrap_or(Value::Null),
             "lints": lint_levels.iter().map(|(k, v)| (k.clone(), level_name(*v))).collect::<BTreeMap<_, _>>(),
             "fmt": serde_json::to_value(&config.fmt).unwrap_or(Value::Null),
-            "ingots": config.ingots.keys().collect::<Vec<_>>(),
         });
-        process
-            .request(&init, process::TIMEOUT)
-            .map_err(|e| format!("init failed: {e}"))?;
 
-        Ok(Ingot {
-            name: name.to_string(),
-            manifest,
-            dir,
-            binary,
-            order,
-            process: Some(process),
-            lint_levels,
-        })
+        Ok((
+            Ingot {
+                name: name.to_string(),
+                manifest,
+                dir,
+                binary,
+                order,
+                process: Some(process),
+                lint_levels,
+            },
+            init,
+        ))
     }
 
     fn request(&self, body: &Value, timeout: Duration) -> Result<Value, String> {
@@ -634,13 +673,16 @@ impl Ingot {
 /// The binary beside the manifest, else under a cargo `target` tree so
 /// an ingot in development runs without a copy step.
 pub fn find_binary(dir: &Path, name: &str) -> Option<PathBuf> {
+    binary_places(dir, name).into_iter().find(|p| p.is_file())
+}
+
+/// Every place [`find_binary`] looks, in order.
+pub fn binary_places(dir: &Path, name: &str) -> [PathBuf; 3] {
     [
         dir.join(name),
         dir.join("target").join("release").join(name),
         dir.join("target").join("debug").join(name),
     ]
-    .into_iter()
-    .find(|p| p.is_file())
 }
 
 fn level_from(word: &str) -> Level {
@@ -665,6 +707,11 @@ fn problem(ingot: &str, message: &str, start: u32, end: u32) -> Diagnostic {
         end,
         message: format!("ingot `{ingot}`: {message}"),
     }
+}
+
+/// An offset an ingot sent, inside the text and on a character.
+fn on_char(text: &str, at: u32) -> u32 {
+    crate::directives::char_floor(text, at as usize) as u32
 }
 
 fn span_of(v: &Value) -> Option<(u32, u32)> {

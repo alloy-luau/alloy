@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use alloy::config::{Config, IngotSource};
+use alloy::ingot::Ingots;
 use alloy::ingot::fetch::{self, Outcome};
 use alloy::ingot::manifest::{self, Manifest};
-use alloy::ingot::{Hook, Ingots};
 
 use crate::help;
 use crate::ui::{self, Painter};
@@ -390,7 +390,9 @@ fn info(dir: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// One file through one ingot, with a throwaway config that names it.
+/// One file through one ingot. The nearest project gives the root, the
+/// ingot's options, the lint levels, and the markup config, so the
+/// ingot sees what a build shows it. The ingot runs alone, from `dir`.
 fn run_one(dir: &Path, file: &Path, args: &[String]) -> ExitCode {
     let p = Painter::for_stderr();
     let dir = match dir.canonicalize() {
@@ -420,16 +422,31 @@ fn run_one(dir: &Path, file: &Path, args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut config = Config::default();
-    config.ingots.insert(
-        manifest.name.clone(),
-        IngotSource::Path(dir.to_string_lossy().into_owned()),
-    );
-    let root = file
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
+    let parent = file.parent().unwrap_or(Path::new("."));
+    let (mut config, root) = match Config::find(parent) {
+        Some(config_path) => match Config::load(&config_path) {
+            Ok(c) => (c, config_path.parent().unwrap_or(parent).to_path_buf()),
+
+            Err(e) => {
+                fail(&format!("{}: {e}", config_path.display()));
+
+                return ExitCode::FAILURE;
+            }
+        },
+
+        None => (Config::default(), parent.to_path_buf()),
+    };
+    // The project's table for this ingot keeps its `order` and `lints`;
+    // the path is the one the command names.
+    let mut table = config
+        .ingots
+        .get(&manifest.name)
+        .map(IngotSource::table)
+        .unwrap_or_default();
+    table.path = Some(dir.to_string_lossy().into_owned());
+    table.repo = None;
+    config.ingots = [(manifest.name.clone(), IngotSource::Table(table))].into();
     let ingots = Ingots::load(&root, &config);
 
     for problem in &ingots.problems {
@@ -447,6 +464,11 @@ fn run_one(dir: &Path, file: &Path, args: &[String]) -> ExitCode {
             .position(|a| a == f)
             .and_then(|i| args.get(i + 1))
             .and_then(|v| v.parse::<u32>().ok())
+    };
+    // Each report names its line and column, as a build prints it.
+    let report = |at: u32, message: &str| {
+        let (line, col) = alloy::directives::line_col(&source, at as usize);
+        fail(&format!("{}:{line}:{col}: {message}", file.display()));
     };
 
     if let Some(offset) = value("--hover") {
@@ -476,67 +498,77 @@ fn run_one(dir: &Path, file: &Path, args: &[String]) -> ExitCode {
     if flag("--format") {
         let (text, problems) = ingots.format(&path, &source);
 
-        for problem in problems {
+        for problem in &problems {
             fail(&problem.to_string());
         }
 
         print!("{text}");
 
-        return ExitCode::SUCCESS;
+        return exit_for(problems.is_empty());
     }
 
+    // The transform alone needs no compile. Its report holds each edit
+    // the host refused, such as one that adds a line.
+    if !flag("--output") && !flag("--lint") {
+        let layer = ingots.before(&path, &source);
+
+        for d in &layer.diagnostics {
+            report(d.start, &d.message);
+        }
+
+        print!("{}", layer.text);
+
+        return exit_for(layer.diagnostics.is_empty());
+    }
+
+    let jsx = match path.ends_with(".alx") {
+        true => match config.markup(&root) {
+            Ok(c) => Some(c),
+
+            Err(e) => {
+                fail(&e);
+
+                return ExitCode::FAILURE;
+            }
+        },
+
+        false => None,
+    };
     let options = alloy::EmitOptions {
         file_name: path.clone(),
         definitions: path.ends_with(".d.aly"),
-        ..alloy::EmitOptions::default()
+        ..alloy::EmitOptions::default().imports_for_file(&file, &source)
     };
-    let out = match alloy::compile_file(&path, &source, &options, None, Some(&ingots)) {
+    let out = match alloy::compile_file(&path, &source, &options, jsx.as_ref(), Some(&ingots)) {
         Ok(o) => o,
 
         Err(e) => {
-            fail(&format!("{path}: {e}"));
+            report(e.offset as u32, &e.message);
 
             return ExitCode::FAILURE;
         }
     };
 
     for d in &out.diagnostics {
-        eprintln!("{}", p.fail(&d.message));
+        report(d.start, &d.message);
     }
 
     if flag("--lint") {
         for l in &out.lints {
-            let line = source[..l.start as usize].matches('\n').count() + 1;
+            let (line, _) = alloy::directives::line_col(&source, l.start as usize);
             println!("{}:{line}: {}", l.name, l.message);
         }
-
-        return ExitCode::SUCCESS;
+    } else {
+        print!("{}", out.ship);
     }
 
-    // The transform's own result is the source after the edits; the
-    // output hook's is the ship artifact.
-    let text = if flag("--output") {
-        out.ship.clone()
-    } else {
-        ingots.before(&path, &source).text
-    };
-    let lines_in = source.lines().count();
-    let lines_out = text.lines().count();
+    exit_for(out.diagnostics.is_empty())
+}
 
-    if lines_in == lines_out {
-        eprintln!(
-            "{}",
-            p.note(&format!("{lines_in} lines in, {lines_out} lines out"))
-        );
-    } else {
-        fail(&format!(
-            "line count changed, {lines_in} in and {lines_out} out; the map cannot follow"
-        ));
+fn exit_for(clean: bool) -> ExitCode {
+    match clean {
+        true => ExitCode::SUCCESS,
+
+        false => ExitCode::FAILURE,
     }
-
-    print!("{text}");
-
-    let _ = manifest.has(Hook::Transform);
-
-    ExitCode::SUCCESS
 }

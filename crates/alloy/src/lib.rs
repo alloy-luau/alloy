@@ -122,13 +122,7 @@ impl CompileError {
     /// `Display` cannot say this, since it holds no source; every
     /// printer that has the source calls this instead.
     pub fn located(&self, src: &str) -> String {
-        let mut at = self.offset.min(src.len());
-
-        while at > 0 && !src.is_char_boundary(at) {
-            at -= 1;
-        }
-
-        let before = &src[..at];
+        let before = &src[..directives::char_floor(src, self.offset)];
         let line = before.matches('\n').count() + 1;
         let col = before.rsplit('\n').next().map_or(0, str::len) + 1;
 
@@ -446,6 +440,23 @@ pub fn compile_file(
 
     if let Some(ingots) = ingots {
         ingots.after(path, source, &mut out);
+
+        // The compile applied the file's directives before the ingots
+        // linted, so their lints meet the same silence here.
+        let silence = directives::scan(source);
+
+        for l in &out.lints {
+            let line = directives::line_of(source, l.start as usize);
+
+            if silence.expects(line) && !out.expected_hits.contains(&line) {
+                out.expected_hits.push(line);
+            }
+        }
+
+        out.lints
+            .retain(|l| silence.allows_lint(directives::line_of(source, l.start as usize), l.name));
+        // A dead ingot answers each hook with the same report.
+        out.diagnostics.dedup();
     }
 
     Ok(out)

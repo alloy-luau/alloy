@@ -9,12 +9,12 @@ use std::process::ExitCode;
 use alloy::config::Config;
 use alloy::lint;
 
-use crate::cli::build::{watch_loop, watch_roots};
+use crate::cli::build::watch_project;
 use crate::cli::lint_support::{
     apply_header_as_fixes, apply_lint_fixes, lint_context, lint_one, list_lints, offer_fixes,
     print_lints,
 };
-use crate::cli::support::{is_source, option, positionals, print_diagnostics, project};
+use crate::cli::support::{is_source, option, positionals, print_diagnostics};
 use crate::ui::{self, Level, Painter};
 use crate::{fail, usage};
 
@@ -51,16 +51,7 @@ pub(crate) fn flux_cmd(args: &[String]) -> ExitCode {
     }
 
     if args.iter().any(|a| a == "--watch") {
-        let roots = match project(args) {
-            Ok((root, config)) => watch_roots(&root, &config),
-
-            Err(e) => {
-                fail(&e);
-                return ExitCode::FAILURE;
-            }
-        };
-
-        return watch_loop(&roots, || flux_once(args));
+        return watch_project(args, || flux_once(args));
     }
 
     flux_once(args)

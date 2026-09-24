@@ -624,7 +624,20 @@ pub fn span_of_line(src: &str, line: usize) -> (usize, usize) {
 
 /// The zero-based line of a byte offset.
 pub fn line_of(src: &str, offset: usize) -> usize {
-    src[..offset.min(src.len())].matches('\n').count()
+    src[..char_floor(src, offset)].matches('\n').count()
+}
+
+/// The offset, clamped to the text and moved back to the start of the
+/// character it falls in. An ingot sends offsets the host does not
+/// choose, and a slice inside a character panics.
+pub fn char_floor(src: &str, offset: usize) -> usize {
+    let mut at = offset.min(src.len());
+
+    while !src.is_char_boundary(at) {
+        at -= 1;
+    }
+
+    at
 }
 
 /// A byte order mark: the three bytes a Windows editor writes in front
@@ -638,7 +651,7 @@ pub const BOM: &str = "\u{feff}";
 /// A leading byte order mark is no character the editor draws, so a
 /// column on the first line counts from after it.
 pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
-    let before = &src[..offset.min(src.len())];
+    let before = &src[..char_floor(src, offset)];
     let line = before.matches('\n').count() + 1;
     // A column counts characters, as the editor draws them, not bytes.
     let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count());
@@ -653,6 +666,18 @@ pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    /// An offset inside a character reads as the character's start.
+    /// It panicked, and an ingot sends offsets the host does not check.
+    #[test]
+    fn an_offset_inside_a_character_does_not_panic() {
+        let src = "local t = \"\u{e9}\"\n";
+        let inside = src.find('\u{e9}').unwrap() + 1;
+
+        assert_eq!(super::line_col(src, inside), (1, 12));
+        assert_eq!(super::line_of(src, inside), 0);
+        assert_eq!(super::char_floor(src, 99), src.len());
+    }
+
     /// A leading byte order mark is no character the editor draws, so a
     /// column on the first line counts from after it. The report read
     /// column 10 where the editor showed 7.

@@ -1112,3 +1112,55 @@ pub(crate) fn a_child_edit_over_generated_text_is_dropped() {
     assert!(!st.keeps_child_action(&lazy, uri, Some(((1, 9), (4, 5)))));
     assert!(st.keeps_child_action(&lazy, uri, Some(((6, 10), (6, 21)))));
 }
+
+/// The child reports a definitions file it cannot load on the file it
+/// read: a compiled copy under the temp folder that no editor shows. A
+/// mistyped name in a `.d.aly` was silent. The report now lands on the
+/// `.d.aly`, and the popup names it.
+#[test]
+fn a_definitions_report_lands_on_the_declaration_file() {
+    use super::documents::Recorder;
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    let read = PathBuf::from("/tmp/defs/g-1.d.luau");
+    let source = PathBuf::from("/w/src/g.d.aly");
+    server
+        .state
+        .lock()
+        .expect("state")
+        .definition_sources
+        .push((read.clone(), source.clone()));
+
+    server.handle_child(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {
+            "uri": path_to_uri(&read),
+            "diagnostics": [{
+                "range": { "start": { "line": 0, "character": 29 }, "end": { "line": 0, "character": 34 } },
+                "message": "TypeError: Unknown type 'strin'",
+            }],
+        },
+    }));
+    server.handle_child(json!({
+        "jsonrpc": "2.0",
+        "method": "window/showMessage",
+        "params": { "type": 1, "message": format!("Failed to read definitions file {}.", read.display()) },
+    }));
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+
+    assert!(sent.contains(&path_to_uri(&source)), "{sent}");
+    assert!(sent.contains("Unknown type 'strin'"), "{sent}");
+    assert!(
+        sent.contains("Failed to read definitions file /w/src/g.d.aly."),
+        "{sent}"
+    );
+    assert!(!sent.contains("g-1.d.luau"), "{sent}");
+}

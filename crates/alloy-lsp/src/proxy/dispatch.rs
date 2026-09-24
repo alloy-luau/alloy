@@ -1028,6 +1028,48 @@ impl Server {
                     return;
                 }
 
+                // A `.d.aly` the child could not load: the report goes to
+                // the source, through its map when the source is open.
+                let declared = uri_to_path(&uri).and_then(|p| {
+                    st.definition_sources
+                        .iter()
+                        .find(|(read, _)| *read == p)
+                        .map(|(_, source)| path_to_uri(source))
+                });
+
+                if let Some(source) = declared {
+                    let mut diagnostics = message
+                        .pointer("/params/diagnostics")
+                        .cloned()
+                        .unwrap_or_else(|| json!([]));
+                    let open = st.docs.contains_key(&source);
+
+                    if open {
+                        map_from_shadow(&mut diagnostics, Some(&source), &st);
+                    }
+
+                    drop(st);
+
+                    let list = diagnostics.as_array().cloned().unwrap_or_default();
+                    self.state
+                        .lock()
+                        .expect("state")
+                        .child_diagnostics
+                        .insert(source.clone(), list);
+
+                    match open {
+                        true => self.publish(&source),
+
+                        false => self.to_client(&json!({
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/publishDiagnostics",
+                            "params": { "uri": source, "diagnostics": diagnostics },
+                        })),
+                    }
+
+                    return;
+                }
+
                 let (source, is_alloy) = st.editor_uri(&uri);
                 drop(st);
 
@@ -1132,6 +1174,14 @@ impl Server {
 
                 if let Some(params) = message.get_mut("params") {
                     map_from_shadow(params, None, &st);
+                }
+
+                // "Failed to read definitions file" names the compiled
+                // copy, which the reader never wrote.
+                if let Some(Value::String(text)) = message.pointer_mut("/params/message") {
+                    for (read, source) in &st.definition_sources {
+                        *text = text.replace(&*read.to_string_lossy(), &source.to_string_lossy());
+                    }
                 }
 
                 drop(st);

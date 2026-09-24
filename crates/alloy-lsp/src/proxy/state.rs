@@ -100,6 +100,10 @@ pub(crate) struct State {
     /// The definitions files the child reads. A datatype member such as
     /// `CFrame:inverse` is marked `@deprecated` there and not in the docs.
     pub(crate) definitions: Vec<PathBuf>,
+    /// Each compiled `.d.aly` the child reads, with its source. The
+    /// child reports a definitions file it cannot load on the file it
+    /// read, and the report belongs on the source.
+    pub(crate) definition_sources: Vec<(PathBuf, PathBuf)>,
     /// The `@roblox/globaltype/Class.Member` entries of that file, read
     /// once on the first list that needs one. The file is 7 MB, so a
     /// read at startup would cost every session that never opens a

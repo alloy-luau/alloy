@@ -312,7 +312,13 @@ impl State {
         };
 
         for (u, doc) in mine.chain(self.docs.iter().map(|(u, d)| (u.as_str(), d))) {
-            let own = u == uri;
+            // A `.d.aly` the child loads declares globals, which every
+            // file sees with no import.
+            let own = u == uri
+                || self
+                    .definition_sources
+                    .iter()
+                    .any(|(_, source)| path_to_uri(source) == u);
             // The export list of the file names what a hover does not:
             // an attribute's hover opens with `@name(...)`, and a name
             // an `export { }` list sends out has no `export` in front.

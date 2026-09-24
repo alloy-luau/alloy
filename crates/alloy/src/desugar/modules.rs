@@ -1020,7 +1020,8 @@ impl<'s> Desugar<'s> {
     /// The export table, appended after the last token. The test
     /// artifact has no module to return: the spec's footer follows.
     pub(crate) fn module_return(&mut self, at: u32, block: &Block) {
-        if self.options.tests {
+        // A definitions file is no module, so it returns nothing.
+        if self.options.tests || self.options.definitions {
             return;
         }
 

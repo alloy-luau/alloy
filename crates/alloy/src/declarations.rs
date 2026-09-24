@@ -181,7 +181,15 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
             Stmt::Attribute(d) => start_of(d.name),
 
-            Stmt::Declare(d) => start_of(d.span),
+            // The name, past `declare function` or `declare class`, so a
+            // jump lands on the word it came from.
+            Stmt::Declare(d) => {
+                let whole = text(d.span);
+                let at = declared_name(whole)
+                    .map_or(0, |n| n.as_ptr() as usize - whole.as_ptr() as usize);
+
+                start_of(d.span) + at
+            }
 
             _ => 0,
         };
@@ -1099,6 +1107,29 @@ fn param_text<'a>(p: &alloy_syntax::ast::Param, text: &impl Fn(TokSpan) -> &'a s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A jump to a declared global landed on `declare f`, the first
+    /// letters of the statement, and not on the name.
+    #[test]
+    fn a_declare_points_at_its_name() {
+        let src = "declare function warn_once(m: string): ()\ndeclare class Sword\n    damage: number\nend\n";
+        let at: Vec<(String, &str)> = summaries(src, true)
+            .into_iter()
+            .map(|d| {
+                let word = &src[d.offset..d.offset + d.name.len()];
+
+                (d.name, word)
+            })
+            .collect();
+
+        assert_eq!(
+            at,
+            vec![
+                ("warn_once".to_string(), "warn_once"),
+                ("Sword".to_string(), "Sword")
+            ]
+        );
+    }
 
     #[test]
     fn struct_with_impls() {

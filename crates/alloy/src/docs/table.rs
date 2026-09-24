@@ -420,7 +420,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "declare",
-        "```alloy\ndeclare function name(params): R\ndeclare name: T\ndeclare extern type Name with ... end\ndeclare class Name extends Base ... end\n```\nA definition-file statement. Luau's own definition syntax, in a `.d.aly`, which compiles to `.d.luau` and joins the analyzer's definitions; no runtime. A class or an extern type lists members: `name: T`, `read name: T`, `write name: T`, a method `function name(self, ...): R`, and an indexer `[K]: V`; `extends` names the base.",
+        "```alloy\ndeclare function name(params): R\ndeclare name: T\ndeclare extern type Name with ... end\ndeclare class Name extends Base ... end\n```\nA definition-file statement. Luau's own definition syntax, in a `.d.aly`: a file of globals that every file sees with no import. It holds no runtime, and `alloy build` writes nothing for it. A class or an extern type lists members: `name: T`, `read name: T`, `write name: T`, a method `function name(self, ...): R`, and an indexer `[K]: V`; `extends` names the base.\n\nThe rest of the file declares types, and each one is global: `type`, `interface`, `struct`, `trait`, and `enum`, which is a type alone, with no constructors. The editor and `alloy flux` load every `.d.aly` under `[build] in` and each file of `[flux] definitions`, which may sit outside `in`. The editor's `alloy-luau.types.definitionFiles` setting adds files for the editor alone.",
     ),
     // The std: ambient names, no import. The child sees `__alloy.Name`.
     (

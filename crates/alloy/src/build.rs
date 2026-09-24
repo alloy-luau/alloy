@@ -687,6 +687,12 @@ fn run_inner(
             );
         }
 
+        // A `.d.aly` feeds the type check of the editor and of `flux`
+        // and runs nowhere, so the output tree takes nothing from it.
+        if options.definitions {
+            continue;
+        }
+
         if !write {
             report.written.push(rel_out);
 
@@ -1570,6 +1576,33 @@ pub fn walk_data(dir: &Path, written: &[PathBuf], out: &mut Vec<PathBuf>) -> std
     out.sort();
 
     Ok(())
+}
+
+/// The definitions a project loads: every `.d.aly` under `[build] in`
+/// that `exclude` keeps, then each `[flux] definitions` entry. The
+/// editor and `flux` read this one list, so both see the same globals.
+pub fn definition_files(root: &Path, config: &Config) -> Vec<PathBuf> {
+    let input = root.join(&config.build.input);
+    let exclude = globs(&config.build.exclude).unwrap_or_default();
+    let mut sources = Vec::new();
+    let _ = walk(&input, &written_dirs(root, config), &mut sources);
+    sources.sort();
+
+    let mut out: Vec<PathBuf> = sources
+        .into_iter()
+        .filter(|p| p.to_string_lossy().ends_with(".d.aly"))
+        .filter(|p| !exclude.is_match(p.strip_prefix(&input).unwrap_or(p)))
+        .collect();
+
+    for d in &config.flux.definitions {
+        let path = normalize_path(&root.join(d));
+
+        if !out.iter().any(|p| normalize_path(p) == path) {
+            out.push(path);
+        }
+    }
+
+    out
 }
 
 /// Every Alloy source under a directory, recursively.

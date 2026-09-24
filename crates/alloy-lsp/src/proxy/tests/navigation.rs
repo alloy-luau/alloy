@@ -2394,3 +2394,181 @@ pub(crate) fn a_receiver_from_new_through_a_star_alias_is_a_method_use() {
         "{edit}"
     );
 }
+
+/// `export { inner as bump }`: importers write `bump`, and the module
+/// spells it in the list alone. A rename of `bump` edits the alias and
+/// every importer; `inner` stays the module's own word.
+#[test]
+fn an_export_list_alias_renames_across_files() {
+    let lib = concat!(
+        "local function inner(n: number): number\n",
+        "    return n + 1\n",
+        "end\n",
+        "\n",
+        "export { inner as bump }\n",
+    );
+    let main = concat!(
+        "import { bump } from \"./lib\"\n",
+        "import * as L from \"./lib\"\n",
+        "print(bump(1), L.bump(2))\n",
+    );
+    let dir = std::env::temp_dir().join(format!("alloy-nav-export-list-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (rel, src) in [("lib.aly", lib), ("main.aly", main)] {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            format!("file://{}", path.display()),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+    }
+
+    let uri = |rel: &str| format!("file://{}", dir.join("src").join(rel).display());
+    let expected = [
+        "lib.aly 4:18-22 -> inc",
+        "main.aly 0:9-13 -> inc",
+        "main.aly 2:17-21 -> inc",
+        "main.aly 2:6-10 -> inc",
+    ];
+
+    for (rel, src, text) in [
+        ("main.aly", main, "(bump"),
+        ("main.aly", main, "L.bump"),
+        ("main.aly", main, "{ bump"),
+        ("lib.aly", lib, "as bump"),
+    ] {
+        let at = src.find(text).expect(text) + text.len() - 2;
+        let target = st.name_target(&uri(rel), at);
+        let Some(Target::Export(file, name)) = target else {
+            panic!("{text}: {target:?}");
+        };
+        let edit = st.export_rename(&file, &name, "inc").expect("the rename");
+
+        assert_eq!(rows(&edit), expected, "{text}");
+    }
+
+    // `inner` is the child's to rename. The emit writes the list as
+    // generated text, so its answer holds the declaration alone.
+    let lib_uri = uri("lib.aly");
+    let mut result = json!({ "changes": { lib_uri.clone(): [
+        { "range": range_value((0, 15), (0, 20)), "newText": "grow" },
+    ] } });
+    st.mend_export_list(&lib_uri, 0, 16, &mut result);
+
+    assert_eq!(
+        rows(&result),
+        ["lib.aly 0:15-20 -> grow", "lib.aly 4:9-14 -> grow"]
+    );
+
+    let mut refs = json!([{ "uri": lib_uri.clone(), "range": range_value((0, 15), (0, 20)) }]);
+    st.mend_export_list(&lib_uri, 0, 16, &mut refs);
+
+    assert_eq!(refs.as_array().map(Vec::len), Some(2), "{refs}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `cfg?.a` lowers to two reads of `cfg` that map to one site, and the
+/// editor refuses a rename whose edits overlap. `match k with` on
+/// literal cases writes `k` on the line of each arm, which spells
+/// something else there; the site is the scrutinee.
+#[test]
+fn a_site_stays_once_and_an_arm_site_is_the_scrutinee() {
+    let src = "local k = 2\nlocal q = match k with\n  case 1 then \"one\"\n  default \"x\"\nend\nprint(q, k)\n";
+    let (st, uri) = super::support::one_file(src);
+    let site = |l: u32, s: u32, e: u32| json!({ "uri": uri, "range": range_value((l, s), (l, e)) });
+    let mut refs = json!([
+        site(0, 6, 7),
+        site(5, 9, 10),
+        site(5, 9, 10),
+        site(2, 2, 6),
+        site(3, 2, 9)
+    ]);
+    st.drop_stray_sites(uri, 0, 6, &mut refs);
+
+    assert_eq!(
+        refs,
+        json!([site(0, 6, 7), site(5, 9, 10), site(1, 16, 17)])
+    );
+
+    let edit =
+        |l: u32, s: u32, e: u32| json!({ "range": range_value((l, s), (l, e)), "newText": "n" });
+    let mut rename = json!({ "changes": { uri: [edit(0, 6, 7), edit(5, 9, 10), edit(5, 9, 10)] } });
+    st.drop_stray_sites(uri, 0, 6, &mut rename);
+
+    assert_eq!(rename["changes"][uri].as_array().map(Vec::len), Some(2));
+}
+
+/// A component's declaration answers like its tags: the lowering
+/// writes each tag as a generated call the child ties to nothing. A
+/// prop's attributes join the child's rename of the prop's field.
+#[test]
+fn a_component_and_its_props_reach_the_tags() {
+    let src = concat!(
+        "type ButtonProps = {\n",
+        "  label: string,\n",
+        "}\n",
+        "\n",
+        "local function Button(props: ButtonProps)\n",
+        "  return <TextButton Text={props.label} />\n",
+        "end\n",
+        "\n",
+        "local function Panel()\n",
+        "  return <Button label=\"ok\" />\n",
+        "end\n",
+        "\n",
+        "return Panel\n",
+    );
+    let uri = "file:///ui.alx";
+    let st = super::support::files(&[(uri, src)]);
+    let at = src.find("function Button").expect("the declaration") + 10;
+
+    assert!(
+        matches!(st.name_target(uri, at), Some(Target::Local(ref n)) if n == "Button"),
+        "{:?}",
+        st.name_target(uri, at)
+    );
+    assert_eq!(
+        st.prop_declaration(uri, "Button", "label"),
+        Some((uri.to_string(), range_value((1, 2), (1, 7))))
+    );
+
+    // The child's rename of the field, from the type.
+    let mut rename = json!({ "changes": { uri: [
+        { "range": range_value((1, 2), (1, 7)), "newText": "text" },
+        { "range": range_value((5, 33), (5, 38)), "newText": "text" },
+    ] } });
+    st.mend_prop_attributes(uri, 1, 3, &mut rename);
+
+    assert_eq!(
+        rows(&rename),
+        [
+            "ui.alx 1:2-7 -> text",
+            "ui.alx 5:33-38 -> text",
+            "ui.alx 9:17-22 -> text",
+        ]
+    );
+}

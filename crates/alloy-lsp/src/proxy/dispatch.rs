@@ -762,7 +762,8 @@ impl Server {
                 let uri = text_document_uri(&message).unwrap_or_default();
 
                 if let Some(id) = message.get("id").cloned()
-                    && self.rename_answer(&uri, &message, &id)
+                    && (self.prop_answer(m, &uri, &message, &id)
+                        || self.rename_answer(&uri, &message, &id))
                 {
                     return true;
                 }
@@ -774,7 +775,8 @@ impl Server {
                 let uri = text_document_uri(&message).unwrap_or_default();
 
                 if let Some(id) = message.get("id").cloned()
-                    && (self.namespace_references(&uri, &message, &id)
+                    && (self.prop_answer(m, &uri, &message, &id)
+                        || self.namespace_references(&uri, &message, &id)
                         || self.name_references(&uri, &message, &id))
                 {
                     return true;
@@ -799,7 +801,8 @@ impl Server {
                 }
 
                 if let Some(id) = message.get("id").cloned()
-                    && self.definition_answer(&uri, &message, &id)
+                    && (self.prop_answer(m, &uri, &message, &id)
+                        || self.definition_answer(&uri, &message, &id))
                 {
                     return true;
                 }
@@ -1696,6 +1699,8 @@ impl Server {
                         && let Some((line, character)) = position
                     {
                         st.mend_field_rename(uri, line, character, result);
+                        st.mend_export_list(uri, line, character, result);
+                        st.mend_prop_attributes(uri, line, character, result);
                     }
                 }
 
@@ -1704,6 +1709,8 @@ impl Server {
                         && let Some((line, character)) = position
                     {
                         st.mend_field_references(uri, line, character, result);
+                        st.mend_export_list(uri, line, character, result);
+                        st.mend_prop_attributes(uri, line, character, result);
                     }
                 }
 

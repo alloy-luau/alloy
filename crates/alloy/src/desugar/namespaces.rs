@@ -123,6 +123,19 @@ impl<'s> Desugar<'s> {
             }
         }
 
+        // Luau makes a type of a definitions file global only when it
+        // says `export`, and a `.d.aly` declares globals, so every type
+        // takes the word. A `__` name is a helper the emit wrote, such
+        // as the type function of a mapped type, and stays local.
+        if self.options.definitions {
+            self.export_listed_types.extend(
+                self.file_types
+                    .keys()
+                    .filter(|name| !name.starts_with("__"))
+                    .cloned(),
+            );
+        }
+
         self.scan_imported_types(&block.stmts);
 
         for stmt in &block.stmts {

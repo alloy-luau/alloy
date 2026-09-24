@@ -28,7 +28,7 @@ pub fn collect(files: &[PathBuf]) -> Vec<Extension> {
 /// The cache directory of one workspace. It carries the root, so the
 /// definitions of one project never reach another project's analyzer.
 /// It sits beside the mirror, which the proxy empties at startup.
-fn cache_dir(root: Option<&Path>) -> PathBuf {
+pub(crate) fn cache_dir(root: Option<&Path>) -> PathBuf {
     std::env::temp_dir()
         .join("alloy-lsp-definitions")
         .join(crate::proxy::root_key(root))

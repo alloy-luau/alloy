@@ -80,3 +80,39 @@ fn a_method_call_on_a_mixed_enum_names_the_string_variant() {
         vec!["`State.Idle` is a unit variant, a string at runtime; call `State.label(s)`"]
     );
 }
+
+/// A `.d.aly` declares globals. Luau makes a type of a definitions file
+/// global only when it says `export`, so `interface Iface` stayed out of
+/// every file's reach. An enum wrote its runtime table into the file,
+/// and a trailing `return` followed.
+#[test]
+fn a_definitions_file_declares_every_type_global_and_runs_nothing() {
+    let options = alloy::EmitOptions {
+        file_name: "g.d.aly".to_string(),
+        definitions: true,
+        ..alloy::EmitOptions::default()
+    };
+    let src = "type Plain = number\nexport type Id = string\ninterface Iface as\n    a: number\nend\nstruct Rec as\n    c: number\nend\nenum Mode as Fast, Slow end\nenum Shape as\n    Circle(number),\n    Dot,\nend\ndeclare function area(s: Shape): Plain\n";
+    let out = alloy::compile_with(src, &options).unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert_eq!(
+        out.check.lines().count(),
+        src.lines().count(),
+        "{}",
+        out.check
+    );
+
+    for line in [
+        "export type Plain = number",
+        "export type Id = string",
+        "export type Iface = { a: number }",
+        "export type Rec = { c: number }",
+        "export type Mode = \"Fast\" | \"Slow\"",
+        "export type Shape = { tag: \"Circle\", _1: number } | \"Dot\"",
+    ] {
+        assert!(out.check.contains(line), "{line}\n{}", out.check);
+    }
+
+    assert!(!out.check.contains("local "), "{}", out.check);
+    assert!(!out.check.contains("return"), "{}", out.check);
+}

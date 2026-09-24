@@ -119,6 +119,12 @@ impl<'s> Desugar<'s> {
         } else {
             super::modules::type_arguments(&alias_generics)
         };
+
+        if self.options.definitions {
+            self.enum_type_only(e, &name, &alias_generics);
+
+            return;
+        }
         // The check artifact types a generic enum as a plain union of
         // `read` tables, one per variant, that list the methods its
         // impls write. The solver finds no `T` through a metatable
@@ -385,6 +391,45 @@ impl<'s> Desugar<'s> {
         if e.exported {
             self.exports.push((name.clone(), name));
         }
+    }
+
+    /// An enum in a definitions file: the global type alone. The file
+    /// runs nowhere, so no constructor table stands behind the type.
+    fn enum_type_only(&mut self, e: &EnumDecl, name: &str, alias_generics: &str) {
+        let mut types = Vec::new();
+
+        for v in &e.variants {
+            let vname = self.text_of(v.name).to_string();
+
+            types.push(match &v.value {
+                Some(value) => format!("typeof({})", self.render_to_string(value)),
+
+                None if v.payload.is_empty() => format!("\"{vname}\""),
+
+                None => {
+                    let fields: Vec<String> = v
+                        .payload
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| format!("_{}: {}", i + 1, self.copy_type_to_string(*t)))
+                        .collect();
+
+                    format!("{{ tag: \"{vname}\", {} }}", fields.join(", "))
+                }
+            });
+        }
+
+        if types.is_empty() {
+            self.diagnose(e.name, "an `enum` needs at least one variant");
+            types.push("never".to_string());
+        }
+
+        let start = self.byte_start(e.span);
+        self.generate(
+            start,
+            &format!("export type {name}{alias_generics} = {}", types.join(" | ")),
+        );
+        self.blank_lines(start, self.byte_end(e.span));
     }
 
     /// The methods a generic enum's alias lists, `read m: typeof(Opt.m)`

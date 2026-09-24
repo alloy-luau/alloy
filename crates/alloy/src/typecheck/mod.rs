@@ -447,8 +447,64 @@ pub fn analyze(
         definitions.push(p);
     }
 
-    for d in &config.flux.definitions {
-        definitions.push(root.join(d));
+    // A `.d.aly` under `in` reaches the checker with the sources below.
+    // One outside it compiles here, and a report on it names its file.
+    let input_dir = normalize(&root.join(&config.build.input));
+    // Each one outside: its artifact under the mirror, its source, and
+    // the artifact's text.
+    let mut outside: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+
+    for (i, d) in config.flux.definitions.iter().enumerate() {
+        let path = normalize(&root.join(d));
+
+        if !d.ends_with(".d.aly") {
+            definitions.push(path);
+
+            continue;
+        }
+
+        if files.iter().any(|f| input_dir.join(&f.rel) == path) {
+            continue;
+        }
+
+        let compiled = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|source| {
+                let options = crate::EmitOptions {
+                    file_name: path.to_string_lossy().into_owned(),
+                    definitions: true,
+                    ..Default::default()
+                };
+
+                crate::compile_with(&source, &options).map_err(|e| e.located(&source))
+            });
+
+        match compiled {
+            Ok(out) => {
+                for d in &out.diagnostics {
+                    let source = std::fs::read_to_string(&path).unwrap_or_default();
+                    let (line, col) = crate::directives::line_col(&source, d.start as usize);
+                    analysis.diagnostics.push(TypeDiag {
+                        rel: path.clone(),
+                        line,
+                        col,
+                        kind: crate::docs::kind_for(&d.message).to_string(),
+                        message: d.message.clone(),
+                    });
+                }
+
+                let rel = PathBuf::from(format!(".alloy-defs/{i}.d.luau"));
+                let target = mirror.join(&rel);
+                std::fs::create_dir_all(mirror.join(".alloy-defs")).map_err(|e| e.to_string())?;
+                std::fs::write(&target, &out.check).map_err(|e| e.to_string())?;
+                outside.push((rel, path, out.check));
+                definitions.push(target);
+            }
+
+            Err(e) => analysis
+                .notes
+                .push(format!("definitions {}: {e}", path.display())),
+        }
     }
 
     // A plain `.luau` beside the sources sits in the output too, as the
@@ -659,6 +715,21 @@ pub fn analyze(
             .strip_prefix(&mirror)
             .map(Path::to_path_buf)
             .unwrap_or(path);
+        // A `[flux] definitions` file outside `in`: the report names
+        // the file alone, and the artifact keeps the source's lines.
+        if let Some((_, source, text)) = outside.iter().find(|(rel, _, _)| *rel == path) {
+            let (line, col) = quoted_place(text, message).unwrap_or((1, 1));
+            analysis.diagnostics.push(TypeDiag {
+                rel: source.clone(),
+                line,
+                col,
+                kind: kind.to_string(),
+                message: message.to_string(),
+            });
+
+            continue;
+        }
+
         let Ok(rel_out) = path.strip_prefix(&config.build.out) else {
             continue;
         };

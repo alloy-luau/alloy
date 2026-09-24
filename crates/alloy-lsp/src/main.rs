@@ -10,9 +10,11 @@
 //! - `--luau-lsp <path>`: the child binary. Default: `ALLOY_LUAU_LSP`,
 //!   then `luau-lsp` on the PATH.
 //! - `--definitions <path>`: a definitions file for the child; a `.d.aly`
-//!   compiles to `.d.luau` in the cache directory first. Repeatable.
-//!   Every `.d.aly` under the workspace root joins them on its own, and
-//!   every `impl` on a foreign type under the root is injected into the
+//!   compiles to `.d.luau` in the cache directory first. A relative path
+//!   reads from the workspace root. Repeatable. The project's own list
+//!   joins them: every `.d.aly` under `[build] in` and each
+//!   `[flux] definitions` entry, the list `alloy flux` reads. Every
+//!   `impl` on a foreign type under the root is injected into the
 //!   definitions that declare the target.
 //! - `--docs <path>`: the API docs JSON for the child, for hover text.
 //! - `--old-solver`: do not pass `--flag:LuauSolverV2=true`.
@@ -152,7 +154,23 @@ fn run() -> ExitCode {
         })
         .and_then(proxy::uri_to_path)
     {
-        definitions.extend(workspace_definitions(&root));
+        // A path the editor setting gives reads from the workspace, as
+        // `[flux] definitions` reads from the project root.
+        for d in &mut definitions {
+            if d.is_relative() {
+                *d = root.join(&*d);
+            }
+        }
+
+        for d in workspace_definitions(&root) {
+            if !definitions
+                .iter()
+                .any(|p| alloy::modules::normalize(p) == d)
+            {
+                definitions.push(d);
+            }
+        }
+
         exts = extensions::collect(&workspace_files(&root, |n| {
             n.ends_with(".aly") && !n.ends_with(".d.aly")
         }));
@@ -194,13 +212,21 @@ fn run() -> ExitCode {
     let mut injected = std::collections::HashSet::new();
 
     let mut given: Vec<PathBuf> = Vec::new();
+    // The file the child reads for each `.d.aly`, and the `.d.aly`: a
+    // report on the one goes to the other.
+    let mut sources: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     for path in &definitions {
-        match prepare_definitions(path).and_then(|p| {
+        match prepare_definitions(path, workspace_root.as_deref()).and_then(|p| {
             extensions::apply(&p, &exts, &rig, &mut injected, workspace_root.as_deref())
         }) {
             Ok(p) => {
                 child_args.push(format!("--definitions={}", p.display()));
+
+                if path.to_string_lossy().ends_with(".d.aly") {
+                    sources.push((p.clone(), path.clone()));
+                }
+
                 given.push(p);
             }
 
@@ -274,7 +300,11 @@ fn run() -> ExitCode {
         exts,
         docs.map(PathBuf::from),
     ));
-    server.state.lock().expect("state").definitions = given;
+    {
+        let mut st = server.state.lock().expect("state");
+        st.definitions = given;
+        st.definition_sources = sources;
+    }
 
     // Child -> editor on its own thread.
     let reader_server = Arc::clone(&server);
@@ -380,9 +410,22 @@ fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Every `.d.aly` under a workspace root, outside the build output.
+/// The definitions of a workspace: the list `alloy flux` reads when
+/// the root holds a configuration, else every `.d.aly` under the root.
 fn workspace_definitions(root: &Path) -> Vec<PathBuf> {
-    workspace_files(root, |name| name.ends_with(".d.aly"))
+    let project = alloy::config::Config::find_within(root, root)
+        .and_then(|p| alloy::config::Config::load(&p).ok().map(|c| (p, c)));
+
+    match project {
+        Some((path, config)) => {
+            alloy::build::definition_files(path.parent().unwrap_or(root), &config)
+                .iter()
+                .map(|p| alloy::modules::normalize(p))
+                .collect()
+        }
+
+        None => workspace_files(root, |name| name.ends_with(".d.aly")),
+    }
 }
 
 /// Every file under a workspace root whose name passes `keep`, outside
@@ -427,8 +470,10 @@ fn workspace_files(root: &Path, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
 }
 
 /// A definitions file the child can read: a `.d.aly` compiles to a
-/// `.d.luau` in the cache directory; anything else passes as is.
-fn prepare_definitions(path: &Path) -> Result<PathBuf, String> {
+/// `.d.luau` in the workspace's cache directory; anything else passes
+/// as is. The name carries the whole path, so `client/types.d.aly` and
+/// `server/types.d.aly` write two files.
+fn prepare_definitions(path: &Path, root: Option<&Path>) -> Result<PathBuf, String> {
     let name = path.to_string_lossy();
 
     if !name.ends_with(".d.aly") {
@@ -442,14 +487,56 @@ fn prepare_definitions(path: &Path) -> Result<PathBuf, String> {
         ..alloy::EmitOptions::default()
     };
     let out = alloy::compile_with(&source, &options).map_err(|e| e.to_string())?;
-    let dir = std::env::temp_dir().join("alloy-lsp");
+    let dir = extensions::cache_dir(root);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let stem = path
         .file_name()
         .map(|n| n.to_string_lossy().replace(".d.aly", ""))
         .unwrap_or_else(|| "definitions".to_string());
-    let target = dir.join(format!("{stem}.d.luau"));
+    let target = dir.join(format!("{stem}-{}.d.luau", proxy::root_key(Some(path))));
     std::fs::write(&target, out.check).map_err(|e| e.to_string())?;
 
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two `.d.aly` of one file name wrote one compiled copy, and the
+    /// second overwrote the first.
+    #[test]
+    fn two_declaration_files_of_one_name_compile_to_two_copies() {
+        let dir = std::env::temp_dir().join(format!("alloy-defs-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("client")).unwrap();
+        std::fs::create_dir_all(dir.join("server")).unwrap();
+        std::fs::write(
+            dir.join("client/types.d.aly"),
+            "declare client_fn: number\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("server/types.d.aly"),
+            "declare server_fn: number\n",
+        )
+        .unwrap();
+
+        let client = prepare_definitions(&dir.join("client/types.d.aly"), Some(&dir)).unwrap();
+        let server = prepare_definitions(&dir.join("server/types.d.aly"), Some(&dir)).unwrap();
+
+        assert_ne!(client, server);
+        assert!(
+            std::fs::read_to_string(&client)
+                .unwrap()
+                .contains("client_fn")
+        );
+        assert!(
+            std::fs::read_to_string(&server)
+                .unwrap()
+                .contains("server_fn")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -367,7 +367,7 @@ pub const TABLES: &[Table] = &[
                 "definitions",
                 Ty::StrList,
                 "[]",
-                "Definitions files for the type check, `.d.luau` or `.d.aly`, relative to this file. The project's `.d.aly` files join them on their own.",
+                "Definitions files for the type check, `.d.luau` or `.d.aly`, relative to this file. The project's `.d.aly` files join them on their own. The editor loads the same list.",
             ),
             key(
                 "roblox_types",

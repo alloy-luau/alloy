@@ -111,6 +111,13 @@ impl State {
             return (source.clone(), true);
         }
 
+        // A compiled `.d.aly` keeps the lines of its source.
+        if let Some((_, source)) = uri_to_path(child)
+            .and_then(|p| self.definition_sources.iter().find(|(read, _)| *read == p))
+        {
+            return (path_to_uri(source), false);
+        }
+
         let real = uri_to_path(child)
             .and_then(|p| self.real_path(&p))
             .map(|p| path_to_uri(&data_source_of(p)))

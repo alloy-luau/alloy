@@ -755,7 +755,7 @@ pub struct FluxConfig {
     pub typecheck: bool,
     /// Definitions files for the type check, `.d.luau` or `.d.aly`,
     /// relative to the root. The `.d.aly` files of the project join
-    /// them on their own.
+    /// them on their own, and the editor loads the same list.
     pub definitions: Vec<String>,
     /// Load the Roblox globals. The file comes from the luau-lsp
     /// extension's storage, or downloads once into `~/.alloy/types`.

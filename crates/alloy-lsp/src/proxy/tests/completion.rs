@@ -3348,3 +3348,44 @@ pub(crate) fn an_alias_folder_is_in_the_list_and_its_dot_store_is_not() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `.d.aly` the child loads declares globals, so its types complete
+/// in every file with no import. A type another module exports still
+/// waits for the import.
+#[test]
+fn a_loaded_declaration_file_is_in_every_scope() {
+    let mut st = files(&[
+        ("file:///src/main.aly", "local q = 1\n"),
+        ("file:///src/other.aly", "export type Hidden = number\n"),
+    ]);
+    let options = EmitOptions {
+        file_name: "/src/g.d.aly".to_string(),
+        definitions: true,
+        ..EmitOptions::default()
+    };
+    st.docs.insert(
+        "file:///src/g.d.aly".to_string(),
+        Doc::new(
+            "interface Save as\n    coins: number\nend\ndeclare function warn_once(m: string): ()\n"
+                .to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    st.definition_sources.push((
+        PathBuf::from("/tmp/defs/g-1.d.luau"),
+        PathBuf::from("/src/g.d.aly"),
+    ));
+
+    let names: Vec<&str> = st
+        .decls_in_scope("file:///src/main.aly")
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+
+    assert!(names.contains(&"Save"), "{names:?}");
+    assert!(names.contains(&"warn_once"), "{names:?}");
+    assert!(!names.contains(&"Hidden"), "{names:?}");
+}

@@ -981,3 +981,70 @@ fn an_annotated_if_local_types_the_narrowed_name() {
         "{reported:?}"
     );
 }
+
+/// `[flux] definitions` passed a `.d.aly` to the checker as it was, and
+/// the checker cannot read Alloy. It compiles now, and a report on it
+/// names the file. The editor reads the same list.
+#[test]
+fn a_listed_declaration_file_outside_in_compiles_and_reports() {
+    let dir = std::env::temp_dir().join(format!("alloy-listed-defs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("types")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[flux]\nroblox_types = false\ndefinitions = [\"types/host.d.aly\", \"types/broken.d.aly\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/g.d.aly"),
+        "interface Save as\n    coins: number\nend\nenum Mode as Fast, Slow end\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("types/host.d.aly"),
+        "declare function host_fn(): number\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("types/broken.d.aly"), "declare x: Nope\n").unwrap();
+    std::fs::write(
+        dir.join("src/main.aly"),
+        "local s: Save = { coins = host_fn() }\nlocal m: Mode = \"Fast\"\nprint(s, m)\n",
+    )
+    .unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let listed: Vec<String> = alloy::build::definition_files(&dir, &config)
+        .iter()
+        .map(|p| p.strip_prefix(&dir).unwrap().display().to_string())
+        .collect();
+    assert_eq!(
+        listed,
+        vec!["src/g.d.aly", "types/host.d.aly", "types/broken.d.aly"]
+    );
+
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{} {}", d.rel.display(), d.message))
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec![format!(
+            "{} Unknown type 'Nope'",
+            dir.join("types/broken.d.aly").display()
+        )]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

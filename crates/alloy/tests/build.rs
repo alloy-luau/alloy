@@ -40,7 +40,8 @@ fn a_project_builds_into_its_out_tree() {
         fs::read_to_string(dir.join("dist/nested/util.luau")).unwrap(),
         "return 1\n"
     );
-    assert!(dir.join("dist/types.d.luau").is_file());
+    // A declaration file feeds the type check and writes nothing.
+    assert!(!dir.join("dist/types.d.luau").exists());
     assert!(
         !dir.join("dist/stale.luau").exists(),
         "clean removed the stale output"

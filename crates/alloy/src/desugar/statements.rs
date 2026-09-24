@@ -730,9 +730,12 @@ impl<'s> Desugar<'s> {
             _ => {}
         }
 
+        // `import "./fx"` is Luau's call sugar for `import("./fx")`.
         AMBIENT.iter().any(|n| text.contains(n))
             || text.contains("import(")
             || text.contains("import<<")
+            || text.contains("import \"")
+            || text.contains("import '")
             || self.constructs_struct(text)
             || WORD_OPS.iter().any(|w| text.contains(w))
             || self.ext_methods.iter().any(|m| text.contains(m.as_str()))

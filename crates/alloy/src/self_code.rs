@@ -92,6 +92,19 @@ fn run_in(dir: &Path, dry_run: bool, home: Option<PathBuf>, config: Option<PathB
     }
 }
 
+/// Rewrites the schema beside an install when one is there. A new
+/// binary brings new keys, and the old file then flags them as unknown.
+/// A file `self code` never wrote stays unwritten.
+pub fn refresh_schema(dir: &Path, text: &str) -> Option<PathBuf> {
+    let path = schema_path(dir);
+
+    if !path.is_file() || std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
+        return None;
+    }
+
+    std::fs::write(&path, text).ok().map(|()| path)
+}
+
 fn write_schema(path: &Path, dry_run: bool) -> Result<(), String> {
     let text = alloy::schema::to_string();
 
@@ -341,6 +354,25 @@ mod tests {
         )
         .unwrap();
         home
+    }
+
+    /// `self install` and `self update` left the schema of an older
+    /// binary in place, so the TOML check flagged every new key.
+    #[test]
+    fn a_new_binary_refreshes_the_schema_it_finds() {
+        let home = scratch("refresh");
+        let dir = home.join(".alloy").join("bin");
+        let schema = home.join(".alloy").join("alloy.schema.json");
+
+        assert_eq!(refresh_schema(&dir, "{}"), None, "no file, no write");
+        assert!(!schema.exists());
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&schema, "{ \"old\": true }").unwrap();
+
+        assert_eq!(refresh_schema(&dir, "{}"), Some(schema.clone()));
+        assert_eq!(std::fs::read_to_string(&schema).unwrap(), "{}");
+        assert_eq!(refresh_schema(&dir, "{}"), None, "same text, no write");
     }
 
     #[test]

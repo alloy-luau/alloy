@@ -1163,6 +1163,21 @@ impl Config {
         Self::file_in(dir).unwrap_or_else(|| dir.join(FILE_NAME))
     }
 
+    /// The warning for a folder that holds both files. `alloy.toml`
+    /// wins, and nothing else says the `.config.aly` does nothing.
+    pub fn ignored_script(dir: &Path) -> Option<String> {
+        let both = [FILE_NAME, crate::config_aly::FILE_NAME]
+            .iter()
+            .all(|name| dir.join(name).is_file());
+
+        both.then(|| {
+            format!(
+                "`{}` has no effect: `{FILE_NAME}` sits beside it and wins; remove one of the two",
+                crate::config_aly::FILE_NAME
+            )
+        })
+    }
+
     /// The configuration file of a folder: `alloy.toml`, else
     /// `.config.aly`. A folder with both reads `alloy.toml`.
     pub fn file_in(dir: &Path) -> Option<PathBuf> {
@@ -1248,6 +1263,33 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `.config.aly` beside an `alloy.toml` was read by no one, and
+    /// nothing said so.
+    #[test]
+    fn a_script_beside_the_toml_is_named_as_ignored() {
+        let dir = std::env::temp_dir().join(format!("alloy-both-configs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(crate::config_aly::FILE_NAME),
+            "export default {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(Config::ignored_script(&dir), None);
+
+        std::fs::write(dir.join(FILE_NAME), "").unwrap();
+
+        assert!(
+            Config::ignored_script(&dir)
+                .is_some_and(|m| m.starts_with("`.config.aly` has no effect")),
+            "{:?}",
+            Config::ignored_script(&dir)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_missing_key_takes_its_default() {

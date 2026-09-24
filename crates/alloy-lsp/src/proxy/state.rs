@@ -90,9 +90,10 @@ pub(crate) struct State {
     pub(crate) configs: std::cell::RefCell<HashMap<PathBuf, Option<Project>>>,
     /// The roots whose `.luaurc` the mirror already holds.
     pub(crate) luau_configs: std::cell::RefCell<HashSet<PathBuf>>,
-    /// The last load of each open `.config.aly`: the source it ran and
-    /// its failure. A publish runs often, and the load runs the file.
-    pub(crate) config_loads: std::cell::RefCell<HashMap<String, (String, Option<String>)>>,
+    /// The last load of each open `.config.aly`: the source it ran, and
+    /// the lint names it gives that name no lint, or its failure. A
+    /// publish runs often, and the load runs the file.
+    pub(crate) config_loads: std::cell::RefCell<HashMap<String, (String, ConfigLoad)>>,
     /// The Roblox API docs the child was started with, `--docs`. The
     /// proxy answers the object initializer itself, so it reads the
     /// same text the child shows after a `.`.
@@ -113,6 +114,10 @@ pub(crate) struct State {
     /// same index the first time a list has to hide one.
     pub(crate) roblox_deprecated: std::cell::RefCell<Option<Arc<HashSet<String>>>>,
 }
+
+/// What one load of a `.config.aly` gives: the lint names that name no
+/// lint, or the reason it did not load.
+pub(crate) type ConfigLoad = Result<Vec<String>, String>;
 
 impl State {
     /// Drops what the state remembers of the disk. A pass over the
@@ -449,10 +454,9 @@ impl State {
             .unwrap_or_default()
     }
 
-    /// The emit options and markup config for a file, from the nearest
-    /// `alloy.toml`: its `[alx]` table, or a `luaux.toml` beside it.
-    pub(crate) fn options_for(&self, uri: &str) -> (EmitOptions, alloy::luaux::Config) {
-        let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
+    /// The configuration a file answers to, and the folder its paths
+    /// read from.
+    fn project_for(&self, path: &Path) -> (Option<Project>, PathBuf) {
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         // The climb stops at the workspace root: a sibling project
         // under the same parent must not lend its configuration. A file
@@ -465,18 +469,51 @@ impl State {
 
             path.starts_with(&input).then_some(found)
         });
-        let file_name = path.to_string_lossy().into_owned();
-        let definitions = file_name.ends_with(".d.aly");
         let config_dir = config
             .as_ref()
             .and_then(|c| c.0.parent().map(Path::to_path_buf))
             .or_else(|| self.root.clone())
-            .unwrap_or_else(|| dir.clone());
-        let jsx = config
-            .as_ref()
-            .map(|c| c.1.markup(&config_dir))
-            .unwrap_or_else(|| alloy::luaux::Config::load(&config_dir).map_err(|e| e.message))
-            .unwrap_or_default();
+            .unwrap_or(dir);
+
+        (config, config_dir)
+    }
+
+    /// The markup config of a file: the `[alx]` table, or a
+    /// `luaux.toml` beside the project.
+    fn markup_for(
+        config: Option<&Project>,
+        config_dir: &Path,
+    ) -> Result<alloy::luaux::Config, String> {
+        match config {
+            Some(c) => c.1.markup(config_dir),
+
+            None => alloy::luaux::Config::load(config_dir).map_err(|e| e.message),
+        }
+    }
+
+    /// Why the markup config of a `.alx` file does not load. The build
+    /// skips the file then; the editor compiles it with the default
+    /// backend, whose own report would hide the real one.
+    pub(crate) fn markup_problem(&self, uri: &str) -> Option<String> {
+        if !uri.ends_with(".alx") {
+            return None;
+        }
+
+        let path = uri_to_path(uri)?;
+        let (config, config_dir) = self.project_for(&path);
+
+        Self::markup_for(config.as_ref(), &config_dir).err()
+    }
+
+    /// The emit options and markup config for a file, from the nearest
+    /// `alloy.toml`: its `[alx]` table, or a `luaux.toml` beside it.
+    pub(crate) fn options_for(&self, uri: &str) -> (EmitOptions, alloy::luaux::Config) {
+        let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let (config, config_dir) = self.project_for(&path);
+        let file_name = path.to_string_lossy().into_owned();
+        let definitions = file_name.ends_with(".d.aly");
+        let jsx = Self::markup_for(config.as_ref(), &config_dir).unwrap_or_default();
 
         let mut options = match config {
             Some(found) => {

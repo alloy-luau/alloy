@@ -405,6 +405,7 @@ impl Server {
                 // file's module joins the list under the module's name.
                 let mut modules: Vec<Value> = Vec::new();
                 let mut data_changed: Vec<PathBuf> = Vec::new();
+                let mut config_changed = false;
 
                 for change in &changes {
                     let uri = change
@@ -421,6 +422,7 @@ impl Server {
 
                     if config_file || uri.ends_with("/.luaurc") || uri.ends_with("/luaux.toml") {
                         self.state.lock().expect("state").forget_disk();
+                        config_changed = true;
                     }
 
                     if config_file {
@@ -488,6 +490,24 @@ impl Server {
 
                 for path in &data_changed {
                     self.refresh_dependents(path);
+                }
+
+                // A file the editor shows compiled with the old config,
+                // and no edit comes to compile it again.
+                if config_changed {
+                    let open: Vec<String> = self
+                        .state
+                        .lock()
+                        .expect("state")
+                        .editor_open
+                        .iter()
+                        .cloned()
+                        .collect();
+
+                    for uri in open {
+                        self.resend_doc(&uri);
+                        self.publish(&uri);
+                    }
                 }
             }
 

@@ -185,6 +185,7 @@ pub(crate) fn project(args: &[String]) -> Result<(PathBuf, Config), String> {
         .deprecations()
         .into_iter()
         .chain(config.unknown_rules())
+        .chain(Config::ignored_script(&root))
     {
         eprintln!("{}", Painter::for_stderr().warn(&line));
     }

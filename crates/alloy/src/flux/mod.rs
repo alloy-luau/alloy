@@ -1078,4 +1078,18 @@ mod tests {
             src.replace("local { a, b } = t", "local { a, b = _b } = t")
         );
     }
+
+    /// The module table reads a default export, as it reads a named
+    /// one. `export default const config = { ... }`, the second style
+    /// of a `.config.aly`, drew `unused_variable`.
+    #[test]
+    fn a_default_export_is_read() {
+        for src in [
+            "export default const settings = { a = 1 }\n",
+            "export default local settings = { a = 1 }\n",
+            "export default function make()\nend\n",
+        ] {
+            assert_eq!(names_of(&lints_of(src, &[])), Vec::<&str>::new(), "{src}");
+        }
+    }
 }

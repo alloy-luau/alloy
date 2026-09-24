@@ -44,6 +44,17 @@ impl State {
             .map(|p| diagnostic(p.start, p.end, &p.message))
             .collect();
 
+        // The file still completes and checks, so the one sign that no
+        // build reads it goes on its first line.
+        if let Some(message) = uri_to_path(uri)
+            .and_then(|p| p.parent().and_then(alloy::config::Config::ignored_script))
+        {
+            let end = doc.source.find('\n').unwrap_or(doc.source.len());
+            let mut d = diagnostic(0, end, &message);
+            d["severity"] = json!(2);
+            out.push(d);
+        }
+
         // A file that does not compile says so through the compiler, and
         // one the check faults would load with the same complaint.
         let compiles = doc
@@ -59,47 +70,120 @@ impl State {
             return out;
         };
         let mut loads = self.config_loads.borrow_mut();
-        let failure = match loads.get(uri) {
-            Some((source, failure)) if *source == doc.source => failure.clone(),
+        let loaded = match loads.get(uri) {
+            Some((source, loaded)) if *source == doc.source => loaded.clone(),
 
             _ => {
-                let failure = alloy::config_aly::evaluate_source(&doc.source, &path)
+                let loaded = alloy::config_aly::evaluate_source(&doc.source, &path)
                     .map_err(|e| alloy::config::ConfigError::Script(path.clone(), e))
                     .and_then(|table| alloy::config::Config::from_table(table, &path))
-                    .err()
-                    .map(|e| e.to_string());
-                loads.insert(uri.to_string(), (doc.source.clone(), failure.clone()));
+                    .map(|config| {
+                        // `<ingot>/<lint>` names a lint the ingot
+                        // registers after the load, as the CLI reads it.
+                        alloy::lint::unknown_names(&config.lint)
+                            .into_iter()
+                            .filter(|name| !name.contains('/'))
+                            .collect()
+                    })
+                    .map_err(|e| e.to_string());
+                loads.insert(uri.to_string(), (doc.source.clone(), loaded.clone()));
 
-                failure
+                loaded
             }
         };
-
-        if let Some(message) = failure {
-            // The report sits on the statement that gives the config.
-            let start = doc
-                .source
-                .lines()
-                .scan(0usize, |at, line| {
-                    let here = *at;
-                    *at += line.len() + 1;
-
-                    Some((here, line))
-                })
-                .find(|(_, line)| line.starts_with("export") || line.starts_with("return"))
-                .map_or(0, |(at, _)| at);
+        let line_span = |start: usize| {
             let end = doc.source[start..]
                 .find('\n')
                 .map_or(doc.source.len(), |n| start + n);
-            let shown = message.replace(&format!("{}: ", path.display()), "");
-            out.push(diagnostic(
-                start,
-                end,
-                &format!("the config does not load: {shown}"),
-            ));
+
+            (start, end)
+        };
+
+        match loaded {
+            // The schema takes any string as a lint name, so the load
+            // says which names are none. Each sits on its key.
+            Ok(unknown) => {
+                for name in unknown {
+                    if let Some(at) = key_offset(&doc.source, &name) {
+                        let mut d = diagnostic(
+                            at,
+                            at + name.len(),
+                            &alloy::config::unknown_rule_message(&name),
+                        );
+                        d["severity"] = json!(2);
+                        out.push(d);
+                    }
+                }
+            }
+
+            // A run that failed names the line: `<path>:<line>: <message>`.
+            // The report sits there, else on the statement that gives the
+            // config.
+            Err(message) => {
+                let prefix = format!("{}:", path.display());
+                let at_line = message
+                    .strip_prefix(&prefix)
+                    .and_then(|rest| rest.split_once(": "))
+                    .and_then(|(n, text)| Some((n.parse::<usize>().ok()?, text)));
+                let (span, shown) = match at_line {
+                    Some((n, text)) => (
+                        offset_of(&doc.source, n.saturating_sub(1) as u32, 0).map(line_span),
+                        text.to_string(),
+                    ),
+
+                    None => (None, message.replace(&format!("{}: ", path.display()), "")),
+                };
+                let (start, end) = span.unwrap_or_else(|| {
+                    line_span(
+                        doc.source
+                            .lines()
+                            .scan(0usize, |at, line| {
+                                let here = *at;
+                                *at += line.len() + 1;
+
+                                Some((here, line))
+                            })
+                            .find(|(_, line)| {
+                                line.starts_with("export") || line.starts_with("return")
+                            })
+                            .map_or(0, |(at, _)| at),
+                    )
+                });
+                out.push(diagnostic(
+                    start,
+                    end,
+                    &format!("the config does not load: {shown}"),
+                ));
+            }
         }
 
         out
     }
+}
+
+/// The byte offset of the lint name `name` in a config source: a key,
+/// `name =`, or a string, `["name"] =` or an item of `deny = { ... }`.
+fn key_offset(src: &str, name: &str) -> Option<usize> {
+    let toks = alloy_syntax::lexer::lex(src).ok()?.toks;
+    let text = |i: usize| {
+        toks.get(i)
+            .map_or("", |t| &src[t.start as usize..t.end as usize])
+    };
+
+    (0..toks.len()).find_map(|i| {
+        let start = toks[i].start as usize;
+        let t = text(i);
+
+        if t == name && text(i + 1) == "=" {
+            return Some(start);
+        }
+
+        let quoted = t.len() == name.len() + 2
+            && t.starts_with(['"', '\''])
+            && t.get(1..=name.len()) == Some(name);
+
+        quoted.then_some(start + 1)
+    })
 }
 
 impl Server {
@@ -134,12 +218,13 @@ impl Server {
                     message.pointer("/params/context/triggerCharacter") == Some(&json!(" "));
 
                 // A key slot answers even with nothing left to add, so no
-                // global of the file lands where a key goes. A space
-                // opens only a list of values.
+                // global of the file lands where a key goes, and so does
+                // the inside of a string. A space opens only a list of
+                // values.
                 match (&site.slot, items.is_empty()) {
                     (Slot::Key { .. }, _) if space => None,
 
-                    (Slot::Key { .. }, _) | (_, false) => {
+                    (Slot::Key { .. } | Slot::Value { quoted: true, .. }, _) | (_, false) => {
                         Some(json!({ "isIncomplete": false, "items": items }))
                     }
 

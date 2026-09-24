@@ -185,6 +185,10 @@ fn update(dir: &Path, version: Option<&str>) -> ExitCode {
     if version.is_none() && wanted == crate::alloy_version() {
         println!("{}", p.ok(&format!("alloy {wanted} is the latest")));
 
+        if let Some(schema) = self_code::refresh_schema(dir, &alloy::schema::to_string()) {
+            println!("{}", p.wrote(&schema.display().to_string()));
+        }
+
         return ExitCode::SUCCESS;
     }
 
@@ -203,6 +207,19 @@ fn update(dir: &Path, version: Option<&str>) -> ExitCode {
                     dir.display()
                 ))
             );
+
+            // The schema is the new binary's, not this one's.
+            let schema = std::process::Command::new(dir.join(exe_name("alloy")))
+                .args(["self", "schema"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|text| self_code::refresh_schema(dir, &text));
+
+            if let Some(schema) = schema {
+                println!("{}", p.wrote(&schema.display().to_string()));
+            }
 
             ExitCode::SUCCESS
         }
@@ -373,6 +390,10 @@ fn install(dir: &Path) -> ExitCode {
 
     if failed {
         return ExitCode::FAILURE;
+    }
+
+    if let Some(schema) = self_code::refresh_schema(dir, &alloy::schema::to_string()) {
+        println!("{}", p.wrote(&schema.display().to_string()));
     }
 
     println!(

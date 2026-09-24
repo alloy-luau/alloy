@@ -1164,3 +1164,104 @@ fn a_definitions_report_lands_on_the_declaration_file() {
     );
     assert!(!sent.contains("g-1.d.luau"), "{sent}");
 }
+
+/// The schema takes any string as a lint name, so `unused_varible` was
+/// silent, and `export default const config` drew `unused_variable`. A
+/// load that failed at run time sat on the `export` line, with the whole
+/// path and a traceback in it.
+#[test]
+fn a_config_file_names_a_wrong_lint_and_the_line_that_failed() {
+    let reports = |src: &str| -> Vec<(u64, String)> {
+        let st = super::support::files(&[("file:///p/.config.aly", src)]);
+
+        st.full_diagnostics("file:///p/.config.aly", Vec::new())
+            .iter()
+            .map(|d| {
+                (
+                    d["range"]["start"]["line"].as_u64().unwrap_or(99),
+                    d["message"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        reports(
+            "export default const config = {\n    lint = { rules = { unused_varible = \"deny\" } },\n}\n"
+        ),
+        [(
+            1,
+            "`unused_varible` is not a lint; did you mean `unused_variable`?".to_string()
+        )]
+    );
+    assert_eq!(
+        reports("local t = nil\nexport default {\n    build = { out = t.x },\n}\n"),
+        [(
+            2,
+            "the config does not load: attempt to index nil with 'x'".to_string()
+        )]
+    );
+}
+
+/// An `[alx.factory]` the markup compiler refuses: the build skips the
+/// file and names the table, and the editor compiled it with the default
+/// backend and named `React`. A fix on disk left that report in place
+/// until the next keystroke.
+#[test]
+fn a_broken_markup_config_is_named_and_a_fix_on_disk_clears_it() {
+    use super::documents::{Recorder, alias_root};
+
+    let dir = alias_root(
+        "broken-factory",
+        &[
+            (
+                "alloy.toml",
+                "[build]\nin = \"src\"\nout = \"build\"\n\n[alx.factory]\ncreate = \"create\"\n",
+            ),
+            (
+                "src/ui.alx",
+                "local function create(name: string, props: any): any\n    return props\nend\n\nreturn <Frame />\n",
+            ),
+        ],
+    );
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Arc::new(Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    ));
+
+    {
+        let mut st = server.state.lock().expect("state");
+        st.root = Some(dir.clone());
+        st.mirror = dir.join("mirror");
+    }
+
+    let uri = path_to_uri(&dir.join("src/ui.alx"));
+    let text = std::fs::read_to_string(dir.join("src/ui.alx")).expect("source");
+    server.open_doc(&uri, text, 1, true);
+    server.publish(&uri);
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+    assert!(sent.contains("needs a backend"), "{sent}");
+    assert!(!sent.contains("`React` is not in scope"), "{sent}");
+
+    log.lock().expect("the log").clear();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[alx.factory]\nbackend = \"element\"\ncreate = \"create\"\n",
+    )
+    .expect("the fix");
+    server.handle_client(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWatchedFiles",
+        "params": { "changes": [{ "uri": path_to_uri(&dir.join("alloy.toml")), "type": 2 }] },
+    }));
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(sent.contains("publishDiagnostics"), "{sent}");
+    assert!(!sent.contains("needs a backend"), "{sent}");
+}

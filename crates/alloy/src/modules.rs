@@ -1821,6 +1821,74 @@ pub fn import_that_exports(path: &Path, source: &str, name: &str) -> Option<Stri
     })
 }
 
+/// What a module exports when it exports only types and interfaces,
+/// each with whether it is an interface, in the order the file writes
+/// them. `None` for a module that exports a value, or nothing.
+///
+/// Such a module emits an empty table, so a binding of it hints `{}`;
+/// the editor names the types instead.
+pub fn type_only_exports(from: &Path, spec: &str) -> Option<Vec<(String, bool)>> {
+    use alloy_syntax::ast::Stmt;
+
+    let (from, aliases) = file_context(from);
+    let target = resolve(spec, &from, &aliases)?;
+
+    if !target.extension().is_some_and(|e| e == "aly" || e == "alx") {
+        return None;
+    }
+
+    let source = module_text(&target).ok()?;
+    let parsed = alloy_syntax::parse_lenient(&source, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(&source, toks).to_string();
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        match stmt {
+            Stmt::TypeAlias(d) if d.exported => out.push((text(d.name), false)),
+
+            Stmt::Interface(d) if d.exported => out.push((text(d.name), true)),
+
+            // `export type { A }` sends types on; a plain list sends values.
+            Stmt::ExportList(list) if list.type_only => {
+                out.extend(
+                    list.specs
+                        .iter()
+                        .map(|sp| (text(sp.alias.unwrap_or(sp.name)), false)),
+                );
+            }
+
+            Stmt::ExportList(_) | Stmt::ExportDefault { .. } | Stmt::Return(_) => return None,
+
+            Stmt::Local(d) if d.exported => return None,
+
+            Stmt::LocalFunction(d) if d.exported => return None,
+
+            Stmt::Function(d) if d.exported => return None,
+
+            Stmt::Struct(d) if d.exported => return None,
+
+            Stmt::Enum(d) if d.exported => return None,
+
+            Stmt::Trait(d) if d.exported => return None,
+
+            Stmt::Class(d) if d.exported => return None,
+
+            Stmt::Remote(d) if d.exported => return None,
+
+            Stmt::Namespace(d) if d.exported => return None,
+
+            Stmt::Macro(d) if d.exported => return None,
+
+            Stmt::Attribute(d) if d.exported => return None,
+
+            _ => {}
+        }
+    }
+
+    (!out.is_empty()).then_some(out)
+}
+
 /// The report for a name the file forgot to import, when an import it
 /// already writes reaches a module that exports the name.
 pub fn missing_import_message(message: &str, path: &Path, source: &str) -> Option<String> {
@@ -2759,6 +2827,51 @@ pub fn normalize(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// A module of types and interfaces lists them apart, in the file's
+    /// order; one value in it, or a return, makes it an ordinary module.
+    #[test]
+    fn a_type_only_module_lists_its_types_and_interfaces() {
+        let dir = std::env::temp_dir().join(format!("alloy-type-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("alloy.toml"), "[build]\nin = \"src\"\n").unwrap();
+        let write =
+            |name: &str, src: &str| std::fs::write(dir.join("src").join(name), src).unwrap();
+        write(
+            "shapes.aly",
+            "export type Id = number\nexport interface Named as\n    name: string\nend\nexport type Label = string\n",
+        );
+        write(
+            "contracts.aly",
+            "export interface Named as\n    name: string\nend\n",
+        );
+        write(
+            "mixed.aly",
+            "export type Id = number\nexport const FIRST = 1\n",
+        );
+        write("returns.aly", "export type Id = number\nreturn {}\n");
+        let main = dir.join("src/main.aly");
+        let exports = |spec: &str| super::type_only_exports(&main, spec);
+
+        assert_eq!(
+            exports("./shapes"),
+            Some(vec![
+                ("Id".to_string(), false),
+                ("Named".to_string(), true),
+                ("Label".to_string(), false)
+            ])
+        );
+        assert_eq!(
+            exports("./contracts"),
+            Some(vec![("Named".to_string(), true)])
+        );
+        assert_eq!(exports("./mixed"), None);
+        assert_eq!(exports("./returns"), None);
+        assert_eq!(exports("./missing"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A name the file forgot names the import that would bring it in;
     /// a name no import reaches keeps the checker's own words.
     #[test]

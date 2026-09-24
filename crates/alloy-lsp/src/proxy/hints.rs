@@ -483,3 +483,110 @@ pub(crate) fn name_future_hint(hint: &mut Value) {
         }
     }
 }
+
+/*
+A binding of a module that exports only types and interfaces: the module
+emits an empty table, so the checker's hint reads `{}`, which says
+nothing and which a click would write as an annotation. The hint names
+what the module carries instead, `{ type Id, interface Named }`, and an
+interface reads as one, apart from the type aliases. It inserts nothing.
+
+`import * as M from "spec"` and `local M = require("spec")` at the top of
+a line bind a module. A hint the child sent for the same binding gives
+way, including luau-lsp's own `{ type ... }` form, which cannot tell an
+interface from a type.
+*/
+pub(crate) fn type_only_module_hints(hints: &mut Vec<Value>, doc: &Doc, path: &std::path::Path) {
+    for (n, line) in doc.source.lines().enumerate() {
+        let Some((name_end, spec)) = module_binding(line) else {
+            continue;
+        };
+        let Some(exports) = alloy::modules::type_only_exports(path, &spec) else {
+            continue;
+        };
+        let (line_no, character) = (n as u32, line[..name_end].encode_utf16().count() as u32);
+        let entries: Vec<String> = exports
+            .iter()
+            .map(|(name, interface)| match interface {
+                true => format!("interface {name}"),
+
+                false => format!("type {name}"),
+            })
+            .collect();
+        let label = format!(": {{ {} }}", entries.join(", "));
+        let tooltip =
+            std::iter::once("A module that exports only types and interfaces:\n".to_string())
+                .chain(entries.iter().map(|e| format!("\n- `{e}`")))
+                .collect::<String>();
+
+        hints.retain(|h| {
+            h.get("position")
+                .and_then(position_of_value)
+                .is_none_or(|(l, c)| {
+                    l != line_no || (c != character && !hint_label(h).starts_with(": { type "))
+                })
+        });
+
+        let mut hint = json!({
+            "position": { "line": line_no, "character": character },
+            "label": label,
+            "kind": 1,
+            "tooltip": { "kind": "markdown", "value": tooltip },
+        });
+        truncate_hint(&mut hint, &label);
+        hints.push(hint);
+    }
+}
+
+/// The end of the name a line binds a module to, and the spec it
+/// names: `import * as M from "spec"` or `local M = require("spec")`.
+fn module_binding(line: &str) -> Option<(usize, String)> {
+    let name_at = |rest: &str| {
+        rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len())
+    };
+    let quoted = |text: &str| {
+        let q = text.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+        let body = &text[1..];
+
+        body.find(q).map(|end| body[..end].to_string())
+    };
+
+    if let Some(rest) = line.strip_prefix("import * as ") {
+        let len = name_at(rest);
+        let spec = quoted(rest[len..].trim_start().strip_prefix("from")?.trim_start())?;
+
+        return (len > 0).then(|| ("import * as ".len() + len, spec));
+    }
+
+    let rest = line.strip_prefix("local ")?;
+    let len = name_at(rest);
+    let call = rest[len..].trim_start().strip_prefix('=')?.trim_start();
+    let spec = quoted(call.strip_prefix("require(")?)?;
+
+    (len > 0).then(|| ("local ".len() + len, spec))
+}
+
+#[cfg(test)]
+mod type_only_tests {
+    #[test]
+    fn a_module_binding_reads_its_name_and_spec() {
+        let read = super::module_binding;
+
+        assert_eq!(
+            read("import * as Shapes from \"@shared/shapes\""),
+            Some((18, "@shared/shapes".to_string()))
+        );
+        assert_eq!(
+            read("local Raw = require('../shared/shapes')"),
+            Some((9, "../shared/shapes".to_string()))
+        );
+        assert_eq!(
+            read("  local Raw = require(\"./x\")"),
+            None,
+            "top of a line only"
+        );
+        assert_eq!(read("import { Id } from \"./x\""), None);
+        assert_eq!(read("local x = f(\"./x\")"), None);
+    }
+}

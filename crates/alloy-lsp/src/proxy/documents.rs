@@ -1200,7 +1200,10 @@ impl Server {
                 })
                 .collect()
         };
-        let changes = imports::rename_edits(&docs, &renames);
+        let root = self.state.lock().expect("state").root.clone();
+        let changes = imports::rename_edits(&docs, &renames, &|dir| {
+            project_aliases(dir, root.as_deref())
+        });
 
         // Shadows move: the old one closes, the new one opens from disk
         // or from the text we hold.

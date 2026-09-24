@@ -444,7 +444,8 @@ fn check_intrinsic(element: &luaux::markup::Element, class: &str, out: &mut Vec<
             continue;
         };
 
-        if want != got {
+        // A ContentId is a string in Luau: `Image="rbxassetid://1"`.
+        if want != got && !(want == "ContentId" && got == "string") {
             report(
                 out,
                 format!(
@@ -1293,6 +1294,7 @@ local function Panel()\n\
             <TextLabel Size={12} Text={5} />\n\
             <TextButton Activated={\"not a function\"} />\n\
             <TextLabel Text=\"fine\" TextSize={14} Visible={true} />\n\
+            <ImageLabel Image=\"rbxassetid://1\" />\n\
         </Frame>\n\
     )\n\
 end\n\

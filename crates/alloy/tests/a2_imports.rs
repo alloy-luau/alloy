@@ -849,3 +849,17 @@ fn an_imported_macro_expands_where_it_is_called() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `import "./fx"` is Luau's call sugar for `import("./fx")`, so it
+/// lowers to the same `require` and runs the module for its effects. It
+/// stayed a call of a global named `import`, which the checker reported.
+#[test]
+fn an_import_of_a_bare_string_is_a_require() {
+    let out = alloy::compile("import \"./fx\"\nlocal m = import './fx'\nprint(m)\n").unwrap();
+
+    for text in [&out.check, &out.ship] {
+        assert!(text.starts_with("require(\"./fx\")\n"), "{text}");
+        assert!(text.contains("local m = require('./fx')"), "{text}");
+        assert!(!text.contains("import"), "{text}");
+    }
+}

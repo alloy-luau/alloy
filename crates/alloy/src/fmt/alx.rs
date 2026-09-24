@@ -367,18 +367,21 @@ fn print_tag(
         return out;
     }
 
-    // The children: inline runs flow, blocks stand alone.
-    let mut run: Vec<&Piece> = Vec::new();
+    // The children: inline runs flow, blocks stand alone. A run holds
+    // each piece's text, and whether it is text or a hole, which may wrap.
+    let mut run: Vec<(&str, bool)> = Vec::new();
     let inner_width = width.saturating_sub(indent_width(options));
-    let flush_run = |run: &mut Vec<&Piece>, out: &mut Vec<Line>| {
+    let flush_run = |run: &mut Vec<(&str, bool)>, out: &mut Vec<Line>| {
         if run.is_empty() {
             return;
         }
 
-        let text: String = run.iter().map(|p| p.flat().unwrap_or_default()).collect();
-        let text = text.trim().to_string();
+        let text: String = run.iter().map(|(t, _)| *t).collect();
+        let text = keep_edges(&text, options);
+        // A break inside a joined element would split its tag.
+        let joined = run.iter().any(|(_, inline)| !inline);
 
-        if alx.text_wrap == TextWrap::Fill && text.chars().count() > inner_width {
+        if alx.text_wrap == TextWrap::Fill && !joined && text.chars().count() > inner_width {
             for l in wrap_text(&text, inner_width) {
                 out.push((level + 1, l));
             }
@@ -389,22 +392,59 @@ fn print_tag(
         run.clear();
     };
 
-    for k in &kids {
+    // A space on one line between text and a child element is text,
+    // and a line break there drops it. So the element joins the text
+    // beside it: its first line ends the text's line, and its last
+    // line starts the next one.
+    let spaced = |text: Option<&str>, edge: fn(&str) -> Option<char>| {
+        text.and_then(edge).is_some_and(|c| c == ' ' || c == '\t')
+    };
+
+    for (i, k) in kids.iter().enumerate() {
         if k.blank_before && alx.blank_lines {
             flush_run(&mut run, &mut out);
             out.push((0, String::new()));
         }
 
         if k.inline && k.flat().is_some() {
-            run.push(k);
+            run.push((&k.lines[0].1, true));
 
             continue;
         }
 
-        flush_run(&mut run, &mut out);
+        let before = spaced(run.last().map(|(t, _)| *t), |t| t.chars().last());
+        let after = spaced(
+            kids.get(i + 1).filter(|n| n.inline).and_then(Piece::flat),
+            |t| t.chars().next(),
+        );
 
-        for (l, text) in &k.lines {
-            out.push((level + 1 + l, text.clone()));
+        match k.lines.as_slice() {
+            [] => {}
+
+            [(_, only)] if before || after => run.push((only, false)),
+
+            [(_, only)] => {
+                flush_run(&mut run, &mut out);
+                out.push((level + 1, only.clone()));
+            }
+
+            [first, middle @ .., last] => {
+                if before {
+                    run.push((&first.1, false));
+                    flush_run(&mut run, &mut out);
+                } else {
+                    flush_run(&mut run, &mut out);
+                    out.push((level + 1 + first.0, first.1.clone()));
+                }
+
+                out.extend(middle.iter().map(|(l, t)| (level + 1 + l, t.clone())));
+
+                match after {
+                    true => run.push((&last.1, false)),
+
+                    false => out.push((level + 1 + last.0, last.1.clone())),
+                }
+            }
         }
     }
 
@@ -413,17 +453,44 @@ fn print_tag(
     out
 }
 
-/// Breaks a text run at spaces outside `{ }` holes.
+/// A run of text that stands on lines of its own. The compiler drops
+/// the whitespace at the edge of a line, and whitespace at the edge of
+/// the run is text the author wrote on one line. It goes in a `{" "}`
+/// hole, where no line break reaches it.
+fn keep_edges(text: &str, options: &FmtConfig) -> String {
+    // The hole formats as any other, so a second run keeps it.
+    let hole = |ws: &str| match ws.is_empty() {
+        true => String::new(),
+
+        false => hole(&format!("\"{ws}\""), options).remove(0).1,
+    };
+    let body = text.trim();
+
+    if body.is_empty() {
+        return hole(text);
+    }
+
+    let lead = &text[..text.len() - text.trim_start().len()];
+    let trail = &text[text.trim_end().len()..];
+
+    format!("{}{body}{}", hole(lead), hole(trail))
+}
+
+/// Breaks a text run at single spaces outside `{ }` holes. A newline
+/// reads as one space, so a run of spaces is text and never breaks.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
     let mut depth = 0usize;
+    let chars: Vec<char> = text.chars().collect();
 
-    for c in text.chars() {
+    for (i, &c) in chars.iter().enumerate() {
+        let single = i > 0 && chars[i - 1] != ' ' && chars.get(i + 1).is_some_and(|n| *n != ' ');
+
         match c {
             '{' => depth += 1,
             '}' => depth = depth.saturating_sub(1),
-            ' ' if depth == 0 => {
+            ' ' if depth == 0 && single => {
                 if !word.is_empty() {
                     words.push(std::mem::take(&mut word));
                 }
@@ -580,48 +647,36 @@ fn print_children(
     out
 }
 
-/// Text with its whitespace folded: a run of spaces is one space, and
-/// the whitespace that only lays the source out, the kind that holds a
-/// newline, goes. Whitespace alone between two holes stays one space.
+/// Text as the compiler reads it. A whitespace run that holds a newline
+/// lays the source out: the compiler reads it as one space inside the
+/// text and drops it at either end. A run on one line is text, so it
+/// stays as written. `None` when nothing is left.
 fn flow_text(raw: &str) -> Option<String> {
-    let lead = raw.len() - raw.trim_start().len();
-    let trail = raw.len() - raw.trim_end().len();
-    let body = raw.trim();
+    let mut out = String::new();
+    let mut run = String::new();
 
-    if body.is_empty() {
-        return if raw.contains('\n') {
-            None
-        } else {
-            Some(" ".to_string())
-        };
-    }
-
-    let mut s = String::new();
-
-    if lead > 0 && !raw[..lead].contains('\n') {
-        s.push(' ');
-    }
-
-    let mut last_space = false;
-
-    for c in body.chars() {
+    for c in raw.chars() {
         if c.is_whitespace() {
-            if !last_space {
-                s.push(' ');
-            }
+            run.push(c);
 
-            last_space = true;
-        } else {
-            s.push(c);
-            last_space = false;
+            continue;
         }
+
+        if !run.contains('\n') {
+            out.push_str(&run);
+        } else if !out.is_empty() {
+            out.push(' ');
+        }
+
+        run.clear();
+        out.push(c);
     }
 
-    if trail > 0 && !raw[raw.len() - trail..].contains('\n') {
-        s.push(' ');
+    if !run.contains('\n') {
+        out.push_str(&run);
     }
 
-    Some(s)
+    (!out.is_empty()).then_some(out)
 }
 
 #[cfg(test)]
@@ -665,6 +720,74 @@ mod tests {
     fn text_and_holes_flow_together() {
         let src = "return <TextLabel>Showing {#items} items</TextLabel>\n";
         assert_eq!(fmt(src), src);
+    }
+
+    /// The Text a tag renders, as the compiler reads it: the text, the
+    /// string holes, and a marker for any other hole.
+    fn rendered(src: &str) -> String {
+        let at = src.find('<').expect("a tag");
+        let (node, _) = luaux::markup::parse_node(src, at).expect("the markup parses");
+        let Node::Element(e) = node else {
+            panic!("an element")
+        };
+
+        e.children
+            .iter()
+            .map(|c| match c {
+                Child::Text { text, .. } => text.clone(),
+
+                Child::Expression { expression, .. } => {
+                    match expression.strip_prefix(['"', '\'']) {
+                        Some(s) => s.trim_end_matches(['"', '\'']).to_string(),
+
+                        // Code in a hole may move; only its words count.
+                        None => format!(
+                            "{{{}}}",
+                            expression.split_whitespace().collect::<Vec<_>>().join(" ")
+                        ),
+                    }
+                }
+
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    /// `fmt` keeps the program the same, and the text a tag renders is
+    /// part of it. It folded runs of spaces and dropped a space beside
+    /// a child element it moved to a line of its own.
+    #[test]
+    fn the_rendered_text_holds() {
+        let mut preserve = FmtConfig::default();
+        preserve.alx.text_wrap = TextWrap::Preserve;
+
+        for src in [
+            "return <TextLabel>Hello <UIPadding PaddingLeft={UDim.new(0, 4)} PaddingRight={UDim.new(0, 4)} /> there {p.x}</TextLabel>\n",
+            "return <TextLabel>Price: {p.x}<UIPadding PaddingLeft={UDim.new(0, 4)} PaddingRight={UDim.new(0, 4)} /> coins</TextLabel>\n",
+            "return <TextLabel>two  spaces   here</TextLabel>\n",
+            "return <TextLabel>{a}   {b}</TextLabel>\n",
+            "return <TextLabel>  leading and trailing  </TextLabel>\n",
+            "return <TextLabel Size={UDim2.fromScale(1, 1)} BackgroundTransparency={1}>  leading and a long line of text that wraps  </TextLabel>\n",
+            "return <TextLabel>Hello <UIPadding PaddingLeft={UDim.new(0, 4)} PaddingRight={UDim.new(0, 4)} PaddingTop={UDim.new(0, 4)} PaddingBottom={UDim.new(0, 4)} /> there</TextLabel>\n",
+            "return <TextLabel>Total: {f(function()\n  return 1\nend)} items</TextLabel>\n",
+        ] {
+            for options in [&FmtConfig::default(), &preserve] {
+                let once = format_alx(src, options).unwrap();
+
+                assert_eq!(rendered(&once), rendered(src), "{once}");
+                // A hole keeps a space only at the edge of the tag; a
+                // hole makes the text a computed value in some backends.
+                assert!(
+                    src.contains("  leading") || !once.contains("{' '}"),
+                    "{once}"
+                );
+                assert_eq!(
+                    format_alx(&once, options).unwrap(),
+                    once,
+                    "fmt is idempotent"
+                );
+            }
+        }
     }
 
     #[test]

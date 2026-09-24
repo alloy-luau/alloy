@@ -151,11 +151,13 @@ pub fn encloses_test(src: &str, at: usize) -> bool {
 }
 
 /// The path of the spec for a source, relative to the test folder:
-/// `a/b.aly` becomes `a/b.spec.luau`. A source already named for its
-/// tests, `b.spec.aly` or `b.test.aly`, keeps one `.spec`.
+/// `a/b.aly` and `a/b.alx` become `a/b.spec.luau`. A source already
+/// named for its tests, `b.spec.aly` or `b.test.aly`, keeps one `.spec`.
 pub fn spec_for(rel: &Path) -> Option<PathBuf> {
     let name = rel.file_name()?.to_str()?;
-    let stem = name.strip_suffix(".aly")?;
+    let stem = name
+        .strip_suffix(".aly")
+        .or_else(|| name.strip_suffix(".alx"))?;
 
     if stem.ends_with(".d") {
         return None;
@@ -395,13 +397,34 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
 /// The source cut down to its tests and what they reach, with every
 /// other top-level statement blanked so the lines stay. `None` when the
 /// file has no `@test`.
-pub fn slice(src: &str, toks: &[Tok], chunk: &Chunk) -> Option<String> {
-    let decls: Vec<Decl> = chunk
+///
+/// `markup` holds the byte ranges of the markup in a `.alx` file. The
+/// parse read them blanked, so the names they use come from their text,
+/// with `factory`, the names the lowering calls.
+pub fn slice(
+    src: &str,
+    toks: &[Tok],
+    chunk: &Chunk,
+    markup: &[(usize, usize)],
+    factory: &[&str],
+) -> Option<String> {
+    let mut decls: Vec<Decl> = chunk
         .block
         .stmts
         .iter()
         .map(|s| describe(src, toks, s))
         .collect();
+
+    for d in &mut decls {
+        for (a, b) in markup.iter().filter(|(a, _)| (d.start..d.end).contains(a)) {
+            let words = src[*a..*b]
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| w.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_'));
+
+            d.refs
+                .extend(words.chain(factory.iter().copied()).map(str::to_string));
+        }
+    }
 
     if !decls.iter().any(|d| d.is_test) {
         return None;
@@ -737,11 +760,21 @@ pub fn spec(
     ingots: Option<&crate::ingot::Ingots>,
     extensions: &[crate::extensions::Extension],
 ) -> Result<Option<(String, Vec<Diagnostic>, usize)>, crate::CompileError> {
-    let parsed = alloy_syntax::parse_lenient(source, Default::default()).map_err(|e| {
-        crate::CompileError {
-            offset: e.offset,
-            message: e.message,
-        }
+    // Markup is no Alloy the parser reads. Blanked, it keeps every
+    // offset, so the slice cuts the source itself.
+    let alx = source_rel.extension().is_some_and(|e| e == "alx");
+    let (markup, blanked) = match alx {
+        true => crate::alx::blank_markup(source).unwrap_or_default(),
+
+        false => (Vec::new(), String::new()),
+    };
+    let parsed = alloy_syntax::parse_lenient(
+        if blanked.is_empty() { source } else { &blanked },
+        Default::default(),
+    )
+    .map_err(|e| crate::CompileError {
+        offset: e.offset,
+        message: e.message,
     })?;
     // A source the lenient parse could not read is no spec: the tree is
     // the recovery's, not the author's, and the slice would register a
@@ -761,7 +794,27 @@ pub fn spec(
         return Ok(Some((String::new(), diagnostics, 0)));
     }
 
-    let Some(sliced) = slice(source, &parsed.lexed.toks, &parsed.chunk) else {
+    let jsx = alx.then(|| config.markup(root).ok()).flatten();
+    // The head name of each expression the lowering calls.
+    let factory: Vec<&str> = jsx
+        .iter()
+        .flat_map(|c| {
+            [
+                Some(c.create.as_str()),
+                c.fragment.as_deref(),
+                c.compute.as_deref(),
+                c.merge.as_deref(),
+                c.children.as_deref(),
+                c.event.as_ref().map(|e| e.expression()),
+            ]
+        })
+        .flatten()
+        .filter_map(|e| {
+            e.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+        })
+        .collect();
+    let Some(sliced) = slice(source, &parsed.lexed.toks, &parsed.chunk, &markup, &factory) else {
         return Ok(None);
     };
     let spec_rel = config.test.out.join(
@@ -790,7 +843,7 @@ pub fn spec(
         &source_rel.to_string_lossy(),
         &sliced,
         &options,
-        None,
+        jsx.as_ref(),
         ingots,
     )?;
     let mut text = rewrite_requires(config, &tree, root, source_rel, &spec_rel, &out.ship);
@@ -1113,7 +1166,7 @@ mod tests {
             .ok()
             .unwrap();
 
-        slice(src, &parsed.lexed.toks, &parsed.chunk)
+        slice(src, &parsed.lexed.toks, &parsed.chunk, &[], &[])
     }
 
     #[test]
@@ -1247,6 +1300,10 @@ mod tests {
             spec_for(Path::new("loot.test.aly")),
             Some(PathBuf::from("loot.spec.luau"))
         );
+        assert_eq!(
+            spec_for(Path::new("ui/card.alx")),
+            Some(PathBuf::from("ui/card.spec.luau"))
+        );
     }
 
     #[test]
@@ -1273,6 +1330,34 @@ mod tests {
         assert!(text.contains("__lest.it(\"plain\", plain)"), "{text}");
         assert!(text.contains("__alloy.await(later())"), "{text}");
         assert!(!text.contains("__alloy.test("), "{text}");
+    }
+
+    /// A `.alx` file writes a spec too. The slice follows the names the
+    /// markup uses, and the markup lowers with the project's config.
+    #[test]
+    fn a_markup_file_writes_a_spec() {
+        let src = "local function create(name: any): any\n    return function(props: any): any return props end\nend\n\nlocal function Card(props: { title: string }): any\n    return <TextLabel Text={props.title} />\nend\n\nlocal unused = 1\n\n@test\nfunction builds_a_card()\n    local card = <Card title=\"x\" />\n    $assert(card ~= nil)\nend\n";
+        let config = Config::parse(
+            "[alx.factory]\nbackend = \"table\"\ncreate = \"create\"\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        let (text, diagnostics, count) = spec(
+            &config,
+            Path::new("/none"),
+            Path::new("src/m.alx"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .expect("a spec");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(count, 1);
+        assert!(text.contains("create(\"TextLabel\")"), "{text}");
+        assert!(text.contains("local function Card"), "{text}");
+        assert!(!text.contains("unused"), "{text}");
     }
 
     /// A namespace member renders under its own name and the table

@@ -57,7 +57,7 @@ fn a_rest_takes_the_other_fields() {
     );
 
     assert!(
-        out.contains("local id, rest: { [string]: unknown } = _p1.id, (function()"),
+        out.contains("local id, rest: { [string]: unknown } = _p1.id, (function(t: any): any"),
         "{out}"
     );
     assert!(out.contains("if k ~= \"id\" then r[k] = v end"), "{out}");
@@ -166,6 +166,183 @@ fn the_patterns_the_rfc_refuses_report() {
     assert_eq!(
         one("local function f({ x, ...rest, y }: Point)\n    print(x, rest)\nend\n"),
         vec!["`...rest` takes the fields that are left; no name follows it"]
+    );
+}
+
+/// A field type copies through the type edits, in a parameter and in a
+/// `local`.
+#[test]
+fn a_field_type_takes_its_luau_form() {
+    let out = ship(
+        "local function f({ list: string[], id: ~nil })\n    print(list, id)\nend\nlocal { b: number[] } = { b = [1] }\nprint(b)\n",
+    );
+
+    assert!(
+        out.contains("_p1: { list: __alloy.Array<string>, id: __neg<nil> }) local list: __alloy.Array<string>, id: __neg<nil> ="),
+        "{out}"
+    );
+    assert!(out.contains("local b: __alloy.Array<number> ="), "{out}");
+}
+
+/// A pattern over several lines keeps them, so the body stays on its
+/// own lines.
+#[test]
+fn a_pattern_over_several_lines_keeps_the_body_in_place() {
+    let out = ship(
+        "type Point = { x: number, y: number }\nlocal function f({\n    x,\n    y,\n}: Point)\n    print(x, y)\nend\nfor _, {\n    x = ex,\n} in { { x = 1, y = 2 } } do\n    print(ex)\nend\n",
+    );
+    let lines: Vec<&str> = out.lines().collect();
+
+    assert_eq!(lines[5], "    print(x, y)", "{out}");
+    assert_eq!(lines[10], "    print(ex)", "{out}");
+}
+
+/// A temp never takes a name the source already binds.
+#[test]
+fn a_temp_skips_a_name_the_source_binds() {
+    let out = ship(
+        "type B = { b: number }\nlocal function named(_p1: string, { b }: B)\n    print(_p1, b)\nend\nlocal _p2 = \"keep\"\nfor _, { b } in { { b = 1 } } do\n    print(_p2, b)\nend\n",
+    );
+
+    assert!(
+        out.contains("named(_p1: string, _p3: B) local b = _p3.b"),
+        "{out}"
+    );
+    assert!(out.contains("for _, _p3 in"), "{out}");
+}
+
+/// A trait signature and a default body take the pattern as a temp.
+#[test]
+fn a_trait_method_takes_a_pattern() {
+    let out = ship(
+        "type Point = { x: number, y: number }\ntrait Mover as\n    function move(self, { x, y }: Point): ()\n    function at(self, { x }: Point): string\n        return `at {x}`\n    end\nend\n",
+    );
+
+    assert!(out.contains("read move: (self: any, Point) -> ()"), "{out}");
+    assert!(
+        out.contains("function Mover.at(self, _p1: Point): string local x = _p1.x"),
+        "{out}"
+    );
+}
+
+/// A declaration rewrites every pattern, whatever its type spells.
+#[test]
+fn every_declared_pattern_writes_a_temp() {
+    let out = alloy::compile_with(
+        "type Vec2 = { x: number, y: number }\ndeclare function spin({ x, y }: Vec2): ()\ndeclare function on({ cb: (n: number) -> string }): ()\ndeclare function after(f: () -> (), { x }: Vec2): ()\ndeclare extern type Canvas with\n    function dot(self, { x }: Vec2): ()\n    function line(self, { x }: Vec2, { y }: Vec2): ()\nend\ndeclare class Brush\n    function paint(self, { x }: Vec2): ()\nend\n",
+        &alloy::EmitOptions {
+            definitions: true,
+            ..alloy::EmitOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    for want in [
+        "declare function spin(_p1: Vec2): ()",
+        "declare function on(_p1: { cb: (n: number) -> string }): ()",
+        "declare function after(f: () -> (), _p1: Vec2): ()",
+        "function line(self, _p2: Vec2, _p3: Vec2): ()",
+        "declare extern type Brush with\n    function paint(self, _p1: Vec2): ()",
+    ] {
+        assert!(out.ship.contains(want), "{want}: {}", out.ship);
+    }
+}
+
+/// A declaration checks its patterns the way a function does.
+#[test]
+fn a_declared_pattern_reports() {
+    let out = alloy::compile_with(
+        "type Vec2 = { x: number, y: number }\ndeclare function a({ x, y }): ()\ndeclare function b({ x }: Vec2?): ()\n",
+        &alloy::EmitOptions {
+            definitions: true,
+            ..alloy::EmitOptions::default()
+        },
+    )
+    .unwrap();
+    let messages: Vec<String> = out.diagnostics.into_iter().map(|d| d.message).collect();
+
+    assert_eq!(
+        messages,
+        vec![
+            "`{ x, y }` has no type; annotate the parameter, `{ x, y }: Options`, or type each field",
+            "a pattern needs a value; `Vec2?` may be nil",
+        ]
+    );
+}
+
+/// A macro binds `...rest`, and a field name in its body stays.
+#[test]
+fn a_macro_pattern_binds_the_rest() {
+    let out = ship(
+        "type R = { w: number, h: number }\nmacro m({ w, ...others }: R, o: R)\n    print(w, others, o.w, { w = w })\nend\nlocal r: R = { w = 1, h = 2 }\n$m(r, r)\n",
+    );
+
+    assert!(
+        out.contains("print(((r).w), ((function(t: any): any"),
+        "{out}"
+    );
+    assert!(out.contains("end)(r)), r.w, { w = ((r).w) })"), "{out}");
+}
+
+/// A default settles an optional pattern, so its local drops the `?`.
+#[test]
+fn a_default_settles_an_optional_pattern() {
+    let out = ship(
+        "type Point = { x: number, y: number }\nlocal function at({ x }: Point? = { x = 0, y = 0 })\n    print(x)\nend\n",
+    );
+
+    assert!(
+        out.contains("at(_p1: Point?) local _p1: Point = if _p1 == nil"),
+        "{out}"
+    );
+
+    let out = ship(
+        "type Point = { x: number, y: number }\nlocal function at({ x }: Point | nil = { x = 0, y = 0 })\n    print(x)\nend\n",
+    );
+    assert!(out.contains("local _p1: Point = if _p1 == nil"), "{out}");
+}
+
+/// A bound on a generic reaches a pattern local of that type through a
+/// cast, since the table in the header drops it.
+#[test]
+fn a_bound_reaches_a_pattern_local() {
+    let out = ship(
+        "trait Shape as\n    function area(self): number\nend\nlocal function f<T: Shape>({ item }: { item: T, n: number }): number\n    return item:area()\nend\n",
+    );
+
+    assert!(
+        out.contains("local item: (T & Shape) = (_p1.item :: (T & Shape))"),
+        "{out}"
+    );
+}
+
+/// The problems the first pass let through.
+#[test]
+fn a_pattern_reports_what_it_hides() {
+    let point = "type Point = { x: number, y: number }\n";
+    let one = |body: &str| messages(&format!("{point}{body}"));
+
+    assert_eq!(
+        one("local function g({ x }: Point, x: number)\n    print(x)\nend\n"),
+        vec!["`x` is already a parameter; one name holds one declaration"]
+    );
+    assert_eq!(
+        one("local function k({ x, huh }: Point)\n    print(x, huh)\nend\n"),
+        vec!["`Point` has no field `huh`"]
+    );
+    assert_eq!(
+        one("local function m({ x }: Point | nil)\n    print(x)\nend\n"),
+        vec!["a pattern needs a value; `Point | nil` may be nil"]
+    );
+    assert_eq!(
+        one("local function l([a, b])\n    print(a, b)\nend\n"),
+        vec!["`[a, b]` has no type; annotate the parameter, `[a, b]: T[]`"]
+    );
+    assert_eq!(
+        one("local function o({ x, ...rest: { [string]: number } }: Point)\n    print(x)\nend\n"),
+        vec!["`...rest` takes no type; the annotation's index type is its type"]
     );
 }
 

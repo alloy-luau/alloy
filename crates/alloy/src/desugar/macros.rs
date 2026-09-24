@@ -329,7 +329,12 @@ impl<'s> Desugar<'s> {
                 .unwrap_or("nil".to_string());
 
             for (bound, access) in pattern {
-                subst.insert(bound.as_str(), format!("({text}){access}"));
+                let read = match access.starts_with(['.', '[']) {
+                    true => format!("({text}){access}"),
+
+                    false => format!("{access}({text})"),
+                };
+                subst.insert(bound.as_str(), read);
             }
         }
 
@@ -431,11 +436,35 @@ impl<'s> Desugar<'s> {
         // gap the declaration wrote.
         let substitute = |text: &str| -> String {
             let mut out = String::new();
+            let parts = body_parts(text);
+            let mut open: Vec<&str> = Vec::new();
 
-            for (gap, word) in body_parts(text) {
+            for (i, &(gap, word)) in parts.iter().enumerate() {
                 out.push_str(gap);
+                let prev = i.checked_sub(1).map_or("", |j| parts[j].1);
+                let next = parts.get(i + 1).map_or("", |p| p.1);
 
-                if word == "..." && m.variadic {
+                // A name after `.` or `:` is a field or a method, and a
+                // name before `=` in a table is a key. Neither is the
+                // parameter or the local of that name.
+                let field = matches!(prev, "." | ":")
+                    || (open.last() == Some(&"{")
+                        && matches!(prev, "{" | "," | ";")
+                        && next == "=");
+
+                match word {
+                    "{" | "(" | "[" => open.push(word),
+
+                    "}" | ")" | "]" => {
+                        open.pop();
+                    }
+
+                    _ => {}
+                }
+
+                if field {
+                    out.push_str(word);
+                } else if word == "..." && m.variadic {
                     // Nothing behind the vararg: the comma in front of
                     // it has no argument to separate, and `f(a, )` is
                     // not Luau.

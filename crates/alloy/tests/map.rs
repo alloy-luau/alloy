@@ -14,7 +14,7 @@ fn line_of(text: &str, offset: usize) -> usize {
 
 /// A binder that declares its name on the anchor's line copies the
 /// name from the source: the negated `if local`, a table pattern, an
-/// array pattern. The editor then maps the child's answer back to the
+/// array pattern, a `for` pattern. The editor then maps the child's answer back to the
 /// name the reader wrote.
 #[test]
 fn a_binder_name_on_its_line_copies_from_the_source() {
@@ -40,6 +40,9 @@ fn a_binder_name_on_its_line_copies_from_the_source() {
         "    local [first_item, ...rest] = arr\n",
         "    return first_item + #rest\n",
         "end\n",
+        "for _, { a = left, b } in { Pair.new({ a = 1, b = 2 }) } do\n",
+        "    print(left, b)\n",
+        "end\n",
     );
     let out = alloy::compile(src).unwrap();
 
@@ -49,6 +52,8 @@ fn a_binder_name_on_its_line_copies_from_the_source() {
         ("b } = p", "b"),
         ("first_item, ...rest", "first_item"),
         ("rest] = arr", "rest"),
+        ("left, b }", "left"),
+        ("b } in", "b"),
     ] {
         let s = src.find(text).unwrap() as u32;
         let o = out

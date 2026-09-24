@@ -282,8 +282,8 @@ pub struct MacroSource {
     /// The default of each parameter, as source text.
     pub defaults: Vec<Option<String>>,
     /// The names each pattern parameter binds, with the access that
-    /// reads each one from the argument: `(x, ".x")`. Empty for a
-    /// parameter with a name.
+    /// reads each one from the argument: `(x, ".x")`. See
+    /// `pattern_accesses`. Empty for a parameter with a name.
     pub patterns: Vec<Vec<(String, String)>>,
     pub variadic: bool,
     pub body: String,
@@ -291,22 +291,32 @@ pub struct MacroSource {
 }
 
 /// The names a pattern parameter binds and the access that reads each
-/// from the argument: `.field` for a table pattern, `[i]` for an array.
+/// from the argument: `.field` for a table pattern, `[i]` for an array,
+/// and for `...rest` a function the argument passes through.
 pub(crate) fn pattern_accesses(
     p: &alloy_syntax::ast::Param,
     text: impl Fn(TokSpan) -> String,
 ) -> Vec<(String, String)> {
     match &p.destructure {
-        Some(Destructure::Table(fields)) => fields
-            .iter()
-            .filter(|f| !f.rest)
-            .map(|f| {
-                (
-                    text(f.rename.unwrap_or(f.field)),
-                    format!(".{}", text(f.field)),
-                )
-            })
-            .collect(),
+        Some(Destructure::Table(fields)) => {
+            let named: Vec<String> = fields
+                .iter()
+                .filter(|f| !f.rest)
+                .map(|f| text(f.field))
+                .collect();
+
+            fields
+                .iter()
+                .map(|f| match f.rest {
+                    true => (text(f.field), statements::rest_copy(&named)),
+
+                    false => (
+                        text(f.rename.unwrap_or(f.field)),
+                        format!(".{}", text(f.field)),
+                    ),
+                })
+                .collect()
+        }
 
         Some(Destructure::Array { items, .. }) => items
             .iter()
@@ -494,7 +504,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             .iter()
             .filter_map(|t| {
                 let text = t.text(src).strip_prefix('_')?;
-                let digits = text.trim_start_matches(['m', 'v', 'c']);
+                let digits = text.trim_start_matches(['m', 'v', 'c', 'p']);
 
                 (digits.len() + 1 >= text.len())
                     .then(|| digits.parse().ok())
@@ -979,8 +989,9 @@ struct Desugar<'s> {
     struct_at: HashMap<String, u32>,
     /// The next temp index inside the statement under render.
     temp_next: u32,
-    /// The temp numbers the source already names, `local _1 = 5`. The
-    /// emit skips them, so a temp never shadows a user local.
+    /// The temp numbers the source already names, `local _1 = 5` or a
+    /// `_p1` parameter. The emit skips them, so a temp never shadows a
+    /// user local.
     taken_temps: Vec<u32>,
     /// Per open block: the temp indices already declared in it, and in
     /// every block around it, since an inner block sees outer locals.

@@ -15,17 +15,19 @@ impl<'a> Parser<'a> {
 
     A class body holds properties (`name: T`, `["a b"]: T`), methods
     (`function name(self): R`), and indexers (`[T]: U`), each with an
-    optional `read` or `write` in front. The tree keeps only the span; a
-    declaration is meta code that larvae validates and never rewrites.
+    optional `read` or `write` in front. The tree keeps the span and the
+    pattern parameters: the emit writes a pattern as a name, since Luau's
+    definitions take one per parameter.
     */
     pub(super) fn declare_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
         self.bump(); // declare
+        let mut patterns = Vec::new();
 
         match self.text() {
             "function" => {
                 self.bump();
                 self.expect_name()?;
-                self.declare_signature()?;
+                self.declare_signature(&mut patterns)?;
             }
 
             /*
@@ -44,10 +46,11 @@ impl<'a> Parser<'a> {
                 }
 
                 self.expect("with")?;
-                self.declare_members()?;
+                self.declare_members(&mut patterns)?;
                 self.expect("end")?;
 
                 return Ok(Stmt::Declare(Declare {
+                    patterns,
                     span: TokSpan::new(start, self.pos),
                 }));
             }
@@ -61,10 +64,11 @@ impl<'a> Parser<'a> {
                     self.expect_name()?;
                 }
 
-                self.declare_members()?;
+                self.declare_members(&mut patterns)?;
                 self.expect("end")?;
 
                 return Ok(Stmt::Declare(Declare {
+                    patterns,
                     span: TokSpan::new(start, self.pos),
                 }));
             }
@@ -77,12 +81,13 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Stmt::Declare(Declare {
+            patterns,
             span: TokSpan::new(start, self.pos),
         }))
     }
 
     /// The members of a class or extern type declaration, up to its `end`
-    fn declare_members(&mut self) -> Result<(), ParseError> {
+    fn declare_members(&mut self, patterns: &mut Vec<Binding>) -> Result<(), ParseError> {
         while !self.at("end") {
             if self.at_end() {
                 return Err(self.err("this declaration never ends"));
@@ -101,7 +106,7 @@ impl<'a> Parser<'a> {
             if self.at("function") {
                 self.bump();
                 self.expect_name()?;
-                self.declare_signature()?;
+                self.declare_signature(patterns)?;
             } else if self.at("[") {
                 self.bump();
 
@@ -125,8 +130,9 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// The parameter list and return type of a declared function, no body
-    fn declare_signature(&mut self) -> Result<(), ParseError> {
+    /// The parameter list and return type of a declared function, no
+    /// body. Each pattern parameter joins `patterns`.
+    fn declare_signature(&mut self, patterns: &mut Vec<Binding>) -> Result<(), ParseError> {
         if self.at("<") {
             self.angle_span()?;
         }
@@ -150,7 +156,11 @@ impl<'a> Parser<'a> {
             }
 
             // A name or a pattern, with its type: `{ x, y }: Point`.
-            self.binding("parameter")?;
+            let b = self.binding("parameter")?;
+
+            if b.destructure.is_some() {
+                patterns.push(b);
+            }
 
             if self.at(",") {
                 self.bump();
@@ -504,23 +514,42 @@ impl<'a> Parser<'a> {
                         ty: None,
                         rest: true,
                     });
-                    self.eat(",");
 
-                    if !self.at("}") {
-                        let message =
-                            "`...rest` takes the fields that are left; no name follows it";
+                    let message = match self.at(":") {
+                        true => {
+                            Some("`...rest` takes no type; the annotation's index type is its type")
+                        }
 
+                        false => {
+                            self.eat(",");
+
+                            (!self.at("}")).then_some(
+                                "`...rest` takes the fields that are left; no name follows it",
+                            )
+                        }
+                    };
+
+                    if let Some(message) = message {
                         if !self.lenient {
                             return Err(self.err(message));
                         }
 
                         // The report is the whole answer: the rest of the
-                        // pattern skips to its brace, so no line after it
-                        // reports again.
+                        // pattern skips to its brace, over any braces of a
+                        // type, so no line after it reports again.
                         let offset = self.err(message).offset;
                         self.report_at(offset, message);
+                        let mut depth = 0;
 
-                        while !self.at("}") && !self.at_end() {
+                        while !(depth == 0 && self.at("}")) && !self.at_end() {
+                            match self.text() {
+                                "{" => depth += 1,
+
+                                "}" => depth -= 1,
+
+                                _ => {}
+                            }
+
                             self.bump();
                         }
                     }

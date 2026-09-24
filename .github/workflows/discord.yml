@@ -1,12 +1,11 @@
 # Posts an embed to Discord for each push, and for each pull request
 # that opens, closes, or merges. The other Alloy repositories call this
-# file, so the embed looks the same in all of them. Each repository
-# names its webhook in a DISCORD_WEBHOOK secret or variable; a
-# repository with neither posts nothing. The secret wins: the log of a
-# public repository shows a variable's value to everyone, and a leaked
-# webhook lets anyone post to the channel.
+# file, so the embed looks the same in all of them. The webhook comes
+# from the DISCORD_WEBHOOK secret; the rfcs repository passes its own
+# RFC_DISCORD_WEBHOOK under that name. A repository with neither posts
+# nothing.
 #
-# pull_request_target runs with the base repository's variables, so a
+# pull_request_target runs with the base repository's secrets, so a
 # pull request from a fork also posts. The job never checks out the
 # pull request's code, and the payload reaches the script as data, so
 # no text from the pull request runs as code.
@@ -18,11 +17,9 @@ on:
   pull_request_target:
     types: [opened, closed]
   workflow_call:
-    inputs:
-      webhook:
-        type: string
+    secrets:
+      DISCORD_WEBHOOK:
         required: false
-        default: ""
 
 permissions: {}
 
@@ -32,7 +29,7 @@ jobs:
     steps:
       - uses: actions/github-script@v7
         env:
-          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK || inputs.webhook || vars.DISCORD_WEBHOOK }}
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         with:
           script: |
             if (!process.env.WEBHOOK) {
@@ -42,6 +39,15 @@ jobs:
             const e = context.payload
             const repo = e.repository
             const cut = (text, n) => (text.length > n ? `${text.slice(0, n - 3).trimEnd()}...` : text)
+            // `#12` and `owner/repo#12` link to what they name, so `Fixes
+            // #12` opens the issue it closes.
+            const linked = (text) =>
+              text.replace(
+                /(^|[^\w/[])((?:([\w.-]+)\/([\w.-]+))?#(\d+))\b/g,
+                (_, lead, ref, owner, name, n) =>
+                  `${lead}[${ref}](https://github.com/${owner ? `${owner}/${name}` : repo.full_name}/issues/${n})`,
+              )
+            const person = (user) => ({ name: user.login, url: user.html_url, icon_url: user.avatar_url })
             const footer = { text: repo.full_name, icon_url: repo.owner.avatar_url }
             let embed
 
@@ -54,19 +60,27 @@ jobs:
               }
 
               const branch = e.ref.replace('refs/heads/', '')
+              const head = (c) => c.message.split('\n')[0]
               const lines = commits
                 .slice(-10)
-                .map((c) => `[\`${c.id.slice(0, 7)}\`](${c.url}) ${cut(c.message.split('\n')[0], 72)} - ${c.author.username ?? c.author.name}`)
+                .map((c) => `[\`${c.id.slice(0, 7)}\`](${c.url}) ${linked(cut(head(c), 72))} - ${c.author.username ?? c.author.name}`)
 
               if (commits.length > 10) {
                 lines.unshift(`*${commits.length - 10} earlier commits not shown*`)
               }
 
+              const one = commits.length === 1 ? commits[0] : null
+
               embed = {
-                author: { name: e.sender.login, url: e.sender.html_url, icon_url: e.sender.avatar_url },
-                title: `${commits.length} new commit${commits.length === 1 ? '' : 's'} on ${branch}`,
-                url: e.compare,
-                description: lines.join('\n'),
+                author: person(e.sender),
+                title: cut(
+                  one
+                    ? `[${repo.name}:${branch}] ${one.id.slice(0, 7)} ${head(one)}`
+                    : `[${repo.name}:${branch}] ${commits.length} new commits`,
+                  256,
+                ),
+                url: one ? one.url : e.compare,
+                description: one ? linked(cut(one.message.replace(/\r/g, '').trim(), 1000)) : lines.join('\n'),
                 color: 0xa78bfa,
                 footer,
                 timestamp: e.head_commit?.timestamp ?? new Date().toISOString(),
@@ -81,7 +95,8 @@ jobs:
                 merged: ['Merged', 0x8957e5],
                 closed: ['Closed without merging', 0xf85149],
               }[state] ?? [state, 0x6e7681]
-              const by = state === 'merged' && pr.merged_by ? ` by ${pr.merged_by.login}` : ''
+              const by =
+                state === 'merged' && pr.merged_by ? ` by [${pr.merged_by.login}](${pr.merged_by.html_url})` : ''
               const body = (pr.body ?? '').replace(/\r/g, '').trim()
               const fields = [
                 { name: 'Branch', value: `\`${pr.head.label}\` -> \`${pr.base.ref}\`` },
@@ -95,10 +110,10 @@ jobs:
               }
 
               embed = {
-                author: { name: pr.user.login, url: pr.user.html_url, icon_url: pr.user.avatar_url },
-                title: cut(`#${pr.number} ${pr.title}`, 256),
+                author: person(pr.user),
+                title: cut(`[${repo.name}] #${pr.number} ${pr.title}`, 256),
                 url: pr.html_url,
-                description: `**${label}**${by}${body ? `\n>>> ${cut(body, 350)}` : ''}`,
+                description: `**${label}**${by}${body ? `\n>>> ${linked(cut(body, 350))}` : ''}`,
                 color,
                 fields,
                 thumbnail: { url: repo.owner.avatar_url },

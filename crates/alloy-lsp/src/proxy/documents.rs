@@ -111,13 +111,6 @@ impl State {
             return (source.clone(), true);
         }
 
-        // A compiled `.d.aly` keeps the lines of its source.
-        if let Some((_, source)) = uri_to_path(child)
-            .and_then(|p| self.definition_sources.iter().find(|(read, _)| *read == p))
-        {
-            return (path_to_uri(source), false);
-        }
-
         let real = uri_to_path(child)
             .and_then(|p| self.real_path(&p))
             .map(|p| path_to_uri(&data_source_of(p)))
@@ -1638,6 +1631,32 @@ pub(crate) fn map_into_shadow(params: &mut Value, doc: &Doc) {
 pub(crate) fn map_from_shadow(value: &mut Value, ctx: Option<&str>, st: &State) {
     match value {
         Value::Object(map) => {
+            // A place in the merged definitions file: the `.d.aly` it
+            // came from, on that file's own lines.
+            for (key, ranges) in [
+                ("uri", &["range"][..]),
+                ("targetUri", &["targetRange", "targetSelectionRange"][..]),
+            ] {
+                let line = ranges
+                    .iter()
+                    .find_map(|r| map.get(*r)?.pointer("/start/line")?.as_u64());
+                let place = map
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .zip(line)
+                    .and_then(|(uri, line)| st.declared_at(uri, line as usize));
+
+                if let Some((source, first)) = place {
+                    map.insert(key.to_string(), json!(source));
+
+                    for r in ranges {
+                        if let Some(range) = map.get_mut(*r) {
+                            shift_lines(range, first);
+                        }
+                    }
+                }
+            }
+
             let mut here: Option<String> = ctx.map(str::to_string);
 
             if let Some(Value::String(uri)) = map.get_mut("uri") {
@@ -1704,6 +1723,17 @@ pub(crate) fn map_from_shadow(value: &mut Value, ctx: Option<&str>, st: &State) 
         }
 
         _ => {}
+    }
+}
+
+/// Moves both ends of a range up by `by` lines.
+pub(crate) fn shift_lines(range: &mut Value, by: usize) {
+    for end in ["start", "end"] {
+        if let Some(line) = range.pointer_mut(&format!("/{end}/line"))
+            && let Some(n) = line.as_u64()
+        {
+            *line = json!(n.saturating_sub(by as u64));
+        }
     }
 }
 

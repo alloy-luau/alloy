@@ -1048,43 +1048,68 @@ impl Server {
                     return;
                 }
 
-                // A `.d.aly` the child could not load: the report goes to
-                // the source, through its map when the source is open.
-                let declared = uri_to_path(&uri).and_then(|p| {
-                    st.definition_sources
+                // The merged `.d.aly` files, which the child could not
+                // load: each report goes to the file its line came from,
+                // through that file's map when it is open. Every file
+                // gets its list, so a fixed one clears.
+                let read = uri_to_path(&uri);
+                let sources: Vec<String> = st
+                    .definition_sources
+                    .iter()
+                    .filter(|(r, _)| Some(r) == read.as_ref())
+                    .map(|(_, s)| path_to_uri(&s.source))
+                    .collect();
+
+                if !sources.is_empty() {
+                    let mut lists: Vec<(String, Vec<Value>, bool)> = sources
                         .iter()
-                        .find(|(read, _)| *read == p)
-                        .map(|(_, source)| path_to_uri(source))
-                });
-
-                if let Some(source) = declared {
-                    let mut diagnostics = message
+                        .map(|s| (s.clone(), Vec::new(), st.docs.contains_key(s)))
+                        .collect();
+                    let diagnostics = message
                         .pointer("/params/diagnostics")
+                        .and_then(Value::as_array)
                         .cloned()
-                        .unwrap_or_else(|| json!([]));
-                    let open = st.docs.contains_key(&source);
+                        .unwrap_or_default();
 
-                    if open {
-                        map_from_shadow(&mut diagnostics, Some(&source), &st);
+                    for mut d in diagnostics {
+                        let line = d.pointer("/range/start/line").and_then(Value::as_u64);
+                        let Some((source, first)) =
+                            line.and_then(|l| st.declared_at(&uri, l as usize))
+                        else {
+                            continue;
+                        };
+
+                        if let Some(range) = d.get_mut("range") {
+                            shift_lines(range, first);
+                        }
+
+                        if let Some((_, list, open)) = lists.iter_mut().find(|l| l.0 == source) {
+                            if *open {
+                                map_from_shadow(&mut d, Some(&source), &st);
+                            }
+
+                            list.push(d);
+                        }
                     }
 
                     drop(st);
 
-                    let list = diagnostics.as_array().cloned().unwrap_or_default();
-                    self.state
-                        .lock()
-                        .expect("state")
-                        .child_diagnostics
-                        .insert(source.clone(), list);
+                    for (source, list, open) in lists {
+                        self.state
+                            .lock()
+                            .expect("state")
+                            .child_diagnostics
+                            .insert(source.clone(), list.clone());
 
-                    match open {
-                        true => self.publish(&source),
+                        match open {
+                            true => self.publish(&source),
 
-                        false => self.to_client(&json!({
-                            "jsonrpc": "2.0",
-                            "method": "textDocument/publishDiagnostics",
-                            "params": { "uri": source, "diagnostics": diagnostics },
-                        })),
+                            false => self.to_client(&json!({
+                                "jsonrpc": "2.0",
+                                "method": "textDocument/publishDiagnostics",
+                                "params": { "uri": source, "diagnostics": list },
+                            })),
+                        }
                     }
 
                     return;
@@ -1196,12 +1221,22 @@ impl Server {
                     map_from_shadow(params, None, &st);
                 }
 
-                // "Failed to read definitions file" names the compiled
-                // copy, which the reader never wrote.
-                if let Some(Value::String(text)) = message.pointer_mut("/params/message") {
-                    for (read, source) in &st.definition_sources {
-                        *text = text.replace(&*read.to_string_lossy(), &source.to_string_lossy());
-                    }
+                // "Failed to read definitions file" names the merged copy,
+                // which the reader never wrote, so it names the `.d.aly`
+                // files in it instead.
+                if let Some(Value::String(text)) = message.pointer_mut("/params/message")
+                    && let Some((read, _)) = st
+                        .definition_sources
+                        .iter()
+                        .find(|(read, _)| text.contains(&*read.to_string_lossy()))
+                {
+                    let names: Vec<String> = st
+                        .definition_sources
+                        .iter()
+                        .filter(|(r, _)| r == read)
+                        .map(|(_, s)| s.source.display().to_string())
+                        .collect();
+                    *text = text.replace(&*read.to_string_lossy(), &names.join(", "));
                 }
 
                 drop(st);

@@ -450,11 +450,12 @@ pub fn analyze(
     // A `.d.aly` under `in` reaches the checker with the sources below.
     // One outside it compiles here, and a report on it names its file.
     let input_dir = normalize(&root.join(&config.build.input));
-    // Each one outside: its artifact under the mirror, its source, and
-    // the artifact's text.
-    let mut outside: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    // Every compiled `.d.aly`: the path a report names, the artifact,
+    // and the source. The ones that name each other reach the checker
+    // as one file.
+    let mut declared: Vec<(PathBuf, String, String)> = Vec::new();
 
-    for (i, d) in config.flux.definitions.iter().enumerate() {
+    for d in &config.flux.definitions {
         let path = normalize(&root.join(d));
 
         if !d.ends_with(".d.aly") {
@@ -493,12 +494,8 @@ pub fn analyze(
                     });
                 }
 
-                let rel = PathBuf::from(format!(".alloy-defs/{i}.d.luau"));
-                let target = mirror.join(&rel);
-                std::fs::create_dir_all(mirror.join(".alloy-defs")).map_err(|e| e.to_string())?;
-                std::fs::write(&target, &out.check).map_err(|e| e.to_string())?;
-                outside.push((rel, path, out.check));
-                definitions.push(target);
+                let source = std::fs::read_to_string(&path).unwrap_or_default();
+                declared.push((path, out.check, source));
             }
 
             Err(e) => analysis
@@ -570,10 +567,18 @@ pub fn analyze(
         std::fs::write(&target, &f.check).map_err(|e| e.to_string())?;
 
         if rel_out.to_string_lossy().ends_with(".d.luau") {
-            definitions.push(target);
+            declared.push((f.rel.clone(), f.check.clone(), f.source.clone()));
         } else {
             sources.push(config.build.out.join(&rel_out));
         }
+    }
+
+    let merged = crate::declarations::merge_definitions(&declared);
+
+    for (i, (text, _)) in merged.iter().enumerate() {
+        let target = mirror.join(format!("{DECLARED}{i}.d.luau"));
+        std::fs::write(&target, text).map_err(|e| e.to_string())?;
+        definitions.push(target);
     }
 
     if sources.is_empty() {
@@ -715,12 +720,47 @@ pub fn analyze(
             .strip_prefix(&mirror)
             .map(Path::to_path_buf)
             .unwrap_or(path);
-        // A `[flux] definitions` file outside `in`: the report names
-        // the file alone, and the artifact keeps the source's lines.
-        if let Some((_, source, text)) = outside.iter().find(|(rel, _, _)| *rel == path) {
-            let (line, col) = quoted_place(text, message).unwrap_or((1, 1));
+        // A merged file of `.d.aly` files, or the copy that carries the
+        // extensions: the report names the file alone, so the name it
+        // quotes finds the line, and the line finds the file. A name
+        // the emit spells another way sits in a source.
+        let group = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split(DECLARED).nth(1))
+            .and_then(|n| n.strip_suffix(".d.luau"))
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|i| merged.get(i));
+
+        if let Some((text, segments)) = group {
+            if quoted_after(message, "Unknown type '").is_some_and(alloy_reports_the_type) {
+                continue;
+            }
+
+            let place = quoted_place(text, message)
+                .and_then(|(line, col)| {
+                    crate::declarations::segment_at(segments, line - 1)
+                        .map(|(s, at)| (s.source.clone(), at + 1, col))
+                })
+                .or_else(|| {
+                    segments.iter().find_map(|s| {
+                        let source = declared.iter().find(|d| d.0 == s.source)?;
+
+                        quoted_place(&source.2, message).map(|(l, c)| (s.source.clone(), l, c))
+                    })
+                });
+            let (rel, line, col) = place.unwrap_or_else(|| {
+                (
+                    segments
+                        .first()
+                        .map(|s| s.source.clone())
+                        .unwrap_or_default(),
+                    1,
+                    1,
+                )
+            });
             analysis.diagnostics.push(TypeDiag {
-                rel: source.clone(),
+                rel,
                 line,
                 col,
                 kind: kind.to_string(),
@@ -745,12 +785,6 @@ pub fn analyze(
         // artifact, so the report lands on the line that writes it and
         // the map takes that back to the source.
         let (line_no, col) = if line_no == 0 {
-            if quoted_after(message, "Unknown type '")
-                .is_some_and(|name| alloy_knows_the_type(name, files))
-            {
-                continue;
-            }
-
             quoted_place(&f.check, message).unwrap_or((1, 1))
         } else {
             (line_no, col)
@@ -1261,18 +1295,17 @@ fn definitions_line(line: &str) -> Option<Line<'_>> {
     })
 }
 
-/// Whether Alloy knows the name is a type, where the checker cannot. A
-/// definitions file reaches the checker on its own: it requires
-/// nothing, so the Alloy std is out of its reach, and the load order
-/// puts a sibling definitions file's types out of reach too. A report
-/// about one of those names the checker's blind spot.
-fn alloy_knows_the_type(name: &str, files: &[CheckSource]) -> bool {
+/// The name of a definitions file the `.d.aly` files merge into, under
+/// the mirror, before its number: `.alloy-declared-0.d.luau`. The copy
+/// that carries the extensions keeps the name after `ext-`.
+const DECLARED: &str = ".alloy-declared-";
+
+/// Whether the compiler already reports an unknown type of a
+/// definitions file: a type of the Alloy std, which the file cannot
+/// reach. Any other unknown type drops the whole file, so its report
+/// stands.
+fn alloy_reports_the_type(name: &str) -> bool {
     crate::desugar::AMBIENT_TYPES.contains(&name)
-        || files.iter().any(|f| {
-            crate::modules::exported_types(&f.source)
-                .iter()
-                .any(|entry| crate::modules::type_head(entry) == name)
-        })
 }
 
 /// The place a report with no position names: the one-based line of the
@@ -1461,21 +1494,12 @@ mod tests {
             Some((1, 23))
         );
 
-        let f = CheckSource {
-            rel: PathBuf::from("k.d.aly"),
-            source: "export type Kind = \"a\" | \"b\"\n".to_string(),
-            check: out.check.clone(),
-            map: out.map,
-            lint_lines: Vec::new(),
-            error_lines: Vec::new(),
-            parsed_clean: true,
-            expected_hits: Vec::new(),
-        };
-        // The Alloy std and a sibling's exported type are types the
-        // checker cannot see from inside a definitions file.
-        assert!(alloy_knows_the_type("Result", &[]));
-        assert!(alloy_knows_the_type("Kind", std::slice::from_ref(&f)));
-        assert!(!alloy_knows_the_type("Nope", std::slice::from_ref(&f)));
+        // The compiler reports a std type in a definitions file. A
+        // sibling's type sits in the same merged file, so a report of
+        // one stands.
+        assert!(alloy_reports_the_type("Result"));
+        assert!(!alloy_reports_the_type("Kind"));
+        assert!(!alloy_reports_the_type("Nope"));
     }
 
     #[test]

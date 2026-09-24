@@ -101,10 +101,10 @@ pub(crate) struct State {
     /// The definitions files the child reads. A datatype member such as
     /// `CFrame:inverse` is marked `@deprecated` there and not in the docs.
     pub(crate) definitions: Vec<PathBuf>,
-    /// Each compiled `.d.aly` the child reads, with its source. The
-    /// child reports a definitions file it cannot load on the file it
-    /// read, and the report belongs on the source.
-    pub(crate) definition_sources: Vec<(PathBuf, PathBuf)>,
+    /// The merged definitions file the child reads, once per `.d.aly`
+    /// in it, with the line that file starts on. The child reports on
+    /// the file it read, and the report belongs on the `.d.aly`.
+    pub(crate) definition_sources: Vec<(PathBuf, alloy::declarations::Segment)>,
     /// The `@roblox/globaltype/Class.Member` entries of that file, read
     /// once on the first list that needs one. The file is 7 MB, so a
     /// read at startup would cost every session that never opens a
@@ -120,6 +120,21 @@ pub(crate) struct State {
 pub(crate) type ConfigLoad = Result<Vec<String>, String>;
 
 impl State {
+    /// The `.d.aly` a zero-based line of a merged definitions file came
+    /// from, as a URI, and the line it starts on there.
+    pub(crate) fn declared_at(&self, uri: &str, line: usize) -> Option<(String, usize)> {
+        let path = uri_to_path(uri)?;
+        let segments: Vec<alloy::declarations::Segment> = self
+            .definition_sources
+            .iter()
+            .filter(|(read, _)| *read == path)
+            .map(|(_, s)| s.clone())
+            .collect();
+
+        alloy::declarations::segment_at(&segments, line)
+            .map(|(s, _)| (path_to_uri(&s.source), s.first_line))
+    }
+
     /// Drops what the state remembers of the disk. A pass over the
     /// workspace calls it first, so a changed `alloy.toml` or a new
     /// file reaches the next compile.

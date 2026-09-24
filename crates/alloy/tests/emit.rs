@@ -177,3 +177,43 @@ fn a_definitions_file_declares_every_type_global_and_runs_nothing() {
     assert!(!out.check.contains("local "), "{}", out.check);
     assert!(!out.check.contains("return"), "{}", out.check);
 }
+
+/// A definitions file runs no require, so a std type there is unknown to
+/// the checker, and one unknown type drops the whole file. `number[]`
+/// lowered to a bare `Array<number>` and broke every declaration beside
+/// it. A host gives a plain table, so the array is a Luau array.
+#[test]
+fn a_definitions_file_writes_arrays_as_tables_and_names_a_std_type() {
+    let options = alloy::EmitOptions {
+        file_name: "g.d.aly".to_string(),
+        definitions: true,
+        ..alloy::EmitOptions::default()
+    };
+    let src = "declare items: number[]\ndeclare names: read string[]\ninterface Bag as\n    slots: Bag[]\nend\n";
+    let out = alloy::compile_with(src, &options).unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    for line in [
+        "declare items: { number }",
+        "declare names: { read [number]: string }",
+        "export type Bag = { slots: { Bag } }",
+    ] {
+        assert!(out.check.contains(line), "{line}\n{}", out.check);
+    }
+
+    assert!(!out.check.contains("Array"), "{}", out.check);
+
+    let std = "declare function load(): Result<number, string>\n";
+    let messages: Vec<String> = alloy::compile_with(std, &options)
+        .unwrap()
+        .diagnostics
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "`Result` is a type of the Alloy std, and a definitions file cannot reach the std; write the type out"
+        ]
+    );
+}

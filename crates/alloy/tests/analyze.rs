@@ -1135,3 +1135,53 @@ fn an_operand_that_keeps_its_temps_analyzes() {
 fn a_rest_pattern_over_a_plain_table_analyzes() {
     analyze(RESTS, "rests");
 }
+
+/// A `.d.aly` that names a type of another `.d.aly` could load first,
+/// and the type was unknown then, which dropped the whole file with no
+/// report. An array there typed as a bare `Array` did the same.
+#[test]
+fn a_declaration_file_names_the_types_of_another() {
+    let dir = std::env::temp_dir().join(format!("alloy-defs-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[flux]\nroblox_types = false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/a.d.aly"),
+        "declare function make(): Save\ndeclare items: number[]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/z.d.aly"),
+        "interface Save as\n    coins: number\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.aly"),
+        "local s: Save = make()\nlocal n: number = items[1]\nprint(s.coins, n)\n",
+    )
+    .unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{} {}", d.rel.display(), d.message))
+        .collect();
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

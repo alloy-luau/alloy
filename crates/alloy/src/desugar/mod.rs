@@ -234,7 +234,7 @@ pub struct ContractGap {
 
 pub use attributes::signature_ret_type;
 pub use contracts::{element_type, is_string_union};
-pub use statements::names_a_future;
+pub use statements::{names_a_future, pattern_type, signature_with_pattern_types};
 
 /// One `requires` clause of an attribute contract, as the prescan keeps
 /// it. The check reads this and the members of the thing the attribute
@@ -281,9 +281,41 @@ pub struct MacroSource {
     pub params: Vec<String>,
     /// The default of each parameter, as source text.
     pub defaults: Vec<Option<String>>,
+    /// The names each pattern parameter binds, with the access that
+    /// reads each one from the argument: `(x, ".x")`. Empty for a
+    /// parameter with a name.
+    pub patterns: Vec<Vec<(String, String)>>,
     pub variadic: bool,
     pub body: String,
     pub tail: Option<String>,
+}
+
+/// The names a pattern parameter binds and the access that reads each
+/// from the argument: `.field` for a table pattern, `[i]` for an array.
+pub(crate) fn pattern_accesses(
+    p: &alloy_syntax::ast::Param,
+    text: impl Fn(TokSpan) -> String,
+) -> Vec<(String, String)> {
+    match &p.destructure {
+        Some(Destructure::Table(fields)) => fields
+            .iter()
+            .filter(|f| !f.rest)
+            .map(|f| {
+                (
+                    text(f.rename.unwrap_or(f.field)),
+                    format!(".{}", text(f.field)),
+                )
+            })
+            .collect(),
+
+        Some(Destructure::Array { items, .. }) => items
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (text(*n), format!("[{}]", i + 1)))
+            .collect(),
+
+        None => Vec::new(),
+    }
 }
 
 impl Default for EmitOptions {
@@ -574,6 +606,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             MacroRef {
                 params: m.params.clone(),
                 defaults: m.defaults.clone(),
+                patterns: m.patterns.clone(),
                 variadic: m.variadic,
                 body: m.body.clone(),
                 tail: m.tail.clone(),

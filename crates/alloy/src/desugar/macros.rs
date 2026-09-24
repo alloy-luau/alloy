@@ -14,6 +14,8 @@ pub(crate) struct MacroRef {
     /// The default of each parameter, as source text. A parameter with
     /// one is optional, the way a function's is.
     pub(crate) defaults: Vec<Option<String>>,
+    /// What each pattern parameter binds, as `MacroSource::patterns`.
+    pub(crate) patterns: Vec<Vec<(String, String)>>,
     pub(crate) variadic: bool,
     /// The statements, tokens joined by spaces.
     pub(crate) body: String,
@@ -318,6 +320,19 @@ impl<'s> Desugar<'s> {
             subst.insert(p.as_str(), text);
         }
 
+        // A pattern parameter binds its names to reads of the argument.
+        for (i, pattern) in m.patterns.iter().enumerate() {
+            let text = arg_texts
+                .get(i)
+                .cloned()
+                .or_else(|| m.defaults.get(i).cloned().flatten())
+                .unwrap_or("nil".to_string());
+
+            for (bound, access) in pattern {
+                subst.insert(bound.as_str(), format!("({text}){access}"));
+            }
+        }
+
         let rest: Vec<String> = arg_texts.iter().skip(m.params.len()).cloned().collect();
 
         // Hygiene: a local the body declares gets a name of its own per
@@ -533,6 +548,7 @@ impl<'s> Desugar<'s> {
                 hidden: false,
                 params: r.params.clone(),
                 defaults: r.defaults.clone(),
+                patterns: r.patterns.clone(),
                 variadic: r.variadic,
                 body: r.body.clone(),
                 tail: r.tail.clone(),

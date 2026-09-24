@@ -149,12 +149,8 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            self.expect_name()?;
-
-            if self.at(":") {
-                self.bump();
-                self.type_()?;
-            }
+            // A name or a pattern, with its type: `{ x, y }: Point`.
+            self.binding("parameter")?;
 
             if self.at(",") {
                 self.bump();
@@ -500,13 +496,55 @@ impl<'a> Parser<'a> {
                     return Err(self.err("unterminated destructuring pattern"));
                 }
 
+                if self.eat("...") {
+                    let field = self.expect_name()?;
+                    fields.push(FieldBinding {
+                        field,
+                        rename: None,
+                        ty: None,
+                        rest: true,
+                    });
+                    self.eat(",");
+
+                    if !self.at("}") {
+                        let message =
+                            "`...rest` takes the fields that are left; no name follows it";
+
+                        if !self.lenient {
+                            return Err(self.err(message));
+                        }
+
+                        // The report is the whole answer: the rest of the
+                        // pattern skips to its brace, so no line after it
+                        // reports again.
+                        let offset = self.err(message).offset;
+                        self.report_at(offset, message);
+
+                        while !self.at("}") && !self.at_end() {
+                            self.bump();
+                        }
+                    }
+
+                    break;
+                }
+
                 let field = self.expect_name()?;
                 let rename = if self.eat("=") {
                     Some(self.expect_name()?)
                 } else {
                     None
                 };
-                fields.push(FieldBinding { field, rename });
+                let ty = match self.eat(":") {
+                    true => Some(self.type_()?),
+
+                    false => None,
+                };
+                fields.push(FieldBinding {
+                    field,
+                    rename,
+                    ty,
+                    rest: false,
+                });
 
                 if !self.eat(",") {
                     break;

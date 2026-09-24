@@ -288,6 +288,17 @@ impl<'s> Desugar<'s> {
         }
 
         for p in &r.params {
+            // The wire layout reads each parameter by its name.
+            if p.destructure.is_some() {
+                let pattern = self.text_of(p.name).trim().to_string();
+                self.diagnose(
+                    p.name,
+                    &format!("a remote packs no pattern: `{pattern}` has no name the wire layout can read; name the parameter"),
+                );
+
+                continue;
+            }
+
             let Some(ty) = p.ty else { continue };
             let text = self.text_of(ty).to_string();
 

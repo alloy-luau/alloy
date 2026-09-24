@@ -1587,6 +1587,9 @@ pub fn module_macros(source: &str) -> Vec<crate::MacroSource> {
             defaults: named()
                 .map(|p| p.default.as_ref().map(|d| join(d.span())))
                 .collect(),
+            patterns: named()
+                .map(|p| crate::desugar::pattern_accesses(p, text))
+                .collect(),
             variadic: m.params.iter().any(|p| p.is_vararg),
             body: join(m.body.span),
             tail: m.tail.as_ref().map(|t| join(t.span())),

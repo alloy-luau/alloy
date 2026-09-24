@@ -56,7 +56,7 @@ use documents::{
 #[allow(unused_imports)]
 use hints::{
     NAME_END, arrow_returns, clean_hints, emit_slot_hint, hint_label, name_end, name_future_hint,
-    undeclared_variable, writable_type,
+    type_only_module_hints, undeclared_variable, writable_type,
 };
 #[allow(unused_imports)]
 use hover::{

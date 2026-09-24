@@ -1549,6 +1549,12 @@ impl Server {
                     // for the arrow; `local x: T` has one spelling and
                     // keeps the colon.
                     arrow_returns(hints, doc, st.editor.arrow_return_hints);
+
+                    if st.settings.pointer("/inlayHints/variableTypes") != Some(&json!(false))
+                        && let Some(path) = ctx.as_deref().and_then(uri_to_path)
+                    {
+                        type_only_module_hints(hints, doc, &path);
+                    }
                 }
 
                 if let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u)) {

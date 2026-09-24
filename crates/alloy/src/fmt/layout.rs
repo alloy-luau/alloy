@@ -133,15 +133,12 @@ impl<'s> Formatter<'s> {
     pub(crate) fn line_has_before(&self, i: usize, word: &str) -> bool {
         let mut j = i;
 
-        while j > 0 {
+        // An item that opens its line has nothing before it there.
+        while j > 0 && self.items[j].newlines_before == 0 {
             j -= 1;
 
             if self.items[j].is(word) {
                 return true;
-            }
-
-            if self.items[j].newlines_before > 0 {
-                return false;
             }
         }
 
@@ -183,6 +180,9 @@ impl<'s> Formatter<'s> {
             Match,
             Arm,
             ExprIf,
+            /// The body of a `declare class` or of an extern type's
+            /// `with`. Its methods are signatures and open nothing.
+            Class,
         }
 
         let mut stack: Vec<Frame> = Vec::new();
@@ -228,7 +228,13 @@ impl<'s> Formatter<'s> {
 
                     if matches!(
                         stack.last(),
-                        Some(Frame::Block | Frame::Match | Frame::Trait | Frame::Contract)
+                        Some(
+                            Frame::Block
+                                | Frame::Match
+                                | Frame::Trait
+                                | Frame::Contract
+                                | Frame::Class
+                        )
                     ) {
                         stack.pop();
                     }
@@ -312,6 +318,8 @@ impl<'s> Formatter<'s> {
                     } else if stack.last() == Some(&Frame::Contract) {
                         // Every word of a `requires` clause sits on one
                         // line, so nothing inside a contract body opens.
+                    } else if text == "function" && stack.last() == Some(&Frame::Class) {
+                        signature[i] = true;
                     } else if text == "function"
                         && stack.last() == Some(&Frame::Trait)
                         && it.newlines_before > 0
@@ -329,7 +337,12 @@ impl<'s> Formatter<'s> {
                                 && self.starts_block(i)
                                 && stack.last() != Some(&Frame::Match));
 
-                        if opens_block {
+                        let declared =
+                            text == "with" || (text == "class" && prev == Some("declare"));
+
+                        if opens_block && declared {
+                            stack.push(Frame::Class);
+                        } else if opens_block {
                             stack.push(Frame::Block);
                         }
                     }

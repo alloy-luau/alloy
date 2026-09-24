@@ -32,7 +32,7 @@ pub enum Spot {
 
 /// Reports if `<` at `lt` opens markup rather than a comparison, by the
 /// token before it.
-fn opens_markup(src: &str, lt: usize) -> bool {
+pub(crate) fn opens_markup(src: &str, lt: usize) -> bool {
     let before = src[..lt].trim_end();
 
     if before.is_empty() {

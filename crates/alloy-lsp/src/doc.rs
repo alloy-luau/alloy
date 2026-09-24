@@ -249,11 +249,74 @@ fn stray_ends(source: &str) -> Vec<usize> {
         .collect()
 }
 
+/// Where a markup tag that never closed wants its end: after its last
+/// attribute, when another tag or the end of the file comes before a
+/// `>`. The author is typing the tag, so the markup cannot lower and a
+/// hole inside the tag answers nothing. A copy with ` />` lowers.
+fn unclosed_tags(source: &str) -> Vec<(usize, &'static str)> {
+    let mut spots = Vec::new();
+
+    for (lt, _) in source.match_indices('<') {
+        let rest = &source[lt + 1..];
+
+        if !rest.starts_with(|c: char| c.is_alphabetic())
+            || !crate::markup::opens_markup(source, lt)
+        {
+            continue;
+        }
+
+        let mut depth = 0i32;
+        let mut quote: Option<char> = None;
+        let mut open_until = Some(source.len());
+
+        for (i, c) in rest.char_indices() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+
+                (Some(_), _) => {}
+
+                (None, '"' | '\'') if depth == 0 => quote = Some(c),
+
+                (None, '{') => depth += 1,
+
+                (None, '}') => depth -= 1,
+
+                (None, '>') if depth == 0 => {
+                    open_until = None;
+
+                    break;
+                }
+
+                (None, '<') if depth == 0 => {
+                    open_until = Some(lt + 1 + i);
+
+                    break;
+                }
+
+                _ => {}
+            }
+        }
+
+        if let Some(at) = open_until {
+            spots.push((source[..at].trim_end().len(), " />"));
+        }
+    }
+
+    spots
+}
+
 /// The source with a placeholder after every dangling access operator
 /// and a stray `end` blanked to its own width, and where each
-/// placeholder went. `None` when the source has neither.
-fn repaired_source(source: &str) -> Option<(String, Vec<(usize, usize)>)> {
-    let spots = dangling_members(source);
+/// placeholder went. `None` when the source has neither. Markup also
+/// gets the end of each tag that never closed.
+fn repaired_source(source: &str, markup: bool) -> Option<(String, Vec<(usize, usize)>)> {
+    let mut spots = dangling_members(source);
+
+    if markup {
+        spots.extend(unclosed_tags(source));
+        spots.sort_by_key(|(at, _)| *at);
+    }
+
     let ends = stray_ends(source);
 
     if spots.is_empty() && ends.is_empty() {
@@ -374,8 +437,9 @@ impl Doc {
         // the child has no answer for the caret sitting on it. A copy
         // with a placeholder after the operator parses, so the caret
         // still reaches the list of what stands before it.
+        let markup = self.is_alx;
         let repair = |source: &str| -> Option<Repair> {
-            let (text, spots) = repaired_source(source)?;
+            let (text, spots) = repaired_source(source, markup)?;
             let out =
                 alloy::compile_file(&options.file_name, &text, options, Some(jsx), ingots).ok()?;
 
@@ -420,7 +484,7 @@ impl Doc {
             // A dangling operator stops the parser here as anywhere
             // else. The blanking keeps every offset, so the spots it
             // reports are the author's own.
-            if let Some((filled, spots)) = repaired_source(&text)
+            if let Some((filled, spots)) = repaired_source(&text, false)
                 && let Some(out) = compile(&filled)
                 && out.parsed_clean
             {
@@ -1055,6 +1119,54 @@ local r = b?.
         let at = src.find("<Frame").expect("the tag") + 2;
         assert!(doc.in_blanked_markup(at));
         assert!(!doc.in_blanked_markup(6));
+    }
+
+    /// A tag the author is still typing: `<TextLabel Text={props.}`
+    /// with the next line a closing tag. The markup could not lower,
+    /// so the shadow blanked it and the hole completed nothing. The
+    /// repair closes the tag, and the hole reaches the child.
+    #[test]
+    fn a_tag_being_typed_closes_in_the_repair() {
+        let src = concat!(
+            "local function create(a: unknown, b: unknown): unknown return a end\n",
+            "type Props = { title: string }\n",
+            "local function P(props: Props)\n",
+            "  return (\n",
+            "    <Frame>\n",
+            "      <TextLabel Text={props.}\n",
+            "    </Frame>\n",
+            "  )\n",
+            "end\n",
+            "return P\n",
+        );
+        let options = EmitOptions {
+            file_name: "/w/p.alx".to_string(),
+            ..EmitOptions::default()
+        };
+        let factory =
+            alloy::luaux::Config::parse("[factory]\nbackend = \"table\"\ncreate = \"create\"\n")
+                .expect("the factory");
+        let doc = Doc::new(src.to_string(), 1, &options, &factory, None);
+
+        assert!(doc.error.is_some());
+        assert!(doc.blanked.is_empty());
+        assert!(
+            doc.shadow.contains("props.__alloy_hole()"),
+            "{}",
+            doc.shadow
+        );
+
+        // The caret after `props.` maps to the hole's own position.
+        let at = src.find("props.}").expect("the hole") + "props.".len();
+        let (line, character) = position_of(src, at);
+        let (sl, sc) = doc.to_shadow(line, character);
+        let shadow_at = offset_of(&doc.shadow, sl, sc).expect("a shadow offset");
+
+        assert!(
+            doc.shadow[..shadow_at].ends_with("props."),
+            "{}",
+            &doc.shadow[..shadow_at]
+        );
     }
 
     #[test]

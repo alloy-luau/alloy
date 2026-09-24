@@ -80,7 +80,7 @@ use navigation::{
     service_definition, whole_word,
 };
 #[allow(unused_imports)]
-use outline::{ambient_symbols, document_symbols, source_symbols};
+use outline::{ambient_symbols, document_symbols, folding_ranges, source_symbols};
 #[allow(unused_imports)]
 use typing::{append_initializer, end_follows};
 

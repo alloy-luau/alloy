@@ -1796,6 +1796,46 @@ pub fn import_problems_for_file(
     import_problems(source, rel.unwrap_or(path), &from, &aliases)
 }
 
+/// The spec of an import the file already writes whose module exports
+/// `name`: where a name the file forgot to import belongs. The checker
+/// calls it an unknown global, and the fix is one word in that list.
+pub fn import_that_exports(path: &Path, source: &str, name: &str) -> Option<String> {
+    use alloy_syntax::ast::Stmt;
+
+    let (from, aliases) = file_context(path);
+    let parsed = alloy_syntax::parse_lenient(source, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+
+    parsed.chunk.block.stmts.iter().find_map(|stmt| {
+        let Stmt::Import(i) = stmt else {
+            return None;
+        };
+        let spec = i.path.text(source, toks).trim_matches(['"', '\'']);
+        let target = resolve(spec, &from, &aliases)?;
+        let text = module_text(&target).ok()?;
+
+        exported_names(&text)
+            .iter()
+            .any(|n| n == name)
+            .then(|| spec.to_string())
+    })
+}
+
+/// The report for a name the file forgot to import, when an import it
+/// already writes reaches a module that exports the name.
+pub fn missing_import_message(message: &str, path: &Path, source: &str) -> Option<String> {
+    let name = message
+        .split("Unknown global '")
+        .nth(1)?
+        .split('\'')
+        .next()?;
+    let spec = import_that_exports(path, source, name)?;
+
+    Some(format!(
+        "`{name}` is not imported; \"{spec}\" exports it, so add it to that import"
+    ))
+}
+
 /// The import types of a file under the nearest `alloy.toml`, or none
 /// when the file sits in no project.
 pub fn import_types_for_file(path: &Path, source: &str) -> Vec<(String, Vec<String>)> {
@@ -2719,6 +2759,39 @@ pub fn normalize(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// A name the file forgot names the import that would bring it in;
+    /// a name no import reaches keeps the checker's own words.
+    #[test]
+    fn a_forgotten_name_names_the_import_that_exports_it() {
+        let dir = std::env::temp_dir().join(format!("alloy-missing-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("alloy.toml"), "[build]\nin = \"src\"\n").unwrap();
+        std::fs::write(
+            dir.join("src/items.aly"),
+            "export enum Rarity as\n    Common\nend\nexport struct Item as\n    x: number\nend\n",
+        )
+        .unwrap();
+        let main = dir.join("src/main.aly");
+        let source = "import { Item } from \"./items\"\nprint(Item, Rarity.Common)\n";
+
+        assert_eq!(
+            super::missing_import_message(
+                "Unknown global 'Rarity'; consider assigning to it first",
+                &main,
+                source,
+            )
+            .as_deref(),
+            Some("`Rarity` is not imported; \"./items\" exports it, so add it to that import")
+        );
+        assert_eq!(
+            super::missing_import_message("Unknown global 'Other'", &main, source),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn duplicates(src: &str) -> Vec<String> {

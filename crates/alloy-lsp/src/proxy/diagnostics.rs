@@ -1456,7 +1456,7 @@ pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
         }
     }
 
-    alloy_wording(d, doc, &known.shapes, &raw);
+    alloy_wording(d, doc, here.as_deref(), &known.shapes, &raw);
 
     let Some(message) = d.get("message").and_then(Value::as_str) else {
         return;
@@ -1562,6 +1562,7 @@ pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
 pub(crate) fn alloy_wording(
     d: &mut Value,
     doc: &Doc,
+    here: Option<&str>,
     shapes: &[alloy::declarations::Shape],
     raw: &str,
 ) {
@@ -1589,6 +1590,16 @@ pub(crate) fn alloy_wording(
     // and `new n { }` on a value each emit a name the artifact never
     // binds. The compiler writes these sentences, so the terminal and
     // the editor say one thing.
+    // A name an import the file writes could bring in: the fix is one
+    // word in that list, and the terminal says the same.
+    if let Some(path) = here.and_then(uri_to_path)
+        && let Some(better) = alloy::modules::missing_import_message(&message, &path, &doc.source)
+    {
+        d["message"] = json!(format!("{kind}: {better}"));
+
+        return;
+    }
+
     if let Some((better, at)) =
         alloy::typecheck::rewrite_emitted_name(&message, &doc.source, sl as usize + 1)
     {

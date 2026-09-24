@@ -1647,7 +1647,8 @@ pub fn shapes(src: &str) -> Vec<Shape> {
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
-        match stmt {
+        // `export default struct P` declares `P` like any other.
+        match stmt.under_default() {
             Stmt::Struct(s) => out.push(Shape::Struct {
                 name: text(s.name),
                 fields: s

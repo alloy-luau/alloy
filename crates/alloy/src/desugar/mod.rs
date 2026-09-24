@@ -587,6 +587,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ns_test: false,
         ns_force_local: false,
         export_listed: HashSet::new(),
+        export_listed_bare: HashSet::new(),
         export_listed_types: HashSet::new(),
         file_types: HashMap::new(),
         imported_types: HashMap::new(),
@@ -1232,6 +1233,10 @@ struct Desugar<'s> {
     /// The names a top-level `export { ... }` list carries, so a
     /// namespace it names exports its types too.
     export_listed: HashSet<String>,
+    /// The names an `export { }` list with no `from` sends out under
+    /// their own name. An imported namespace among them sends its type
+    /// aliases out with the word `export`.
+    export_listed_bare: HashSet<String>,
     /// The types a top-level `export { ... }` list names under their
     /// own names. Luau has no way to re-export an alias, so the
     /// declaration takes the `export` word instead.
@@ -2081,9 +2086,9 @@ fn exports_a_type(block: &Block) -> bool {
 
         Stmt::Macro(m) => m.exported,
 
-        // `export type { T }`, and a mixed list with a `type` spec in
-        // it: the list sends a type out and binds no value.
-        Stmt::ExportList(e) => e.type_only || e.specs.iter().any(|sp| sp.is_type),
+        // A list sends a value out, or a type or a macro, which bind
+        // none. A list of those alone still makes an export table.
+        Stmt::ExportList(_) => true,
 
         _ => false,
     })

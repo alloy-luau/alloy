@@ -146,6 +146,10 @@ impl<'s> Desugar<'s> {
                     self.export_listed_types.insert(name.clone());
                 }
 
+                if list.from.is_none() && spec.alias.is_none() {
+                    self.export_listed_bare.insert(name.clone());
+                }
+
                 self.export_listed.insert(name);
             }
         }

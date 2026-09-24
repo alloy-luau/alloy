@@ -5,7 +5,7 @@ local VERSION = 2
 
 local Theme = {} Theme.__index = Theme setmetatable(Theme, { __call = function(_, f)  return setmetatable(f, Theme) end }) function Theme.new(f) return Theme(f) end
 
- type Theme = typeof(setmetatable({} :: { primary: string }, Theme)) Theme.__tostring = function(s) return __alloy.show_struct("Theme", s, { "primary" }) end
+ export type Theme = typeof(setmetatable({} :: { primary: string }, Theme)) Theme.__tostring = function(s) return __alloy.show_struct("Theme", s, { "primary" }) end
 
 local function name(): string
     return "theme"

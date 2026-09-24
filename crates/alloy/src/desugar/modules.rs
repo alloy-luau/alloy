@@ -165,6 +165,11 @@ impl<'s> Desugar<'s> {
             .unwrap_or(quoted);
         let head = format!("{name}_");
         let mut out = Vec::new();
+        let word = match self.export_listed_bare.contains(local) {
+            true => "export type",
+
+            false => "type",
+        };
 
         for entry in self
             .options
@@ -180,7 +185,7 @@ impl<'s> Desugar<'s> {
             let args = crate::modules::type_args(entry).to_string();
             let type_args = type_arguments(&args);
             out.push(format!(
-                "type {local}_{rest}{args} = {temp}.{full}{type_args}"
+                "{word} {local}_{rest}{args} = {temp}.{full}{type_args}"
             ));
 
             // A member with private members keeps a full view the
@@ -193,6 +198,39 @@ impl<'s> Desugar<'s> {
         }
 
         out
+    }
+
+    /// `export type G_Vec = Geo_Vec` for each type member of a namespace
+    /// the file imports as `name`, sent out as `exported`.
+    fn imported_member_types(&self, name: &str, exported: &str) -> Vec<String> {
+        let Some(ns) = self.namespaces.get(name).filter(|ns| ns.start == ns.end) else {
+            return Vec::new();
+        };
+        let entries: Vec<&String> = self
+            .options
+            .import_types
+            .iter()
+            .flat_map(|(_, types)| types.iter())
+            .collect();
+
+        ns.members
+            .iter()
+            .filter(|m| m.ty)
+            .map(|m| {
+                let full = format!("{}{}", ns.prefix, m.name);
+                let args = entries
+                    .iter()
+                    .find(|e| crate::modules::type_head(e) == full)
+                    .map(|e| crate::modules::type_args(e).to_string())
+                    .unwrap_or_default();
+                let type_args = type_arguments(&args);
+
+                format!(
+                    "export type {exported}_{}{args} = {}{type_args}",
+                    m.name, m.rendered
+                )
+            })
+            .collect()
     }
 
     /// Whether a quoted spec names a module Alloy does not compile. Such
@@ -214,6 +252,44 @@ impl<'s> Desugar<'s> {
     /// What a default import reads off the required module: the
     /// `default` field of an Alloy module's export table, and the whole
     /// value of a plain Luau or data module.
+    /// `local P = _m1.default type P = _m1.Player` for a bare import of
+    /// a module whose `export default` is a struct or an enum, or `None`
+    /// for any other default.
+    fn default_type(&mut self, quoted: &str, local: &str, anchor: u32) -> Option<String> {
+        let target = self.require_literal(quoted);
+        self.default_entry(quoted)?;
+        let temp = self.hoist_import(&target, anchor);
+        let ty = self.default_type_of(quoted, local, &temp)?;
+
+        Some(format!("local {local} = {temp}.default {ty}"))
+    }
+
+    /// `type P = _m1.Player`: the type of a module's default struct or
+    /// enum, under the name this file binds.
+    fn default_type_of(&self, quoted: &str, local: &str, temp: &str) -> Option<String> {
+        let entry = self.default_entry(quoted)?;
+        let head = crate::modules::type_head(entry);
+        let args = crate::modules::type_args(entry);
+        let type_args = type_arguments(args);
+        let word = self.type_word(local);
+
+        Some(format!("{word} {local}{args} = {temp}.{head}{type_args}"))
+    }
+
+    /// The type entry of a module's default struct or enum.
+    fn default_entry(&self, quoted: &str) -> Option<&str> {
+        let spec = quoted
+            .strip_prefix(['"', '\''])
+            .and_then(|s| s.strip_suffix(['"', '\'']))
+            .unwrap_or(quoted);
+
+        self.options
+            .import_types
+            .iter()
+            .filter(|(s, _)| s == spec)
+            .find_map(|(_, types)| crate::modules::default_type(types))
+    }
+
     pub(crate) fn default_suffix(&self, quoted: &str) -> &'static str {
         match self.is_plain_module(quoted) {
             true => "",
@@ -259,6 +335,15 @@ impl<'s> Desugar<'s> {
             // the name written here.
             ImportKind::Default(n) => {
                 let name = self.text_of(*n).to_string();
+
+                // `export default struct P`: the type comes along under
+                // the name this file binds.
+                if let Some(ty) = self.default_type(&path, &name, anchor) {
+                    self.generate(anchor, &ty);
+
+                    return;
+                }
+
                 let suffix = self.default_suffix(&spec);
                 self.generate(anchor, &format!("local {name} = require({target}){suffix}"));
             }
@@ -276,7 +361,11 @@ impl<'s> Desugar<'s> {
 
                     false => {
                         let temp = self.hoist_import(&target, anchor);
-                        let text = format!("local {base} = {temp}.default");
+                        let mut text = format!("local {base} = {temp}.default");
+
+                        if let Some(ty) = self.default_type_of(&path, &base, &temp) {
+                            text.push_str(&format!(" {ty}"));
+                        }
 
                         (temp, text)
                     }
@@ -694,6 +783,13 @@ impl<'s> Desugar<'s> {
 
                 for sp in &e.specs {
                     let name = self.text_of(sp.name).to_string();
+
+                    // A macro is source, not a value; the importer
+                    // reads it through `crate::modules::import_macros`.
+                    if self.macro_of(&name).is_some() {
+                        continue;
+                    }
+
                     let exported = sp
                         .alias
                         .map(|a| self.text_of(a).to_string())
@@ -731,6 +827,13 @@ impl<'s> Desugar<'s> {
                             types.push(format!("export type {exported} = {name}"));
                         }
 
+                        // An imported namespace under a new name sends
+                        // its types out under that name. Under its own
+                        // name the import's aliases carry the word.
+                        if exported != name {
+                            types.extend(self.imported_member_types(&name, &exported));
+                        }
+
                         self.exports.push((exported, name));
                     }
                 }
@@ -753,6 +856,13 @@ impl<'s> Desugar<'s> {
                         .alias
                         .map(|a| self.text_of(a).to_string())
                         .unwrap_or(name.clone());
+
+                    // `crate::modules::import_macros` reads the list as
+                    // an import, under the name it goes out as.
+                    if self.options.macros.iter().any(|m| m.name == exported) {
+                        continue;
+                    }
+
                     // A generic type carries its parameters on: the
                     // alias reads the bare name otherwise.
                     let args = self.module_type_params(&spec, &name);
@@ -768,6 +878,8 @@ impl<'s> Desugar<'s> {
                             types.push(alias);
                         }
 
+                        let members = self.namespace_type_aliases(&spec, &name, &exported, &temp);
+                        types.extend(members.into_iter().map(|t| format!("export {t}")));
                         self.exports.push((exported, format!("{temp}.{name}")));
                     }
                 }
@@ -826,13 +938,19 @@ impl<'s> Desugar<'s> {
                         message: "`export default` needs a name here, or a value".to_string(),
                     });
                 } else if !is_type {
-                    self.exports.push(("default".to_string(), name));
+                    self.exports.push(("default".to_string(), name.clone()));
                 }
 
                 // `function f()` at the top level is a global; the name
                 // a module exports is its own.
                 if matches!(inner.as_ref(), Stmt::Function(_)) {
                     self.generate(self.byte_start(inner.span()), "local ");
+                }
+
+                // A struct or an enum is a type too, and a bare import
+                // binds it; see `crate::modules::default_type`.
+                if matches!(inner.as_ref(), Stmt::Struct(_) | Stmt::Enum(_)) {
+                    self.export_listed_types.insert(name);
                 }
 
                 // The `export default` words are dropped; the

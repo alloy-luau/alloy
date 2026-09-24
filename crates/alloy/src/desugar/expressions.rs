@@ -16,7 +16,7 @@ pub(crate) enum WordOp {
 }
 
 pub(crate) struct ChainParts {
-    pub(crate) guard: Option<String>,
+    pub(crate) guards: Vec<String>,
     pub(crate) inner: String,
 }
 
@@ -94,7 +94,28 @@ pub(crate) fn one_line(text: &str) -> String {
 }
 
 impl<'s> Desugar<'s> {
+    /*
+    Renders an expression. A hoist goes in front of the statement, so it
+    runs first. That is wrong when `e` runs on some paths only, when the
+    statement has called code already, and when `e` calls code after the
+    statement has read a value. Then `e` keeps its hoists, see
+    `expr_in_place`.
+    */
     pub(crate) fn expr(&mut self, e: &Expr) {
+        if self.lazy || self.effects || (self.reads && any_part(e, &calls_code)) {
+            self.expr_in_place(e, |d| d.expr_node(e));
+        } else {
+            self.expr_node(e);
+        }
+
+        if calls_code(e) {
+            self.effects = true;
+        } else if matches!(e, Expr::Name(_) | Expr::Index { .. }) {
+            self.reads = true;
+        }
+    }
+
+    fn expr_node(&mut self, e: &Expr) {
         let anchor = self.byte_start(e.span());
 
         match e {
@@ -185,8 +206,8 @@ impl<'s> Desugar<'s> {
                 ..
             } => {
                 let c = self.render_to_string(cond);
-                let a = self.render_to_string(then_value);
-                let b = self.render_to_string(else_value);
+                let a = self.render_lazy(then_value);
+                let b = self.render_lazy(else_value);
                 self.generate(anchor, &format!("(if {c} then {a} else {b})"));
             }
 
@@ -405,12 +426,41 @@ impl<'s> Desugar<'s> {
                 if children.is_empty() {
                     self.copy_span(e.span());
                 } else {
-                    self.stitch(e.span(), &children, |d, child| match child {
-                        Child::Expr(e) => d.expr(e),
+                    // The right side of `and` and `or`, and an `if`
+                    // expression past its first condition, run on some
+                    // paths only.
+                    let lazy_from = match e {
+                        Expr::Binary { op, .. } if matches!(self.text_of(*op), "and" | "or") => 1,
 
-                        Child::Block(b) => d.block(b),
+                        Expr::IfElse { .. } => 1,
 
-                        Child::Function(b) => d.function_block(b),
+                        _ => usize::MAX,
+                    };
+                    // A call reads its callee before its arguments. A
+                    // call rarely changes the callee, so that read does
+                    // not keep an argument's hoists in place.
+                    let callee = match e {
+                        Expr::Call { func, .. } => Some(std::ptr::from_ref::<Expr>(func)),
+
+                        _ => None,
+                    };
+                    let mut at = 0;
+                    self.stitch(e.span(), &children, |d, child| {
+                        at += 1;
+
+                        match child {
+                            Child::Expr(c) if callee == Some(std::ptr::from_ref::<Expr>(c)) => {
+                                let reads = d.reads;
+                                d.expr(c);
+                                d.reads = reads;
+                            }
+
+                            Child::Expr(c) => d.expr_lazy(at > lazy_from, c),
+
+                            Child::Block(b) => d.block(b),
+
+                            Child::Function(b) => d.function_block(b),
+                        }
                     });
                 }
             }
@@ -483,13 +533,14 @@ impl<'s> Desugar<'s> {
     `a ?? b` renders as `(if A == nil then B else A)`.
 
     A simple left side reads twice in place. Any other left side hoists into
-    a temp so it evaluates once. The right side renders inline either way:
-    it evaluates only when the left is nil, which is the point.
+    a temp so it evaluates once. The right side evaluates only when the left
+    is nil, which is the point, so it keeps its own hoists: see
+    `expr_in_place`.
     */
     pub(crate) fn coalesce(&mut self, span: TokSpan, lhs: &Expr, rhs: &Expr) {
         let anchor = self.byte_start(span);
         let left = self.reusable(lhs);
-        let right = self.render_to_string(rhs);
+        let right = self.render_lazy(rhs);
         self.generate(
             anchor,
             &format!("(if {left} == nil then {right} else {left})"),
@@ -945,6 +996,7 @@ impl<'s> Desugar<'s> {
         }
 
         // The operand keeps its chunks, so the editor maps its names.
+        let flags = (self.effects, self.reads);
         let value = match operand {
             Expr::Await { operand: inner, .. } => {
                 let std = self.std();
@@ -967,6 +1019,8 @@ impl<'s> Desugar<'s> {
 
             other => self.render_to_side(other),
         };
+        // The value runs in front of the statement, see `render_hoisted`.
+        (self.effects, self.reads) = flags;
         let temp = self.hoist_rendered(value, anchor);
 
         match target {
@@ -984,6 +1038,7 @@ impl<'s> Desugar<'s> {
                 self.hoist_stmt(
                     format!("if {temp}.tag == \"Err\" then {fail}({payload}, {temp}.trace) end"),
                     anchor,
+                    false,
                 );
             }
 
@@ -992,6 +1047,7 @@ impl<'s> Desugar<'s> {
                 self.hoist_stmt(
                     format!("if {temp}.tag == \"Err\" then return {returned} end"),
                     anchor,
+                    true,
                 );
             }
         }
@@ -1182,12 +1238,15 @@ impl<'s> Desugar<'s> {
     /*
     Walks a postfix chain and returns its guard and inner text.
 
-    `inner` is the expression as it stands; `guard` is the temp whose nil
-    makes the whole result nil. An optional link needs its prefix named
+    `inner` is the expression as it stands; `guards` are the values whose
+    nil makes the whole result nil. An optional link needs its prefix named
     once, so the prefix becomes a temp (or stays, when it is simple) and
     the guard moves to it. A plain link applies inside the current guard,
     which is the chain rule: one `?` guards every later link. `!` names
     the prefix the same way, then ends the guard with an `error` branch.
+
+    In place, a prefix of names and fields is read again instead: each
+    `?` adds its prefix to `guards`, and the chain needs no temp.
     */
     pub(crate) fn chain_parts(&mut self, e: &Expr) -> ChainParts {
         let (base, links) = flatten(e);
@@ -1196,6 +1255,12 @@ impl<'s> Desugar<'s> {
         // A timed `WaitForChild` can return nil, so the link after it guards.
         let mut pending_guard = false;
 
+        // What the chain has called or read when a prefix becomes a temp
+        // runs in front of the statement, see `render_hoisted`.
+        let start = (self.effects, self.reads);
+        // The base is the callee or the receiver of what follows. Its
+        // read is the chain's own, so it does not count as an earlier one.
+        let reads = self.reads;
         // A string literal as a receiver needs parentheses in Luau.
         let mut inner = match base {
             Expr::String(_) | Expr::InterpString(_) | Expr::Interp { .. } if !links.is_empty() => {
@@ -1204,6 +1269,7 @@ impl<'s> Desugar<'s> {
 
             _ => self.render_to_string(base),
         };
+        self.reads = reads;
 
         // `Vector3.zero(...)`: a static declared on a foreign type.
         let mut links = links;
@@ -1281,7 +1347,11 @@ impl<'s> Desugar<'s> {
         }
 
         let mut inner_simple = self.is_simple(base);
-        let mut guard: Option<String> = None;
+        // Names and fields only, `?` links included: safe to read again.
+        // The checker narrows a field path and not a computed key, so a
+        // key ends it.
+        let mut rereadable = inner_simple;
+        let mut guards: Vec<String> = Vec::new();
 
         // `HashMap.new()` under `local m: HashMap<K, V>`: the arguments
         // the annotation names go on the call.
@@ -1303,7 +1373,7 @@ impl<'s> Desugar<'s> {
             let targs = self.lower_type_args(&format!("<<{args_text}>>"));
 
             return ChainParts {
-                guard: None,
+                guards: Vec::new(),
                 inner: format!("{inner}.{method}{targs}{a}"),
             };
         }
@@ -1319,13 +1389,23 @@ impl<'s> Desugar<'s> {
             match link {
                 Link::Plain(step) => {
                     inner_simple = inner_simple && matches!(step, Step::Field(_));
+                    rereadable = rereadable && matches!(step, Step::Field(_));
                     pending_guard = timed_waits && matches!(step, Step::Child { wait: true, .. });
-                    inner = self.apply(&inner, &step);
+                    // Past a `?`, a step runs only when the prefix is not
+                    // nil, and so do its arguments.
+                    inner = self.apply_step(!guards.is_empty(), &inner, &step);
                 }
 
                 Link::Optional(step) => {
-                    let name = self.name_prefix(&mut inner, &mut guard, inner_simple);
+                    let hoists = self.hoists.len();
+                    let name = self.name_prefix(&mut inner, &mut guards, inner_simple, rereadable);
+
+                    if self.hoists.len() > hoists {
+                        (self.effects, self.reads) = start;
+                    }
+
                     inner_simple = false;
+                    rereadable = rereadable && matches!(step, Step::Field(_));
                     pending_guard = timed_waits && matches!(step, Step::Child { wait: true, .. });
                     // `f?()` on a field of an optional function type: the new
                     // solver loses the field's type under an earlier `== n`
@@ -1338,11 +1418,17 @@ impl<'s> Desugar<'s> {
                         } else {
                             name
                         };
-                    inner = self.apply(&callee, &step);
+                    inner = self.apply_step(true, &callee, &step);
                 }
 
                 Link::NonNil { span } => {
-                    let name = self.name_prefix(&mut inner, &mut guard, inner_simple);
+                    let hoists = self.hoists.len();
+                    let name = self.name_prefix(&mut inner, &mut guards, inner_simple, false);
+
+                    if self.hoists.len() > hoists {
+                        (self.effects, self.reads) = start;
+                    }
+
                     let source = self.text_of(span);
                     let message = luau_string(&format!("{source} is nil"));
                     // The checker gives `error(m)` a type it cannot
@@ -1358,42 +1444,65 @@ impl<'s> Desugar<'s> {
                     };
                     inner = format!("(if {name} == nil then {raised} else {name})");
                     inner_simple = false;
+                    rereadable = false;
                     // `!` ends the guard: past it the value is never nil.
-                    guard = None;
+                    guards.clear();
                 }
             }
         }
 
-        ChainParts { guard, inner }
+        ChainParts { guards, inner }
+    }
+
+    /// Applies a step, as code that runs on some paths only when `lazy`
+    /// is set. A call runs after its arguments, so a later argument
+    /// counts it.
+    fn apply_step(&mut self, lazy: bool, prefix: &str, step: &Step<'_>) -> String {
+        let saved = std::mem::replace(&mut self.lazy, lazy);
+        let text = self.apply(prefix, step);
+        self.lazy = saved;
+
+        if matches!(step, Step::Call { .. } | Step::Child { .. }) {
+            self.effects = true;
+        }
+
+        text
     }
 
     /// Names the current prefix so a link can test it and then use it.
+    /// In place, a prefix safe to read again stays as it is and joins the
+    /// guards; any other becomes a temp that replaces them.
     pub(crate) fn name_prefix(
         &mut self,
         inner: &mut String,
-        guard: &mut Option<String>,
+        guards: &mut Vec<String>,
         inner_simple: bool,
+        rereadable: bool,
     ) -> String {
-        let name = if guard.is_none() && inner_simple {
-            inner.clone()
-        } else {
-            let whole = self.guarded(guard.as_deref(), inner);
-            let anchor = self.chain_anchor;
-            self.hoist_text(whole, anchor)
-        };
+        if (guards.is_empty() && inner_simple) || (self.in_place && rereadable) {
+            guards.push(inner.clone());
 
-        *guard = Some(name.clone());
+            return inner.clone();
+        }
+
+        let whole = self.guarded(guards, inner);
+        let anchor = self.chain_anchor;
+        let name = self.hoist_text(whole, anchor);
+        *guards = vec![name.clone()];
         *inner = name.clone();
 
         name
     }
 
-    pub(crate) fn guarded(&self, guard: Option<&str>, inner: &str) -> String {
-        match guard {
-            Some(g) => format!("(if {g} == nil then nil else {inner})"),
-
-            None => inner.to_string(),
+    /// `(if g == nil then nil else inner)`, with one test per guard.
+    pub(crate) fn guarded(&self, guards: &[String], inner: &str) -> String {
+        if guards.is_empty() {
+            return inner.to_string();
         }
+
+        let tests: Vec<String> = guards.iter().map(|g| format!("{g} == nil")).collect();
+
+        format!("(if {} then nil else {inner})", tests.join(" or "))
     }
 
     pub(crate) fn apply(&mut self, prefix: &str, step: &Step<'_>) -> String {
@@ -1644,7 +1753,7 @@ impl<'s> Desugar<'s> {
         self.check_struct_call(e);
         let parts = self.chain_parts(e);
 
-        self.guarded(parts.guard.as_deref(), &parts.inner)
+        self.guarded(&parts.guards, &parts.inner)
     }
 }
 

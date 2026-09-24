@@ -26,7 +26,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "?.",
-        "```alloy\na?.b\n```\nSafe index: nil when `a` is nil, else `a.b`. The `?` guards the rest of the chain, and `!` ends the guard.\n\nEmits `a.b` under a nil check on a temp.",
+        "```alloy\na?.b\n```\nSafe index: nil when `a` is nil, else `a.b`. The `?` guards the rest of the chain, and `!` ends the guard.\n\nEmits `a.b` under a nil check on a temp. The temp runs in front of the statement. Where that would change the result, the chain keeps its temps: after `and`, `or` and `??`, in a later branch or a guard, in a loop condition, or after an earlier call. There a path of fields reads again, `(if a == nil or a.b == nil then nil else a.b.c)`, and any other chain runs in a closure called in place.",
     ),
     (
         "?[",

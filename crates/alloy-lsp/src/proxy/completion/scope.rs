@@ -291,6 +291,9 @@ impl State {
 
         for (u, doc) in mine.chain(self.docs.iter().map(|(u, d)| (u.as_str(), d))) {
             let own = u == uri;
+            // The export list of the file names what a hover does not:
+            // an attribute's hover opens with `@name(...)`, and a name
+            // an `export { }` list sends out has no `export` in front.
             let exports: HashSet<String> = doc
                 .decls
                 .iter()
@@ -301,6 +304,7 @@ impl State {
                         .is_some_and(|l| l.starts_with("export "))
                 })
                 .map(|d| bound_name(&d.name))
+                .chain(doc.exports.iter().map(|e| e.name.clone()))
                 .collect();
             for d in &doc.decls {
                 let bound = bound_name(&d.name);

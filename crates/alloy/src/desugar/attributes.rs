@@ -1133,6 +1133,12 @@ impl<'s> Desugar<'s> {
                                 .map(|d| self.text_of(d.span()).to_string())
                         })
                         .collect();
+                    let patterns: Vec<Vec<(String, String)>> = m
+                        .params
+                        .iter()
+                        .filter(|p| !p.is_vararg)
+                        .map(|p| super::pattern_accesses(p, |t| self.text_of(t).to_string()))
+                        .collect();
                     let variadic = m.params.iter().any(|p| p.is_vararg);
                     let name = self.text_of(m.name).to_string();
                     let body = self.join_tokens(m.body.span);
@@ -1140,6 +1146,7 @@ impl<'s> Desugar<'s> {
                     let mac = MacroRef {
                         params,
                         defaults,
+                        patterns,
                         variadic,
                         body,
                         tail,

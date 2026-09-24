@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{
-    After, Assign, Block, CallArgs, Cond, Destructure, Expr, Function, FunctionBody, GenericFor,
-    ImportKind, IndexKey, Local, Pattern, Return, Stmt, TableField, TokSpan,
+    After, Assign, Block, CallArgs, Cond, Destructure, Expr, FieldBinding, Function, FunctionBody,
+    GenericFor, ImportKind, IndexKey, Local, Param, Pattern, Return, Stmt, TableField, TokSpan,
 };
 
 use crate::render::Renderer;
@@ -1657,6 +1657,13 @@ impl<'s> Desugar<'s> {
                 self.declare_class(d.span);
             }
 
+            // Luau's definitions take a name for each parameter, so a
+            // pattern writes as the temp the function body would use.
+            Stmt::Declare(d) if declare_patterns(self.text_of(d.span)).is_some() => {
+                let text = declare_patterns(self.text_of(d.span)).unwrap_or_default();
+                self.generate(self.byte_start(d.span), &text);
+            }
+
             Stmt::GenericFor(f) if for_needs_rewrite(f) => self.generic_for(stmt.span(), f),
 
             _ => {
@@ -1942,8 +1949,9 @@ impl<'s> Desugar<'s> {
         // The plain names with their annotations, and their values.
         let mut names: Vec<(TokSpan, String)> = Vec::new();
         let mut values = Vec::new();
-        // One declaration per destructure: its names and their values.
-        let mut decls: Vec<(Vec<TokSpan>, String)> = Vec::new();
+        // One declaration per destructure: its names with their types,
+        // and their values.
+        let mut decls: Vec<(Vec<TypedName>, String)> = Vec::new();
 
         for (b, v) in l.names.iter().zip(&l.values) {
             self.expected_generic = b.ty.and_then(|t| generic_head(self.text_of(t)));
@@ -1966,8 +1974,12 @@ impl<'s> Desugar<'s> {
                         None => value,
                     };
                     let temp = self.hoist_text(typed, anchor);
-                    let (ns, vs) = self.destructure_parts(d, &temp);
-                    decls.push((ns, vs.join(", ")));
+                    let entries = self.destructure_entries(d, &temp, None);
+                    let vs: Vec<String> = entries.iter().map(|(_, _, v)| v.clone()).collect();
+                    decls.push((
+                        entries.into_iter().map(|(n, t, _)| (n, t)).collect(),
+                        vs.join(", "),
+                    ));
                 }
             }
         }
@@ -1992,15 +2004,19 @@ impl<'s> Desugar<'s> {
             lead = " ";
         }
 
-        for (ns, vs) in decls {
+        for (ns, vs) in decls.into_iter().filter(|(ns, _)| !ns.is_empty()) {
             self.generate(anchor, &format!("{lead}{keyword} "));
 
-            for (i, name) in ns.iter().enumerate() {
+            for (i, (name, ty)) in ns.iter().enumerate() {
                 if i > 0 {
                     self.generate(anchor, ", ");
                 }
 
                 self.copy_on_line(anchor, *name);
+
+                if let Some(t) = ty {
+                    self.generate(anchor, &format!(": {t}"));
+                }
             }
 
             self.generate(anchor, &format!(" = {vs}"));
@@ -2152,46 +2168,211 @@ impl<'s> Desugar<'s> {
         self.copy(cursor, end);
     }
 
-    /// The names and values of a destructure over a temp. A name is
-    /// its source span, so a writer can copy it.
-    pub(crate) fn destructure_parts(
+    /// Each name a destructure binds, with its annotation and its value
+    /// over a temp. `rest_type` is the type `...rest` takes; unset, it
+    /// is `{ [string]: unknown }`.
+    pub(crate) fn destructure_entries(
         &mut self,
         d: &Destructure,
         temp: &str,
-    ) -> (Vec<TokSpan>, Vec<String>) {
+        rest_type: Option<&str>,
+    ) -> Vec<(TokSpan, Option<String>, String)> {
         match d {
             Destructure::Table(fields) => {
-                let ns: Vec<TokSpan> = fields.iter().map(|f| f.rename.unwrap_or(f.field)).collect();
-                let vs: Vec<String> = fields
+                let named: Vec<String> = fields
                     .iter()
-                    .map(|f| format!("{temp}.{}", self.text_of(f.field)))
+                    .filter(|f| !f.rest)
+                    .map(|f| self.text_of(f.field).to_string())
                     .collect();
 
-                (ns, vs)
+                fields
+                    .iter()
+                    .map(|f| match f.rest {
+                        // A copy of the table without the named fields.
+                        // The loop reads the value through `any`, since
+                        // a record type has no indexer to iterate.
+                        true => {
+                            let keep = match named.is_empty() {
+                                true => "true".to_string(),
+
+                                false => named
+                                    .iter()
+                                    .map(|n| format!("k ~= \"{n}\""))
+                                    .collect::<Vec<_>>()
+                                    .join(" and "),
+                            };
+                            let value = format!(
+                                "(function() local r: {{ [any]: unknown }} = {{}} for k, v in ({temp} :: any) do if {keep} then r[k] = v end end return r end)() :: any"
+                            );
+
+                            (
+                                f.field,
+                                Some(rest_type.unwrap_or("{ [string]: unknown }").to_string()),
+                                value,
+                            )
+                        }
+
+                        false => (
+                            f.rename.unwrap_or(f.field),
+                            f.ty.map(|t| self.text_of(t).trim().to_string()),
+                            format!("{temp}.{}", self.text_of(f.field)),
+                        ),
+                    })
+                    .collect()
             }
 
             Destructure::Array { items, rest } => {
-                let mut ns: Vec<TokSpan> = items.clone();
-                let mut vs: Vec<String> =
-                    (1..=items.len()).map(|i| format!("{temp}[{i}]")).collect();
+                let mut out: Vec<(TokSpan, Option<String>, String)> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (*n, None, format!("{temp}[{}]", i + 1)))
+                    .collect();
 
                 if let Some(r) = rest {
-                    ns.push(*r);
                     let std = self.std();
-                    vs.push(format!("{std}.Array.slice({temp}, {})", items.len() + 1));
+                    out.push((
+                        *r,
+                        None,
+                        format!("{std}.Array.slice({temp}, {})", items.len() + 1),
+                    ));
                 }
 
-                (ns, vs)
+                out
             }
         }
     }
 
     /// A destructure as one line of text, for a prologue.
     fn destructure_text(&mut self, d: &Destructure, temp: &str) -> String {
-        let (ns, vs) = self.destructure_parts(d, temp);
-        let ns: Vec<&str> = ns.iter().map(|n| self.text_of(*n)).collect();
+        let entries = self.destructure_entries(d, temp, None);
+
+        if entries.is_empty() {
+            return String::new();
+        }
+        let ns: Vec<String> = entries
+            .iter()
+            .map(|(n, ty, _)| match ty {
+                Some(t) => format!("{}: {t}", self.text_of(*n)),
+
+                None => self.text_of(*n).to_string(),
+            })
+            .collect();
+        let vs: Vec<&str> = entries.iter().map(|(_, _, v)| v.as_str()).collect();
 
         format!("local {} = {}", ns.join(", "), vs.join(", "))
+    }
+
+    /// A destructure as a prologue: each name copies from the source
+    /// where its line allows, so the editor maps it to the pattern.
+    fn destructure_pieces(
+        &mut self,
+        d: &Destructure,
+        temp: &str,
+        rest_type: Option<&str>,
+    ) -> Vec<Piece> {
+        let entries = self.destructure_entries(d, temp, rest_type);
+
+        // `{ }` binds nothing: someone is typing, and the list completes.
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
+        let mut out = vec![Piece::Text("local ".to_string())];
+
+        for (i, (name, ty, _)) in entries.iter().enumerate() {
+            if i > 0 {
+                out.push(Piece::Text(", ".to_string()));
+            }
+
+            out.push(Piece::Name(*name));
+
+            if let Some(t) = ty {
+                out.push(Piece::Text(format!(": {t}")));
+            }
+        }
+
+        let values: Vec<&str> = entries.iter().map(|(_, _, v)| v.as_str()).collect();
+        out.push(Piece::Text(format!(" = {}", values.join(", "))));
+
+        out
+    }
+
+    /// The problems of a parameter pattern, reported on the pattern.
+    /// Returns the shape the typed fields state, when they state one.
+    fn check_param_pattern(&mut self, p: &Param, d: &Destructure) -> Option<String> {
+        let Destructure::Table(fields) = d else {
+            return None;
+        };
+        let pattern = self.text_of(p.name).trim().to_string();
+        let named: Vec<&FieldBinding> = fields.iter().filter(|f| !f.rest).collect();
+        let typed = named.iter().filter(|f| f.ty.is_some()).count();
+
+        if let Some(t) = p.ty {
+            let ty = self.text_of(t).trim().to_string();
+
+            if typed > 0 {
+                self.diagnose(
+                    p.name,
+                    &format!("`{pattern}: {ty}` states the shape twice; drop the field types or drop the annotation"),
+                );
+
+                return None;
+            }
+
+            if ty.ends_with('?') && p.default.is_none() {
+                self.diagnose(t, &format!("a pattern needs a value; `{ty}` may be nil"));
+            }
+
+            // A struct this file or an import declares says which
+            // fields exist.
+            if let Some(declared) = self.declared_fields(ty.trim_end_matches('?')) {
+                for f in &named {
+                    let field = self.text_of(f.field).to_string();
+
+                    if !declared.iter().any(|(n, _)| *n == field) {
+                        self.diagnose(
+                            f.field,
+                            &format!("`{}` has no field `{field}`", ty.trim_end_matches('?')),
+                        );
+                    }
+                }
+            }
+
+            return None;
+        }
+
+        if typed == 0 {
+            self.diagnose(
+                p.name,
+                &format!("`{pattern}` has no type; annotate the parameter, `{pattern}: Options`, or type each field"),
+            );
+
+            return None;
+        }
+
+        if typed < named.len() {
+            self.diagnose(
+                p.name,
+                &format!("`{pattern}` types some fields and not others; type every field, or annotate the parameter"),
+            );
+
+            return None;
+        }
+
+        let shape = named
+            .iter()
+            .map(|f| {
+                format!(
+                    "{}: {}",
+                    self.text_of(f.field),
+                    f.ty.map(|t| self.text_of(t).trim().to_string())
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        Some(format!("{{ {shape} }}"))
     }
 
     // --- functions ---------------------------------------------------------
@@ -2299,25 +2480,39 @@ impl<'s> Desugar<'s> {
 
         // 2. Parameters: a destructure becomes a temp, a default makes the
         //    type optional, and both add a prologue line.
-        let mut prologue: Vec<String> = Vec::new();
+        let mut prologue: Vec<Vec<Piece>> = Vec::new();
         let mut param_temp = 0;
 
         for p in &body.params {
             let ps = self.byte_start(p.name);
             self.copy(cursor, ps);
 
-            match &p.destructure {
+            // A pattern takes a temp in the list and opens on the
+            // header's line; the typed fields state its type.
+            let mut shape = None;
+            let temp = match &p.destructure {
                 Some(d) => {
                     param_temp += 1;
                     let temp = format!("_p{param_temp}");
                     self.generate(ps, &temp);
-                    prologue.push(self.destructure_text(d, &temp));
+                    shape = self.check_param_pattern(p, d);
+
+                    Some(temp)
                 }
 
-                None => self.copy(ps, self.byte_end(p.name)),
-            }
+                None => {
+                    self.copy(ps, self.byte_end(p.name));
+
+                    None
+                }
+            };
 
             cursor = self.byte_end(p.name);
+
+            if let Some(shape) = &shape {
+                let optional = if p.default.is_some() { "?" } else { "" };
+                self.generate(cursor, &format!(": {shape}{optional}"));
+            }
 
             if p.ty.is_none()
                 && self.text_of(p.name) == "self"
@@ -2344,16 +2539,30 @@ impl<'s> Desugar<'s> {
             }
 
             if let Some(default) = &p.default {
-                let name = self.text_of(p.name).to_string();
+                let name = temp
+                    .clone()
+                    .unwrap_or_else(|| self.text_of(p.name).to_string());
                 let value = self.render_to_string(default);
-                let ty =
-                    p.ty.map(|t| format!(": {}", self.text_of(t)))
-                        .unwrap_or_default();
-                prologue.push(format!(
+                let ty = match (p.ty, &shape) {
+                    (Some(t), _) => format!(": {}", self.text_of(t)),
+
+                    (None, Some(shape)) => format!(": {shape}"),
+
+                    (None, None) => String::new(),
+                };
+                prologue.push(vec![Piece::Text(format!(
                     "local {name}{ty} = if {name} == nil then {value} else {name}"
-                ));
+                ))]);
                 // ` = default` disappears from the parameter list.
                 cursor = self.byte_end(default.span());
+            }
+
+            // The pattern opens after the default settled the value.
+            if let (Some(temp), Some(d)) = (&temp, &p.destructure) {
+                let rest_type =
+                    p.ty.map(|t| self.text_of(t).trim().to_string())
+                        .filter(|t| is_string_index_table(t));
+                prologue.push(self.destructure_pieces(d, temp, rest_type.as_deref()));
             }
         }
 
@@ -2417,9 +2626,21 @@ impl<'s> Desugar<'s> {
             lead.push_str(&p);
         }
 
-        for p in &prologue {
+        // Each prologue writes its text, and a bound name copies from the
+        // pattern, so the editor finds the local under the author's name.
+        for pieces in prologue.iter().filter(|p| !p.is_empty()) {
             lead.push(' ');
-            lead.push_str(p);
+
+            for piece in pieces {
+                match piece {
+                    Piece::Text(t) => lead.push_str(t),
+
+                    Piece::Name(n) => {
+                        self.generate(cursor, &std::mem::take(&mut lead));
+                        self.copy_on_line(cursor, *n);
+                    }
+                }
+            }
         }
 
         // A body that returns nothing resolves to nil: the wrapper alone
@@ -3044,6 +3265,28 @@ fn is_declare_class(src: &str, toks: &[alloy_syntax::lexer::Tok], s: &Stmt) -> b
         .is_some_and(|t| &src[t.start as usize..t.end as usize] == "class")
 }
 
+/// A name a destructure binds, with its annotation.
+type TypedName = (TokSpan, Option<String>);
+
+/// A piece of a prologue: generated text, or a name copied from the
+/// source.
+#[derive(Debug, Clone)]
+pub(crate) enum Piece {
+    Text(String),
+    Name(TokSpan),
+}
+
+/// Whether a type is a table with a string index and nothing else:
+/// `{ [string]: T }`, the type `...rest` takes over from its annotation.
+fn is_string_index_table(t: &str) -> bool {
+    let Some(inner) = t.strip_prefix('{').and_then(|r| r.strip_suffix('}')) else {
+        return false;
+    };
+    let inner = inner.trim();
+
+    inner.starts_with("[string]:") && !inner.contains(',')
+}
+
 #[cfg(test)]
 mod tests {
     fn messages(src: &str) -> Vec<String> {
@@ -3653,4 +3896,234 @@ pub fn local_names(l: &Local) -> Vec<TokSpan> {
             }
         })
         .collect()
+}
+
+/// The type a parameter pattern stands for, from its source text: the
+/// annotation after `}`, or the shape its typed fields state.
+/// `{ x, y }: Point` is `Point`; `{ bar: string }` is `{ bar: string }`.
+/// `None` when the text is no pattern, or a pattern with no type.
+pub fn pattern_type(param: &str) -> Option<String> {
+    let t = param.trim();
+
+    if !t.starts_with('{') {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut end = None;
+
+    for (i, c) in t.char_indices() {
+        match c {
+            '{' | '(' | '[' | '<' => depth += 1,
+
+            '}' | ')' | ']' | '>' => {
+                depth -= 1;
+
+                if depth == 0 && c == '}' {
+                    end = Some(i);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let end = end?;
+
+    if let Some(ty) = t[end + 1..].trim().strip_prefix(':') {
+        // The annotation ends at the default or the next parameter.
+        let mut depth = 0i32;
+        let stop = ty
+            .char_indices()
+            .find(|(_, c)| match c {
+                '(' | '{' | '[' | '<' => {
+                    depth += 1;
+
+                    false
+                }
+
+                ')' | '}' | ']' | '>' => {
+                    depth -= 1;
+
+                    depth < 0
+                }
+
+                ',' | '=' => depth == 0,
+
+                _ => false,
+            })
+            .map_or(ty.len(), |(n, _)| n);
+        let ty = ty[..stop].trim();
+
+        return (!ty.is_empty()).then(|| ty.to_string());
+    }
+
+    let fields: Vec<String> = t[1..end]
+        .split(',')
+        .map(str::trim)
+        .filter(|f| !f.is_empty() && !f.starts_with("..."))
+        .map(|f| {
+            let (name, ty) = f.split_once(':')?;
+            let name = name.split('=').next().unwrap_or(name).trim();
+
+            Some(format!("{name}: {}", ty.trim()))
+        })
+        .collect::<Option<_>>()?;
+
+    Some(format!("{{ {} }}", fields.join(", ")))
+}
+
+/// A signature with each parameter pattern written as its type: the
+/// caller passes one value, and the pattern is the body's business.
+pub fn signature_with_pattern_types(label: &str) -> Option<String> {
+    let open = label.find('(')?;
+    let mut depth = 0i32;
+    let mut close = None;
+
+    for (i, c) in label.char_indices().skip_while(|(i, _)| *i < open) {
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+
+            ')' | '}' | ']' | '>' => {
+                depth -= 1;
+
+                if depth == 0 && c == ')' {
+                    close = Some(i);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let close = close?;
+    let inner = &label[open + 1..close];
+    let mut params = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+
+            ')' | '}' | ']' | '>' => depth -= 1,
+
+            ',' if depth == 0 => {
+                params.push(&inner[start..i]);
+                start = i + 1;
+            }
+
+            _ => {}
+        }
+    }
+
+    params.push(&inner[start..]);
+
+    if !params.iter().any(|p| p.trim_start().starts_with('{')) {
+        return None;
+    }
+
+    let written: Vec<String> = params
+        .iter()
+        .map(|p| match pattern_type(p) {
+            Some(ty) => format!("{}{ty}", &p[..p.len() - p.trim_start().len()]),
+
+            None => p.to_string(),
+        })
+        .collect();
+
+    Some(format!(
+        "{}{}{}",
+        &label[..=open],
+        written.join(","),
+        &label[close..]
+    ))
+}
+
+/// A `declare function` with each parameter pattern written as `_pN`
+/// and the pattern's type: the annotation, or the shape its typed
+/// fields state. `None` when the declaration holds no pattern.
+fn declare_patterns(text: &str) -> Option<String> {
+    let open = text.find('(')?;
+    let b = text.as_bytes();
+    let mut depth = 0i32;
+    let mut close = None;
+
+    for (i, c) in b.iter().enumerate().skip(open) {
+        match c {
+            b'(' | b'{' | b'[' | b'<' => depth += 1,
+
+            b')' | b'}' | b']' | b'>' => {
+                depth -= 1;
+
+                if depth == 0 && *c == b')' {
+                    close = Some(i);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let close = close?;
+    let inner = &text[open + 1..close];
+
+    // The parameters, split on the commas outside brackets.
+    let mut params = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+
+            ')' | '}' | ']' | '>' => depth -= 1,
+
+            ',' if depth == 0 => {
+                params.push(&inner[start..i]);
+                start = i + 1;
+            }
+
+            _ => {}
+        }
+    }
+
+    params.push(&inner[start..]);
+
+    if !params.iter().any(|p| p.trim_start().starts_with('{')) {
+        return None;
+    }
+
+    let mut n = 0;
+    let written: Vec<String> = params
+        .iter()
+        .map(|p| {
+            let t = p.trim();
+
+            if !t.starts_with('{') {
+                return p.to_string();
+            }
+
+            n += 1;
+            let lead = &p[..p.len() - p.trim_start().len()];
+
+            format!(
+                "{lead}_p{n}: {}",
+                pattern_type(t).unwrap_or_else(|| "any".into())
+            )
+        })
+        .collect();
+
+    Some(format!(
+        "{}{}{}",
+        &text[..=open],
+        written.join(","),
+        &text[close..]
+    ))
 }

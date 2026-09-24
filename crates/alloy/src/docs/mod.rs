@@ -76,6 +76,21 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     (&["internal:"], "InternalError"),
     // A negation the analyzer cannot build, said before it tries.
     (&["negates twice", "luau cannot negate"], "TypeError"),
+    // A name after the rest of a pattern: the parser's report, which
+    // the struct rule below would read by its word `fields`.
+    (&["takes the fields that are left"], "SyntaxError"),
+    // A parameter pattern whose type is missing, doubled, partial, or
+    // optional. A field its struct lacks reads as the struct literal's
+    // report of the same words.
+    (
+        &[
+            "has no type; annotate the parameter",
+            "states the shape twice",
+            "types some fields and not others",
+            "a pattern needs a value",
+        ],
+        "TypeError",
+    ),
     // The removal report names a declaration kind, which the rules
     // below would read as the kind's own family.
     (&["`global` is removed"], "ImportError"),

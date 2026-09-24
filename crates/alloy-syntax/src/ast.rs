@@ -730,7 +730,8 @@ pub struct Binding {
 
 #[derive(Debug)]
 pub enum Destructure {
-    /// `{ a, b = c }`: field `a` binds `a`; field `b` binds `c`.
+    /// `{ a, b = c, d: T, ...rest }`: field `a` binds `a`; field `b`
+    /// binds `c`; `d` binds with a type; `rest` takes the other fields.
     Table(Vec<FieldBinding>),
     /// `[ a, b, ...rest ]`.
     Array {
@@ -741,9 +742,16 @@ pub enum Destructure {
 
 #[derive(Debug)]
 pub struct FieldBinding {
+    /// The field, or the name of a `...rest` entry.
     pub field: TokSpan,
     /// The local name when it differs from the field.
     pub rename: Option<TokSpan>,
+    /// `name: Type`: the field's type. In a parameter pattern the typed
+    /// fields state the parameter's type.
+    pub ty: Option<TokSpan>,
+    /// `...rest`: the entry binds a table of the fields the pattern
+    /// does not name. It comes last.
+    pub rest: bool,
 }
 
 /// `a, b = x, y` and the compound forms, for example `a += 1`.

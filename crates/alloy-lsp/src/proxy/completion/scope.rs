@@ -23,14 +23,36 @@ impl State {
             return Vec::new();
         };
 
-        let answered = result
+        let child = result
             .get("items")
             .and_then(Value::as_array)
             .or_else(|| result.as_array())
-            .is_some_and(|items| !items.is_empty());
+            .cloned()
+            .unwrap_or_default();
 
-        // The child answered: its list already holds the scope.
-        if answered || !context::expression_start(&doc.source, offset) {
+        // The child answered: its list holds the scope, but for the
+        // bindings of a `case` arm. A match expression reads its payload
+        // through a temp, and an unclosed match does not compile, so the
+        // child never sees the name.
+        if !child.is_empty() {
+            let line = line as usize;
+
+            return context::locals_in_scope(&doc.source, offset)
+                .into_iter()
+                .filter(|l| !child.iter().any(|i| i["label"] == l.name.as_str()))
+                .filter(|l| case_arm_of_binding(doc, line, &l.name).is_some())
+                .map(|l| {
+                    json!({
+                        "label": l.name,
+                        "kind": 6,
+                        "detail": "local",
+                        "sortText": format!("0{}", l.name),
+                    })
+                })
+                .collect();
+        }
+
+        if !context::expression_start(&doc.source, offset) {
             return Vec::new();
         }
 

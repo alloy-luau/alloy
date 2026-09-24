@@ -669,6 +669,33 @@ pub(crate) fn a_declared_attribute_reaches_its_own_targets() {
 
     assert!(!labels.contains(&"@audited".to_string()), "{labels:?}");
 }
+/// A match expression reads a payload through a temp, so the child's
+/// list lacks the arm's binding. The scope adds it, and nothing the
+/// child already offers.
+#[test]
+pub(crate) fn an_arm_binding_joins_the_childs_list() {
+    let src = concat!(
+        "enum Shape as\n",
+        "    Circle(number)\n",
+        "    Dot\n",
+        "end\n",
+        "local s = Shape.Dot\n",
+        "local z = match s with\n",
+        "    case Circle(radius) then ra\n",
+        "    default 0\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let child = json!([{ "label": "print" }, { "label": "s" }]);
+    let labels: Vec<String> = st
+        .value_scope(uri, 6, 31, &child)
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+
+    assert_eq!(labels, ["radius"]);
+}
+
 /// An imported attribute joins the list. Its hover opens with
 /// `@slow(...)`, not `export`, so the scope took it for private.
 #[test]

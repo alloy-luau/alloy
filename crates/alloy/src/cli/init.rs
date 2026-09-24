@@ -105,7 +105,12 @@ fn init_at(dir: &Path) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if let Err(e) = std::fs::write(&path, config::TEMPLATE) {
+    // The wizard and `--yes` name the project after its folder; the
+    // plain path does the same.
+    let name = toml::Value::String(folder_name(dir)).to_string();
+    let text = config::TEMPLATE.replacen("name = \"game\"", &format!("name = {name}"), 1);
+
+    if let Err(e) = std::fs::write(&path, text) {
         fail(&format!("cannot write {}: {e}", path.display()));
         return ExitCode::FAILURE;
     }
@@ -598,14 +603,17 @@ mod tests {
     /// configuration byte for byte, whatever the wizard writes beside
     /// it. A script reads the same two files it read before.
     #[test]
-    fn the_plain_path_writes_the_template_byte_for_byte() {
+    fn the_plain_path_writes_the_template_with_the_folder_name() {
         let dir = temp("plain");
         let _ = init_at(&dir);
 
+        // The template as it is, with the folder's name for the project.
+        let folder = folder_name(&dir);
         assert_eq!(
             std::fs::read_to_string(dir.join("alloy.toml")).expect("alloy.toml"),
-            config::TEMPLATE
+            config::TEMPLATE.replacen("name = \"game\"", &format!("name = \"{folder}\""), 1)
         );
+        assert_ne!(folder, "game");
         assert_eq!(
             std::fs::read_to_string(dir.join(".config.luau")).expect(".config.luau"),
             config::CONFIG_LUAU_TEMPLATE

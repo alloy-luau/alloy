@@ -1021,6 +1021,20 @@ mod tests {
         let mut o = FmtConfig::default();
         o.call_parentheses = CallParentheses::None;
         assert_eq!(format_with("print(\"x\")\n", &o).unwrap(), "print 'x'\n");
+        // A macro call keeps them: `$say 'hi'` does not parse.
+        assert_eq!(
+            format_with("$dbg(\"x\")\n$M.say({ 1 })\n", &o).unwrap(),
+            "$dbg('x')\n$M.say({ 1 })\n"
+        );
+    }
+
+    /// A macro body that opens with a group keeps its space: glued to
+    /// the parameters it reads as a call.
+    #[test]
+    fn a_macro_body_keeps_its_space_after_the_parameters() {
+        let want = "macro dbl(x) (x) * 2 end\n";
+        assert_eq!(fmt("macro dbl(x) (x)*2 end\n"), want);
+        assert_eq!(fmt(want), want);
     }
 
     #[test]

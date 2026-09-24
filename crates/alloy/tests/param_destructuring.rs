@@ -57,12 +57,12 @@ fn a_rest_takes_the_other_fields() {
     );
 
     assert!(
-        out.contains("local id, rest: { [string]: unknown } = _p1.id, (function(t: any): any"),
+        out.contains("local id, rest: { [string]: any } = _p1.id, (function(t: any): any"),
         "{out}"
     );
     assert!(out.contains("if k ~= \"id\" then r[k] = v end"), "{out}");
     assert!(
-        out.contains("local id, others: { [string]: unknown } = "),
+        out.contains("local id, others: { [string]: any } = "),
         "{out}"
     );
 

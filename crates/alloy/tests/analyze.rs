@@ -342,6 +342,24 @@ local v: number? = cached ?? get()?.a?.b
 print(health(nil), check(Ev.Num(1)), v)
 "#;
 
+/// A rest pattern over a plain table: the slice takes `{ T }`, and the
+/// fields a table rest keeps read as `any`.
+const RESTS: &str = r#"local xs: { number } = { 1, 2, 3 }
+local [head, ...rest] = xs
+
+local function f(ys: { number }): number
+    return match ys with
+        case [first, ...more] then first + #more
+        default 0
+    end
+end
+
+type Point = { x: number, y: number }
+local pt: Point = { x = 1, y = 2 }
+local { x, ...others } = pt
+print(head, #rest, f(xs), x, others.y)
+"#;
+
 /// The analyzer's `TypeError` and `SyntaxError` lines for one source,
 /// or `None` when luau-lsp or the Roblox definitions are missing.
 fn reports(src: &str, name: &str) -> Option<Vec<String>> {
@@ -1111,4 +1129,9 @@ fn a_derived_method_and_a_generic_fields_form_analyze() {
 #[test]
 fn an_operand_that_keeps_its_temps_analyzes() {
     analyze(IN_PLACE, "in_place");
+}
+
+#[test]
+fn a_rest_pattern_over_a_plain_table_analyzes() {
+    analyze(RESTS, "rests");
 }

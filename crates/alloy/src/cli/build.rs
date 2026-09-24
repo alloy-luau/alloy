@@ -246,7 +246,13 @@ fn build_project(args: &[String]) -> ExitCode {
         (report.data.len(), "data", ui::DIM),
         (report.skipped.len(), "skipped", ui::DIM),
         (report.removed.len(), "removed", ui::AMBER),
-        (report.diagnostics.len(), "diagnostics", ui::RED),
+        // A file that does not lex or parse is a failure, and it is a
+        // diagnostic to the reader, as `check` counts it.
+        (
+            report.diagnostics.len() + report.failures.len(),
+            "diagnostics",
+            ui::RED,
+        ),
     ]);
     let out = p.paint(
         ui::DIM,

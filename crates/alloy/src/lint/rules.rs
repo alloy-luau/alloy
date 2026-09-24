@@ -84,103 +84,218 @@ pub fn namespace_consts(
 /// reports it as a syntax error in the emit, which only `alloy flux`
 /// runs, and in the checker's words.
 ///
-/// A `const` inside a namespace is named by its dotted path,
-/// `Cfg.LIMIT`, since that is what a source writes to reach it;
-/// `namespace_consts` holds those paths.
+/// The walk keeps a scope per block, so a `local` or a parameter of the
+/// same name hides the `const`, and every name of `const a, b` and of a
+/// `const { a, b }` destructure counts. A `const` inside a namespace is
+/// named by its dotted path, `Cfg.LIMIT`, since that is what a source
+/// writes to reach it; `namespace_consts` holds those paths.
 pub fn const_reassignments(
     src: &str,
     toks: &[Tok],
+    block: &alloy_syntax::ast::Block,
     namespace_consts: &[String],
 ) -> Vec<(u32, u32, String)> {
-    let text = |i: usize| toks.get(i).map(|t| t.text(src)).unwrap_or("");
-    let lines = crate::fmt::structure::token_lines(src, toks);
-    let starts = |i: usize| {
-        i == 0
-            || lines[i - 1] != lines[i]
-            || matches!(text(i - 1), "then" | "do" | "else" | "end" | ";" | "repeat")
+    let mut walk = ConstWalk {
+        src,
+        toks,
+        scopes: Vec::new(),
+        namespace_consts,
+        out: Vec::new(),
     };
-    let mut names: Vec<&str> = Vec::new();
+    walk.block(block);
 
-    for i in 0..toks.len() {
-        if text(i) != "const"
-            || !(starts(i) || matches!(text(i.wrapping_sub(1)), "export" | "global"))
-        {
-            continue;
-        }
+    walk.out
+}
 
-        let mut j = i + 1;
+/// The scopes of one `const_reassignments` walk: each name a block
+/// binds, with whether it is a `const`.
+struct ConstWalk<'a> {
+    src: &'a str,
+    toks: &'a [Tok],
+    scopes: Vec<Vec<(String, bool)>>,
+    namespace_consts: &'a [String],
+    out: Vec<(u32, u32, String)>,
+}
 
-        while text(j) == "async" {
-            j += 1;
-        }
-
-        if text(j) == "function" || toks.get(j).map(|t| t.kind) != Some(TokKind::Ident) {
-            continue;
-        }
-
-        names.push(text(j));
+impl ConstWalk<'_> {
+    fn text(&self, span: alloy_syntax::ast::TokSpan) -> String {
+        span.text(self.src, self.toks).to_string()
     }
 
-    if names.is_empty() && namespace_consts.is_empty() {
-        return Vec::new();
+    fn bind(&mut self, span: alloy_syntax::ast::TokSpan, is_const: bool) {
+        let name = self.text(span);
+
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.push((name, is_const));
+        }
     }
 
-    let assigns = |i: usize| {
-        matches!(
-            text(i),
-            "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..=" | "??="
-        )
-    };
-    let mut out = Vec::new();
+    /// Whether the innermost binding of `name` is a `const`.
+    fn is_const(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .flat_map(|scope| scope.iter().rev())
+            .find(|(n, _)| n == name)
+            .is_some_and(|(_, c)| *c)
+    }
 
-    for (i, t) in toks.iter().enumerate() {
-        if t.kind != TokKind::Ident || !starts(i) {
-            continue;
+    fn block(&mut self, b: &alloy_syntax::ast::Block) {
+        self.scopes.push(Vec::new());
+
+        for s in &b.stmts {
+            self.stmt(s);
         }
 
-        // `Cfg.LIMIT = 1`: a `const` of a namespace is reached by its
-        // path, so the target of the assignment is the whole path.
-        let mut end = i + 1;
+        self.scopes.pop();
+    }
 
-        while text(end) == "." && toks.get(end + 1).map(|t| t.kind) == Some(TokKind::Ident) {
-            end += 2;
+    fn function(&mut self, body: &alloy_syntax::ast::FunctionBody) {
+        self.scopes.push(Vec::new());
+
+        for p in body.params.iter().filter(|p| !p.is_vararg) {
+            match &p.destructure {
+                Some(d) => {
+                    for n in crate::desugar::statements::destructure_names(d) {
+                        self.bind(n, false);
+                    }
+                }
+
+                None => self.bind(p.name, false),
+            }
         }
 
-        if !assigns(end) {
-            continue;
+        for s in &body.block.stmts {
+            self.stmt(s);
         }
 
-        let path: String = (i..end)
-            .step_by(2)
-            .map(text)
-            .collect::<Vec<&str>>()
-            .join(".");
+        self.scopes.pop();
+    }
 
-        if end > i + 1 {
-            if !namespace_consts.contains(&path) {
-                continue;
+    fn children(&mut self, children: Vec<crate::desugar::Child<'_>>) {
+        for child in children {
+            match child {
+                crate::desugar::Child::Expr(e) => self.children(crate::desugar::expr_children(e)),
+
+                crate::desugar::Child::Block(b) => self.block(b),
+
+                crate::desugar::Child::Function(f) => self.function(f),
+            }
+        }
+    }
+
+    fn stmt(&mut self, s: &Stmt) {
+        use alloy_syntax::ast::Expr;
+
+        match s.under_default() {
+            Stmt::Local(l) => {
+                self.children(crate::desugar::stmt_children(s.under_default()));
+
+                for n in crate::desugar::statements::local_names(l) {
+                    self.bind(n, l.is_const);
+                }
             }
 
-            let message = format!(
-                "`{path}` is a `const`; its value is set once and a reassignment is an error"
-            );
-            out.push((t.start, toks[end - 1].end, message));
+            Stmt::PatternLocal(p) => {
+                self.children(crate::desugar::stmt_children(s.under_default()));
+                let is_const = self.text(p.keyword) == "const";
 
-            continue;
+                for n in crate::desugar::statements::pattern_binds(&p.pattern) {
+                    self.bind(n, is_const);
+                }
+            }
+
+            Stmt::LocalFunction(f) => {
+                self.bind(f.name, f.is_const);
+                self.function(&f.body);
+            }
+
+            Stmt::NumericFor(f) => {
+                for e in [&f.start, &f.limit].into_iter().chain(f.step.as_ref()) {
+                    self.children(crate::desugar::expr_children(e));
+                }
+
+                self.scopes.push(Vec::new());
+                self.bind(f.var.name, false);
+                self.block(&f.block);
+                self.scopes.pop();
+            }
+
+            Stmt::GenericFor(f) => {
+                for e in &f.exprs {
+                    self.children(crate::desugar::expr_children(e));
+                }
+
+                self.scopes.push(Vec::new());
+
+                for v in &f.vars {
+                    self.bind(v.name, false);
+                }
+
+                self.block(&f.block);
+                self.scopes.pop();
+            }
+
+            // A namespace member reads its siblings by their bare names.
+            Stmt::Namespace(ns) => {
+                self.scopes.push(Vec::new());
+
+                for m in &ns.members {
+                    self.stmt(&m.stmt);
+                }
+
+                self.scopes.pop();
+            }
+
+            // A macro body is source for another place.
+            Stmt::Macro(_) => {}
+
+            Stmt::Assign(a) => {
+                for t in &a.targets {
+                    // `Cfg.LIMIT`: the path of a namespace `const`.
+                    let mut path = Vec::new();
+                    let mut at = t;
+
+                    while let Expr::Index {
+                        object,
+                        key: alloy_syntax::ast::IndexKey::Field(k),
+                        optional: false,
+                        ..
+                    } = at
+                    {
+                        path.push(self.text(*k));
+                        at = object;
+                    }
+
+                    let Expr::Name(root) = at else {
+                        continue;
+                    };
+                    path.push(self.text(*root));
+                    path.reverse();
+                    let path = path.join(".");
+                    let reassigned = match path.contains('.') {
+                        true => self.namespace_consts.contains(&path),
+
+                        false => self.is_const(&path),
+                    };
+
+                    if reassigned {
+                        let span = t.span();
+                        let start = self.toks[span.start as usize].start;
+                        let end = self.toks[span.end as usize - 1].end;
+                        let message = format!(
+                            "`{path}` is a `const`; its value is set once and a reassignment is an error"
+                        );
+                        self.out.push((start, end, message));
+                    }
+                }
+
+                self.children(crate::desugar::stmt_children(s.under_default()));
+            }
+
+            other => self.children(crate::desugar::stmt_children(other)),
         }
-
-        let name = text(i);
-
-        if !names.contains(&name) {
-            continue;
-        }
-
-        let message =
-            format!("`{name}` is a `const`; its value is set once and a reassignment is an error");
-        out.push((t.start, t.end, message));
     }
-
-    out
 }
 
 /// One function in the token stream.

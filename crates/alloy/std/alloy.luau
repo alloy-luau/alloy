@@ -952,7 +952,9 @@ function Array.reduce(xs, f, init)
 	return acc
 end
 
-function Array.slice<T>(xs: Array<T>, from: number, to: number?): Array<T>
+-- `{ T }` and not `Array<T>`: a rest pattern, `local [a, ...rest] = xs`,
+-- slices a plain table as well.
+function Array.slice<T>(xs: { T }, from: number, to: number?): Array<T>
 	local last = to or #xs
 	local out = table.move(xs, from, last, 1, {})
 	return setmetatable(out, Array)

@@ -325,6 +325,12 @@ impl<'a> Parser<'a> {
     /// The read runs ahead and rewinds, so it costs one extra parse of
     /// the first expression of every statement arm.
     fn arm_is_value(&mut self) -> bool {
+        // `continue` is a name to the expression reader, and a
+        // statement here.
+        if self.at("continue") {
+            return false;
+        }
+
         let save = self.pos;
         let reports = self.diagnostics.len();
         let edits = self.type_edits.len();

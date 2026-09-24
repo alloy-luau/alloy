@@ -122,11 +122,41 @@ impl<'s> Formatter<'s> {
         };
         let a = &self.items[p];
 
-        if self.items[i].newlines_before > 0 {
+        if self.items[i].newlines_before > 0 || self.macro_callee(p) {
             return false;
         }
 
         (a.is_ident() && !a.is_keyword_here()) || a.is(")") || a.is("]") || a.is_string()
+    }
+
+    /// Whether the name that ends at `p` is the path of a macro or an
+    /// intrinsic, `$say` or `$M.twice`. Its call keeps its parentheses:
+    /// `$say "hi"` does not parse.
+    fn macro_callee(&self, p: usize) -> bool {
+        let mut j = p;
+
+        loop {
+            if !self.items[j].is_ident() {
+                return false;
+            }
+
+            let Some(before) = self.prev_code(j) else {
+                return false;
+            };
+
+            if self.items[before].is("$") {
+                return true;
+            }
+
+            if !self.items[before].is(".") {
+                return false;
+            }
+
+            let Some(owner) = self.prev_code(before) else {
+                return false;
+            };
+            j = owner;
+        }
     }
 
     /// `f "x"` and `f { }` take or lose their parentheses by the option.

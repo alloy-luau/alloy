@@ -485,13 +485,15 @@ impl<'a> Parser<'a> {
 
     /// Consumes the character after a backslash.
     ///
-    /// `\{`, `\}`, `` \` `` and `\\` are luaux escapes and yield the bare
-    /// character. Anything else keeps the backslash, so Luau escapes written in
-    /// attribute strings (`\n`, `\t`) survive to the output untouched.
+    /// `\{`, `\}`, `` \` ``, `\\`, and `\<` are luaux escapes and yield the bare
+    /// character. `\<` is an Alloy patch: it writes a Roblox RichText tag as
+    /// text, as in `\<b>bold\</b>`. Anything else keeps the backslash, so Luau
+    /// escapes written in attribute strings (`\n`, `\t`) survive to the output
+    /// untouched.
     fn push_escaped(&mut self, out: &mut String) {
         match self.byte() {
             None => out.push('\\'),
-            Some(c @ (b'{' | b'}' | b'`' | b'\\')) => {
+            Some(c @ (b'{' | b'}' | b'`' | b'\\' | b'<')) => {
                 out.push(c as char);
                 self.pos += 1;
             }

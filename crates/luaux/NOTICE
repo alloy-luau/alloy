@@ -1,6 +1,6 @@
 This crate is a fork of luaux 0.2.0 (crates.io, revision dad67d6), part of
 luau-xml, published under the MIT license. Alloy carries it as a path
-dependency with four patches:
+dependency with six patches:
 
 - `Config.extra_bound`: names the caller knows are bound, so a component
   declared with Alloy syntax resolves. Alloy's parser supplies them.
@@ -11,6 +11,9 @@ dependency with four patches:
 - `Compiled.regions` reports where each markup region went in the output,
   and `imports::inject_at` reports where the preamble went. Alloy builds an
   exact position map between the source and the lowered text from them.
+- `\<` is a text escape, so a Roblox RichText tag can be written as text.
+- An element with literal text may hold expressions beside element children:
+  the text settles that each expression is part of it.
 
 Every other line is upstream luaux. Upstream fixes land here by re-applying
 the patches on the new revision.

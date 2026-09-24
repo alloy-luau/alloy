@@ -992,7 +992,8 @@ impl<'s> Desugar<'s> {
         // writes `Status.m`, and the static form reaches it.
         if let (Some(m), Expr::Name(n)) = (method, &**func)
             && let Some(ty) = annotated.get(self.text_of(*n))
-            && let target = ty.trim_end_matches('?')
+            // `Opt<number>` names the generic enum `Opt`.
+            && let target = ty.trim_end_matches('?').split('<').next().unwrap_or_default().trim()
             && let Some(unit) = self.unit_variant(target)
             && self
                 .impl_methods
@@ -3720,6 +3721,18 @@ mod tests {
             "{head}struct Two as\n    v: number\nend\n\nimpl Alpha for Two as\n    function a(self): number\n        return self.v\n    end\nend\n\nimpl Beta for Two as\n    function b(self): number\n        return self.v\n    end\nend\n\nprint(h:sum_both(new Two {{ v = 1 }}))\n"
         );
         assert_eq!(messages(&both), Vec::<String>::new());
+    }
+
+    /// A generic enum's unit variant is a string too. The annotation
+    /// names the enum with its arguments, `Opt<number>`.
+    #[test]
+    fn a_colon_call_on_a_generic_enum_with_a_unit_variant_names_the_static_form() {
+        let src = "enum Opt<T> as\n    Some(T)\n    None\nend\n\nimpl Opt<T> as\n    function unwrap_or(self, d: T): T\n        return d\n    end\nend\n\nlocal b: Opt<number> = Opt.None\nprint(b:unwrap_or(9))\n";
+
+        assert_eq!(
+            messages(src),
+            vec!["`Opt.None` is a unit variant, a string at runtime; call `Opt.unwrap_or(b)`"]
+        );
     }
 
     /// A unit enum is a string at runtime, so `s:describe()` finds no

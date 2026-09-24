@@ -25,6 +25,49 @@ fn a_rename_that_is_no_name_goes_in_brackets() {
     assert!(out.contains("[\"end\"] = self.stop"), "{out}");
 }
 
+/// A key is the text the literal stands for, so the quote style the
+/// formatter picks and an escape change nothing.
+#[test]
+fn a_rename_reads_the_text_of_its_literal() {
+    let single =
+        ship("@derive(Serialize)\nstruct P as\n    @rename('it\\'s')\n    a: number\nend\n");
+    let double =
+        ship("@derive(Serialize)\nstruct P as\n    @rename(\"it's\")\n    a: number\nend\n");
+    for out in [single, double] {
+        assert!(out.contains("{ [\"it's\"] = self.a }"), "{out}");
+        assert!(out.contains("P({ a = t[\"it's\"] })"), "{out}");
+    }
+}
+
+/// A field of a struct that derives Serialize goes through that
+/// struct's own pair, so the table nests and reads back with its
+/// metatable.
+#[test]
+fn a_nested_struct_serializes_through_its_own_pair() {
+    let out = ship(
+        "@derive(Serialize)\nstruct Inner as\n    v: number\nend\n@derive(Serialize)\nstruct Outer as\n    inner: Inner\n    maybe: Inner?\nend\n",
+    );
+    assert!(out.contains("inner = Inner.to_table(self.inner)"), "{out}");
+    assert!(out.contains("inner = Inner.from_table(t.inner)"), "{out}");
+    assert!(
+        out.contains("maybe = if self.maybe == nil then nil else Inner.to_table(self.maybe)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_derive_reports_a_key_or_a_name_it_cannot_hold() {
+    assert_eq!(
+        messages(
+            "@derive(Serialize, Clone)\nstruct D as\n    @rename(\"a\")\n    x: number\n    @rename(\"a\")\n    y: number\n    clone: number\nend\n"
+        ),
+        vec![
+            "`x` and `y` serialize under one key, `a`, and the derived table keeps one; give one of them another `@rename`",
+            "`clone` is a field of `D` and a method `@derive(Clone)` writes; one name holds one of the two",
+        ]
+    );
+}
+
 #[test]
 fn an_enum_reports_the_names_its_emit_takes() {
     assert_eq!(

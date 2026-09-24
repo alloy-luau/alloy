@@ -781,6 +781,16 @@ impl<'s> Desugar<'s> {
             // `export default struct S` declares `S` like any other
             // top-level declaration; the prescan reads through it.
             let stmt = stmt.under_default();
+
+            if let Stmt::Struct(s) = stmt
+                && s.attributes.iter().any(|a| {
+                    a.name.is_some_and(|n| self.text_of(n) == "derive")
+                        && a.args.iter().any(|x| self.text_of(x.span()) == "Serialize")
+                })
+            {
+                let name = self.decl_name(s.name);
+                self.serializable.insert(name);
+            }
             let returns_result = |body: &FunctionBody| {
                 body.is_async.is_some()
                     && body

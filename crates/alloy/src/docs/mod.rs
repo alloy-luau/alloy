@@ -108,6 +108,16 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // word in the sentence as that declaration's own family.
     (&["body is `as ... end`"], "SyntaxError"),
     (&["one name holds one declaration"], "DuplicateError"),
+    // A variant or an enum method that takes a name the emit gives the
+    // enum. The words `type test` and `field` in the sentence would
+    // reach the test rule and the struct rule below.
+    (
+        &[
+            "a variant cannot be named",
+            "an enum method cannot be named",
+        ],
+        "EnumError",
+    ),
     (&["a comment starts with"], "SyntaxError"),
     (&["interpolation hole is empty"], "SyntaxError"),
     (&["has no `++`"], "SyntaxError"),
@@ -275,6 +285,18 @@ mod tests {
                 super::section_kinds(code).contains(kind),
                 "{kind}: section {code} does not list it"
             );
+        }
+    }
+
+    /// A name the enum's emit takes is an enum report. The sentence
+    /// says `type test` and `field`, which other rules read.
+    #[test]
+    fn a_reserved_enum_name_is_an_enum_error() {
+        for message in [
+            "a variant cannot be named `is`; the enum's type test `E.is(v)` takes that name",
+            "an enum method cannot be named `tag`; each variant keeps its name in the field `tag`",
+        ] {
+            assert_eq!(super::kind_for(message), "EnumError", "{message}");
         }
     }
 

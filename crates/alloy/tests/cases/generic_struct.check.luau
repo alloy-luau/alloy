@@ -5,7 +5,7 @@ local __alloy = require("@alloy") local Slotted = {} Slotted.__index = Slotted f
 
 do
 	function Slotted.new<T>(value: T): Slotted<T>
-		return Slotted.__new({ value = value })
+		return Slotted.__new<<T>>({ value = value })
 	end
 
 	function Slotted.get<T>(self: Slotted<T>): T
@@ -36,7 +36,7 @@ local Swap = {} Swap.__index = Swap function Swap.__new<A, B>(f: { left: A, righ
 
 do
 	function Swap.flip<A, B>(self: Swap<A, B>): Swap<B, A>
-		return Swap.__new({ left = self.right, right = self.left })
+		return Swap.__new<<B, A>>({ left = self.right, right = self.left })
 	end
 end
 
@@ -55,7 +55,7 @@ do
 end
 
 local held = Slotted.new(5)
-local sw = Swap.__new({ left = 1, right = "a" })
-local p = Pair.__new({ left = 1, right = "a" })
-local v = Voiced.__new({ value = 1 })
+local sw = Swap.__new<<number, string>>({ left = 1, right = "a" })
+local p = Pair.__new<<number, string>>({ left = 1, right = "a" })
+local v = Voiced.__new<<number>>({ value = 1 })
 print(held:get(), p:swap(), v:shout(), sw:flip()) return { Slotted = Slotted }

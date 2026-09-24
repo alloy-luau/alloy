@@ -304,10 +304,23 @@ impl<'s> Desugar<'s> {
                     // full view, so `self.count` in `new` type checks.
                     let full_view = self.impl_target.as_deref() == Some(n.as_str())
                         && self.has_private_view(&n);
+                    // `new Stack<<number>> { }` and `local s: Stack<number>`
+                    // name the arguments the typed constructor takes, the
+                    // way the call form passes them.
+                    let t = match type_args {
+                        Some(s) => {
+                            let text = self.text_of(*s).to_string();
+
+                            self.lower_type_args(&text)
+                        }
+
+                        None => self.expected_args_for(name),
+                    };
+                    let ctor = self.raw_ctor(&n);
                     let open = if full_view {
-                        format!("(({}(", self.raw_ctor(&n))
+                        format!("(({ctor}{t}(")
                     } else {
-                        format!("{}(", self.raw_ctor(&n))
+                        format!("{ctor}{t}(")
                     };
                     self.generate(anchor, &open);
                     self.expr(table);

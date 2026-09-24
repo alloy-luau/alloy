@@ -2274,6 +2274,40 @@ function alloy.bind(obj, method)
 	end
 end
 
+--- A namespace `local` is a local of its module. The namespace table
+--- reads and writes it through these accessors, so a write on either
+--- side reaches the other. A table with a metatable of its own keeps a
+--- copy, as before.
+function alloy.ns_local(ns: any, key: string, get: () -> any, set: (any) -> ())
+	local mt = getmetatable(ns)
+	if mt == nil then
+		local getters, setters = {}, {}
+		mt = {
+			__get = getters,
+			__set = setters,
+			__index = function(_, k)
+				local g = getters[k]
+				return if g then g() else nil
+			end,
+			__newindex = function(t, k, v)
+				local s = setters[k]
+				if s then
+					s(v)
+				else
+					rawset(t, k, v)
+				end
+			end,
+		}
+		setmetatable(ns, mt)
+	end
+	if type(mt) ~= "table" or mt.__get == nil then
+		rawset(ns, key, get())
+		return
+	end
+	mt.__get[key] = get
+	mt.__set[key] = set
+end
+
 --- `$dbg(expr)`: prints the source and the value, returns the value.
 function alloy.dbg(where: string, source: string, value)
 	print(`{where}: {source} = {value}`)

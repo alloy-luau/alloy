@@ -1333,6 +1333,12 @@ impl<'s> Desugar<'s> {
             }
         }
 
+        // A `local` member is one variable. The ship artifact reaches it
+        // from the table through accessors, since a copy would miss every
+        // later write. The check artifact keeps the copy for its type.
+        let variable = matches!(m.stmt.under_default(), Stmt::Local(l) if self.text_of(l.keyword) == "local")
+            && !self.options.check;
+
         for b in member_bindings(m, self.src, self.toks) {
             if !b.value || b.nested || private {
                 continue;
@@ -1345,7 +1351,16 @@ impl<'s> Desugar<'s> {
                 continue;
             }
 
-            tail.push_str(&format!(" {}.{name} = {rendered}", info.path));
+            if variable {
+                let std = self.std();
+                tail.push_str(&format!(
+                    " {std}.ns_local({}, {}, function() return {rendered} end, function(v) {rendered} = v end)",
+                    info.path,
+                    super::luau_string(&name)
+                ));
+            } else {
+                tail.push_str(&format!(" {}.{name} = {rendered}", info.path));
+            }
         }
 
         if !tail.is_empty() {

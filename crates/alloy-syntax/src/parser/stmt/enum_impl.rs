@@ -181,11 +181,13 @@ impl<'a> Parser<'a> {
             }
 
             let m_start = self.pos;
-            let attributes = if self.at("@") {
-                self.attributes()?
+            // `@route("/x")` takes arguments, as it does on a function.
+            let attrs = if self.at("@") {
+                self.attrs()?
             } else {
                 Vec::new()
             };
+            let attributes: Vec<TokSpan> = attrs.iter().map(|a| a.span).collect();
 
             // `private function f`, `public async function g`.
             let visibility = if matches!(self.text(), "private" | "public")
@@ -211,6 +213,7 @@ impl<'a> Parser<'a> {
             };
             f.body.is_async = is_async;
             f.visibility = visibility;
+            f.attrs = attrs;
             methods.push(f);
         }
 

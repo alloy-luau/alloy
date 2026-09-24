@@ -2177,7 +2177,8 @@ impl<'s> Desugar<'s> {
 
     /// Each name a destructure binds, with its annotation and its value
     /// over a temp. `rest_type` is the type `...rest` takes; unset, it
-    /// is `{ [string]: unknown }`.
+    /// is `{ [string]: any }`, since the fields left over have no type
+    /// the pattern names.
     pub(crate) fn destructure_entries(
         &mut self,
         d: &Destructure,
@@ -2197,7 +2198,7 @@ impl<'s> Desugar<'s> {
                     out.push(match f.rest {
                         true => (
                             f.field,
-                            Some(rest_type.unwrap_or("{ [string]: unknown }").to_string()),
+                            Some(rest_type.unwrap_or("{ [string]: any }").to_string()),
                             format!("{}({temp})", rest_copy(&named)),
                         ),
 

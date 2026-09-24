@@ -423,7 +423,11 @@ fn merge(base: &mut toml::Table, over: &toml::Table) {
 /// smallest step between the leading spaces of two lines. `None` for a
 /// file that indents nothing.
 pub fn detect_indent(src: &str) -> Option<(IndentType, usize)> {
-    let mut widths: Vec<usize> = Vec::new();
+    // How often each step between a line and a deeper next line occurs.
+    // The step is the most common one, so one continuation line at an
+    // odd width does not set the width of every level.
+    let mut steps: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut prev = 0;
 
     for line in src.lines() {
         if line.trim().is_empty() {
@@ -436,23 +440,20 @@ pub fn detect_indent(src: &str) -> Option<(IndentType, usize)> {
 
         let spaces = line.len() - line.trim_start_matches(' ').len();
 
-        if spaces > 0 {
-            widths.push(spaces);
+        if spaces > prev {
+            *steps.entry(spaces - prev).or_default() += 1;
         }
+
+        prev = spaces;
     }
 
-    // The step is the smallest gap between two indent levels, so a
-    // block nested three deep does not read as one level of twelve.
-    widths.sort_unstable();
-    widths.dedup();
+    // A tie goes to the smaller step.
+    let step = steps
+        .into_iter()
+        .max_by_key(|&(step, count)| (count, std::cmp::Reverse(step)))?
+        .0;
 
-    let step = widths
-        .windows(2)
-        .map(|w| w[1] - w[0])
-        .chain(widths.first().copied())
-        .min()?;
-
-    (step > 0).then_some((IndentType::Spaces, step))
+    Some((IndentType::Spaces, step))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1289,6 +1290,20 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One continuation line at an odd width does not set the step, and
+    /// a block three levels deep reads as three steps of four.
+    #[test]
+    fn the_indent_step_is_the_most_common_one() {
+        let src = "local t = {\n    a = 1,\n}\nif x then\n    if y then\n        if z then\n            print(1,\n               2)\n        end\n    end\nend\n";
+
+        assert_eq!(detect_indent(src), Some((IndentType::Spaces, 4)));
+        assert_eq!(
+            detect_indent("if x then\n\tprint(1)\nend\n"),
+            Some((IndentType::Tabs, 4))
+        );
+        assert_eq!(detect_indent("print(1)\n"), None);
     }
 
     #[test]

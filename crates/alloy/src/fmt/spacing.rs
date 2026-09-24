@@ -212,6 +212,12 @@ impl<'s> Formatter<'s> {
                     );
             }
 
+            // `macro dbl(x) (x) * 2 end`: the body opens with a group,
+            // and glued to the parameters it reads as a call.
+            if at == ")" && bt == "(" && self.closes_macro_params(ai) {
+                return true;
+            }
+
             if at == ")" || at == "]" || at == "}" || a.is_string() {
                 return false;
             }
@@ -274,6 +280,15 @@ impl<'s> Formatter<'s> {
         }
 
         false
+    }
+
+    /// Whether the `)` at `close` ends the parameters of a `macro`.
+    fn closes_macro_params(&self, close: usize) -> bool {
+        self.opener_of(close)
+            .and_then(|open| self.prev_code(open))
+            .filter(|&name| self.items[name].is_ident())
+            .and_then(|name| self.prev_code(name))
+            .is_some_and(|word| self.items[word].is("macro"))
     }
 
     pub(crate) fn opener_of(&self, close: usize) -> Option<usize> {

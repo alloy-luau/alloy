@@ -148,3 +148,17 @@ fn a_luau_lsp_that_cannot_run_fails_the_type_check() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file that does not lex fails the build, and the summary counts it
+/// as `check` does.
+#[test]
+fn a_file_that_does_not_lex_counts_in_the_build_summary() {
+    let root = project("lex", TOML, "local a = 0o17\nprint(a)\n");
+
+    let (code, err) = run(&root, &["build"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("malformed number `0o17`"), "{err}");
+    assert!(err.contains("1 diagnostics"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

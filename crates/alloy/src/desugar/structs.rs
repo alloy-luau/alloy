@@ -259,36 +259,77 @@ impl<'s> Desugar<'s> {
             // `private` or `public` word has no Luau form and goes, and
             // so does `async`: the body wrap is what it turns into, and
             // a copy of it would sit in front of the Luau header.
-            let mut cut: Vec<(u32, u32)> = Vec::new();
+            // A cut range, with the text that takes its place.
+            let mut cut: Vec<(u32, u32, String)> = Vec::new();
+            // User attributes, which attach to the method after its `end`.
+            let mut user: Vec<String> = Vec::new();
 
-            // `@test` makes a function local and registers it with the
-            // runner, which calls it by name. A method takes a receiver,
-            // so no runner can call it. Luau has no `@test` either, so
-            // the attribute leaves the emit: a copy of it is a syntax
-            // error in the artifact.
-            for a in &m.attributes {
-                if self.text_of(*a).trim_end() != "@test" {
-                    continue;
+            for a in &m.attrs {
+                let range = (self.byte_start(a.span), self.byte_end(a.span));
+
+                match a.name.map(|n| self.text_of(n).to_string()).as_deref() {
+                    // `@test` makes a function local and registers it with
+                    // the runner, which calls it by name. A method takes a
+                    // receiver, so no runner can call it. Luau has no
+                    // `@test` either, so the attribute leaves the emit.
+                    Some("test") => {
+                        self.diagnose(a.span, "`@test` goes on a function, not a method");
+                        cut.push((range.0, range.1, String::new()));
+                    }
+
+                    // Luau reads the message of `@deprecated` from a table,
+                    // as `attributed_function` writes it.
+                    Some(n @ ("native" | "checked" | "deprecated")) if !a.args.is_empty() => {
+                        let args: Vec<String> =
+                            a.args.iter().map(|e| self.render_to_string(e)).collect();
+                        let text = match n {
+                            "deprecated" => {
+                                format!("@[deprecated {{reason = {}}}]", args.join(", "))
+                            }
+
+                            _ => format!("@[{n}({})]", args.join(", ")),
+                        };
+                        cut.push((range.0, range.1, text));
+                    }
+
+                    Some("native" | "checked" | "deprecated") | None => {}
+
+                    // An attribute that reaches no function is a
+                    // diagnostic already, and Luau reads none of it.
+                    Some(n) => {
+                        if self.attr_reaches(n, "function") {
+                            let args = self.attr_args(a, n);
+                            user.push(format!(
+                                "{} = {{ {} }}",
+                                super::attributes::attr_key(n),
+                                args.join(", ")
+                            ));
+                        }
+
+                        cut.push((range.0, range.1, String::new()));
+                    }
                 }
-
-                self.diagnose(*a, "`@test` goes on a function, not a method");
-                cut.push((self.byte_start(*a), self.byte_end(*a)));
             }
 
             if let Some(v) = m.visibility {
-                cut.push((self.byte_start(v), self.byte_end(v)));
+                cut.push((self.byte_start(v), self.byte_end(v), String::new()));
             }
 
             if let Some(a) = m.body.is_async {
-                cut.push((self.byte_start(a), self.byte_end(a)));
+                cut.push((self.byte_start(a), self.byte_end(a), String::new()));
             }
 
             cut.sort_unstable();
             let mut head = ms;
 
-            for (from, to) in cut {
+            for (from, to, text) in cut {
                 if from >= head {
                     self.copy(head, from);
+
+                    if !text.is_empty() {
+                        self.generate(from, &text);
+                    }
+
                     head = to;
                 }
             }
@@ -366,6 +407,15 @@ impl<'s> Desugar<'s> {
             }
 
             cursor = self.byte_end(m.span);
+
+            if !user.is_empty() {
+                let std = self.std();
+                self.generate(
+                    cursor,
+                    &format!(" {std}.attach({owner}.{mname}, {{ {} }})", user.join(", ")),
+                );
+            }
+
             self.self_prologue = None;
             self.impl_method = None;
         }

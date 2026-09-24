@@ -233,9 +233,12 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         }
     }
 
-    for (start, end, message) in
-        lint::const_reassignments(src, &parsed.lexed.toks, &namespace_consts)
-    {
+    for (start, end, message) in lint::const_reassignments(
+        src,
+        &parsed.lexed.toks,
+        &parsed.chunk.block,
+        &namespace_consts,
+    ) {
         diagnostics.push(Diagnostic {
             start,
             end,
@@ -569,6 +572,23 @@ mod tests {
         assert!(messages("local max = 3\nmax = 4\nprint(max)\n").is_empty());
         // A read is not a write.
         assert!(messages("const MAX = 3\nlocal n = MAX + 1\nprint(n)\n").is_empty());
+    }
+
+    /// The check reads scopes: a `local` or a parameter of the name hides
+    /// the `const`. Every name of a list and of a destructure is one.
+    #[test]
+    fn a_const_is_the_innermost_binding_of_its_name() {
+        let hidden = "const A = 1\nlocal function f(A: number): number\n    A += 1\n    return A\nend\nlocal function g(): number\n    local A = 5\n    A = 6\n    return A\nend\nfor A = 1, 2 do\n    A = 3\nend\nprint(A, f(1), g())\n";
+        assert_eq!(messages(hidden), Vec::<String>::new());
+
+        let all = "const { hp, mp } = { hp = 1, mp = 2 }\nconst a, b = 1, 2\nhp = 3\nb = 4\nprint(hp, mp, a, b)\n";
+        assert_eq!(
+            messages(all),
+            vec![
+                "`hp` is a `const`; its value is set once and a reassignment is an error",
+                "`b` is a `const`; its value is set once and a reassignment is an error",
+            ]
+        );
     }
 
     /// A statement under a `return` used to end the block early, so the

@@ -68,6 +68,24 @@ fn a_derive_reports_a_key_or_a_name_it_cannot_hold() {
     );
 }
 
+/// `continue` is a statement arm, and an attribute with arguments reads
+/// on a method as it does on a function.
+#[test]
+fn a_method_takes_an_attribute_with_arguments() {
+    let out = ship(
+        "attribute route(path: string) on function\nstruct Svc as\n    n: number\nend\nimpl Svc as\n    @deprecated(\"use run2\")\n    function run(self): number\n        return self.n\n    end\n    @route(\"/x\")\n    function run2(self): number\n        return self.n\n    end\nend\nfor i = 1, 3 do\n    match i with\n        case 2 then continue\n        default print(i)\n    end\nend\n",
+    );
+    assert!(
+        out.contains("@[deprecated {reason = \"use run2\"}]"),
+        "{out}"
+    );
+    assert!(
+        out.contains("end __alloy.attach(Svc.run2, { route = { \"/x\" } })"),
+        "{out}"
+    );
+    assert!(out.contains("then continue"), "{out}");
+}
+
 #[test]
 fn an_enum_reports_the_names_its_emit_takes() {
     assert_eq!(

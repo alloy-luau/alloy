@@ -594,6 +594,9 @@ impl<'s> Scan<'s> {
 
     /// `"a" .. x .. "b"` is `` `a{x}b` ``.
     fn concat_interpolation(&self, out: &mut Vec<Lint>) {
+        // The binary and unary operators that bind tighter than `..`.
+        const TIGHTER: &[&str] = &["+", "-", "*", "/", "//", "%", "^", "#", "not"];
+
         let mut i = 0;
 
         while i < self.toks.len() {
@@ -603,8 +606,20 @@ impl<'s> Scan<'s> {
                 continue;
             };
 
+            // An operator that binds tighter than `..` owns the operand
+            // on that side: `2 ^ n .. "!"` concatenates `2 ^ n`, and `$`
+            // opens a macro call the operand is only part of.
+            // After a name or a closer, `(`, `[`, `{` and a string go on
+            // a call or an index: `$add(1, 2)` and `f "a"`.
+            let continues = i > 0
+                && (self.is_name(i - 1)
+                    || matches!(self.prev(i), ")" | "]" | "}")
+                    || matches!(self.toks[i - 1].kind, TokKind::Str { .. } | TokKind::Number));
+
             if !self.at(first_end, "..")
-                || matches!(self.prev(i), "." | ":" | "..")
+                || continues
+                || matches!(self.prev(i), "." | ":" | ".." | "$")
+                || TIGHTER.contains(&self.prev(i))
                 || self.line_of(first_end) != self.line_of(i)
             {
                 i += 1;
@@ -633,7 +648,7 @@ impl<'s> Scan<'s> {
                 e = next;
             }
 
-            if !ok || parts.len() < 2 {
+            if !ok || parts.len() < 2 || TIGHTER.contains(&self.t(e)) {
                 i = e.max(i + 1);
 
                 continue;
@@ -858,6 +873,26 @@ mod tests {
 
     fn names(src: &str) -> Vec<&'static str> {
         names_of(&lints(src))
+    }
+
+    /// An operand an operator binds tighter than `..` is part of a larger
+    /// operand, and a call's arguments go with the call. The rewrite
+    /// would change the value, or write a string that does not parse.
+    #[test]
+    fn a_concat_keeps_the_operands_the_operators_bind() {
+        for src in [
+            "local n = 3\nprint(2 ^ n .. \"!\")\n",
+            "local n = 3\nprint(n + 1 .. \"?\")\n",
+            "local n = 3\nprint(\"a\" .. n * 2)\n",
+            "print($add(1, 2) .. \"x\")\n",
+        ] {
+            assert_eq!(fixed(src), src, "{src}");
+        }
+
+        assert_eq!(
+            fixed("local n = 3\nprint(\"v\" .. n .. \"!\")\n"),
+            "local n = 3\nprint(`v{n}!`)\n"
+        );
     }
 
     #[test]

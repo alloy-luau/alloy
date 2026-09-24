@@ -1821,14 +1821,25 @@ pub fn import_that_exports(path: &Path, source: &str, name: &str) -> Option<Stri
     })
 }
 
-/// What a module exports when it exports only types and interfaces,
-/// each with whether it is an interface, in the order the file writes
-/// them. `None` for a module that exports a value, or nothing.
+/// A type or interface that a module exports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeExport {
+    pub name: String,
+    pub interface: bool,
+    /// The comment above the declaration, as Markdown.
+    pub doc: Option<String>,
+    /// The line and UTF-16 column of the name in the module.
+    pub at: (u32, u32),
+}
+
+/// The file a module resolves to and what it exports, when it exports
+/// only types and interfaces, in the order the file writes them. `None`
+/// for a module that exports a value, or nothing.
 ///
 /// Such a module emits an empty table, so a binding of it hints `{}`;
 /// the editor names the types instead.
-pub fn type_only_exports(from: &Path, spec: &str) -> Option<Vec<(String, bool)>> {
-    use alloy_syntax::ast::Stmt;
+pub fn type_only_exports(from: &Path, spec: &str) -> Option<(PathBuf, Vec<TypeExport>)> {
+    use alloy_syntax::ast::{Stmt, TokSpan};
 
     let (from, aliases) = file_context(from);
     let target = resolve(spec, &from, &aliases)?;
@@ -1840,21 +1851,37 @@ pub fn type_only_exports(from: &Path, spec: &str) -> Option<Vec<(String, bool)>>
     let source = module_text(&target).ok()?;
     let parsed = alloy_syntax::parse_lenient(&source, Default::default()).ok()?;
     let toks = &parsed.lexed.toks;
-    let text = |span: alloy_syntax::ast::TokSpan| span.text(&source, toks).to_string();
+    let export = |span: TokSpan, interface: bool, documented: bool| {
+        let offset = toks[span.start as usize].start as usize;
+        let line_start = source[..offset].rfind('\n').map_or(0, |n| n + 1);
+
+        TypeExport {
+            name: span.text(&source, toks).to_string(),
+            interface,
+            doc: documented
+                .then(|| crate::declarations::doc_before(&source, offset))
+                .flatten(),
+            at: (
+                source[..offset].matches('\n').count() as u32,
+                source[line_start..offset].encode_utf16().count() as u32,
+            ),
+        }
+    };
     let mut out = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
         match stmt {
-            Stmt::TypeAlias(d) if d.exported => out.push((text(d.name), false)),
+            Stmt::TypeAlias(d) if d.exported => out.push(export(d.name, false, true)),
 
-            Stmt::Interface(d) if d.exported => out.push((text(d.name), true)),
+            Stmt::Interface(d) if d.exported => out.push(export(d.name, true, true)),
 
             // `export type { A }` sends types on; a plain list sends values.
+            // The comment above the list is not the doc of one name.
             Stmt::ExportList(list) if list.type_only => {
                 out.extend(
                     list.specs
                         .iter()
-                        .map(|sp| (text(sp.alias.unwrap_or(sp.name)), false)),
+                        .map(|sp| export(sp.alias.unwrap_or(sp.name), false, false)),
                 );
             }
 
@@ -1886,7 +1913,7 @@ pub fn type_only_exports(from: &Path, spec: &str) -> Option<Vec<(String, bool)>>
         }
     }
 
-    (!out.is_empty()).then_some(out)
+    (!out.is_empty()).then_some((target, out))
 }
 
 /// The report for a name the file forgot to import, when an import it
@@ -2839,7 +2866,7 @@ mod tests {
             |name: &str, src: &str| std::fs::write(dir.join("src").join(name), src).unwrap();
         write(
             "shapes.aly",
-            "export type Id = number\nexport interface Named as\n    name: string\nend\nexport type Label = string\n",
+            "--- The key of a row\nexport type Id = number\nexport interface Named as\n    name: string\nend\nexport type Label = string\n",
         );
         write(
             "contracts.aly",
@@ -2851,7 +2878,13 @@ mod tests {
         );
         write("returns.aly", "export type Id = number\nreturn {}\n");
         let main = dir.join("src/main.aly");
-        let exports = |spec: &str| super::type_only_exports(&main, spec);
+        let exports = |spec: &str| {
+            super::type_only_exports(&main, spec).map(|(_, e)| {
+                e.into_iter()
+                    .map(|e| (e.name, e.interface))
+                    .collect::<Vec<_>>()
+            })
+        };
 
         assert_eq!(
             exports("./shapes"),
@@ -2865,6 +2898,11 @@ mod tests {
             exports("./contracts"),
             Some(vec![("Named".to_string(), true)])
         );
+        let (target, shapes) = super::type_only_exports(&main, "./shapes").unwrap();
+        assert!(target.ends_with("shapes.aly"), "{}", target.display());
+        assert_eq!(shapes[0].doc.as_deref(), Some("The key of a row"));
+        assert_eq!(shapes[0].at, (1, 12));
+        assert_eq!(shapes[1].doc, None);
         assert_eq!(exports("./mixed"), None);
         assert_eq!(exports("./returns"), None);
         assert_eq!(exports("./missing"), None);

@@ -460,7 +460,7 @@ fn run_one(dir: &Path, file: &Path, args: &[String]) -> ExitCode {
     }
 
     if let Some(offset) = value("--complete") {
-        let (items, _) = ingots.complete(&path, &source, offset, None);
+        let items = ingots.complete(&path, &source, offset, None).items;
 
         for item in items {
             println!(

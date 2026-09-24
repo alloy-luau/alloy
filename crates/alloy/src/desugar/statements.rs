@@ -72,6 +72,13 @@ pub(crate) fn pattern_binds(p: &Pattern) -> Vec<TokSpan> {
 
 /// The condition expressions a statement evaluates more than once, or
 /// after other statements ran: `while`, `repeat`, and every `elseif`.
+/// `g ~= nil and h ~= nil` for a chain's guards, or `None` for none.
+fn nil_tests(guards: &[String]) -> Option<String> {
+    let tests: Vec<String> = guards.iter().map(|g| format!("{g} ~= nil")).collect();
+
+    (!tests.is_empty()).then(|| tests.join(" and "))
+}
+
 pub(crate) fn reevaluated_conditions(s: &Stmt) -> Vec<*const Expr> {
     match s {
         Stmt::While(w) => match &w.cond {
@@ -491,6 +498,10 @@ impl<'s> Desugar<'s> {
         let saved_hoists = std::mem::take(&mut self.hoists);
         let saved_next = self.temp_next;
         self.temp_next = 0;
+        // A statement inside a closure starts clean: the operand around
+        // the closure has not run yet when the body runs.
+        let saved_flags = (self.lazy, self.effects, self.reads, self.in_place);
+        (self.lazy, self.effects, self.reads, self.in_place) = (false, false, false, false);
 
         let mut side = Renderer::new(self.src);
         std::mem::swap(&mut self.r, &mut side);
@@ -499,62 +510,9 @@ impl<'s> Desugar<'s> {
 
         let hoists = std::mem::replace(&mut self.hoists, saved_hoists);
         self.temp_next = saved_next;
+        (self.lazy, self.effects, self.reads, self.in_place) = saved_flags;
 
-        for h in hoists {
-            match h {
-                Hoist::Temp {
-                    index,
-                    value,
-                    anchor,
-                } => {
-                    let keyword = if self.temp_declared(index) {
-                        ""
-                    } else {
-                        self.declare_temp(index);
-
-                        "local "
-                    };
-
-                    match value {
-                        HoistValue::Text(text) => {
-                            let line = format!("{keyword}_{index} = {text} ");
-                            self.generate(anchor, &line);
-                        }
-
-                        // The value keeps its source chunks, so a function
-                        // literal inside it keeps its lines.
-                        HoistValue::Rendered(rendered) => {
-                            self.generate(anchor, &format!("{keyword}_{index} = "));
-                            self.r.append(rendered);
-                            self.generate(anchor, " ");
-                        }
-                    }
-                }
-
-                Hoist::Stmt { text, anchor } => {
-                    let line = format!("{text} ");
-                    self.generate(anchor, &line);
-                }
-
-                Hoist::Fresh {
-                    name,
-                    value,
-                    anchor,
-                } => match value {
-                    HoistValue::Text(text) => {
-                        let line = format!("local {name} = {text} ");
-                        self.generate(anchor, &line);
-                    }
-
-                    HoistValue::Rendered(rendered) => {
-                        self.generate(anchor, &format!("local {name} = "));
-                        self.r.append(rendered);
-                        self.generate(anchor, " ");
-                    }
-                },
-            }
-        }
-
+        self.write_hoists(hoists, false);
         self.r.append(side);
     }
 
@@ -1670,6 +1628,11 @@ impl<'s> Desugar<'s> {
                 let span = stmt.span();
                 let children = stmt_children(stmt);
                 let reevaluated = reevaluated_conditions(stmt);
+                let targets: Vec<*const Expr> = match stmt {
+                    Stmt::Assign(a) => a.targets.iter().map(std::ptr::from_ref).collect(),
+
+                    _ => Vec::new(),
+                };
                 let (narrow_blocks, narrow_after) = match stmt {
                     Stmt::If(i) => self.narrowings(i),
 
@@ -1677,16 +1640,13 @@ impl<'s> Desugar<'s> {
                 };
                 self.stitch(span, &children, |d, child| match child {
                     Child::Expr(e) => {
-                        let guard = reevaluated.contains(&std::ptr::from_ref::<Expr>(e));
+                        let at = std::ptr::from_ref::<Expr>(e);
+                        let reads = d.reads;
+                        d.expr_lazy(reevaluated.contains(&at), e);
 
-                        if guard {
-                            d.no_hoist += 1;
-                        }
-
-                        d.expr(e);
-
-                        if guard {
-                            d.no_hoist -= 1;
+                        // A target is written, not read.
+                        if targets.contains(&at) {
+                            d.reads = reads;
                         }
                     }
 
@@ -1795,8 +1755,8 @@ impl<'s> Desugar<'s> {
         self.check_struct_call(e);
         let parts = self.chain_parts(e);
 
-        match parts.guard {
-            Some(g) => format!("if {g} ~= nil then {} end", parts.inner),
+        match nil_tests(&parts.guards) {
+            Some(g) => format!("if {g} then {} end", parts.inner),
 
             // A statement that opens with `(` reads as a call of the line
             // above in Luau. Inside `do ... end` it is the first statement
@@ -1840,7 +1800,12 @@ impl<'s> Desugar<'s> {
         let coalesce = self.is_coalesce_assign(a.op);
         self.chain_anchor = anchor;
         let (guard, target) = self.target_parts(&a.targets[0], coalesce);
-        let value = self.render_to_string(&a.values[0]);
+        // `??=` and a target past `?` write the value on some paths only.
+        let value = if coalesce || !guard.is_empty() {
+            self.render_lazy(&a.values[0])
+        } else {
+            self.render_to_string(&a.values[0])
+        };
         let op = if coalesce { "=" } else { self.text_of(a.op) };
 
         // A plain name takes the value through an `if` expression, not
@@ -1857,8 +1822,8 @@ impl<'s> Desugar<'s> {
             (false, false) => format!("{target} {op} {value}"),
         };
 
-        let text = match guard {
-            Some(g) => format!("if {g} ~= nil then {body} end"),
+        let text = match nil_tests(&guard) {
+            Some(g) => format!("if {g} then {body} end"),
 
             None => body,
         };
@@ -1868,27 +1833,27 @@ impl<'s> Desugar<'s> {
 
     /// The guard and the assignable text of a target. With `twice`, the
     /// object and key of the last link become names safe to read twice.
-    pub(crate) fn target_parts(&mut self, target: &Expr, twice: bool) -> (Option<String>, String) {
+    pub(crate) fn target_parts(&mut self, target: &Expr, twice: bool) -> (Vec<String>, String) {
         let Expr::Index { object, key, .. } = target else {
             // A plain name, or something the parser let through as a target.
-            return (None, self.render_to_string(target));
+            return (Vec::new(), self.render_to_string(target));
         };
 
         let parts = self.chain_parts(object);
-        let mut guard = parts.guard;
+        let mut guard = parts.guards;
         let mut obj = parts.inner;
 
         let optional = matches!(target, Expr::Index { optional: true, .. });
-        let simple = guard.is_none() && self.is_simple(object);
+        let simple = guard.is_empty() && self.is_simple(object);
 
         if optional {
-            let name = self.name_prefix(&mut obj, &mut guard, simple);
+            let name = self.name_prefix(&mut obj, &mut guard, simple, false);
             obj = name;
-        } else if twice && !(guard.is_none() && self.is_simple(object)) {
-            let whole = self.guarded(guard.as_deref(), &obj);
+        } else if twice && !simple {
+            let whole = self.guarded(&guard, &obj);
             let anchor = self.chain_anchor;
             obj = self.hoist_text(whole, anchor);
-            guard = None;
+            guard.clear();
         }
 
         let text = match key {

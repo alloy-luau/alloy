@@ -568,7 +568,7 @@ impl<'s> Desugar<'s> {
         let mut paths = Vec::new();
 
         for (col, sc) in scrutinees.iter().enumerate() {
-            let ename = if self.options.check && self.no_hoist == 0 {
+            let ename = if self.options.check {
                 self.column_enum(arms, col)
             } else {
                 None
@@ -577,7 +577,7 @@ impl<'s> Desugar<'s> {
             match ename {
                 Some(e) => {
                     let anchor = self.byte_start(sc.span());
-                    let value = self.render_to_side(sc);
+                    let value = self.render_hoisted(|d| d.render_to_side(sc));
                     let path = self.scrutinee_local(value, &e, anchor);
                     paths.push(path);
                 }
@@ -858,7 +858,8 @@ impl<'s> Desugar<'s> {
         if let Some(g) = guard {
             let map = self.bind_map(&c.binds);
             self.renames.push(map);
-            let text = self.render_to_string(g);
+            // The guard runs only when the patterns match.
+            let text = self.render_lazy(g);
             self.renames.pop();
             test = if test == "true" {
                 format!("({text})")
@@ -1687,7 +1688,7 @@ impl<'s> Desugar<'s> {
             self.copy(cursor, vs);
             let map = self.bind_map(&c.binds);
             self.renames.push(map);
-            self.expr(&arm.value);
+            self.expr_lazy(true, &arm.value);
             self.renames.pop();
             cursor = self.byte_end(arm.value.span());
         }
@@ -1699,7 +1700,7 @@ impl<'s> Desugar<'s> {
             cursor = default_tok.end;
             let vs = self.byte_start(d.span());
             self.copy(cursor, vs);
-            self.expr(d);
+            self.expr_lazy(true, d);
             cursor = self.byte_end(d.span());
         } else if !exhaustive {
             self.generate(cursor, " else nil");
@@ -1731,6 +1732,7 @@ impl<'s> Desugar<'s> {
                         luau_string(&format!("pattern `{pat}` did not match, got "))
                     ),
                     anchor,
+                    false,
                 );
                 self.write_binds(anchor, &keyword, &c.binds);
             }
@@ -2134,9 +2136,15 @@ impl<'s> Desugar<'s> {
             let keyword = if idx == 0 { "if" } else { "elseif" };
 
             match cond {
+                // Past the first condition, every part runs on some paths
+                // only, and so does every value.
                 Cond::Expr(e) => {
-                    let c = self.render_to_string(e);
-                    let v = self.render_to_string(value);
+                    let c = if idx == 0 {
+                        self.render_to_string(e)
+                    } else {
+                        self.render_lazy(e)
+                    };
+                    let v = self.render_lazy(value);
                     text.push_str(&format!("{keyword} {c} then {v} "));
                 }
 
@@ -2155,19 +2163,20 @@ impl<'s> Desugar<'s> {
                         self.hoists.push(Hoist::Stmt {
                             text: format!("local {name} = {value}"),
                             anchor,
+                            exits: false,
                         });
                     }
 
                     let map = self.bind_map(&binds);
                     self.renames.push(map);
-                    let v = self.render_to_string(value);
+                    let v = self.render_lazy(value);
                     self.renames.pop();
                     text.push_str(&format!("{keyword} {test} then {v} "));
                 }
             }
         }
 
-        let e = self.render_to_string(else_value);
+        let e = self.render_lazy(else_value);
         text.push_str(&format!("else {e})"));
         self.generate(anchor, &text);
     }

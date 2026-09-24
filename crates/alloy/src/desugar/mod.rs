@@ -502,7 +502,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             })
             .collect(),
         declared: Vec::new(),
-        no_hoist: 0,
+        lazy: false,
+        effects: false,
+        reads: false,
+        in_place: false,
         chain_anchor: 0,
         barrier: 0,
         type_edits: edits,
@@ -910,8 +913,13 @@ enum Hoist<'s> {
         value: HoistValue<'s>,
         anchor: u32,
     },
-    /// A whole statement, such as the early return of `try`.
-    Stmt { text: String, anchor: u32 },
+    /// A whole statement, such as the early return of `try`. `exits`
+    /// marks a `return`, which a closure cannot hold.
+    Stmt {
+        text: String,
+        anchor: u32,
+        exits: bool,
+    },
     /// `local name = value`, always a new local: an import's module,
     /// whose type must not be another module's.
     Fresh {
@@ -977,9 +985,20 @@ struct Desugar<'s> {
     /// Per open block: the temp indices already declared in it, and in
     /// every block around it, since an inner block sees outer locals.
     declared: Vec<Vec<u32>>,
-    /// Above zero while rendering a condition the loop re-evaluates. A
-    /// temp hoisted before the statement would run once, not per pass.
-    no_hoist: u32,
+    /// Set around an operand that runs on some paths only: the right
+    /// side of `and`, `or` and `??`, a later branch, a guard, a step past
+    /// `?`, a loop condition. A hoist would run it on every path, and a
+    /// loop condition once, so its hoists stay inside it.
+    lazy: bool,
+    /// The statement under render has called code. A later hoist would
+    /// run in front of that call.
+    effects: bool,
+    /// The statement under render has read a name or a field. A later
+    /// hoist that calls code would run in front of that read.
+    reads: bool,
+    /// Inside an operand that keeps its hoists. A chain then reads a
+    /// plain prefix again instead of naming it, so it needs no closure.
+    in_place: bool,
     /// Where the chain under render starts; the anchor of its hoists.
     chain_anchor: u32,
     /// The index into `declared` where the innermost function body starts.
@@ -1475,6 +1494,35 @@ fn cond_children(c: &Cond) -> Vec<Child<'_>> {
             v
         }
     }
+}
+
+/// Whether `test` holds for `e` or for a part of it that runs with it.
+/// A function literal runs later, so the walk skips it.
+pub(crate) fn any_part(e: &Expr, test: &impl Fn(&Expr) -> bool) -> bool {
+    if matches!(e, Expr::Function { .. }) {
+        return false;
+    }
+
+    test(e)
+        || expr_children(e)
+            .iter()
+            .any(|c| matches!(c, Child::Expr(x) if any_part(x, test)))
+}
+
+/// Whether `e` itself calls code in place: a call, a constructor, an
+/// await, a block, a child lookup, or a macro, whose body may hold any
+/// of them. A `try` calls its operand in a hoist, which runs first.
+pub(crate) fn calls_code(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Call { .. }
+            | Expr::New { .. }
+            | Expr::Await { .. }
+            | Expr::TryBlock { .. }
+            | Expr::AsyncBlock { .. }
+            | Expr::Child { .. }
+            | Expr::Macro { .. }
+    )
 }
 
 fn function_children(body: &FunctionBody) -> Vec<Child<'_>> {
@@ -2851,24 +2899,144 @@ impl<'s> Desugar<'s> {
         side
     }
 
-    /// Hoists rendered text into a temp and returns the temp's name.
-    fn hoist_text(&mut self, value: String, anchor: u32) -> String {
-        if self.no_hoist > 0 {
-            // The rewrites for `while`, `repeat`, and `elseif` conditions
-            // are designed and not built yet. Reading twice here would be
-            // wrong silently, so it is a diagnostic and a parenthesized
-            // re-read instead.
-            self.diagnostics.push(Diagnostic {
-                start: anchor,
-                end: anchor,
-                message: "an operand with side effects is not supported yet inside a `while`, \
-                          `repeat`, or `elseif` condition; bind it to a local first"
-                    .to_string(),
-            });
+    /// Writes hoists as statements in front of what follows. With
+    /// `fresh`, every temp is a new local: inside a closure, the block's
+    /// temps are upvalues, and two coroutines must not share one.
+    fn write_hoists(&mut self, hoists: Vec<Hoist<'s>>, fresh: bool) {
+        for h in hoists {
+            match h {
+                Hoist::Temp {
+                    index,
+                    value,
+                    anchor,
+                } => {
+                    let keyword = if fresh {
+                        "local "
+                    } else if self.temp_declared(index) {
+                        ""
+                    } else {
+                        self.declare_temp(index);
 
-            return format!("({value})");
+                        "local "
+                    };
+
+                    match value {
+                        HoistValue::Text(text) => {
+                            let line = format!("{keyword}_{index} = {text} ");
+                            self.generate(anchor, &line);
+                        }
+
+                        // The value keeps its source chunks, so a function
+                        // literal inside it keeps its lines.
+                        HoistValue::Rendered(rendered) => {
+                            self.generate(anchor, &format!("{keyword}_{index} = "));
+                            self.r.append(rendered);
+                            self.generate(anchor, " ");
+                        }
+                    }
+                }
+
+                Hoist::Stmt { text, anchor, .. } => {
+                    let line = format!("{text} ");
+                    self.generate(anchor, &line);
+                }
+
+                Hoist::Fresh {
+                    name,
+                    value,
+                    anchor,
+                } => match value {
+                    HoistValue::Text(text) => {
+                        let line = format!("local {name} = {text} ");
+                        self.generate(anchor, &line);
+                    }
+
+                    HoistValue::Rendered(rendered) => {
+                        self.generate(anchor, &format!("local {name} = "));
+                        self.r.append(rendered);
+                        self.generate(anchor, " ");
+                    }
+                },
+            }
+        }
+    }
+
+    /// Renders `e`, as an operand that runs on some paths only when
+    /// `lazy` is set.
+    pub(crate) fn expr_lazy(&mut self, lazy: bool, e: &Expr) {
+        let saved = std::mem::replace(&mut self.lazy, lazy);
+        self.expr(e);
+        self.lazy = saved;
+    }
+
+    /// `render_to_string` for an operand that runs on some paths only.
+    pub(crate) fn render_lazy(&mut self, e: &Expr) -> String {
+        self.render_side(|d| d.expr_lazy(true, e)).finish().0
+    }
+
+    /*
+    Renders `e` where a hoist in front of the statement would change what
+    it means: `e` runs on some paths only, or an earlier part of the
+    statement must run first. The hoists `e` asks for stay inside it, as
+    `(function() local _1 = v return e end)()` on the line `e` starts.
+    With no hoist, `e` renders as it is.
+
+    A `try` that returns cannot return from inside a closure. On a path
+    that may skip it, that is an error; ahead of an earlier call, its
+    hoists still go in front of the statement.
+    */
+    pub(crate) fn expr_in_place(&mut self, e: &Expr, render: impl FnOnce(&mut Self)) {
+        let saved_hoists = std::mem::take(&mut self.hoists);
+        let lazy = std::mem::replace(&mut self.lazy, false);
+        let effects = std::mem::replace(&mut self.effects, false);
+        let reads = std::mem::replace(&mut self.reads, false);
+        let in_place = std::mem::replace(&mut self.in_place, true);
+        let side = self.render_side(render);
+        let hoists = std::mem::replace(&mut self.hoists, saved_hoists);
+        self.lazy = lazy;
+        self.effects |= effects;
+        self.reads |= reads;
+        self.in_place = in_place;
+
+        if hoists.is_empty() {
+            self.r.append(side);
+
+            return;
         }
 
+        if hoists
+            .iter()
+            .any(|h| matches!(h, Hoist::Stmt { exits: true, .. }))
+        {
+            if lazy {
+                self.diagnose(
+                    e.span(),
+                    "`try` cannot return from an operand that runs on some paths only, such as the right side of `and` or a loop condition; bind it to a local first",
+                );
+            }
+
+            self.hoists.extend(hoists);
+            self.r.append(side);
+
+            return;
+        }
+
+        let anchor = self.byte_start(e.span());
+        // A closure reads no `...` of the function around it.
+        let (open, close) = if any_part(e, &|x| matches!(x, Expr::Vararg(_))) {
+            ("(function(...) ", " end)(...)")
+        } else {
+            ("(function() ", " end)()")
+        };
+        self.generate(anchor, open);
+        self.write_hoists(hoists, true);
+        self.generate(anchor, "return ");
+        self.r.append(side);
+        self.generate(self.byte_end(e.span()), close);
+    }
+
+    /// Hoists rendered text into a temp and returns the temp's name.
+    fn hoist_text(&mut self, value: String, anchor: u32) -> String {
         self.bump_temp();
         let index = self.temp_next;
         self.hoists.push(Hoist::Temp {
@@ -2900,20 +3068,12 @@ impl<'s> Desugar<'s> {
     }
 
     /// Hoists a whole statement in front of the current one.
-    fn hoist_stmt(&mut self, text: String, anchor: u32) {
-        if self.no_hoist > 0 {
-            self.diagnostics.push(Diagnostic {
-                start: anchor,
-                end: anchor,
-                message: "`try` is not supported yet inside a `while`, `repeat`, or `elseif` \
-                          condition; bind it to a local first"
-                    .to_string(),
-            });
-
-            return;
-        }
-
-        self.hoists.push(Hoist::Stmt { text, anchor });
+    fn hoist_stmt(&mut self, text: String, anchor: u32, exits: bool) {
+        self.hoists.push(Hoist::Stmt {
+            text,
+            anchor,
+            exits,
+        });
     }
 
     /// Hoists an expression into a temp and returns the temp's name. The
@@ -2921,20 +3081,25 @@ impl<'s> Desugar<'s> {
     /// a function literal as an argument, keeps every line in place.
     fn hoist(&mut self, e: &Expr) -> String {
         let anchor = self.byte_start(e.span());
-        let rendered = self.render_to_side(e);
+        let rendered = self.render_hoisted(|d| d.render_to_side(e));
 
         self.hoist_rendered(rendered, anchor)
+    }
+
+    /// Renders a value that a hoist takes. The hoists run in order in
+    /// front of the statement, so what the value calls or reads is not
+    /// an earlier part of the statement for a later hoist.
+    fn render_hoisted<T>(&mut self, render: impl FnOnce(&mut Self) -> T) -> T {
+        let flags = (self.effects, self.reads);
+        let value = render(self);
+        (self.effects, self.reads) = flags;
+
+        value
     }
 
     /// Hoists a rendered value, chunks and all, into a temp and returns
     /// the temp's name.
     fn hoist_rendered(&mut self, rendered: Renderer<'s>, anchor: u32) -> String {
-        if self.no_hoist > 0 {
-            let value = rendered.finish().0;
-
-            return self.hoist_text(value, anchor);
-        }
-
         self.bump_temp();
         let index = self.temp_next;
         self.hoists.push(Hoist::Temp {

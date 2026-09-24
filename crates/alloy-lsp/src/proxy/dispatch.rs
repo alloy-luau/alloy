@@ -1475,6 +1475,34 @@ impl Server {
                 }
             }
 
+            // Before the map: the check reads the child's ranges in the
+            // shadow, where generated text still shows as generated.
+            if method == "textDocument/codeAction"
+                && let Some(uri) = &ctx
+                && let Some(actions) = result.as_array_mut()
+            {
+                actions.retain(|a| st.keeps_child_action(a, uri, range));
+            }
+
+            // A refactor the list kept can still edit generated text
+            // around the selection. It then applies nothing, and says so.
+            if method == "codeAction/resolve"
+                && let Some(action) = result.as_object_mut()
+                && action
+                    .get("edit")
+                    .is_some_and(|e| !st.writes_source_only(e))
+            {
+                action.remove("edit");
+                self.to_client(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "window/showMessage",
+                    "params": {
+                        "type": 2,
+                        "message": "Alloy: this refactor changes code that the compiler generates, so it does not apply here.",
+                    },
+                }));
+            }
+
             map_from_shadow(result, ctx.as_deref(), &st);
 
             if method == "textDocument/diagnostic"
@@ -1628,6 +1656,7 @@ impl Server {
                         actions.extend(st.ingot_actions(uri, range));
                         actions.extend(st.import_actions(uri, &reported));
                         st.unused_import_actions(uri, range, actions);
+                        drop_child_prefix_fixes(actions);
                     }
                 }
 
@@ -1932,6 +1961,31 @@ impl Server {
         drop(st);
         self.to_client(&message);
     }
+}
+
+/// The child's "Prefix 'x' with '_'" where the `unused_variable` lint
+/// offers "Rewrite as `_x`" already: two entries for one change.
+fn drop_child_prefix_fixes(actions: &mut Vec<Value>) {
+    let title = |a: &Value| {
+        a.get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let ours: Vec<String> = actions.iter().map(title).collect();
+
+    actions.retain(|a| {
+        let t = title(a);
+        let Some(name) = t
+            .strip_prefix("Prefix '")
+            .and_then(|r| r.strip_suffix("' with '_' to silence"))
+        else {
+            return true;
+        };
+        let rewrite = format!("Rewrite as `_{name}`");
+
+        !ours.iter().any(|o| o.starts_with(&rewrite))
+    });
 }
 
 /// `function Item:cost(self: Item): number` names `self` twice: the `:`

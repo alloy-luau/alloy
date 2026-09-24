@@ -422,6 +422,14 @@ fn unresolved_name(message: &str) -> Option<&str> {
         return Some(name);
     }
 
+    // A module the file imports already exports the name: the import
+    // takes it into that list.
+    if let Some((_, rest)) = message.split_once('`')
+        && let Some((name, _)) = rest.split_once("` is not imported;")
+    {
+        return Some(name);
+    }
+
     let rest = message
         .split_once("Unknown type '")
         .or_else(|| message.split_once("Unknown global '"))
@@ -483,6 +491,12 @@ mod tests {
         assert_eq!(
             unresolved_name("TypeError: `Vec2` is a type, not a struct"),
             Some("Vec2")
+        );
+        assert_eq!(
+            unresolved_name(
+                "TypeError: `ORIGIN` is not imported; \"./shapes\" exports it, so add it to that import"
+            ),
+            Some("ORIGIN")
         );
         assert_eq!(unresolved_name("unused_variable: `x` is never read"), None);
     }

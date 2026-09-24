@@ -2254,6 +2254,96 @@ impl State {
         });
         actions.extend(mine);
     }
+
+    /// Whether an action of the child can stay in an Alloy file's list,
+    /// while its ranges still name the shadow. The child computes it on
+    /// the lowered Luau, so an edit over generated text writes that Luau
+    /// into the source. An edit that changes nothing is noise.
+    pub(crate) fn keeps_child_action(
+        &self,
+        action: &Value,
+        uri: &str,
+        range: Option<((u32, u32), (u32, u32))>,
+    ) -> bool {
+        if let Some(edit) = action.get("edit") {
+            return edit_count(edit) > 0 && self.writes_source_only(edit);
+        }
+
+        // A refactor sends its edit on resolve. A selection over text
+        // the lowering wrote gives an edit over that text.
+        let refactor = action
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|k| k.starts_with("refactor"));
+        // A position the lowering replaced maps to the next copied byte,
+        // which maps back somewhere else.
+        let clean = || {
+            let (start, end) = range?;
+            let doc = self.docs.get(uri)?;
+            let (s, e) = (doc.to_shadow(start.0, start.1), doc.to_shadow(end.0, end.1));
+
+            Some(
+                doc.to_source(s.0, s.1) == start
+                    && doc.to_source(e.0, e.1) == end
+                    && doc.copies_source(s, e),
+            )
+        };
+
+        !refactor || clean() == Some(true)
+    }
+
+    /// Whether a workspace edit of the child, in shadow terms, rewrites
+    /// only text the author wrote in every Alloy file it touches.
+    pub(crate) fn writes_source_only(&self, edit: &Value) -> bool {
+        let changes = edit
+            .get("changes")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .map(|(uri, edits)| (uri.as_str(), edits));
+        let documents = edit
+            .get("documentChanges")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| Some((c.pointer("/textDocument/uri")?.as_str()?, c.get("edits")?)));
+
+        changes.chain(documents).all(|(uri, edits)| {
+            let (real, is_alloy) = self.editor_uri(uri);
+
+            if !is_alloy {
+                return true;
+            }
+
+            let Some(doc) = self.docs.get(&real) else {
+                return false;
+            };
+
+            edits.as_array().into_iter().flatten().all(|e| {
+                e.get("range")
+                    .and_then(range_of)
+                    .is_some_and(|(start, end)| doc.copies_source(start, end))
+            })
+        })
+    }
+}
+
+/// How many text edits a workspace edit holds.
+fn edit_count(edit: &Value) -> usize {
+    let lists = edit
+        .get("changes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|m| m.values())
+        .chain(
+            edit.get("documentChanges")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.get("edits")),
+        );
+
+    lists.filter_map(Value::as_array).map(Vec::len).sum()
 }
 
 /// The written type and its simple form, from the report of a double

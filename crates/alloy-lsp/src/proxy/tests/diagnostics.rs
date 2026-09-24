@@ -1070,3 +1070,45 @@ fn a_config_file_reports_its_keys_and_its_load() {
     );
     assert!(messages("export const build = { out = \"dist\" }\n").is_empty());
 }
+
+/// The child computes a refactor on the lowered Luau. An edit over text
+/// the lowering wrote would put that Luau into the source, so the
+/// action goes; an edit over the author's own text stays.
+#[test]
+pub(crate) fn a_child_edit_over_generated_text_is_dropped() {
+    let src = "local function describe(n: number): string\n  return match n with\n    case 1 then \"one\"\n    default \"many\"\n  end\nend\nlocal a = describe(2)\n";
+    let (mut st, uri) = one_file(src);
+    let shadow_uri = "file:///m/t.luau";
+    st.shadows.insert(shadow_uri.to_string(), uri.to_string());
+    let shadow = st.docs[uri].shadow.clone();
+    let range_of_text = |text: &str| {
+        let at = shadow.find(text).expect(text);
+
+        range_value(
+            position_of(&shadow, at),
+            position_of(&shadow, at + text.len()),
+        )
+    };
+    let edit =
+        |range: Value| json!({ "changes": { shadow_uri: [{ "range": range, "newText": "x" }] } });
+    let call = edit(range_of_text("describe(2)"));
+    let lowered = edit(range_of_text("n == 1"));
+
+    assert!(st.writes_source_only(&call), "{shadow}");
+    assert!(!st.writes_source_only(&lowered), "{shadow}");
+    assert!(st.keeps_child_action(&json!({ "edit": call }), uri, None));
+    assert!(!st.keeps_child_action(&json!({ "edit": lowered }), uri, None));
+    // Nothing to change is noise.
+    assert!(!st.keeps_child_action(
+        &json!({ "edit": { "changes": { shadow_uri: [] } } }),
+        uri,
+        None
+    ));
+
+    // A lazy refactor reads the selection: the `match` lowered, the
+    // call did not.
+    let lazy = json!({ "kind": "refactor.extract", "data": {} });
+
+    assert!(!st.keeps_child_action(&lazy, uri, Some(((1, 9), (4, 5)))));
+    assert!(st.keeps_child_action(&lazy, uri, Some(((6, 10), (6, 21)))));
+}

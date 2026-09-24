@@ -669,6 +669,28 @@ pub(crate) fn a_declared_attribute_reaches_its_own_targets() {
 
     assert!(!labels.contains(&"@audited".to_string()), "{labels:?}");
 }
+/// An imported attribute joins the list. Its hover opens with
+/// `@slow(...)`, not `export`, so the scope took it for private.
+#[test]
+pub(crate) fn an_imported_attribute_joins_the_list() {
+    let main = "import { slow } from \"./lib\"\n\n@\nlocal function f() end\n";
+    let st = super::support::files(&[
+        (
+            "file:///lib.aly",
+            "export attribute slow(reason: string) on function\n",
+        ),
+        ("file:///main.aly", main),
+    ]);
+    let offset = main.find('@').expect("a sigil") + 1;
+    let ctx = context::detect(main, offset).expect("an attribute list");
+    let labels: Vec<String> = st
+        .context_items("file:///main.aly", offset, &ctx)
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+
+    assert!(labels.contains(&"@slow".to_string()), "{labels:?}");
+}
 pub(crate) fn case_items(st: &State, uri: &str, src: &str) -> Vec<Value> {
     let offset = src.rfind("case ").unwrap() + "case ".len();
     let ctx = context::detect(src, offset).expect("a case list");

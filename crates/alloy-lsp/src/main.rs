@@ -53,11 +53,7 @@ fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        println!(
-            "alloy-lsp {} (alloy {})",
-            env!("CARGO_PKG_VERSION"),
-            alloy::VERSION
-        );
+        println!("{}", version());
         return ExitCode::SUCCESS;
     }
 
@@ -422,6 +418,21 @@ fn run() -> ExitCode {
     let _ = std::io::stdout().flush();
 
     ExitCode::SUCCESS
+}
+
+/// The version line, with the commit when the build had one.
+fn version() -> String {
+    let base = format!(
+        "alloy-lsp {} (alloy {}",
+        env!("CARGO_PKG_VERSION"),
+        alloy::VERSION
+    );
+
+    match option_env!("ALLOY_LSP_COMMIT") {
+        Some(commit) => format!("{base}, commit {commit})"),
+
+        None => format!("{base})"),
+    }
 }
 
 /// The definitions of a workspace: the list `alloy flux` reads when

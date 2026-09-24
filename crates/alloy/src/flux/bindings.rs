@@ -667,9 +667,10 @@ impl<'s> Scan<'s> {
                 "local" | "const" if self.statement_start(i) => {
                     // The module table reads an export, and a `global`
                     // reads from anywhere, so neither name is unused.
-                    // `export const X`, `export local x` and
+                    // `export const X`, `export local x`,
+                    // `export default const X` and
                     // `export const { a, b } = t` all stay out.
-                    if matches!(self.prev(i), "export" | "global") {
+                    if self.sends_out(i) {
                         continue;
                     }
 
@@ -720,9 +721,7 @@ impl<'s> Scan<'s> {
                 // `function f` and `async function f` at statement level:
                 // a plain name, not exported, not a method of an `impl`
                 // or a `trait`. A global reads from anywhere in the file.
-                "function" | "async"
-                    if self.statement_start(i) && !matches!(self.prev(i), "export" | "global") =>
-                {
+                "function" | "async" if self.statement_start(i) && !self.sends_out(i) => {
                     let f = if self.at(i, "async") { i + 1 } else { i };
 
                     if !self.at(f, "function")
@@ -795,6 +794,18 @@ impl<'s> Scan<'s> {
                     Some(fix),
                 );
             }
+        }
+    }
+
+    /// Whether the declaration at `i` sends its name out of the file:
+    /// `export`, `global`, or `export default` in front of it.
+    fn sends_out(&self, i: usize) -> bool {
+        match self.prev(i) {
+            "export" | "global" => true,
+
+            "default" => i >= 2 && self.t(i - 2) == "export",
+
+            _ => false,
         }
     }
 

@@ -122,6 +122,33 @@ impl<'a> Lexed<'a> {
         None
     }
 
+    /// Whether only spaces sit before the token on its line. `export`
+    /// stands at the top level wherever it is indented; a `return` or a
+    /// `local` inside a function is indented, so those two keep column 0.
+    fn opens_line(&self, i: usize) -> bool {
+        self.toks.get(i).is_some_and(|t| {
+            let before = &self.src[..t.start as usize];
+
+            before[before.rfind('\n').map_or(0, |n| n + 1)..]
+                .trim()
+                .is_empty()
+        })
+    }
+
+    /// The name a `const` or `local` binds when its `=` sits at `eq`:
+    /// `NAME =`, or `NAME: T =` with the type on the same line.
+    fn bound_name(&self, eq: usize) -> Option<usize> {
+        let name = (0..eq)
+            .rev()
+            .find(|&k| matches!(self.text(k), "const" | "local"))?
+            + 1;
+        let one_line = !self.src[self.toks.get(name)?.end as usize..self.toks[eq].start as usize]
+            .contains('\n');
+
+        (self.is_name(name) && (name + 1 == eq || self.text(name + 1) == ":") && one_line)
+            .then_some(name)
+    }
+
     /// The path of the config the table opened at `open` is: the whole
     /// config, one exported key of it, or `None` for ordinary code.
     fn root_path(&self, open: usize) -> Option<Vec<Seg>> {
@@ -134,34 +161,28 @@ impl<'a> Lexed<'a> {
         if self.text(prev) == "default"
             && prev >= 1
             && self.text(prev - 1) == "export"
-            && self.at_line_start(prev - 1)
+            && self.opens_line(prev - 1)
         {
             return Some(Vec::new());
         }
 
-        // `NAME =` after `const` or `local`, with `export` and
-        // `default` in front or none.
-        if self.text(prev) != "=" || prev < 2 || !self.is_name(prev - 1) {
+        // `NAME =` or `NAME: T =` after `const` or `local`, with
+        // `export` and `default` in front or none.
+        if self.text(prev) != "=" {
             return None;
         }
 
-        let name = self.text(prev - 1);
-        let decl = prev - 2;
-
-        if !matches!(self.text(decl), "const" | "local") {
-            return None;
-        }
-
+        let at = self.bound_name(prev)?;
+        let name = self.text(at);
+        let decl = at - 1;
         let before = |n: usize| decl.checked_sub(n).map(|i| self.text(i));
 
-        if before(1) == Some("default")
-            && before(2) == Some("export")
-            && self.at_line_start(decl - 2)
+        if before(1) == Some("default") && before(2) == Some("export") && self.opens_line(decl - 2)
         {
             return Some(Vec::new());
         }
 
-        if before(1) == Some("export") && self.at_line_start(decl - 1) {
+        if before(1) == Some("export") && self.opens_line(decl - 1) {
             return Some(vec![Seg::Key(name.to_string())]);
         }
 
@@ -723,6 +744,23 @@ pub fn hover(schema: &Value, src: &str, offset: usize) -> Option<String> {
     let (key, _) = lexed.key_before(eq)?;
     let site = site_at(src, lexed.toks[key_tok].start as usize)?;
     let node = node_at(schema, &site.path)?;
+
+    // A table of open keys lists the names it knows; a key outside the
+    // list is a misspelling, and the check says so on the key. A name
+    // with a `/` or a `.` is an ingot's or a prefix's, which the list
+    // cannot hold.
+    let known = node
+        .get("propertyNames")
+        .map(enum_values)
+        .unwrap_or_default();
+
+    if !known.is_empty()
+        && !key.contains(['/', '.'])
+        && !known.iter().any(|v| v.as_str() == Some(&key))
+    {
+        return None;
+    }
+
     let child = alloy::config_aly::property(node, &key)?;
     let mut dotted: Vec<String> = site
         .path
@@ -929,8 +967,14 @@ fn check_literal(lexed: &Lexed, at: usize, node: &Value, path: &[Seg]) -> Option
     }
 
     let values = enum_values(node);
+    // A branch that takes any string makes the list a set of hints: a
+    // lint name lists the known ones and still takes an ingot's.
+    let open = branches(node).iter().any(|b| {
+        b.get("type").and_then(Value::as_str) == Some("string") && b.get("enum").is_none()
+    });
 
     if let Some(s) = string
+        && !open
         && !values.is_empty()
         && !values.iter().any(|v| v.as_str() == Some(s))
     {
@@ -993,6 +1037,17 @@ mod tests {
         assert_eq!(
             place("local config = {\n    |\n}\nreturn config\n"),
             key(&[], "")
+        );
+        // The loader runs these too: an indented `export`, and a const
+        // with a type.
+        assert_eq!(place("  export default {\n    |\n  }\n"), key(&[], ""));
+        assert_eq!(
+            place("export default const config: any = {\n    |\n}\n"),
+            key(&[], "")
+        );
+        assert_eq!(
+            place("export const build: { out: string } = {\n    o|\n}\n"),
+            key(&["build"], "o")
         );
     }
 
@@ -1175,6 +1230,10 @@ mod tests {
             text.starts_with("```alloy\nbuild.in: string\n```"),
             "{text}"
         );
+
+        // A lint name no lint has gets no documentation as a level.
+        let src = "export default { lint = { rules = { unused_varible = \"deny\" } } }\n";
+        assert_eq!(hover(&schema(), src, src.find("unused").unwrap() + 2), None);
     }
 
     #[test]

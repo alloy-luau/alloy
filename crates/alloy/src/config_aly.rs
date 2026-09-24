@@ -385,7 +385,13 @@ fn luau_type(value: &Value) -> &'static str {
 
 fn lua_error(e: mlua::Error) -> String {
     match e {
-        mlua::Error::RuntimeError(m) | mlua::Error::SyntaxError { message: m, .. } => m,
+        // The traceback names the VM's frames and the file again, and
+        // the reader of a config needs the line and the message alone.
+        mlua::Error::RuntimeError(m) | mlua::Error::SyntaxError { message: m, .. } => m
+            .split("\nstack traceback:")
+            .next()
+            .unwrap_or_default()
+            .to_string(),
 
         mlua::Error::CallbackError { cause, .. } => lua_error((*cause).clone()),
 
@@ -454,6 +460,14 @@ mod tests {
             eval("local x: number = \n")
                 .unwrap_err()
                 .starts_with("/tmp/project/.config.aly:")
+        );
+
+        // A runtime error names the line once, with no traceback: the
+        // traceback printed the path twice more.
+        let runtime = eval("local t = nil\nreturn { build = { out = t.x } }\n").unwrap_err();
+        assert_eq!(
+            runtime,
+            "/tmp/project/.config.aly:2: attempt to index nil with 'x'"
         );
     }
 

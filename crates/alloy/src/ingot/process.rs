@@ -116,13 +116,30 @@ impl Process {
 
 impl Inner {
     fn spawn(&mut self) -> Result<(), String> {
-        let mut child = Command::new(&self.binary)
-            .current_dir(&self.dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| format!("cannot start {}: {e}", self.binary.display()))?;
+        let mut tries = 0;
+        let mut child = loop {
+            let started = Command::new(&self.binary)
+                .current_dir(&self.dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn();
+
+            match started {
+                // Linux refuses to run a file that a process still holds
+                // open to write: a cargo build in progress, or a fork that
+                // copied the handle. The hold lasts milliseconds.
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 10 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+
+                started => {
+                    break started
+                        .map_err(|e| format!("cannot start {}: {e}", self.binary.display()))?;
+                }
+            }
+        };
         let stdin = child.stdin.take();
         let mut stdout = child.stdout.take().expect("piped stdout");
         let (tx, rx) = channel();

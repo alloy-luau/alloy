@@ -427,45 +427,8 @@ impl Server {
                 None => return false,
             },
 
-            _ => match markup::completion_spot(&doc.source, offset) {
-                Some(spot) => {
-                    let props = st.ingot_props(uri);
-                    // A dotted tag reaches the members of the path in
-                    // front of its last `.`; a bare one reaches every
-                    // name of the file that holds a component.
-                    let reach = match &spot {
-                        markup::Spot::TagSlot { prefix } => match prefix.rsplit_once('.') {
-                            Some((holder, _)) => {
-                                let path: Vec<&str> = holder.split('.').collect();
-
-                                components::members(&doc.source, &path, &load)
-                            }
-
-                            None => components::containers(&doc.source),
-                        },
-
-                        _ => Vec::new(),
-                    };
-
-                    // The props of a component stand where it is
-                    // declared, which an import may bring from another
-                    // module.
-                    let declared = match &spot {
-                        markup::Spot::AttributeSlot { class, .. } => {
-                            markup::component_source(&doc.source, class, &load)
-                        }
-
-                        _ => None,
-                    };
-
-                    Value::Array(markup::completions(
-                        &spot,
-                        &bound,
-                        declared.as_deref().unwrap_or(&doc.source),
-                        &props,
-                        &reach,
-                    ))
-                }
+            _ => match st.markup_completion(uri, offset, None) {
+                Some(items) => Value::Array(items),
 
                 None => return false,
             },
@@ -479,6 +442,61 @@ impl Server {
 }
 
 impl State {
+    /// The completion items inside `.alx` markup at a byte offset, or
+    /// `None` off markup. `as_class` completes an attribute slot as that
+    /// Roblox class, for a tag an ingot rewrites into it.
+    pub(crate) fn markup_completion(
+        &self,
+        uri: &str,
+        offset: usize,
+        as_class: Option<&str>,
+    ) -> Option<Vec<Value>> {
+        let doc = self.docs.get(uri)?;
+        let mut spot = markup::completion_spot(&doc.source, offset)?;
+        let bound = markup_bound(&doc.source);
+        let load = |spec: &str| self.module_source(uri, spec);
+
+        if let (markup::Spot::AttributeSlot { class, .. }, Some(as_class)) = (&mut spot, as_class) {
+            *class = as_class.to_string();
+        }
+
+        let props = self.ingot_props(uri);
+        // A dotted tag reaches the members of the path in front of its
+        // last `.`; a bare one reaches every name of the file that holds
+        // a component.
+        let reach = match &spot {
+            markup::Spot::TagSlot { prefix } => match prefix.rsplit_once('.') {
+                Some((holder, _)) => {
+                    let path: Vec<&str> = holder.split('.').collect();
+
+                    components::members(&doc.source, &path, &load)
+                }
+
+                None => components::containers(&doc.source),
+            },
+
+            _ => Vec::new(),
+        };
+
+        // The props of a component stand where it is declared, which an
+        // import may bring from another module.
+        let declared = match &spot {
+            markup::Spot::AttributeSlot { class, .. } => {
+                markup::component_source(&doc.source, class, &load)
+            }
+
+            _ => None,
+        };
+
+        Some(markup::completions(
+            &spot,
+            &bound,
+            declared.as_deref().unwrap_or(&doc.source),
+            &props,
+            &reach,
+        ))
+    }
+
     /// The source of the module a spec names: an open document first,
     /// then the file on disk. A `.alx` in another folder is open only
     /// when the author has it in a tab, so the disk answers for the

@@ -145,7 +145,7 @@ fn the_format_hook_runs_after_anneal_and_the_editor_hooks_answer() {
         "no hover on `local`"
     );
 
-    let (items, _) = ingots.complete("a.aly", "local x = $", 11, Some("$"));
+    let items = ingots.complete("a.aly", "local x = $", 11, Some("$")).items;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["label"], "$shout");
     assert_eq!(items[0]["snippet"], true);

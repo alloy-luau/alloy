@@ -88,6 +88,25 @@ pub fn kind_of(path: &str) -> &'static str {
     }
 }
 
+/// The completion answer of the ingots at one position.
+#[derive(Debug, Default)]
+pub struct Completed {
+    pub items: Vec<Value>,
+    /// Whether the next keystroke gives a different list. An ingot that
+    /// builds its items from the word being typed says so, and the editor
+    /// asks again instead of filtering what it holds.
+    pub incomplete: bool,
+    /// Whether the host adds its own list after the items. Unset, the
+    /// ingot owns the spot.
+    pub merge: bool,
+    /// Whether the host's list leaves out the Roblox classes and their
+    /// properties and events.
+    pub hide_roblox: bool,
+    /// The Roblox class the host completes an attribute slot as, for a
+    /// tag the ingot rewrites into that class.
+    pub class: Option<String>,
+}
+
 impl Ingots {
     /// Loads every ingot of a config. A problem with one ingot never
     /// stops the others; the problems come back beside the list.
@@ -343,18 +362,15 @@ impl Ingots {
     }
 
     /// Every completion item the ingots offer, as the guest shapes them,
-    /// and whether the next keystroke gives a different list. An ingot
-    /// that builds its items from the word being typed says so, and the
-    /// editor asks again instead of filtering what it holds.
+    /// and what the replies ask of the host's own list.
     pub fn complete(
         &self,
         path: &str,
         source: &str,
         offset: u32,
         trigger: Option<&str>,
-    ) -> (Vec<Value>, bool) {
-        let mut items = Vec::new();
-        let mut incomplete = false;
+    ) -> Completed {
+        let mut out = Completed::default();
 
         for ingot in self.with_hook(Hook::Complete, path) {
             let mut request = self.file(path, source);
@@ -363,12 +379,24 @@ impl Ingots {
             request["trigger"] = json!(trigger);
 
             if let Ok(reply) = ingot.request(&request, EDITOR_TIMEOUT) {
-                items.extend(reply["items"].as_array().cloned().unwrap_or_default());
-                incomplete |= reply["incomplete"].as_bool() == Some(true);
+                let items = reply["items"].as_array().cloned().unwrap_or_default();
+                let flag = |key: &str| reply[key].as_bool() == Some(true);
+
+                out.incomplete |= flag("incomplete");
+
+                if !items.is_empty() {
+                    out.merge |= flag("merge");
+                    out.hide_roblox |= flag("hide_roblox");
+                    out.class = out
+                        .class
+                        .or_else(|| reply["class"].as_str().map(str::to_string));
+                }
+
+                out.items.extend(items);
             }
         }
 
-        (items, incomplete)
+        out
     }
 
     /// The props the ingots read on a markup tag of a file: the name,
@@ -573,6 +601,7 @@ impl Ingot {
             "options": serde_json::to_value(&options).unwrap_or(Value::Null),
             "lints": lint_levels.iter().map(|(k, v)| (k.clone(), level_name(*v))).collect::<BTreeMap<_, _>>(),
             "fmt": serde_json::to_value(&config.fmt).unwrap_or(Value::Null),
+            "ingots": config.ingots.keys().collect::<Vec<_>>(),
         });
         process
             .request(&init, process::TIMEOUT)

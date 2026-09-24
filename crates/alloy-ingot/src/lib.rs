@@ -32,13 +32,13 @@
 //! # The requests the host sends
 //!
 //! ```jsonc
-//! {"op": "init", "api": 1, "root": "/project", "options": {...}, "lints": {...}, "fmt": {...}}
+//! {"op": "init", "api": 1, "root": "/project", "options": {...}, "lints": {...}, "fmt": {...}, "ingots": ["enamel"]}
 //! {"op": "transform", "path": "src/a.aly", "kind": "aly", "source": "..."}   // reply {"ok": true, "edits": [[4, 20, "new"]]}
 //! {"op": "output", "path": "...", "kind": "aly", "source": "..."}            // the ship Luau; reply {"ok": true, "edits": [...]}
 //! {"op": "lint", ...}      // reply {"ok": true, "findings": [{"span": [2, 9], "lint": "x", "message": "..."}]}
 //! {"op": "format", ...}    // reply {"ok": true, "edits": [...]}
 //! {"op": "hover", ..., "offset": 12}      // reply {"ok": true, "hover": {"contents": "md", "span": [10, 14]}}
-//! {"op": "complete", ..., "offset": 12}   // reply {"ok": true, "items": [{"label": "x"}], "incomplete": false}
+//! {"op": "complete", ..., "offset": 12}   // reply {"ok": true, "items": [{"label": "x"}], "incomplete": false, "merge": false}
 //! {"op": "actions", ..., "span": [0, 4]}  // reply {"ok": true, "actions": [{"title": "t", "edits": [...]}]}
 //! {"op": "colors", ...}                   // reply {"ok": true, "colors": [{"span": [3, 13], "red": 1, "green": 0, "blue": 0, "alpha": 1}]}
 //! {"op": "present", ..., "span": [3, 13], "color": {"red": 1, ...}}  // reply {"ok": true, "labels": ["bg-red-500"]}
@@ -216,19 +216,54 @@ pub struct Completions {
     /// the next keystroke.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub incomplete: bool,
+    /// Whether the host adds its own list after these items. Unset, a
+    /// list with items owns the spot and the host adds nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merge: bool,
+    /// Whether the host's own list leaves out the Roblox classes and
+    /// their properties and events. It applies with `merge`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_roblox: bool,
+    /// The Roblox class the host completes a markup attribute slot as,
+    /// for a tag the ingot rewrites into that class. It applies with
+    /// `merge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
 }
 
 impl Completions {
     pub fn new(items: Vec<CompletionItem>) -> Self {
         Self {
             items,
-            incomplete: false,
+            ..Self::default()
         }
     }
 
     /// Marks the list as one the next keystroke changes.
     pub fn incomplete(mut self, yes: bool) -> Self {
         self.incomplete = yes;
+
+        self
+    }
+
+    /// Asks the host to add its own list after the items.
+    pub fn merge(mut self, yes: bool) -> Self {
+        self.merge = yes;
+
+        self
+    }
+
+    /// Asks the host to leave the Roblox classes, properties, and events
+    /// out of the list it adds.
+    pub fn hide_roblox(mut self, yes: bool) -> Self {
+        self.hide_roblox = yes;
+
+        self
+    }
+
+    /// Asks the host to complete an attribute slot as this Roblox class.
+    pub fn as_class(mut self, class: impl Into<String>) -> Self {
+        self.class = Some(class.into());
 
         self
     }
@@ -450,6 +485,10 @@ pub struct Settings {
     /// and the language server runs wherever the editor started it.
     #[serde(default)]
     pub root: String,
+    /// The name of every ingot the project loads, this one included, so
+    /// an ingot can work with another one.
+    #[serde(default)]
+    pub ingots: Vec<String>,
 }
 
 /// The operations of an ingot. Each default is a refusal or an empty
@@ -677,9 +716,15 @@ fn answer(handler: &mut impl Handler, request: Request) -> Vec<u8> {
             file,
             offset,
             trigger,
-        } => handler.complete(&file, offset, trigger.as_deref()).map(
-            |c| serde_json::json!({ "ok": true, "items": c.items, "incomplete": c.incomplete }),
-        ),
+        } => handler
+            .complete(&file, offset, trigger.as_deref())
+            .map(|c| {
+                let mut reply = serde_json::to_value(&c).expect("a reply always serializes");
+                reply["ok"] = serde_json::json!(true);
+                reply["incomplete"] = serde_json::json!(c.incomplete);
+
+                reply
+            }),
 
         Request::Actions {
             file,
@@ -782,6 +827,42 @@ mod tests {
         assert_eq!(
             value(r#"{"op":"hover","path":"a.aly","source":"local abc","offset":7}"#),
             serde_json::json!({ "ok": true, "hover": { "contents": "word `abc`", "span": [6, 9] } })
+        );
+    }
+
+    #[test]
+    fn a_completion_reply_carries_its_host_flags() {
+        struct Tags;
+
+        impl Handler for Tags {
+            fn complete(
+                &mut self,
+                _: &File,
+                _: u32,
+                _: Option<&str>,
+            ) -> Result<Completions, String> {
+                Ok(Completions::new(vec![CompletionItem::new("div")])
+                    .merge(true)
+                    .hide_roblox(true)
+                    .as_class("Frame"))
+            }
+        }
+
+        let request: Request =
+            serde_json::from_str(r#"{"op":"complete","path":"a.alx","source":"<","offset":1}"#)
+                .unwrap();
+        let reply: Value = serde_json::from_slice(&answer(&mut Tags, request)).unwrap();
+
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "ok": true,
+                "items": [{ "label": "div" }],
+                "incomplete": false,
+                "merge": true,
+                "hide_roblox": true,
+                "class": "Frame",
+            })
         );
     }
 

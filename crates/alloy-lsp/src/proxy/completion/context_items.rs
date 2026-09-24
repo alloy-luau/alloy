@@ -1936,7 +1936,9 @@ impl Server {
             return false;
         }
 
-        let (extra, incomplete) = st.ingot_items(uri, line, character, trigger);
+        let (extra, incomplete) = st
+            .ingot_items(uri, line, character, trigger)
+            .map_or((Vec::new(), false), |(items, c)| (items, c.incomplete));
         items.extend(extra);
         let mut result = match incomplete {
             true => json!({ "isIncomplete": true, "items": items }),

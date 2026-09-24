@@ -4,34 +4,26 @@ use super::hover::declares_a_name_at;
 use super::*;
 
 impl State {
-    /// The completion items the ingots offer at a position, and whether
-    /// the list changes as more is typed. An ingot that builds its items
-    /// from the word under the cursor, a class name with a number in it,
-    /// answers a different list on the next keystroke; the editor has to
-    /// ask again rather than filter the one it holds.
+    /// The completion items the ingots offer at a position, as LSP
+    /// items, with what the replies ask of the host's own list.
     pub(crate) fn ingot_items(
         &self,
         uri: &str,
         line: u32,
         character: u32,
         trigger: Option<&str>,
-    ) -> (Vec<Value>, bool) {
-        let Some(ingots) = &self.ingots else {
-            return (Vec::new(), false);
-        };
-        let Some(doc) = self.docs.get(uri) else {
-            return (Vec::new(), false);
-        };
-        let Some(offset) = offset_of(&doc.source, line, character) else {
-            return (Vec::new(), false);
-        };
-        let Some(path) = uri_to_path(uri) else {
-            return (Vec::new(), false);
-        };
-        let (items, incomplete) =
+    ) -> Option<(Vec<Value>, alloy::ingot::Completed)> {
+        let ingots = self.ingots.as_ref()?;
+        let doc = self.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let path = uri_to_path(uri)?;
+        let completed =
             ingots.complete(&path.to_string_lossy(), &doc.source, offset as u32, trigger);
 
-        (crate::ingots::completion_items(doc, &items), incomplete)
+        Some((
+            crate::ingots::completion_items(doc, &completed.items),
+            completed,
+        ))
     }
 
     /// The props the ingots read on a markup tag of a document, as the
@@ -246,14 +238,30 @@ impl Server {
             .and_then(Value::as_str)
             .map(str::to_string);
         let st = self.state.lock().expect("state");
-        let (items, incomplete) = st.ingot_items(uri, line, character, trigger.as_deref());
+        let Some((mut items, completed)) = st.ingot_items(uri, line, character, trigger.as_deref())
+        else {
+            return false;
+        };
 
         if items.is_empty() {
             return false;
         }
 
+        // The ingot asked for the markup list too: an HTML tag slot also
+        // takes the components, and its attributes the properties of the
+        // class the tag becomes.
+        if completed.merge
+            && let Some(offset) = st
+                .docs
+                .get(uri)
+                .and_then(|d| offset_of(&d.source, line, character))
+            && let Some(host) = st.markup_completion(uri, offset, completed.class.as_deref())
+        {
+            items = merged(items, host, completed.hide_roblox);
+        }
+
         drop(st);
-        let result = match incomplete {
+        let result = match completed.incomplete {
             true => json!({ "isIncomplete": true, "items": items }),
 
             false => json!(items),
@@ -314,5 +322,59 @@ impl Server {
         self.respond(id, json!(result));
 
         true
+    }
+}
+
+/// The ingot's items, then the host's markup items it does not already
+/// hold. `hide_roblox` leaves out the Roblox classes and their properties
+/// and events.
+fn merged(mut items: Vec<Value>, host: Vec<Value>, hide_roblox: bool) -> Vec<Value> {
+    let roblox = |item: &Value| {
+        let detail = item["detail"].as_str().unwrap_or_default();
+
+        detail == "Roblox class"
+            || detail.starts_with("property of ")
+            || detail.starts_with("event of ")
+    };
+    let taken: HashSet<String> = items
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+
+    items.extend(host.into_iter().filter(|item| {
+        !(hide_roblox && roblox(item)) && !item["label"].as_str().is_some_and(|l| taken.contains(l))
+    }));
+
+    items
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use serde_json::json;
+
+    #[test]
+    fn the_host_list_follows_and_can_hide_roblox() {
+        let items = vec![json!({ "label": "div" }), json!({ "label": "key" })];
+        let host = vec![
+            json!({ "label": "Frame", "detail": "Roblox class" }),
+            json!({ "label": "Card", "detail": "component" }),
+            json!({ "label": "Size", "detail": "property of Frame" }),
+            json!({ "label": "Activated", "detail": "event of TextButton" }),
+            json!({ "label": "key", "detail": "prop of the markup" }),
+        ];
+        let labels = |v: Vec<serde_json::Value>| {
+            v.iter()
+                .map(|i| i["label"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            labels(super::merged(items.clone(), host.clone(), false)),
+            ["div", "key", "Frame", "Card", "Size", "Activated"]
+        );
+        assert_eq!(
+            labels(super::merged(items, host, true)),
+            ["div", "key", "Card"]
+        );
     }
 }

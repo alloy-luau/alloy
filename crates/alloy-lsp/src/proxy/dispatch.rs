@@ -1842,8 +1842,9 @@ impl Server {
                             extra.extend(st.impl_self_members(uri, line, character, result));
                         }
 
-                        let (from_ingots, incomplete) =
-                            st.ingot_items(uri, line, character, trigger.as_deref());
+                        let (from_ingots, incomplete) = st
+                            .ingot_items(uri, line, character, trigger.as_deref())
+                            .map_or((Vec::new(), false), |(items, c)| (items, c.incomplete));
                         extra.extend(from_ingots);
 
                         if !extra.is_empty() {

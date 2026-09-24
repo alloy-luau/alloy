@@ -1503,6 +1503,26 @@ fn struct_field_report(
         _ => None,
     })?;
     let at = member_column(text, key);
+
+    // `local total = sword.` with the name not typed yet: Luau reads on
+    // into the next line, so its first word becomes the field.
+    let trimmed = text.split("--").next().unwrap_or(text).trim_end();
+
+    if at.is_none() && trimmed.ends_with(['.', ':']) {
+        let head = trimmed
+            .rsplit(char::is_whitespace)
+            .next()
+            .unwrap_or(trimmed);
+
+        return Some(Resited {
+            kind: "SyntaxError",
+            message: format!(
+                "`{head}` has no name after it, so the next line's `{key}` reads as the member; finish the name"
+            ),
+            at: None,
+        });
+    }
+
     let called = at.is_some_and(|c| text.as_bytes().get(c.saturating_sub(2)) == Some(&b':'));
     let at = at.map(|c| (line, c));
     let methods = impl_methods(source, owner);
@@ -2101,6 +2121,20 @@ mod tests {
                 20,
             )
             .is_none()
+        );
+    }
+
+    /// A name left untyped after the dot reads the next line's first
+    /// word as the member; the report says the name is missing.
+    #[test]
+    fn a_dot_with_no_name_after_it_says_so() {
+        let src = "struct Loadout as\n    weapon: string\nend\n\nlocal kit = new Loadout { weapon = \"Bow\" }\nlocal n = kit.\nprint(n)\n";
+        let got = resited("Type 'Loadout' does not have key 'print'", src, 6, 11);
+
+        assert_eq!(got.kind, "SyntaxError");
+        assert_eq!(
+            got.message,
+            "`kit.` has no name after it, so the next line's `print` reads as the member; finish the name"
         );
     }
 

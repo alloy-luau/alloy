@@ -22,6 +22,7 @@ mod hover;
 mod ingots_bridge;
 mod navigation;
 mod outline;
+mod patterns;
 mod state;
 mod typing;
 

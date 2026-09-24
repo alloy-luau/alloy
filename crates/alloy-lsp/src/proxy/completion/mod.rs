@@ -359,9 +359,12 @@ impl State {
                 .find_map(|src| callable_signature(declared_line(src, &key)?))
                 .or_else(|| intrinsic_signature(&key)),
         }?;
+        // A caller passes one value for a pattern, so its type stands in
+        // the list.
+        let label = alloy::desugar::signature_with_pattern_types(&label).unwrap_or(label);
         let parameters: Vec<Value> = parameters
             .into_iter()
-            .map(|p| json!({ "label": p }))
+            .map(|p| json!({ "label": alloy::desugar::pattern_type(&p).unwrap_or(p) }))
             .collect();
 
         Some(json!({

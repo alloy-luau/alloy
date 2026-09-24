@@ -380,10 +380,21 @@ pub fn component_props(src: &str, name: &str) -> Vec<Field> {
         return Vec::new();
     };
 
-    let Some((_, declared)) = rest[..close].split_once(':') else {
-        return Vec::new();
+    // A pattern states its type after the brace, or in its fields.
+    let pattern = rest
+        .trim_start()
+        .starts_with('{')
+        .then(|| alloy::desugar::pattern_type(rest))
+        .flatten();
+    let declared = match &pattern {
+        Some(t) => t.as_str(),
+
+        None => match rest[..close].split_once(':') {
+            Some((_, d)) => d.trim(),
+
+            None => return Vec::new(),
+        },
     };
-    let declared = declared.trim();
 
     if declared.starts_with('{') {
         return record_entries(declared);
@@ -1447,6 +1458,20 @@ mod tests {
             hole_expression_start(plain, plain.find("rows").expect("hole")),
             None
         );
+    }
+
+    #[test]
+    fn a_component_with_a_pattern_offers_its_props() {
+        let src = "type CardProps = { title: string, count: number }\nlocal function Card({ title }: CardProps, extra: number) end\nlocal function Badge({ label: string, count: number }) end";
+        let names = |name: &str| {
+            component_props(src, name)
+                .into_iter()
+                .map(|f| f.name)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(names("Card"), ["title", "count"]);
+        assert_eq!(names("Badge"), ["label", "count"]);
     }
 
     #[test]

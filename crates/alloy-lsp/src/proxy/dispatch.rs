@@ -589,6 +589,15 @@ impl Server {
                     return true;
                 }
 
+                // Inside a parameter pattern the fields of its type
+                // complete, before the rules about spaces and names that
+                // are being declared, and a bound name hovers as its field.
+                if let Some(id) = message.get("id").cloned()
+                    && self.pattern_answer(m, &uri, &message, &id)
+                {
+                    return true;
+                }
+
                 // A space triggers a completion for the field after the
                 // comma of an object initializer, and for the next name
                 // of an import list; every other space answers nothing,
@@ -780,6 +789,14 @@ impl Server {
                 | "textDocument/typeDefinition"),
             ) => {
                 let uri = text_document_uri(&message).unwrap_or_default();
+
+                // A bound name of a parameter pattern reads a field.
+                if m == "textDocument/definition"
+                    && let Some(id) = message.get("id").cloned()
+                    && self.pattern_answer(m, &uri, &message, &id)
+                {
+                    return true;
+                }
 
                 if let Some(id) = message.get("id").cloned()
                     && self.definition_answer(&uri, &message, &id)

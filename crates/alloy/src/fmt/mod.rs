@@ -1143,6 +1143,18 @@ mod tests {
         );
     }
 
+    /// A method of a declared class has no body. After a field, the
+    /// layout read one and indented the `end` and every line below.
+    #[test]
+    fn a_declared_class_method_after_a_field_opens_nothing() {
+        let want = "declare class A\n  n: number\n  function f(self): number\n  m: string\nend\n\ndeclare x: number\nfunction g()\n  return 1\nend\n";
+        assert_eq!(fmt(want), want);
+        assert_eq!(
+            fmt("declare extern type P with\n  n: number\n  function f(self): number\nend\n"),
+            "declare extern type P with\n  n: number\n  function f(self): number\nend\n"
+        );
+    }
+
     #[test]
     fn match_arms_indent_once_and_bodies_twice() {
         let src = "match m with\ncase Ok(v) then\nprint(v)\ncase Err(e) then print(e)\ndefault\nprint(0)\nend\n";

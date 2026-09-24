@@ -279,8 +279,7 @@ fn run() -> ExitCode {
     // The child's stderr still goes to ours; the last line of it names
     // what went wrong when the child dies.
     let stderr_tail = Arc::new(Mutex::new(String::new()));
-
-    if let Some(child_err) = child.stderr.take() {
+    let stderr_reader = child.stderr.take().map(|child_err| {
         let tail = Arc::clone(&stderr_tail);
 
         alloy_syntax::parser::spawn_deep(move || {
@@ -291,8 +290,8 @@ fn run() -> ExitCode {
                     *tail.lock().expect("stderr tail") = line;
                 }
             }
-        });
-    }
+        })
+    });
 
     let server = Arc::new(proxy::Server::new(
         Box::new(child_in),
@@ -334,6 +333,21 @@ fn run() -> ExitCode {
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return;
+        }
+
+        // Stdout can close before the stderr thread reads the last
+        // line, and the report then lost the reason. A grandchild may
+        // hold stderr open, so the wait has a bound.
+        if let Some(reader) = stderr_reader {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
+            while !reader.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
         }
 
         let last = stderr_tail.lock().expect("stderr tail").clone();

@@ -540,6 +540,23 @@ impl Server {
                 self.forward_request(message, method.as_deref());
             }
 
+            // Folding reads the source's own blocks. The child folds the
+            // shadow, and its ranges start past the end of a line.
+            Some("textDocument/foldingRange") => {
+                let uri = text_document_uri(&message).unwrap_or_default();
+                let ranges = {
+                    let st = self.state.lock().expect("state");
+
+                    st.docs.get(&uri).map(|d| folding_ranges(&d.source))
+                };
+
+                match (message.get("id").cloned(), ranges) {
+                    (Some(id), Some(ranges)) => self.respond(&id, json!(ranges)),
+
+                    _ => self.forward_request(message, method.as_deref()),
+                }
+            }
+
             Some("textDocument/onTypeFormatting") => {
                 if let Some(id) = message.get("id").cloned() {
                     let uri = text_document_uri(&message).unwrap_or_default();

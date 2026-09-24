@@ -447,6 +447,75 @@ fn push_statement(stmt: &Stmt, src: &str, toks: &[Tok], out: &mut Vec<Entry>) {
     }
 }
 
+/// The folding ranges of a source: each block from the line of its
+/// opener to the line before its closer, each comment that spans lines,
+/// and each run of line comments. The child folds the shadow, whose
+/// blocks and lines are the emit's.
+pub(crate) fn folding_ranges(src: &str) -> Vec<Value> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let structure = alloy::fmt::structure(src, &lexed.toks);
+    let line_of = |offset: usize| src[..offset.min(src.len())].matches('\n').count();
+    let mut out: Vec<(usize, usize, Option<&str>)> = Vec::new();
+
+    for (i, end) in structure.ends.iter().enumerate() {
+        let Some(j) = end else {
+            continue;
+        };
+        let (open, close) = (structure.lines[i], structure.lines[*j]);
+
+        if close > open + 1 {
+            out.push((open, close - 1, None));
+        }
+    }
+
+    let mut run: Option<(usize, usize)> = None;
+    let close_run = |run: Option<(usize, usize)>, out: &mut Vec<_>| {
+        if let Some((a, b)) = run
+            && b > a
+        {
+            out.push((a, b, Some("comment")));
+        }
+    };
+
+    for &(s, e) in &lexed.comments {
+        let (first, last) = (line_of(s as usize), line_of((e as usize).saturating_sub(1)));
+        let line_start = src[..s as usize].rfind('\n').map_or(0, |n| n + 1);
+        let alone = src[line_start..s as usize].trim().is_empty();
+
+        if last > first {
+            out.push((first, last, Some("comment")));
+        }
+
+        run = match run {
+            Some((a, b)) if alone && first == last && first == b + 1 => Some((a, first)),
+
+            _ => {
+                close_run(run, &mut out);
+
+                (alone && first == last).then_some((first, first))
+            }
+        };
+    }
+
+    close_run(run, &mut out);
+    out.sort();
+    out.dedup();
+
+    out.into_iter()
+        .map(|(start, end, kind)| {
+            let mut range = json!({ "startLine": start, "endLine": end });
+
+            if let Some(kind) = kind {
+                range["kind"] = json!(kind);
+            }
+
+            range
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +542,50 @@ mod tests {
         );
 
         out
+    }
+
+    /// A block folds from its opener to the line before its `end`, a
+    /// run of comment lines folds as a comment, and a trailing comment
+    /// joins no run. The child's ranges were the shadow's.
+    #[test]
+    fn folds_follow_the_blocks_of_the_source() {
+        let src = concat!(
+            "-- One.\n",
+            "-- Two.\n",
+            "struct P as\n",
+            "  x: number\n",
+            "end\n",
+            "local v = 1 -- trailing\n",
+            "-- Alone.\n",
+            "enum E as\n",
+            "  A\n",
+            "  B\n",
+            "end\n",
+            "local q = match v with\n",
+            "  case 1 then \"a\"\n",
+            "  default \"b\"\n",
+            "end\n",
+        );
+        let folds: Vec<(u64, u64, Option<String>)> = folding_ranges(src)
+            .iter()
+            .map(|r| {
+                (
+                    r["startLine"].as_u64().unwrap_or(0),
+                    r["endLine"].as_u64().unwrap_or(0),
+                    r["kind"].as_str().map(str::to_string),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            folds,
+            [
+                (0, 1, Some("comment".to_string())),
+                (2, 3, None),
+                (7, 9, None),
+                (11, 13, None),
+            ]
+        );
     }
 
     /// Every declaration once, under the name the source wrote, with

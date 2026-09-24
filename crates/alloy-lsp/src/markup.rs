@@ -188,6 +188,66 @@ pub fn close_tag(src: &str, offset: usize) -> Option<String> {
     Some(name)
 }
 
+/// The element a `</` before `offset` closes: the innermost tag above
+/// it that no closing tag has taken yet. The caret may follow part of
+/// the name, `</Fr`.
+pub fn closing_slot(src: &str, offset: usize) -> Option<String> {
+    let head = &src[..offset.min(src.len())];
+    let lt = head
+        .trim_end_matches(is_name_char)
+        .strip_suffix("</")?
+        .len();
+    let mut open: Vec<String> = Vec::new();
+
+    for (i, _) in src[..lt].match_indices('<') {
+        if let Some(rest) = src[i + 1..].strip_prefix('/') {
+            let name: String = rest.chars().take_while(|c| is_name_char(*c)).collect();
+
+            if let Some(at) = open.iter().rposition(|n| *n == name) {
+                open.truncate(at);
+            }
+
+            continue;
+        }
+
+        if !opens_markup(src, i) || !src[i + 1..].starts_with(char::is_alphabetic) {
+            continue;
+        }
+
+        // `<Frame />` closes itself: the `>` at the top level of the
+        // tag follows a `/`.
+        let mut depth = 0i32;
+        let mut closes_itself = false;
+
+        for (k, c) in src[i + 1..lt].char_indices() {
+            match c {
+                '{' => depth += 1,
+
+                '}' => depth -= 1,
+
+                '>' if depth == 0 => {
+                    closes_itself = src[i + 1..i + 1 + k].trim_end().ends_with('/');
+
+                    break;
+                }
+
+                _ => {}
+            }
+        }
+
+        if !closes_itself {
+            open.push(
+                src[i + 1..]
+                    .chars()
+                    .take_while(|c| is_name_char(*c))
+                    .collect(),
+            );
+        }
+    }
+
+    open.pop()
+}
+
 /// Whether an element of this name already has a closing tag after
 /// `from` that no nested opener of the same name takes.
 fn already_closed(src: &str, from: usize, name: &str) -> bool {
@@ -1084,6 +1144,25 @@ pub fn completions(
 
 #[cfg(test)]
 mod tests {
+
+    /// `</` names the innermost element still open above it. A closed
+    /// element and one that closes itself are done.
+    #[test]
+    fn a_closing_slot_names_the_open_element() {
+        let src = "return (\n  <Frame Size={x > 1}>\n    <TextLabel Text=\"a\" />\n    <UIList></UIList>\n    </";
+        assert_eq!(closing_slot(src, src.len()).as_deref(), Some("Frame"));
+
+        let typed = format!("{src}Fr");
+        assert_eq!(closing_slot(&typed, typed.len()).as_deref(), Some("Frame"));
+
+        let nested = "local e = <Frame>\n  <TextButton>\n    </";
+        assert_eq!(
+            closing_slot(nested, nested.len()).as_deref(),
+            Some("TextButton")
+        );
+
+        assert_eq!(closing_slot("local x = a < b\n", 16), None);
+    }
     use super::*;
 
     /// A tag inside a `{ }` hole is one expression to the markup

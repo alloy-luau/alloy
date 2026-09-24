@@ -452,6 +452,16 @@ impl State {
         as_class: Option<&str>,
     ) -> Option<Vec<Value>> {
         let doc = self.docs.get(uri)?;
+
+        // `</` names the element it closes, and nothing else.
+        if let Some(name) = markup::closing_slot(&doc.source, offset) {
+            return Some(vec![json!({
+                "label": name,
+                "kind": 7,
+                "insertText": format!("{name}>"),
+            })]);
+        }
+
         let mut spot = markup::completion_spot(&doc.source, offset)?;
         let bound = markup_bound(&doc.source);
         let load = |spec: &str| self.module_source(uri, spec);

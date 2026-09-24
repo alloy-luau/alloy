@@ -1094,14 +1094,51 @@ impl<'s> Desugar<'s> {
         // a read view of those fields.
         let readable = self.read_view(decls);
         let sn = if self.options.check && !self.generic_types.contains(name) {
-            format!(": {}{readable}", self.self_alias(name))
+            format!(": {name}{readable}")
         } else {
             String::new()
         };
+        // A derived method takes the struct's public type, so a caller
+        // outside the impl passes the value it holds. A body reads the
+        // private fields through the full view, a subtype it casts to.
+        let full =
+            self.options.check && !self.generic_types.contains(name) && self.has_private_view(name);
+        let view = |x: &str| match full {
+            true => format!("({x} :: {name}__all)"),
+
+            false => x.to_string(),
+        };
+        let (a, b, s_, this) = (view("a"), view("b"), view("s"), view("self"));
         let tn = if self.options.check { ": any" } else { "" };
+
+        // A derive writes these methods on every value; a field of the
+        // name would hide the method.
+        let writes: &[&str] = match which {
+            "Clone" => &["clone"],
+
+            "Debug" => &["debug"],
+
+            "Serialize" => &["to_table", "serialize"],
+
+            _ => &[],
+        };
+
+        for f in decls {
+            let fname = self.text_of(f.name);
+
+            if writes.contains(&fname) {
+                let message = format!(
+                    "`{fname}` is a field of `{name}` and a method `@derive({which})` writes; one name holds one of the two"
+                );
+                self.diagnose(f.name, &message);
+            }
+        }
         match which {
             "Eq" | "PartialEq" => {
-                let cmp: Vec<String> = fields.iter().map(|f| format!("a.{f} == b.{f}")).collect();
+                let cmp: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{a}.{f} == {b}.{f}"))
+                    .collect();
                 let body = if cmp.is_empty() {
                     "true".to_string()
                 } else {
@@ -1116,7 +1153,7 @@ impl<'s> Desugar<'s> {
             "Ord" => {
                 let steps: Vec<String> = fields
                     .iter()
-                    .map(|f| format!("if a.{f} ~= b.{f} then return a.{f} < b.{f} end"))
+                    .map(|f| format!("if {a}.{f} ~= {b}.{f} then return {a}.{f} < {b}.{f} end"))
                     .collect();
                 let steps = steps.join(" ");
 
@@ -1128,7 +1165,7 @@ impl<'s> Desugar<'s> {
             "Debug" => {
                 let parts: Vec<String> = fields
                     .iter()
-                    .map(|f| format!("\"{f} = \" .. tostring(s.{f})"))
+                    .map(|f| format!("\"{f} = \" .. tostring({s_}.{f})"))
                     .collect();
                 let inner = if parts.is_empty() {
                     "\"\"".to_string()
@@ -1159,6 +1196,7 @@ impl<'s> Desugar<'s> {
             "Serialize" => {
                 let mut to = Vec::new();
                 let mut from = Vec::new();
+                let mut keys: Vec<(String, String)> = Vec::new();
 
                 for f in decls {
                     let fname = self.text_of(f.name).to_string();
@@ -1187,14 +1225,23 @@ impl<'s> Desugar<'s> {
                         .find(|a| a.name.map(|n| self.text_of(n) == "rename").unwrap_or(false))
                         .and_then(|a| a.args.first())
                         .map(|e| {
+                            // The key is the text the literal stands for,
+                            // so a quote style or an escape changes nothing.
                             let text = self.text_of(e.span());
 
-                            text.get(1..text.len().saturating_sub(1))
-                                .filter(|_| text.starts_with(['"', '\'']))
-                                .unwrap_or(text)
-                                .to_string()
+                            crate::data::literal_text(text).unwrap_or_else(|| text.to_string())
                         })
                         .unwrap_or(fname.clone());
+
+                    // Two fields under one key: the table holds one.
+                    if let Some((_, other)) = keys.iter().find(|(k, _)| *k == key) {
+                        let message = format!(
+                            "`{other}` and `{fname}` serialize under one key, `{key}`, and the derived table keeps one; give one of them another `@rename`"
+                        );
+                        self.diagnose(f.name, &message);
+                    }
+
+                    keys.push((key.clone(), fname.clone()));
                     // A key that is no Luau name, `regen-per-second` or
                     // `end`, goes in brackets on both sides.
                     let key = crate::data::luau_key(&key);
@@ -1203,8 +1250,39 @@ impl<'s> Desugar<'s> {
 
                         false => format!("t.{key}"),
                     };
-                    to.push(format!("{key} = self.{fname}"));
-                    from.push(format!("{fname} = {read}"));
+                    let field = format!("{this}.{fname}");
+                    // A field of a struct that derives Serialize goes
+                    // through that struct's own pair, both ways.
+                    let ty = self.text_of(f.ty).trim();
+                    let (inner, optional) = match ty.strip_suffix('?') {
+                        Some(t) => (t.trim(), true),
+
+                        None => (ty, false),
+                    };
+
+                    if self.serializable.contains(inner) {
+                        let (out, back) = (
+                            format!("{inner}.to_table({field})"),
+                            format!("{inner}.from_table({read})"),
+                        );
+
+                        match optional {
+                            true => {
+                                to.push(format!("{key} = if {field} == nil then nil else {out}"));
+                                from.push(format!(
+                                    "{fname} = if {read} == nil then nil else {back}"
+                                ));
+                            }
+
+                            false => {
+                                to.push(format!("{key} = {out}"));
+                                from.push(format!("{fname} = {back}"));
+                            }
+                        }
+                    } else {
+                        to.push(format!("{key} = {field}"));
+                        from.push(format!("{fname} = {read}"));
+                    }
                 }
 
                 // `serialize` is the name the `Serialize` bound asks
@@ -1761,10 +1839,27 @@ impl<'s> Desugar<'s> {
             return None;
         }
 
-        let head = generic_head(self.text_of(l.names[0].ty?))?;
+        let head = self.generic_annotation(self.text_of(l.names[0].ty?))?;
 
         self.is_constructor_call(&l.values[0], &head.0)
             .then_some(head)
+    }
+
+    /// The base and arguments of an annotation the solver cannot pass to
+    /// a constructor on its own: a std container, or a generic struct or
+    /// enum of this file, `Stack<number>`.
+    fn generic_annotation(&self, ty: &str) -> Option<(String, String)> {
+        if let Some(head) = generic_head(ty) {
+            return Some(head);
+        }
+
+        let ty = ty.trim();
+        let (base, args) = ty.strip_suffix('>')?.split_once('<')?;
+        let base = base.trim();
+
+        self.generic_types
+            .contains(base)
+            .then(|| (base.to_string(), args.trim().to_string()))
     }
 
     /// The return type's base and arguments when a `return` hands back
@@ -1777,7 +1872,7 @@ impl<'s> Desugar<'s> {
         }
 
         let ty = self.ret_types.last()?.clone()?;
-        let head = generic_head(&ty)?;
+        let head = self.generic_annotation(&ty)?;
 
         self.is_constructor_call(&values[0], &head.0)
             .then_some(head)

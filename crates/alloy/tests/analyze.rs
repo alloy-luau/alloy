@@ -288,11 +288,65 @@ held:Reset()
 print(held:Bump(2), held:Peek())
 "#;
 
+/// A derived method takes the struct's public type, so a caller outside
+/// the impl passes the value it holds. The fields form of a generic
+/// struct takes the arguments `<<T>>` or the annotation names.
+const DERIVED_PRIVATE: &str = r#"@derive(Clone, Debug, Serialize, Eq)
+struct V as
+    x: number
+    private y: number = 0
+end
+
+local a = new V { x = 1 }
+local b = a:clone()
+print(a:debug(), b.x, a:serialize(), a == b)
+
+struct Stack<T> as
+    items: { T } = {}
+end
+
+local s = new Stack<<number>> {}
+local s2: Stack<number> = new Stack { items = {} }
+print(#s.items, #s2.items)
+"#;
+
+/// An operand that keeps its temps: a path of fields read again in
+/// place, a closure called in place, and a guard past its pattern.
+const IN_PLACE: &str = r#"type Char = { Humanoid: { Health: number }? }
+type Player = { Character: Char? }
+
+local function health(p: Player?): number
+    return p and p.Character?.Humanoid?.Health or 0
+end
+
+local function get(): { a: { b: number }? }?
+    return nil
+end
+
+type Info = { meta: { ok: boolean }? }
+enum Ev as
+    Got(Info?)
+    Num(number)
+end
+
+local function check(e: Ev): string
+    return match e with
+        case Ev.Got(i) and i?.meta?.ok then "ok"
+        case Ev.Got(_) then "got"
+        case Ev.Num(_) then "num"
+    end
+end
+
+local cached: number? = 5
+local v: number? = cached ?? get()?.a?.b
+print(health(nil), check(Ev.Num(1)), v)
+"#;
+
 /// The analyzer's `TypeError` and `SyntaxError` lines for one source,
 /// or `None` when luau-lsp or the Roblox definitions are missing.
 fn reports(src: &str, name: &str) -> Option<Vec<String>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let defs = root.join("tools/types/globalTypes.d.luau");
+    let defs = root.join("../tools/types/globalTypes.d.luau");
 
     if !defs.is_file() {
         eprintln!("skipped: no definitions at {}", defs.display());
@@ -556,7 +610,7 @@ fn a_service_import_types_as_its_class() {
 #[test]
 fn an_exporting_module_returns_one_value_to_require() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let defs = root.join("tools/types/globalTypes.d.luau");
+    let defs = root.join("../tools/types/globalTypes.d.luau");
 
     if !defs.is_file() {
         eprintln!("skipped: no definitions at {}", defs.display());
@@ -625,7 +679,7 @@ fn an_exporting_module_returns_one_value_to_require() {
 #[test]
 fn a_returning_module_types_through_its_value() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let defs = root.join("tools/types/globalTypes.d.luau");
+    let defs = root.join("../tools/types/globalTypes.d.luau");
 
     if !defs.is_file() {
         eprintln!("skipped: no definitions at {}", defs.display());
@@ -691,7 +745,7 @@ fn a_returning_module_types_through_its_value() {
 #[test]
 fn a_project_with_imports_analyzes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let defs = root.join("tools/types/globalTypes.d.luau");
+    let defs = root.join("../tools/types/globalTypes.d.luau");
 
     if !defs.is_file() {
         eprintln!("skipped: no definitions at {}", defs.display());
@@ -785,7 +839,7 @@ fn a_table_method_self_type_settles() {
 fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
 
-    if !root.join("tools/types/globalTypes.d.luau").is_file() {
+    if !root.join("../tools/types/globalTypes.d.luau").is_file() {
         eprintln!("skipped: no definitions");
 
         return;
@@ -858,7 +912,7 @@ fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
 #[test]
 fn the_rig_types_the_character_of_a_player() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let defs = root.join("tools/types/globalTypes.d.luau");
+    let defs = root.join("../tools/types/globalTypes.d.luau");
 
     if !defs.is_file() {
         eprintln!("skipped: no definitions");
@@ -1047,4 +1101,14 @@ fn a_listed_declaration_file_outside_in_compiles_and_reports() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_derived_method_and_a_generic_fields_form_analyze() {
+    analyze(DERIVED_PRIVATE, "derived_private");
+}
+
+#[test]
+fn an_operand_that_keeps_its_temps_analyzes() {
+    analyze(IN_PLACE, "in_place");
 }

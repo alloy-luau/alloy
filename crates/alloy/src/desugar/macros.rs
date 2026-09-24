@@ -263,6 +263,40 @@ fn path_last(e: &Expr) -> Option<TokSpan> {
     }
 }
 
+/// Whether Luau text is one term that an operator beside it cannot
+/// split: a name, a literal, a call, an index, or a bracketed group.
+/// `1 + 2` is not, so `$add(1, 2) * 3` needs it in parentheses.
+fn is_one_term(text: &str) -> bool {
+    use alloy_syntax::lexer::TokKind;
+
+    let Ok(lexed) = alloy_syntax::lexer::lex_luau(text) else {
+        return false;
+    };
+    let mut depth = 0usize;
+
+    for t in &lexed.toks {
+        let word = t.text(text);
+
+        match (t.kind, word) {
+            (TokKind::LParen, _) | (TokKind::Symbol, "[" | "{") => depth += 1,
+
+            (TokKind::RParen, _) | (TokKind::Symbol, "]" | "}") => {
+                depth = depth.saturating_sub(1);
+            }
+
+            _ if depth > 0 => {}
+
+            (TokKind::Ident, "and" | "or" | "not" | "if" | "function") => return false,
+
+            (TokKind::Symbol, _) => return false,
+
+            _ => {}
+        }
+    }
+
+    true
+}
+
 pub(crate) fn is_simple_text(t: &str) -> bool {
     !t.is_empty()
         && t.chars()
@@ -664,7 +698,11 @@ impl<'s> Desugar<'s> {
                 }
 
                 match text.strip_prefix("return ") {
-                    Some(value) => value.to_string(),
+                    Some(value) if is_one_term(value) => value.to_string(),
+
+                    // The value lands between the operators around the
+                    // call, so it keeps its own grouping.
+                    Some(value) => format!("({value})"),
 
                     // Statements before the value, a hoisted temp: a
                     // closure keeps them in expression position.
@@ -1096,7 +1134,7 @@ mod tests {
         let out = crate::compile(src).unwrap();
 
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-        assert!(out.ship.contains("(1 * 2) * 2"), "{}", out.ship);
+        assert!(out.ship.contains("(((1 * 2)) * 2)"), "{}", out.ship);
     }
 
     /// A macro body travels as one line. The join used to put a space
@@ -1204,13 +1242,29 @@ mod tests {
         let out = crate::compile(src).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(
-            out.ship.contains("local p = if true then 1 else 2"),
+            out.ship.contains("local p = (if true then 1 else 2)"),
             "{}",
             out.ship
         );
         assert!(
             out.ship
                 .contains("if false then print(\"a\") else print(\"b\") end"),
+            "{}",
+            out.ship
+        );
+    }
+
+    /// The value lands between the operators around the call, so it
+    /// keeps its own grouping: `10 / $sq(2)` is 2.5, not 10.
+    #[test]
+    fn a_macro_value_keeps_its_grouping() {
+        let src = "macro sq(x) (x) * (x) end\nmacro add(a, b) a + b end\nmacro first(t) t[1] end\nlocal t = { 4 }\nprint(10 / $sq(2), $add(1, 2) * 3, -$add(1, 2), $first(t))\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship
+                .contains("print(10 / ((2) * (2)), (1 + 2) * 3, -(1 + 2), t[1])"),
             "{}",
             out.ship
         );
@@ -1227,8 +1281,8 @@ mod tests {
             "{decl}local n = $sum(1)\nlocal m = $sum(1, 5)\nprint(n, m)\n"
         ));
 
-        assert!(out.contains("local n = 1 + 2"), "{out}");
-        assert!(out.contains("local m = 1 + 5"), "{out}");
+        assert!(out.contains("local n = (1 + 2)"), "{out}");
+        assert!(out.contains("local m = (1 + 5)"), "{out}");
         assert!(!out.contains("= return"), "{out}");
 
         // A statement-position call keeps the `return`, so the body

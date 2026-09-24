@@ -582,12 +582,12 @@ fn a_macro_expands_by_its_path() {
     let out = clean(
         "namespace M as\n    macro twice(x)\n        x * 2\n    end\nend\n\nprint($M.twice(2))\n",
     );
-    assert!(out.contains("print(2 * 2)"), "{out}");
+    assert!(out.contains("print((2 * 2))"), "{out}");
 
     let nested = clean(
         "namespace Outer as\n    namespace Inner as\n        macro plus(x)\n            x + 1\n        end\n    end\nend\n\nprint($Outer.Inner.plus(4))\n",
     );
-    assert!(nested.contains("print(4 + 1)"), "{nested}");
+    assert!(nested.contains("print((4 + 1))"), "{nested}");
 }
 
 /// A path that names no namespace, and a namespace with no such
@@ -711,7 +711,7 @@ fn a_macro_member_keeps_its_own_name() {
     let out = clean(
         "namespace M as\n    macro twice(x)\n        x * 2\n    end\n    attribute tag(name: string) on field\nend\n\nprint($M.twice(2))\n",
     );
-    assert!(out.contains("print(2 * 2)"), "{out}");
+    assert!(out.contains("print((2 * 2))"), "{out}");
     assert!(!out.contains("M.twice"), "{out}");
 }
 
@@ -1335,4 +1335,42 @@ fn a_match_inside_a_namespace_reads_the_enum_by_its_own_name() {
         messages,
         ["this match is not exhaustive: `N.Kind` has no arm for `B`; add it or a `default` arm"]
     );
+}
+
+/// A `local` member is one variable. A write inside the namespace
+/// reaches `Game.count`, and a write to `Game.count` reaches the body.
+#[test]
+fn a_local_member_is_one_variable() {
+    let src = "namespace Game as\n    const MAX = 3\n    local count = 0\n    function add(): number\n        count += 1\n        return count\n    end\n    function read(): number\n        return count\n    end\nend\nGame.add()\nGame.add()\nprint(Game.count, Game.MAX)\nGame.count = 10\nprint(Game.read(), Game.add(), Game.count)\n";
+    let (ship, check, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+    // The check artifact keeps the copy, which types the field.
+    assert!(check.contains("Game.count = Game_count"), "{check}");
+    assert!(check.contains("Game.MAX = Game_MAX"), "{check}");
+
+    let dir = std::env::temp_dir().join(format!("alloy-ns-local-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("alloy.luau"), alloy::RUNTIME).unwrap();
+    fs::write(
+        dir.join(".luaurc"),
+        "{ \"aliases\": { \"alloy\": \"./alloy\" } }\n",
+    )
+    .unwrap();
+    fs::write(dir.join("main.luau"), &ship).unwrap();
+    let run = std::process::Command::new("luau")
+        .arg("main.luau")
+        .current_dir(&dir)
+        .output();
+    let _ = fs::remove_dir_all(&dir);
+
+    let Ok(run) = run else {
+        eprintln!("skipped: luau is not installed");
+
+        return;
+    };
+    let out =
+        String::from_utf8_lossy(&run.stdout).into_owned() + &String::from_utf8_lossy(&run.stderr);
+
+    assert_eq!(out.trim(), "2\t3\n10\t11\t11", "{out}\n{ship}");
 }

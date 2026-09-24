@@ -545,6 +545,71 @@ const LUAU_KEYWORDS: &[&str] = &[
     "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
 ];
 
+/*
+The text a quoted Luau string literal stands for, its escapes decoded:
+`'it\'s'` is `it's`. `None` for text that is no quoted literal, or for
+an escape Luau rejects.
+*/
+pub fn literal_text(literal: &str) -> Option<String> {
+    let quote = literal.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let body = literal.strip_prefix(quote)?.strip_suffix(quote)?;
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+
+            continue;
+        }
+
+        match chars.next()? {
+            'a' => out.push('\u{7}'),
+
+            'b' => out.push('\u{8}'),
+
+            'f' => out.push('\u{c}'),
+
+            'n' | '\n' => out.push('\n'),
+
+            'r' => out.push('\r'),
+
+            't' => out.push('\t'),
+
+            'v' => out.push('\u{b}'),
+
+            'z' => while chars.next_if(|c| c.is_whitespace()).is_some() {},
+
+            'x' => {
+                let hex: String = [chars.next()?, chars.next()?].iter().collect();
+                out.push(char::from(u8::from_str_radix(&hex, 16).ok()?));
+            }
+
+            'u' => {
+                chars.next().filter(|c| *c == '{')?;
+                let hex: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+            }
+
+            d if d.is_ascii_digit() => {
+                let mut digits = d.to_string();
+
+                while digits.len() < 3
+                    && let Some(n) = chars.next_if(char::is_ascii_digit)
+                {
+                    digits.push(n);
+                }
+
+                out.push(char::from(digits.parse::<u8>().ok()?));
+            }
+
+            other => out.push(other),
+        }
+    }
+
+    Some(out)
+}
+
 /// A table key: bare when it is a name Luau accepts, else in brackets.
 pub fn luau_key(key: &str) -> String {
     let mut chars = key.chars();
@@ -593,6 +658,20 @@ fn luau_string(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_literal_reads_as_the_text_it_stands_for() {
+        assert_eq!(super::literal_text("'it\\'s'").as_deref(), Some("it's"));
+        assert_eq!(
+            super::literal_text("\"say \\\"hi\\\"\"").as_deref(),
+            Some("say \"hi\"")
+        );
+        assert_eq!(
+            super::literal_text("'a\\tb\\65\\x41\\u{263A}'").as_deref(),
+            Some("a\tbAA\u{263A}")
+        );
+        assert_eq!(super::literal_text("plain"), None);
+    }
+
     use super::*;
 
     #[test]

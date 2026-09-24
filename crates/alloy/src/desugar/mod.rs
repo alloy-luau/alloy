@@ -585,6 +585,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         macro_stmt: false,
         macro_followed: false,
         structs_with_to_string: HashSet::new(),
+        serializable: HashSet::new(),
         private_types: HashSet::new(),
         self_prologue: None,
         not_constructible: HashMap::new(),
@@ -1219,6 +1220,9 @@ struct Desugar<'s> {
     /// Structs whose impl writes `to_string`: they print through it, so
     /// the default printer stays out.
     structs_with_to_string: HashSet<String>,
+    /// The structs of this file that derive `Serialize`. A field of one
+    /// of them serializes through its own `to_table` and `from_table`.
+    serializable: HashSet<String>,
     /// Structs with a `private` field or method. The check artifact
     /// gives each two views: the public type, and `Name__all` for the
     /// impl's own methods.

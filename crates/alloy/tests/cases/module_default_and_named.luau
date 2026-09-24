@@ -1,7 +1,7 @@
-local __alloy = require("@alloy") -- A default sits beside named exports; they are separate names. The
+-- A default sits beside named exports; they are separate names. The
 -- declaration under `export default` binds here too, so the file uses
 -- it like any other.
-local VERSION = 2
+local __alloy = require("@alloy") local VERSION = 2
 
 local Theme = {} Theme.__index = Theme setmetatable(Theme, { __call = function(_, f)  return setmetatable(f, Theme) end }) function Theme.new(f) return Theme(f) end
 

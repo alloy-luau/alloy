@@ -1,6 +1,6 @@
-local __alloy = require("@alloy") -- A namespace inside a namespace: the inner one is a field of the
+-- A namespace inside a namespace: the inner one is a field of the
 -- outer table, and its members take both names.
-local Outer = {}
+local __alloy = require("@alloy") local Outer = {}
     const Outer_A = 1 Outer.A = Outer_A
     Outer.Inner = {}
         const Outer_Inner_B = 2 Outer.Inner.B = Outer_Inner_B

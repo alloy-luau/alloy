@@ -1,6 +1,6 @@
-local __alloy = require("@alloy") -- Bindings in conditions. One construct, two spellings, two pattern kinds.
+-- Bindings in conditions. One construct, two spellings, two pattern kinds.
 
-local Players = game:GetService("Players")
+local __alloy = require("@alloy") local Players = game:GetService("Players")
 
 local Job = {} Job.__index = Job
     function Job.Build(_1) return setmetatable({ tag = "Build", _1 = _1 }, Job) end

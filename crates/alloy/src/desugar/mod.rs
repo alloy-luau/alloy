@@ -651,9 +651,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.check_negations();
 
     // Leading trivia, the block, trailing trivia: the printer's shape. The
-    // std require, when the file needs one, goes on the first line after
-    // the hot comments, so `--!strict` stays first.
-    let insert_at = first_code_line(src) as u32;
+    // std require, when the file needs one, goes on the first line of
+    // code. Luau reads a `--!strict` only above the first token, and a
+    // plain comment may sit above the hot comments.
+    let insert_at = first_code_line(src, toks) as u32;
     d.copy(0, insert_at);
 
     let mut side = Renderer::new(src);
@@ -693,10 +694,14 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         d.generate(insert_at, &line);
     }
 
+    // Luau's solver crashes on the negation of a union or an
+    // intersection with a table in it, and the crash drops every check
+    // of the file. Each member negates first, so a table member errors
+    // the way a table does.
     if d.uses_neg {
         d.generate(
             insert_at,
-            "type function __neg(t) return types.negationof(t) end ",
+            "type function __neg(t) local function each(u) if u:is(\"union\") or u:is(\"intersection\") then for _, c in u:components() do each(c) end else types.negationof(u) end end each(t) return types.negationof(t) end ",
         );
     }
 
@@ -901,19 +906,12 @@ pub(crate) fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
     }
 }
 
-/// The byte offset of the first line that is not a `--!` hot comment.
-fn first_code_line(src: &str) -> usize {
-    let mut at = 0;
-
-    for line in src.split_inclusive('\n') {
-        if line.starts_with("--!") {
-            at += line.len();
-        } else {
-            break;
-        }
-    }
-
-    at
+/// The byte offset of the line that holds the first token: every
+/// comment above it stays above the header.
+fn first_code_line(src: &str, toks: &[Tok]) -> usize {
+    toks.first().map_or(src.len(), |t| {
+        src[..t.start as usize].rfind('\n').map_or(0, |i| i + 1)
+    })
 }
 
 /// One thing a statement hoists in front of itself.

@@ -1,6 +1,6 @@
-local __alloy = require("@alloy") -- A remote packs its parameters by width, down into a struct, a record,
+-- A remote packs its parameters by width, down into a struct, a record,
 -- and an array; a Player crosses as it is.
-local Stats = {} Stats.__index = Stats setmetatable(Stats, { __call = function(_, f)  return setmetatable(f, Stats) end }) function Stats.new(f) return Stats(f) end
+local __alloy = require("@alloy") local Stats = {} Stats.__index = Stats setmetatable(Stats, { __call = function(_, f)  return setmetatable(f, Stats) end }) function Stats.new(f) return Stats(f) end
 
 
 

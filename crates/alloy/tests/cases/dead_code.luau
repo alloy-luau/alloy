@@ -1,7 +1,7 @@
-local __alloy = require("@alloy") -- A statement under a `return`, a `break`, or a `continue` never runs.
+-- A statement under a `return`, a `break`, or a `continue` never runs.
 -- Luau takes those three only as the last statement of a block, so the
 -- emit fences each one in `do ... end`.
-local function scan(xs: __alloy.Array<number>): number
+local __alloy = require("@alloy") local function scan(xs: __alloy.Array<number>): number
     local found = 0
 
     for _, x in xs do

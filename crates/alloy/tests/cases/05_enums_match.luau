@@ -1,8 +1,8 @@
-local __alloy = require("@alloy") -- Enums carry payloads. `match` compiles to an if-chain on the tag.
+-- Enums carry payloads. `match` compiles to an if-chain on the tag.
 -- Every Alloy block closes with `end`.
 
 -- A payload enum desugars to tagged tables.
-local Msg = {} Msg.__index = Msg
+local __alloy = require("@alloy") local Msg = {} Msg.__index = Msg
     function Msg.Join(_1) return setmetatable({ tag = "Join", _1 = _1 }, Msg) end
     function Msg.Chat(_1, _2) return setmetatable({ tag = "Chat", _1 = _1, _2 = _2 }, Msg) end
     function Msg.Leave(_1) return setmetatable({ tag = "Leave", _1 = _1 }, Msg) end

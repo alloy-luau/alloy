@@ -709,6 +709,11 @@ mod tests {
             build(r"local e = <TextLabel>slash \\{text}</TextLabel>"),
             "local e = create(\"TextLabel\")({ Text = function() return `slash \\\\{__luaux_read(text)}` end })"
         );
+        // Alloy patch: `\<` writes a RichText tag as text.
+        assert_eq!(
+            build(r"local e = <TextLabel>\<b>bold\</b> {n}</TextLabel>"),
+            "local e = create(\"TextLabel\")({ Text = function() return `<b>bold</b> {__luaux_read(n)}` end })"
+        );
         assert_eq!(
             build("local e = <TextLabel>a ` b</TextLabel>"),
             "local e = create(\"TextLabel\")({ Text = \"a ` b\" })"
@@ -1321,6 +1326,11 @@ mod tests {
 
         // Unambiguous either side of it.
         assert!(try_build("local e = <TextButton>Click<UICorner/></TextButton>").is_ok());
+        // Alloy patch: literal text makes the expression part of the text.
+        assert_eq!(
+            build("local e = <TextButton>Count: {n}<UICorner/></TextButton>"),
+            "local e = create(\"TextButton\")({ Text = function() return `Count: {__luaux_read(n)}` end, create(\"UICorner\")({}) })"
+        );
         assert!(try_build("local e = <TextButton>{label}</TextButton>").is_ok());
         assert!(try_build("local e = <Frame>{child}<TextLabel/></Frame>").is_ok());
     }

@@ -512,8 +512,10 @@ pub(super) fn plan_text(
     // `<TextButton>{label}<UICorner/></TextButton>` is genuinely ambiguous: the
     // expression could be the button's text or another child, and nothing here
     // can tell. Emitting a guess produces code that fails inside Vide at
-    // runtime, so refuse and ask for the explicit form.
-    if has_expressions && has_nodes {
+    // runtime, so refuse and ask for the explicit form. Alloy patch: literal
+    // text beside the expression settles it, since `Count: {n}` reads as one
+    // string, so `<TextButton>Count: {n}<UICorner/></TextButton>` builds.
+    if has_expressions && has_nodes && !has_text_literal {
         return Err(EmitError::new(
             format!(
                 "<{class}> has both an expression child and element children, so it is unclear \

@@ -1063,4 +1063,19 @@ mod tests {
         let unread = "for _, item: Instance in t do\n    print(1)\nend\n";
         assert_eq!(names_of(&lints_of(unread, &[])), vec!["unused_variable"]);
     }
+
+    /// A pattern binds its locals: a field it reads and a type it
+    /// states bind nothing, and the fix of a shorthand entry keeps the
+    /// field.
+    #[test]
+    fn a_pattern_binds_its_locals_only() {
+        let src = "local t = { a = 1, b = 2 }\nlocal { a, b } = t\nlocal { a: number, c = d } = t\nprint(a, d)\nfor _, { a = q } in { t } do print(q) end\n";
+        let lints = lints_of(src, &[]);
+
+        assert_eq!(names_of(&lints), vec!["unused_variable"], "{lints:?}");
+        assert_eq!(
+            fixed_by(src, &lints),
+            src.replace("local { a, b } = t", "local { a, b = _b } = t")
+        );
+    }
 }

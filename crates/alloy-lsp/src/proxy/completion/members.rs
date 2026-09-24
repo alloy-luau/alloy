@@ -854,7 +854,17 @@ pub(crate) fn payload_types(signature: &str) -> Vec<String> {
     let Some(open) = signature.find('(') else {
         return Vec::new();
     };
-    let Some(close) = signature.rfind(')') else {
+    // The `)` that closes the list: a return type `()` has one too.
+    let mut depth = 0i32;
+    let Some(close) = signature[open..].char_indices().find_map(|(i, c)| {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+
+        (depth == 0).then_some(open + i)
+    }) else {
         return Vec::new();
     };
     let inner = &signature[open + 1..close];
@@ -865,6 +875,8 @@ pub(crate) fn payload_types(signature: &str) -> Vec<String> {
     for (i, c) in inner.char_indices() {
         match c {
             '(' | '{' | '<' | '[' => depth += 1,
+            // The `>` of `->` closes nothing.
+            '>' if inner[..i].ends_with('-') => {}
             ')' | '}' | '>' | ']' => depth -= 1,
             ',' if depth == 0 => {
                 out.push(inner[start..i].trim().to_string());

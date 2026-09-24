@@ -955,6 +955,38 @@ fn a_field_rename_reaches_a_parameter_pattern() {
     );
 }
 
+/// A rename of a local that a shorthand entry binds keeps the field the
+/// entry reads.
+#[test]
+fn a_local_rename_keeps_the_field_of_a_shorthand_entry() {
+    const SRC: &str = concat!(
+        "type Point = { x: number, y: number }\n",
+        "local function draw({ x, y }: Point): number\n",
+        "    return x + y\n",
+        "end\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    // What the child answers: the local in the pattern and its read.
+    let mut result = json!({
+        "changes": {
+            uri: [
+                { "range": range_value((1, 22), (1, 23)), "newText": "across" },
+                { "range": range_value((2, 11), (2, 12)), "newText": "across" },
+            ],
+        },
+    });
+    st.mend_pattern_rename(&mut result);
+
+    let texts: Vec<&str> = result["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .map(|e| e["newText"].as_str().unwrap_or_default())
+        .collect();
+
+    assert_eq!(texts, ["x = across", "across"], "{result}");
+}
+
 /// A field rename stays with its struct: a file that declares another
 /// type under the name keeps its patterns and its keys, and a file that
 /// imports the struct gets them.

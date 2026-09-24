@@ -1264,6 +1264,12 @@ impl Server {
                                 text = rewritten;
                             }
 
+                            if let Some(plain) =
+                                super::patterns::without_pattern_temps(&text, &doc.source)
+                            {
+                                text = plain;
+                            }
+
                             if let Some(kept) = keep_annotation(&text, doc, line, character) {
                                 text = kept;
                             }
@@ -1772,9 +1778,12 @@ impl Server {
                     }
                 }
 
-                // A struct field: the constructor writes it as a table
-                // key the child ties to no field.
+                // A shorthand pattern entry keeps its field. A struct
+                // field: the constructor writes it as a table key the
+                // child ties to no field.
                 "textDocument/rename" => {
+                    st.mend_pattern_rename(result);
+
                     if let Some(uri) = &ctx
                         && let Some((line, character)) = position
                     {

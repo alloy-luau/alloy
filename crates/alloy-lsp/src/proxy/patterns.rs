@@ -357,6 +357,128 @@ impl Server {
     }
 }
 
+impl State {
+    /// A rename of a local that a shorthand entry binds. The child edits
+    /// the entry, which also names the field it reads, so the edit keeps
+    /// the field and renames the local: `{ x = across }`.
+    pub(crate) fn mend_pattern_rename(&self, result: &mut Value) {
+        let Some(changes) = result
+            .pointer_mut("/changes")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+
+        for (uri, edits) in changes.iter_mut() {
+            let Some(doc) = self.docs.get(uri) else {
+                continue;
+            };
+
+            for edit in edits.as_array_mut().into_iter().flatten() {
+                let Some(((sl, sc), (el, ec))) = edit.get("range").and_then(range_of) else {
+                    continue;
+                };
+                let (Some(s), Some(e)) = (
+                    offset_of(&doc.source, sl, sc),
+                    offset_of(&doc.source, el, ec),
+                ) else {
+                    continue;
+                };
+                let new = edit["newText"].as_str().unwrap_or_default().to_string();
+
+                if s < e && shorthand_entry(&doc.source, s, e) {
+                    edit["newText"] = json!(format!("{} = {new}", &doc.source[s..e]));
+                }
+            }
+        }
+    }
+}
+
+/// A signature with each pattern temp dropped from its parameter list:
+/// the caller passes one value, so its type stands for the pattern. A
+/// `_p1` the source writes itself stays.
+pub(crate) fn without_pattern_temps(text: &str, source: &str) -> Option<String> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let written = |name: &str| {
+        source.match_indices(name).any(|(at, _)| {
+            !source[..at].ends_with(word) && !source[at + name.len()..].starts_with(word)
+        })
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut changed = false;
+
+    while let Some(at) = rest.find("_p") {
+        out.push_str(&rest[..at]);
+        let digits = rest[at + 2..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let (name, after) = rest[at..].split_at(2 + digits);
+
+        if digits > 0
+            && (out.ends_with('(') || out.ends_with(", "))
+            && let Some(ty) = after.strip_prefix(": ")
+            && !written(name)
+        {
+            rest = ty;
+            changed = true;
+        } else {
+            out.push_str(name);
+            rest = after;
+        }
+    }
+
+    out.push_str(rest);
+
+    changed.then_some(out)
+}
+
+/// Whether `start..end` is a shorthand entry of a table pattern: `{ x }`
+/// in a parameter list, a `local`, or a `for` head.
+pub(crate) fn shorthand_entry(src: &str, start: usize, end: usize) -> bool {
+    let before = src[..start].trim_end();
+    let after = src[end..].trim_start();
+
+    if !before.ends_with(['{', ',']) || !after.starts_with([',', '}', ':']) {
+        return false;
+    }
+
+    let b = src.as_bytes();
+    let mut depth = 0i32;
+    let open = (0..start).rev().find(|&i| match b[i] {
+        b'}' | b')' | b']' => {
+            depth += 1;
+
+            false
+        }
+
+        b'{' | b'(' | b'[' if depth == 0 => true,
+
+        b'{' | b'(' | b'[' => {
+            depth -= 1;
+
+            false
+        }
+
+        _ => false,
+    });
+    let Some(open) = open.filter(|&i| b[i] == b'{') else {
+        return false;
+    };
+    let head = src[..open].trim_end();
+    let line = head[head.rfind('\n').map_or(0, |n| n + 1)..].trim_start();
+    let word = |w: &str| {
+        head.strip_suffix(w)
+            .is_some_and(|h| !h.ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+    };
+
+    word("local")
+        || word("const")
+        || (line.starts_with("for ") && !line.contains(" in "))
+        || site_at(src, start).is_some()
+}
+
 /// The edits a rename of field `field` of `owner` makes in the parameter
 /// patterns of a source that name `owner`: `{ x }` reads the field under
 /// its new name and keeps its local, `{ left = x }`, and `{ x = a }`
@@ -468,6 +590,37 @@ mod tests {
         // An unclosed pattern while someone types.
         let typing = "local function pick({ x, ";
         assert_eq!(site_at(typing, typing.len()).unwrap().close, None);
+    }
+
+    #[test]
+    fn a_signature_drops_the_pattern_temps() {
+        let src = "local function draw({ x }: Point, _p9: number)\nend";
+
+        assert_eq!(
+            without_pattern_temps(
+                "function draw(_p1: Point, _p9: number, b: { _p2: string }): number",
+                src
+            )
+            .as_deref(),
+            Some("function draw(Point, _p9: number, b: { _p2: string }): number")
+        );
+        assert_eq!(without_pattern_temps("function f(a: number)", src), None);
+    }
+
+    #[test]
+    fn a_shorthand_entry_is_found_in_every_pattern() {
+        let at = |src: &str, word: &str| {
+            let s = src.find(word).unwrap();
+
+            shorthand_entry(src, s, s + word.len())
+        };
+
+        assert!(at("local function f({ x, y }: P)\nend", "y"));
+        assert!(at("local { a, b: number } = t", "b"));
+        assert!(at("for _, { x = ex, y } in pts do end", "y"));
+        assert!(!at("for _, { x = ex, y } in pts do end", "ex"));
+        assert!(!at("local t = { y }", "y"));
+        assert!(!at("print { y }", "y"));
     }
 
     #[test]

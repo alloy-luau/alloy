@@ -364,7 +364,7 @@ fn reports(src: &str, name: &str) -> Option<Vec<String>> {
     let out = alloy::compile_with(src, &options).unwrap();
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
 
-    let dir = std::env::temp_dir().join(format!("alloy-analyze-{name}"));
+    let dir = std::env::temp_dir().join(format!("alloy-analyze-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(format!("{name}.luau"));
     std::fs::write(&file, &out.check).unwrap();

@@ -117,6 +117,50 @@ impl Server {
         true
     }
 
+    /// A caret on an attribute of a component's tag: the prop's field in
+    /// the component's props type answers. Definition lands there, and
+    /// rename and references ask the child there, as though the caret
+    /// sat on the field. The mend adds the tags back to that answer.
+    pub(crate) fn prop_answer(&self, method: &str, uri: &str, message: &Value, id: &Value) -> bool {
+        if !uri.ends_with(".alx") {
+            return false;
+        }
+
+        let Some((line, character)) = position_of_message(message) else {
+            return false;
+        };
+        let field = {
+            let st = self.state.lock().expect("state");
+            let spot = st.docs.get(uri).and_then(|doc| {
+                markup::hover_spot(&doc.source, offset_of(&doc.source, line, character)?)
+            });
+
+            match spot {
+                Some(markup::Spot::Attribute { class, name }) => {
+                    st.prop_declaration(uri, &class, &name)
+                }
+
+                _ => None,
+            }
+        };
+        let Some((home, range)) = field else {
+            return false;
+        };
+
+        if method == "textDocument/definition" {
+            self.respond(id, json!([{ "uri": home, "range": range }]));
+
+            return true;
+        }
+
+        let mut moved = message.clone();
+        moved["params"]["textDocument"]["uri"] = json!(home);
+        moved["params"]["position"] = range["start"].clone();
+        self.forward_request(moved, Some(method));
+
+        true
+    }
+
     /// Renames a name an import list binds. The emit writes the binding
     /// as generated text, so the child's edits map back to the first
     /// byte of the import line: one-character ranges, in the wrong
@@ -955,7 +999,10 @@ impl State {
                 });
             }
 
+            // A component's tags are generated calls the child ties to
+            // nothing, so its declaration and its uses answer below.
             if !declares
+                && !(doc.is_alx && markup::names_a_tag(source, word))
                 && matches!(
                     context::binding_in_scope(source, offset, word).map(|l| l.kind),
                     Some(context::LocalKind::Parameter | context::LocalKind::Variable)
@@ -1000,10 +1047,10 @@ impl State {
             // ties to nothing. The function's own walk answers, here or
             // in the module an import reads it from.
             if doc.is_alx
-                && matches!(
+                && (matches!(
                     markup::hover_spot(source, offset),
                     Some(markup::Spot::Tag { .. })
-                )
+                ) || markup::names_a_tag(source, &word))
             {
                 if let Some(entry) = import_entries(source)
                     .into_iter()
@@ -1454,18 +1501,50 @@ impl State {
             return;
         };
         let name = &doc.source[start..end];
-        let spells = |u: &str, site: &Value| {
-            self.docs
-                .get(u)
-                .is_none_or(|d| edits_the_word(&d.source, site, name))
+        let spells = |u: &str, site: &mut Value| {
+            let Some(d) = self.docs.get(u) else {
+                return true;
+            };
+
+            if edits_the_word(&d.source, site, name) {
+                return true;
+            }
+
+            // `match k with` on literal cases lowers to `if k == 1` on
+            // the line of each arm, so the child's site lands there.
+            let Some((s, e)) = site
+                .get("range")
+                .and_then(range_of)
+                .and_then(|((l, c), _)| offset_of(&d.source, l, c))
+                .and_then(|at| scrutinee_of_arm(&d.source, at, name))
+            else {
+                return false;
+            };
+            site["range"] = range_value(position_of(&d.source, s), position_of(&d.source, e));
+
+            true
+        };
+
+        // `cfg?.a` and `v ??= 3` lower to two reads of the name that
+        // both map back to the one the author wrote. The editor refuses
+        // a rename whose edits overlap, so each site stays once.
+        let mut seen: Vec<Value> = Vec::new();
+        let mut first = |site: &Value| {
+            let fresh = !seen.contains(site);
+            seen.push(site.clone());
+
+            fresh
         };
 
         if let Some(list) = result.as_array_mut() {
-            list.retain(|loc| {
-                spells(
-                    loc.get("uri").and_then(Value::as_str).unwrap_or_default(),
-                    loc,
-                )
+            list.retain_mut(|loc| {
+                let u = loc
+                    .get("uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+
+                spells(&u, loc) && first(loc)
             });
         }
 
@@ -1475,7 +1554,7 @@ impl State {
         {
             for (u, edits) in changes.iter_mut() {
                 if let Some(list) = edits.as_array_mut() {
-                    list.retain(|e| spells(u, e));
+                    list.retain_mut(|e| spells(u, e) && first(&json!([u, e])));
                 }
             }
         }
@@ -1523,6 +1602,230 @@ impl State {
 
                 if !list.contains(&loc) {
                     list.push(loc);
+                }
+            }
+        }
+    }
+
+    /// The binding a local `export { inner as bump }` list names. The
+    /// emit writes the list as generated text, so the child's rename
+    /// and references of `inner` leave the list out. The child's answer
+    /// holds the module's own declaration when the caret's name is the
+    /// one the list reads.
+    pub(crate) fn mend_export_list(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
+            return;
+        };
+        let name = &doc.source[start..end];
+        let entries: Vec<ImportEntry> = export_list_entries(&doc.source)
+            .into_iter()
+            .filter(|e| e.name == name)
+            .collect();
+
+        if entries.is_empty() {
+            return;
+        }
+
+        let Some((s, e)) = export_span(&doc.source, name) else {
+            return;
+        };
+        let declared = range_value(position_of(&doc.source, s), position_of(&doc.source, e));
+        let site = |(s, e): (usize, usize)| {
+            range_value(position_of(&doc.source, s), position_of(&doc.source, e))
+        };
+
+        if let Some(list) = result.as_array_mut() {
+            let at_declaration = list
+                .iter()
+                .any(|l| l["uri"] == uri && l["range"] == declared);
+
+            for entry in entries.iter().filter(|_| at_declaration) {
+                let loc = json!({ "uri": uri, "range": site(entry.name_at) });
+
+                if !list.contains(&loc) {
+                    list.push(loc);
+                }
+            }
+        }
+
+        if let Some(edits) = result
+            .pointer_mut("/changes")
+            .and_then(|c| c.get_mut(uri))
+            .and_then(Value::as_array_mut)
+            && let Some(new_text) = edits
+                .iter()
+                .find(|e| e["range"] == declared)
+                .map(|e| e["newText"].clone())
+        {
+            for entry in &entries {
+                let edit = json!({ "range": site(entry.name_at), "newText": new_text });
+
+                if !edits.contains(&edit) {
+                    edits.push(edit);
+                }
+            }
+        }
+    }
+
+    /// The file that declares the component a tag of `uri` names, with
+    /// its text: this file, or the module an import brings it from.
+    fn component_home(&self, uri: &str, tag: &str) -> Option<(String, String)> {
+        let doc = self.docs.get(uri)?;
+        let last = tag.rsplit('.').next()?;
+
+        if doc.source.contains(&format!("function {last}(")) {
+            return Some((uri.to_string(), doc.source.clone()));
+        }
+
+        let load = |spec: &str| self.module_source(uri, spec);
+        let spec = markup::component_module(&doc.source, tag, &load)?;
+        let file = imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
+
+        Some((path_to_uri(&file), self.module_text(&file)?))
+    }
+
+    /// Where the props type of a component declares `prop`: the record
+    /// in the parameter list, or the `type`, `struct`, or `interface` it
+    /// names in the same file. A URI and a source range.
+    pub(crate) fn prop_declaration(
+        &self,
+        uri: &str,
+        tag: &str,
+        prop: &str,
+    ) -> Option<(String, Value)> {
+        let (home, text) = self.component_home(uri, tag)?;
+        let head = format!("function {}(", tag.rsplit('.').next()?);
+        let open = text.find(&head)? + head.len();
+        let close = open + text[open..].find(')')?;
+        let declared = text[open..close].split_once(':')?.1.trim();
+        let from = match declared.starts_with('{') {
+            true => open,
+
+            false => {
+                let name: String = declared
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+
+                export_span(&text, &name)?.1
+            }
+        };
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let at = from
+            + text[from..]
+                .match_indices(prop)
+                .map(|(i, _)| i)
+                .find(|&i| {
+                    let (s, e) = (from + i, from + i + prop.len());
+                    let after = text[e..].trim_start();
+
+                    !text[..s].ends_with(word)
+                        && !text[e..].starts_with(word)
+                        && after.starts_with(':')
+                        && !after.starts_with("::")
+                })?;
+
+        Some((
+            home,
+            range_value(position_of(&text, at), position_of(&text, at + prop.len())),
+        ))
+    }
+
+    /// The attributes that set a prop on a component's tags. The markup
+    /// lowers each to a key of a generated table, so the child's rename
+    /// and references of the prop's field leave the tags out. A tag
+    /// joins when its component's field is one of the child's sites.
+    pub(crate) fn mend_prop_attributes(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
+            return;
+        };
+        let name = doc.source[start..end].to_string();
+        let mut sites: Vec<(String, Value)> = Vec::new();
+        let mut new_text = None;
+
+        if let Some(list) = result.as_array() {
+            for loc in list {
+                sites.push((
+                    loc["uri"].as_str().unwrap_or_default().to_string(),
+                    loc["range"].clone(),
+                ));
+            }
+        }
+
+        if let Some(changes) = result.get("changes").and_then(Value::as_object) {
+            for (u, edits) in changes {
+                for e in edits.as_array().into_iter().flatten() {
+                    sites.push((u.clone(), e["range"].clone()));
+                    new_text = Some(e["newText"].clone());
+                }
+            }
+        }
+
+        // Only a field's rename reaches a tag, and a field key reads
+        // `name:`. Any other answer skips the walk over the markup.
+        let names_a_field = sites.iter().any(|(u, range)| {
+            self.docs.get(u).is_some_and(|d| {
+                range_of(range)
+                    .and_then(|(_, (l, c))| offset_of(&d.source, l, c))
+                    .is_some_and(|at| d.source[at..].trim_start().starts_with(':'))
+            })
+        });
+
+        if !names_a_field {
+            return;
+        }
+
+        let mut extra: Vec<(String, Value)> = Vec::new();
+
+        for (u, d) in self.docs.iter().filter(|(_, d)| d.is_alx) {
+            for (tag, (s, e)) in markup::attribute_sites(&d.source, &name) {
+                if self
+                    .prop_declaration(u, &tag, &name)
+                    .is_some_and(|field| sites.contains(&field))
+                {
+                    let range = range_value(position_of(&d.source, s), position_of(&d.source, e));
+                    extra.push((u.clone(), range));
+                }
+            }
+        }
+
+        for (u, range) in extra {
+            if sites.contains(&(u.clone(), range.clone())) {
+                continue;
+            }
+
+            if let Some(list) = result.as_array_mut() {
+                list.push(json!({ "uri": u, "range": range }));
+            } else if let (Some(changes), Some(text)) = (
+                result.get_mut("changes").and_then(Value::as_object_mut),
+                &new_text,
+            ) {
+                let edit = json!({ "range": range, "newText": text });
+
+                match changes.get_mut(&u).and_then(Value::as_array_mut) {
+                    Some(list) => list.push(edit),
+
+                    None => {
+                        changes.insert(u, json!([edit]));
+                    }
                 }
             }
         }
@@ -2426,6 +2729,39 @@ fn edits_the_word(src: &str, edit: &Value, name: &str) -> bool {
     src.get(start..end) == Some(name)
 }
 
+/// The scrutinee `name` of the `match` whose arm holds byte `at`: the
+/// `k` of `match k with` when `at` sits on a `case` or `default` line
+/// under it. The head is the nearest line above that is indented less.
+fn scrutinee_of_arm(src: &str, at: usize, name: &str) -> Option<(usize, usize)> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let arm = src[line_start..].lines().next()?;
+
+    if !(arm.trim_start().starts_with("case ") || arm.trim_start().starts_with("default")) {
+        return None;
+    }
+
+    let mut end = line_start.checked_sub(1)?;
+    let head_start = loop {
+        let start = src[..end].rfind('\n').map_or(0, |i| i + 1);
+        let line = &src[start..end];
+
+        if !line.trim().is_empty() && indent(line) < indent(arm) {
+            break start;
+        }
+
+        end = start.checked_sub(1)?;
+    };
+    let head = &src[head_start..end];
+    let at = head.rfind("match ")? + "match ".len();
+
+    (head[at..].trim_end().strip_suffix(" with")?.trim() == name).then(|| {
+        let s = head_start + at + (head[at..].len() - head[at..].trim_start().len());
+
+        (s, s + name.len())
+    })
+}
+
 /// Every `name =` key of a constructor of `owner` in a source: the
 /// literal of `new Owner { ... }`, and the one a typed binding takes. A
 /// nested literal reads by the brace it sits in, so an inner struct
@@ -2917,18 +3253,26 @@ pub(crate) struct ImportEntry {
 /// `import` to the `from` of the same statement and not to the end of
 /// the line.
 pub(crate) fn import_entries(src: &str) -> Vec<ImportEntry> {
-    list_entries(src, &["import "])
+    list_entries(src, &["import "], false)
 }
 
 /// Every name an `export { ... } from` list of the file sends on. The
 /// file binds none of them; a rename edits the list.
 pub(crate) fn reexport_entries(src: &str) -> Vec<ImportEntry> {
-    list_entries(src, &["export {", "export type {"])
+    list_entries(src, &["export {", "export type {"], false)
 }
 
-/// The entries of the lists whose statements start with one of `heads`
-/// and name a module with `from`.
-fn list_entries(src: &str, heads: &[&str]) -> Vec<ImportEntry> {
+/// Every name an `export { ... }` list with no `from` sends out. The
+/// entry's name is the file's own binding, and its bound name is the
+/// one importers write: `export { inner as bump }` exports `bump`.
+pub(crate) fn export_list_entries(src: &str) -> Vec<ImportEntry> {
+    list_entries(src, &["export {", "export type {"], true)
+}
+
+/// The entries of the lists whose statements start with one of `heads`:
+/// the lists that name a module with `from`, or with `local`, the ones
+/// that do not.
+fn list_entries(src: &str, heads: &[&str], local: bool) -> Vec<ImportEntry> {
     let mut out = Vec::new();
     let mut line_start = 0;
 
@@ -2940,21 +3284,21 @@ fn list_entries(src: &str, heads: &[&str]) -> Vec<ImportEntry> {
             continue;
         }
 
-        // The `from` closes the head of the statement. A `{` past it
-        // belongs to someone else's code.
-        let Some(from) = src[here..].find(" from ").map(|i| here + i) else {
+        // A `from` belongs to the list when it follows the `}`; one
+        // further down belongs to another statement.
+        let Some(open) = line.find('{').map(|i| here + i) else {
             continue;
         };
-        let head = &src[here..from];
-        let Some(open) = head.find('{').map(|i| here + i) else {
+        let Some(close) = src[open..].find('}').map(|i| open + i) else {
             continue;
         };
-        let Some(close) = src[open..from].find('}').map(|i| open + i) else {
-            continue;
-        };
-        let tail_end = src[from..].find('\n').map_or(src.len(), |i| from + i);
-        let Some(spec) = import_spec(&src[from..tail_end]) else {
-            continue;
+        let tail_end = src[close..].find('\n').map_or(src.len(), |i| close + i);
+        let spec = match (import_spec(&src[close..tail_end]), local) {
+            (Some(spec), false) => spec,
+
+            (None, true) => String::new(),
+
+            _ => continue,
         };
 
         for entry in split_entries(&src[open + 1..close]) {
@@ -3080,17 +3424,26 @@ fn parameter_span(src: &str, offset: usize, name: &str) -> Option<(usize, usize)
 
 /// Where a module declares a name it exports, as the byte range of the
 /// name. `export default` has an answer of its own, in
-/// `default_import_definition`.
+/// `default_import_definition`. The alias of `export { inner as bump }`
+/// declares `bump`: no other place in the module spells it.
 pub(crate) fn export_span(src: &str, name: &str) -> Option<(usize, usize)> {
     let lexed = alloy_syntax::lexer::lex(src).ok()?;
     let toks = &lexed.toks;
 
-    toks.iter().enumerate().find_map(|(i, t)| {
-        let before = toks.get(i.wrapping_sub(1))?.text(src);
+    toks.iter()
+        .enumerate()
+        .find_map(|(i, t)| {
+            let before = toks.get(i.wrapping_sub(1))?.text(src);
 
-        (t.text(src) == name && DECLARES.contains(&before))
-            .then_some((t.start as usize, t.end as usize))
-    })
+            (t.text(src) == name && DECLARES.contains(&before))
+                .then_some((t.start as usize, t.end as usize))
+        })
+        .or_else(|| {
+            export_list_entries(src)
+                .into_iter()
+                .find(|e| e.bound == name)
+                .and_then(|e| e.alias_at)
+        })
 }
 
 /// Whether a module declares a name as a type: a `struct`, an `enum`, a

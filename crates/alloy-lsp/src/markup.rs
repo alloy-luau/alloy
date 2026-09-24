@@ -582,6 +582,28 @@ pub fn hover_spot(src: &str, offset: usize) -> Option<Spot> {
         .or_else(|| attribute_at(src, offset))
 }
 
+/// Whether the source writes an element of `name`, as `<name ...>`.
+pub fn names_a_tag(src: &str, name: &str) -> bool {
+    src.match_indices(&format!("<{name}"))
+        .any(|(i, _)| matches!(hover_spot(src, i + 1), Some(Spot::Tag { name: n }) if n == name))
+}
+
+/// Every attribute `attr` an element of the source sets, with the tag
+/// that sets it: `<Button label="ok" />` gives `Button` and the byte
+/// range of `label`.
+pub fn attribute_sites(src: &str, attr: &str) -> Vec<(String, (usize, usize))> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+
+    src.match_indices(attr)
+        .filter(|(i, _)| !src[..*i].ends_with(word) && !src[i + attr.len()..].starts_with(word))
+        .filter_map(|(i, _)| match hover_spot(src, i)? {
+            Spot::Attribute { class, name } if name == attr => Some((class, (i, i + attr.len()))),
+
+            _ => None,
+        })
+        .collect()
+}
+
 /// An attribute name read from the text, for a tag the tree holds no
 /// element for: a tag inside a `{ }` hole is one expression there.
 fn attribute_at(src: &str, offset: usize) -> Option<Spot> {

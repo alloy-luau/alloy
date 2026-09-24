@@ -1281,6 +1281,13 @@ impl Server {
                                 text = with_init;
                             }
 
+                            if let Some(path) = uri_to_path(uri)
+                                && let Some(types) =
+                                    type_only_module_hover(&text, doc, &path, line, character)
+                            {
+                                text = types;
+                            }
+
                             // The head of a method comes from several
                             // passes; the comment above its declaration
                             // goes on once they have all run.

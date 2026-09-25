@@ -599,6 +599,46 @@ fn a_dotted_attribute_is_checked_against_its_declaration() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `@M.Ns.tag` reads a public attribute of a namespace the module
+/// exports, with its targets and defaults. A path the index knows to be
+/// wrong reports; a name the module sends on from another module is
+/// out of the index's reach, so a path through it passes. The path was
+/// accepted in silence with no default.
+#[test]
+fn a_namespace_attribute_is_checked_through_a_star_import() {
+    let dir = scratch("namespace-attribute");
+    std::fs::write(dir.join("inner.aly"), "export attribute deep on function\n").unwrap();
+    std::fs::write(
+        dir.join("tags.aly"),
+        "import * as Inner from \"./inner\"\nexport namespace Ns as\n    attribute tag(n: number = 3) on function\n    private attribute hidden on function\n    namespace Deeper as\n        attribute low on struct\n    end\nend\nexport { Inner }\n",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let source = "import * as M from \"./tags\"\n@M.Ns.tag\nfunction a()\nend\n@M.Ns.Deeper.low\nstruct S as\n    x: number\nend\n@M.Inner.deep\nfunction b()\nend\n@M.Ns.tga\nfunction c()\nend\n@M.Ns.hidden\nfunction d()\nend\n@M.Nx.tag\nfunction e()\nend\n@M.Ns.Dx.low\nfunction f()\nend\n@M.Ns.tag\nstruct T as\n    x: number\nend\nprint(a, S, b, c, d, e, f, T)\n";
+    std::fs::write(&main, source).unwrap();
+    let options = alloy::EmitOptions::default().imports(source, &main, &[]);
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert_eq!(
+        messages,
+        [
+            "`M.Ns` exports no attribute `tga`; it exports `tag`",
+            "`M.Ns` exports no attribute `hidden`; it exports `tag`",
+            "`M` exports no `Nx`, so `@M.Nx.tag` names no attribute",
+            "`M` declares no namespace `Ns.Dx`, so `@M.Ns.Dx.low` names no attribute",
+            "the attribute `M.Ns.tag` has no meaning on a struct; it goes on `function`",
+        ]
+    );
+    assert!(
+        out.ship.contains("__alloy.attach(a, { tag = { 3 } })"),
+        "{}",
+        out.ship
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `import * as M, { a }` binds the whole module and names from it, the
 /// way `import M, { a }` binds the default and names from it.
 #[test]

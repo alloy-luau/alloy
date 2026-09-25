@@ -169,10 +169,12 @@ pub struct EmitOptions {
     /// attribute is used, so a use here needs the declaration there.
     /// See `crate::modules::import_attributes`.
     pub import_attributes: Vec<(String, AttrDecl)>,
-    /// The locals of the star imports that name an Alloy module, whose
-    /// attributes `import_attributes` lists in full. `@M.tag` that names
+    /// Each star import of an Alloy module: the local, the paths of the
+    /// namespaces the module declares, and every name it exports.
+    /// `import_attributes` lists the attributes of the module and of
+    /// those namespaces in full, so `@M.tag` or `@M.Ns.tag` that names
     /// none of them reports. See `crate::modules::import_star_modules`.
-    pub import_star_modules: Vec<String>,
+    pub import_star_modules: Vec<(String, Vec<String>, Vec<String>)>,
     /// The enums the file around a macro expansion declares. A macro
     /// body compiles as a fragment of its own, and a `match` in it
     /// covers the enums of the file it lands in. See `compile_fragment`.

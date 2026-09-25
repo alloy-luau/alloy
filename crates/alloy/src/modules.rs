@@ -7,7 +7,7 @@
 //! The index is a line scan of the target file, not a compile: it runs
 //! for every import of every file on every edit in the editor.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
@@ -1456,7 +1456,9 @@ check would hold only inside the declaring module.
 
 Each one is keyed as a use spells it: `price` for a named import, and
 `M.price` through `import * as M`, so the path fills the defaults and
-checks the targets the way the bare name does.
+checks the targets the way the bare name does. A public member of an
+exported namespace reads under its path, `M.Ns.tag`. A path whose head
+this file does not bind is left out.
 */
 pub fn import_attributes(
     source: &str,
@@ -1464,82 +1466,146 @@ pub fn import_attributes(
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, crate::desugar::AttrDecl)> {
     let modules = module_decls(source, from, aliases, exported_attribute_decls);
+    let bound: HashSet<String> = named_specs(source, from, aliases)
+        .into_iter()
+        .map(|(_, _, local)| local)
+        .chain(
+            star_locals(source, from, aliases)
+                .into_iter()
+                .map(|(_, l)| l),
+        )
+        .collect();
+    let mut out = keyed_by_local(source, from, aliases, &modules);
+    out.retain(|(key, _)| {
+        key.split_once('.')
+            .is_none_or(|(head, _)| bound.contains(head))
+    });
 
-    keyed_by_local(source, from, aliases, &modules)
+    out
 }
 
-/// The locals of the star imports that name an Alloy module. Such a
-/// module lists every attribute it exports.
+/// Each star import of an Alloy module: the local, the namespaces the
+/// module declares, and every name it exports. The attribute index
+/// holds each attribute of the module and of those namespaces, so a
+/// path it lacks reports. See `EmitOptions::import_star_modules`.
 pub fn import_star_modules(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
-) -> Vec<String> {
+) -> Vec<(String, Vec<String>, Vec<String>)> {
     star_locals(source, from, aliases)
         .into_iter()
         .filter(|(path, _)| is_alloy(path))
-        .map(|(_, local)| local)
+        .map(|(path, local)| {
+            let text = module_text(&path).unwrap_or_default();
+            let mut namespaces = Vec::new();
+            attribute_walk(&text, &mut Vec::new(), &mut namespaces);
+
+            (local, namespaces, exported_names(&text))
+        })
         .collect()
 }
 
 /// The `export attribute` declarations of one source, for a file that
-/// imports it.
+/// imports it, with the public attributes of its exported namespaces.
 pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
     let mut out = Vec::new();
+    attribute_walk(src, &mut out, &mut Vec::new());
 
-    {
-        let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
-            return out;
-        };
-        let toks = &parsed.lexed.toks;
+    out
+}
 
-        for stmt in &parsed.chunk.block.stmts {
-            let alloy_syntax::ast::Stmt::Attribute(a) = stmt else {
-                continue;
-            };
+/// The attributes a module exports, and the path of every namespace
+/// the walk reads them from. A top-level declaration counts when it is
+/// exported, and a namespace member when it is not private.
+fn attribute_walk(
+    src: &str,
+    out: &mut Vec<(String, crate::desugar::AttrDecl)>,
+    namespaces: &mut Vec<String>,
+) {
+    use alloy_syntax::ast::Stmt;
 
-            if !a.exported {
-                continue;
+    fn walk(
+        src: &str,
+        toks: &[alloy_syntax::lexer::Tok],
+        stmt: &Stmt,
+        prefix: &str,
+        out: &mut Vec<(String, crate::desugar::AttrDecl)>,
+        namespaces: &mut Vec<String>,
+    ) {
+        match stmt {
+            Stmt::Attribute(a) => out.push((
+                format!("{prefix}{}", token_text(src, toks, a.name)),
+                attribute_decl(src, toks, a),
+            )),
+
+            Stmt::Namespace(ns) => {
+                let path = format!("{prefix}{}", token_text(src, toks, ns.name));
+
+                for m in ns.members.iter().filter(|m| !m.is_private(src, toks)) {
+                    walk(src, toks, &m.stmt, &format!("{path}."), out, namespaces);
+                }
+
+                namespaces.push(path);
             }
 
-            let targets = a
-                .targets
-                .iter()
-                .map(|t| token_text(src, toks, *t))
-                .collect();
-            let params = a
-                .params
-                .iter()
-                .map(|p| {
-                    (
-                        token_text(src, toks, p.name),
-                        p.ty.map(|t| span_text(src, toks, t).trim().to_string()),
-                    )
-                })
-                .collect();
-            let defaults = a
-                .params
-                .iter()
-                .map(|p| p.default.as_ref().map(|d| span_text(src, toks, d.span())))
-                .collect();
-            let requires = a
-                .requires
-                .iter()
-                .map(|c| require_of(src, toks, c))
-                .collect();
-            out.push((
-                token_text(src, toks, a.name),
-                crate::desugar::AttrDecl {
-                    targets,
-                    params,
-                    defaults,
-                    requires,
-                },
-            ));
+            _ => {}
         }
     }
 
-    out
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return;
+    };
+    let toks = &parsed.lexed.toks;
+
+    for stmt in &parsed.chunk.block.stmts {
+        let exported = match stmt {
+            Stmt::Attribute(a) => a.exported,
+
+            Stmt::Namespace(ns) => ns.exported,
+
+            _ => false,
+        };
+
+        if exported {
+            walk(src, toks, stmt, "", out, namespaces);
+        }
+    }
+}
+
+/// One `attribute` declaration as the check reads it.
+fn attribute_decl(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    a: &alloy_syntax::ast::AttributeDecl,
+) -> crate::desugar::AttrDecl {
+    crate::desugar::AttrDecl {
+        targets: a
+            .targets
+            .iter()
+            .map(|t| token_text(src, toks, *t))
+            .collect(),
+        params: a
+            .params
+            .iter()
+            .map(|p| {
+                (
+                    token_text(src, toks, p.name),
+                    p.ty.map(|t| span_text(src, toks, t).trim().to_string()),
+                )
+            })
+            .collect(),
+        defaults: a
+            .params
+            .iter()
+            .map(|p| p.default.as_ref().map(|d| span_text(src, toks, d.span())))
+            .collect(),
+        requires: a
+            .requires
+            .iter()
+            .map(|c| require_of(src, toks, c))
+            .collect(),
+    }
 }
 
 /// One `requires` clause of an `attribute`, as the check reads it.
@@ -2541,9 +2607,11 @@ impl Surface {
                 .as_ref()
                 .is_none_or(|r| r.iter().any(|m| !m.contains("is a reserved word"))),
             names: exported_names(source),
+            // An import list names a top-level attribute alone.
             attributes: exported_attribute_decls(source)
                 .into_iter()
                 .map(|(name, _)| name)
+                .filter(|name| !name.contains('.'))
                 .collect(),
             has_default: exports_default(source),
             returns: returns && !both,

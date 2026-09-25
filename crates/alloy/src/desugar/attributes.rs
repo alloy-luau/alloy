@@ -703,30 +703,11 @@ impl<'s> Desugar<'s> {
             });
         }
 
-        // `import * as M`: `@M.tag` names the module's own attribute.
-        // The import index lists every attribute an Alloy module
-        // exports; another module's are out of reach, so it passes.
+        // `import * as M`: `@M.tag` names the module's own attribute,
+        // and `@M.Ns.tag` one of its namespaces. The import index lists
+        // every attribute an Alloy module and its namespaces export.
         if self.star_path(name) {
-            if owner != head || !self.options.import_star_modules.iter().any(|m| m == head) {
-                return None;
-            }
-
-            let prefix = format!("{head}.");
-            let mut exported: Vec<&str> = self
-                .attr_decls
-                .keys()
-                .filter_map(|k| k.strip_prefix(&prefix))
-                .collect();
-            exported.sort_unstable();
-
-            return Some(match exported.is_empty() {
-                true => format!("`{head}` exports no attribute `{member}`"),
-
-                false => format!(
-                    "`{head}` exports no attribute `{member}`; it exports {}",
-                    list_names(&exported)
-                ),
-            });
+            return self.star_attr_error(owner, member);
         }
 
         // A named import binds a module's attribute under its own name.
@@ -740,6 +721,57 @@ impl<'s> Desugar<'s> {
             true => format!("`{owner}` declares no attribute `{member}`"),
 
             false => format!("`{owner}` is no namespace, so `{name}` names no attribute"),
+        })
+    }
+
+    /*
+    The report for `@M.tag` or `@M.Ns.tag` that the import index does not
+    hold. The index is whole for the module itself, for each namespace it
+    declares, and for a namespace that holds an attribute. A name the
+    module sends on from elsewhere, `export { Inner }`, is out of its
+    reach, so a path through one passes unchecked.
+    */
+    fn star_attr_error(&self, owner: &str, member: &str) -> Option<String> {
+        let (head, path) = owner.split_once('.').unwrap_or((owner, ""));
+        let (_, namespaces, exports) = self
+            .options
+            .import_star_modules
+            .iter()
+            .find(|(local, _, _)| local == head)?;
+        let prefix = format!("{owner}.");
+        let mut held: Vec<&str> = self
+            .attr_decls
+            .keys()
+            .filter_map(|k| k.strip_prefix(&prefix))
+            .filter(|rest| !rest.contains('.'))
+            .collect();
+        held.sort_unstable();
+        let first = path.split('.').next().unwrap_or(path);
+        let whole = path.is_empty() || !held.is_empty() || namespaces.iter().any(|n| n == path);
+
+        if !whole && namespaces.iter().any(|n| n == first) {
+            return Some(format!(
+                "`{head}` declares no namespace `{path}`, so `@{owner}.{member}` names no attribute"
+            ));
+        }
+
+        if !whole && exports.iter().any(|n| n == first) {
+            return None;
+        }
+
+        if !whole {
+            return Some(format!(
+                "`{head}` exports no `{first}`, so `@{owner}.{member}` names no attribute"
+            ));
+        }
+
+        Some(match held.is_empty() {
+            true => format!("`{owner}` exports no attribute `{member}`"),
+
+            false => format!(
+                "`{owner}` exports no attribute `{member}`; it exports {}",
+                list_names(&held)
+            ),
         })
     }
 

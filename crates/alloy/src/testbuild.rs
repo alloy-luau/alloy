@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use alloy_syntax::ast::{Chunk, Expr, ImportKind, Stmt};
 use alloy_syntax::lexer::{Tok, TokKind};
 
-use crate::build::{module_base, relative_require};
+use crate::build::relative_require;
 use crate::config::Config;
 use crate::{Diagnostic, EmitOptions};
 
@@ -656,10 +656,7 @@ fn write_modules(
                     rewrite_requires(config, &tree, root, &source_rel, &module_rel, &out.ship);
 
                 if config.test.shim {
-                    text = with_shim(
-                        &text,
-                        &relative_require(&module_base(&module_rel), &modules.join("shim")),
-                    );
+                    text = with_shim(&text, &require_from(&module_rel, &modules.join("shim")));
                 }
 
                 let target = dir.join(&rel_out);
@@ -740,9 +737,21 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// The require path from the module at `rel` to `target`. lest reads a
+/// relative path in an `init.luau` from the file's own folder, and Luau
+/// reads it from the folder above. `@self` names the own folder in both.
+fn require_from(rel: &Path, target: &Path) -> String {
+    let path = relative_require(rel, target);
+
+    match crate::build::is_init(rel) {
+        true => format!("@self/{}", path.strip_prefix("./").unwrap_or(&path)),
+
+        false => path,
+    }
+}
+
 /// Rewrites every relative or aliased `require` of an emitted text to
 /// the path from the spec to the target. The text keeps its line count.
-/// A spec named `init.luau` requires from its folder, as Luau reads it.
 fn rewrite_requires(
     config: &Config,
     tree: &crate::project::Tree,
@@ -753,7 +762,7 @@ fn rewrite_requires(
 ) -> String {
     crate::project::map_requires(text, |path| {
         target_for(config, tree, root, source_rel, path)
-            .map(|target| relative_require(&module_base(spec_rel), &target))
+            .map(|target| require_from(spec_rel, &target))
     })
 }
 
@@ -1242,6 +1251,41 @@ mod tests {
 
         assert_eq!(report.removed, [PathBuf::from("tests/main.spec.luau")]);
         assert!(!dir.join("tests/main.spec.luau").is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A barrel `lib/init.aly` wrote `require("./lib/m")` and
+    /// `require("../shim")` in its test copy, from the folder above, as
+    /// Luau reads an `init.luau`. lest reads them from the file's own
+    /// folder, so no spec that reached the barrel could load. `@self`
+    /// names that folder for both.
+    #[test]
+    fn an_init_module_requires_from_its_own_folder() {
+        let dir = std::env::temp_dir().join(format!("alloy-init-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/lib")).expect("the folder");
+        std::fs::write(dir.join("src/lib/init.aly"), "export { X } from \"./m\"\n")
+            .expect("the file");
+        std::fs::write(dir.join("src/lib/m.aly"), "export const X = 1\n").expect("the file");
+        std::fs::write(
+            dir.join("src/use.aly"),
+            "import { X } from \"./lib\"\n\n@test\nfunction one()\n    $assert_eq(X, 1)\nend\n",
+        )
+        .expect("the file");
+
+        let mut config = Config::default();
+        config.test.shim = true;
+        run(&dir, &config, true).expect("the write");
+
+        let init = dir.join("tests/.modules/lib/init.luau");
+        let text = std::fs::read_to_string(&init).expect("the module");
+        let folder = init.parent().expect("the folder");
+
+        for (spec, file) in [("@self/m", "m.luau"), ("@self/../shim", "../shim.luau")] {
+            assert!(text.contains(&format!("require(\"{spec}\")")), "{text}");
+            assert!(folder.join(file).is_file(), "{spec} names no module");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

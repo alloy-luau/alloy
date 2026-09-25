@@ -705,6 +705,9 @@ pub fn analyze(
     // them describe a partial tree.
     let mut unparsed: HashSet<PathBuf> = HashSet::new();
 
+    // Every report, for a report that repeats one inside its bracket.
+    let reports: Vec<Line<'_>> = text.lines().filter_map(parse_line).collect();
+
     for line in text.lines() {
         let Some(report) = parse_line(line) else {
             if let Some(i) = last
@@ -807,6 +810,17 @@ pub fn analyze(
         } else {
             (line_no, col)
         };
+
+        // The checker writes a mistake in a match arm again at the `(`
+        // of the whole match. The report inside points at the mistake.
+        let inner = reports
+            .iter()
+            .filter(|r| r.path == report.path && r.message == message)
+            .map(|r| (r.line, r.col));
+
+        if repeats_an_inner_report(&f.check, line_no, col, inner) {
+            continue;
+        }
 
         let silence = directives
             .entry(f.rel.clone())
@@ -1275,6 +1289,70 @@ pub fn known_shapes(files: &[CheckSource]) -> crate::shapes::Known {
     }
 }
 
+/// Whether a report at an opening `(` of the artifact repeats a report
+/// at one of `inner`, the positions of the same message, inside that
+/// bracket. Positions are one-based.
+fn repeats_an_inner_report(
+    check: &str,
+    line: usize,
+    col: usize,
+    inner: impl Iterator<Item = (usize, usize)>,
+) -> bool {
+    let offset = |line: usize, col: usize| {
+        let start = check
+            .split_inclusive('\n')
+            .take(line.saturating_sub(1))
+            .map(str::len)
+            .sum::<usize>();
+
+        start + col.saturating_sub(1)
+    };
+    let open = offset(line, col);
+
+    if check.as_bytes().get(open) != Some(&b'(') {
+        return false;
+    }
+
+    // The matching `)`, past any bracket inside a string.
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut close = None;
+
+    for (i, &b) in check.as_bytes().iter().enumerate().skip(open) {
+        match (quote, b) {
+            (Some(q), _) if b == q => quote = None,
+
+            (Some(_), _) => {}
+
+            (None, b'"' | b'\'') => quote = Some(b),
+
+            (None, b'(') => depth += 1,
+
+            (None, b')') => {
+                depth -= 1;
+
+                if depth == 0 {
+                    close = Some(i);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let Some(close) = close else {
+        return false;
+    };
+
+    inner.into_iter().any(|(l, c)| {
+        let at = offset(l, c);
+
+        at > open && at < close
+    })
+}
+
 /// One line of the analyzer's output, split.
 struct Line<'a> {
     path: &'a str,
@@ -1488,6 +1566,24 @@ fn offset_of(text: &str, line: usize, col: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checker writes a match arm's mistake at the arm and again at
+    /// the `(` of the whole match. Only the outer copy goes.
+    #[test]
+    fn a_report_at_a_bracket_yields_to_the_same_report_inside() {
+        let check = "local x = (\n    if a then b + \")\" else 0\n)\nprint(x + 1)\n";
+
+        assert!(repeats_an_inner_report(check, 1, 11, [(2, 15)].into_iter()));
+        // A report outside the bracket is another mistake.
+        assert!(!repeats_an_inner_report(check, 1, 11, [(4, 7)].into_iter()));
+        // A report that is not at a bracket stays.
+        assert!(!repeats_an_inner_report(
+            check,
+            2,
+            15,
+            [(2, 15)].into_iter()
+        ));
+    }
 
     #[test]
     fn the_analyzer_line_parses() {

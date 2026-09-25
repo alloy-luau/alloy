@@ -378,6 +378,34 @@ fn a_mount_alias_rewrites_in_every_setting_of_the_keys() {
     }
 }
 
+/// A mount with no source yet, `src/client` here, has no output
+/// folder, and `rojo build` stopped at the missing `$path`. The build
+/// makes an empty folder for it.
+#[test]
+fn every_path_of_the_build_project_is_there() {
+    let dir = mounted_root("empty-mount", true, true);
+    build(&dir);
+
+    let built = read_json(&dir.join(".alloy/build.project.json"));
+    let mut stack = vec![&built["tree"]];
+
+    while let Some(node) = stack.pop() {
+        let Some(map) = node.as_object() else {
+            continue;
+        };
+
+        if let Some(path) = map.get("$path").and_then(Value::as_str) {
+            assert!(dir.join(".alloy").join(path).exists(), "{path}");
+        }
+
+        stack.extend(map.values());
+    }
+
+    assert!(dir.join("build/client").is_dir());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn source_of_truth_decides_whether_the_project_files_are_written() {
     let owned = mounted_root("truth-on", true, true);

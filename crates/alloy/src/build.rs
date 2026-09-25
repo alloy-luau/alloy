@@ -1024,6 +1024,12 @@ fn run_inner(
         }
     }
 
+    // A mount with no source yet, `src/client` before the first client
+    // file, still has a place in the build project.
+    for dir in tree.out_dirs(root) {
+        std::fs::create_dir_all(root.join(dir))?;
+    }
+
     Ok(report)
 }
 

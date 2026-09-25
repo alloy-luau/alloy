@@ -190,6 +190,23 @@ impl Tree {
         }
     }
 
+    /// The output folders the build project names, relative to the root:
+    /// each folder mount under `[build] in`, moved under `[build] out`.
+    /// A mount with no source in it has no output, and `rojo build`
+    /// stops at the missing path, so the build makes each folder.
+    pub fn out_dirs(&self, root: &Path) -> Vec<PathBuf> {
+        if self.project.is_none() && !self.source_of_truth {
+            return Vec::new();
+        }
+
+        self.mounts
+            .iter()
+            .filter(|m| m.disk.extension().is_none() && !root.join(&m.disk).is_file())
+            .filter_map(|m| m.disk.strip_prefix(&self.input).ok())
+            .map(|rest| self.out.join(rest))
+            .collect()
+    }
+
     /// The mount that holds `rel`, the one with the longest disk path,
     /// with the rest of `rel` under it.
     fn holder(&self, rel: &Path) -> Option<(&Mounted, PathBuf)> {

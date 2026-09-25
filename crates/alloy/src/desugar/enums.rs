@@ -1080,7 +1080,12 @@ impl<'s> Desugar<'s> {
     /// `Kind` at slot 0. `within` is the enum of the pattern's own place,
     /// when that is known. `None` when no one enum owns the variant, or
     /// the slot's type is no enum here.
-    fn slot_enum(&self, name: TokSpan, within: Option<&str>, slot: usize) -> Option<String> {
+    pub(crate) fn slot_enum(
+        &self,
+        name: TokSpan,
+        within: Option<&str>,
+        slot: usize,
+    ) -> Option<String> {
         let (vname, path_enum) = self.pattern_variant(name);
         let owner = match path_enum {
             Some(e) => e,

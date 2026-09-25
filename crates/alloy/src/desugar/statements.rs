@@ -871,7 +871,7 @@ impl<'s> Desugar<'s> {
         if self.fn_bounds.is_empty()
             && self.method_bounds.is_empty()
             && !self
-                .impl_methods
+                .enum_decls
                 .keys()
                 .any(|t| self.unit_variant(t).is_some())
         {
@@ -937,6 +937,17 @@ impl<'s> Desugar<'s> {
             .map(|(v, _)| v.as_str())
     }
 
+    /// Whether an `impl` of the enum writes the method: an impl in this
+    /// file, or in the module that declares an imported enum.
+    fn enum_has_method(&self, target: &str, method: &str) -> bool {
+        let key = format!("{target}:{method}");
+
+        self.impl_methods
+            .get(target)
+            .is_some_and(|ms| ms.contains(method))
+            || self.options.import_callables.iter().any(|(k, _)| *k == key)
+    }
+
     fn is_unit_enum(&self, name: &str) -> bool {
         self.enum_decls
             .get(name)
@@ -957,8 +968,69 @@ impl<'s> Desugar<'s> {
                 self.note_annotations(l, &mut annotated);
             }
 
+            // An arm knows the names its patterns bind.
+            if let Stmt::Match(m) = stmt {
+                let scrutinees = m.scrutinees.iter().map(Child::Expr).collect();
+                self.bound_calls_in(scrutinees, &annotated, hits);
+
+                for a in &m.arms {
+                    let inner = self.arm_annotations(&a.patterns, &annotated);
+                    let guard = a.guard.iter().map(Child::Expr);
+                    let body = guard.chain([Child::Block(&a.block)]).collect();
+                    self.bound_calls_in(body, &inner, hits);
+                }
+
+                let default = m.default.iter().map(Child::Block).collect();
+                self.bound_calls_in(default, &annotated, hits);
+
+                continue;
+            }
+
             self.bound_calls_in(stmt_children(stmt), &annotated, hits);
         }
+    }
+
+    /// The names the patterns of one arm bind, over the names outside:
+    /// a name in a payload slot takes the enum the slot declares, and
+    /// `case Missing(item, n)` types `item` as `Item`. Any other name a
+    /// pattern binds hides the outer one.
+    fn arm_annotations(
+        &self,
+        patterns: &[Pattern],
+        annotated: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut inner = annotated.clone();
+        let mut stack: Vec<(&Pattern, Option<(TokSpan, usize)>)> =
+            patterns.iter().map(|p| (p, None)).collect();
+
+        while let Some((p, slot)) = stack.pop() {
+            match p {
+                Pattern::Bind(n) => {
+                    let name = self.text_of(*n).to_string();
+
+                    match slot.and_then(|(v, i)| self.slot_enum(v, None, i)) {
+                        Some(e) => inner.insert(name, e),
+
+                        None => inner.remove(&name),
+                    };
+                }
+
+                Pattern::Variant { name, args, .. } => {
+                    for (i, a) in args.iter().enumerate() {
+                        stack.push((a, Some((*name, i))));
+                    }
+                }
+
+                Pattern::Or(a, b, _) => {
+                    stack.push((a, slot));
+                    stack.push((b, slot));
+                }
+
+                _ => {}
+            }
+        }
+
+        inner
     }
 
     fn bound_calls_in(
@@ -986,6 +1058,21 @@ impl<'s> Desugar<'s> {
                     }
 
                     self.bound_calls_in_block(&f.block, &inner, hits);
+                }
+
+                Child::Expr(Expr::Match(m)) => {
+                    let scrutinees = m.scrutinees.iter().map(Child::Expr).collect();
+                    self.bound_calls_in(scrutinees, annotated, hits);
+
+                    for a in &m.arms {
+                        let inner = self.arm_annotations(&a.patterns, annotated);
+                        let guard = a.guard.iter().map(Child::Expr);
+                        let body = guard.chain([Child::Expr(&a.value)]).collect();
+                        self.bound_calls_in(body, &inner, hits);
+                    }
+
+                    let default = m.default.iter().map(|d| Child::Expr(d)).collect();
+                    self.bound_calls_in(default, annotated, hits);
                 }
 
                 Child::Expr(e) => {
@@ -1023,10 +1110,7 @@ impl<'s> Desugar<'s> {
             // `Opt<number>` names the generic enum `Opt`.
             && let target = ty.trim_end_matches('?').split('<').next().unwrap_or_default().trim()
             && let Some(unit) = self.unit_variant(target)
-            && self
-                .impl_methods
-                .get(target)
-                .is_some_and(|ms| ms.contains(self.text_of(*m)))
+            && self.enum_has_method(target, self.text_of(*m))
         {
             let (m, recv) = (self.text_of(*m), self.text_of(*n));
             let what = match self.is_unit_enum(target) {
@@ -3942,6 +4026,43 @@ mod tests {
             messages(src),
             vec!["`Opt.None` is a unit variant, a string at runtime; call `Opt.unwrap_or(b)`"]
         );
+    }
+
+    /// The check knew an enum and its methods only from this file. An
+    /// imported enum, or a name a match arm binds to a payload slot,
+    /// passed `check`, and `flux` gave the checker's "Key 'label' is
+    /// missing from 'string'" alone.
+    #[test]
+    fn a_colon_call_on_an_imported_or_arm_bound_mixed_enum_names_the_static_form() {
+        let want = "`Item.Junk` is a unit variant, a string at runtime; call `Item.label(item)`";
+        let imported = crate::compile_with(
+            "import { Item } from \"./items\"\n\nlocal function f(item: Item): string\n    return item:label()\nend\nprint(f)\n",
+            &crate::EmitOptions {
+                import_enums: vec![(
+                    "Item".to_string(),
+                    vec![("Tool".to_string(), 1), ("Junk".to_string(), 0)],
+                )],
+                import_callables: vec![(
+                    "Item:label".to_string(),
+                    crate::flux::Callable {
+                        params: Some(1),
+                        deprecated: None,
+                        exported: true,
+                    },
+                )],
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        let got: Vec<&str> = imported
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(got, [want]);
+
+        let bound = "enum Item as\n    Tool(number)\n    Junk\nend\n\nimpl Item as\n    function label(self): string\n        return \"x\"\n    end\nend\n\nenum Why as\n    Lost(Item)\n    Full\nend\n\nlocal function g(w: Why): string\n    return match w with\n        case Lost(item) then item:label()\n        case Full then \"full\"\n    end\nend\nprint(g)\n";
+        assert_eq!(messages(bound), [want]);
     }
 
     /// A unit enum is a string at runtime, so `s:describe()` finds no

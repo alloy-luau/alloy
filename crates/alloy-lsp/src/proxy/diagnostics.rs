@@ -381,6 +381,19 @@ impl State {
                         "newText": "~=",
                     }]),
                 ))
+            } else if d.message.starts_with("Alloy has no `let`")
+                && doc.source.get(start..start + 3) == Some("let")
+            {
+                // The report sits on `let`; the rest of the line stands.
+                let (el, ec) = position_of(&doc.source, start + 3);
+
+                Some((
+                    "Write `local`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": "local",
+                    }]),
+                ))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
             } else if let Some(name) = alloy::std_names::missing_name(&d.message) {

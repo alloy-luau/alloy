@@ -756,6 +756,27 @@ impl<'a> Parser<'a> {
             }));
         }
 
+        // `let x = 5` is another language's declaration. The report sits
+        // on `let` and writes the line out the Luau way.
+        if let Expr::Name(word) = &first
+            && self.span_text(*word) == "let"
+            && self.at_name()
+        {
+            let end = self.toks[self.pos..]
+                .iter()
+                .take_while(|t| {
+                    !self.src[self.toks[start].end as usize..t.start as usize].contains('\n')
+                })
+                .last()
+                .map_or(self.toks[self.pos].end, |t| t.end);
+            let rest = &self.src[self.toks[self.pos].start as usize..end as usize];
+
+            return Err(ParseError {
+                offset: self.toks[start].start as usize,
+                message: format!("Alloy has no `let`; write `local {rest}` or `const {rest}`"),
+            });
+        }
+
         match &first {
             Expr::Call { .. } => Ok(Stmt::Call(first, TokSpan::new(start, self.pos))),
 

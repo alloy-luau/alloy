@@ -579,6 +579,18 @@ mod tests {
         );
         assert!(messages("local x = 1\nx += 1\nprint(x)\n").is_empty());
 
+        // A `let` said only that the next name was not a statement. The
+        // report sits on the word and writes the line out.
+        let let_ = "let x = 5 -- a note\nprint(x)\n";
+        assert_eq!(
+            messages(let_),
+            vec!["Alloy has no `let`; write `local x = 5` or `const x = 5`"]
+        );
+        assert_eq!(docs::kind_for(&messages(let_)[0]), "SyntaxError");
+        assert_eq!(compile(let_).unwrap().diagnostics[0].start, 0);
+        // `let` stays a name.
+        assert!(messages("local let = 1\nprint(let)\n").is_empty());
+
         // A declaration `declare` does not take, in a definitions file.
         let options = EmitOptions {
             definitions: true,

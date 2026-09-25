@@ -1109,6 +1109,18 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
             "newText": "~=",
         }])
     );
+
+    // `let` is `local`: the edit takes the word alone.
+    let (st, uri) = one_file("local a = 1\nlet b = a\nprint(b)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `local`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 3 } },
+            "newText": "local",
+        }])
+    );
 }
 
 /// The checker's report on a `.` call of a method, in the compiler's

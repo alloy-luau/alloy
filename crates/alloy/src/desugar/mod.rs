@@ -158,10 +158,10 @@ pub struct EmitOptions {
     /// leaves unset. See `crate::modules::import_struct_fields`.
     pub import_struct_fields: Vec<(String, Vec<(String, bool)>)>,
     /// Per struct an imported module declares, the type text of each
-    /// field this file can write the way the module does. A field's
-    /// constructor takes the arguments the type names, as in the
-    /// module. See `crate::modules::import_field_types`.
-    pub import_field_types: Vec<(String, Vec<(String, String)>)>,
+    /// field, with whether this file can write it the way the module
+    /// does. A field's constructor takes the arguments the type names,
+    /// as in the module. See `crate::modules::import_field_types`.
+    pub import_field_types: Vec<(String, Vec<crate::declarations::FieldText>)>,
     /// Per struct an imported module declares that writes a
     /// constructor, the name of that `new` or `New`. A report of
     /// `Box(1)` reads it, so it names the constructor. See
@@ -579,6 +579,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         import_next: 0,
         expected_generic: None,
         field_expected: HashMap::new(),
+        field_casts: HashMap::new(),
         value_sink: None,
         for_header: 0,
         child_cast: None,
@@ -1182,6 +1183,11 @@ struct Desugar<'s> {
     /// with the arguments the field's declared type names: `visits =
     /// HashMap.new()` under `visits: HashMap<string, number>`.
     field_expected: HashMap<usize, (String, String)>,
+    /// The field values of a `new S { ... }` of an imported struct, by
+    /// address, with the type the check artifact casts each one to:
+    /// `index<S, "rows">` for `rows = HashMap.new()`, where the field's
+    /// type names a type this file cannot write.
+    field_casts: HashMap<usize, String>,
     /// The text a value-only `return` writes in front of its value: `s = `
     /// in an arm of `local s = match`, `return ` for a value block. None
     /// writes `return `.

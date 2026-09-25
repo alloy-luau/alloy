@@ -1465,13 +1465,13 @@ pub fn import_struct_fields(
 }
 
 /// The field types of every struct a module the source imports
-/// declares, where this file can write them. A field of `new S { }`
-/// then constructs under its declared type, as in the module.
+/// declares, each with whether this file can write it. A field of `new
+/// S { }` then constructs under its declared type, as in the module.
 pub fn import_field_types(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
-) -> Vec<(String, Vec<(String, String)>)> {
+) -> Vec<(String, Vec<crate::declarations::FieldText>)> {
     let modules = module_decls(source, from, aliases, |text| {
         crate::declarations::struct_field_types(text)
     });

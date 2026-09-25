@@ -3650,7 +3650,11 @@ mod tests {
             import_struct_fields: vec![("Ballot".to_string(), vec![("votes".to_string(), false)])],
             import_field_types: vec![(
                 "Ballot".to_string(),
-                vec![("votes".to_string(), "HashMap<string, string>".to_string())],
+                vec![(
+                    "votes".to_string(),
+                    "HashMap<string, string>".to_string(),
+                    true,
+                )],
             )],
             ..Default::default()
         };
@@ -3667,6 +3671,60 @@ mod tests {
             "{}",
             out.check
         );
+    }
+
+    /// A field type that names a type of the module, `HashMap<string,
+    /// Entry>`, may mean nothing in the file that constructs. An empty
+    /// constructor there takes the field's own type through `index`,
+    /// under the name the file writes. `from(t)` reads its type off `t`,
+    /// and a constructor of another type is an error the cast must not
+    /// hide, so neither takes a cast. The shipped Luau has none.
+    #[test]
+    fn a_field_that_names_a_module_type_takes_the_field_type() {
+        let fields = vec![
+            (
+                "votes".to_string(),
+                "HashMap<string, Entry>".to_string(),
+                false,
+            ),
+            ("seen".to_string(), "Set<Entry>?".to_string(), false),
+            (
+                "from".to_string(),
+                "HashMap<string, Entry>".to_string(),
+                false,
+            ),
+            ("wrong".to_string(), "Set<Entry>".to_string(), false),
+        ];
+        let options = crate::EmitOptions {
+            check: true,
+            import_field_types: vec![
+                ("Ballot".to_string(), fields.clone()),
+                ("B".to_string(), fields),
+            ],
+            ..Default::default()
+        };
+        let src = "import { Ballot } from \"./book\"\nimport { Ballot as B } from \"./book\"\n\nprint(new Ballot { votes = HashMap.new(), seen = Set.new(), from = HashMap.from({}), wrong = HashMap.new() })\nprint(new B { votes = HashMap.new() })\n";
+        let out = crate::compile_with(src, &options).unwrap();
+
+        for part in [
+            "votes = ((__alloy.HashMap.new() :: any) :: index<Ballot, \"votes\">)",
+            "seen = ((__alloy.Set.new() :: any) :: index<Ballot, \"seen\">)",
+            "from = __alloy.HashMap.from({})",
+            "wrong = __alloy.HashMap.new()",
+            "votes = ((__alloy.HashMap.new() :: any) :: index<B, \"votes\">)",
+        ] {
+            assert!(out.check.contains(part), "{part}\n{}", out.check);
+        }
+
+        let shipped = crate::compile_with(
+            src,
+            &crate::EmitOptions {
+                check: false,
+                ..options
+            },
+        )
+        .unwrap();
+        assert!(!shipped.ship.contains("index<"), "{}", shipped.ship);
     }
 
     #[test]

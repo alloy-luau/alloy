@@ -1083,6 +1083,84 @@ fn a_project_with_imports_analyzes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A field of an imported struct whose type names a type of its module,
+/// `HashMap<string, Entry>`, constructs with a bare `HashMap.new()`. The
+/// call took no type arguments there, and the analyzer reported that
+/// the type arguments differ. The check artifact now casts it to the
+/// field's own type, `index<Ballot, "votes">`, which keeps the field
+/// typed: a read of it as a string reports.
+#[test]
+fn a_field_of_an_imported_struct_takes_its_own_type() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let defs = root.join("../tools/types/globalTypes.d.luau");
+
+    if !defs.is_file() {
+        eprintln!("skipped: no definitions at {}", defs.display());
+
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("alloy-analyze-fields-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/shared")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nout = \"out\"\nartifact = \"check\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
+    std::fs::write(
+        dir.join("src/shared/book.aly"),
+        "import { HashMap, Set } from \"@alloy/std/collections\"\n\nexport type Entry = { n: number }\n\nexport struct Ballot as\n    votes: HashMap<string, Entry>\n    seen: Set<Entry>\n    plain: HashMap<string, string>\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.aly"),
+        "import { HashMap, Set } from \"@alloy/std/collections\"\nimport { Ballot } from \"./shared/book\"\nlocal b = new Ballot { votes = HashMap.new(), seen = Set.new(), plain = HashMap.new() }\nlocal wrong: string = b.votes\nprint(wrong)\n",
+    )
+    .unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let main = dir.join("out/main.luau");
+    let emitted = std::fs::read_to_string(&main).unwrap();
+    assert!(
+        emitted.contains("votes = ((__alloy.HashMap.new() :: any) :: index<Ballot, \"votes\">)")
+            && emitted.contains("plain = __alloy.HashMap.new<<string, string>>()"),
+        "{emitted}"
+    );
+
+    let run = Command::new("luau-lsp")
+        .arg("analyze")
+        .arg("--flag:LuauSolverV2=true")
+        .arg(format!("--definitions={}", defs.display()))
+        .arg(&main)
+        .output();
+
+    let Ok(run) = run else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+
+    let text =
+        String::from_utf8_lossy(&run.stdout).into_owned() + &String::from_utf8_lossy(&run.stderr);
+    let bad: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("TypeError") || l.contains("SyntaxError"))
+        .collect();
+    assert_eq!(bad.len(), 1, "{}\n---\n{emitted}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(4,") && bad[0].contains("Expected this to be 'string'"),
+        "{}",
+        bad[0]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A namespace's artifact is Luau the analyzer reads: the table, the
 /// type names, and the impl on a member struct.
 #[test]

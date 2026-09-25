@@ -141,37 +141,74 @@ impl<'s> Desugar<'s> {
     /// the arguments `HashMap<string, string>` names. `n` is the struct's
     /// name here; an imported struct gives the type text its module
     /// wrote, under the name the source writes.
+    ///
+    /// A type the module owns, `HashMap<string, Entry>`, may mean
+    /// nothing here. The check artifact then casts an empty constructor
+    /// to the field's own type, `index<S, "rows">`, which the imported
+    /// struct type carries.
     fn expect_field_types(&mut self, n: &str, name: &Expr, table: &Expr) {
-        let types: Option<Vec<(String, String)>> = match self.struct_field_types.get(n) {
-            Some(own) => Some(
-                own.iter()
-                    .map(|t| (t.name.clone(), self.text_of(t.ty).to_string()))
-                    .collect(),
-            ),
+        let written = self.text_of(name.span()).trim().to_string();
+        let types: Option<Vec<crate::declarations::FieldText>> =
+            match self.struct_field_types.get(n) {
+                Some(own) => Some(
+                    own.iter()
+                        .map(|t| (t.name.clone(), self.text_of(t.ty).to_string(), true))
+                        .collect(),
+                ),
 
-            None => {
-                let written = self.text_of(name.span()).trim();
-
-                self.options
+                None => self
+                    .options
                     .import_field_types
                     .iter()
-                    .find(|(s, _)| s == written)
-                    .map(|(_, fields)| fields.clone())
-            }
-        };
+                    .find(|(s, _)| *s == written)
+                    .map(|(_, fields)| fields.clone()),
+            };
         let (Expr::Table { fields, .. }, Some(types)) = (table, types) else {
             return;
         };
 
         for f in fields {
-            if let TableField::Named { name, value } = f
-                && let Some((_, ty)) = types.iter().find(|(t, _)| t == self.text_of(*name))
-                && let Some(g) = super::types::generic_head(ty)
-            {
-                self.field_expected
-                    .insert(std::ptr::from_ref(value) as usize, g);
+            let TableField::Named { name, value } = f else {
+                continue;
+            };
+            let field = self.text_of(*name);
+            let Some((_, ty, portable)) = types.iter().find(|(t, _, _)| t == field) else {
+                continue;
+            };
+            // An optional field takes the same constructor.
+            let Some(g) = super::types::generic_head(ty.trim().trim_end_matches('?')) else {
+                continue;
+            };
+            let at = std::ptr::from_ref(value) as usize;
+
+            if *portable {
+                self.field_expected.insert(at, g);
+
+                continue;
+            }
+
+            let bare = g.0.rsplit('.').next().unwrap_or(&g.0).to_string();
+
+            if self.options.check && self.empty_constructor(value, &bare) {
+                let owner = self.lower_type_name(&written);
+                let cast = format!("index<{owner}, {}>", luau_string(field));
+                self.field_casts.insert(at, cast);
             }
         }
+    }
+
+    /// A constructor call of `base` that takes nothing to read its type
+    /// arguments off: `HashMap.new()`, `new Set()`, `Queue.with_capacity(n)`.
+    /// `HashMap.from(t)` reads them off `t`, and a cast would hide what
+    /// `t` holds.
+    fn empty_constructor(&self, value: &Expr, base: &str) -> bool {
+        let from = matches!(
+            value,
+            Expr::Call { func, .. }
+                if matches!(func.as_ref(), Expr::Index { key: IndexKey::Field(f), .. } if self.text_of(*f) == "from")
+        );
+
+        !from && self.is_constructor_call(value, base)
     }
 
     /*
@@ -182,6 +219,17 @@ impl<'s> Desugar<'s> {
     `expr_in_place`.
     */
     pub(crate) fn expr(&mut self, e: &Expr) {
+        // A field of an imported `new S { }` whose type names a type of
+        // the module: the empty constructor takes the field's own type.
+        if let Some(cast) = self.field_casts.remove(&(std::ptr::from_ref(e) as usize)) {
+            let (start, end) = (self.byte_start(e.span()), self.byte_end(e.span()));
+            self.generate(start, "((");
+            self.expr(e);
+            self.generate(end, &format!(" :: any) :: {cast})"));
+
+            return;
+        }
+
         // A field of `new S { }` constructs under its declared type.
         if let Some(g) = self
             .field_expected

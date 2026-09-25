@@ -1203,12 +1203,12 @@ fn param_text<'a>(p: &alloy_syntax::ast::Param, text: &impl Fn(TokSpan) -> &'a s
 mod tests {
     use super::*;
 
-    /// A field type another file can write travels; one that names a
-    /// type, an import, or a generic of the module stays home, since the
+    /// A field type is portable when the other file can write it; one
+    /// that names a type or an import of the module is not, since the
     /// name may mean nothing in the other file. A std type an import of
-    /// the std binds is the ambient one.
+    /// the std binds is the ambient one. A generic struct gives no field.
     #[test]
-    fn a_field_type_travels_when_the_other_file_can_write_it() {
+    fn a_field_type_is_portable_when_the_other_file_can_write_it() {
         let src = "import { HashMap } from \"@alloy/std/collections\"
 import { Entry } from \"./entry\"
 type Id = number
@@ -1223,12 +1223,18 @@ end
 ";
         let got = struct_field_types(src);
 
+        let field = |f: &str, ty: &str, portable: bool| (f.to_string(), ty.to_string(), portable);
+
         assert_eq!(
             got,
             vec![
                 (
                     "Ballot".to_string(),
-                    vec![("votes".to_string(), "HashMap<string, Player>".to_string())]
+                    vec![
+                        field("votes", "HashMap<string, Player>", true),
+                        field("rows", "HashMap<string, Entry>", false),
+                        field("ids", "HashMap<Id, string>", false),
+                    ]
                 ),
                 ("Box".to_string(), vec![]),
             ]
@@ -2139,16 +2145,22 @@ pub fn struct_privates(src: &str) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// Every struct a source declares, with the type text of each field
-/// another file can write the way the source does. A construction in
-/// that file reads it, so `new Ballot { votes = HashMap.new() }` passes
-/// `<<string, string>>` to the constructor, as the declaring file does.
+/// One field of a struct: its name, its type text, and whether another
+/// file can write that text.
+pub type FieldText = (String, String, bool);
+
+/// Every struct a source declares, with the type text of each field and
+/// whether another file can write that text the way the source does. A
+/// construction in that file reads it, so `new Ballot { votes =
+/// HashMap.new() }` passes `<<string, string>>` to the constructor, as
+/// the declaring file does.
 ///
 /// A name the source binds, a type, an import, or a namespace, means
 /// one thing there and may mean nothing in the other file, so a field
-/// type that names one is left out. A std type an import of the std
-/// binds is the ambient one, and stays in.
-pub fn struct_field_types(src: &str) -> Vec<(String, Vec<(String, String)>)> {
+/// type that names one cannot be written there. A std type an import of
+/// the std binds is the ambient one, and can. A generic struct gives no
+/// field, since a field type may name the struct's own parameters.
+pub fn struct_field_types(src: &str) -> Vec<(String, Vec<FieldText>)> {
     let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
         return Vec::new();
     };
@@ -2192,8 +2204,12 @@ pub fn struct_field_types(src: &str) -> Vec<(String, Vec<(String, String)>)> {
         .map(|(name, fields)| {
             let typed = fields
                 .into_iter()
-                .filter(|(_, _, _, ty)| !ty.is_empty() && !names_own(ty))
-                .map(|(f, _, _, ty)| (f, ty))
+                .filter(|(_, _, _, ty)| !ty.is_empty())
+                .map(|(f, _, _, ty)| {
+                    let portable = !names_own(&ty);
+
+                    (f, ty, portable)
+                })
                 .collect();
 
             (name, typed)

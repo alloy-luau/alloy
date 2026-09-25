@@ -791,7 +791,17 @@ impl<'a> Parser<'a> {
                 // `expr!` asserts non-nil. `!=` is the one typo worth naming.
                 "!" => {
                     if self.text_at(1) == "=" && self.adjacent(0) {
-                        return Err(self.err("`!=` is not an operator; write `~=`"));
+                        let message = "`!=` is not an operator; write `~=`";
+
+                        if !self.lenient {
+                            return Err(self.err(message));
+                        }
+
+                        // The editor reads on as if `~=` stood here, so
+                        // the typo draws one report, not a stray `end`.
+                        self.report(message);
+
+                        break;
                     }
 
                     self.bump();

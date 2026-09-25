@@ -368,6 +368,19 @@ impl State {
                     format!("Write `{simple}`"),
                     json!([{ "range": at, "newText": simple }]),
                 ))
+            } else if d.message.starts_with("`!=` is not an operator")
+                && doc.source.get(start..start + 2) == Some("!=")
+            {
+                // The report spans the `!`; the edit takes the `=` too.
+                let (el, ec) = position_of(&doc.source, start + 2);
+
+                Some((
+                    "Write `~=`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": "~=",
+                    }]),
+                ))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
             } else if let Some(name) = alloy::std_names::missing_name(&d.message) {
@@ -446,13 +459,38 @@ impl State {
                 continue;
             }
 
-            let Some((wrote, name)) = remote_verb_fix(message) else {
-                continue;
-            };
             let Some(text) = doc.source.lines().nth(sl as usize) else {
                 continue;
             };
             let from = byte_column(doc, sl, sc) - 1;
+
+            // `bag.add(3)` on a method: the `.` before the name becomes `:`.
+            if let Some(wrote) = dot_call_fix(message)
+                && let Some(i) = text.get(from..).and_then(|rest| rest.find(&wrote))
+                && let Some(dot) = wrote.rfind('.')
+            {
+                let at = utf16_column(doc, sl, from + i + dot + 1);
+
+                actions.push(json!({
+                    "title": format!("Write `{}:{}`", &wrote[..dot], &wrote[dot + 1..]),
+                    "kind": "quickfix",
+                    "isPreferred": true,
+                    "diagnostics": [d],
+                    "edit": { "changes": { uri: [{
+                        "range": {
+                            "start": { "line": sl, "character": at },
+                            "end": { "line": sl, "character": at + 1 },
+                        },
+                        "newText": ":",
+                    }] } },
+                }));
+
+                continue;
+            }
+
+            let Some((wrote, name)) = remote_verb_fix(message) else {
+                continue;
+            };
             let Some(i) = text[from..].find(&format!(".{wrote}")) else {
                 continue;
             };
@@ -1911,6 +1949,19 @@ fn remote_verb_fix(message: &str) -> Option<(String, String)> {
     let name = quoted_names(tail).pop()?;
 
     Some((wrote, name))
+}
+
+/// The call a report says needs `:`, as the source wrote it: `bag.add`
+/// from "`add` is a method; call it with `bag:add(...)`, not
+/// `bag.add(...)`".
+fn dot_call_fix(message: &str) -> Option<String> {
+    if !message.contains(alloy::typecheck::DOT_FOR_COLON) {
+        return None;
+    }
+
+    let wrote = quoted_names(message).pop()?;
+
+    wrote.strip_suffix("(...)").map(str::to_string)
 }
 
 /// The edit distance of two names, for a "did you mean".

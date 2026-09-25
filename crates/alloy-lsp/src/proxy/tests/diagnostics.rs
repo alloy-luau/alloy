@@ -1097,6 +1097,41 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
         "enum Color as\n    Red\n    Green\n    Blue\nend\n\nlocal c = Color.Purple\nprint(c)\n",
     );
     assert!(st.compiler_actions(uri, whole).is_empty());
+
+    // `!=` is `~=`: the edit takes both characters.
+    let (st, uri) = one_file("local a = 1\nif a != 2 then\n    print(a)\nend\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `~=`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 1, "character": 5 }, "end": { "line": 1, "character": 7 } },
+            "newText": "~=",
+        }])
+    );
+}
+
+/// The checker's report on a `.` call of a method, in the compiler's
+/// words, carries the edit that writes the `:`.
+#[test]
+fn a_dot_call_of_a_method_takes_the_colon() {
+    let (mut st, uri) = one_file("local bag = { n = 0 }\n    bag.add(3)\n");
+    let d = json!({
+        "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 11 } },
+        "severity": 1,
+        "message": "TypeError: `add` is a method; call it with `bag:add(...)`, not `bag.add(...)`",
+    });
+    st.child_diagnostics.insert(uri.to_string(), vec![d]);
+    let actions = st.compiler_actions(uri, ((0, 0), (99, 0)));
+
+    assert_eq!(actions[0]["title"], "Write `bag:add`");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri],
+        json!([{
+            "range": { "start": { "line": 1, "character": 7 }, "end": { "line": 1, "character": 8 } },
+            "newText": ":",
+        }])
+    );
 }
 
 /// A missing member of a remote names the remote the source declared.

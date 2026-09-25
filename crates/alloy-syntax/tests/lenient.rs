@@ -942,3 +942,20 @@ fn an_arm_of_the_wrong_form_reports_once() {
     );
     assert_eq!((errors, diagnostics), (0, 0));
 }
+
+/// `!=` drew its own report and then "unexpected `end`". The lenient
+/// parse reads it as `~=`, so the typo is the one report. A strict parse
+/// still refuses it.
+#[test]
+fn a_not_equal_typo_is_one_report() {
+    let src = "local a = 1\nif a != 2 then\n    print(a)\nend\n";
+    assert_eq!(lenient(src), (0, 1));
+
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert_eq!(
+        diagnostics[0].message,
+        "`!=` is not an operator; write `~=`"
+    );
+    assert!(parser::parse(src, &lexed.toks).is_err());
+}

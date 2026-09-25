@@ -203,6 +203,14 @@ impl<'s> Desugar<'s> {
                 self.coalesce(*span, lhs, rhs);
             }
 
+            // `a != b` carries the parser's report; the emit reads `~=`,
+            // so the checker sees the rest of the file.
+            Expr::Binary { op, lhs, rhs, .. } if self.text_of(*op) == "!=" => {
+                let l = self.render_to_string(lhs);
+                let r = self.render_to_string(rhs);
+                self.generate(anchor, &format!("{l} ~= {r}"));
+            }
+
             Expr::Binary { op, lhs, rhs, .. } if self.word_binop(*op).is_some() => {
                 let (kind, name) = self.word_binop(*op).unwrap();
                 let l = self.render_to_string(lhs);

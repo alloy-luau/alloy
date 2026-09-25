@@ -486,6 +486,11 @@ impl<'a> Parser<'a> {
             return Some((2, (3, 3)));
         }
 
+        // `!=` reads as `~=` once `suffix_chain` reported it.
+        if self.at("!") && self.text_at(1) == "=" && self.adjacent(0) {
+            return binop_priority("~=").map(|p| (2, p));
+        }
+
         let word = self.text();
 
         // A word operator obeys the same-line rule; `in` is reserved and

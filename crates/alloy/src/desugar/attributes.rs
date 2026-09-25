@@ -1744,7 +1744,14 @@ impl<'s> Desugar<'s> {
     /// and the export list names it flat, `Geo_Kind<T>`: some tail of
     /// the path, joined with `_`, is the exported head.
     fn imported_type_is_generic(&self, name: &str) -> bool {
-        let parts: Vec<&str> = name.split('.').collect();
+        // `import { Opt as O }` keys the enum by `O`, and the module
+        // exports it as `Opt<T>`.
+        let mut parts: Vec<&str> = name.split('.').collect();
+
+        if let Some(declared) = self.import_renames.get(parts[0]) {
+            parts[0] = declared;
+        }
+
         let tails: Vec<String> = (0..parts.len()).map(|i| parts[i..].join("_")).collect();
 
         self.options

@@ -3204,8 +3204,8 @@ mod tests {
 
         let star = "import * as M from \"./lib\"\nlocal function f(o: M.Opt<number>): number\n    return match o with\n        case M.Opt.Some(v) then v\n        case M.Opt.Nil then 0\n    end\nend\nprint(f)\n";
         let options = EmitOptions {
-            import_enums: vec![("M.Opt".to_string(), variants)],
-            import_types: types,
+            import_enums: vec![("M.Opt".to_string(), variants.clone())],
+            import_types: types.clone(),
             ..EmitOptions::default()
         };
         let out = crate::compile_with(star, &options).expect("compiles");
@@ -3213,6 +3213,20 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(!out.check.contains(":: M_Opt"), "{}", out.check);
         assert!(!out.check.contains(":: M.Opt"), "{}", out.check);
+
+        // `import { Opt as O }` keys the enum by `O`; the export list
+        // still names it `Opt<T>`.
+        let renamed = "import { Opt as O } from \"./lib\"\nlocal function f(o: O<number>): number\n    return match o with\n        case O.Some(v) then v\n        case O.Nil then 0\n    end\nend\nprint(f)\n";
+        let options = EmitOptions {
+            import_enums: vec![("O".to_string(), variants)],
+            import_types: types,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(renamed, &options).expect("compiles");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.check.contains(":: O\n"), "{}", out.check);
+        assert!(!out.check.contains(":: O "), "{}", out.check);
     }
 
     /// `import * as Sh` binds the module, so the cast of a match over

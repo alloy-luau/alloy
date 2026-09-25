@@ -160,14 +160,21 @@ impl<'s> Desugar<'s> {
         // method call on a union with a string in it fails.
         let plain = self.options.check && !alias_generics.is_empty();
         let methods = if plain {
-            let derives_clone = e
+            let derived: Vec<String> = e
                 .attributes
                 .iter()
                 .filter(|a| a.name.is_some_and(|n| self.text_of(n) == "derive"))
                 .flat_map(|a| a.args.iter())
-                .any(|arg| self.derive_name(arg) == "Clone");
+                .filter_map(|arg| match self.derive_name(arg).as_str() {
+                    "Clone" => Some("clone".to_string()),
 
-            self.enum_alias_methods(&name, derives_clone)
+                    "Debug" => Some("debug".to_string()),
+
+                    _ => None,
+                })
+                .collect();
+
+            self.enum_alias_methods(&name, derived)
         } else {
             String::new()
         };
@@ -305,7 +312,7 @@ impl<'s> Desugar<'s> {
 
         // `@derive(Eq)` compares the tag and the payload slots; a unit
         // variant is a string and compares on its own. `Clone` copies a
-        // payload variant with its metatable; `Debug` is the printer above.
+        // payload variant with its metatable; `Debug` writes `debug`.
         let max_arity = e
             .variants
             .iter()
@@ -353,8 +360,14 @@ impl<'s> Desugar<'s> {
                         ));
                     }
 
-                    // `Debug` is every enum's printer already.
-                    "Debug" => {}
+                    // The printer above is every enum's `__tostring`;
+                    // `Debug` adds the `debug` a derived struct has. A
+                    // unit variant is a string, so it takes the value.
+                    "Debug" => {
+                        printer.push_str(&format!(
+                            " function {name}.debug(v: any): string return tostring(v) end"
+                        ));
+                    }
 
                     // A derive that writes nothing must not pass in silence:
                     // a unit variant is a string, and a payload variant a
@@ -487,11 +500,11 @@ impl<'s> Desugar<'s> {
     }
 
     /// The methods a generic enum's alias lists, `read m: typeof(Opt.m)`
-    /// each: the impls of this file, the impls of other files, and a
-    /// derived `clone`. `typeof` keeps the method's own generic list;
+    /// each: the impls of this file, the impls of other files, and the
+    /// derived methods. `typeof` keeps the method's own generic list;
     /// a spelled `self: Opt<T>` names the alias inside itself, and the
     /// solver then finds no `T` for a call that takes an `Opt<T>`.
-    fn enum_alias_methods(&self, name: &str, derives_clone: bool) -> String {
+    fn enum_alias_methods(&self, name: &str, derived: Vec<String>) -> String {
         let mut names: Vec<String> = self
             .type_members
             .get(name)
@@ -507,10 +520,7 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        if derives_clone {
-            names.push("clone".to_string());
-        }
-
+        names.extend(derived);
         names.sort();
         names.dedup();
 

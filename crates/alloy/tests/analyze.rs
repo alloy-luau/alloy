@@ -467,6 +467,24 @@ fn a_nested_variant_binding_takes_its_payload_type() {
     );
 }
 
+/// `@derive(Debug)` on an enum wrote no `debug`, so a call of it
+/// reported a missing key. It writes the one a derived struct has.
+#[test]
+fn a_derived_debug_on_an_enum_writes_debug() {
+    let good = "@derive(Debug)\nenum Item as\n    Sword(number)\n    Nothing\nend\n@derive(Debug)\nenum Opt<T> as\n    Some(T)\n    None\nend\nlocal s = Item.Sword(4)\nlocal a: string = Item.debug(s)\nlocal b: string = Item.debug(Item.Nothing)\nlocal c: string = s:debug()\nlocal d: string = Opt.Some(1):debug()\nprint(a, b, c, d)\n";
+    analyze(good, "enum-debug");
+
+    let bad = "@derive(Debug)\nenum Item as\n    Sword(number)\n    Nothing\nend\nlocal n: number = Item.debug(Item.Nothing)\nprint(n)\n";
+    let Some(reported) = reports(bad, "enum-debug-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0].contains("Expected this to be 'number', but got 'string'"),
+        "{reported:?}"
+    );
+}
+
 /// A `for` over an `Iter`, a `Queue`, or a `Heap` reported "Cannot
 /// iterate over a table without indexer": the checker reads an
 /// `__iter` from the type's metatable, and the std types had none.

@@ -1027,7 +1027,15 @@ impl<'s> Desugar<'s> {
     /// `Shape.Triangle` on an enum the file declares: the member is a
     /// variant, a method the impl writes, or nothing at all.
     pub(crate) fn check_enum_member(&mut self, e: &Expr) {
-        const BUILT_IN: &[&str] = &["is", "clone", "__index", "__tostring", "__eq", "__call"];
+        const BUILT_IN: &[&str] = &[
+            "is",
+            "clone",
+            "debug",
+            "__index",
+            "__tostring",
+            "__eq",
+            "__call",
+        ];
 
         let Expr::Index {
             object,

@@ -559,6 +559,28 @@ impl State {
 
         std::fs::read_to_string(imports::module_file(&target)?).ok()
     }
+
+    /// The documents of the modules a file imports. Each one holds the
+    /// declarations of its own imports, and a remote or a function of
+    /// it can hand the file a struct that the file never imports.
+    pub(crate) fn imported_docs(&self, uri: &str) -> Vec<&Doc> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let targets: Vec<PathBuf> = alloy_syntax::scan::import_statements(&doc.source)
+            .into_iter()
+            .filter_map(|s| self.resolve_spec(uri, &s.spec))
+            .map(|p| imports::module_path(&p))
+            .collect();
+
+        self.docs
+            .iter()
+            .filter(|(u, _)| {
+                uri_to_path(u).is_some_and(|p| targets.contains(&imports::module_path(&p)))
+            })
+            .map(|(_, d)| d)
+            .collect()
+    }
 }
 
 /// The check artifact's call for the child lookup whose name starts at

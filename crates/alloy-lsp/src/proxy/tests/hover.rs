@@ -2109,7 +2109,7 @@ fn a_namespace_struct_value_hovers_by_its_name() {
     let (st, uri) = one_file(SRC);
     let doc = st.docs.get(uri).expect("doc");
     let printed = "t2 where t1 = {\n    new: (f: {\n        x: number\n    }) -> t2\n} ; t2 = { @metatable t1,\n{\n    x: number\n} }";
-    let named = |text: String| crate::proxy::hover::name_solver_struct(&text, doc);
+    let named = |text: String| crate::proxy::hover::name_solver_struct(&text, doc, &[]);
 
     assert_eq!(
         named(format!("```luau\nlocal p: {printed}\n```")).as_deref(),
@@ -2130,6 +2130,84 @@ fn a_namespace_struct_value_hovers_by_its_name() {
         .as_deref(),
         Some("```luau\nlocal ps: {Geo.Vec2}?\n```")
     );
+}
+
+/// A remote of `net` sends `{ Stack }`, and only `net` imports `Stack`.
+/// The client reaches the struct through `net`: the hover names it, and
+/// `s.` offers no `new`. An enum field of a struct binds its own
+/// variable ahead of the struct's in the clause.
+#[test]
+fn a_struct_a_remote_sends_is_named_through_its_module() {
+    let dir = std::env::temp_dir().join(format!("alloy-remote-struct-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    let sources = [
+        (
+            "items",
+            "export enum Kind\n    A\n    B(number)\nend\n\nexport struct Stack\n    count: number\nend\n\nexport struct Slot\n    count: number\n    kind: Kind\nend\n",
+        ),
+        (
+            "net",
+            "import { Stack, Slot } from \"./items\"\n\nexport remote Stacks(stacks: { Stack }, slot: Slot) from server\n",
+        ),
+        (
+            "client",
+            "import { Stacks } from \"./net\"\n\nStacks.on(function(stacks, slot)\n    for _, s in stacks do\n        print(s.count, slot)\n    end\nend)\n",
+        ),
+    ];
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (name, source) in sources {
+        let path = dir.join(format!("src/{name}.aly"));
+        std::fs::write(&path, source).expect("source");
+        let uri = path_to_uri(&path);
+        let (options, jsx) = st.options_for(&uri);
+        st.docs
+            .insert(uri, Doc::new(source.to_string(), 1, &options, &jsx, None));
+    }
+
+    let client = path_to_uri(&dir.join("src/client.aly"));
+    let doc = st.docs.get(&client).expect("doc");
+    let imported = st.imported_docs(&client);
+    let decls: Vec<_> = imported
+        .iter()
+        .flat_map(|d| d.import_decls.iter())
+        .collect();
+    let shapes: Vec<_> = imported
+        .iter()
+        .flat_map(|d| d.import_shapes.iter())
+        .collect();
+    let stack = "```luau\nlocal s: t1 where t1 = { @metatable t2,\n{\n    count: number\n} } ; t2 = {\n    __index: t2,\n    new: (f: {\n        count: number\n    }) -> t1\n}\n```";
+    let slot = "```luau\nlocal slot: t3 where t1 = \"A\" | { @metatable t2,\n{\n    _1: number,\n    tag: \"B\"\n} } ; t2 = {\n    __index: t2\n} ; t3 = { @metatable t4,\n{\n    count: number,\n    kind: t1\n} } ; t4 = {\n    __index: t4\n}\n```";
+
+    assert_eq!(name_solver_struct(stack, doc, &[]), None);
+    assert_eq!(
+        name_solver_struct(stack, doc, &decls).as_deref(),
+        Some("```luau\nlocal s: Stack\n```")
+    );
+    assert_eq!(
+        name_solver_struct(slot, doc, &decls).as_deref(),
+        Some("```luau\nlocal slot: Slot\n```")
+    );
+
+    let mut result = json!([
+        { "label": "new", "kind": 3, "detail": "({ count: number }) -> Stack" },
+        { "label": "count", "kind": 5, "detail": "number" },
+    ]);
+    clean_completion(&mut result, doc, &shapes, 4, 16, true);
+    assert_eq!(result.as_array().map(Vec::len), Some(1), "{result}");
+    assert_eq!(result[0]["label"], "count");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A file-level local and a parameter may share a name. Inside the

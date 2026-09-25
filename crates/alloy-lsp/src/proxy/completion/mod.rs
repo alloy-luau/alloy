@@ -786,9 +786,13 @@ fn receiver_is_a_local(doc: &Doc, line: u32, character: u32) -> bool {
 /// list holds members alone, each without the receiver its signature
 /// carries. A detail the reader cannot write goes, and an empty
 /// documentation, which opens an empty panel, goes too.
+///
+/// `reach` holds the shapes the imported modules import: a remote of
+/// one can hand the file a struct that the file never imports.
 pub(crate) fn clean_completion(
     result: &mut Value,
     doc: &Doc,
+    reach: &[&alloy::declarations::Shape],
     line: u32,
     character: u32,
     snippets: bool,
@@ -832,6 +836,7 @@ pub(crate) fn clean_completion(
             .shapes
             .iter()
             .chain(doc.import_shapes.iter())
+            .chain(reach.iter().copied())
             .map(|s| s.name())
             .collect();
 

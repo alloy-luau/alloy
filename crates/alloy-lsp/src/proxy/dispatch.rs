@@ -1342,7 +1342,15 @@ impl Server {
                             // Before any pass reads the `where` clause of
                             // a solver variable as a type of its own.
                             if let Some(named) = name_solver_local(&st, &text, doc, line, character)
-                                .or_else(|| name_solver_struct(&text, doc))
+                                .or_else(|| {
+                                    let reach: Vec<_> = st
+                                        .imported_docs(uri)
+                                        .into_iter()
+                                        .flat_map(|d| d.import_decls.iter())
+                                        .collect();
+
+                                    name_solver_struct(&text, doc, &reach)
+                                })
                             {
                                 text = named;
                             }
@@ -2166,7 +2174,13 @@ impl Server {
                         }
 
                         if let Some(doc) = st.docs.get(uri) {
-                            clean_completion(result, doc, line, character, st.snippets);
+                            let reach: Vec<_> = st
+                                .imported_docs(uri)
+                                .into_iter()
+                                .flat_map(|d| d.import_shapes.iter())
+                                .collect();
+
+                            clean_completion(result, doc, &reach, line, character, st.snippets);
                         }
 
                         st.child_name_details(uri, line, character, result);

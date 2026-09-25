@@ -1515,7 +1515,7 @@ pub(crate) fn a_value_offers_no_constructor() {
 
     // `player.` on line 5, past the dot.
     let mut result = child();
-    clean_completion(&mut result, doc, 5, 13, true);
+    clean_completion(&mut result, doc, &[], 5, 13, true);
     assert_eq!(labels(&result), ["name"]);
 
     // `Player.` names the type, and the constructor stays.
@@ -1523,7 +1523,7 @@ pub(crate) fn a_value_offers_no_constructor() {
     let (st, uri) = one_file(src);
     let doc = st.docs.get(uri).expect("doc");
     let mut result = child();
-    clean_completion(&mut result, doc, 4, 17, true);
+    clean_completion(&mut result, doc, &[], 4, 17, true);
     let mut got = labels(&result);
     got.sort();
     assert_eq!(got, ["name", "new"]);
@@ -3684,7 +3684,7 @@ fn a_colon_list_leaves_out_a_static_of_no_parameters() {
         { "label": "default", "kind": 2, "detail": "() -> Stats" },
         { "label": "clone", "kind": 2, "detail": "(Stats) -> Stats" },
     ]);
-    clean_completion(&mut result, doc, 4, 8, false);
+    clean_completion(&mut result, doc, &[], 4, 8, false);
     let labels: Vec<&str> = result
         .as_array()
         .unwrap()

@@ -4078,6 +4078,23 @@ mod tests {
         );
     }
 
+    /// An exported local takes the annotation's arguments as a plain one
+    /// does. `export const` wrote `HashMap.new()`, and the checker
+    /// reported that the type arguments differ.
+    #[test]
+    fn an_exported_constructor_takes_the_annotation_arguments() {
+        for head in ["export const", "export local", "const"] {
+            let src = format!("{head} m: HashMap<string, number> = HashMap.new()\nprint(m)\n");
+            let out = crate::compile(&src).unwrap();
+            assert!(out.diagnostics.is_empty(), "{head}: {:?}", out.diagnostics);
+            assert!(
+                out.check.contains("HashMap.new<<string, number>>()"),
+                "{head}: {}",
+                out.check
+            );
+        }
+    }
+
     /// `is` reads through a type alias, and the branch it opens has to
     /// agree. `type B = Box` narrowed nothing, so a field read under
     /// `if x is B` reported on `unknown` inside a branch that holds.

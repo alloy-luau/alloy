@@ -1114,6 +1114,9 @@ impl<'s> Desugar<'s> {
         if local_needs_rewrite(l) {
             self.local_stmt(l);
         } else {
+            // `export const m: HashMap<K, V> = HashMap.new()`: the call
+            // takes the annotation's arguments, as for a plain local.
+            self.expected_generic = self.annotated_constructor(l);
             let children: Vec<Child<'_>> = l.values.iter().map(Child::Expr).collect();
             self.stitch(rest, &children, |d, child| match child {
                 Child::Expr(e) => d.expr(e),
@@ -1122,6 +1125,7 @@ impl<'s> Desugar<'s> {
 
                 Child::Function(b) => d.function_block(b),
             });
+            self.expected_generic = None;
         }
     }
 

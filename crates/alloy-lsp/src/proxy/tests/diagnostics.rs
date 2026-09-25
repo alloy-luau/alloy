@@ -1521,3 +1521,19 @@ fn a_broken_markup_config_is_named_and_a_fix_on_disk_clears_it() {
     assert!(sent.contains("publishDiagnostics"), "{sent}");
     assert!(!sent.contains("needs a backend"), "{sent}");
 }
+
+/// The `as` fix stands only at a header the parser reports. A method
+/// line under `impl Svc` took it and became `public as function`.
+#[test]
+fn the_header_as_fix_stands_only_at_its_report() {
+    let src = "struct Svc\n  n: number\nend\n\nimpl Svc\n  public function boot(self)\n  end\nend\n\nimpl Svc function stop(self)\n  end\nend\n";
+    let (st, uri) = one_file(src);
+
+    assert!(st.header_as_actions(uri, ((5, 4), (5, 4))).is_empty());
+
+    let actions = st.header_as_actions(uri, ((9, 2), (9, 2)));
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    let edit = &actions[0]["edit"]["changes"][uri][0];
+    assert_eq!(edit["range"]["start"], json!({ "line": 9, "character": 8 }));
+    assert!(actions[0]["diagnostics"][0]["message"].is_string());
+}

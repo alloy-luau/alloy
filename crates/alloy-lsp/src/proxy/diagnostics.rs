@@ -694,6 +694,21 @@ impl State {
 
         for f in &fixes {
             let (line, at) = position_of(&doc.source, f.start as usize);
+            // The parser's report names the header. A rewrite with no
+            // report on its line is the scan's mistake, not a fix.
+            let Some(head) = doc
+                .output
+                .as_ref()
+                .map(|o| o.diagnostics.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .find(|d| {
+                    d.message.ends_with(alloy::fmt::NEEDS_AS)
+                        && position_of(&doc.source, d.start as usize).0 == line
+                })
+            else {
+                continue;
+            };
             let edit = json!({
                 "range": {
                     "start": { "line": line, "character": at },
@@ -707,37 +722,22 @@ impl State {
                 continue;
             }
 
-            let head = doc
-                .output
-                .as_ref()
-                .map(|o| o.diagnostics.as_slice())
-                .unwrap_or_default()
-                .iter()
-                .find(|d| {
-                    d.message.ends_with(alloy::fmt::NEEDS_AS)
-                        && position_of(&doc.source, d.start as usize).0 == line
-                });
-            let mut action = json!({
+            let (sl, sc) = position_of(&doc.source, head.start as usize);
+            actions.push(json!({
                 "title": "Write `as` after the header",
                 "kind": "quickfix",
                 "isPreferred": true,
-                "edit": { "changes": { uri: [edit] } },
-            });
-
-            if let Some(d) = head {
-                let (sl, sc) = position_of(&doc.source, d.start as usize);
-                action["diagnostics"] = json!([{
+                "diagnostics": [{
                     "range": {
                         "start": { "line": sl, "character": sc },
                         "end": { "line": line, "character": at },
                     },
                     "severity": 1,
                     "source": "Alloy",
-                    "message": alloy::docs::labeled(&d.message),
-                }]);
-            }
-
-            actions.push(action);
+                    "message": alloy::docs::labeled(&head.message),
+                }],
+                "edit": { "changes": { uri: [edit] } },
+            }));
         }
 
         if all.len() > 1 {

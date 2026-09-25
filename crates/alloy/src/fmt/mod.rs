@@ -150,9 +150,11 @@ pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
 
         // An `impl` header runs over names, `.`, and `for`; the others end
         // at their one name, past `<...>` and an interface's `extends`.
+        // A name follows the opener or a joining word. The first word of
+        // the body is a name too: `public` in `impl Svc` then `public
+        // function`, or `area` in `interface Shape` then `area: number`.
         let mut j = i + 1;
         let mut angle = 0usize;
-        let mut names = 0usize;
 
         while j < toks.len() {
             let t = text(j);
@@ -162,15 +164,12 @@ pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
                 angle += usize::from(t == "<");
                 angle -= usize::from(t == ">");
                 j += 1;
-            } else if t == "<" {
-                angle += 1;
-                j += 1;
-            } else if opener == "impl" && (t == "." || t == "for" || name) {
-                j += 1;
-            } else if (opener == "interface" && (t == "extends" || t == "," || (name && names > 0)))
-                || (name && names == 0)
+            } else if t == "<"
+                || (opener == "impl" && (t == "." || t == "for"))
+                || (opener == "interface" && (t == "extends" || t == ","))
+                || (name && (j == i + 1 || matches!(text(j - 1), "." | "for" | "extends" | ",")))
             {
-                names += 1;
+                angle += usize::from(t == "<");
                 j += 1;
             } else {
                 break;
@@ -1510,6 +1509,23 @@ mod tests {
         );
         assert!(parse_error(&text).is_none(), "{text}");
         assert!(header_as_fixes(&text).is_empty());
+    }
+
+    /// A header on its own line takes no rewrite. The first word of the
+    /// body read as one more name of the header, and the fix wrote
+    /// `public as function` and `area as: number`.
+    #[test]
+    fn the_header_rewrite_stops_at_the_header() {
+        for src in [
+            "impl Svc\n  public function boot(self)\n  end\nend\n",
+            "impl Shape for Svc\n  private function area(self): number\n    return 1\n  end\nend\n",
+            "interface Shape extends Base, Named\n  area: number\nend\n",
+            "impl Box<T>\n  public function get(self): T\n  end\nend\n",
+        ] {
+            assert!(header_as_fixes(src).is_empty(), "{src}");
+        }
+        let fixes = header_as_fixes("interface Shape extends Base area: number end\n");
+        assert_eq!(fixes.len(), 1, "{fixes:?}");
     }
 
     /// The `as name` of a match head stays on the head line, with one

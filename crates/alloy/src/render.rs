@@ -289,6 +289,36 @@ pub fn apply_edits(src: &str, edits: &[Edit]) -> (String, SpanMap, Vec<EditError
     (text, map, errors)
 }
 
+/// The first character of `text` that is code, past spaces and Luau
+/// comments. `None` when a comment runs past the end of `text`.
+fn first_code_char(text: &str) -> Option<char> {
+    let mut s = text;
+
+    loop {
+        s = s.trim_start();
+
+        let Some(comment) = s.strip_prefix("--") else {
+            return s.chars().next();
+        };
+        // `--[[ ]]` and `--[==[ ]==]` close on their own bracket.
+        let level = comment
+            .strip_prefix('[')
+            .map(|r| r.len() - r.trim_start_matches('=').len())
+            .filter(|n| comment[1 + n..].starts_with('['));
+
+        s = match level {
+            Some(n) => {
+                let close = format!("]{}]", "=".repeat(n));
+                let body = &comment[2 + n..];
+
+                &body[body.find(&close)? + close.len()..]
+            }
+
+            None => &comment[comment.find('\n')?..],
+        };
+    }
+}
+
 impl SpanMap {
     /// The output offset at which chunk `i` starts.
     pub fn chunk_start(&self, i: usize) -> u32 {
@@ -301,6 +331,9 @@ pub struct Renderer<'s> {
     src: &'s str,
     out: String,
     map: SpanMap,
+    /// A generated statement that ends in an expression stands last, and
+    /// no code has followed it yet. See [`Renderer::end_stmt`].
+    open_stmt: bool,
 }
 
 /// A generated chunk that holds a newline. The renderer refuses it, because
@@ -327,6 +360,31 @@ impl<'s> Renderer<'s> {
             src,
             out: String::with_capacity(src.len() + src.len() / 8),
             map: SpanMap::default(),
+            open_stmt: false,
+        }
+    }
+
+    /// Marks the end of a generated statement that ends in an
+    /// expression. Luau reads a `(` after an expression as a call, so the
+    /// next code gets a `;` in front when it starts with `(`.
+    pub fn end_stmt(&mut self) {
+        self.open_stmt = true;
+    }
+
+    /// Writes the `;` that [`Renderer::end_stmt`] asks for, when `text`
+    /// is the code after the statement and starts with `(`. Spaces and
+    /// comments leave the statement open.
+    fn close_stmt(&mut self, anchor: u32, text: &str) {
+        if !self.open_stmt {
+            return;
+        }
+
+        if let Some(c) = first_code_char(text) {
+            self.open_stmt = false;
+
+            if c == '(' {
+                self.push_generated(anchor, ";");
+            }
         }
     }
 
@@ -351,6 +409,9 @@ impl<'s> Renderer<'s> {
         if start >= end {
             return;
         }
+
+        let src = self.src;
+        self.close_stmt(start, &src[start as usize..end as usize]);
 
         // Merge with a preceding copy of the adjacent range, so the map
         // stays small on the common path of untouched code.
@@ -383,6 +444,13 @@ impl<'s> Renderer<'s> {
             return Ok(());
         }
 
+        self.close_stmt(anchor, text);
+        self.push_generated(anchor, text);
+
+        Ok(())
+    }
+
+    fn push_generated(&mut self, anchor: u32, text: &str) {
         self.map.starts.push(self.out.len() as u32);
         self.map.chunks.push(Chunk::Generated {
             anchor,
@@ -390,13 +458,12 @@ impl<'s> Renderer<'s> {
         });
         self.out.push_str(text);
         self.map.out_len = self.out.len() as u32;
-
-        Ok(())
     }
 
     /// Appends everything another renderer over the same source produced,
     /// chunk by chunk, so provenance survives the move.
     pub fn append(&mut self, other: Renderer<'s>) {
+        let open = other.open_stmt;
         let (text, map) = other.finish();
 
         for (i, chunk) in map.chunks.iter().enumerate() {
@@ -411,6 +478,8 @@ impl<'s> Renderer<'s> {
                 }
             }
         }
+
+        self.open_stmt |= open;
     }
 
     pub fn finish(self) -> (String, SpanMap) {

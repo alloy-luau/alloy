@@ -2177,6 +2177,7 @@ impl<'s> Desugar<'s> {
                         {
                             let anchor = d.byte_start(b.span);
                             d.generate(anchor, prefix);
+                            d.r.end_stmt();
                         }
 
                         d.block(b);
@@ -2188,6 +2189,7 @@ impl<'s> Desugar<'s> {
                 if let Some(text) = narrow_after {
                     let anchor = self.byte_end(span);
                     self.generate(anchor, &text);
+                    self.r.end_stmt();
                 }
             }
         }
@@ -2790,6 +2792,8 @@ impl<'s> Desugar<'s> {
                     Piece::Name(n) => self.copy_on_line(anchor, *n),
                 }
             }
+
+            self.r.end_stmt();
         }
     }
 
@@ -3248,6 +3252,10 @@ impl<'s> Desugar<'s> {
         // 4. The prologue and the async wrapper, on the header line.
         let has_vararg = body.params.iter().any(|p| p.is_vararg);
         let mut lead = String::new();
+        // A prologue ends in an expression. The async wrapper ends in
+        // `function()`, and a `;` there opens the body with no statement.
+        let ends_open = body.is_async.is_none()
+            && (self.self_prologue.is_some() || prologue.iter().any(|p| !p.is_empty()));
 
         if let Some(p) = self.self_prologue.take() {
             lead.push(' ');
@@ -3313,6 +3321,10 @@ impl<'s> Desugar<'s> {
 
         if !lead.is_empty() {
             self.generate(cursor, &lead);
+        }
+
+        if ends_open {
+            self.r.end_stmt();
         }
 
         // 5. The body, its trailing trivia, and the close.
@@ -4021,6 +4033,30 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    /// A statement the desugar writes in front of source code ends in an
+    /// expression, so a next line that opens with `(` read as a call on
+    /// it: the narrowing of `is table`, a payload binding, a hoisted temp,
+    /// a parameter prologue. A `;` now ends it, and both artifacts parse.
+    #[test]
+    fn a_paren_line_after_a_written_statement_stays_a_statement() {
+        let src = "struct Pt\n    x: number\nend\nenum Job\n    Idle\n    Build(string)\nend\nlocal function get(): number?\n    return 1\nend\nlocal function a(value: unknown, i: Instance, job: Job)\n    if value is table then\n        (i :: any).Name = \"t\"\n    end\n    if local v = get() then\n        -- a note\n        (i :: any).Name = tostring(v)\n    end\n    local Build(m) = job else return end\n    (i :: any).Name = m\n    match job with\n        case Build(n) then\n            (i :: any).Name = n\n        case Idle then\n    end\n    (i :: any).Name = tostring(get() ?? 0)\n    if value is not Pt then return end\n    (i :: any).Name = \"p\"\nend\nlocal function b({ x }: Pt, i: Instance, n: number = 1)\n    (i :: any).Name = tostring(x + n)\nend\nprint(a, b)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("{ [any]: any }) ;(i :: any).Name"),
+            "{}",
+            out.check
+        );
+
+        let lua = mlua::Lua::new();
+
+        for text in [&out.ship, &out.check] {
+            if let Err(e) = lua.load(text.as_str()).into_function() {
+                panic!("{e}\n{text}");
+            }
+        }
     }
 
     /// Two declarations of one name in one file. The second wins in

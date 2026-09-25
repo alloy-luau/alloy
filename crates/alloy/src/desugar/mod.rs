@@ -3333,6 +3333,8 @@ impl<'s> Desugar<'s> {
                     }
                 },
             }
+
+            self.r.end_stmt();
         }
     }
 

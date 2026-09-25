@@ -874,6 +874,7 @@ impl<'s> Desugar<'s> {
 
         let values: Vec<&str> = binds.iter().map(|(_, v, _)| v.as_str()).collect();
         self.generate(anchor, &format!(" = {}", values.join(", ")));
+        self.r.end_stmt();
     }
 
     /// Copies a span when it sits on the anchor's line, and generates

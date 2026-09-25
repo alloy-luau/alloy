@@ -2080,6 +2080,33 @@ pub fn import_that_exports(path: &Path, source: &str, name: &str) -> Option<Stri
         })
 }
 
+/// The spec of a module of the project that exports `name`, as the
+/// file at `path` would import it: where a name the file never imported
+/// lives. The first source in path order answers.
+pub fn module_that_exports(path: &Path, name: &str) -> Option<String> {
+    let config_path = Config::find(path.parent()?)?;
+    let config = Config::load(&config_path).ok()?;
+    let root = config_path.parent()?;
+    let abs = |p: &Path| normalize(&std::env::current_dir().unwrap_or_default().join(p));
+    let input = abs(&root.join(&config.build.input));
+    let from = abs(path);
+    let written = crate::build::written_dirs(root, &config);
+    let target = crate::build::sources(&input, &written)
+        .ok()?
+        .into_iter()
+        .map(|p| abs(&p))
+        .filter(|p| *p != from && !p.to_string_lossy().ends_with(".d.aly"))
+        .find(|p| {
+            std::fs::read_to_string(p)
+                .is_ok_and(|text| exported_names(&text).iter().any(|n| n == name))
+        })?;
+
+    Some(crate::build::relative_require(
+        from.strip_prefix(&input).ok()?,
+        &target.strip_prefix(&input).ok()?.with_extension(""),
+    ))
+}
+
 /// A type or interface that a module exports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeExport {

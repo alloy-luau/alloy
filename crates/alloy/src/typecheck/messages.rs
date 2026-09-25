@@ -177,7 +177,7 @@ pub fn rewrite_emitted_name(
     let text = source.lines().nth(line.saturating_sub(1))?;
 
     if let Some(name) = quoted_after(message, "Unknown global '") {
-        if names_word(text, &format!("new {name}")) {
+        if names_word(text, &format!("new {name}")) && declares_type_only(source, name) {
             return Some((format!("`{name}` is a type, not a struct"), None));
         }
 
@@ -235,6 +235,40 @@ pub fn rewrite_emitted_name(
     }
 
     None
+}
+
+/// `new Nope { }` with no struct of that name in scope. The emit reads
+/// the struct's table, so the checker reports an unknown global on
+/// `new`. The report names the struct, moves onto its name, and names
+/// the module of the project that exports it, if one does. A name the
+/// file declares as a type alone is `rewrite_emitted_name`'s.
+pub fn unknown_struct_report(
+    message: &str,
+    path: &std::path::Path,
+    source: &str,
+    line: usize,
+) -> Option<Resited> {
+    let name = quoted_after(message, "Unknown global '")?;
+    let text = source.lines().nth(line.saturating_sub(1))?;
+    let at = word_column(text, &format!("new {name}"))? + "new ".len();
+
+    if declares_type_only(source, name) {
+        return None;
+    }
+
+    let hint = match crate::modules::import_that_exports(path, source, name) {
+        Some(spec) => format!("; \"{spec}\" exports it, so add it to that import"),
+
+        None => crate::modules::module_that_exports(path, name)
+            .map(|spec| format!("; \"{spec}\" exports it: `import {{ {name} }} from \"{spec}\"`"))
+            .unwrap_or_default(),
+    };
+
+    Some(Resited {
+        kind: "TypeError",
+        message: format!("unknown struct `{name}`{hint}"),
+        at: Some((line, at)),
+    })
 }
 
 /// The text between `opener` and the next quote.
@@ -2967,6 +3001,53 @@ end
             ),
             Some(("`Plain` is a type, not a struct".to_string(), None))
         );
+    }
+
+    /// `new Nope { }` with nothing named `Nope` names the struct, on the
+    /// name. A module of the project that exports the name gives the
+    /// import to write.
+    #[test]
+    fn a_new_of_an_unknown_name_says_unknown_struct() {
+        let dir = std::env::temp_dir().join(format!("alloy-unknown-struct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/c")).unwrap();
+        std::fs::write(
+            dir.join("alloy.toml"),
+            "[build]\nin = \"src\"\nout = \"build\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/tags.aly"),
+            "export struct Coins\n    amount: number\nend\n",
+        )
+        .unwrap();
+        let src = "const c = new Coins { amount = 1 }\nconst d = new Nope { a = 1 }\n";
+        let path = dir.join("src/c/imp.aly");
+        let report = |name: &str, line: usize| {
+            let message = format!("Unknown global '{name}'; consider assigning to it first");
+            let r = unknown_struct_report(&message, &path, src, line).unwrap();
+
+            (r.message, r.at)
+        };
+
+        assert_eq!(
+            report("Coins", 1),
+            (
+                "unknown struct `Coins`; \"../tags\" exports it: `import { Coins } from \"../tags\"`"
+                    .to_string(),
+                Some((1, 15))
+            )
+        );
+        assert_eq!(
+            report("Nope", 2),
+            ("unknown struct `Nope`".to_string(), Some((2, 15)))
+        );
+
+        // A type alias of the file is a type, not a struct.
+        let alias = "type Nope = { a: number }\nconst d = new Nope { a = 1 }\n";
+        assert!(unknown_struct_report("Unknown global 'Nope'", &path, alias, 2).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

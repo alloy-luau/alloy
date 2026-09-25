@@ -1045,6 +1045,27 @@ pub fn analyze(
         };
         d.message = friendly_type_message(&d.message, &reach, source, d.col);
 
+        // `new Nope { }` names a struct, not a global, and the report
+        // moves onto the name.
+        if let Some(text) = whole
+            && let Some(better) = unknown_struct_report(
+                &d.message,
+                &root.join(&config.build.input).join(&d.rel),
+                text,
+                d.line,
+            )
+        {
+            d.kind = better.kind.to_string();
+            d.message = better.message;
+
+            if let Some((line, col)) = better.at {
+                d.line = line;
+                d.col = col;
+            }
+
+            continue;
+        }
+
         if let Some(text) = whole
             && let Some(message) = crate::modules::missing_import_message(
                 &d.message,

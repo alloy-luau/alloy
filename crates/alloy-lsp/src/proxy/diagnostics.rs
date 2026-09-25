@@ -1709,7 +1709,14 @@ pub(crate) fn alloy_wording(
     // the editor say one thing.
     // A name an import the file writes could bring in: the fix is one
     // word in that list, and the terminal says the same.
-    if let Some(path) = here.and_then(uri_to_path)
+    // `new Nope { }` names a struct, not a global. The compiler writes
+    // the sentence and moves the report onto the name.
+    let unknown_struct = here.and_then(uri_to_path).and_then(|path| {
+        alloy::typecheck::unknown_struct_report(&message, &path, &doc.source, sl as usize + 1)
+    });
+
+    if unknown_struct.is_none()
+        && let Some(path) = here.and_then(uri_to_path)
         && let Some(better) = alloy::modules::missing_import_message(&message, &path, &doc.source)
     {
         d["message"] = json!(format!("{kind}: {better}"));
@@ -1717,8 +1724,9 @@ pub(crate) fn alloy_wording(
         return;
     }
 
-    if let Some((better, at)) =
-        alloy::typecheck::rewrite_emitted_name(&message, &doc.source, sl as usize + 1)
+    if unknown_struct.is_none()
+        && let Some((better, at)) =
+            alloy::typecheck::rewrite_emitted_name(&message, &doc.source, sl as usize + 1)
     {
         d["message"] = json!(format!("{kind}: {better}"));
 
@@ -1736,13 +1744,15 @@ pub(crate) fn alloy_wording(
     // that is a value, and an enum variant built with the wrong
     // payload: the compiler writes these sentences and puts them on the
     // token the reader wrote.
-    if let Some(better) = alloy::typecheck::resite_report(
-        &body,
-        shapes,
-        &doc.source,
-        sl as usize + 1,
-        byte_column(doc, sl, sc),
-    ) {
+    if let Some(better) = unknown_struct.or_else(|| {
+        alloy::typecheck::resite_report(
+            &body,
+            shapes,
+            &doc.source,
+            sl as usize + 1,
+            byte_column(doc, sl, sc),
+        )
+    }) {
         d["message"] = json!(format!("{}: {}", better.kind, better.message));
 
         if let Some(code) = alloy::typecheck::section_of(better.kind) {

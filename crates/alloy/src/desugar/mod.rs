@@ -677,7 +677,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         structs_with_new: HashMap::new(),
         impl_target: None,
         impl_method: None,
-        plain_tables: HashSet::new(),
+        table_selfs: HashMap::new(),
         self_inject: None,
         declared_types: HashSet::new(),
         traits: HashMap::new(),
@@ -1409,10 +1409,9 @@ struct Desugar<'s> {
     /// `new Self()` in the constructor itself would call the
     /// constructor again, so the emit builds the value instead.
     impl_method: Option<String>,
-    /// Top-level `local X = { }` tables the file never rebinds and
-    /// never gives a metatable. A colon method on one of them takes
-    /// `typeof(X)` for its `self`.
-    plain_tables: HashSet<String>,
+    /// The `self` type of each top-level table a colon method is
+    /// written on, for the check artifact.
+    table_selfs: HashMap<String, crate::tables::SelfType>,
     /// The type of the `self` parameter the next function header has to
     /// write out, for a method the source spells with a colon.
     self_inject: Option<String>,

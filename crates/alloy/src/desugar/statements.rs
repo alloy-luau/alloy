@@ -600,32 +600,54 @@ impl<'s> Desugar<'s> {
         self.r.append(side);
     }
 
-    /// Finds the plain tables of the file that a colon method can take
-    /// a `self` type from: `local X = { }` at the top level, with no
-    /// later rebind and no metatable of its own.
+    /// Finds the top-level tables of the file that a colon method can
+    /// take a `self` type from, and the type each takes.
     ///
     /// Luau gives `self` no type in `function X:m()` on such a table, so
-    /// the check artifact writes the parameter out as `typeof(X)`. A
-    /// struct, an enum, and a foreign `impl` carry their own `self`
-    /// already, and none of them reaches this scan.
+    /// the check artifact writes the parameter out. A plain table takes
+    /// `typeof(X)`, and a class of the `X.__index = X` shape takes an
+    /// instance. A table the file rebinds takes an alias written right
+    /// after the last rebind. A struct, an enum, and a foreign `impl`
+    /// carry their own `self` already, and none of them reaches this
+    /// scan.
     pub(crate) fn scan_plain_tables(&mut self, block: &Block) {
         let colon_method = |stmt: &Stmt| matches!(stmt.under_default(), Stmt::Function(f) if f.is_method && f.path.len() == 2);
 
         if !self.options.check || !block.stmts.iter().any(colon_method) {
             return;
         }
-        // The hover folds read the same list, so both come from one
-        // scan of the source.
-        let mut out: HashSet<String> = crate::tables::plain_tables(self.src)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
+        let mut out = crate::tables::self_types(self.src);
+        // A rebind or a metatable inside a function or a block leaves
+        // the value at a method unknown.
+        let mut nested: HashSet<String> = out.keys().cloned().collect();
+        let all = nested.clone();
 
         for stmt in &block.stmts {
-            self.drop_rebound_tables(stmt.under_default(), &mut out);
+            for child in stmt_children(stmt.under_default()) {
+                let stmts = match child {
+                    Child::Block(b) => &b.stmts,
+
+                    Child::Function(f) => &f.block.stmts,
+
+                    Child::Expr(_) => continue,
+                };
+
+                for inner in stmts {
+                    self.drop_rebound_tables(inner.under_default(), &mut nested);
+                }
+            }
         }
 
-        self.plain_tables = out;
+        out.retain(|name, _| nested.contains(name) || !all.contains(name));
+
+        for (name, kind) in &out {
+            if let crate::tables::SelfType::Rebound(at) = kind {
+                self.inserts
+                    .push((*at, format!(" type __self_{name} = typeof({name})")));
+            }
+        }
+
+        self.table_selfs = out;
     }
 
     /// Takes a name out of the plain tables when the file rebinds it,
@@ -700,9 +722,7 @@ impl<'s> Desugar<'s> {
             return None;
         }
 
-        self.plain_tables
-            .contains(owner)
-            .then(|| format!("typeof({owner})"))
+        self.table_selfs.get(owner).map(|kind| kind.text(owner))
     }
 
     /// `function X:m(...)` on a plain table, written out as

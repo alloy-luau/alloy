@@ -1358,6 +1358,34 @@ pub(crate) fn self_reads_as_the_impl_target_at_every_site() {
     assert_eq!(at("function Point.length(self: Point): number"), None);
 }
 
+/// `self` in a colon method on a table printed the checker's shape, or
+/// `unknown` for a class. It reads as the class for an instance, and as
+/// the table otherwise.
+#[test]
+pub(crate) fn self_on_a_table_method_reads_as_the_table() {
+    let src = concat!(
+        "local Klass = { }\n",
+        "Klass.__index = Klass\n",
+        "function Klass:m()\n",
+        "    print(self)\n",
+        "end\n",
+        "local Rebound = { }\n",
+        "Rebound = { other = 1 }\n",
+        "function Rebound:m()\n",
+        "    print(self)\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let at = |line: u32| name_self_receiver("```alloy\nlocal self: t1\n```", doc, line, 10);
+
+    assert_eq!(at(3).as_deref(), Some("```alloy\nself: Klass\n```"));
+    assert_eq!(
+        at(8).as_deref(),
+        Some("```alloy\nself: typeof(Rebound)\n```")
+    );
+}
+
 /// A method of an `impl` of an imported struct hovered as `unknown`: the
 /// emit writes it on the table the module exports, and that table's type
 /// comes from the module, so the method is not in it.

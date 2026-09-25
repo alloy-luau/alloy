@@ -2209,9 +2209,48 @@ pub(crate) fn name_self_receiver(
         return None;
     }
 
-    let out = format!("self: {}", impl_self_type(doc, line)?);
+    let named = impl_self_type(doc, line).or_else(|| table_self_name(doc, line))?;
+    let out = format!("self: {named}");
 
     (out != body).then(|| format!("{fence}\n{out}\n```{tail}"))
+}
+
+/// The name of `self` in a colon method on a top-level table, from the
+/// method head above the line. The checker prints the shape, and for a
+/// class the metatable too; the reader wrote a name. An instance of a
+/// class reads as the class, the way an instance of a struct does.
+fn table_self_name(doc: &Doc, line: u32) -> Option<String> {
+    let mut owner: Option<(usize, String)> = None;
+
+    for l in doc.source.lines().take(line as usize + 1) {
+        let indent = l.len() - l.trim_start().len();
+        let text = l.trim_start();
+
+        if let Some((at, _)) = &owner
+            && indent == *at
+            && (text == "end" || text.starts_with("end "))
+        {
+            owner = None;
+
+            continue;
+        }
+
+        if let Some(rest) = text.strip_prefix("function ")
+            && let Some((name, _)) = rest.split_once(':')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            owner = Some((indent, name.to_string()));
+        }
+    }
+
+    let (_, name) = owner?;
+    let kind = alloy::tables::self_types(&doc.source).remove(&name)?;
+
+    Some(match kind {
+        alloy::tables::SelfType::Instance(_) => name,
+
+        _ => format!("typeof({name})"),
+    })
 }
 
 /// `local rows = checked(ids)`: the child prints a solver variable for

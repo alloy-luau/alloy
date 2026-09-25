@@ -1136,6 +1136,41 @@ impl<'s> Desugar<'s> {
             .map(|(v, _)| v.as_str())
     }
 
+    /// The type a receiver holds: a name's annotation, or the declared
+    /// type of a field of a struct. `p.rarity` reads `rarity: Rarity`
+    /// from the struct `p` holds, in this file or in an imported one.
+    fn receiver_type(&self, e: &Expr, annotated: &HashMap<String, String>) -> Option<String> {
+        match e {
+            Expr::Name(n) => annotated.get(self.text_of(*n)).cloned(),
+
+            Expr::Index {
+                object,
+                key: IndexKey::Field(f),
+                ..
+            } => {
+                let owner = self.receiver_type(object, annotated)?;
+                let owner = owner.trim_end_matches('?');
+                let field = self.text_of(*f);
+
+                match self.type_members.get(owner) {
+                    Some(ms) => ms
+                        .iter()
+                        .find(|m| m.kind == "field" && m.name == field)
+                        .map(|m| m.shape.clone()),
+
+                    None => self
+                        .imported_type(owner)?
+                        .fields
+                        .iter()
+                        .find(|f| f.name == field)
+                        .map(|f| f.ty.clone()),
+                }
+            }
+
+            _ => None,
+        }
+    }
+
     /// Whether an `impl` of the enum writes the method: an impl in this
     /// file, or in the module that declares an imported enum.
     fn enum_has_method(&self, target: &str, method: &str) -> bool {
@@ -1181,6 +1216,19 @@ impl<'s> Desugar<'s> {
 
                 let default = m.default.iter().map(Child::Block).collect();
                 self.bound_calls_in(default, &annotated, hits);
+
+                continue;
+            }
+
+            // `self` in an impl of a struct holds the struct, so
+            // `self.rarity:weight()` reads the type of the field.
+            if let Stmt::Impl(i) = stmt
+                && let target = self.impl_target_name(i.target)
+                && self.structs.contains(&target)
+            {
+                let mut inner = annotated.clone();
+                inner.insert("self".to_string(), target);
+                self.bound_calls_in(stmt_children(stmt), &inner, hits);
 
                 continue;
             }
@@ -1304,14 +1352,14 @@ impl<'s> Desugar<'s> {
         // A unit enum is a string at runtime, and a string carries no
         // metatable of its own, so `s:m()` finds no method. The impl
         // writes `Status.m`, and the static form reaches it.
-        if let (Some(m), Expr::Name(n)) = (method, &**func)
-            && let Some(ty) = annotated.get(self.text_of(*n))
+        if let Some(m) = method
+            && let Some(ty) = self.receiver_type(func, annotated)
             // `Opt<number>` names the generic enum `Opt`.
             && let target = ty.trim_end_matches('?').split('<').next().unwrap_or_default().trim()
             && let Some(unit) = self.unit_variant(target)
             && self.enum_has_method(target, self.text_of(*m))
         {
-            let (m, recv) = (self.text_of(*m), self.text_of(*n));
+            let (m, recv) = (self.text_of(*m), self.text_of(func.span()));
             let what = match self.is_unit_enum(target) {
                 true => format!("`{target}` is a unit enum, a string at runtime"),
 
@@ -4355,6 +4403,62 @@ mod tests {
 
         let bound = "enum Item as\n    Tool(number)\n    Junk\nend\n\nimpl Item as\n    function label(self): string\n        return \"x\"\n    end\nend\n\nenum Why as\n    Lost(Item)\n    Full\nend\n\nlocal function g(w: Why): string\n    return match w with\n        case Lost(item) then item:label()\n        case Full then \"full\"\n    end\nend\nprint(g)\n";
         assert_eq!(messages(bound), [want]);
+    }
+
+    /// `p.rarity:weight()` read a receiver that is a field, and the
+    /// check knew a type only from a name. `flux` gave the checker's
+    /// "Type 'Rarity' does not have key 'weight'" alone. The field's
+    /// declared type now answers: of a struct here, of `self` in its
+    /// impl, and of a struct another module declares.
+    #[test]
+    fn a_colon_call_through_a_struct_field_names_the_static_form() {
+        let rarity = "enum Rarity as\n    Common\n    Mythic\nend\nimpl Rarity as\n    function weight(self): number\n        return 1\n    end\nend\n";
+        let src = format!(
+            "{rarity}struct Pet as\n    rarity: Rarity\nend\nimpl Pet as\n    function odds(self): number\n        return self.rarity:weight()\n    end\nend\nlocal function w(p: Pet): number\n    return p.rarity:weight()\nend\nprint(w)\n"
+        );
+        assert_eq!(
+            messages(&src),
+            [
+                "`Rarity` is a unit enum, a string at runtime; call `Rarity.weight(self.rarity)`",
+                "`Rarity` is a unit enum, a string at runtime; call `Rarity.weight(p.rarity)`",
+            ]
+        );
+
+        let field = crate::WireField {
+            name: "rarity".to_string(),
+            ty: "Rarity".to_string(),
+            width: None,
+        };
+        let imported = crate::compile_with(
+            &format!(
+                "import {{ Pet }} from \"./pet\"\n{rarity}local function w(p: Pet): number\n    return p.rarity:weight()\nend\nprint(w)\n"
+            ),
+            &crate::EmitOptions {
+                file_name: "a.aly".into(),
+                shapes: vec![crate::StructShape {
+                    name: "Pet".into(),
+                    fields: vec![field],
+                    module: "pet.aly".into(),
+                    ..Default::default()
+                }],
+                wire_scopes: vec![crate::WireScope {
+                    module: "a.aly".into(),
+                    names: vec![("Pet".into(), "pet.aly".into(), "Pet".into())],
+                    stars: Vec::new(),
+                }],
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        let got: Vec<&str> = imported
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            got,
+            ["`Rarity` is a unit enum, a string at runtime; call `Rarity.weight(p.rarity)`"]
+        );
     }
 
     /// `x == Item.Tool("a", 1)` compared a fresh table by identity and

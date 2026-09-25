@@ -1076,34 +1076,36 @@ impl<'s> Desugar<'s> {
         else {
             return;
         };
-        let Expr::Name(n) = object.as_ref() else {
+        // `E.Reached` names an enum through `import * as E`.
+        let Some(ename) = self.dotted_name(object) else {
             return;
         };
-        let ename = self.text_of(*n).to_string();
         let Some(variants) = self.enum_decls.get(&ename) else {
             return;
         };
 
-        // The methods of an imported enum stay in the module that
-        // declares it: `project_impls` carries only the impls other
-        // files add. The checker reads them off the import's type, so a
-        // member of an imported enum is its report, not this one. A
-        // macro body sees the enums of the file it expands in the same
-        // way, without their impls.
-        let elsewhere = self
-            .options
-            .import_enums
-            .iter()
-            .chain(&self.options.macro_enums)
-            .any(|(n, _)| *n == ename);
-
-        if elsewhere {
+        // A macro body sees the enums of the file it expands in, without
+        // their impls, so a member there is the checker's report.
+        if self.options.macro_enums.iter().any(|(n, _)| *n == ename) {
             return;
         }
 
         let member = self.text_of(*field).to_string();
 
+        // The methods of an imported enum stay in the module that
+        // declares it, and the import index keys them the way this file
+        // spells the enum: `R.flip` for `import { Reached as R }`. An
+        // impl in a third file lands in `foreign_impls`.
+        let imported = self.options.import_enums.iter().any(|(n, _)| *n == ename)
+            && (self
+                .options
+                .import_callables
+                .iter()
+                .any(|(k, _)| *k == format!("{ename}.{member}"))
+                || self.options.foreign_impls.iter().any(|x| x.name == member));
+
         if BUILT_IN.contains(&member.as_str())
+            || imported
             || variants.iter().any(|(v, _)| *v == member)
             || self
                 .impl_methods

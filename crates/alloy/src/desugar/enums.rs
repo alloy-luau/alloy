@@ -3476,14 +3476,22 @@ mod tests {
 
     /// A static call of a method an imported enum's impl writes,
     /// `Opt.or_else(o, 5)`, is no missing variant: the impl sits in the
-    /// module that declares the enum, and the checker types the call
-    /// off the import. An enum of this file still reports.
+    /// module that declares the enum, and the import index keys it as
+    /// `Opt.or_else`. An enum of this file still reports.
     #[test]
     fn a_method_of_an_imported_enum_is_no_missing_variant() {
         let variants = vec![("Some".to_string(), 1), ("Nil".to_string(), 0)];
         let options = EmitOptions {
             import_enums: vec![("Opt".to_string(), variants)],
             import_types: vec![("./lib".to_string(), vec!["Opt<T>".to_string()])],
+            import_callables: vec![(
+                "Opt.or_else".to_string(),
+                crate::flux::Callable {
+                    params: Some(2),
+                    deprecated: None,
+                    exported: true,
+                },
+            )],
             ..EmitOptions::default()
         };
         let src = "import { Opt } from \"./lib\"\nlocal o: Opt<number> = Opt.Some(1)\nprint(Opt.or_else(o, 5))\n";
@@ -3498,6 +3506,29 @@ mod tests {
             got[0],
             "`Opt` has no variant `or_else`; its variants are `Some` and `Nil`"
         );
+    }
+
+    /// `Reached.Walkd` on an imported enum gave the checker's "Key
+    /// 'Walkd' not found in table 'Reached'" alone, with no variant list
+    /// and no quick fix. The import index names the variants under each
+    /// spelling a file binds: a named, a renamed, and a star import.
+    #[test]
+    fn a_misspelt_variant_of_an_imported_enum_is_an_error() {
+        let variants = vec![("Walked".to_string(), 0), ("Skipped".to_string(), 0)];
+        let options = EmitOptions {
+            import_enums: ["Reached", "R", "E.Reached"]
+                .map(|n| (n.to_string(), variants.clone()))
+                .to_vec(),
+            ..EmitOptions::default()
+        };
+        let src = "import { Reached } from \"./en\"\nimport { Reached as R } from \"./en\"\nimport * as E from \"./en\"\nprint(Reached.Walkd, R.Walkd, E.Reached.Walkd, R.Walked)\n";
+        let out = crate::compile_with(src, &options).expect("compiles");
+        let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        let want = |e: &str| {
+            format!("`{e}` has no variant `Walkd`; its variants are `Walked` and `Skipped`")
+        };
+
+        assert_eq!(got, [want("Reached"), want("R"), want("E.Reached")]);
     }
 
     #[test]

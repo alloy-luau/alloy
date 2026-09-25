@@ -1244,6 +1244,15 @@ mod tests {
             format_with(src, &o).unwrap(),
             "import { a } from '@pkg/a'\nimport { b } from './b'\nprint(a, b)\n"
         );
+
+        // A name list over several lines moves whole.
+        let src = "import { b } from './b'\nimport {\n  a, -- the a\n  c,\n} from './a'\nprint(a, b, c)\n";
+        let once = format_with(src, &o).unwrap();
+        assert_eq!(
+            once,
+            "import {\n  a, -- the a\n  c,\n} from './a'\nimport { b } from './b'\nprint(a, b, c)\n"
+        );
+        assert_eq!(format_with(&once, &o).unwrap(), once);
     }
 
     #[test]

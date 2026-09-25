@@ -1380,6 +1380,16 @@ mod tests {
             cut("import * as m, { a } from \"./m\"\nprint(m.z)\n"),
             "import * as m from \"./m\"\nprint(m.z)\n"
         );
+        // A list over several lines: a dead entry on a line of its own
+        // goes with that line, and the comment above it stays.
+        assert_eq!(
+            cut("import {\n    a, -- the a\n    b,\n    c,\n} from \"./m\"\nprint(a, c)\n"),
+            "import {\n    a, -- the a\n    c,\n} from \"./m\"\nprint(a, c)\n"
+        );
+        assert_eq!(
+            cut("import {\n    a, -- the a\n    b\n} from \"./m\"\nprint(a)\n"),
+            "import {\n    a, -- the a\n} from \"./m\"\nprint(a)\n"
+        );
     }
 
     /// `local xs = []` names no element type, so `implicit_any` fires

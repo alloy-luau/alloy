@@ -2677,11 +2677,18 @@ fn doc_sentence(text: &str) -> Option<String> {
 fn from_clause_at(src: &str, offset: usize) -> (usize, usize, &'static str) {
     let rest = src[offset..].split('\n').next().unwrap_or("");
     let line_end = offset + rest.len();
+    // The brace that closes the list. A list over several lines closes
+    // it on a line under the caret, with only entries between.
+    let close = src[offset..].find('}').filter(|i| {
+        src[offset..offset + i]
+            .chars()
+            .all(|c| c.is_alphanumeric() || " \t\r\n,.@_".contains(c))
+    });
 
-    match rest.find('}') {
+    match close {
         // The editor closed the brace as the reader opened it: the
         // name and the clause take the space up to it.
-        Some(i) if rest[..i].trim().is_empty() => (offset, offset + i + 1, " }"),
+        Some(i) if i <= rest.len() && rest[..i].trim().is_empty() => (offset, offset + i + 1, " }"),
 
         // The caret sits in the middle of the list, so the clause goes
         // after the brace that closes it.

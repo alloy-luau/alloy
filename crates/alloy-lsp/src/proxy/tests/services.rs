@@ -127,8 +127,8 @@ pub(crate) fn the_import_path_list_offers_the_game_alias() {
 #[test]
 pub(crate) fn a_service_hover_reads_the_import_line() {
     let src = "import Players from '@game/Players'\nimport { RunService as Run } from '@game'\n\nprint(Players, Run)\n";
-    let first = src.lines().next().unwrap();
-    let second = src.lines().nth(1).unwrap();
+    let first = src.find("@game/Players").unwrap();
+    let second = src.find("'@game'").unwrap() + 1;
     let on_binding = service_hover(src, "Players", None).expect("the binding");
 
     // The binding names its type, the way every other binding hovers.
@@ -138,8 +138,8 @@ pub(crate) fn a_service_hover_reads_the_import_line() {
          `Players`: a Roblox service. The class extends `Instance`."
     );
 
-    // Inside the path one word can name several services, so the line
-    // the reader is on stands instead.
+    // Inside the path one word can name several services, so the
+    // statement the reader is in stands instead.
     assert_eq!(
         service_hover(src, "game", Some(first)),
         Some(

@@ -354,10 +354,25 @@ impl<'s> Formatter<'s> {
             }
 
             let start = i;
-            let mut j = i + 1;
+            let mut j = i;
+            // A name list may run over several lines: a line break
+            // inside the braces does not end the statement.
+            let mut depth = 0i32;
 
-            while j < self.items.len() && self.items[j].newlines_before == 0 {
+            loop {
+                let it = &self.items[j];
+
+                if !it.is_comment() && opens(&it.text) {
+                    depth += 1;
+                } else if !it.is_comment() && closes(&it.text) {
+                    depth -= 1;
+                }
+
                 j += 1;
+
+                if j == self.items.len() || (self.items[j].newlines_before > 0 && depth <= 0) {
+                    break;
+                }
             }
 
             let path = (start..j)

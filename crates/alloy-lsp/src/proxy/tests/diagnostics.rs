@@ -4,8 +4,13 @@ use super::support::one_file;
 #[test]
 pub(crate) fn the_quoted_path_of_an_import_line() {
     let src = "import * as M from \"./inventory\"\nlocal x = 1\n";
-    assert_eq!(quoted_span_on_line(src, 0), Some((19, 32)));
+    assert_eq!(quoted_span_on_line(src, 0), Some(((0, 19), (0, 32))));
     assert_eq!(quoted_span_on_line(src, 1), None);
+
+    // The emit writes the `require` of a list over several lines on the
+    // line of `import`; the path sits on the last line.
+    let src = "import {\n    a, -- \"x\"\n} from \"./inventory\"\n";
+    assert_eq!(quoted_span_on_line(src, 0), Some(((2, 7), (2, 20))));
 }
 #[test]
 pub(crate) fn a_private_view_in_a_message_reads_as_the_struct() {
@@ -899,6 +904,25 @@ pub(crate) fn an_unused_type_import_loses_its_whole_line() {
         actions[0]["edit"]["changes"][uri],
         json!([{
             "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 1, "character": 0 } },
+            "newText": "",
+        }])
+    );
+}
+/// A name list over several lines: a dead entry on a line of its own
+/// goes with that line, and the comment of the entry above it stays. A
+/// comma in that comment is no entry.
+#[test]
+pub(crate) fn a_dead_entry_on_its_own_line_goes_with_the_line() {
+    let src = "import {\n    a, -- the a, not b\n    b,\n} from \"./mod\"\n\nprint(a)\n";
+    let (st, uri) = one_file(src);
+    let mut actions = Vec::new();
+    st.unused_import_actions(uri, ((0, 0), (0, 0)), &mut actions);
+
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri],
+        json!([{
+            "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 3, "character": 0 } },
             "newText": "",
         }])
     );

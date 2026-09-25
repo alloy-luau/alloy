@@ -2741,6 +2741,27 @@ pub(crate) fn an_unresolved_type_name_offers_the_type_import() {
         fix(src, "TypeError: Unknown type 'Pair'")[0].1["newText"],
         json!("import { other, type Pair } from \"./point\"")
     );
+
+    // A list over several lines takes the name on a line of its own,
+    // indented as the last entry, with its trailing comma.
+    let src = "import {\n    other, -- the other\n} from \"./point\"\n\nlocal p: Point = nil\nprint(p, other)\n";
+    assert_eq!(
+        fix(src, unknown)[0].1,
+        json!({
+            "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 0 } },
+            "newText": "    type Point,\n",
+        })
+    );
+    // With no trailing comma, the comma joins the last entry and its
+    // comment stays on its line.
+    let src = "import {\n    other -- the other\n} from \"./point\"\n\nlocal p: Point = nil\nprint(p, other)\n";
+    assert_eq!(
+        fix(src, unknown)[0].1,
+        json!({
+            "range": { "start": { "line": 1, "character": 9 }, "end": { "line": 2, "character": 0 } },
+            "newText": ", -- the other\n    type Point\n",
+        })
+    );
 }
 
 /// `self.` inside an `impl` of an imported struct listed the fields

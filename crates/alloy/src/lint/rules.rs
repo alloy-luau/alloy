@@ -1355,18 +1355,38 @@ fn import_cuts(
             continue;
         }
 
-        let (a, b) = match (entries.get(k + 1), k) {
-            (Some(next), _) => (toks[*s].start, toks[next.0].start),
+        // A list over several lines: an entry on a line of its own goes
+        // with that line, so the comment of a neighbour stays.
+        let line = own_line(src, toks[*s].start, toks[e - 1].end);
+        let (a, b) = match (line, entries.get(k + 1), k) {
+            (Some(line), _, _) => line,
 
-            (None, 0) => (toks[*s].start, toks[e - 1].end),
+            (None, Some(next), _) => (toks[*s].start, toks[next.0].start),
 
-            (None, _) => (toks[entries[k - 1].1 - 1].end, toks[e - 1].end),
+            (None, None, 0) => (toks[*s].start, toks[e - 1].end),
+
+            (None, None, _) => (toks[entries[k - 1].1 - 1].end, toks[e - 1].end),
         };
 
         out.push(((e - 1) as u32, Fix::new(src, a, b, "")));
     }
 
     out
+}
+
+/// The bytes of the line that holds the text from `from` to `to`, its
+/// line break included, when nothing else is on that line: a comma and
+/// a comment may follow.
+fn own_line(src: &str, from: u32, to: u32) -> Option<(u32, u32)> {
+    let start = src[..from as usize].rfind('\n').map_or(0, |i| i + 1);
+    let end = src[to as usize..]
+        .find('\n')
+        .map_or(src.len(), |i| to as usize + i + 1);
+    let after = src[to as usize..end].trim_start();
+    let after = after.strip_prefix(',').unwrap_or(after).trim();
+
+    (src[start..from as usize].trim().is_empty() && (after.is_empty() || after.starts_with("--")))
+        .then_some((start as u32, end as u32))
 }
 
 /// The index of the bracket that closes the one at `open`.

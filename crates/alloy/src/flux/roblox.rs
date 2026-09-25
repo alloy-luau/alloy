@@ -299,9 +299,20 @@ impl<'s> Scan<'s> {
             .any(|i| {
                 let mut j = i + 1;
                 let mut binds = false;
+                // A name list may run over several lines: a line inside
+                // the braces opens no statement.
+                let mut depth = 0;
 
-                while j < self.toks.len() && !self.at(j, "from") && !self.statement_start(j) {
-                    binds |= self.t(j) == name;
+                while j < self.toks.len()
+                    && !self.at(j, "from")
+                    && (depth > 0 || !self.statement_start(j))
+                {
+                    match self.t(j) {
+                        "{" => depth += 1,
+                        "}" => depth -= 1,
+                        _ => binds |= self.t(j) == name,
+                    }
+
                     j += 1;
                 }
 
@@ -802,6 +813,18 @@ mod tests {
             names("local c: SignalConnection = sig:connect(f)\nc:disconnect()\n"),
             Vec::<&str>::new()
         );
+        // A chain from an imported name reaches another module, and a
+        // name list over several lines binds it too.
+        for head in [
+            "import { Shop } from \"./shop\"\n",
+            "import {\n    Shop,\n} from \"./shop\"\n",
+        ] {
+            assert_eq!(
+                names(&format!("{head}local o = Shop.Offer:clone()\n")),
+                Vec::<&str>::new(),
+                "{head}"
+            );
+        }
     }
 
     /// The receiver reads the binding in scope. A `conn` of a Roblox

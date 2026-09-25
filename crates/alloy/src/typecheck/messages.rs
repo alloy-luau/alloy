@@ -1170,10 +1170,16 @@ pub fn quoted_on_line(source: &str, line: usize) -> Option<String> {
 }
 
 /// Every quoted string on a zero-based line, in the order they read.
+/// An import over several lines reads whole: the emit writes its
+/// `require` on the line of `import`, and the path sits on the last.
 pub fn quoted_paths_on_line(source: &str, line: usize) -> Vec<String> {
     let Some(text) = source.lines().nth(line) else {
         return Vec::new();
     };
+    let statement = alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .find(|s| s.line == line && source[s.start..s.end].contains('\n'));
+    let text = statement.as_ref().map_or(text, |s| s.text.as_str());
     let mut out = Vec::new();
     let mut rest = text;
 

@@ -36,12 +36,9 @@ impl Server {
         let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
         let quoted = doc.source[line_start..start].matches('"').count() % 2 == 1
             || doc.source[line_start..start].matches('\'').count() % 2 == 1;
-        // The line the caret sits on, for a word inside a path string:
-        // one file can name the same service on two lines.
-        let line_end = doc.source[start..]
-            .find('\n')
-            .map_or(doc.source.len(), |i| start + i);
-        let spec_line = quoted.then(|| &doc.source[line_start..line_end]);
+        // The caret, for a word inside a path string: one file can name
+        // the same service in two statements.
+        let spec_at = quoted.then_some(start);
         let shadowed = shadows_an_import(&doc.source, &word, start);
         // `Hit.Swing` reads a member of `Hit`, not the `Swing` an import
         // binds. The alias of a star import holds what its module
@@ -52,11 +49,10 @@ impl Server {
                 let from = head
                     .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
                     .map_or(0, |i| i + 1);
-                let star = format!("import * as {} ", &head[from..]);
 
-                !doc.source
-                    .lines()
-                    .any(|l| l.trim_start().starts_with(&star))
+                !super::super::navigation::module_bindings(&doc.source)
+                    .iter()
+                    .any(|(alias, _)| *alias == head[from..])
             });
         let inner = |answer: Option<String>| answer.filter(|_| !shadowed && !member);
         let answer = inner(remote_hover(&doc.source, &word))
@@ -66,7 +62,7 @@ impl Server {
                     .then(|| inner(std_import_hover(&doc.source, &word, start)))
                     .flatten()
             })
-            .or_else(|| service_hover(&doc.source, &word, spec_line))
+            .or_else(|| service_hover(&doc.source, &word, spec_at))
             .or_else(|| {
                 let dir = path
                     .as_deref()
@@ -309,19 +305,19 @@ pub(crate) fn module_hover(
         return None;
     }
 
-    let line = source.lines().find(|l| {
-        let l = l.trim();
-
-        l.starts_with("import ") && import_spec(l).is_some_and(|spec| spec_names(&spec, word))
-    })?;
-    let spec = import_spec(line)?;
+    let statement = alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .find(|s| s.text.starts_with("import ") && spec_names(&s.spec, word))?;
 
     // A module the server cannot find is the child's to answer.
-    module_target(&spec, from, aliases)?;
+    module_target(&statement.spec, from, aliases)?;
 
     // No link: the editor's document links already offer to follow the
     // path, on the same characters.
-    Some(format!("```alloy\n{}\n```", line.trim()))
+    Some(format!(
+        "```alloy\n{}\n```",
+        &source[statement.start..statement.end]
+    ))
 }
 
 /// The alias of `import * as Ty from "./types"`, where the path names
@@ -341,11 +337,11 @@ pub(crate) fn star_module_hover(
         return None;
     }
 
-    let line = source
-        .lines()
-        .map(str::trim)
-        .find(|l| l.starts_with("import * as ") && l.contains(&format!(" as {word} from ")))?;
-    let target = module_target(&import_spec(line)?, from, aliases)?;
+    let statement = alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .find(|s| super::super::navigation::star_alias(&s.text) == Some(word))?;
+    let line = &source[statement.start..statement.end];
+    let target = module_target(&statement.spec, from, aliases)?;
 
     if !target.extension().is_some_and(|e| e == "aly" || e == "alx") {
         return None;
@@ -381,12 +377,14 @@ pub(crate) fn std_import_hover(source: &str, word: &str, start: usize) -> Option
     }
 
     if let Some(names) = crate::proxy::completion::std_module_names(source, word) {
-        let line = source.lines().map(str::trim).find(|l| {
-            l.starts_with("import ")
-                && l.contains(&format!(" as {word} "))
-                && import_spec(l).is_some_and(|s| alloy::std_names::module_of_spec(&s).is_some())
-        })?;
-        let module = alloy::std_names::module_of_spec(&import_spec(line)?)?.to_string();
+        let statement = alloy_syntax::scan::import_statements(source)
+            .into_iter()
+            .find(|s| {
+                super::super::navigation::star_alias(&s.text) == Some(word)
+                    && alloy::std_names::module_of_spec(&s.spec).is_some()
+            })?;
+        let line = &source[statement.start..statement.end];
+        let module = alloy::std_names::module_of_spec(&statement.spec)?.to_string();
         let attributes = alloy::std_names::ATTRIBUTES
             .iter()
             .filter(|(m, _)| module.is_empty() || *m == module)
@@ -552,24 +550,17 @@ impl RemoteSpec {
 /// the whole class table; the import line and one line about the
 /// service say what the reader asked.
 ///
-/// `spec_line` is the line the caret sits on when it sits inside a path
-/// string. `None` means the word is a binding, which any line of the
-/// file may have bound.
-pub(crate) fn service_hover(source: &str, word: &str, spec_line: Option<&str>) -> Option<String> {
-    let lines: Vec<&str> = match spec_line {
-        Some(line) => vec![line],
-
-        None => source.lines().collect(),
-    };
-
-    for line in lines {
-        let text = line.trim();
-
-        if !text.starts_with("import ") {
+/// `spec_at` is the caret when it sits inside a path string, and only
+/// the statement around it counts. `None` means the word is a binding,
+/// which any import of the file may have bound.
+pub(crate) fn service_hover(source: &str, word: &str, spec_at: Option<usize>) -> Option<String> {
+    for statement in alloy_syntax::scan::import_statements(source) {
+        if spec_at.is_some_and(|at| !(statement.start..=statement.end).contains(&at)) {
             continue;
         }
 
-        let bound = imports::service_bindings(text);
+        let text = &source[statement.start..statement.end];
+        let bound = imports::service_bindings(&statement.text);
 
         if bound.is_empty() {
             continue;
@@ -578,7 +569,7 @@ pub(crate) fn service_hover(source: &str, word: &str, spec_line: Option<&str>) -
         // Inside the path, `game` names every service the line binds
         // and `game:Players` names the one it spells out. Outside it,
         // the word is the local the line binds.
-        let hit: Vec<&str> = match spec_line.is_some() {
+        let hit: Vec<&str> = match spec_at.is_some() {
             true => match word == "game" || bound.iter().any(|(_, s)| s == word) {
                 true => bound.iter().map(|(_, s)| s.as_str()).collect(),
 
@@ -600,7 +591,7 @@ pub(crate) fn service_hover(source: &str, word: &str, spec_line: Option<&str>) -
         // the way every other binding hovers. The import line above is
         // the line they are already looking at. Inside the path, one
         // word can name several services, so the line stands.
-        let head = match (spec_line.is_none(), hit.as_slice()) {
+        let head = match (spec_at.is_none(), hit.as_slice()) {
             (true, [service]) => format!("local {word}: {service}"),
 
             _ => text.to_string(),

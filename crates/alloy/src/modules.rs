@@ -2379,16 +2379,18 @@ pub fn missing_import_message(message: &str, path: &Path, source: &str) -> Optio
 
     // `import type { Item }` binds the type alone; a derive or a call
     // reads the value, which the type import leaves out.
-    let as_type = source.lines().any(|line| {
-        let line = line.trim_start();
-        let words = |from: &str| {
-            from.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .any(|w| w == name)
-        };
+    let as_type = alloy_syntax::scan::import_statements(source)
+        .iter()
+        .any(|s| {
+            let line = s.text.as_str();
+            let words = |from: &str| {
+                from.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|w| w == name)
+            };
 
-        (line.starts_with("import type") && words(line.split(" from").next().unwrap_or("")))
-            || (line.starts_with("import") && line.contains(&format!("type {name}")))
-    });
+            (line.starts_with("import type") && words(line.split(" from").next().unwrap_or("")))
+                || (line.starts_with("import") && line.contains(&format!("type {name}")))
+        });
 
     if as_type {
         return Some(format!(
@@ -3282,30 +3284,10 @@ pub fn import_problems(
 
 /// The quoted path of every `import ... from "..."` and `export ... from "..."`.
 pub(crate) fn import_specs(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-
-        if !(trimmed.starts_with("import ") || trimmed.starts_with("export ")) {
-            continue;
-        }
-
-        let Some(at) = trimmed.find(" from ") else {
-            continue;
-        };
-        let after = trimmed[at + 6..].trim_start();
-        let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-            continue;
-        };
-        let body = &after[1..];
-
-        if let Some(end) = body.find(quote) {
-            out.push(body[..end].to_string());
-        }
-    }
-
-    out
+    alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .map(|s| s.spec)
+        .collect()
 }
 
 /// A path with `.` and `..` folded, no file system access.
@@ -3411,6 +3393,16 @@ mod tests {
         assert_eq!(
             super::missing_import_message("Unknown global 'Other'", &main, source),
             None
+        );
+
+        // A type import over several lines binds the type alone.
+        let source = "import type {\n    Item,\n} from \"./items\"\nprint(Item.new)\n";
+        let message = super::missing_import_message("Unknown global 'Item'", &main, source);
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("`Item` is imported as a type")),
+            "{message:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

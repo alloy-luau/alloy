@@ -2656,19 +2656,15 @@ impl State {
         source: &str,
         offset: usize,
     ) -> Option<Value> {
-        let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = source[offset..]
-            .find('\n')
-            .map_or(source.len(), |i| offset + i);
-        let line = &source[line_start..line_end];
-
-        if !line.trim_start().starts_with("import ") {
-            return None;
-        }
-
+        // A list may run over several lines, so the statement and not
+        // the caret's line holds the path.
+        let statement = alloy_syntax::scan::import_statements(source)
+            .into_iter()
+            .find(|s| s.text.starts_with("import ") && (s.start..=s.end).contains(&offset))?;
+        let line = statement.text.as_str();
         let (start, end) = keywords::word_range(source, offset);
         let word = &source[start..end];
-        let at = start - line_start;
+        let at = start.checked_sub(statement.start)?;
         let head = &line[..at];
 
         // The binding sits between `import` and the braces or `from`;
@@ -2681,8 +2677,9 @@ impl State {
             return None;
         }
 
-        let spec = import_spec(line)?;
-        let file = imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
+        let file = imports::module_file(&imports::module_path(
+            &self.resolve_spec(uri, &statement.spec)?,
+        ))?;
         let is_alx = file.extension().is_some_and(|e| e == "alx");
 
         // `import * as M` binds the table the module hands back, not
@@ -3263,12 +3260,24 @@ pub(crate) fn instance_segments(path: &str) -> Vec<String> {
 /// data file's first line; on an imported name, the line of that key.
 /// None when the line holds no data path or the file is not there.
 pub(crate) fn data_definition(source: &str, offset: usize, dir: &Path) -> Option<Value> {
-    let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line_end = source[offset..]
-        .find('\n')
-        .map(|i| offset + i)
-        .unwrap_or(source.len());
-    let line = &source[line_start..line_end];
+    // A name list may run over several lines, and the path sits on the
+    // last one; an import statement reads whole.
+    let statement = alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .find(|s| (s.start..=s.end).contains(&offset));
+    let (line_start, line) = match &statement {
+        Some(s) => (s.start, s.text.as_str()),
+
+        None => {
+            let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_end = source[offset..]
+                .find('\n')
+                .map(|i| offset + i)
+                .unwrap_or(source.len());
+
+            (line_start, &source[line_start..line_end])
+        }
+    };
     let at = offset - line_start;
     let reference = alloy::data::references(line).into_iter().next()?;
     let format = alloy::data::Format::of(&reference.path)?;
@@ -3361,24 +3370,34 @@ pub(crate) fn data_source_of(path: PathBuf) -> PathBuf {
 /// line binds. The emit writes the `local` as generated text, which
 /// carries no column of its own.
 pub(crate) fn service_definition(source: &str, uri: &str, word: &str) -> Option<Value> {
-    let mut at = 0usize;
-
-    for line in source.lines() {
-        if imports::service_bindings(line)
+    import_binding(source, uri, word, |text| {
+        imports::service_bindings(text)
             .iter()
             .any(|(local, _)| local == word)
-            && let Some(col) = whole_word(line, word)
-        {
-            let s = position_of(source, at + col);
-            let e = position_of(source, at + col + word.len());
+    })
+}
 
-            return Some(json!([{ "uri": uri, "range": range_value(s, e) }]));
-        }
+/// Where the first import statement that `binds` accepts writes `word`.
+/// A list may run over several lines, and the statement's text keeps
+/// the offsets of the source.
+fn import_binding(
+    source: &str,
+    uri: &str,
+    word: &str,
+    binds: impl Fn(&str) -> bool,
+) -> Option<Value> {
+    alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .filter(|s| s.text.starts_with("import ") && binds(&s.text))
+        .find_map(|s| {
+            let at = s.start + whole_word(&s.text, word)?;
+            let range = range_value(
+                position_of(source, at),
+                position_of(source, at + word.len()),
+            );
 
-        at += line.len() + 1;
-    }
-
-    None
+            Some(json!([{ "uri": uri, "range": range }]))
+        })
 }
 
 /// Where `import * as M` binds `M`, when the word is such a binding.
@@ -3392,22 +3411,7 @@ pub(crate) fn module_binding_definition(source: &str, uri: &str, word: &str) -> 
         return None;
     }
 
-    let mut at = 0usize;
-
-    for line in source.lines() {
-        if line.trim_start().starts_with("import ")
-            && let Some(col) = whole_word(line, word)
-        {
-            let s = position_of(source, at + col);
-            let e = position_of(source, at + col + word.len());
-
-            return Some(json!([{ "uri": uri, "range": range_value(s, e) }]));
-        }
-
-        at += line.len() + 1;
-    }
-
-    None
+    import_binding(source, uri, word, |_| true)
 }
 
 /// Where a word sits in a line on its own, not inside a longer name:
@@ -3828,40 +3832,32 @@ fn declares_a_type(src: &str, name: &str) -> bool {
     })
 }
 
-/// The names an import line binds to a whole module, each with the spec
-/// of its line: `import * as M from "./m"` and nothing else. A member
-/// of such a module is written `M.name`, which a rename of `name` has
-/// to follow.
+/// The names an import statement binds to a whole module, each with
+/// the spec of its statement: `import * as M from "./m"` and nothing
+/// else. A member of such a module is written `M.name`, which a rename
+/// of `name` has to follow.
 ///
 /// A default binding is not one of these. `import M from "./m"` on a
 /// module with an export table binds the `default` field, so `M.name`
 /// there is a field of that value and not the module's export.
 pub(crate) fn module_bindings(src: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
+    alloy_syntax::scan::import_statements(src)
+        .into_iter()
+        .filter_map(|s| Some((star_alias(&s.text)?.to_string(), s.spec)))
+        .collect()
+}
 
-    for line in src.lines() {
-        let t = line.trim_start();
-        let Some(rest) = t.strip_prefix("import ") else {
-            continue;
-        };
-        let Some(after_star) = rest.trim_start().strip_prefix('*') else {
-            continue;
-        };
-        let Some(name) = after_star.trim_start().strip_prefix("as ") else {
-            continue;
-        };
-        let Some(spec) = import_spec(line) else {
-            continue;
-        };
+/// The name `import * as M` binds, from the statement's text. The list
+/// of `import * as M, { a }` is not part of it.
+pub(crate) fn star_alias(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("import ")?.trim_start();
+    let name = rest.strip_prefix('*')?.trim_start().strip_prefix("as ")?;
+    let name = name.trim_start();
+    let end = name
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(name.len());
 
-        out.push((
-            name.split_whitespace().next().unwrap_or("").to_string(),
-            spec,
-        ));
-    }
-
-    out.retain(|(name, _)| !name.is_empty());
-    out
+    (end > 0).then(|| &name[..end])
 }
 
 /// Every `case` pattern that names a variant, as the byte range of the

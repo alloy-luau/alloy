@@ -2279,6 +2279,14 @@ mod tests {
         assert_eq!(at("import {\n    a\n} from \"./m\"\nprint(q|"), None);
         // An import left open does not take the statement under it.
         assert_eq!(at("import { ver\nlocal q = 1\nprint(q|"), None);
+        // A comment after an entry holds no name: its `as` is no alias.
+        match at("import {\n    a, -- as the a\n    b|\n} from \"./m\"") {
+            Some(Context::ImportNames { prefix, spec, .. }) => {
+                assert_eq!(prefix, "b");
+                assert_eq!(spec.as_deref(), Some("./m"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// The local name after `as` is the reader's own, and a written

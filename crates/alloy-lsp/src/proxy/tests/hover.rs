@@ -2419,3 +2419,78 @@ fn a_std_import_name_hovers_as_the_std() {
     // A member named like the alias is the member's.
     assert_eq!(at("serde)"), None);
 }
+
+/// A name list over several lines reaches its module as a one-line
+/// list does: a remote, a const and a function the list names hover as
+/// their declarations, in the list and at a use. The path hovers as the
+/// whole statement.
+#[test]
+fn a_list_over_several_lines_hovers_as_its_declarations() {
+    use super::documents::{Recorder, alias_root};
+
+    let main = "import {\n    Hit, -- the hit\n    LIMIT,\n    helper,\n} from \"./net\"\n\nHit.fire(helper(LIMIT))\n";
+    let dir = alias_root(
+        "multi-line-hover",
+        &[
+            ("alloy.toml", "[build]\nin = \"src\"\nout = \"build\"\n"),
+            (
+                "src/net.aly",
+                "-- A hit.\nexport remote Hit(n: number) from client\n-- The cap.\nexport const LIMIT = 10\n-- Adds one.\nexport function helper(n: number): number\n    return n + 1\nend\n",
+            ),
+            ("src/main.aly", main),
+        ],
+    );
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+
+    {
+        let mut st = server.state.lock().expect("state");
+        st.root = Some(dir.clone());
+        st.mirror = dir.join("mirror");
+    }
+
+    let uri = path_to_uri(&dir.join("src/main.aly"));
+    server.open_doc(&uri, main.to_string(), 1, true);
+    let hover = |needle: &str, occurrence: usize| {
+        let at = main
+            .match_indices(needle)
+            .nth(occurrence)
+            .expect("the name")
+            .0;
+        let (line, character) = position_of(main, at);
+        let message = json!({ "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+        } });
+        log.lock().expect("the log").clear();
+        server.source_binding_hover(&uri, &message, &json!(1));
+
+        String::from_utf8_lossy(&log.lock().expect("the log")).into_owned()
+    };
+
+    for occurrence in [0, 1] {
+        let sent = hover("Hit", occurrence);
+        assert!(
+            sent.contains("export remote Hit(n: number) from client"),
+            "{sent}"
+        );
+        let sent = hover("LIMIT", occurrence);
+        assert!(sent.contains("export const LIMIT: number"), "{sent}");
+        let sent = hover("helper", occurrence);
+        assert!(
+            sent.contains("export function helper(n: number): number"),
+            "{sent}"
+        );
+    }
+
+    // The path hovers as the statement, as the source lays it out.
+    let sent = hover("net", 0);
+    assert!(sent.contains(r"import {\n    Hit, -- the hit\n"), "{sent}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

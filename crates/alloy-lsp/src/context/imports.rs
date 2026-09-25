@@ -145,6 +145,8 @@ fn continues_list(src: &str, start: usize, line_start: usize, offset: usize) -> 
             // brace, which no entry rule covers.
             false => "",
         };
+        // An entry may carry a comment after it: `a, -- the a`.
+        let text = text.find("--").map_or(text, |i| &text[..i]);
         let trimmed = text.trim_start();
         let indented = text.len() - trimmed.len() > column || trimmed.is_empty();
         let entry_only = trimmed.starts_with('}')
@@ -184,7 +186,24 @@ where the reader is picking a name out of one module.
 */
 pub(crate) fn import_context(src: &str, line_start: usize, offset: usize) -> Option<Context> {
     let start = statement_at(src, line_start, offset)?;
-    let before = &src[start..offset];
+    // A comment after an entry holds no name: its words read as spaces.
+    let mut bytes = src.as_bytes()[start..offset].to_vec();
+    let mut comment = false;
+
+    for i in 0..bytes.len() {
+        comment = match bytes[i] {
+            b'\n' => false,
+
+            _ => comment || bytes[i..].starts_with(b"--"),
+        };
+
+        if comment {
+            bytes[i] = b' ';
+        }
+    }
+
+    let before = String::from_utf8_lossy(&bytes);
+    let before = before.as_ref();
     let prefix = super::trailing_word(before);
     let head = &before[..before.len() - prefix.len()];
 

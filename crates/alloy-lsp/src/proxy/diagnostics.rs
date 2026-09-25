@@ -1093,15 +1093,28 @@ pub(crate) fn unmet_expectations(doc: &Doc, child: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// The columns of the first quoted string on a line, quotes included.
-pub(crate) fn quoted_span_on_line(source: &str, line: u32) -> Option<(u32, u32)> {
+/// The first quoted string on a line, quotes included, as a start and
+/// an end position. An import over several lines holds its path on its
+/// last line, and the emit writes its `require` on the line of `import`,
+/// so that line answers with the path of the statement.
+pub(crate) fn quoted_span_on_line(source: &str, line: u32) -> Option<((u32, u32), (u32, u32))> {
+    if let Some(s) = alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .find(|s| s.line == line as usize && source[s.start..s.end].contains('\n'))
+    {
+        let quote = source[..s.end].chars().next_back()?;
+        let open = source[..s.end - 1].rfind(quote)?;
+
+        return Some((position_of(source, open), position_of(source, s.end)));
+    }
+
     let text = source.lines().nth(line as usize)?;
     let open = text.find(['"', '\''])?;
     let quote = text.as_bytes()[open] as char;
     let close = text[open + 1..].find(quote)? + open + 1;
     let col = |byte: usize| text[..byte].encode_utf16().count() as u32;
 
-    Some((col(open), col(close + 1)))
+    Some(((line, col(open)), (line, col(close + 1))))
 }
 
 /// A diagnostic points at a token the reader can see. A range that
@@ -1523,12 +1536,12 @@ pub(crate) fn statement_range(d: &mut Value, doc: &Doc, line: usize) {
     };
     let start = text.len() - text.trim_start().len();
     let start = text[..start].encode_utf16().count() as u32;
-    let end = quoted_span_on_line(&doc.source, line as u32)
+    let (end_line, end) = quoted_span_on_line(&doc.source, line as u32)
         .map(|(_, e)| e)
-        .unwrap_or_else(|| text.encode_utf16().count() as u32);
+        .unwrap_or_else(|| (line as u32, text.encode_utf16().count() as u32));
     d["range"] = json!({
         "start": { "line": line, "character": start },
-        "end": { "line": line, "character": end },
+        "end": { "line": end_line, "character": end },
     });
 }
 
@@ -2096,6 +2109,21 @@ struct Bound {
 /// lines, so the walk reads from the `import` to the `from` of the same
 /// statement.
 fn import_lines(src: &str) -> Vec<ImportLine> {
+    // A comment in a list holds no name, no comma and no `from`. The
+    // walk reads a copy with each comment blanked; the copy keeps every
+    // offset and every line break.
+    let mut blank = src.as_bytes().to_vec();
+
+    for (a, b) in alloy_syntax::lexer::lex(src).map_or(Vec::new(), |l| l.comments) {
+        for byte in &mut blank[a as usize..b as usize] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+
+    let blank = String::from_utf8(blank).unwrap_or_else(|_| src.to_string());
+    let src = blank.as_str();
     let mut out = Vec::new();
     let mut at = 0;
 
@@ -2229,7 +2257,16 @@ fn list_cuts(src: &str, open: usize, close: usize) -> Vec<Bound> {
         let entry = &src[s..e];
         let word = entry.split_whitespace().next_back().unwrap_or(entry);
         let name_at = s + (entry.len() - word.len());
+        // A list over several lines: an entry on a line of its own goes
+        // with that line, so the comment of a neighbour stays.
+        let line_start = src[..s].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = src[e..].find('\n').map_or(src.len(), |i| e + i + 1);
+        let after = src[e..line_end].trim_start();
+        let alone = src[line_start..s].trim().is_empty()
+            && after.strip_prefix(',').unwrap_or(after).trim().is_empty();
         let cut = match (parts.get(k + 1), k) {
+            _ if alone => (line_start, line_end),
+
             (Some(&(next, _)), _) => (s, next),
 
             (None, 0) => (s, e),

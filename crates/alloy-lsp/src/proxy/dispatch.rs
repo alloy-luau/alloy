@@ -1960,12 +1960,12 @@ impl Server {
                                 return false;
                             };
 
-                            if !seen.insert((line, s)) {
+                            if !seen.insert(s) {
                                 return false;
                             }
 
                             link["target"] = json!(target);
-                            link["range"] = range_value((line, s), (line, e));
+                            link["range"] = range_value(s, e);
 
                             true
                         });

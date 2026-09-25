@@ -402,6 +402,54 @@ fn a_star_alias_opens_at_its_import_line() {
     assert_eq!(module_binding_definition(src, uri, "x"), None);
 }
 
+/// A name list over several lines holds its path on its last line. The
+/// definitions that read the statement find it there: a star alias, the
+/// default binding of `import M, { ... }`, and a service of `@game`.
+#[test]
+fn a_list_over_several_lines_goes_to_its_definitions() {
+    let range = |uri: &str, line: u32, start: u32, end: u32| {
+        json!([{ "uri": uri, "range": {
+            "start": { "line": line, "character": start },
+            "end": { "line": line, "character": end },
+        } }])
+    };
+    let uri = "file:///w/src/main.aly";
+    let src = "import * as M, {\n    a,\n} from \"./mod\"\n\nprint(M, a)\n";
+    assert_eq!(
+        module_binding_definition(src, uri, "M"),
+        Some(range(uri, 0, 12, 13))
+    );
+
+    let src = "import {\n    Players,\n    RunService as Run, -- the loop\n} from '@game'\n\nprint(Players, Run)\n";
+    assert_eq!(
+        service_definition(src, uri, "Run"),
+        Some(range(uri, 2, 18, 21))
+    );
+
+    let main = "import Panel, {\n    size,\n} from \"./ui\"\n\nprint(Panel, size)\n";
+    let dir = super::documents::alias_root(
+        "multi-line-default",
+        &[
+            (
+                "src/ui.aly",
+                "export const size = 1\n\nexport default function Panel(): number\n    return size\nend\n",
+            ),
+            ("src/main.aly", main),
+        ],
+    );
+    let main_uri = path_to_uri(&dir.join("src/main.aly"));
+    let ui_uri = path_to_uri(&dir.join("src/ui.aly"));
+    let (st, _) = super::support::one_file(main);
+    let found = st
+        .default_import_definition(&main_uri, main, main.find("Panel").expect("the binding"))
+        .expect("the default export");
+
+    assert_eq!(found[0]["uri"], json!(ui_uri), "{found}");
+    assert_eq!(found[0]["range"]["start"]["line"], json!(2), "{found}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `Outer.Inner.T`: the word in front of the group is a group of this
 /// file, not a module binding. The member is the declaring file's own,
 /// so go-to-definition and rename read it like any other member.

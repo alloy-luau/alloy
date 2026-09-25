@@ -705,6 +705,30 @@ fn a_namespace_import_takes_a_name_list_too() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A name list over several lines reaches its module as a one-line
+/// list does, so the check artifact binds the types of the structs.
+#[test]
+fn a_list_over_several_lines_binds_the_types_it_names() {
+    let dir = scratch("multi-line");
+    std::fs::write(
+        dir.join("types.aly"),
+        "export struct Stats as\n    hp: number\nend\nexport struct Gear as\n    s: Stats\nend\n",
+    )
+    .unwrap();
+    let source = "import {\n    Stats, -- the stats\n    Gear,\n} from \"./types\"\n\nlocal function f(g: Gear): Stats\n    return g.s\nend\nprint(f)\n";
+    let options = alloy::EmitOptions {
+        import_types: alloy::modules::import_types(source, &dir.join("main.aly"), &[]),
+        ..Default::default()
+    };
+    let out = alloy::compile_with(source, &options).unwrap();
+    let line = out.check.lines().next().unwrap();
+
+    assert!(line.contains("type Stats = _m1.Stats"), "{line}");
+    assert!(line.contains("type Gear = _m1.Gear"), "{line}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `export type` and `export interface` have no value at run time. A
 /// bare import of one binds the type alone; a `local` would read a
 /// key the module's table lacks, and the checker would report it.

@@ -278,19 +278,26 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     );
     lints.extend(rendered.lints);
 
+    // A config names each value once, and the loader's Luau has no
+    // `const`, so fmt keeps its locals and the lint says nothing there.
+    // A local of a config therefore keeps the variable style.
+    let config_file = options.file_name.ends_with(config_aly::FILE_NAME);
+
     if !options.definitions {
+        let naming = naming::Naming {
+            locals_as_const: options.naming.locals_as_const && !config_file,
+            ..options.naming.clone()
+        };
         lints.extend(naming::lints(
             src,
             &parsed.lexed.toks,
             &parsed.chunk,
-            &options.naming,
+            &naming,
             &options.markup,
         ));
     }
 
-    // A config names each value once, and the loader's Luau has no
-    // `const`, so fmt keeps its locals and the lint says nothing there.
-    if options.file_name.ends_with(config_aly::FILE_NAME) {
+    if config_file {
         lints.retain(|l| l.name != "prefer_const");
     }
 

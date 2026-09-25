@@ -1096,7 +1096,17 @@ impl Config {
             config.fmt = over_preserving(&written);
         }
 
+        config.settle_naming();
+
         Ok(config)
+    }
+
+    /// A `local` that nothing assigns again becomes a `const` when the
+    /// `prefer_const` lint or `[fmt] prefer_const` is on, so the naming
+    /// lint gives it the const style.
+    fn settle_naming(&mut self) {
+        self.lint.naming.locals_as_const = self.fmt.prefer_const
+            || crate::lint::level_of(&self.lint, "prefer_const") != crate::lint::Level::Allow;
     }
 
     /// The keys of the file that still parse and no longer belong: the
@@ -1201,6 +1211,8 @@ impl Config {
 
             config.fmt = over_preserving(&written);
         }
+
+        config.settle_naming();
 
         Ok(config)
     }

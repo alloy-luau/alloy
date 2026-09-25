@@ -303,6 +303,12 @@ pub struct Naming {
     pub attribute: Styles,
     pub r#macro: Styles,
     pub remote: Styles,
+    /// A `local` that nothing assigns again takes the const style. The
+    /// `prefer_const` lint or `[fmt] prefer_const` makes it a `const`,
+    /// and a rename to the variable style would then fire again. The
+    /// config sets it from those two keys, and no file writes it.
+    #[serde(skip)]
+    pub locals_as_const: bool,
 }
 
 impl Default for Naming {
@@ -331,6 +337,9 @@ impl Default for Naming {
             attribute: snake.clone(),
             r#macro: snake,
             remote: pascal,
+            // Both `prefer_const` and `[fmt] prefer_const` are on by
+            // default.
+            locals_as_const: true,
         }
     }
 }
@@ -413,6 +422,11 @@ struct Walk<'a> {
     roles: Vec<Role>,
     /// The names an `export { }` list or an `export default` sends out.
     exported: Vec<&'a str>,
+    /// The byte offset of each `local` that `prefer_const` makes a
+    /// `const`, when `[lint.naming]` reads such a local as one.
+    const_locals: HashSet<u32>,
+    /// The declarations of those locals, by index into `decls`.
+    promoted: Vec<usize>,
 }
 
 impl<'a> Walk<'a> {
@@ -492,11 +506,18 @@ impl<'a> Walk<'a> {
     fn stmt(&mut self, s: &'a Stmt, end: usize, top: bool, ns: bool) {
         match s {
             Stmt::Local(l) => {
-                let kind = if l.is_const {
+                // `prefer_const` writes `const` over the `local` word,
+                // which sits in front of the first name.
+                let first = l.names.first().map_or(l.span.start, |b| b.name.start);
+                let promoted = !l.is_const
+                    && (l.span.start..first)
+                        .any(|i| self.const_locals.contains(&self.toks[i as usize].start));
+                let kind = if l.is_const || promoted {
                     Kind::Const
                 } else {
                     Kind::Variable
                 };
+                let before = self.decls.len();
                 // `local Players = game:GetService("Players")` takes the
                 // case of the service or the module it names.
                 let named_after =
@@ -510,6 +531,10 @@ impl<'a> Walk<'a> {
                         false => Reach::Scope(vec![(l.span.end as usize, end)]),
                     };
                     self.binding(b.name, b.destructure.as_ref(), kind, reach);
+                }
+
+                if promoted {
+                    self.promoted.extend(before..self.decls.len());
                 }
             }
 
@@ -1219,6 +1244,15 @@ pub(crate) fn lints(
         decls: Vec::new(),
         roles: vec![Role::Unknown; toks.len()],
         exported: Vec::new(),
+        const_locals: match naming.locals_as_const {
+            true => crate::flux::prefer_const_fixes(src)
+                .iter()
+                .map(|f| f.start)
+                .collect(),
+
+            false => HashSet::new(),
+        },
+        promoted: Vec::new(),
     };
 
     for t in &chunk.type_names {
@@ -1250,7 +1284,7 @@ pub(crate) fn lints(
         markup_returns(toks, &chunk.block, markup, &mut components);
     }
 
-    for d in &w.decls {
+    for (at, d) in w.decls.iter().enumerate() {
         let Some(kind) = d.kind else { continue };
         let name = w.text(d.tok);
         // A local that holds a component is one too.
@@ -1303,12 +1337,19 @@ pub(crate) fn lints(
             "a"
         };
 
+        // A `local` that `prefer_const` makes a `const` says why it is one.
+        let what = match kind == Kind::Const && w.promoted.contains(&at) {
+            true => "never assigned again, so it is a const".to_string(),
+
+            false => format!("{article} {key}"),
+        };
+
         out.push(Lint {
             name: LINT,
             start: toks[d.tok].start,
             end: toks[d.tok].end,
             message: format!(
-                "`{name}` is {article} {key}, and {key}s are {} here: `{fixed}`",
+                "`{name}` is {what}, and {key}s are {} here: `{fixed}`",
                 styles.describe()
             ),
             fix,
@@ -1480,6 +1521,7 @@ mod tests {
     fn each_kind_reads_its_own_default() {
         let src = concat!(
             "local playerCount = 1\n",
+            "playerCount += 1\n",
             "const maxHp = 2\n",
             "const MAX_HP = 3\n",
             "local function LoadMap(mapName: string) return mapName end\n",
@@ -1517,16 +1559,22 @@ mod tests {
 
         // `_` marks a name as unused, a service or a module keeps its
         // own case, `self` is the receiver, and a function stored on a
-        // table is a member of the table.
+        // table is a member of the table. `M` stays a local here, so
+        // it takes the variable style.
         assert_eq!(
-            hits(
-                "local _unusedThing = 1\nlocal Players = game:GetService(\"Players\")\nlocal M = {}\nfunction M:Destroy() end\nfunction M.OnLoad() end\nprint(Players)\n"
+            hits_with(
+                "local _unusedThing = 1\nlocal Players = game:GetService(\"Players\")\nlocal M = {}\nfunction M:Destroy() end\nfunction M.OnLoad() end\nprint(Players)\n",
+                &Naming {
+                    locals_as_const: false,
+                    ..Naming::default()
+                }
             ),
             vec!["`M` is a variable, and variables are snake_case here: `m`"]
         );
 
         let camel = Naming {
             variable: Styles(vec![Style::Camel]),
+            locals_as_const: false,
             ..Naming::default()
         };
         assert_eq!(
@@ -1535,6 +1583,57 @@ mod tests {
                 &camel
             ),
             vec!["`player_count2` is a variable, and variables are camelCase here: `playerCount2`"]
+        );
+    }
+
+    /// A `local` that nothing assigns again becomes a `const` under
+    /// `prefer_const`, so it takes the const style. The variable style
+    /// named `maxHealth`, and `prefer_const` then `alloy fmt` renamed it
+    /// again to `MAX_HEALTH`.
+    #[test]
+    fn a_local_that_prefer_const_makes_a_const_takes_the_const_style() {
+        let src = "local max_health = 100\nlocal walk_speed = 16\nwalk_speed = 20\nprint(max_health, walk_speed)\n";
+        let naming = Naming {
+            variable: Styles(vec![Style::Camel]),
+            r#const: Styles(vec![Style::Screaming]),
+            ..Naming::default()
+        };
+
+        assert_eq!(
+            hits_with(src, &naming),
+            vec![
+                "`max_health` is never assigned again, so it is a const, and consts are SCREAMING_SNAKE_CASE here: `MAX_HEALTH`",
+                "`walk_speed` is a variable, and variables are camelCase here: `walkSpeed`",
+            ]
+        );
+
+        // With `prefer_const` and `[fmt] prefer_const` both off, the
+        // local stays a local.
+        let off = |text: &str| {
+            crate::config::Config::parse(
+                &format!("[lint.naming]\nvariable = \"camelCase\"\n{text}"),
+                std::path::Path::new("alloy.toml"),
+            )
+            .unwrap()
+            .lint
+            .naming
+        };
+
+        assert!(off("").locals_as_const);
+        assert!(off("[fmt]\nprefer_const = false\n").locals_as_const);
+        assert!(
+            !off("[fmt]\nprefer_const = false\n[lint.rules]\nprefer_const = \"allow\"\n")
+                .locals_as_const
+        );
+        assert_eq!(
+            hits_with(
+                src,
+                &Naming {
+                    locals_as_const: false,
+                    ..naming
+                }
+            )[0],
+            "`max_health` is a variable, and variables are camelCase here: `maxHealth`"
         );
     }
 

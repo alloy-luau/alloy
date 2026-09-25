@@ -180,6 +180,8 @@ pub struct EmitOptions {
     /// `[lint.naming]`: the case style of each kind of name, for the
     /// `naming_convention` lint.
     pub naming: crate::naming::Naming,
+    /// The markup of an `.alx` file, for the component names.
+    pub markup: crate::naming::Markup,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -371,6 +373,7 @@ impl Default for EmitOptions {
             macro_enums: Vec::new(),
             macro_depth: 0,
             naming: crate::naming::Naming::default(),
+            markup: crate::naming::Markup::default(),
         }
     }
 }

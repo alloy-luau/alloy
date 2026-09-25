@@ -63,14 +63,10 @@ pub fn compile_alx(
     let lowering = lowering_map(src, &compiled);
     let preamble = compiled.preamble;
     let lowered = compiled.output;
-    // A component is a function a tag names, `<Row />`, so its name
-    // may be PascalCase by the markup's own rule.
+    // A function that returns markup, or that a tag names, is a
+    // component, which `[lint.naming] component` styles.
     let mut options = options.clone();
-    let functions = &mut options.naming.function.0;
-
-    if !functions.contains(&crate::naming::Style::Pascal) {
-        functions.push(crate::naming::Style::Pascal);
-    }
+    options.markup = crate::naming::Markup::of(src, &compiled.regions);
 
     let mut output = crate::compile_with(&lowered, &options)?;
     let back = |offset: u32| lowering.to_source(offset);
@@ -1042,7 +1038,7 @@ mod tests {
     /// applier drops one that no longer covers what the lint read.
     #[test]
     fn a_rewrite_reads_the_source_the_author_wrote() {
-        let src = "import { create } from \"./util\"\n\nlocal function Cond(props: { open: boolean })\n    return <Frame>{function() return if props.open then <TextLabel /> else nil end}</Frame>\nend\n\nlocal function Dead(n: number)\n    return n\nend\n\nreturn Cond\n";
+        let src = "import { create } from \"./util\"\n\nlocal function Cond(props: { open: boolean })\n    return <Frame>{function() return if props.open then <TextLabel /> else nil end}</Frame>\nend\n\nlocal function dead(n: number)\n    return n\nend\n\nreturn Cond\n";
         let out = compile_alx(src, &EmitOptions::default(), luaux::Config::bare())
             .expect("the markup compiles")
             .output;
@@ -1050,7 +1046,7 @@ mod tests {
             .lints
             .iter()
             .find(|l| l.name == "unused_function")
-            .expect("`Dead` is never called");
+            .expect("`dead` is never called");
         let fix = lint.fix.as_ref().expect("the rewrite");
 
         assert_eq!(&src[fix.start as usize..fix.end as usize], fix.saw);
@@ -1058,7 +1054,7 @@ mod tests {
         let (text, n) = crate::lint::apply_fixes(src, &out.lints);
 
         assert_eq!(n, 1);
-        assert!(text.contains("local function _Dead(n: number)"), "{text}");
+        assert!(text.contains("local function _dead(n: number)"), "{text}");
 
         // The guard: a range the source moved under writes nothing.
         let moved = crate::lint::Fix {
@@ -1067,6 +1063,33 @@ mod tests {
         };
 
         assert!(!crate::lint::fix_applies(src, &moved));
+    }
+
+    /// A function that returns markup, or that a tag names, is a
+    /// component and takes `[lint.naming] component`, PascalCase by
+    /// default. Any other function takes the function style.
+    #[test]
+    fn a_component_takes_the_component_style() {
+        let src = "local function create(n: string): any return n end\nlocal function Row()\n    return <TextLabel />\nend\nlocal function main_panel()\n    return <Frame><Row /></Frame>\nend\nlocal function FormatText(s: string): string\n    return s:upper()\nend\nreturn { main_panel = main_panel, format = FormatText }\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+        let naming: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "naming_convention")
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            naming,
+            [
+                "`main_panel` is a component, and components are PascalCase here: `MainPanel`",
+                "`FormatText` is a function, and functions are snake_case here: `format_text`",
+            ]
+        );
     }
 
     /// A lint message quotes the markup the author wrote, not the

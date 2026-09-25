@@ -284,6 +284,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
             &parsed.lexed.toks,
             &parsed.chunk,
             &options.naming,
+            &options.markup,
         ));
     }
 

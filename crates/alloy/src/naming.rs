@@ -9,11 +9,11 @@
 //! the tree for the scope of each binding, and it writes nothing when a
 //! token of the old name has a role the tree does not explain.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{
-    Attr, ChildName, Chunk, Cond, DefaultExport, Destructure, Expr, FunctionBody, ImportKind,
-    IndexKey, Param, Pattern, Stmt, TableField, TokSpan,
+    Attr, Block, ChildName, Chunk, Cond, DefaultExport, Destructure, Expr, FunctionBody,
+    ImportKind, IndexKey, Param, Pattern, Stmt, TableField, TokSpan,
 };
 use alloy_syntax::lexer::{Tok, TokKind};
 use serde::{Deserialize, Serialize};
@@ -225,6 +225,9 @@ pub enum Kind {
     Variable,
     Const,
     Function,
+    /// A function of an `.alx` file that returns markup or that a tag
+    /// names, `<Row />`.
+    Component,
     Method,
     Parameter,
     Field,
@@ -247,6 +250,7 @@ impl Kind {
             Kind::Variable => "variable",
             Kind::Const => "const",
             Kind::Function => "function",
+            Kind::Component => "component",
             Kind::Method => "method",
             Kind::Parameter => "parameter",
             Kind::Field => "field",
@@ -285,6 +289,7 @@ pub struct Naming {
     pub variable: Styles,
     pub r#const: Styles,
     pub function: Styles,
+    pub component: Styles,
     pub method: Styles,
     pub parameter: Styles,
     pub field: Styles,
@@ -311,6 +316,8 @@ impl Default for Naming {
             // as in JavaScript, so both cases read as a constant.
             r#const: Styles::of(&[Style::Snake, Style::Screaming]),
             function: snake.clone(),
+            // React's rule: a tag names a component by a capital letter.
+            component: pascal.clone(),
             method: snake.clone(),
             parameter: snake.clone(),
             field: snake.clone(),
@@ -334,6 +341,7 @@ impl Naming {
             Kind::Variable => &self.variable,
             Kind::Const => &self.r#const,
             Kind::Function => &self.function,
+            Kind::Component => &self.component,
             Kind::Method => &self.method,
             Kind::Parameter => &self.parameter,
             Kind::Field => &self.field,
@@ -1088,7 +1096,112 @@ impl<'a> Walk<'a> {
 /// The naming lint over one file. A name that breaks its style carries
 /// a rename when one is safe: the file alone reads the name, and the
 /// new name is free.
-pub(crate) fn lints(src: &str, toks: &[Tok], chunk: &Chunk, naming: &Naming) -> Vec<Lint> {
+/// What an `.alx` file's markup says about its functions: the ranges its
+/// markup lowered to, in the lowered text, and every name a tag writes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Markup {
+    pub regions: Vec<(u32, u32)>,
+    pub tags: std::collections::HashSet<String>,
+}
+
+impl Markup {
+    /// The markup of one `.alx` source, from the regions its lowering
+    /// reports.
+    pub fn of(src: &str, regions: &[luaux::compile::Region]) -> Self {
+        let mut tags = std::collections::HashSet::new();
+
+        for r in regions {
+            let text = src.get(r.src_start..r.src_end).unwrap_or_default();
+
+            for (i, _) in text.match_indices('<') {
+                let name: String = text[i + 1..]
+                    .trim_start_matches('/')
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+
+                if !name.is_empty() {
+                    tags.insert(name);
+                }
+            }
+        }
+
+        Self {
+            regions: regions
+                .iter()
+                .map(|r| (r.out_start as u32, r.out_end as u32))
+                .collect(),
+            tags,
+        }
+    }
+}
+
+/// The functions of a file that return markup, by the token of their
+/// name: a `return` whose value lies in a markup region.
+fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSet<usize>) {
+    fn returns(toks: &[Tok], block: &Block, markup: &Markup) -> bool {
+        block.stmts.iter().any(|s| match s {
+            // A region inside the value: `return <Frame />`, and
+            // `return ( <Frame /> )` in parentheses too.
+            Stmt::Return(r) => r.values.iter().any(|v| {
+                let span = v.span();
+                let from = toks.get(span.start as usize).map_or(0, |t| t.start);
+                let to = toks
+                    .get((span.end as usize).saturating_sub(1))
+                    .map_or(0, |t| t.end);
+
+                markup.regions.iter().any(|(a, _)| from <= *a && *a < to)
+            }),
+
+            // A nested function returns for itself.
+            Stmt::LocalFunction(_) | Stmt::Function(_) => false,
+
+            other => stmt_children(other).iter().any(|c| match c {
+                Child::Block(b) => returns(toks, b, markup),
+
+                _ => false,
+            }),
+        })
+    }
+
+    for s in &block.stmts {
+        match s.under_default() {
+            Stmt::LocalFunction(f) => {
+                if returns(toks, &f.body.block, markup) {
+                    out.insert(f.name.start as usize);
+                }
+
+                markup_returns(toks, &f.body.block, markup, out);
+            }
+
+            Stmt::Function(f) => {
+                if let [name] = f.path.as_slice()
+                    && returns(toks, &f.body.block, markup)
+                {
+                    out.insert(name.start as usize);
+                }
+
+                markup_returns(toks, &f.body.block, markup, out);
+            }
+
+            other => {
+                for c in stmt_children(other) {
+                    if let Child::Block(b) = c {
+                        markup_returns(toks, b, markup, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn lints(
+    src: &str,
+    toks: &[Tok],
+    chunk: &Chunk,
+    naming: &Naming,
+    markup: &Markup,
+) -> Vec<Lint> {
     let mut w = Walk {
         src,
         toks,
@@ -1118,9 +1231,24 @@ pub(crate) fn lints(src: &str, toks: &[Tok], chunk: &Chunk, naming: &Naming) -> 
     let mut claimed: HashMap<String, &str> = HashMap::new();
     let mut out = Vec::new();
 
+    // In an `.alx` file a function that returns markup, or that a tag
+    // names, is a component and takes the component styles.
+    let mut components = HashSet::new();
+
+    if !markup.regions.is_empty() {
+        markup_returns(toks, &chunk.block, markup, &mut components);
+    }
+
     for d in &w.decls {
         let Some(kind) = d.kind else { continue };
         let name = w.text(d.tok);
+        let kind = match kind {
+            Kind::Function if components.contains(&d.tok) || markup.tags.contains(name) => {
+                Kind::Component
+            }
+
+            other => other,
+        };
         let styles = naming.get(kind);
         let Some(first) = styles.0.first() else {
             continue;
@@ -1205,14 +1333,20 @@ pub fn renamed(src: &str, options: &crate::config::FmtConfig) -> Option<String> 
         return None;
     }
 
-    let fixes: Vec<Lint> = lints(src, &parsed.lexed.toks, &parsed.chunk, &options.lint.naming)
-        .into_iter()
-        .filter(|l| {
-            let line = line_of(src, l.start as usize);
+    let fixes: Vec<Lint> = lints(
+        src,
+        &parsed.lexed.toks,
+        &parsed.chunk,
+        &options.lint.naming,
+        &Markup::default(),
+    )
+    .into_iter()
+    .filter(|l| {
+        let line = line_of(src, l.start as usize);
 
-            directives.allows_lint(line, LINT) && !directives.preserves(line)
-        })
-        .collect();
+        directives.allows_lint(line, LINT) && !directives.preserves(line)
+    })
+    .collect();
     let (text, n) = crate::lint::apply_fixes(src, &fixes);
 
     (n > 0).then_some(text)

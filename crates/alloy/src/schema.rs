@@ -400,6 +400,11 @@ pub const TABLES: &[Table] = &[
                 "A `const` binding. Alloy marks any binding that the file never assigns again as `const`, so both cases pass by default.",
             ),
             style_key("function", SNAKE, "A free function and a `local function`."),
+            style_key(
+                "component",
+                PASCAL,
+                "A function of an `.alx` file that returns markup, or that a tag names, `<Row />`.",
+            ),
             style_key("method", SNAKE, "A function in an `impl` or a `trait`."),
             style_key("parameter", SNAKE, "A parameter of a function."),
             style_key("field", SNAKE, "A field of a struct or an interface."),

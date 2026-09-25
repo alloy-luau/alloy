@@ -294,6 +294,20 @@ fn file_shapes(
         }
     };
 
+    let derives_of = |attributes: &[alloy_syntax::ast::Attr]| -> Vec<String> {
+        attributes
+            .iter()
+            .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
+            .flat_map(|a| a.args.iter().map(|x| text(x.span())))
+            // `serde.Serialize` through a star import of the std.
+            .map(|d: String| match d.rsplit_once('.') {
+                Some((_, n)) if crate::std_names::is_std_name(n) => n.to_string(),
+
+                _ => d,
+            })
+            .collect()
+    };
+
     for stmt in &parsed.chunk.block.stmts {
         if let alloy_syntax::ast::Stmt::Enum(e) = stmt.under_default() {
             let variants = e.variants.iter().map(|v| {
@@ -309,6 +323,7 @@ fn file_shapes(
                 name: text(e.name),
                 module: module.to_string(),
                 variants: variants.collect(),
+                derives: derives_of(&e.attributes),
                 ..Default::default()
             });
         }
@@ -338,18 +353,7 @@ fn file_shapes(
                 }),
             })
             .collect();
-        let derives = st
-            .attributes
-            .iter()
-            .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
-            .flat_map(|a| a.args.iter().map(|x| text(x.span())))
-            // `serde.Serialize` through a star import of the std.
-            .map(|d: String| match d.rsplit_once('.') {
-                Some((_, n)) if crate::std_names::is_std_name(n) => n.to_string(),
-
-                _ => d,
-            })
-            .collect();
+        let derives = derives_of(&st.attributes);
         shapes.push(crate::StructShape {
             name: text(st.name),
             fields,

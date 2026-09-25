@@ -675,6 +675,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         serializable: HashSet::new(),
         deserializable: HashSet::new(),
         cloneable: HashSet::new(),
+        equatable: HashSet::new(),
         defaultable: HashSet::new(),
         std_imports,
         std_namespaces,
@@ -766,6 +767,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             d.top_scope = d.scope_depth();
             d.block(&chunk.block);
             d.check_bound_calls(&chunk.block);
+            d.check_identity_compares(&chunk.block);
             let last = toks[toks.len() - 1].end;
             d.return_at = Some(d.r.out_len());
             d.module_return(last, &chunk.block);
@@ -1454,6 +1456,9 @@ struct Desugar<'s> {
     /// The structs of this file that derive `Clone`: a field of one
     /// clones through its own `clone`.
     cloneable: HashSet<String>,
+    /// The structs and enums of this file that derive `Eq` or
+    /// `PartialEq`, so `==` compares their content.
+    equatable: HashSet<String>,
     /// The structs of this file that derive `Default`: a field of one
     /// starts as its own `default()`.
     defaultable: HashSet<String>,

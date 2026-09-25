@@ -1893,12 +1893,13 @@ impl<'s> Desugar<'s> {
     }
 
     /// Whether `ty` names a struct through a star import, `I.Item`, and
-    /// that struct derives `which` in the file that declares it.
+    /// that struct derives `which` in the file that declares it. An enum
+    /// shape carries its derives too, and has variants.
     fn star_derives(&self, ty: &str, which: &str) -> bool {
         ty.contains('.')
             && self
                 .imported_type(ty)
-                .is_some_and(|s| s.derives.iter().any(|d| d == which))
+                .is_some_and(|s| s.variants.is_empty() && s.derives.iter().any(|d| d == which))
     }
 
     /// The copy `Clone` writes for a field of type `ty` read at `field`,

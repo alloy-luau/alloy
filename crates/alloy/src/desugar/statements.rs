@@ -896,6 +896,121 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// `x == Item.Tool("a", 1)`: a payload variant and a `new` struct are
+    /// a fresh table, and `==` on a table compares identity, so the test
+    /// never holds. `@derive(Eq)` writes the `__eq` that compares the
+    /// content. A type this file cannot see the derives of stays quiet.
+    pub(crate) fn check_identity_compares(&mut self, block: &Block) {
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+        let stmts = block.stmts.iter().flat_map(stmt_children).collect();
+        self.identity_compares_in(stmts, &mut hits);
+
+        for (span, message) in hits {
+            let (start, end) = (
+                self.toks[span.start as usize],
+                self.toks[span.end as usize - 1],
+            );
+            self.lints.push(Lint {
+                name: "identity_compare",
+                start: start.start,
+                end: end.end,
+                message,
+                fix: None,
+            });
+        }
+    }
+
+    fn identity_compares_in(&self, children: Vec<Child<'_>>, hits: &mut Vec<(TokSpan, String)>) {
+        for child in children {
+            let inner = match child {
+                Child::Block(b) => b.stmts.iter().flat_map(stmt_children).collect(),
+
+                Child::Function(f) => f.block.stmts.iter().flat_map(stmt_children).collect(),
+
+                Child::Expr(e) => {
+                    if let Expr::Binary { op, lhs, rhs, span } = e
+                        && let op = self.text_of(*op)
+                        && matches!(op, "==" | "~=")
+                        && let Some((ty, part)) = self
+                            .built_without_eq(lhs)
+                            .or_else(|| self.built_without_eq(rhs))
+                    {
+                        let never = match op {
+                            "==" => "equals no other",
+
+                            _ => "differs from every other",
+                        };
+                        hits.push((
+                            *span,
+                            format!(
+                                "this `{op}` compares identity, and a value built here {never}; `@derive(Eq)` on `{ty}` compares the {part}"
+                            ),
+                        ));
+                    }
+
+                    super::expr_children(e)
+                }
+            };
+
+            self.identity_compares_in(inner, hits);
+        }
+    }
+
+    /// The type a payload variant call or a `new` builds, when that type
+    /// derives no `Eq`, with what a derived `Eq` would compare.
+    fn built_without_eq(&self, e: &Expr) -> Option<(String, &'static str)> {
+        let (ty, part) = match e {
+            Expr::Paren { inner, .. } => return self.built_without_eq(inner),
+
+            Expr::Call {
+                func, method: None, ..
+            } => {
+                let (ty, v) = self.enum_of_path(&self.dotted_name(func)?)?;
+                let (_, arity) = self.enums.get(&ty)?.iter().find(|(n, _)| *n == v)?;
+
+                if *arity == 0 {
+                    return None;
+                }
+
+                (ty, "payload")
+            }
+
+            Expr::New { name, .. } => (self.dotted_name(name)?, "fields"),
+
+            _ => return None,
+        };
+
+        (self.derives_eq(&ty) == Some(false)).then(|| (self.display_name(&ty), part))
+    }
+
+    /// Whether `==` on a struct or an enum compares its content: a derived
+    /// `Eq` or `PartialEq`, or an `eq` an `impl` writes. `None` for a
+    /// type this file neither declares nor imports from the project.
+    fn derives_eq(&self, ty: &str) -> Option<bool> {
+        if self.structs.contains(ty) || self.enum_payloads.contains_key(ty) {
+            let written = |m: &str| {
+                self.impl_methods.get(ty).is_some_and(|ms| ms.contains(m))
+                    || self
+                        .options
+                        .foreign_impls
+                        .iter()
+                        .any(|x| x.head().0 == ty && x.name == m)
+            };
+
+            return Some(self.equatable.contains(ty) || written("eq") || written("__eq"));
+        }
+
+        let shape = self.imported_type(ty)?;
+        let written = ["eq", "__eq"].iter().any(|m| {
+            self.options
+                .import_callables
+                .iter()
+                .any(|(k, _)| *k == format!("{ty}:{m}") || *k == format!("{ty}.{m}"))
+        });
+
+        Some(written || shape.derives.iter().any(|d| d == "Eq" || d == "PartialEq"))
+    }
+
     /// The types a `local` binds, by name. An annotation names the type.
     /// Without one, `local x = new S { }` names the struct as exactly,
     /// and that is the form most calls hand a bounded parameter.
@@ -4063,6 +4178,29 @@ mod tests {
 
         let bound = "enum Item as\n    Tool(number)\n    Junk\nend\n\nimpl Item as\n    function label(self): string\n        return \"x\"\n    end\nend\n\nenum Why as\n    Lost(Item)\n    Full\nend\n\nlocal function g(w: Why): string\n    return match w with\n        case Lost(item) then item:label()\n        case Full then \"full\"\n    end\nend\nprint(g)\n";
         assert_eq!(messages(bound), [want]);
+    }
+
+    /// `x == Item.Tool("a", 1)` compared a fresh table by identity and
+    /// was never true, with no word. A type that derives `Eq`, a unit
+    /// variant, and a type the file cannot see stay quiet.
+    #[test]
+    fn an_equality_with_a_new_value_of_a_type_without_eq_warns() {
+        let src = "enum Loose\n    Tool(string, number)\n    Junk\nend\n@derive(Eq)\nenum Tight\n    Tool(string, number)\nend\nstruct Point\n    x: number\nend\n@derive(PartialEq)\nstruct Same\n    x: number\nend\nlocal function f(x: Loose, t: Tight, p: Point, s: Same, o: any)\n    print(x == Loose.Tool(\"a\", 1))\n    print(new Point { x = 1 } ~= p)\n    print(x == Loose.Junk)\n    print(t == Tight.Tool(\"a\", 1))\n    print(s == new Same { x = 1 })\n    print(o == Other.Tool(1))\nend\nprint(f)\n";
+        let out = crate::compile(src).unwrap();
+        let got: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "identity_compare")
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            got,
+            [
+                "this `==` compares identity, and a value built here equals no other; `@derive(Eq)` on `Loose` compares the payload",
+                "this `~=` compares identity, and a value built here differs from every other; `@derive(Eq)` on `Point` compares the fields",
+            ]
+        );
     }
 
     /// A unit enum is a string at runtime, so `s:describe()` finds no

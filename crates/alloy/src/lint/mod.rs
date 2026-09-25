@@ -451,6 +451,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "The second body replaces the first, so the first never runs. Either the two were meant to have different names, or one is a leftover from an edit. A `@cfg` pair is exempt: only one of the two reaches a build.",
     },
     LintInfo {
+        name: "identity_compare",
+        group: Group::Correctness,
+        default: Level::Warn,
+        summary: "`==` or `~=` with a new payload variant or a new struct of a type that derives no `Eq`",
+        detail: "A payload variant, `Item.Tool(\"a\", 1)`, and a `new` struct are a new table. `==` on two tables compares identity, so a value built in the comparison equals no other: `x == Item.Tool(\"a\", 1)` is always false, and `~=` is always true. `@derive(Eq)` on the type writes an `__eq` that compares the payload or the fields. A unit variant is a string and compares by its text, so it does not fire. The lint reads the derives of a type the file declares or imports from the project.",
+    },
+    LintInfo {
         name: "circular_import",
         group: Group::Correctness,
         default: Level::Warn,

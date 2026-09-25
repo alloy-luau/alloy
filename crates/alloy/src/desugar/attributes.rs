@@ -1291,7 +1291,12 @@ impl<'s> Desugar<'s> {
                 };
                 let (ser, de) = (derives("Serialize"), derives("Deserialize"));
                 let (clone, default) = (derives("Clone"), derives("Default"));
+                let eq = derives("Eq") || derives("PartialEq");
                 let name = self.decl_name(s.name);
+
+                if eq {
+                    self.equatable.insert(name.clone());
+                }
 
                 if clone {
                     self.cloneable.insert(name.clone());
@@ -1463,6 +1468,16 @@ impl<'s> Desugar<'s> {
                 // declaration fills them.
                 Stmt::Enum(e) => {
                     let name = self.decl_name(e.name);
+
+                    if e.attributes.iter().any(|a| {
+                        a.name.is_some_and(|n| self.text_of(n) == "derive")
+                            && a.args
+                                .iter()
+                                .any(|x| matches!(self.derive_name(x).as_str(), "Eq" | "PartialEq"))
+                    }) {
+                        self.equatable.insert(name.clone());
+                    }
+
                     let variants: Vec<(String, usize)> = e
                         .variants
                         .iter()

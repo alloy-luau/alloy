@@ -1979,7 +1979,16 @@ impl<'s> Desugar<'s> {
             .collect();
         let default = m.default.as_ref().map(ArmBody::Block);
 
-        self.match_chain(m.span, &m.scrutinees, &m.aliases, &arms, default, None, "");
+        self.match_chain(
+            m.span,
+            &m.scrutinees,
+            &m.aliases,
+            &arms,
+            default,
+            None,
+            "",
+            m.recovered,
+        );
     }
 
     /// `local s = match ...` whose arms run statements: the statement
@@ -2006,6 +2015,7 @@ impl<'s> Desugar<'s> {
             default,
             Some(sink),
             lead,
+            m.recovered,
         );
     }
 
@@ -2057,6 +2067,7 @@ impl<'s> Desugar<'s> {
         default: Option<ArmBody<'_>>,
         sink: Option<&str>,
         lead: &str,
+        recovered: bool,
     ) {
         let start = self.byte_start(span);
         let with_end =
@@ -2079,7 +2090,9 @@ impl<'s> Desugar<'s> {
         // exhaustiveness message would name the wrong variant.
         let bad_arm = self.check_variant_patterns(&pats);
 
-        if default.is_none() && !exhaustive && !bad_arm {
+        // A match the parse recovered in lost the arm it could not
+        // read, so what is left proves nothing about coverage.
+        if default.is_none() && !exhaustive && !bad_arm && !recovered {
             let msg = self.not_exhaustive_message(&pats);
             self.diagnose(span, &msg);
         }
@@ -2189,7 +2202,7 @@ impl<'s> Desugar<'s> {
         // exhaustiveness message would name the wrong variant.
         let bad_arm = self.check_variant_patterns(&pats);
 
-        if m.default.is_none() && !exhaustive && !bad_arm {
+        if m.default.is_none() && !exhaustive && !bad_arm && !m.recovered {
             let msg = self.not_exhaustive_message(&pats);
             self.diagnose(m.span, &msg);
         }
@@ -3935,5 +3948,29 @@ mod tests {
             .filter_map(|l| l.fix.as_ref().map(|f| f.replacement.clone()))
             .collect();
         assert_eq!(fixes, ["x = _x"]);
+    }
+
+    /// A match that holds a parse error lost the arm it could not read,
+    /// so it reports that error alone and no missing arm.
+    #[test]
+    fn a_match_with_a_broken_arm_claims_no_coverage() {
+        let head = "enum Hit as\n    Block(number)\n    Miss\nend\nlocal function f(h: Hit)\n    match h with\n        case Block(n) then print(n)\n";
+
+        assert_eq!(
+            messages(&format!("{head}        case\n    end\nend\nprint(f)\n")),
+            ["expected a pattern after `case`"]
+        );
+        assert_eq!(
+            messages(&format!(
+                "{head}        case Miss(\n    end\nend\nprint(f)\n"
+            )),
+            ["this arm opens `(` and never closes it; write `)` before `then`"]
+        );
+        assert_eq!(
+            messages(&format!("{head}    end\nend\nprint(f)\n")),
+            [
+                "this match is not exhaustive: `Hit` has no arm for `Miss`; add it or a `default` arm"
+            ]
+        );
     }
 }

@@ -769,6 +769,55 @@ fn a_bare_case_reports_once_on_the_case() {
     }
 }
 
+/// A `case` head that leaves a bracket open reports once, on the last
+/// bracket it opens. The read moves to the next arm, so the arms below,
+/// the `end` of the match, and the `end` of the function all parse.
+/// The match says it recovered, so the compiler claims no coverage.
+#[test]
+fn an_unclosed_bracket_in_a_case_reports_once_on_the_bracket() {
+    for (src, closers) in [
+        (
+            "local function f(h: Hit): number\n    return match h with\n        case Hit.Block(\n        case Hit.Miss then 0\n        default 1\n    end\nend\n",
+            "`)`",
+        ),
+        (
+            "match h with\n    case (\n    default print(1)\nend\nprint(2)\n",
+            "`)`",
+        ),
+        (
+            "local function f(h: X)\n    match h with\n        case X(Strike {\n        case Y then print(0)\n    end\nend\n",
+            "`})`",
+        ),
+    ] {
+        let (errors, diagnostics) = lenient(src);
+        assert_eq!((errors, diagnostics), (0, 1), "for {src:?}");
+
+        let lexed = lexer::lex(src).unwrap();
+        let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        let message = &diagnostics[0].message;
+        assert!(message.contains("never closes it"), "{message}");
+        assert!(message.contains(closers), "{message}");
+        assert!(
+            src[diagnostics[0].offset..].starts_with(['(', '{']),
+            "for {src:?}"
+        );
+        assert!(
+            src[diagnostics[0].offset + 1..].starts_with('\n'),
+            "for {src:?}"
+        );
+
+        if let Stmt::Match(m) = &chunk.block.stmts[0] {
+            assert!(m.recovered);
+        }
+    }
+
+    let src = "match h with\n    case (x) then print(x)\n    default print(1)\nend\n";
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].message, "expected a pattern, found `(`");
+}
+
 /// Two values of one head under one name: the second would shadow the
 /// first. The report lands on the second name, once.
 #[test]

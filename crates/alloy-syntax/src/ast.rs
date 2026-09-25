@@ -584,6 +584,9 @@ pub struct MatchStmt {
     pub aliases: Vec<Option<TokSpan>>,
     pub arms: Vec<MatchArm>,
     pub default: Option<Block>,
+    /// A lenient parse met a mistake inside the match and read on. An
+    /// arm it dropped leaves the list short, so it proves no coverage.
+    pub recovered: bool,
     pub span: TokSpan,
 }
 
@@ -604,6 +607,8 @@ pub struct MatchExpr {
     pub aliases: Vec<Option<TokSpan>>,
     pub arms: Vec<MatchExprArm>,
     pub default: Option<Box<Expr>>,
+    /// See [`MatchStmt::recovered`].
+    pub recovered: bool,
     pub span: TokSpan,
 }
 

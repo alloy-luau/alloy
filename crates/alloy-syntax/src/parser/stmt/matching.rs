@@ -13,6 +13,9 @@ const RUST_ARM: &str = "an arm reads `case Ok(v) then ...`; `=>` after a pattern
 const STMT_ARM_TAKES_STATEMENT: &str = "a statement arm takes a statement; write `local x = match ... with` to read the arms as values";
 const BARE_CASE: &str = "expected a pattern after `case`";
 
+/// The patterns of an arm, one per scrutinee, and its guard.
+type ArmHead = (Vec<Pattern>, Option<Expr>);
+
 /// Whether an expression stands alone as a statement: a call, the three
 /// words that wrap one, a macro call, `$assert(x)`, and a `match`, which
 /// in statement position is the statement form.
@@ -80,11 +83,15 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn match_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
+        let reports = self.diagnostics.len();
         self.bump();
         let (scrutinees, aliases) = self.match_head()?;
         self.expect("with")?;
         let mut arms = Vec::new();
         let mut default = None;
+        // A `case` counts though its arm is dropped: a head the lenient
+        // parse could not read is not a missing arm.
+        let mut cased = false;
 
         loop {
             if self.at("end") {
@@ -98,6 +105,8 @@ impl<'a> Parser<'a> {
             }
 
             if self.at("case") {
+                cased = true;
+
                 if default.is_some() {
                     self.bad_arm(CASE_AFTER_DEFAULT)?;
                 }
@@ -108,7 +117,9 @@ impl<'a> Parser<'a> {
                     continue;
                 }
 
-                let (patterns, guard) = self.arm_head()?;
+                let Some((patterns, guard)) = self.arm_head_or_skip(arm_start)? else {
+                    continue;
+                };
                 self.check_alias_binds(&aliases, &patterns)?;
                 // A broken head, one the author is still typing, keeps no
                 // arm: the emit reads an arm up to its `then`.
@@ -130,7 +141,7 @@ impl<'a> Parser<'a> {
             if self.at("default") {
                 if default.is_some() {
                     self.bad_arm(TWO_DEFAULTS)?;
-                } else if arms.is_empty() {
+                } else if !cased {
                     self.bad_arm(DEFAULT_ALONE)?;
                 }
 
@@ -155,6 +166,7 @@ impl<'a> Parser<'a> {
             aliases,
             arms,
             default,
+            recovered: self.diagnostics.len() > reports,
             span: TokSpan::new(start, self.pos),
         }))
     }
@@ -296,7 +308,7 @@ impl<'a> Parser<'a> {
     /// The patterns of an arm, one per scrutinee, and the guard. `where`
     /// is the guard's word, as on a `for` filter; `and` is the old one,
     /// and a lint rewrites it.
-    fn arm_head(&mut self) -> Result<(Vec<Pattern>, Option<Expr>), ParseError> {
+    fn arm_head(&mut self) -> Result<ArmHead, ParseError> {
         let mut patterns = vec![self.pattern()?];
 
         while self.eat(",") {
@@ -310,6 +322,81 @@ impl<'a> Parser<'a> {
         };
 
         Ok((patterns, guard))
+    }
+
+    /// The patterns and the guard of an arm. A lenient parse that meets
+    /// a mistake in them reports it once and moves to the next arm, so
+    /// the arms around it and the match's `end` report nothing.
+    fn arm_head_or_skip(&mut self, arm_start: usize) -> Result<Option<ArmHead>, ParseError> {
+        let e = match self.arm_head() {
+            Ok(head) => return Ok(Some(head)),
+
+            Err(e) if !self.lenient => return Err(e),
+
+            Err(e) => e,
+        };
+
+        // The read of a head the author is still typing runs on into
+        // the next arm, so the skip starts over at the head.
+        self.pos = arm_start + 1;
+        let e = self.unclosed_head().unwrap_or(e);
+        self.report_at(e.offset, &e.message);
+        self.skip_to_next_arm();
+
+        Ok(None)
+    }
+
+    /// The report for an arm head that leaves a bracket open, on the
+    /// last one: `case Hit.Block(` above the next arm. The head ends at
+    /// its `then`, or at a line that opens with an arm or the `end`.
+    fn unclosed_head(&self) -> Option<ParseError> {
+        let text = |i: usize| self.toks[i].text(self.src);
+        let mut stack = Vec::new();
+        // A guard can hold an `if` expression, whose `then` is its own.
+        let mut ifs = 0usize;
+
+        for i in self.pos..self.toks.len() {
+            let line_start = crate::contextual::newline_after(self.src, self.toks, i - 1);
+
+            match text(i) {
+                "case" | "default" | "end" if line_start => break,
+
+                "if" => ifs += 1,
+
+                "then" if ifs > 0 => ifs -= 1,
+
+                "then" => break,
+
+                "(" | "{" | "[" => stack.push(i),
+
+                ")" | "}" | "]" => {
+                    stack.pop();
+                }
+
+                _ => {}
+            }
+        }
+
+        let last = *stack.last()?;
+        let closers: String = stack
+            .iter()
+            .rev()
+            .map(|&i| match text(i) {
+                "{" => '}',
+
+                "[" => ']',
+
+                _ => ')',
+            })
+            .collect();
+
+        Some(ParseError {
+            offset: self.toks[last].start as usize,
+            message: format!(
+                "this arm opens `{}` and never closes it; write `{closers}` before `then`",
+                text(last)
+            ),
+        })
     }
 
     /// Whether the `case` at `at` has no pattern, as while the author
@@ -562,11 +649,15 @@ impl<'a> Parser<'a> {
     /// that end in the value ([`Self::arm_value`]).
     pub(in super::super) fn match_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
+        let reports = self.diagnostics.len();
         self.bump();
         let (scrutinees, aliases) = self.match_head()?;
         self.expect("with")?;
         let mut arms = Vec::new();
         let mut default = None;
+        // A `case` counts though its arm is dropped: a head the lenient
+        // parse could not read is not a missing arm.
+        let mut cased = false;
 
         loop {
             if self.at("end") {
@@ -580,6 +671,8 @@ impl<'a> Parser<'a> {
             }
 
             if self.at("case") {
+                cased = true;
+
                 if default.is_some() {
                     self.bad_arm(CASE_AFTER_DEFAULT)?;
                 }
@@ -590,7 +683,9 @@ impl<'a> Parser<'a> {
                     continue;
                 }
 
-                let (patterns, guard) = self.arm_head()?;
+                let Some((patterns, guard)) = self.arm_head_or_skip(arm_start)? else {
+                    continue;
+                };
                 self.check_alias_binds(&aliases, &patterns)?;
                 // A broken head, one the author is still typing, keeps no
                 // arm: the emit reads an arm up to its `then`.
@@ -612,7 +707,7 @@ impl<'a> Parser<'a> {
             if self.at("default") {
                 if default.is_some() {
                     self.bad_arm(TWO_DEFAULTS)?;
-                } else if arms.is_empty() {
+                } else if !cased {
                     self.bad_arm(DEFAULT_ALONE)?;
                 }
 
@@ -637,6 +732,7 @@ impl<'a> Parser<'a> {
             aliases,
             arms,
             default,
+            recovered: self.diagnostics.len() > reports,
             span: TokSpan::new(start, self.pos),
         })))
     }

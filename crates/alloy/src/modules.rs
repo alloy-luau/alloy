@@ -1262,6 +1262,17 @@ fn module_decls<T: Clone>(
     aliases: &[(String, PathBuf)],
     read: impl Fn(&str) -> Vec<(String, T)>,
 ) -> Vec<(PathBuf, Vec<(String, T)>)> {
+    module_decls_at(source, from, aliases, |_, text| read(text))
+}
+
+/// `module_decls` with a reader that takes the path of each module, for
+/// a declaration that reads the module's own imports.
+fn module_decls_at<T: Clone>(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+    read: impl Fn(&Path, &str) -> Vec<(String, T)>,
+) -> Vec<(PathBuf, Vec<(String, T)>)> {
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut out = Vec::new();
 
@@ -1299,10 +1310,10 @@ fn sent_decls<T: Clone>(
     path: &Path,
     text: &str,
     aliases: &[(String, PathBuf)],
-    read: &impl Fn(&str) -> Vec<(String, T)>,
+    read: &impl Fn(&Path, &str) -> Vec<(String, T)>,
     depth: u8,
 ) -> Vec<(String, T)> {
-    let mut out = read(text);
+    let mut out = read(path, text);
 
     if let Some(name) = default_decl(text)
         && let Some((_, payload)) = out.iter().find(|(n, _)| *n == name)
@@ -1561,9 +1572,99 @@ pub fn import_callables(
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, crate::flux::Callable)> {
-    let modules = module_decls(source, from, aliases, crate::flux::exported_callables);
+    let modules = module_decls_at(source, from, aliases, |path, text| {
+        let mut out = crate::flux::exported_callables(text);
+        out.extend(trait_default_callables(text, path, aliases));
+
+        out
+    });
 
     keyed_by_local(source, from, aliases, &modules)
+}
+
+/*
+`Mode.hi` for each default method an `impl Named for Mode` of a module
+gives a type the module declares. The emit writes the default onto the
+type's table, so a file that imports `Mode` reaches it as a member.
+
+The trait is one the module declares, or one it imports; the defaults
+resolve the way the module's own emit resolves them. The parameter
+count is left open, so `argument_count` stands down.
+*/
+fn trait_default_callables(
+    text: &str,
+    path: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, crate::flux::Callable)> {
+    use alloy_syntax::ast::Stmt;
+
+    if !text.contains(" for ") {
+        return Vec::new();
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(text, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let name = |span: alloy_syntax::ast::TokSpan| span.text(text, toks).to_string();
+    let stmts: Vec<&Stmt> = parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .map(|s| s.under_default())
+        .collect();
+    let mut defaults: Vec<(String, Vec<String>)> = stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Trait(t) => {
+                let methods = t.methods.iter().filter(|m| m.body.is_some());
+
+                Some((name(t.name), methods.map(|m| name(m.name)).collect()))
+            }
+
+            _ => None,
+        })
+        .collect();
+    defaults.extend(import_trait_defaults(text, path, aliases));
+    let own = |target: &str| {
+        stmts.iter().any(|s| match s {
+            Stmt::Enum(e) => name(e.name) == target,
+
+            Stmt::Struct(d) => name(d.name) == target,
+
+            _ => false,
+        })
+    };
+    let mut out = Vec::new();
+
+    for s in &stmts {
+        let Stmt::Impl(i) = s else {
+            continue;
+        };
+        let (Some(t), target) = (i.trait_name, name(i.target)) else {
+            continue;
+        };
+
+        if !own(&target) {
+            continue;
+        }
+
+        let Some((_, methods)) = defaults.iter().find(|(n, _)| *n == name(t)) else {
+            continue;
+        };
+
+        for m in methods {
+            let callable = crate::flux::Callable {
+                params: None,
+                deprecated: None,
+                exported: true,
+            };
+            out.push((format!("{target}.{m}"), callable));
+        }
+    }
+
+    out
 }
 
 /// The private fields of the imported structs of a file under the
@@ -2158,7 +2259,7 @@ pub fn import_summaries_for_file(
 pub fn sent_summaries(path: &Path, text: &str) -> Vec<crate::declarations::Declaration> {
     let (_, aliases) = file_context(path);
 
-    sent_decls(path, text, &aliases, &summary_pairs, BARREL_DEPTH)
+    sent_decls(path, text, &aliases, &|_, t| summary_pairs(t), BARREL_DEPTH)
         .into_iter()
         .map(|(name, d)| crate::declarations::Declaration { name, ..d })
         .collect()
@@ -4039,6 +4140,46 @@ mod tests {
             vec![
                 "this match is not exhaustive: `B.State` has no arm for `On`; add it or a `default` arm"
             ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `impl Named for Mode` writes the trait's default `hi` onto the
+    /// enum, and `Mode.hi(m)` in a file that imports `Mode` said "`Mode`
+    /// has no variant `hi`". The callable index now holds the defaults:
+    /// of a trait the module declares, and of one it imports. A typo
+    /// still reports, through a rename, a star import and a barrel.
+    #[test]
+    fn a_trait_default_of_an_imported_enum_is_no_missing_variant() {
+        let dir = std::env::temp_dir().join(format!("alloy-trait-enum-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        let files = [
+            (
+                "traits.aly",
+                "export trait Shout as\n    function yell(self): string\n        return \"HEY\"\n    end\nend\n",
+            ),
+            (
+                "mode.aly",
+                "import { Shout } from \"./traits\"\ntrait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nexport enum Mode as On, Off end\nimpl Named for Mode as\nend\nimpl Shout for Mode as\nend\n",
+            ),
+            ("barrel.aly", "export { Mode } from \"./mode\"\n"),
+        ];
+
+        for (name, text) in files {
+            std::fs::write(dir.join("src").join(name), text).expect("module");
+        }
+
+        let from = dir.join("src/main.aly");
+        let src = "import { Mode } from \"./mode\"\nimport { Mode as M } from \"./mode\"\nimport * as D from \"./mode\"\nimport { Mode as B } from \"./barrel\"\nprint(Mode.hi(Mode.On), M.yell(M.On), D.Mode.hi(D.Mode.On), B.yell(B.On))\nprint(M.hii)\n";
+        let options = crate::EmitOptions::default().imports(src, &from, &[]);
+        let out = crate::compile_with(src, &options).expect("compile");
+        let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            got,
+            ["`M` has no variant `hii`; its variants are `On` and `Off`"]
         );
 
         let _ = std::fs::remove_dir_all(&dir);

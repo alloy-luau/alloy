@@ -3531,6 +3531,31 @@ mod tests {
         assert_eq!(got, [want("Reached"), want("R"), want("E.Reached")]);
     }
 
+    /// `impl Named for Mode` gives the enum the trait's default `hi`,
+    /// and `Mode.hi(m)` said "`Mode` has no variant `hi`". An impl in
+    /// another file gives it `extra` the same way. A typo still reports.
+    #[test]
+    fn a_trait_default_and_a_foreign_impl_are_no_missing_variant() {
+        let src = "trait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nprint(Mode.hi(Mode.On), Mode.extra(Mode.Off), Mode.hii)\n";
+        let options = EmitOptions {
+            foreign_impls: vec![crate::extensions::Extension {
+                target: "Mode".to_string(),
+                name: "extra".to_string(),
+                is_static: false,
+                params: String::new(),
+                ret: None,
+            }],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+        let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            got,
+            ["`Mode` has no variant `hii`; its variants are `On` and `Off`"]
+        );
+    }
+
     #[test]
     fn a_match_over_an_imported_enum_is_exhaustive() {
         let src = "import { R } from \"./e1\"\nlocal function t(r: R): number\n    return match r with\n        case R.A then 1\n        case R.B then 2\n    end\nend\nprint(t)\n";

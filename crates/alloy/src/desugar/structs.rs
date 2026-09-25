@@ -2951,6 +2951,17 @@ impl<'s> Desugar<'s> {
         out
     }
 
+    /// The name the module declares a type under, for a type this file
+    /// imports. `import { Box as B }` binds the type as `B`, and `import
+    /// * as M` as `M.Box`; an import index keys both as `Box`.
+    pub(crate) fn declared_type_name<'n>(&'n self, name: &'n str) -> &'n str {
+        match name.split_once('.') {
+            Some((head, rest)) if self.star_modules.contains(head) => rest,
+
+            _ => self.import_renames.get(name).map_or(name, String::as_str),
+        }
+    }
+
     /// The type an `is` narrows `value` to when Luau cannot: a struct,
     /// an enum, an imported type, or a datatype the definitions declare
     /// as an alias. A class, a primitive, and a datatype class refine on
@@ -2987,14 +2998,7 @@ impl<'s> Desugar<'s> {
             });
         }
 
-        // `import { Box as B }` binds the type as `B`, and `import * as
-        // M` as `M.Box`. The index keys it by the name the module
-        // declares.
-        let declared = match name.split_once('.') {
-            Some((head, rest)) if self.star_modules.contains(head) => rest,
-
-            _ => self.import_renames.get(name).map_or(name, String::as_str),
-        };
+        let declared = self.declared_type_name(name);
 
         if self.enums.contains_key(name)
             || self.options.import_types.iter().any(|(_, names)| {

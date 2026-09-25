@@ -1094,18 +1094,39 @@ impl<'s> Desugar<'s> {
 
         // The methods of an imported enum stay in the module that
         // declares it, and the import index keys them the way this file
-        // spells the enum: `R.flip` for `import { Reached as R }`. An
-        // impl in a third file lands in `foreign_impls`.
+        // spells the enum: `R.flip` for `import { Reached as R }`. The
+        // index holds the defaults its trait impls take, too.
         let imported = self.options.import_enums.iter().any(|(n, _)| *n == ename)
-            && (self
+            && self
                 .options
                 .import_callables
                 .iter()
-                .any(|(k, _)| *k == format!("{ename}.{member}"))
-                || self.options.foreign_impls.iter().any(|x| x.name == member));
+                .any(|(k, _)| *k == format!("{ename}.{member}"));
+        // `impl Named for Mode` here gives `Mode` the trait's defaults.
+        let from_trait = self.impl_traits.get(&ename).is_some_and(|ts| {
+            ts.iter().any(|t| {
+                self.traits
+                    .get(t)
+                    .or_else(|| {
+                        let imported = self.options.import_trait_defaults.iter();
+
+                        imported.filter(|(n, _)| n == t).map(|(_, d)| d).next()
+                    })
+                    .is_some_and(|d| d.contains(&member))
+            })
+        });
+        // An impl in another file, and the defaults its trait brings.
+        let declared = self.declared_type_name(&ename);
+        let elsewhere = self
+            .options
+            .foreign_impls
+            .iter()
+            .any(|x| x.name == member && x.head().0 == declared);
 
         if BUILT_IN.contains(&member.as_str())
             || imported
+            || from_trait
+            || elsewhere
             || variants.iter().any(|(v, _)| *v == member)
             || self
                 .impl_methods

@@ -127,7 +127,7 @@ pub const MEMBERS: &[(&str, &[Member])] = &[
             Member {
                 name: "entries",
                 kind: MemberKind::Method,
-                signature: "HashMap:entries(): () -> (K?, V?)",
+                signature: "HashMap:entries(): () -> (K?, V)",
                 doc: "An iterator over the pairs, for a `for` loop. The order is the table's own. `for key, value in map` walks the same pairs.",
                 example: "local prices = HashMap.from({ gem = 5 })\nfor key, value in prices:entries() do\n    print(key, value)\nend",
             },

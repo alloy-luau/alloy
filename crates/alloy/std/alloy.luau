@@ -1238,7 +1238,9 @@ export type HashMap<K, V> = typeof(setmetatable({} :: {
 	len: (self: HashMap<K, V>) -> number,
 	keys: (self: HashMap<K, V>) -> Array<K>,
 	values: (self: HashMap<K, V>) -> Array<V>,
-	entries: (self: HashMap<K, V>) -> () -> (K?, V?),
+	-- `V`, not `V?`: a loop ends on a nil key, and a pair with a key
+	-- holds a value. Luau's own `next` has the same shape.
+	entries: (self: HashMap<K, V>) -> () -> (K?, V),
 	get_or_insert: (self: HashMap<K, V>, key: K, default: V) -> V,
 	clear: (self: HashMap<K, V>) -> (),
 	to_table: (self: HashMap<K, V>) -> { [K]: V },

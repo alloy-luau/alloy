@@ -557,6 +557,25 @@ fn a_for_loop_over_a_std_collection_binds_the_element() {
     );
 }
 
+/// `for k, v in map:entries()` binds the value as `V`, the way `for k, v
+/// in map` does. The iterator typed it `V?`, so `v + 1` reported
+/// "number? and number" on the docs' own example.
+#[test]
+fn a_loop_over_entries_binds_the_value_type() {
+    let good = "local prices: HashMap<string, number> = HashMap.new()\nprices:set(\"gem\", 5)\nfor key, value in prices:entries() do\n    print(key, value + 1)\nend\n";
+    analyze(good, "entries-good");
+
+    let bad = "local prices: HashMap<string, number> = HashMap.new()\nfor _, value in prices:entries() do\n    local s: string = value\n    print(s)\nend\n";
+    let Some(reported) = reports(bad, "entries-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0].contains("Expected this to be 'string', but got 'number'"),
+        "{reported:?}"
+    );
+}
+
 /// `satisfies` emitted a `::`, which casts either way, so a literal that
 /// leaves a key of `T` out went through.
 #[test]

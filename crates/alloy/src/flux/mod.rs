@@ -56,6 +56,22 @@ pub(crate) fn prefer_const_fixes(src: &str) -> Vec<crate::lint::Fix> {
     out.into_iter().filter_map(|l| l.fix).collect()
 }
 
+/// Whether a statement after the declaration writes a new value to the
+/// local whose name starts at byte `name_at`. A write in a scope where a
+/// later `local` hides the name does not count. A source that does not
+/// lex counts as written, so a caller shows no stale value.
+pub fn reassigned(src: &str, name_at: usize) -> bool {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return true;
+    };
+    let st = crate::fmt::structure::structure(src, &lexed.toks);
+    let Some(n) = lexed.toks.iter().position(|t| t.start as usize == name_at) else {
+        return true;
+    };
+
+    Scan::new(src, &lexed.toks, &st).written_after(n)
+}
+
 impl<'s> Scan<'s> {
     // --- the lints -----------------------------------------------------------------------
 

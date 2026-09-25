@@ -2137,6 +2137,12 @@ fn an_initializer_shows_only_while_the_binding_holds_it() {
         "print(c)\n",
         "local k = new P { n = 5 }\n",
         "print(k)\n",
+        "local r = new P { n = 6 }\n",
+        "local x = 0; r = new P { n = 7 }\n",
+        "print(r)\n",
+        "local s = new P { n = 8 }\n",
+        "do local s = 0; s = 1 end\n",
+        "print(s)\n",
     );
     let (st, uri) = one_file(src);
     let doc = st.docs.get(uri).expect("doc");
@@ -2150,6 +2156,10 @@ fn an_initializer_shows_only_while_the_binding_holds_it() {
     assert_eq!(hover("q", 9), None);
     assert!(hover("c", 11).is_some_and(|t| t.contains("n = 4")));
     assert!(hover("k", 13).is_some_and(|t| t.contains("n = 5")));
+    // A write after a `;` counts, and a write to an inner `local` of the
+    // same name does not.
+    assert_eq!(hover("r", 16), None);
+    assert!(hover("s", 19).is_some_and(|t| t.contains("n = 8")));
 }
 
 /// A name a std import binds hovers as the std: a star alias as its

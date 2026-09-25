@@ -1009,7 +1009,7 @@ impl<'s> Scan<'s> {
 
     /// Whether a statement after the name at `n` assigns a name of its
     /// text: `x = 1`, `x += 1`, or a target of `a, x = f()`.
-    fn written_after(&self, n: usize) -> bool {
+    pub(super) fn written_after(&self, n: usize) -> bool {
         let name = self.t(n);
 
         (n + 1..self.toks.len()).any(|j| {

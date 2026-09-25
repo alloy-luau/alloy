@@ -1719,6 +1719,24 @@ fn callee_column(doc: &Doc, label: &str, line: u32, character: u32) -> Option<u3
     Some(call as u32)
 }
 
+/// The name of the call open at the caret, when a `case` pattern binds
+/// it. An expression match calls the payload path in its place, so the
+/// child names the call after the path, `Item._1`, or not at all.
+fn case_bound_callee(doc: &Doc, line: u32, character: u32) -> Option<&str> {
+    let offset = offset_of(&doc.source, line, character)?;
+    let (start, end, _) = crate::proxy::completion::open_paren_word(&doc.source, offset)?;
+
+    // `t.f(` and `x:m(` call a member, which no pattern binds.
+    if doc.source[..start].ends_with(['.', ':']) {
+        return None;
+    }
+
+    let word = &doc.source[start..end];
+    case_arm_of_binding(doc, line as usize, word)?;
+
+    Some(word)
+}
+
 /// Signature help through the hover's restyle: the source's own head
 /// replaces the print, a struct name gets its declared parameters
 /// back, and the receiver binds the impl's own. The parameters follow
@@ -1762,6 +1780,14 @@ pub(crate) fn restyle_signatures(result: &mut Value, doc: &Doc, line: u32, chara
         let rebuilt = typed.as_deref().unwrap_or(rebuilt);
         let plain = crate::proxy::patterns::without_pattern_temps(rebuilt, &doc.source);
         let rebuilt = plain.as_deref().unwrap_or(rebuilt);
+        let named = case_bound_callee(doc, line, character).and_then(|word| {
+            let rest = rebuilt.strip_prefix("function")?;
+            let open = rest.find('(')?;
+            let name_end = rest[..open].find('<').unwrap_or(open);
+
+            Some(format!("function {word}{}", &rest[name_end..]))
+        });
+        let rebuilt = named.as_deref().unwrap_or(rebuilt);
 
         if rebuilt == label {
             continue;

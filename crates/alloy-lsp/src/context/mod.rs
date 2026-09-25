@@ -35,7 +35,7 @@ pub use members::{
 };
 #[allow(unused_imports)]
 pub use scope::{
-    Local, LocalKind, binding_in_scope, locals_in_scope, pattern_names, value_openers,
+    Local, LocalKind, alternatives, binding_in_scope, locals_in_scope, pattern_names, value_openers,
 };
 #[allow(unused_imports)]
 pub use strings::block_closers;

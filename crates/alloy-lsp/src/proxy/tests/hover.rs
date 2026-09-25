@@ -419,6 +419,69 @@ pub(crate) fn a_case_binding_reads_its_payload() {
         Some("```alloy\namount: number\n```\nA field of `struct Boost`.".to_string())
     );
 }
+/// A name a nested pattern binds reads its type off the level that
+/// binds it: a variant's payload, with the arguments of a generic one
+/// from the payload above, a struct's field, and an `or` the union of
+/// its sides. The emit writes the path in the name's place, so the child
+/// answered for the text after the name.
+#[test]
+pub(crate) fn a_nested_case_binding_reads_its_payload() {
+    const SRC: &str = "struct Point as\n    x: number\n    y: number\nend\n\nenum Opt<T> as\n    Some(T)\n    Nil\nend\n\nenum Item as\n    Sword(number)\n    Wand(string)\nend\n\nenum Box as\n    It(Item)\n    O(Opt<Item>)\n    Pt(Point)\nend\n\nlocal function s(b: Box): string\n    return match b with\n        case Box.It(Item.Sword(d)) then d:upper()\n        case Box.O(Opt.Some(it)) then tostring(it)\n        case Box.Pt(Point { x = px }) then tostring(px)\n        case Box.It(Item.Sword(n) or Item.Wand(n)) then tostring(n)\n        default \"x\"\n    end\nend\nprint(s)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let known = st.known_shapes_at(Some(uri));
+    let hover = |needle: &str, word: &str| {
+        let at = SRC.find(needle).expect("needle");
+
+        case_binding_text(doc, position_of(SRC, at).0 as usize, at, word, &known)
+    };
+
+    assert_eq!(
+        hover("d:upper", "d").as_deref(),
+        Some("```alloy\nd: number\n```\nA binding of `Item.Sword`.")
+    );
+    assert_eq!(
+        hover("it)\n", "it").as_deref(),
+        Some("```alloy\nit: Item\n```\nA binding of `Opt.Some`.")
+    );
+    assert_eq!(
+        hover("px)\n", "px").as_deref(),
+        Some("```alloy\npx: number\n```\nA binding of field `x` of `Point`.")
+    );
+    assert_eq!(
+        hover("n)\n", "n").as_deref(),
+        Some("```alloy\nn: number | string\n```\nA binding of `Item.Sword` or `Item.Wand`.")
+    );
+
+    // Go to definition lands on the name in the pattern.
+    let used = SRC.find("d:upper").expect("use");
+    let bound = SRC.find("Sword(d)").expect("pattern") + "Sword(".len();
+    assert_eq!(
+        case_binding_span(doc, position_of(SRC, used).0 as usize, "d", &known),
+        Some((bound, bound + 1))
+    );
+}
+
+/// A call of a name a `case` pattern binds: the child names the call
+/// after the path the emit writes, `Item._1`. The label takes the name.
+#[test]
+fn a_call_of_a_case_binding_names_the_binding() {
+    let src = "enum Item as\n    Wand((n: number) -> string)\n    Nothing\nend\nlocal function f(i: Item): string\n    return match i with\n        case Item.Wand(w) then w(1)\n        default \"x\"\n    end\nend\nprint(f)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut result = json!({
+        "signatures": [{
+            "label": "function Item._1(n: number): string",
+            "parameters": [{ "label": [17, 26] }],
+        }],
+    });
+    restyle_signatures(&mut result, doc, 6, 34);
+    assert_eq!(
+        result["signatures"][0]["label"],
+        "function w(n: number): string"
+    );
+}
+
 /// The `default` arm binds nothing, so a name in it is not the payload
 /// a sibling `case` bound. The emit gives the arm no shadow, and the
 /// child answers with the outer local.

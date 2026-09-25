@@ -2853,7 +2853,8 @@ impl<'s> Desugar<'s> {
     /// an enum, an imported type, or a datatype the definitions declare
     /// as an alias. A class, a primitive, and a datatype class refine on
     /// their own; `table` and `function` refine to the top types, which
-    /// no index or call accepts, so those meet the value's own type.
+    /// no index or call accepts. `table` meets the value's own type, and
+    /// `function` takes one function type.
     ///
     /// An alias narrows the way the name it spells does: `is` reads
     /// through an alias, so the branch it opens has to agree.
@@ -2864,13 +2865,10 @@ impl<'s> Desugar<'s> {
         match name {
             "table" => return Some(format!("typeof({value}) & {{ [any]: any }}")),
 
-            // Both function shapes: a call yields values, and a callback
-            // parameter that returns nothing accepts it.
-            "function" => {
-                return Some(format!(
-                    "typeof({value}) & ((...any) -> ...any) & ((...any) -> ())"
-                ));
-            }
+            // One function type. Two in an intersection are an overload,
+            // and a call of it with no argument or with a number was
+            // ambiguous. This one also passes where `() -> ()` is asked.
+            "function" => return Some("(...any) -> ...any".to_string()),
 
             _ => {}
         }

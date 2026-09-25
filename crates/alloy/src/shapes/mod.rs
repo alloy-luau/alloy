@@ -893,8 +893,8 @@ fn fold_heads(text: &mut String, known: &Known) {
     }
 }
 
-/// An `is table` or `is function` test meets the value with a shape the
-/// checker can index or call; the reader wants the primitive's name.
+/// An `is table` test meets the value with a shape the checker can
+/// index; the reader wants the primitive's name.
 fn fold_narrowed_primitives(text: &mut String) {
     // A long union prints one member per line.
     while let Some(i) = text.find("*error-type*\n") {
@@ -921,22 +921,6 @@ fn fold_narrowed_primitives(text: &mut String) {
     }
 
     for (from, to) in [
-        (
-            "((...any) -> ()) & ((...any) -> (...any)) & function",
-            "function",
-        ),
-        (
-            "((...any) -> (...any)) & ((...any) -> ()) & function",
-            "function",
-        ),
-        (
-            "function & ((...any) -> ()) & ((...any) -> (...any))",
-            "function",
-        ),
-        (
-            "function & ((...any) -> (...any)) & ((...any) -> ())",
-            "function",
-        ),
         ("{ [any]: any } & table", "table"),
         ("table & { [any]: any }", "table"),
         // The new solver types the value a `for` reads from an `any`

@@ -1471,6 +1471,15 @@ fn a_rest_pattern_over_a_plain_table_analyzes() {
     analyze(RESTS, "rests");
 }
 
+/// `f is function` cast `f` to two function types in an intersection,
+/// an overload, so `f()` and `f(1)` were ambiguous. One function type
+/// takes every call, and passes where a callback is asked.
+#[test]
+fn a_value_narrowed_to_function_calls() {
+    let src = "local function take(cb: () -> ()) cb() end\nlocal function run(f: unknown, g: string | (number) -> ())\n    if f is function then\n        f()\n        f(1)\n        f(\"x\")\n        take(f)\n    end\n    if g is function then\n        g(1)\n    end\nend\nrun(print, \"x\")\n";
+    analyze(src, "is-function");
+}
+
 /// A `.d.aly` that names a type of another `.d.aly` could load first,
 /// and the type was unknown then, which dropped the whole file with no
 /// report. An array there typed as a bare `Array` did the same.

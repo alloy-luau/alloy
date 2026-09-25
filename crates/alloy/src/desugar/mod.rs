@@ -463,6 +463,9 @@ pub struct Rendered {
     pub tests: Vec<(String, bool)>,
     /// The members an attribute contract asked for and did not find.
     pub contract_gaps: Vec<ContractGap>,
+    /// The member names an attribute contract asks for. The contract
+    /// fixes each name, so the naming lint leaves it alone.
+    pub contract_names: HashSet<String>,
 }
 
 /// The words a declaration may write between `global` and the name it
@@ -647,6 +650,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         enum_payloads: HashMap::new(),
         impl_methods: HashMap::new(),
         contract_gaps: Vec::new(),
+        contract_names: HashSet::new(),
         field_body: HashMap::new(),
         method_body: HashMap::new(),
         type_members: HashMap::new(),
@@ -891,6 +895,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ext_used: d.ext_hit,
         tests: d.test_names,
         contract_gaps: d.contract_gaps,
+        contract_names: d.contract_names,
     }
 }
 
@@ -1338,6 +1343,8 @@ struct Desugar<'s> {
     /// source order. The report names each one; this is what the editor
     /// writes in.
     contract_gaps: Vec<ContractGap>,
+    /// See [`Rendered::contract_names`].
+    contract_names: HashSet<String>,
     /// Where a member of a type goes, by the type's name: the span of
     /// the `struct` or `interface` that holds its fields, and the span of
     /// an `impl` that holds its methods. A contract on an `impl` can ask

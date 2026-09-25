@@ -1292,12 +1292,15 @@ pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<Sco
         .collect()
 }
 
+/// `fixed` holds the member names an attribute contract asks for: the
+/// contract fixes the name, so a rename breaks it.
 pub(crate) fn lints(
     src: &str,
     toks: &[Tok],
     chunk: &Chunk,
     naming: &Naming,
     markup: &Markup,
+    fixed: &HashSet<String>,
 ) -> Vec<Lint> {
     let mut w = Walk {
         src,
@@ -1363,7 +1366,7 @@ pub(crate) fn lints(
             continue;
         };
 
-        if name.starts_with('_') || styles.fits(name) {
+        if name.starts_with('_') || styles.fits(name) || (d.is_member() && fixed.contains(name)) {
             continue;
         }
 
@@ -1455,6 +1458,7 @@ pub fn renamed(src: &str, options: &crate::config::FmtConfig) -> Option<String> 
         &parsed.chunk,
         &options.lint.naming,
         &Markup::default(),
+        &HashSet::new(),
     )
     .into_iter()
     .filter(|l| {
@@ -1484,6 +1488,7 @@ pub fn lints_after_consts(src: &str, consts: &[Fix], naming: &Naming) -> Vec<Lin
         &parsed.chunk,
         naming,
         &Markup::default(),
+        &HashSet::new(),
     )
 }
 
@@ -1644,6 +1649,31 @@ mod tests {
                 &camel
             ),
             vec!["`player_count2` is a variable, and variables are camelCase here: `playerCount2`"]
+        );
+    }
+
+    /// A `requires` clause fixes a member's name. The lint asked for
+    /// `init` where the `each` example needs `Init`, and the rename then
+    /// broke the contract. A member no clause names still reports.
+    #[test]
+    fn a_name_a_contract_requires_keeps_its_case() {
+        let src = concat!(
+            "enum Lifecycle\n    Init\n    Start\nend\n",
+            "attribute provider(lifecycles: Lifecycle[]) on impl as\n",
+            "    requires private function each lifecycles(self)\nend\n",
+            "attribute service on impl as\n    requires function Boot(self)\nend\n",
+            "struct Data\n    n: number\nend\n",
+            "@provider({ lifecycles = [ Lifecycle.Init, Lifecycle.Start ] })\n@service\n",
+            "impl Data\n",
+            "    private function Init(self) print(self.n) end\n",
+            "    private function Start(self) print(self.n) end\n",
+            "    function Boot(self): () print(self.n) end\n",
+            "    function Other(self): () print(self.n) end\n",
+            "end\n",
+        );
+        assert_eq!(
+            hits(src),
+            vec!["`Other` is a method, and methods are snake_case here: `other`"]
         );
     }
 

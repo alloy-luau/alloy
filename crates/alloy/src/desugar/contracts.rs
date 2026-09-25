@@ -167,6 +167,7 @@ impl<'s> Desugar<'s> {
             }
 
             for want in self.contract_clauses(a, &decl) {
+                self.contract_names.insert(want.member.clone());
                 self.check_one_clause(a.span, &name, owner, members, &want);
             }
         }

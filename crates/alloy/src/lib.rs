@@ -313,6 +313,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
             &parsed.chunk,
             &naming,
             &options.markup,
+            &rendered.contract_names,
         ));
     }
 

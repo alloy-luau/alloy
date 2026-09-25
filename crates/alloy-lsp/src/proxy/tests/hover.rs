@@ -2124,6 +2124,38 @@ fn a_solver_variable_local_reads_its_first_value() {
     assert_eq!(named("local b: HashMap<number, string>", 8, 6), None);
 }
 
+/// `local alias = Provider` printed a solver dump once the shape folds
+/// stopped matching a plain table by its keys. The value is the table
+/// itself, so it reads as `typeof(Provider)`.
+#[test]
+fn a_solver_variable_local_names_its_plain_table() {
+    const SRC: &str = "local Provider = { count = 0 }\nlocal alias = Provider\nlocal other = { count = 1 }\nprint(alias, other)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let named = |printed: &str, line: u32, character: u32| {
+        crate::proxy::hover::name_solver_local(
+            &st,
+            &format!("```luau\n{printed}\n```"),
+            doc,
+            line,
+            character,
+        )
+    };
+    let shape = "t1 where t1 = {\n    count: number\n}";
+
+    assert_eq!(
+        named(&format!("local alias: {shape}"), 1, 7).as_deref(),
+        Some("```luau\nlocal alias: typeof(Provider)\n```")
+    );
+    // A use below reads the same binding.
+    assert_eq!(
+        named(&format!("local alias: {shape}"), 3, 7).as_deref(),
+        Some("```luau\nlocal alias: typeof(Provider)\n```")
+    );
+    // A table literal of its own is no other table.
+    assert_eq!(named(&format!("local other: {shape}"), 2, 7), None);
+}
+
 /// A callback's parameter belongs to the lambda around it, not to an
 /// earlier function that takes a parameter by the same name.
 #[test]

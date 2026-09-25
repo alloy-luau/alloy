@@ -786,7 +786,8 @@ pub(crate) fn name_solver_local(
     let named = match init.strip_prefix("new ") {
         Some(after) => super::restyle::constructed_type(doc, after)?,
 
-        None => read_field_type(st, doc, line_start, &init)?,
+        None => read_field_type(st, doc, line_start, &init)
+            .or_else(|| plain_table_alias(doc, &init))?,
     };
     let named = match printed.ends_with('?') && !named.ends_with('?') {
         true => format!("{named}?"),
@@ -795,6 +796,16 @@ pub(crate) fn name_solver_local(
     };
 
     Some(format!("{fence}\n{head}: {named}\n```{tail}"))
+}
+
+/// `local alias = Provider`, where `Provider` is a plain table of this
+/// file. The value is the table itself, so the name is `typeof(Provider)`.
+/// The shape folds name a plain table for `self` alone.
+fn plain_table_alias(doc: &Doc, init: &str) -> Option<String> {
+    doc.tables
+        .iter()
+        .any(|(name, _)| name == init)
+        .then(|| format!("typeof({init})"))
 }
 
 /*

@@ -39,7 +39,8 @@ pub struct Doc {
     /// block instead of as the name it targets.
     pub impl_blocks: Vec<alloy::impl_blocks::ImplBlock>,
     /// The plain `local X = { }` tables with their members, for the
-    /// folds: a print of the whole shape reads back as `typeof(X)`.
+    /// folds: a print of the whole shape as `self` reads back as
+    /// `typeof(X)`.
     pub tables: Vec<(String, Vec<String>)>,
     /// Every namespace the file declares, with the byte range of its
     /// body and the members it holds.

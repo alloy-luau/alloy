@@ -747,6 +747,42 @@ fn an_unclosed_attribute_names_its_bracket() {
     );
 }
 
+/// Luau's `@[...]` form that never closes reports at its `@` and names
+/// the brackets left open. It read on to the end of the file and
+/// reported past the last line. A group that closes parses.
+#[test]
+fn an_unclosed_bracket_attribute_names_its_bracket() {
+    for (src, message) in [
+        (
+            "@[deprecated({\nfunction old()\nend\n",
+            "`@[deprecated` opens `{` and never closes it; write `})]` after its arguments",
+        ),
+        (
+            "@[deprecated(\nfunction old()\nend\n",
+            "`@[deprecated` opens `(` and never closes it; write `)]` after its arguments",
+        ),
+        (
+            "@[deprecated\nfunction old()\nend\n",
+            "`@[deprecated` opens `[` and never closes it; write `]` after the attribute",
+        ),
+        (
+            "@[deprecated {\nfunction old()\nend\n",
+            "`@[deprecated` opens `{` and never closes it; write `}]` after its arguments",
+        ),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(diagnostics.len(), 1, "for {src:?}: {diagnostics:?}");
+        assert_eq!(diagnostics[0].message, message);
+        assert_eq!(diagnostics[0].offset, 0, "for {src:?}");
+    }
+
+    assert_eq!(
+        lenient("@[deprecated { use = \"f\" }]\nfunction old()\nend\n"),
+        (0, 0)
+    );
+}
+
 /// A `case` the author is still typing reports once, on the `case`. The
 /// arms around it, the `end` of the match, and the `end` of the function
 /// all parse, in the value form and in the statement form.

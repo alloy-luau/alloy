@@ -43,12 +43,25 @@ fn unparsed(src: &str, offset: usize, message: &str) -> String {
 }
 
 fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<String, String> {
+    // The code formats with each markup span held out, so a write inside
+    // a handler the markup holds is out of sight. `prefer_const` would
+    // read that local as never written; `flux --fix` reads the lowered
+    // file and writes `const` where it holds.
+    let options = &FmtConfig {
+        prefer_const: false,
+        ..options.clone()
+    };
     let code_fmt = if whole { format_file } else { format_with };
     // Markup the parser cannot read is the same case as Alloy code it
     // cannot read: the file keeps its text and the run says why, with
     // the position the same error carries under `alloy check`.
+    // A `<style>` element holds CSS, which an ingot reads, not markup:
+    // `{` there opens a rule and `--x` names a property. The spans are
+    // found with its text blanked, and a span that holds one keeps its
+    // text as written.
+    let masked = blank_styles(src);
     let spans =
-        luaux::compile::markup_spans(src).map_err(|e| unparsed(src, e.offset, &e.message))?;
+        luaux::compile::markup_spans(&masked).map_err(|e| unparsed(src, e.offset, &e.message))?;
 
     if spans.is_empty() {
         return code_fmt(src, options);
@@ -60,6 +73,21 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
 
     for (n, (a, b)) in spans.iter().enumerate() {
         code.push_str(&src[last..*a]);
+
+        if masked[*a..*b] != src[*a..*b] {
+            let lines = as_written(src, *a, *b);
+            let width = match lines.len() {
+                1 => lines[0].1.chars().count(),
+
+                _ => options.column_width + 1,
+            };
+            code.push_str(&placeholder(n, width));
+            printed.push(lines);
+            last = *b;
+
+            continue;
+        }
+
         let (node, _) =
             luaux::markup::parse_node(src, *a).map_err(|e| unparsed(src, e.offset, &e.message))?;
         let lines = print_node(src, &node, options, 0);
@@ -76,6 +104,62 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
     code.push_str(&src[last..]);
     let formatted = code_fmt(&code, options)?;
     Ok(substitute(&formatted, &printed, options))
+}
+
+/// The source with the text of each `<style>` element blanked to
+/// spaces, byte for byte, so every offset holds.
+fn blank_styles(src: &str) -> String {
+    let mut out = src.to_string();
+    let mut from = 0;
+
+    while let Some(open) = src[from..].find("<style") {
+        let open = from + open;
+        let Some(body) = src[open..].find('>').map(|i| open + i + 1) else {
+            break;
+        };
+        let Some(close) = src[body..].find("</style>").map(|i| body + i) else {
+            break;
+        };
+        let blank: String = src[body..close]
+            .chars()
+            .map(|c| match c {
+                '\n' => "\n".to_string(),
+
+                c => " ".repeat(c.len_utf8()),
+            })
+            .collect();
+        out.replace_range(body..close, &blank);
+        from = close;
+    }
+
+    out
+}
+
+/// A span as the source wrote it, one line per source line. A later
+/// line keeps its indent over the span's first line, which the printer
+/// sets again from where the span now stands.
+fn as_written(src: &str, start: usize, end: usize) -> Vec<Line> {
+    let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
+    let base: String = src[line_start..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+
+    src[start..end]
+        .split('\n')
+        .enumerate()
+        .map(|(k, text)| match k {
+            0 => (0, text.to_string()),
+
+            _ => (
+                0,
+                text.strip_prefix(base.as_str())
+                    .unwrap_or(text)
+                    .trim_end()
+                    .to_string(),
+            ),
+        })
+        .collect()
 }
 
 /// Whether the source put the markup in parentheses of its own, one on
@@ -277,9 +361,16 @@ fn print_tag(
         s
     });
 
-    // Everything on one line.
+    // Everything on one line. A tag the source wrote on one line keeps
+    // its elements beside each other while it fits: a line break between
+    // two elements is a space in rendered text, so breaking them would
+    // change what the player reads.
+    let one_line = !src[start..end].contains('\n');
+
     if let Some(open) = &open_flat
-        && kids.iter().all(|k| k.inline && k.flat().is_some())
+        && kids
+            .iter()
+            .all(|k| (k.inline || one_line) && k.flat().is_some())
     {
         let mut s = open.clone();
 

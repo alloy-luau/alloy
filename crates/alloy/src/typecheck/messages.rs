@@ -1163,13 +1163,14 @@ fn module_tail(spec: &str) -> &str {
 /// holds it. Only the phrases that quote a name the source wrote count;
 /// a quoted type is not a place.
 pub(crate) fn named_column(text: &str, message: &str) -> Option<usize> {
-    const OPENERS: [&str; 6] = [
+    const OPENERS: [&str; 7] = [
         "Unknown global '",
         "Unknown type '",
         "Key '",
         "does not have key '",
         "Cannot add property '",
         "Variable '",
+        "Function '",
     ];
 
     let name = OPENERS
@@ -1206,6 +1207,26 @@ pub fn resite_report(
         .or_else(|| contains_report(message, text))
         .or_else(|| after_report(message, text))
         .or_else(|| mixed_return_report(message, source, text, line, col))
+        .or_else(|| deprecated_report(message, text, line, col))
+}
+
+/// A deprecated function a tag calls, `<OldRow />`. The lowering writes
+/// the call, so the report sits on the markup's first `<`; the name it
+/// quotes is on the line, and the report moves onto it.
+fn deprecated_report(message: &str, text: &str, line: usize, col: usize) -> Option<Resited> {
+    let name = quoted_after(message, "Function '")?;
+
+    if !message.contains("' is deprecated") {
+        return None;
+    }
+
+    let at = word_column(text, name)?;
+
+    (at != col).then(|| Resited {
+        kind: "DeprecatedApi",
+        message: message.to_string(),
+        at: Some((line, at)),
+    })
 }
 
 /*

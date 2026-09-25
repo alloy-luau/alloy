@@ -229,7 +229,7 @@ pub enum Group {
     Roblox,
     /// Strict rules, on while `[lint] strict = true`.
     Pedantic,
-    /// The case of names, off until `[lint.rules] naming = "warn"`.
+    /// The case of names, by `[lint.naming]`. It warns by default.
     Naming,
 }
 
@@ -271,7 +271,9 @@ impl Group {
             Group::Perf => "code that runs slower than the plain form",
             Group::Roblox => "a Roblox API that is deprecated or misused",
             Group::Pedantic => "strict rules, on while `[lint] strict = true`",
-            Group::Naming => "the case of names, off until `[lint.rules] naming = \"warn\"`",
+            Group::Naming => {
+                "the case of names, by `[lint.naming]`; `[lint.rules] naming = \"allow\"` turns it off"
+            }
         }
     }
 }
@@ -560,7 +562,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "a `local` that nothing assigns again",
-        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A `const` value stays mutable, so `t.x = 1` still works. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
+        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A local whose value a line writes into, `t.x = 1`, stays `local`, so `prefer_const` and `const_mutation` never disagree. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
     },
     LintInfo {
         name: "redundant_as",

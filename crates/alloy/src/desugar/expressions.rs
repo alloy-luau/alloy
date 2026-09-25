@@ -1804,15 +1804,17 @@ impl<'s> Desugar<'s> {
                 // child continues untyped, since `Instance` has no
                 // `CFrame`. A child that ends the chain is what the call
                 // returns: `->` finds an `Instance` or nil, so `is`
-                // narrows it, and `=>` an `Instance`, as Roblox types
-                // `WaitForChild` with a timeout too.
+                // narrows it. `=>` waits for an `Instance`; with
+                // `wait_timeout` the wait gives up and returns nil, as
+                // Roblox types `WaitForChild` with a timeout.
                 if self.options.check {
+                    let timed = self.options.wait_timeout.is_some();
                     let ty = match (*wait, self.last_link) {
                         (_, false) => "any",
 
-                        (true, true) => "Instance",
+                        (true, true) if !timed => "Instance",
 
-                        (false, true) => "Instance?",
+                        (_, true) => "Instance?",
                     };
 
                     format!("({call} :: {ty})")

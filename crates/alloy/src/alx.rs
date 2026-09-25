@@ -103,6 +103,31 @@ pub fn compile_alx(
         }
     }
 
+    // A lint inside markup reads the calls the markup lowered to. A tag
+    // hands its component the props table, so a component with no
+    // parameters is no wrong call. A lint that still quotes code the
+    // author never wrote, `create(Menu, {})`, describes the lowering,
+    // and its rewrite would write that code into the file; the markup's
+    // own lints cover the shape.
+    let in_markup = |at: u32| {
+        compiled
+            .regions
+            .iter()
+            .any(|r| r.out_start <= at as usize && (at as usize) < r.out_end)
+    };
+    let written: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    output.lints.retain(|l| {
+        if !in_markup(l.start) {
+            return true;
+        }
+
+        l.name != "argument_count"
+            && l.message.split('`').skip(1).step_by(2).all(|quoted| {
+                written.contains(&quoted.split_whitespace().collect::<Vec<_>>().join(" "))
+            })
+    });
+
     // A rewrite carries a range of its own, and the lowering moves
     // every byte after the first tag. Without this the rewrite lands at
     // the wrong offset and writes over the author's code.

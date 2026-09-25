@@ -897,14 +897,28 @@ impl<'s> Scan<'s> {
             }
 
             // The first target opens the statement; `local x =` again
-            // declares a new local instead.
+            // declares a new local instead. A name right after the end of
+            // an expression opens one too: `function() n += 1 end` holds
+            // the write on the line of the `function`.
             let mut first = j;
 
             while first >= 2 && self.at(first - 1, ",") && self.is_name(first - 2) {
                 first -= 2;
             }
 
-            self.statement_start(first) && !matches!(self.prev(first), "local" | "const")
+            let after_expression = first > 0
+                && (matches!(self.prev(first), ")" | "]" | "}")
+                    || matches!(
+                        self.toks[first - 1].kind,
+                        TokKind::Str { .. }
+                            | TokKind::InterpStr
+                            | TokKind::InterpTail
+                            | TokKind::Number
+                    )
+                    || self.is_name(first - 1));
+
+            (self.statement_start(first) || after_expression)
+                && !matches!(self.prev(first), "local" | "const")
         })
     }
 

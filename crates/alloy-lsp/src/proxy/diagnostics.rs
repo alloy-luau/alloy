@@ -1463,6 +1463,12 @@ pub(crate) fn keep_diagnostic(
     };
     let end = offset_of(&doc.shadow, el, ec).unwrap_or(doc.shadow.len());
 
+    // A deprecated component reads by its tag, `<OldRow />`: the
+    // lowering writes the call, and the report stands for the tag.
+    if message.starts_with("DeprecatedApi") {
+        return true;
+    }
+
     !(start..end.max(start + 1)).any(|o| doc.generated_offset(o))
 }
 

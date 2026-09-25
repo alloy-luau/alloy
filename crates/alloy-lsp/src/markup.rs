@@ -1037,9 +1037,22 @@ pub fn completions(
             // `ClassName` belongs to no class, so nothing else offers
             // it, and the ingot's own words say what it holds.
             let mut from_ingots: HashSet<&str> = HashSet::new();
+            // An ingot rewrites the props of an element into properties
+            // before the tag is built; a component gets its props as a
+            // table, so an ingot's prop has nothing to read there.
+            // Enamel refuses one on a component.
+            let component = !roblox::is_class(class)
+                && class
+                    .rsplit('.')
+                    .next()
+                    .and_then(|n| n.chars().next())
+                    .is_some_and(char::is_uppercase);
 
             for p in props {
-                if !p.name.starts_with(prefix.as_str()) || taken.contains(p.name.as_str()) {
+                if component
+                    || !p.name.starts_with(prefix.as_str())
+                    || taken.contains(p.name.as_str())
+                {
                     continue;
                 }
 
@@ -1753,7 +1766,9 @@ mod tests {
         );
         assert!(items.iter().all(|i| i["label"] != "ClassName"));
 
-        // On a component the ingot's words replace the generic ones.
+        // A component gets its props as a table, so the ingot has
+        // nothing to read there and Enamel refuses one: the list leaves
+        // it out.
         let src = "local function Badge(props: { label: string }) end";
         let items = completions(
             &Spot::AttributeSlot {
@@ -1766,8 +1781,7 @@ mod tests {
             &props,
             &[],
         );
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["detail"], "prop of the enamel ingot");
+        assert!(items.iter().all(|i| i["label"] != "ClassName"), "{items:?}");
     }
 
     /// A `<` the reader started and left opens markup, so a tag under

@@ -1338,7 +1338,19 @@ fn map_position(
     let out_off = offset_of(&f.check, line, col)?;
 
     if !is_error && f.map.is_generated(out_off as u32) {
-        return None;
+        // A deprecated component reads by its tag, `<OldRow />`. The
+        // lowering writes the call, and the name stays on the line.
+        if kind != "DeprecatedApi" {
+            return None;
+        }
+
+        let col = f
+            .source
+            .lines()
+            .nth(line.saturating_sub(1))
+            .and_then(|text| named_column(text, message))?;
+
+        return Some((line, col));
     }
 
     // `$nameof(x)` and `$stringify(x)` turn their argument into a

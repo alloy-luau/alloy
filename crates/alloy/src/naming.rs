@@ -1184,6 +1184,17 @@ fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSe
                 markup_returns(toks, &f.body.block, markup, out);
             }
 
+            // `local Row = function(props) return <Frame /> end`.
+            Stmt::Local(l) if l.names.len() == 1 && l.values.len() == 1 => {
+                if let Expr::Function { body, .. } = &l.values[0] {
+                    if returns(toks, &body.block, markup) {
+                        out.insert(l.names[0].name.start as usize);
+                    }
+
+                    markup_returns(toks, &body.block, markup, out);
+                }
+            }
+
             other => {
                 for c in stmt_children(other) {
                     if let Child::Block(b) = c {
@@ -1242,8 +1253,11 @@ pub(crate) fn lints(
     for d in &w.decls {
         let Some(kind) = d.kind else { continue };
         let name = w.text(d.tok);
+        // A local that holds a component is one too.
         let kind = match kind {
-            Kind::Function if components.contains(&d.tok) || markup.tags.contains(name) => {
+            Kind::Function | Kind::Variable | Kind::Const
+                if components.contains(&d.tok) || markup.tags.contains(name) =>
+            {
                 Kind::Component
             }
 

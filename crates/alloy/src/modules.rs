@@ -1996,14 +1996,29 @@ impl crate::EmitOptions {
     /// joins them, since its imports say what a name in it means.
     pub fn imports_for_file(self, path: &Path, source: &str) -> Self {
         let (from, aliases, config) = project_context(path);
-        let files: Vec<PathBuf> = std::iter::once(from.clone())
-            .chain(
-                import_specs(source)
-                    .iter()
-                    .filter_map(|spec| resolve(spec, &from, &aliases)),
-            )
-            .filter(|p| is_alloy(p))
-            .collect();
+        // The file and the chain of modules it imports: a type in a
+        // remote's layout reads through the imports of each one.
+        let mut files = vec![from.clone()];
+        let mut next = 0;
+
+        while let Some(file) = files.get(next).cloned() {
+            let text = match next {
+                0 => source.to_string(),
+
+                _ => module_text(&file).unwrap_or_default(),
+            };
+            next += 1;
+
+            for target in import_specs(&text)
+                .iter()
+                .filter_map(|spec| resolve(spec, &file, &aliases))
+            {
+                if is_alloy(&target) && !files.contains(&target) {
+                    files.push(target);
+                }
+            }
+        }
+
         // The project's `in` folder keys each module as the project
         // build does, so a key here names the table a build registers.
         let base = match &config {
@@ -3842,6 +3857,45 @@ mod tests {
         set_open_source(&module, None);
 
         assert_eq!(names(), vec!["Saved".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One file compiled on its own reads the chain of modules it
+    /// imports, so a remote's layout reaches a type two imports away,
+    /// and keys it as the project build does. It read the direct
+    /// imports alone, and the enum slot fell to `any`.
+    #[test]
+    fn one_file_reads_the_import_chain_of_a_layout() {
+        let dir = std::env::temp_dir().join(format!("alloy-wire-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/shared")).expect("temp dir");
+        let write = |rel: &str, text: &str| std::fs::write(dir.join(rel), text).expect("write");
+        write("alloy.toml", "[build]\nin = \"src\"\n");
+        write(
+            "src/shared/inner.aly",
+            "export struct Inner\n    n: number\nend\n",
+        );
+        write(
+            "src/shared/kind.aly",
+            "import { Inner } from \"./inner\"\nexport enum Kind\n    Big(Inner)\n    Small\nend\n",
+        );
+        write("src/other.aly", "struct Inner\n    label: string\nend\n");
+        let src = "import * as K from \"./shared/kind\"\nexport remote R1(k: K.Kind) from client\n";
+        write("src/net.aly", src);
+
+        let net = dir.join("src/net.aly");
+        let options = crate::EmitOptions {
+            file_name: net.to_string_lossy().into_owned(),
+            ..crate::EmitOptions::default().imports_for_file(&net, src)
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+
+        assert!(
+            out.ship.contains("slots = { Big = { { fields = { { \"n\", \"f64\" } }, struct = \"shared/inner.aly:Inner\" } } }"),
+            "{}",
+            out.ship
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

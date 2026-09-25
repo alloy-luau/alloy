@@ -2404,6 +2404,37 @@ impl<'s> Desugar<'s> {
             })
             .collect();
 
+        // The field types of each struct with a derive that reads them:
+        // `from_table` sets the metatable of a payload enum, and a nested
+        // struct clones and serializes through its own functions. The
+        // derived functions run after the file loads, as a body does.
+        let derived: Vec<(u32, &str)> = block
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Struct(st)
+                    if st
+                        .attributes
+                        .iter()
+                        .filter(|a| a.name.is_some_and(|n| self.text_of(n) == "derive"))
+                        .flat_map(|a| a.args.iter())
+                        .any(|arg| {
+                            matches!(
+                                self.derive_name(arg).as_str(),
+                                "Clone" | "Default" | "Serialize" | "Deserialize"
+                            )
+                        }) =>
+                {
+                    Some(st)
+                }
+
+                _ => None,
+            })
+            .flat_map(|st| st.fields.iter())
+            .flat_map(|f| f.ty.start..f.ty.end)
+            .map(|k| (k, self.toks[k as usize].text(self.src)))
+            .collect();
+
         // The names declared so far.
         let mut declared: Vec<&str> = Vec::new();
 
@@ -2493,6 +2524,11 @@ impl<'s> Desugar<'s> {
                 self.diagnose(TokSpan::new(k, k + 1), &message);
                 break;
             }
+
+            deferred |= !is_fn
+                && derived
+                    .iter()
+                    .any(|(k, word)| *k < decl.start && *word == name);
 
             if deferred && is_fn {
                 self.hoisted_fns.push(name.to_string());

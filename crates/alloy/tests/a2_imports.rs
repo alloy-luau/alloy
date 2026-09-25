@@ -74,6 +74,33 @@ fn an_import_names_the_module_and_what_it_exports() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `export { X, Y } from "./leaf"` reads each name off the module as an
+/// import does. A name the module lacks shipped as `Y = _m.Y`, nil at
+/// run time, and the check said nothing.
+#[test]
+fn a_reexport_names_what_the_module_lacks() {
+    let dir = scratch("reexport");
+    std::fs::write(dir.join("leaf.aly"), "export const X = 1\n").unwrap();
+    let source = "export { X, Y } from \"./leaf\"\n";
+    let barrel = dir.join("barrel.aly");
+    std::fs::write(&barrel, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("barrel.aly"), &barrel, &[]);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].kind, "ImportError");
+    assert_eq!(
+        problems[0].message,
+        "\"./leaf\" does not export `Y`; it exports `X`"
+    );
+    assert_eq!(
+        &source[problems[0].start as usize..problems[0].end as usize],
+        "Y"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_plain_luau_module_is_not_checked_for_names() {
     let dir = scratch("plain");

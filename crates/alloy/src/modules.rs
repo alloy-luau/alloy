@@ -2973,6 +2973,48 @@ pub fn import_problems(
     let mut bound_types: Vec<String> = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
+        // `export { X } from "./m"` reads `X` off the module as an
+        // import does, and a name it lacks is nil at run time.
+        if let Stmt::ExportList(list) = stmt
+            && let Some(path) = list.from
+        {
+            let spec = text(path).trim_matches(['"', '\'']).to_string();
+            let Some(target) = resolve(&spec, from, aliases).filter(|t| is_alloy(t)) else {
+                continue;
+            };
+            let surface = exports
+                .entry(target.clone())
+                .or_insert_with(|| {
+                    module_text(&target)
+                        .map(|t| Surface::of(&t))
+                        .unwrap_or_default()
+                })
+                .clone();
+
+            if surface.broken || surface.returns || surface.both {
+                continue;
+            }
+
+            for item in &list.specs {
+                let name = text(item.name).to_string();
+
+                if !surface.names.contains(&name) {
+                    let (a, b) = range(item.name);
+                    out.push(ImportProblem {
+                        start: a,
+                        end: b,
+                        kind: "ImportError",
+                        message: format!(
+                            "\"{spec}\" does not export `{name}`; it exports {}",
+                            and_list(&surface.names)
+                        ),
+                    });
+                }
+            }
+
+            continue;
+        }
+
         let Stmt::Import(node) = stmt else {
             continue;
         };

@@ -202,14 +202,19 @@ pub fn struct_shapes(sources: &[PathBuf], base: &Path) -> Vec<crate::StructShape
 
         for stmt in &parsed.chunk.block.stmts {
             if let alloy_syntax::ast::Stmt::Enum(e) = stmt.under_default() {
+                let variants = e.variants.iter().map(|v| {
+                    let types = v
+                        .payload
+                        .iter()
+                        .map(|t| resolve(text(*t).trim().to_string()))
+                        .collect();
+
+                    (text(v.name), types)
+                });
                 shapes.push(crate::StructShape {
                     name: text(e.name),
                     module: module.clone(),
-                    variants: e
-                        .variants
-                        .iter()
-                        .map(|v| (text(v.name), v.payload.len()))
-                        .collect(),
+                    variants: variants.collect(),
                     ..Default::default()
                 });
             }

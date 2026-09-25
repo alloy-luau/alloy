@@ -1433,6 +1433,20 @@ impl<'s> Desugar<'s> {
                     // An `impl` above the enum writes onto a nil table.
                     let at = self.byte_start(e.span);
                     self.struct_at.entry(name.clone()).or_insert(at);
+                    let payloads = e
+                        .variants
+                        .iter()
+                        .map(|v| {
+                            let types = v
+                                .payload
+                                .iter()
+                                .map(|t| self.text_of(*t).trim().to_string())
+                                .collect();
+
+                            (self.text_of(v.name).to_string(), types)
+                        })
+                        .collect();
+                    self.enum_payloads.insert(name.clone(), payloads);
                     self.enum_decls.insert(name, variants);
                 }
 

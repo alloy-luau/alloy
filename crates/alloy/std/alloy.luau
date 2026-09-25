@@ -3279,7 +3279,8 @@ local WIRE_RANGE = {
 -- A kind in a layout is a string, `u8`, `str?`, `any`, `inst:Player`, or a
 -- table: `{ fields = { { name, kind }, ... }, struct = Metatable? }` for a
 -- record, `{ item = kind }` for an array, `{ enum = Enum, tags = { A = 0,
--- B = 1 } }` for an enum with each variant's payload count, each with
+-- B = 1 }, slots = { B = { kind } } }` for an enum with each variant's
+-- payload count and the kind of each payload value, each with
 -- `optional = true` when nil is fine. A `struct` or an `enum` can be a key
 -- of `wire.types` in place of the table. The codec reads each layout once into nodes, so a fire
 -- parses no string.
@@ -3294,6 +3295,7 @@ type WireNode = {
 	choices: { [string]: boolean }?,
 	enum: any?,
 	tags: { [string]: number }?,
+	slots: { [string]: { WireNode } }?,
 }
 
 local function wire_node(kind: any): WireNode
@@ -3317,7 +3319,18 @@ local function wire_node(kind: any): WireNode
 		return { base = base, opt = opt }
 	end
 	if kind.enum ~= nil then
-		return { base = "enum", opt = kind.optional == true, enum = kind.enum, tags = kind.tags }
+		local slots = nil
+		if kind.slots ~= nil then
+			slots = {}
+			for tag, list in kind.slots do
+				local nodes = {}
+				for i, k in list do
+					nodes[i] = wire_node(k)
+				end
+				slots[tag] = nodes
+			end
+		end
+		return { base = "enum", opt = kind.optional == true, enum = kind.enum, tags = kind.tags, slots = slots }
 	end
 	local node: WireNode = {
 		base = if kind.fields ~= nil then "record" else "array",
@@ -3551,11 +3564,15 @@ local function wire_struct(struct: any, t: any): any
 	return setmetatable(t, struct)
 end
 
+-- A payload value of an enum crosses inside the variant's table, so the
+-- reader of the variant restores it; the function comes below.
+local wire_restore: (node: WireNode, v: any) -> any
+
 -- An enum value crosses as Roblox copies a table, which drops the
 -- metatable. A unit variant is its name, and a payload variant is a
 -- table whose tag the layout lists with a payload; anything else is
--- forged. The table gets the enum's metatable back. A payload value
--- inside it keeps what Roblox gives, as a map does.
+-- forged. The table gets the enum's metatable back, and each payload
+-- value the layout names is checked and restored by its own kind.
 local function wire_variant(node: WireNode, v: any): any
 	if v == nil then
 		if node.opt then
@@ -3572,6 +3589,13 @@ local function wire_variant(node: WireNode, v: any): any
 	end
 	if type(v) ~= "table" or type(v.tag) ~= "string" or (tags[v.tag] or 0) == 0 then
 		error(`wire: {typeof(v)} is no variant of the enum`, 0)
+	end
+	local slots = node.slots and node.slots[v.tag]
+	if slots ~= nil then
+		for i, slot in slots do
+			local key = `_{i}`
+			v[key] = wire_restore(slot, v[key])
+		end
 	end
 	local enum = node.enum
 	if type(enum) == "string" then
@@ -3660,7 +3684,7 @@ end
 -- A value that crossed as Roblox encodes a table, checked against its
 -- node the way the reader checks a buffer. A record comes back with the
 -- keys its layout names alone, and with its metatable.
-local function wire_restore(node: WireNode, v: any): any
+function wire_restore(node: WireNode, v: any): any
 	local base = node.base
 	if base == "any" then
 		return v

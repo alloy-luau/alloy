@@ -10,6 +10,18 @@ local function roundtrip(layout, args)
 	return wire.unpack(layout, buf, rest), buf
 end
 
+-- Roblox copies a table across a remote and drops every metatable.
+local function engine_copy(v)
+	if type(v) ~= "table" then
+		return v
+	end
+	local t = {}
+	for k, x in v do
+		t[k] = engine_copy(x)
+	end
+	return t
+end
+
 describe("wire", function()
 	it("packs every width and reads it back", function()
 		local layout = { "u8", "u16", "u32", "i8", "i16", "i32", "f32", "f64", "bool", "str" }
@@ -160,17 +172,6 @@ describe("wire", function()
 	end)
 
 	it("restores a struct and an enum that a layout names by key", function()
-		-- Roblox copies a table across a remote and drops every metatable.
-		local function engine_copy(v)
-			if type(v) ~= "table" then
-				return v
-			end
-			local t = {}
-			for k, x in v do
-				t[k] = engine_copy(x)
-			end
-			return t
-		end
 		local Stats = {}
 		Stats.__index = Stats
 		setmetatable(Stats, {
@@ -215,6 +216,46 @@ describe("wire", function()
 		local plain = wire.restore({ { fields = { { "hp", "f64" } }, struct = "keys.aly:Gone" } }, { n = 1, { hp = 1 } })
 		expect(getmetatable(plain[1])).toBe(nil)
 		expect(plain[1].hp).toBe(1)
+	end)
+
+	it("restores a struct inside a variant's payload", function()
+		local Stats = {}
+		Stats.__index = Stats
+		function Stats.double(self)
+			return self.hp * 2
+		end
+		local Purchase = {}
+		Purchase.__index = Purchase
+		function Purchase.Bought(s, n)
+			return setmetatable({ tag = "Bought", _1 = s, _2 = n }, Purchase)
+		end
+		function Purchase.Denied(why)
+			return setmetatable({ tag = "Denied", _1 = why }, Purchase)
+		end
+		wire.types["keys.aly:Stats"] = Stats
+		local node = {
+			enum = Purchase,
+			tags = { Bought = 2, Denied = 1 },
+			slots = { Bought = { { fields = { { "hp", "f64" } }, struct = "keys.aly:Stats" }, "u8" } },
+		}
+		local sent = setmetatable({ hp = 4 }, Stats)
+		-- The table road and the buffer road both copy the variant.
+		local out = wire.restore({ node }, engine_copy({ n = 1, Purchase.Bought(sent, 3) }))[1]
+		expect(getmetatable(out)).toBe(Purchase)
+		expect(out._1:double()).toBe(8)
+		expect(out._2).toBe(3)
+		local buf, rest = wire.pack({ node }, { Purchase.Bought(sent, 3) }, "T")
+		local packed = wire.unpack({ node }, buf, engine_copy(rest))[1]
+		expect(packed._1:double()).toBe(8)
+		-- A variant with no slot keeps its payload as it came.
+		expect(wire.restore({ node }, { n = 1, { tag = "Denied", _1 = "poor" } })[1]._1).toBe("poor")
+		-- A payload value its kind refuses is forged.
+		expect(function()
+			wire.restore({ node }, { n = 1, { tag = "Bought", _1 = { hp = 1 }, _2 = 300 } })
+		end).toThrow("does not fit @u8")
+		expect(function()
+			wire.restore({ node }, { n = 1, { tag = "Bought", _1 = "x", _2 = 1 } })
+		end).toThrow("is not a table")
 	end)
 
 	it("writes a long string's length in more bytes", function()

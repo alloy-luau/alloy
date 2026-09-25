@@ -281,8 +281,9 @@ pub struct StructShape {
     /// The declaring source, relative to the project's `in` folder. It
     /// keys the table the runtime registers for the wire.
     pub module: String,
-    /// Each variant with its payload count; empty for a struct.
-    pub variants: Vec<(String, usize)>,
+    /// Each variant with the type of each payload value; empty for a
+    /// struct.
+    pub variants: Vec<(String, Vec<String>)>,
 }
 
 impl StructShape {
@@ -590,6 +591,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         plain_fns: HashSet::new(),
         binding_types: HashMap::new(),
         enum_decls: HashMap::new(),
+        enum_payloads: HashMap::new(),
         impl_methods: HashMap::new(),
         contract_gaps: Vec::new(),
         field_body: HashMap::new(),
@@ -1232,6 +1234,9 @@ struct Desugar<'s> {
     /// the declaration still checks. `enums` also holds `Result`, which
     /// the std owns and whose table carries more than its variants.
     enum_decls: HashMap<String, Vec<(String, usize)>>,
+    /// The payload types of each enum this file declares, variant by
+    /// variant, for the wire layout that restores a payload value.
+    enum_payloads: HashMap<String, Vec<(String, Vec<String>)>>,
     /// Method and static names an `impl` block writes, by target. An enum
     /// member check reads it so a method call is not a missing variant.
     impl_methods: HashMap<String, HashSet<String>>,

@@ -302,6 +302,35 @@ fn a_body_with_no_end_keeps_the_statements_after_it() {
     }
 }
 
+/// `local function f()` with no `end` said "`local` on line 1 needs an
+/// `end`", and `export function` named `export`. The `end` closes the
+/// `function`, so the report names that word and sits on it.
+#[test]
+fn a_function_with_no_end_names_function() {
+    for head in [
+        "local function f()",
+        "const function f()",
+        "export function f()",
+        "function f()",
+        "local g = @native function()",
+        "local h = async function()",
+    ] {
+        let src = format!("{head}\n    print(1)\n");
+        let lexed = lexer::lex(&src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(&src, &lexed.toks, ParseOptions::default());
+
+        assert_eq!(
+            diagnostics[0].message, "`function` on line 1 needs an `end`",
+            "{head}"
+        );
+        assert_eq!(
+            diagnostics[0].offset,
+            src.find("function").unwrap(),
+            "{head}"
+        );
+    }
+}
+
 /// A body that holds members and no `end` reports once, against the
 /// keyword that opened it. The members stay and the file after the body
 /// still parses, so the editor reads `later`.

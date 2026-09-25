@@ -103,7 +103,12 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     (&["`global` is removed", "has no `export *"], "ImportError"),
     // An attribute's argument list that never closes. The report names
     // the attribute, which could reach any rule below.
-    (&["and never closes it; write"], "SyntaxError"),
+    // A block with no `end`. The report names the word that opened
+    // it, `export` or `struct`, which a rule below would read.
+    (
+        &["and never closes it; write", "needs an `end`"],
+        "SyntaxError",
+    ),
     // Luau's attribute list and `@allow`. The words of a lint name in
     // the report could reach any rule below. A std module's attribute
     // path names the module, which the std rule below would read.
@@ -374,6 +379,17 @@ mod tests {
         let message = "`@deprecated` opens `{` and never closes it; write `})` after its arguments";
 
         assert_eq!(super::kind_for(message), "SyntaxError");
+    }
+
+    /// A missing `end` is the parser's report. `export` on line 1 read
+    /// as an import report, ImportError(3.2).
+    #[test]
+    fn a_missing_end_is_a_syntax_error() {
+        for word in ["export", "function", "struct", "enum"] {
+            let message = format!("`{word}` on line 1 needs an `end`");
+
+            assert_eq!(super::kind_for(&message), "SyntaxError", "{message}");
+        }
     }
 
     /// The `Future` entry documents every member the std declares. The

@@ -314,7 +314,7 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            self.expect("function")?;
+            let keyword = self.expect("function")?;
             let mname = self.expect_name()?;
             let sig_start = self.pos;
             let params = self.param_list()?;
@@ -336,7 +336,7 @@ impl<'a> Parser<'a> {
             let body = if has_body {
                 let b_start = self.pos;
                 let block = self.block()?;
-                self.expect_end(m_start)?;
+                self.expect_end(keyword)?;
 
                 Some(FunctionBody {
                     is_async,

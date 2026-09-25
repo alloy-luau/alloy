@@ -299,10 +299,12 @@ impl<'a> Parser<'a> {
         attributes: Vec<TokSpan>,
         is_const: bool,
     ) -> Result<Stmt, ParseError> {
-        self.expect("function")?;
+        // A missing `end` names `function`, the word the `end` closes,
+        // not the `local` or `const` in front of it.
+        let keyword = self.expect("function")?;
 
         let name = self.expect_name()?;
-        let body = self.function_body(start)?;
+        let body = self.function_body(keyword)?;
 
         Ok(Stmt::LocalFunction(LocalFunction {
             attributes,
@@ -320,7 +322,8 @@ impl<'a> Parser<'a> {
         start: usize,
         attributes: Vec<TokSpan>,
     ) -> Result<Stmt, ParseError> {
-        self.expect("function")?;
+        // A missing `end` names `function`, not the `export` in front.
+        let keyword = self.expect("function")?;
 
         let mut path = vec![self.expect_name()?];
         let mut is_method = false;
@@ -338,7 +341,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let body = self.function_body(start)?;
+        let body = self.function_body(keyword)?;
         Ok(Stmt::Function(Function {
             attributes,
             attrs: Vec::new(),
@@ -671,9 +674,9 @@ impl<'a> Parser<'a> {
 
         if self.at("function") {
             // `type function f() ... end` is a user-defined type function.
-            self.bump();
+            let keyword = self.bump();
             let name = self.expect_name()?;
-            self.function_body(start)?;
+            self.function_body(keyword)?;
 
             return Ok(Stmt::TypeAlias(TypeAlias {
                 exported,

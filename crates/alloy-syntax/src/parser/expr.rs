@@ -208,8 +208,8 @@ impl<'a> Parser<'a> {
 
             "@" => {
                 let attributes = self.attributes()?;
-                self.expect("function")?;
-                let body = self.function_body(start)?;
+                let keyword = self.expect("function")?;
+                let body = self.function_body(keyword)?;
                 Expr::Function {
                     attributes,
                     body: Box::new(body),
@@ -235,8 +235,8 @@ impl<'a> Parser<'a> {
 
             "async" if self.text_at(1) == "function" && !self.newline_after(0) => {
                 let is_async = Some(TokSpan::new(self.bump(), self.pos));
-                self.bump();
-                let mut body = self.function_body(start)?;
+                let keyword = self.bump();
+                let mut body = self.function_body(keyword)?;
                 body.is_async = is_async;
                 Expr::Function {
                     attributes: Vec::new(),

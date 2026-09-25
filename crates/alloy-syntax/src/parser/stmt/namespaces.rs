@@ -108,9 +108,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether `namespace` at the cursor opens a declaration. The word
-    /// stays contextual, the way `export` and `global` do.
+    /// stays contextual, the way `export` and `global` do. A member on
+    /// the header's line, `namespace Geo function two()`, opens one too,
+    /// so `header_as` reports the missing `as` and the fix writes it.
     pub(super) fn namespace_follows(&self) -> bool {
         self.name_at(1)
-            && (matches!(self.text_at(2), "as" | "end") || self.newline_after(1) || self.name_at(2))
+            && (matches!(self.text_at(2), "as" | "end")
+                || self.newline_after(1)
+                || self.name_at(2)
+                || self.member_decl_at(2))
     }
 }

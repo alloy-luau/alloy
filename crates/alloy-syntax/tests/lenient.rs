@@ -204,6 +204,13 @@ fn a_header_without_as_reports_and_still_parses() {
             "trait Shape",
         ),
         ("impl Box<T> function f(self) end\nend\n", "impl Box<T>"),
+        // A namespace read `function` after its name as no declaration,
+        // and reported "this expression is not a statement".
+        (
+            "namespace Geo function two(): number return 2 end end\n",
+            "namespace Geo",
+        ),
+        ("namespace Geo const X = 1 end\n", "namespace Geo"),
     ] {
         let lexed = lexer::lex(src).unwrap();
         let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());

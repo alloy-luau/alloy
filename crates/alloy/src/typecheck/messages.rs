@@ -1479,9 +1479,14 @@ fn mixed_return_report(
 }
 
 /// Whether the function that holds the line writes no return type. The
-/// header is the nearest line above that names `function`, and a return
-/// type follows the `)` of the parameters.
+/// tree answers when the source parses. Otherwise the header is the
+/// nearest line above that names `function`, and a return type follows
+/// the `)` of the parameters.
 fn function_without_return_type(source: &str, line: usize) -> bool {
+    if let Some(untyped) = untyped_by_tree(source, line) {
+        return untyped;
+    }
+
     let lines: Vec<&str> = source.lines().collect();
     let head = (0..line.saturating_sub(1))
         .rev()
@@ -1492,6 +1497,57 @@ fn function_without_return_type(source: &str, line: usize) -> bool {
     // function type with no parameters spells the same two characters,
     // so the test reads as no rewrite, not as a wrong one.
     head.is_some_and(|h| !h.contains("):"))
+}
+
+/// Whether the innermost function around the code of `line` writes no
+/// return type, by the tree. A closure above the line, such as the
+/// callback of `xs:for_each(...)`, closes before it and is not the one.
+/// `false` at the top level, and `None` when the source does not parse.
+fn untyped_by_tree(source: &str, line: usize) -> Option<bool> {
+    use crate::desugar::{Child, expr_children, stmt_children};
+
+    let parsed = alloy_syntax::parse_one(source).ok()?;
+    let toks = &parsed.lexed.toks;
+    let text = source.lines().nth(line.checked_sub(1)?)?;
+    let at = source
+        .split_inclusive('\n')
+        .take(line - 1)
+        .map(str::len)
+        .sum::<usize>()
+        + (text.len() - text.trim_start().len());
+    let holds = |span: alloy_syntax::ast::TokSpan| {
+        span.start < span.end
+            && toks[span.start as usize].start as usize <= at
+            && at < toks[span.end as usize - 1].end as usize
+    };
+    // Functions nest, so the last one the walk enters is the innermost.
+    let mut untyped = false;
+    let mut stack: Vec<Child<'_>> = parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .flat_map(stmt_children)
+        .collect();
+
+    while let Some(child) = stack.pop() {
+        match child {
+            Child::Expr(e) if holds(e.span()) => stack.extend(expr_children(e)),
+
+            Child::Block(b) if holds(b.span) => {
+                stack.extend(b.stmts.iter().flat_map(stmt_children));
+            }
+
+            Child::Function(f) if holds(f.block.span) => {
+                untyped = f.ret_type.is_none();
+                stack.extend(f.block.stmts.iter().flat_map(stmt_children));
+            }
+
+            _ => {}
+        }
+    }
+
+    Some(untyped)
 }
 
 /// `x in t` on a value the std cannot search. The emit calls `contains`,
@@ -2234,6 +2290,35 @@ mod tests {
                 17
             ),
             None
+        );
+    }
+
+    /// A closure above a `return` named `function` on its line, so the
+    /// scan read it as the header, found no return type, and blamed an
+    /// earlier `return` that the closure holds. The typed function
+    /// around the line owns the report.
+    #[test]
+    fn a_closure_above_a_return_is_not_its_function() {
+        let shapes = Vec::new();
+        let message = "Expected this to be 'number[]', but got '{number}'";
+        let one_line = "local function f(xs: number[]): number[]\n    xs:for_each(function(x: number) return end)\n    const out = {}\n    return out\nend\nprint(f)\n";
+        let sort = "local function f(xs: number[]): number[]\n    const out = {}\n    table.sort(out, function(a: number, b: number)\n        return a < b\n    end)\n    return out\nend\nprint(f)\n";
+
+        assert_eq!(resite_report(message, &shapes, one_line, 4, 12), None);
+        assert_eq!(resite_report(message, &shapes, sort, 6, 12), None);
+
+        // A `return` inside the closure answers to the closure.
+        let inside = "local function f(): number\n    local g = function(a: boolean)\n        if a then\n            return \"x\"\n        end\n        return 1\n    end\n    return 2\nend\nprint(f)\n";
+        let got = resited(
+            "Expected this to be 'string', but got 'number'",
+            inside,
+            6,
+            9,
+        );
+        assert!(
+            got.message.starts_with("this `return` gives `number`"),
+            "{}",
+            got.message
         );
     }
 

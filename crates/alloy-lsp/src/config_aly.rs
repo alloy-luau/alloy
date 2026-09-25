@@ -924,12 +924,12 @@ fn check_table(lexed: &Lexed, open: usize, node: &Value, path: &[Seg], out: &mut
                 Some(child) => child,
 
                 None => {
-                    if closed(node) {
+                    if alloy::config_aly::closed(node) {
                         let t = &lexed.toks[at];
                         out.push(Problem {
                             start: t.start as usize,
                             end: lexed.toks[lexed.key_end(at)].end as usize,
-                            message: unknown_key(node, k, path),
+                            message: alloy::config_aly::unknown_key(node, k, &table_name(path)),
                         });
                     }
 
@@ -972,14 +972,6 @@ impl Lexed<'_> {
     }
 }
 
-/// Whether a table node takes only the keys it names.
-fn closed(node: &Value) -> bool {
-    node.get("properties").is_some()
-        && !node
-            .get("additionalProperties")
-            .is_some_and(|a| a.is_object() || a == &Value::Bool(true))
-}
-
 fn table_name(path: &[Seg]) -> String {
     let keys: Vec<&str> = path
         .iter()
@@ -995,44 +987,6 @@ fn table_name(path: &[Seg]) -> String {
 
         false => format!("`{}`", keys.join(".")),
     }
-}
-
-fn unknown_key(node: &Value, key: &str, path: &[Seg]) -> String {
-    let names: Vec<&String> = node
-        .get("properties")
-        .and_then(Value::as_object)
-        .map(|p| p.keys().collect())
-        .unwrap_or_default();
-    let near = names
-        .iter()
-        .map(|n| (strsim_distance(n, key), n))
-        .filter(|(d, _)| *d <= 2)
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, n)| format!("; did you mean `{n}`?"))
-        .unwrap_or_default();
-
-    format!("`{key}` is no key of {}{near}", table_name(path))
-}
-
-/// The edit distance of two short words.
-fn strsim_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-
-        for (j, cb) in b.iter().enumerate() {
-            let here = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb))
-                .min(row[j] + 1)
-                .min(here + 1);
-            prev = here;
-        }
-    }
-
-    row[b.len()]
 }
 
 /// A literal value that does not fit its key: a single token, followed

@@ -74,8 +74,8 @@ pub fn evaluate_source(source: &str, path: &Path) -> Result<toml::Table, String>
     // as `Sgnal` is no std name. That report wins over the schema's.
     let problems: Vec<(String, String)> = refused
         .into_iter()
-        .filter_map(
-            |(at, message, word)| match word.map(|w| (probe(&at, &w), w)) {
+        .filter_map(|(at, message, word)| {
+            match word.map(|w| (probe(&at, toml::Value::String(w.clone())), w)) {
                 None => Some((at, message)),
 
                 // The load takes the word after all.
@@ -87,8 +87,8 @@ pub fn evaluate_source(source: &str, path: &Path) -> Result<toml::Table, String>
                 }
 
                 Some(_) => Some((at, message)),
-            },
-        )
+            }
+        })
         .collect();
 
     // Each value the schema refuses reports on the line of its key, the
@@ -120,12 +120,11 @@ pub fn evaluate_source(source: &str, path: &Path) -> Result<toml::Table, String>
     }
 }
 
-/// Loads a config that holds `word` alone, at the key path `at`. A list
-/// item stands in a list of one. The error is the deserializer's own.
+/// Loads a config that holds `value` alone, at the key path `at`. A
+/// list item stands in a list of one. The error is the deserializer's
+/// own.
 #[cfg(not(target_arch = "wasm32"))]
-fn probe(at: &str, word: &str) -> Result<(), String> {
-    let mut value = toml::Value::String(word.to_string());
-
+fn probe(at: &str, mut value: toml::Value) -> Result<(), String> {
     for seg in at.rsplit('.') {
         let key = match seg.split_once('[') {
             Some((key, _)) => {
@@ -819,7 +818,23 @@ fn convert(
                     false => format!("{at}.{key}"),
                 };
                 let child = schema.and_then(|s| property(s, &key));
-                out.insert(key, convert(&v, child, &path, refused)?);
+                let value = convert(&v, child, &path, refused)?;
+
+                // A key the schema does not list reports as the editor
+                // reports it, when the load refuses it too. An ingot's
+                // table is in no schema here, and the load takes it.
+                if let Some(node) = schema.filter(|s| child.is_none() && closed(s))
+                    && probe(&path, value.clone()).is_err_and(|e| e.starts_with("unknown field"))
+                {
+                    let table = match at.is_empty() {
+                        true => "the config".to_string(),
+
+                        false => format!("`{at}`"),
+                    };
+                    refused.push((path.clone(), unknown_key(node, &key, &table), None));
+                }
+
+                out.insert(key, value);
             }
 
             Ok(toml::Value::Table(out))
@@ -830,6 +845,32 @@ fn convert(
             luau_type(other)
         )),
     }
+}
+
+/// Whether an object node takes only the keys it names.
+pub fn closed(node: &Json) -> bool {
+    node.get("properties").is_some()
+        && !node
+            .get("additionalProperties")
+            .is_some_and(|a| a.is_object() || a == &Json::Bool(true))
+}
+
+/// The report of a key a closed table does not take, with the nearest
+/// key it does take. `table` names the table: `` `lint` ``, or `the
+/// config` at the top.
+pub fn unknown_key(node: &Json, key: &str, table: &str) -> String {
+    let near = node
+        .get("properties")
+        .and_then(Json::as_object)
+        .into_iter()
+        .flat_map(|p| p.keys())
+        .map(|n| (crate::game_import::edit_distance(n, key), n))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, n)| format!("; did you mean `{n}`?"))
+        .unwrap_or_default();
+
+    format!("`{key}` is no key of {table}{near}")
 }
 
 /// The schema of one property of an object node: its own entry, else
@@ -1219,6 +1260,18 @@ mod tests {
         );
         // A word the schema lists loads.
         assert!(eval("export const fmt = { quote_style = \"preserve\" }\n").is_ok());
+
+        // A key the schema does not list names its table, the nearest
+        // key, and its line, as the editor does. The top level too.
+        let keys = eval("export const build = { in = \"src\" }\nexport const lint = { strict = true, stirct = false }\nexport const buld = 1\n").unwrap_err();
+        assert_eq!(
+            keys,
+            [
+                "/tmp/project/.config.aly:2: `stirct` is no key of `lint`; did you mean `strict`?",
+                "/tmp/project/.config.aly:3: `buld` is no key of the config; did you mean `build`?",
+            ]
+            .join("\n")
+        );
     }
 
     #[test]

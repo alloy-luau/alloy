@@ -1707,6 +1707,17 @@ impl<'s> Desugar<'s> {
                 );
             }
 
+            // `$matches(e, Ok(_))` alone is a value and no call. Its
+            // expansion, `( if ... )`, is no Luau statement, so the
+            // report is the one `x + 1` alone gets.
+            Stmt::Call(Expr::Macro { name, span, .. }, _)
+                if matches!(self.text_of(*name), "matches" | "nameof" | "stringify")
+                    && self.macro_of(self.text_of(*name)).is_none() =>
+            {
+                self.diagnose(*span, "this expression is not a statement");
+                self.blank_lines(self.byte_start(*span), self.byte_end(*span));
+            }
+
             // A macro call that stands alone is a statement, so the
             // body's statements stay statements and a `return` in it
             // returns from the function around the call.

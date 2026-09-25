@@ -974,6 +974,24 @@ mod tests {
             .collect()
     }
 
+    /// `$matches(e, Ok(_))` alone expanded to `( if ... )`, which is no
+    /// Luau statement: check passed, and flux said "Ambiguous syntax".
+    /// A value intrinsic alone now reports as `x + 1` alone does.
+    #[test]
+    fn a_value_intrinsic_alone_is_no_statement() {
+        for line in ["$matches(e, Ok(_))", "$nameof(e.tag)", "$stringify(e)"] {
+            let src = format!("local e: Result<number, string> = Ok(1)\n{line}\nprint(e)\n");
+            assert_eq!(
+                messages(&src),
+                vec!["this expression is not a statement"],
+                "{line}"
+            );
+        }
+
+        let used = "local e: Result<number, string> = Ok(1)\nprint($matches(e, Ok(_)))\n";
+        assert!(messages(used).is_empty(), "{:?}", messages(used));
+    }
+
     /// `$map` takes pairs. A flat list reads as one pair and built a
     /// map of one entry in silence.
     #[test]

@@ -515,9 +515,11 @@ impl<'s> Desugar<'s> {
             // The operand keeps its chunks, so the editor maps its names.
             Expr::Await { operand, .. } => {
                 let std = self.std();
-                self.generate(anchor, &format!("{std}.await("));
+                let one = self.one_value.remove(&(std::ptr::from_ref(e) as usize));
+                let (open, close) = if one { ("(", "))") } else { ("", ")") };
+                self.generate(anchor, &format!("{open}{std}.await("));
                 self.expr(operand);
-                self.generate(anchor, ")");
+                self.generate(anchor, close);
             }
 
             Expr::Try { operand, span } => {

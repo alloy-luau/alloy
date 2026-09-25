@@ -569,17 +569,16 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
         // back. `()` is a type pack, so `Future<()>` names a type
         // nobody can spell; it read as a different type from the one
         // the source declared.
-        // `__rest: (B, C) -> ()` holds the values after the first, so
-        // the Future reads `Future<A, B, C>`.
-        let rest = get("__rest")
+        // `__values: (A, B) -> ()` holds every value, so a Future of
+        // two reads `Future<A, B>`.
+        let all = get("__values")
             .and_then(|r| r.trim().strip_suffix("-> ()"))
             .and_then(|r| r.trim().strip_prefix('(')?.strip_suffix(')'))
             .map(str::trim)
             .filter(|r| !r.is_empty())
-            .map(|r| format!(", {r}"))
-            .unwrap_or_default();
+            .unwrap_or(v);
 
-        return Some(format!("Future<{v}{rest}>"));
+        return Some(format!("Future<{all}>"));
     }
 
     if let Some(sig) = get("andThen")

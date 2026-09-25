@@ -854,6 +854,13 @@ main()
         "{}",
         bad.join("\n")
     );
+    // Each report is the annotation's, not a type function that failed
+    // on the pack a bare `await` returns.
+    assert!(
+        bad.iter().all(|l| l.contains("Expected this to be")),
+        "{}",
+        bad.join("\n")
+    );
 }
 
 /// A `try await` of a Future that settles with a Result yields that

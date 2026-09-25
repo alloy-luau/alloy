@@ -1567,6 +1567,18 @@ impl<'s> Desugar<'s> {
     }
 
     pub(crate) fn stmt_inner(&mut self, stmt: &Stmt) {
+        // `try do await f end` gives one value, and `__try_ret` reads the
+        // type of the closure's `return`. A bare `await` there returns
+        // the open pack of every value, which a type function cannot
+        // read; the parens keep the first value alone.
+        if let Stmt::Return(r) = stmt
+            && self.options.check
+            && matches!(self.try_targets.last(), Some(Some(_)))
+            && let [e @ Expr::Await { .. }] = r.values.as_slice()
+        {
+            self.one_value.insert(std::ptr::from_ref(e) as usize);
+        }
+
         match stmt {
             Stmt::Struct(st) => self.struct_decl(st),
 

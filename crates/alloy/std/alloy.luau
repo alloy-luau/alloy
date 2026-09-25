@@ -554,9 +554,9 @@ end
 -- `Future<number, string>`, and `Future<number>` settles with one value.
 export type Future<T, R... = ()> = {
 	-- In the type alone: a generic reads `T` off a Future it is handed,
-	-- and `await` reads `R...` off `__rest`.
+	-- and `await` reads every value off `__values`.
 	read __value: T,
-	read __rest: (R...) -> (),
+	read __values: (T, R...) -> (),
 	read andThen: (
 		self: Future<T, R...>,
 		on_resolve: ((T, R...) -> ...any)?,
@@ -759,35 +759,16 @@ export type Settled<T> = {
 	read andThen: (self: any, on_resolve: any, on_reject: any) -> any,
 }
 
--- The first value `await` gives: the `__value` of a Future, the union
--- of them for a union, and `any` for an awaitable with `andThen` alone.
--- `index<A, "__value">` reported that missing key once `await` read
--- `R...` off the operand as well.
-type function __settled_value(A)
-	local shape: any = A
-
-	if shape:is("union") then
-		local parts: { any } = {}
-
-		for _, part in shape:components() do
-			parts[#parts + 1] = __settled_value(part)
-		end
-
-		return types.unionof(table.unpack(parts))
-	end
-
-	return __try_member(A, types.singleton("__value")) or types.any
-end
-
 --- `await`: a Future, or anything with `andThen`. Yields until settled,
 --- returns every value it settled with, rethrows the error.
--- The values after the first come off `__rest`: `local a, b = await f`
--- types `b` from a `Future<number, string>`, and reports it on a
--- `Future<number>`. `__rest` is optional, so a hand-written awaitable
--- with `andThen` alone still fits.
-function alloy.await<A, R...>(
-	target: A & Settled<any> & { read __rest: ((R...) -> ())? }
-): (__settled_value<A>, R...)
+-- The values come off `__values`: `local a, b = await f` types `b` from
+-- a `Future<number, string>`, and reports it on a `Future<number>`.
+-- `__values` is optional, so a hand-written awaitable with `andThen`
+-- alone still fits, and its values stay open. `index<A, "__value">`
+-- beside an open pack reported the missing key on such an awaitable,
+-- and a type function over `__value` rebuilt the type the checker then
+-- reached its limit on.
+function alloy.await<A, V...>(target: A & Settled<any> & { read __values: ((V...) -> ())? }): V...
 	if type(target) == "table" and getmetatable(target) == Future then
 		if target.state == PENDING then
 			local thread = coroutine.running()

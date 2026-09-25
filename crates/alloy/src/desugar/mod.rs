@@ -637,6 +637,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         private_view_names: HashSet::new(),
         ret_types: Vec::new(),
         try_targets: Vec::new(),
+        one_value: HashSet::new(),
         result_aliases: HashSet::new(),
         alias_values: HashMap::new(),
         fn_ret_types: HashMap::new(),
@@ -1301,6 +1302,9 @@ struct Desugar<'s> {
     /// reads the last one to pick between the block's `fail` and a
     /// `return` from the function.
     try_targets: Vec<Option<TryTarget>>,
+    /// Each `await` a `try do` block returns, by address, which the check
+    /// artifact wraps in parens to keep its first value alone.
+    one_value: HashSet<usize>,
     /// Type aliases the file declares whose value is a `Result`, so a
     /// function that returns one still takes `try`.
     result_aliases: HashSet<String>,

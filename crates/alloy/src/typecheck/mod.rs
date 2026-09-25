@@ -373,9 +373,16 @@ pub fn analyze(
         .flatten()
     {
         let name = entry.file_name();
-        let skip = [".git", "target", "node_modules", ".luaurc", ".config.luau"]
-            .iter()
-            .any(|s| name == *s)
+        let skip = [
+            ".git",
+            "target",
+            "node_modules",
+            ".luaurc",
+            ".config.luau",
+            "sourcemap.json",
+        ]
+        .iter()
+        .any(|s| name == *s)
             || Path::new(&name) == config.build.input
             || Path::new(&name) == config.build.out
             || Path::new(&name) == config.test.out;
@@ -636,18 +643,29 @@ pub fn analyze(
         cmd.arg(format!("--definitions={}", d.display()));
     }
 
-    // `alloy build` writes `sourcemap.json` at the root. A root that
-    // still holds the `.alloy/sourcemap.json` an older build wrote uses
-    // that one.
-    let sourcemap = [
-        root.join("sourcemap.json"),
-        root.join(".alloy/sourcemap.json"),
-    ]
-    .into_iter()
-    .find(|p| p.is_file());
+    // The sourcemap the language server gives luau-lsp. Its scripts
+    // point at the artifacts, which sit under `out` here as the build
+    // writes them, so `script.Parent` and a `require` of a child resolve.
+    if let Some(text) = crate::project::luau_sourcemap(root, config) {
+        let out_dir = normalize(&root.join(&config.build.out));
+        let text = crate::project::map_sourcemap(&text, &|s| {
+            let luau = crate::project::luau_script_path(s);
+            let at = normalize(&root.join(&luau));
 
-    if let Some(sourcemap) = &sourcemap {
-        cmd.arg("--sourcemap").arg(sourcemap);
+            match at.strip_prefix(&input_dir) {
+                Ok(rest) if !at.starts_with(&out_dir) => config
+                    .build
+                    .out
+                    .join(rest)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+
+                _ => luau,
+            }
+        });
+        let target = mirror.join("sourcemap.json");
+        std::fs::write(&target, text).map_err(|e| e.to_string())?;
+        cmd.arg("--sourcemap").arg(&target);
     }
 
     for s in &sources {
@@ -1251,7 +1269,18 @@ fn parse_line(line: &str) -> Option<Line<'_>> {
         return Some(d);
     }
 
-    let open = line.find('(')?;
+    // With a sourcemap the checker writes the file's place in the tree
+    // after its path: `/m/build/a.luau [game/ReplicatedStorage/a](3,12)`.
+    // A name in the tree may hold a `(`, so the bracket goes first.
+    let first = line.find('(')?;
+    let placed = line[..first]
+        .find(" [")
+        .and_then(|b| Some((b, b + line[b..].find("](")? + 1)));
+    let (path, open) = match placed {
+        Some((end, open)) => (&line[..end], open),
+
+        None => (&line[..first], first),
+    };
     let close = line[open..].find(')')? + open;
     let (l, c) = line[open + 1..close].split_once(',')?;
     let rest = line[close + 1..].strip_prefix(": ")?;
@@ -1262,7 +1291,7 @@ fn parse_line(line: &str) -> Option<Line<'_>> {
     }
 
     Some(Line {
-        path: &line[..open],
+        path,
         line: l.trim().parse().ok()?,
         col: c.trim().parse().ok()?,
         kind,
@@ -1455,6 +1484,15 @@ mod tests {
         assert_eq!((d.line, d.col), (0, 0));
         assert_eq!(d.kind, "TypeError");
         assert!(parse_line("[INFO] Loading definitions file: @roblox - a.d.luau").is_none());
+
+        // A file the sourcemap places carries its place in the tree.
+        let d = parse_line(
+            "/m/build/a.luau [game/ReplicatedStorage/Model (1)/a](3,12): TypeError: Expected 'number'",
+        )
+        .unwrap();
+        assert_eq!(d.path, "/m/build/a.luau");
+        assert_eq!((d.line, d.col), (3, 12));
+        assert_eq!(d.message, "Expected 'number'");
     }
 
     /// Two enums with one variant set print alike. The file imports

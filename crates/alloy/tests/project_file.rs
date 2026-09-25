@@ -707,3 +707,69 @@ fn a_top_level_config_luau_key_reports_on_its_file() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `alloy flux` hands luau-lsp the sourcemap the language server does,
+/// with each script at its artifact. A child then types from the tree,
+/// and a `require` of one resolves the module, so a wrong argument to
+/// it reports. The runtime still resolves in a file the tree places.
+#[test]
+fn flux_types_a_child_from_the_sourcemap() {
+    let dir = std::env::temp_dir().join(format!("alloy-flux-sourcemap-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    write(
+        &dir,
+        "alloy.toml",
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[emit]\nwait_timeout = 5\n\n[mount]\nshared = [\"src\", \"@game/ReplicatedStorage/Shared\"]\n",
+    );
+    write(
+        &dir,
+        "src/tags.aly",
+        "export const DOUBLED = [ 1, 2 ]:map(function(n) return n * 2 end)\n\nexport function add(a: number, b: number): number\n    return a + b\nend\n",
+    );
+    write(
+        &dir,
+        "src/systems/combat.aly",
+        "export function hit(n: number): number\n    return n - 1\nend\n",
+    );
+    write(
+        &dir,
+        "src/main.aly",
+        concat!(
+            "const tags = require(script.Parent=>tags)\n",
+            "const combat = require(script.Parent->systems->combat)\n",
+            "const found: Folder = script.Parent:FindFirstChild(\"systems\")\n",
+            "print(tags.add(\"x\", 1), found)\n",
+            "print(combat.hit(\"y\"))\n",
+        ),
+    );
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    }
+
+    let analysis = alloy::typecheck::analyze(&dir, &config, &report.checks, &report.dep_artifacts)
+        .expect("the type check runs");
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{}:{}:{} {}", d.rel.display(), d.line, d.col, d.message))
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec![
+            "main.aly:4:16 Expected this to be 'number', but got 'string'".to_string(),
+            "main.aly:5:18 Expected this to be 'number', but got 'string'".to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

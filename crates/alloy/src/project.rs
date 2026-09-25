@@ -656,6 +656,80 @@ pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
     Ok(Value::Object(game))
 }
 
+/// The sourcemap luau-lsp reads for the project, before its paths move
+/// into a mirror. A tree that mounts a folder writes it, as `alloy
+/// build` does, so a file added since the last build has its place.
+/// Any other root reads the file the last build or Rojo left there.
+/// The language server and `alloy flux` both start from this text.
+pub fn luau_sourcemap(root: &Path, config: &Config) -> Option<String> {
+    let tree = Tree::load(root, config);
+
+    if !tree.mounts.is_empty() {
+        let map = sourcemap(&tree, root).ok()?;
+
+        return Some(serde_json::to_string_pretty(&map).ok()? + "\n");
+    }
+
+    // A root that still holds the `.alloy/sourcemap.json` an older build
+    // wrote uses that one.
+    ["sourcemap.json", ".alloy/sourcemap.json"]
+        .iter()
+        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
+}
+
+/// A sourcemap with each script path passed through `f`. A text that
+/// does not parse comes back as it is.
+pub fn map_sourcemap(text: &str, f: &dyn Fn(&str) -> String) -> String {
+    fn walk(v: &mut Value, f: &dyn Fn(&str) -> String) {
+        match v {
+            Value::Array(items) => items.iter_mut().for_each(|i| walk(i, f)),
+
+            Value::Object(map) => {
+                for (k, v) in map.iter_mut() {
+                    match (k.as_str(), v) {
+                        ("filePaths", Value::Array(paths)) => {
+                            for p in paths.iter_mut() {
+                                if let Value::String(s) = p {
+                                    *s = f(s);
+                                }
+                            }
+                        }
+
+                        (_, v) => walk(v, f),
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let Ok(mut json) = serde_json::from_str::<Value>(text) else {
+        return text.to_string();
+    };
+    walk(&mut json, f);
+
+    serde_json::to_string(&json).unwrap_or_else(|_| text.to_string())
+}
+
+/// The Luau file luau-lsp reads for a script path of a sourcemap. An
+/// Alloy source compiles to `.luau`, and a data file becomes a module,
+/// as in the build. Any other path stays.
+pub fn luau_script_path(path: &str) -> String {
+    if let Some(b) = path.strip_suffix(".d.aly") {
+        format!("{b}.d.luau")
+    } else if let Some(b) = path
+        .strip_suffix(".aly")
+        .or_else(|| path.strip_suffix(".alx"))
+        .or_else(|| path.strip_suffix(".json"))
+        .or_else(|| path.strip_suffix(".toml"))
+    {
+        format!("{b}.luau")
+    } else {
+        path.to_string()
+    }
+}
+
 /// The files `alloy build` writes for the tree, as (path relative to
 /// the root, text). A root whose tree is its own project file keeps
 /// that file: Alloy writes only the build project and the sourcemap.

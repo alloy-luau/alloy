@@ -707,18 +707,14 @@ impl Server {
             // The tree writes the mirror's sourcemap, as `alloy build`
             // writes the project's. A file added since the last build is
             // in this one, so `@game/` completes and types without one.
-            if let Some(config) = &config {
-                let tree = alloy::project::Tree::load(&root, config);
-
-                if !tree.mounts.is_empty()
-                    && let Ok(map) = alloy::project::sourcemap(&tree, &root)
-                {
-                    let text = serde_json::to_string_pretty(&map).unwrap_or_default() + "\n";
-                    st.write_mirror(
-                        &root.join("sourcemap.json"),
-                        &mirrored_sourcemap(&text, &input, out.as_deref(), &root),
-                    );
-                }
+            if let Some(config) = &config
+                && tree_sourcemap(&root, Some(config))
+                && let Some(text) = alloy::project::luau_sourcemap(&root, config)
+            {
+                st.write_mirror(
+                    &root.join("sourcemap.json"),
+                    &mirrored_sourcemap(&text, &input, out.as_deref(), &root),
+                );
             }
         }
 
@@ -1746,9 +1742,6 @@ pub(crate) fn mirrored_sourcemap(
     out: Option<&Path>,
     root: &Path,
 ) -> String {
-    let Ok(mut json) = serde_json::from_str::<Value>(text) else {
-        return text.to_string();
-    };
     let rel = |p: &Path| {
         p.strip_prefix(root)
             .unwrap_or(p)
@@ -1758,51 +1751,13 @@ pub(crate) fn mirrored_sourcemap(
     let runtime_out = out.map(|o| rel(&o.join("alloy.luau")));
     let runtime_in = rel(&input.join("alloy.luau"));
 
-    pub(crate) fn walk(v: &mut Value, f: &dyn Fn(&str) -> String) {
-        match v {
-            Value::Array(items) => items.iter_mut().for_each(|i| walk(i, f)),
-
-            Value::Object(map) => {
-                for (k, v) in map.iter_mut() {
-                    if k == "filePaths" {
-                        if let Value::Array(paths) = v {
-                            for p in paths.iter_mut() {
-                                if let Value::String(s) = p {
-                                    *s = f(s);
-                                }
-                            }
-                        }
-                    } else {
-                        walk(v, f);
-                    }
-                }
-            }
-
-            _ => {}
-        }
-    }
-
-    walk(&mut json, &|s: &str| {
+    alloy::project::map_sourcemap(text, &|s| {
         if runtime_out.as_deref() == Some(s) {
             return runtime_in.clone();
         }
 
-        if let Some(b) = s.strip_suffix(".d.aly") {
-            format!("{b}.d.luau")
-        } else if let Some(b) = s
-            .strip_suffix(".aly")
-            .or_else(|| s.strip_suffix(".alx"))
-            .or_else(|| s.strip_suffix(".json"))
-            .or_else(|| s.strip_suffix(".toml"))
-        {
-            // A data file is a module in the mirror, as in the build.
-            format!("{b}.luau")
-        } else {
-            s.to_string()
-        }
-    });
-
-    serde_json::to_string(&json).unwrap_or_else(|_| text.to_string())
+        alloy::project::luau_script_path(s)
+    })
 }
 
 /// The text the workspace pass writes into the mirror for a plain

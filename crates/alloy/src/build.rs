@@ -555,10 +555,21 @@ fn run_inner(
             &module_base(&build.out.join(&rel_out)),
             &build.out.join("alloy"),
         );
+        let ship_by_tree = crate::project::std_require_for(&tree, &source_rel);
         let (std_require, ship_std_require) = match &emit.std_require {
             Some(s) => (s.clone(), None),
 
-            None => (by_file, crate::project::std_require_for(&tree, &source_rel)),
+            // `flux` gives luau-lsp the sourcemap, and luau-lsp reads a
+            // relative path in a file the sourcemap holds as a place in
+            // the tree. The check artifact then names the runtime by the
+            // alias the flux mirror declares, as the language server
+            // does. A project an import leads into sits outside the
+            // mirror's configuration and keeps the file path.
+            None if keep && deps.stack.len() == 1 => {
+                ("@alloy".to_string(), Some(ship_by_tree.unwrap_or(by_file)))
+            }
+
+            None => (by_file, ship_by_tree),
         };
         let options = EmitOptions {
             file_name: rel.to_string_lossy().into_owned(),

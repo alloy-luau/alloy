@@ -2497,6 +2497,18 @@ impl State {
         uri: &str,
         range: Option<((u32, u32), (u32, u32))>,
     ) -> bool {
+        // The child's extracts read the lowered Luau. "Extract to
+        // function" passes a module name as an untyped parameter and
+        // drops the types. "Extract to local variable" on a statement
+        // word or a declared name takes the whole enclosing function.
+        match action.pointer("/data/type").and_then(Value::as_str) {
+            Some("extractFunction") => return false,
+
+            Some("extractVariable") if !self.extracts_at(uri, range) => return false,
+
+            _ => {}
+        }
+
         if let Some(edit) = action.get("edit") {
             return edit_count(edit) > 0 && self.writes_source_only(edit);
         }
@@ -2522,6 +2534,98 @@ impl State {
         };
 
         !refactor || clean() == Some(true)
+    }
+
+    /// Whether the start of a source range sits in an expression, where
+    /// an extract has something to take. A declared name and a word
+    /// that only a statement writes are not in one. An `if` or a `then`
+    /// is a statement's on a line that `if`, `elseif` or `else` opens.
+    fn extracts_at(&self, uri: &str, range: Option<((u32, u32), (u32, u32))>) -> bool {
+        let Some(((line, character), _)) = range else {
+            return false;
+        };
+        let Some(doc) = self.docs.get(uri) else {
+            return false;
+        };
+        let Some(at) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+        let (start, end) = keywords::word_range(&doc.source, at);
+        let word = &doc.source[start..end];
+        let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
+        let branch = matches!(word, "if" | "then" | "elseif" | "else")
+            && matches!(
+                doc.source[line_start..].split_whitespace().next(),
+                Some("if" | "elseif" | "else")
+            );
+
+        !branch
+            && !declares_a_name_at(&doc.source, at)
+            && !matches!(
+                word,
+                "local"
+                    | "const"
+                    | "return"
+                    | "do"
+                    | "end"
+                    | "while"
+                    | "for"
+                    | "in"
+                    | "repeat"
+                    | "until"
+                    | "break"
+                    | "continue"
+                    | "export"
+            )
+    }
+
+    /// Whether a resolved "Extract to local variable" leaves each
+    /// source it edits parsing. The child reads the lowered Luau and
+    /// can write `local extracted = local function`. The check is the
+    /// one `--fix` gives a lint's rewrite. Other actions pass.
+    pub(crate) fn extract_parses(&self, action: &Value) -> bool {
+        if action.pointer("/data/type").and_then(Value::as_str) != Some("extractVariable") {
+            return true;
+        }
+
+        let mut changes = action
+            .pointer("/edit/changes")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten();
+
+        changes.all(|(uri, edits)| {
+            let Some(doc) = self.docs.get(uri) else {
+                return true;
+            };
+            let src = doc.source.as_str();
+            let fixes: Option<Vec<alloy::lint::Fix>> = edits
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    let ((sl, sc), (el, ec)) = e.get("range").and_then(range_of)?;
+                    let start = offset_of(src, sl, sc)? as u32;
+                    let end = offset_of(src, el, ec)? as u32;
+
+                    Some(alloy::lint::Fix::new(
+                        src,
+                        start,
+                        end,
+                        e.get("newText").and_then(Value::as_str)?,
+                    ))
+                })
+                .collect();
+            let Some((first, rest)) = fixes.as_deref().and_then(<[_]>::split_first) else {
+                return false;
+            };
+            let fix = alloy::lint::Fix {
+                more: rest.to_vec(),
+                ..first.clone()
+            };
+
+            alloy::lint::sound(src, vec![&fix]).1.is_empty()
+        })
     }
 
     /// Whether a workspace edit of the child, in shadow terms, rewrites

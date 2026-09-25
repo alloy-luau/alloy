@@ -1537,3 +1537,53 @@ fn the_header_as_fix_stands_only_at_its_report() {
     assert_eq!(edit["range"]["start"], json!({ "line": 9, "character": 8 }));
     assert!(actions[0]["diagnostics"][0]["message"].is_string());
 }
+
+/// The child's extracts read the lowered Luau. "Extract to function"
+/// goes. "Extract to local variable" stays in an expression, and its
+/// edit lands only when the file still parses.
+#[test]
+fn an_extract_stays_only_where_the_file_keeps_parsing() {
+    let src = "local function count(bonus: number): number\n  local n = 1 + bonus\n  if n > 1 then\n    return n * 2\n  end\n  return n\nend\n";
+    let (st, uri) = one_file(src);
+    let action =
+        |kind: &str| json!({ "title": "x", "kind": "refactor.extract", "data": { "type": kind } });
+    let at = |l: u32, c: u32| Some(((l, c), (l, c)));
+
+    assert!(!st.keeps_child_action(&action("extractFunction"), uri, at(1, 12)));
+    assert!(st.keeps_child_action(&action("extractVariable"), uri, at(1, 12)));
+    assert!(st.keeps_child_action(&action("extractVariable"), uri, at(3, 11)));
+
+    // `local`, the name `n`, the `if` and `then` of a statement, `return`.
+    for (l, c) in [(1, 2), (1, 8), (2, 2), (2, 11), (3, 4)] {
+        assert!(
+            !st.keeps_child_action(&action("extractVariable"), uri, at(l, c)),
+            "{l}:{c}"
+        );
+    }
+
+    let resolved = |edits: Value| json!({ "data": { "type": "extractVariable" }, "edit": { "changes": { uri: edits } } });
+    let edit = |(sl, sc): (u32, u32), (el, ec): (u32, u32), text: &str| {
+        json!({
+            "range": {
+                "start": { "line": sl, "character": sc },
+                "end": { "line": el, "character": ec },
+            },
+            "newText": text,
+        })
+    };
+
+    assert!(st.extract_parses(&resolved(json!([
+        edit((1, 0), (1, 0), "  local extracted = 1 + bonus\n"),
+        edit((1, 12), (1, 21), "extracted"),
+    ]))));
+    // The whole function taken as the value: `local extracted = local
+    // function count(...)` once reached the file.
+    assert!(!st.extract_parses(&resolved(json!([
+        edit(
+            (0, 0),
+            (0, 0),
+            "local extracted = local function count() end\n"
+        ),
+        edit((0, 0), (6, 3), "extracted"),
+    ]))));
+}

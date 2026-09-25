@@ -1707,6 +1707,24 @@ impl Server {
 
             map_from_shadow(result, ctx.as_deref(), &st);
 
+            // An extract that breaks the parse applies nothing, and its
+            // rename has no name to rename.
+            if method == "codeAction/resolve"
+                && !st.extract_parses(result)
+                && let Some(action) = result.as_object_mut()
+            {
+                action.remove("edit");
+                action.remove("command");
+                self.to_client(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "window/showMessage",
+                    "params": {
+                        "type": 2,
+                        "message": "Alloy: this extract would leave code that does not parse, so it does not apply here.",
+                    },
+                }));
+            }
+
             if method == "textDocument/diagnostic"
                 && let Some(uri) = ctx.as_deref()
                 && let Some(doc) = st.docs.get(uri)

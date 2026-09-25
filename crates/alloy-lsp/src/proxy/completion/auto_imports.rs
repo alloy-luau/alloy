@@ -430,6 +430,19 @@ fn unresolved_name(message: &str) -> Option<&str> {
         return Some(name);
     }
 
+    // `new Nope { }` and `new Nope.Stack { }` in the compiler's words.
+    if let Some((_, rest)) = message.split_once("unknown struct `")
+        && let Some((name, _)) = rest.split_once('`')
+    {
+        return Some(name);
+    }
+
+    if let Some((_, rest)) = message.split_once('`')
+        && let Some((name, _)) = rest.split_once("` is not a module, namespace or import in scope")
+    {
+        return Some(name);
+    }
+
     let rest = message
         .split_once("Unknown type '")
         .or_else(|| message.split_once("Unknown global '"))
@@ -497,6 +510,16 @@ mod tests {
                 "TypeError: `ORIGIN` is not imported; \"./shapes\" exports it, so add it to that import"
             ),
             Some("ORIGIN")
+        );
+        assert_eq!(
+            unresolved_name("TypeError: unknown struct `Coins`"),
+            Some("Coins")
+        );
+        assert_eq!(
+            unresolved_name(
+                "TypeError: `Items` is not a module, namespace or import in scope; \"./items\" exports it: `import { Items } from \"./items\"`"
+            ),
+            Some("Items")
         );
         assert_eq!(unresolved_name("unused_variable: `x` is never read"), None);
     }

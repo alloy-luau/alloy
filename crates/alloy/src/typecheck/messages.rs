@@ -284,9 +284,19 @@ pub fn unknown_struct_report(
             .unwrap_or_default(),
     };
 
+    // `new Nope.Stack { }`: `Nope` heads a path, so the report does not
+    // call it a struct.
+    let message = match text.get(at - 1 + name.len()..) {
+        Some(rest) if rest.starts_with('.') => {
+            format!("`{name}` is not a module, namespace or import in scope{hint}")
+        }
+
+        _ => format!("unknown struct `{name}`{hint}"),
+    };
+
     Some(Resited {
         kind: "TypeError",
-        message: format!("unknown struct `{name}`{hint}"),
+        message,
         at: Some((line, at)),
     })
 }
@@ -3218,6 +3228,25 @@ end
         assert_eq!(
             report("Nope", 2),
             ("unknown struct `Nope`".to_string(), Some((2, 15)))
+        );
+
+        // The head of a path is no struct: it names the module or the
+        // namespace that holds one.
+        let dotted = "const e = new Nope.Stack {}\nconst f = new Coins.Stack {}\n";
+        let head = |name: &str, line: usize| {
+            let message = format!("Unknown global '{name}'; consider assigning to it first");
+
+            unknown_struct_report(&message, &path, dotted, line)
+                .unwrap()
+                .message
+        };
+        assert_eq!(
+            head("Nope", 1),
+            "`Nope` is not a module, namespace or import in scope"
+        );
+        assert_eq!(
+            head("Coins", 2),
+            "`Coins` is not a module, namespace or import in scope; \"../tags\" exports it: `import { Coins } from \"../tags\"`"
         );
 
         // A type alias of the file is a type, not a struct.

@@ -383,10 +383,13 @@ impl<'s> Desugar<'s> {
 
                     // The printer above is every enum's `__tostring`;
                     // `Debug` adds the `debug` a derived struct has. A
-                    // unit variant is a string, so it takes the value.
+                    // unit variant is a string, which has no metatable,
+                    // so `debug` adds the enum's name to it: `Event.Quit`
+                    // reads the way `Event.Scored(3)` does.
                     "Debug" => {
+                        let head = luau_string(&format!("{}.", self.display_name(&name)));
                         printer.push_str(&format!(
-                            " function {name}.debug(v: any): string return tostring(v) end"
+                            " function {name}.debug(v: any): string return if type(v) == \"string\" then {head} .. v else tostring(v) end"
                         ));
                     }
 

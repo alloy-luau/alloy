@@ -336,7 +336,7 @@ pub const TABLE: &[(&str, &str)] = &[
     // Attributes
     (
         "@derive",
-        "```alloy\n@derive(Eq, Debug, Clone)\n```\nGenerates methods from the field list: `Eq` or `PartialEq` is `__eq`, `Ord` is `__lt` and `__le` over the fields in order, `Debug` is `debug` and `__tostring`, `Clone` is `clone`, `Default` is `default`, `Serialize` is `to_table` and `serialize`, `Deserialize` is `from_table`. `Serialize` and `Deserialize` come from `@alloy/std/serde`. On an enum, `Eq`, `PartialEq`, `Clone`, and `Debug` derive. Every enum prints through `__tostring`, and `Debug` adds `debug`; a unit variant is a string, so call `E.debug(v)`.",
+        "```alloy\n@derive(Eq, Debug, Clone)\n```\nGenerates methods from the field list: `Eq` or `PartialEq` is `__eq`, `Ord` is `__lt` and `__le` over the fields in order, `Debug` is `debug` and `__tostring`, `Clone` is `clone`, `Default` is `default`, `Serialize` is `to_table` and `serialize`, `Deserialize` is `from_table`. `Serialize` and `Deserialize` come from `@alloy/std/serde`. On an enum, `Eq`, `PartialEq`, `Clone`, and `Debug` derive. Every enum prints through `__tostring`, and `Debug` adds `debug`; a unit variant is a string, so call `E.debug(v)`. `debug` prints every variant under the enum's name: `Event.Quit` and `Event.Scored(3)`.",
     ),
     (
         "@cfg",

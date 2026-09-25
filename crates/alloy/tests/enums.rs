@@ -53,3 +53,26 @@ fn an_unclosed_enum_reports_and_does_not_panic() {
     let got = messages(src);
     assert!(got.iter().any(|m| m.contains("needs an `end`")), "{got:?}");
 }
+
+/// `@derive(Debug)` prints every variant under the enum's name. A unit
+/// variant is a string with no metatable, and `debug` gave it bare:
+/// `Quit` beside `Event.Scored(3, "bob")`.
+#[test]
+fn a_derived_debug_names_the_enum_for_every_variant() {
+    let src = concat!(
+        "@derive(Debug)\n",
+        "enum Event\n",
+        "    Scored(number, string)\n",
+        "    Quit\n",
+        "end\n",
+        "local seen = `{Event.debug(Event.Quit)}|{Event.Scored(3, \"bob\"):debug()}`\n",
+        "export const project = { name = seen }\n",
+    );
+    let config = alloy::config_aly::evaluate_source(src, std::path::Path::new(".config.aly"))
+        .expect("the code runs");
+
+    assert_eq!(
+        config["project"]["name"].as_str(),
+        Some("Event.Quit|Event.Scored(3, \"bob\")")
+    );
+}

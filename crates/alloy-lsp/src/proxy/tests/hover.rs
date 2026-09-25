@@ -2156,6 +2156,58 @@ fn a_solver_variable_local_names_its_plain_table() {
     assert_eq!(named(&format!("local other: {shape}"), 2, 7), None);
 }
 
+/// An instance a class of the `Klass.__index = Klass` shape builds
+/// printed a solver dump in the declaring file and a dangling `t1`
+/// across modules. It reads as `Klass`, the way `self` does in a method
+/// of the class.
+#[test]
+fn a_solver_variable_local_names_its_class() {
+    const SRC: &str = concat!(
+        "local Klass = {}\n",
+        "Klass.__index = Klass\n",
+        "function Klass.new(n: number)\n",
+        "    return setmetatable({ n = n }, Klass)\n",
+        "end\n",
+        "local Other = {}\n",
+        "function Other.new() return {} end\n",
+        "local k = Klass.new(1)\n",
+        "local tagged = Klass.new(1):tag()\n",
+        "local o = Other.new()\n",
+        "local i = Imported.new(2)\n",
+        "print(k, tagged, o, i)\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let named = |printed: &str, line: u32, character: u32| {
+        crate::proxy::hover::name_solver_local(
+            &st,
+            &format!("```luau\n{printed}\n```"),
+            doc,
+            line,
+            character,
+        )
+    };
+    let instance = "t1 where t1 = { @metatable t2,\n{\n    n: number\n} } ; t2 = {\n    __index: t2,\n    new: (n: number) -> t1\n}";
+
+    assert_eq!(
+        named(&format!("local k: {instance}"), 7, 6).as_deref(),
+        Some("```luau\nlocal k: Klass\n```")
+    );
+    // A use below reads the same `new`.
+    assert_eq!(
+        named(&format!("local k: {instance}"), 11, 6).as_deref(),
+        Some("```luau\nlocal k: Klass\n```")
+    );
+    assert_eq!(
+        named(&format!("local i: {instance}"), 10, 6).as_deref(),
+        Some("```luau\nlocal i: Imported\n```")
+    );
+    // A method after `new` returns what it returns, and a table of this
+    // file that is no class builds no instance of itself.
+    assert_eq!(named(&format!("local tagged: {instance}"), 8, 6), None);
+    assert_eq!(named(&format!("local o: {instance}"), 9, 6), None);
+}
+
 /// A callback's parameter belongs to the lambda around it, not to an
 /// earlier function that takes a parameter by the same name.
 #[test]

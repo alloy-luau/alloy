@@ -787,7 +787,8 @@ pub(crate) fn name_solver_local(
         Some(after) => super::restyle::constructed_type(doc, after)?,
 
         None => read_field_type(st, doc, line_start, &init)
-            .or_else(|| plain_table_alias(doc, &init))?,
+            .or_else(|| plain_table_alias(doc, &init))
+            .or_else(|| class_instance(doc, &init, body))?,
     };
     let named = match printed.ends_with('?') && !named.ends_with('?') {
         true => format!("{named}?"),
@@ -806,6 +807,58 @@ fn plain_table_alias(doc: &Doc, init: &str) -> Option<String> {
         .iter()
         .any(|(name, _)| name == init)
         .then(|| format!("typeof({init})"))
+}
+
+/// `local a = Klass.new(1)` on a class of the `Klass.__index = Klass`
+/// shape. The checker prints the instance as a metatable over a record,
+/// in solver variables. `self` in a method of the class reads as
+/// `Klass`, so the value its `new` builds reads the same way. A table
+/// of this file must be such a class. An imported one has the
+/// metatable in the print as its proof.
+fn class_instance(doc: &Doc, init: &str, body: &str) -> Option<String> {
+    let (owner, args) = init.split_once(".new(")?;
+
+    if owner.is_empty()
+        || !owner.chars().all(|c| c.is_alphanumeric() || c == '_')
+        || !body.contains("@metatable")
+        || !body.contains("__index")
+    {
+        return None;
+    }
+
+    // The call to `new` is the whole value: `Klass.new(1):tag()` holds
+    // what `tag` returns.
+    let mut depth = 1;
+
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' => depth += 1,
+
+            ')' => depth -= 1,
+
+            _ => {}
+        }
+
+        if depth == 0 {
+            if !args[i + 1..].trim().is_empty() {
+                return None;
+            }
+
+            break;
+        }
+    }
+
+    let declared = doc.source.lines().any(|l| {
+        l.strip_prefix("local ")
+            .and_then(|r| r.strip_prefix(owner))
+            .is_some_and(|r| r.trim_start().starts_with('='))
+    });
+
+    if declared && !doc.source.contains(&format!("{owner}.__index = {owner}")) {
+        return None;
+    }
+
+    Some(owner.to_string())
 }
 
 /*

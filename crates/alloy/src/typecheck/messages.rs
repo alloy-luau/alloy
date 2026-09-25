@@ -1017,12 +1017,23 @@ pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
 /// The constructor field a column falls in: `new Plain { a = "x" }` at
 /// the column of `"x"` gives `("a", "Plain")`. The checker reports the
 /// value alone, and the reader wants to know which field it was for.
+/// The name is the path the source wrote, `N.Entry`, and the innermost
+/// `new` that holds the column answers, so a line may build two.
 fn constructor_field(line: &str, col: usize) -> Option<(String, String)> {
-    let at = line.find("new ")?;
+    let starts: Vec<usize> = line.match_indices("new ").map(|(at, _)| at).collect();
+
+    starts
+        .into_iter()
+        .rev()
+        .find_map(|at| field_of_new(line, at, col))
+}
+
+/// The field of the `new` at byte `at` that a column falls in.
+fn field_of_new(line: &str, at: usize, col: usize) -> Option<(String, String)> {
     let rest = &line[at + 4..];
     let name: String = rest
         .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
         .collect();
 
     if name.is_empty() {
@@ -3387,6 +3398,18 @@ end
             Some(("b".into(), "Plain".into()))
         );
         assert_eq!(constructor_field("local p = { a = 1 }", 13), None);
+
+        // A namespace member reads by its path, and a second `new` on
+        // the line names its own struct.
+        let line = "print(new N.Entry { wins = 1 }, new Top { wins = 1 })";
+        assert_eq!(
+            constructor_field(line, 28),
+            Some(("wins".into(), "N.Entry".into()))
+        );
+        assert_eq!(
+            constructor_field(line, 50),
+            Some(("wins".into(), "Top".into()))
+        );
     }
 
     #[test]

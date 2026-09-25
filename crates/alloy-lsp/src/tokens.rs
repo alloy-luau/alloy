@@ -252,13 +252,33 @@ fn declared_word(doc: &Doc, path: &str) -> Option<&'static str> {
 /// `function` without. The hover of the type lists what its `impl`
 /// blocks write, as `public function describe(self): string`.
 fn impl_function_kind(doc: &Doc, path: &str, member: &str) -> Option<&'static str> {
-    let hover = &doc
-        .decls
-        .iter()
-        .chain(doc.import_decls.iter())
-        .find(|d| d.name == path)?
-        .hover;
+    let hover_of = |name: &str| {
+        doc.decls
+            .iter()
+            .chain(doc.import_decls.iter())
+            .find(|d| d.name == name)
+            .map(|d| d.hover.as_str())
+    };
+    let hover = hover_of(path)?;
 
+    // A default method of a trait the type implements: the `impl` writes
+    // no line for it, and the hover of the trait lists it.
+    function_kind(hover, member).or_else(|| {
+        let traits = hover
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Implements "))?;
+
+        traits.split('`').skip(1).step_by(2).find_map(|t| {
+            let name = t.split('<').next().unwrap_or(t);
+
+            function_kind(hover_of(name)?, member)
+        })
+    })
+}
+
+/// What `member` draws as in the hover of a type or a trait: `method`
+/// with `self` first, and `function` without.
+fn function_kind(hover: &str, member: &str) -> Option<&'static str> {
     hover.lines().find_map(|line| {
         let mut line = line.trim_start();
 
@@ -1377,6 +1397,34 @@ mod tests {
 
         assert_eq!(kind("describe)"), Some("method"), "{drawn:?}");
         assert_eq!(kind("Fast)"), Some("enumMember"), "{drawn:?}");
+    }
+
+    /// A default method of a trait an enum implements drew as a variant.
+    /// The `impl` writes no line for it, and the trait lists it.
+    #[test]
+    fn a_trait_default_on_an_enum_draws_as_a_method() {
+        const SRC: &str = "trait Named\n  function name(self): string\n  function label(self): string\n    return self:name()\n  end\nend\nenum Foe\n  Grunt(number)\nend\nimpl Named for Foe\n  function name(self): string\n    return 'f'\n  end\nend\nprint(Foe.label(Foe.Grunt(1)), Foe.name(Foe.Grunt(2)))\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let drawn = alloy_tokens(&doc, &types, &[]);
+        let kind = |needle: &str| {
+            let (line, column) = position_of(SRC, SRC.rfind(needle).expect(needle));
+
+            drawn
+                .iter()
+                .find(|t| t.0 == line && t.1 == column)
+                .map(|t| types[t.3 as usize].as_str())
+        };
+
+        assert_eq!(kind("label(Foe"), Some("method"), "{drawn:?}");
+        assert_eq!(kind("name(Foe"), Some("method"), "{drawn:?}");
+        assert_eq!(kind("Grunt(1"), Some("enumMember"), "{drawn:?}");
     }
     /// A variant draws as `enumMember` in a macro argument and outside
     /// one. The child reads the key the emit writes, `property`, and its

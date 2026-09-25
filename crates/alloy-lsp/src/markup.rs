@@ -52,12 +52,46 @@ pub(crate) fn opens_markup(src: &str, lt: usize) -> bool {
         return true;
     }
 
+    // `<Frame> {R()} <TextLabel`: the `}` closes a hole among the
+    // children of an element, and the tag after it is the next child.
+    if last == '}' {
+        return ends_with_child_hole(before);
+    }
+
     let word = crate::imports::word_before(before, before.len());
 
     matches!(
         word.as_str(),
         "return" | "then" | "else" | "do" | "and" | "or" | "not"
     )
+}
+
+/// Whether `text` ends with a `{ }` hole that is a child of an element:
+/// its `{` follows the `>` of a tag or another such hole. A table
+/// constructor follows neither.
+fn ends_with_child_hole(text: &str) -> bool {
+    let mut depth = 0i32;
+
+    for (i, c) in text.char_indices().rev() {
+        match c {
+            '}' => depth += 1,
+
+            '{' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    let head = text[..i].trim_end();
+
+                    return head.ends_with('>')
+                        || head.ends_with('}') && ends_with_child_hole(head);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// Whether a statement of its own stands between `lt` and `offset`.
@@ -1796,6 +1830,34 @@ mod tests {
         let at = src.rfind("<NS.").unwrap();
 
         assert!(opens_markup(src, at), "the tag after a bare `<` is a tag");
+    }
+
+    /// A tag after a `{ }` child is the next child. The list then holds
+    /// the tag's properties, or the tag names at `<T`, and not every
+    /// global in scope. A table before a comparison opens nothing.
+    #[test]
+    fn a_tag_after_a_hole_child_opens_markup() {
+        let src =
+            "return (\n    <Frame>\n      {R()} {S()}\n      <TextLabel  />\n    </Frame>\n)\n";
+        let at = src.find("<TextLabel").unwrap() + "<TextLabel ".len();
+
+        assert_eq!(
+            completion_spot(src, at),
+            Some(Spot::AttributeSlot {
+                class: "TextLabel".into(),
+                prefix: String::new(),
+                existing: Vec::new(),
+            })
+        );
+
+        let typing = "return (\n    <Frame>\n      {R()}\n      <T\n    </Frame>\n)\n";
+        assert_eq!(
+            completion_spot(typing, typing.find("<T").unwrap() + 2),
+            Some(Spot::TagSlot { prefix: "T".into() })
+        );
+
+        let table = "local x = {1} < 2";
+        assert!(!opens_markup(table, table.rfind('<').unwrap()));
     }
 
     /// `a << b` is a shift. Its second `<` sits against the first, and

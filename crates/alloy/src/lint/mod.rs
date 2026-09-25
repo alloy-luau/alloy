@@ -466,6 +466,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "`@deprecated` on a `function` passes through to Luau, which reports a call to it. A namespace has no Luau form, so this lint reports the use instead. The message the attribute carries prints after the name. Inside the namespace the members read each other by their own names, and nothing fires.",
     },
     LintInfo {
+        name: "deprecated_call",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a `:` call of an impl method declared `@deprecated`",
+        detail: "Flux. Luau reports `Box.value(b)` on a method marked `@deprecated`, but its lint does not follow `b:value()` through the metatable. This lint reports the method call when the file types the receiver as the struct: an annotation, `b: Box`, or the struct a `new Box { }` builds. A receiver of no known type stays quiet. The message the attribute carries prints after the name.",
+    },
+    LintInfo {
         name: "and_or_ternary",
         group: Group::Suspicious,
         default: Level::Warn,

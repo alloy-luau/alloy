@@ -180,6 +180,121 @@ impl<'s> Scan<'s> {
         .then(|| self.last_segment(i + 3))
     }
 
+    /// `b:value()` where `value` is a method its impl marks
+    /// `@deprecated`, and the file types `b` as the struct: an
+    /// annotation, or the struct a `new` builds. Luau reports
+    /// `Box.value(b)`, but its lint does not follow a method call
+    /// through the metatable.
+    pub(crate) fn deprecated_call(&self, out: &mut Vec<Lint>) {
+        // Each marked method: its struct, its name, and the note.
+        let mut marked: Vec<(&'s str, &'s str, String)> = Vec::new();
+
+        for i in 0..self.toks.len() {
+            if !(self.at(i, "@") && self.at(i + 1, "deprecated")) {
+                continue;
+            }
+
+            let (note, mut j) = match self.at(i + 2, "(").then(|| self.matching(i + 2)) {
+                Some(Some(close)) => (self.deprecation_note(i + 3, close), close + 1),
+
+                _ => (String::new(), i + 2),
+            };
+
+            // Other attributes and the modifiers of the method.
+            loop {
+                if self.at(j, "@") && self.is_name(j + 1) {
+                    j += 2;
+
+                    if self.at(j, "(") {
+                        let Some(close) = self.matching(j) else { break };
+                        j = close + 1;
+                    }
+                } else if matches!(self.t(j), "private" | "public" | "async") {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if !self.at(j, "function") {
+                continue;
+            }
+
+            // `function Box:value` names its struct; `function value`
+            // inside `impl Box` takes the impl's.
+            let owner = match self.path_end(j + 1) {
+                Some(end) if self.at(end, ":") && self.is_name(end + 1) => {
+                    Some((self.t(end - 1), self.t(end + 1)))
+                }
+
+                Some(end) if end == j + 2 => self.enclosing_owner(j).map(|o| (o, self.t(j + 1))),
+
+                _ => None,
+            };
+
+            if let Some((owner, name)) = owner {
+                marked.push((owner, name, note));
+            }
+        }
+
+        if marked.is_empty() {
+            return;
+        }
+
+        for i in 0..self.toks.len() {
+            if !self.is_name(i)
+                || matches!(self.prev(i), "." | ":" | "?." | "?:")
+                || !self.at(i + 1, ":")
+                || !self.is_name(i + 2)
+                || !self.at(i + 3, "(")
+            {
+                continue;
+            }
+
+            let Some(ty) = self.type_at(i) else { continue };
+            let method = self.t(i + 2);
+            let Some((owner, _, note)) = marked.iter().find(|(o, m, _)| *o == ty && *m == method)
+            else {
+                continue;
+            };
+
+            self.lint(
+                out,
+                "deprecated_call",
+                i + 2,
+                i + 2,
+                format!("`{owner}:{method}` is deprecated{note}"),
+                None,
+            );
+        }
+    }
+
+    /// The note of `@deprecated(...)` between `from` and `close`: a
+    /// string, or a table of `reason` and `use`.
+    fn deprecation_note(&self, from: usize, close: usize) -> String {
+        if close == from + 1
+            && let Some(text) = self.string_content(from)
+        {
+            return format!("; {text}");
+        }
+
+        let key = |k: &str| {
+            (from..close)
+                .find(|&t| self.at(t, k) && self.at(t + 1, "="))
+                .and_then(|t| self.string_content(t + 2))
+        };
+
+        match (key("reason"), key("use")) {
+            (Some(r), Some(u)) => format!("; {r}; use `{u}`"),
+
+            (Some(r), None) => format!("; {r}"),
+
+            (None, Some(u)) => format!("; use `{u}`"),
+
+            (None, None) => String::new(),
+        }
+    }
+
     /// `x.count` or `x:reset()` outside the impl of the struct that
     /// declared `count` or `reset` private.
     pub(crate) fn private_access(&self, out: &mut Vec<Lint>) {

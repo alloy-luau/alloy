@@ -25,6 +25,7 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.numeric_for_index(&mut out);
     s.unused_variable(&mut out);
     s.private_access(&mut out);
+    s.deprecated_call(&mut out);
     s.const_mutation(&mut out);
     s.duplicate_function(&mut out);
     s.prefer_const(&mut out);
@@ -1449,6 +1450,26 @@ mod tests {
         assert_eq!(
             pedantic("const T = { a = 1 }\nprint(T.a)\nlocal u = { a = 1 }\nu.a = 2\nprint(u)\n"),
             Vec::<&str>::new()
+        );
+    }
+
+    /// Luau reports `Box.value(b)` on a deprecated method and misses
+    /// `b:value()`. The lint takes the method call when the file types
+    /// the receiver, and a receiver of no known type stays quiet.
+    #[test]
+    fn a_method_call_of_a_deprecated_method_fires() {
+        let src = "struct Box as\n    n: number\nend\nimpl Box as\n    @deprecated(\"use get\")\n    function value(self): number\n        return self.n\n    end\n    function get(self): number\n        return self.n\n    end\nend\nlocal b = new Box { n = 1 }\nprint(b:value(), b:get())\nlocal function show(x: Box, y)\n    print(x:value(), y:value())\nend\nshow(b, b)\n";
+        let got: Vec<(usize, String)> = lints(src)
+            .into_iter()
+            .filter(|l| l.name == "deprecated_call")
+            .map(|l| (src[..l.start as usize].matches('\n').count() + 1, l.message))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (14, "`Box:value` is deprecated; use get".to_string()),
+                (16, "`Box:value` is deprecated; use get".to_string()),
+            ]
         );
     }
 

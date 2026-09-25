@@ -222,7 +222,7 @@ impl Server {
         let Some(target) = target else {
             return false;
         };
-        let result = match target {
+        let mut result = match target {
             Target::Export(file, name) => match st.export_rename(&file, &name, &new_name) {
                 Some(edit) => edit,
 
@@ -307,6 +307,9 @@ impl Server {
 
             Target::Nothing => json!({ "changes": {} }),
         };
+        // A prop's field renamed from its type: the tags that set it
+        // are keys of generated tables, and no walk above reads them.
+        st.mend_prop_attributes(uri, line, character, &mut result);
         drop(st);
         self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
 
@@ -406,6 +409,8 @@ impl Server {
 
             Target::Nothing => Vec::new(),
         };
+        let mut out = Value::Array(out);
+        st.mend_prop_attributes(uri, line, character, &mut out);
         drop(st);
         self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": out }));
 

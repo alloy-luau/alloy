@@ -2930,6 +2930,67 @@ fn a_component_and_its_props_reach_the_tags() {
     );
 }
 
+/// A rename of a prop's field from its type edited the type and
+/// `props.label`, and `<Bar label=...>` kept the old name. The field
+/// walk answers there without the child, so the tags now join it, for
+/// the references too.
+#[test]
+fn a_prop_renamed_from_its_type_reaches_the_tags() {
+    use super::documents::Recorder;
+
+    let src = concat!(
+        "type BarProps = {\n",
+        "    label: string,\n",
+        "}\n",
+        "\n",
+        "local function Bar(props: BarProps)\n",
+        "    return <TextLabel Text={props.label} />\n",
+        "end\n",
+        "\n",
+        "export function Screen()\n",
+        "    return <Bar label=\"Lives\" />\n",
+        "end\n",
+    );
+    let uri = "file:///ui.alx";
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    server.state.lock().expect("state").docs = super::support::files(&[(uri, src)]).docs;
+
+    let message = json!({ "params": {
+        "textDocument": { "uri": uri },
+        "position": { "line": 1, "character": 6 },
+        "newName": "caption",
+    } });
+    assert!(server.rename_answer(uri, &message, &json!(1)));
+    assert!(server.name_references(uri, &message, &json!(2)));
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+    let answers: Vec<Value> = sent
+        .split("Content-Length")
+        .filter_map(|m| m.find('{').map(|at| &m[at..]))
+        .filter_map(|m| serde_json::from_str(m).ok())
+        .collect();
+    let attribute = range_value((9, 16), (9, 21));
+
+    assert!(
+        answers[0]["result"]["changes"][uri]
+            .as_array()
+            .is_some_and(|edits| edits.iter().any(|e| e["range"] == attribute)),
+        "{sent}"
+    );
+    assert!(
+        answers[1]["result"]
+            .as_array()
+            .is_some_and(|locs| locs.iter().any(|l| l["range"] == attribute)),
+        "{sent}"
+    );
+}
+
 /// `p.b` goes to the line of the struct body that declares `b`. The
 /// child lands on the struct's `end`, and the name alone finds the `b`
 /// that another file exports.

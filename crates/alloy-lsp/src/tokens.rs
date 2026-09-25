@@ -212,8 +212,53 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
             _ => {}
         }
 
+        // `@[native, deprecated {...}]`: Luau's list, where each entry
+        // opens with the name of an attribute. The walk goes on inside
+        // the list, so the table of `deprecated` keeps its own tokens.
+        if tok.kind == TokKind::Symbol
+            && text == "@"
+            && toks
+                .get(i + 1)
+                .is_some_and(|n| n.text(src) == "[" && n.start == tok.end)
+        {
+            let mut depth = 0;
+
+            for k in i + 1..toks.len() {
+                let t = toks[k];
+
+                // A list still being typed ends at its line.
+                if depth == 1 && src[toks[k - 1].end as usize..t.start as usize].contains('\n') {
+                    break;
+                }
+
+                match t.text(src) {
+                    "[" | "(" | "{" => depth += 1,
+
+                    "]" | ")" | "}" => depth -= 1,
+
+                    _ if t.kind == TokKind::Ident
+                        && depth == 1
+                        && matches!(toks[k - 1].text(src), "[" | ",") =>
+                    {
+                        push(t.start, t.end, "decorator", 0)
+                    }
+
+                    _ => {}
+                }
+
+                if depth == 0 {
+                    break;
+                }
+            }
+
+            i += 2;
+
+            continue;
+        }
+
         // `@Contracted` and `$triple`: the name draws, and the sigil
         // stays with the grammar, which gives it a punctuation scope.
+        // `@serde.rename` is one attribute, so its whole path draws as one.
         if tok.kind == TokKind::Symbol && matches!(text, "@" | "$") {
             let name = match toks.get(i + 1) {
                 Some(n) if n.kind == TokKind::Ident && n.start == tok.end => *n,
@@ -224,13 +269,26 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
                     continue;
                 }
             };
+            let mut end = i + 1;
+
+            while text == "@"
+                && toks
+                    .get(end + 1)
+                    .is_some_and(|d| d.kind == TokKind::Dot && d.start == toks[end].end)
+                && toks
+                    .get(end + 2)
+                    .is_some_and(|n| n.kind == TokKind::Ident && n.start == toks[end + 1].end)
+            {
+                end += 2;
+            }
+
             push(
                 name.start,
-                name.end,
+                toks[end].end,
                 if text == "@" { "decorator" } else { "macro" },
                 0,
             );
-            i += 2;
+            i = end + 1;
 
             continue;
         }
@@ -554,6 +612,64 @@ mod tests {
             .collect();
 
         assert_eq!(drawn, [(0, 6), (1, 6), (2, 6), (2, 13)]);
+    }
+
+    /// The words of a `match` and of a guard draw as names where they
+    /// are names, the way `trait` does, and draw nothing as keywords.
+    #[test]
+    fn a_match_word_as_a_name_draws_as_a_variable() {
+        const SRC: &str = "local where = 1\nlocal case, default, with = 2, 3, 4\nmatch where with\n    case 1 then print(case)\n    case n where n > 1 then print(n)\n    default print(default, with)\nend\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let variable = type_index(&types, "variable").expect("the type");
+        let drawn: Vec<(u32, u32)> = alloy_tokens(&doc, &types, &[])
+            .into_iter()
+            .filter(|t| t.3 == variable)
+            .map(|t| (t.0, t.1))
+            .collect();
+
+        assert_eq!(
+            drawn,
+            [
+                (0, 6),
+                (1, 6),
+                (1, 12),
+                (1, 21),
+                (2, 6),
+                (3, 22),
+                (5, 18),
+                (5, 27)
+            ]
+        );
+    }
+
+    /// Every attribute name draws as one: the whole dotted path, and
+    /// each name of Luau's list.
+    #[test]
+    fn every_attribute_form_draws_its_name() {
+        const SRC: &str = "@[native, deprecated {use = \"g\"}]\nlocal function f() end\n@serde.rename_all(\"camelCase\")\nstruct S\n    @T.label(\"x\")\n    x: number\nend\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let decorator = type_index(&types, "decorator").expect("the type");
+        let drawn: Vec<(u32, u32, u64)> = alloy_tokens(&doc, &types, &[])
+            .into_iter()
+            .filter(|t| t.3 == decorator)
+            .map(|t| (t.0, t.1, t.2))
+            .collect();
+
+        assert_eq!(drawn, [(0, 2, 6), (0, 10, 10), (2, 1, 16), (4, 5, 7)]);
     }
 
     /// `match macro with`: the word is the value the match reads, so the

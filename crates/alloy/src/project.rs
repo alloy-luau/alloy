@@ -26,7 +26,7 @@ use crate::rojo::{Mounted, ProjectFile};
 /// What `.alloy/.gitignore` holds: the files under `.alloy` that no
 /// repository wants. The ingot store is build output; the lock file
 /// beside it is not, so it stays in version control.
-pub const ALLOY_DIR_IGNORE: &str = "sourcemap.json\ningots/\n";
+pub const ALLOY_DIR_IGNORE: &str = "sourcemap.json\ningots/\noutputs.txt\n";
 
 /// The DataModel path of a mount, split: `@game/A/B` is `["A", "B"]`.
 /// `None` when the string does not start with `@game/`.

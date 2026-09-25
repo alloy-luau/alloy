@@ -84,6 +84,10 @@ pub(crate) fn relative_require(from: &Path, to: &Path) -> String {
     out
 }
 
+/// The manifest of the outputs the last build wrote, one path from the
+/// root per line.
+const OUTPUTS: &str = ".alloy/outputs.txt";
+
 /// Whether a file is the `init` of its folder: `init.luau`, and also a
 /// script like `init.server.luau`. Rojo makes the folder that module or
 /// script, and the other files of the folder its children.
@@ -413,6 +417,9 @@ fn run_inner(
     let tree = crate::project::Tree::load(root, config);
     let mut report = Report::default();
     let mut expected: HashSet<PathBuf> = HashSet::new();
+    // The outputs of the sources that failed this run. Each keeps the
+    // output a run before wrote, so the game runs the last good build.
+    let mut held: HashSet<PathBuf> = HashSet::new();
     let mut imports: Vec<(PathBuf, Vec<crate::ImportRef>)> = Vec::new();
 
     // A project whose `out` (or spec folder) sits under `in` would read
@@ -705,6 +712,7 @@ fn run_inner(
             (Err(_), false) => None,
 
             (Err(e), true) => {
+                held.insert(target.clone());
                 report.skipped.push(rel);
 
                 if !markup_reported {
@@ -734,6 +742,7 @@ fn run_inner(
             Ok(c) => c,
 
             Err(e) => {
+                held.insert(target.clone());
                 report.skipped.push(rel.clone());
                 report.failures.push((rel, e.located(&source)));
 
@@ -911,6 +920,7 @@ fn run_inner(
         // The file produces nothing: `clean` then takes the stale output
         // a run before this one left.
         if !compiled.parsed_clean || report.diagnostics.len() > errors_before {
+            held.insert(target.clone());
             report.skipped.push(rel);
 
             continue;
@@ -1022,6 +1032,59 @@ fn run_inner(
                     .push(file.strip_prefix(&out).unwrap_or(&file).to_path_buf());
             }
         }
+    }
+
+    // `clean` off keeps what no source makes, so a renamed script left
+    // its old output, and Rojo ran both. The manifest lists what the
+    // build wrote, and an entry no source makes now goes. A file the
+    // build never wrote stays.
+    let manifest = root.join(OUTPUTS);
+    let before = std::fs::read_to_string(&manifest).unwrap_or_default();
+
+    for line in before.lines() {
+        let path = root.join(line);
+
+        if expected.contains(&path) || held.contains(&path) || !path.starts_with(&out) {
+            continue;
+        }
+
+        if path.is_file() {
+            std::fs::remove_file(&path)?;
+            report
+                .removed
+                .push(path.strip_prefix(&out).unwrap_or(&path).to_path_buf());
+        }
+
+        // A folder the file leaves empty goes too, else Rojo keeps an
+        // empty instance of it.
+        let mut dir = path.parent();
+
+        while let Some(d) = dir
+            && d != out
+            && d.starts_with(&out)
+            && std::fs::remove_dir(d).is_ok()
+        {
+            dir = d.parent();
+        }
+    }
+
+    // A held output enters the manifest only when the build wrote it.
+    let mut now: Vec<String> = expected
+        .iter()
+        .chain(
+            held.iter()
+                .filter(|p| before.lines().any(|l| root.join(l) == **p)),
+        )
+        .filter(|p| p.is_file())
+        .filter_map(|p| p.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    now.sort();
+    let text: String = now.iter().map(|l| format!("{l}\n")).collect();
+
+    if text != before {
+        std::fs::create_dir_all(root.join(".alloy"))?;
+        std::fs::write(&manifest, text)?;
     }
 
     // A mount with no source yet, `src/client` before the first client

@@ -969,7 +969,8 @@ pub struct Build {
     pub out: PathBuf,
     /// Glob patterns, relative to `in`, of sources to skip.
     pub exclude: Vec<String>,
-    /// Delete an output whose source is gone.
+    /// Delete every `.luau` under `out` that no source makes. Off, the
+    /// build deletes only the stale outputs it wrote itself.
     pub clean: bool,
     /// Which artifact to write: `ship` runs on Roblox, `check` is what
     /// luau-lsp sees.

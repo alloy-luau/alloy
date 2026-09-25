@@ -318,7 +318,7 @@ pub const TABLES: &[Table] = &[
                 "clean",
                 BOOL,
                 "false",
-                "Delete an output whose source is gone.",
+                "Delete every `.luau` under `out` that no source makes. Off, the build deletes only the stale outputs it wrote itself.",
             ),
             key(
                 "artifact",

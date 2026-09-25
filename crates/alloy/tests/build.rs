@@ -158,6 +158,44 @@ fn a_file_with_an_error_keeps_its_last_output() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// With `clean` off, a renamed script left its old output, and Rojo ran
+/// both scripts. The build keeps a manifest of what it wrote and removes
+/// an output no source makes now. A file the build never wrote stays,
+/// and so does the last output of a file with an error.
+#[test]
+fn a_renamed_source_takes_its_old_output_with_it() {
+    let dir = temp_project("rename");
+    fs::write(dir.join("alloy.toml"), "[build]\nclean = false\n").unwrap();
+    fs::write(dir.join("src/nested/main.server.aly"), "print(1)\n").unwrap();
+    fs::write(dir.join("src/bad.aly"), "return 1\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let build = || alloy::build::run_project(&dir, &config).unwrap();
+    build();
+    fs::write(dir.join("build/mine.luau"), "-- the author's\n").unwrap();
+
+    fs::rename(dir.join("src/nested"), dir.join("src/moved")).unwrap();
+    fs::write(dir.join("src/bad.aly"), "local = 1\n").unwrap();
+    let report = build();
+
+    assert_eq!(
+        report.removed,
+        vec![PathBuf::from("nested/main.server.luau")]
+    );
+    assert!(!dir.join("build/nested").exists(), "the empty folder goes");
+    assert!(dir.join("build/moved/main.server.luau").is_file());
+    assert!(
+        dir.join("build/mine.luau").is_file(),
+        "the build never wrote it"
+    );
+    assert!(
+        dir.join("build/bad.luau").is_file(),
+        "the last good output stays"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// A file the parser could not read whole writes no output: past the
 /// first error the emit copies the source through, and a `.luau` of
 /// Alloy text is what the next tool would load. `clean` takes the one a

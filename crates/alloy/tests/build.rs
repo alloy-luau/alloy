@@ -626,6 +626,57 @@ fn a_side_file_cannot_use_a_remote_of_the_other_side() {
 }
 
 /*
+A parameter, a loop variable, or a local of a remote's name is some other
+value, so a call through it is no fire of the remote. The side check read
+the name alone and would report each of them. A use past their scopes is
+the remote again and reports.
+*/
+#[test]
+fn a_binding_that_shadows_a_remote_is_no_remote() {
+    let dir = temp_project("remote-shadow");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/rem.aly"),
+        "export remote Up(n: number) from client\n",
+    )
+    .unwrap();
+    let src = "import { Up } from \"./rem\"
+local function relay(Up: { fire: (number) -> () })
+    Up.fire(1)
+end
+for _, Up in { { fire = function(_n: number) end } } do
+    Up.fire(2)
+end
+do
+    local Up = { fire = function(_n: number) end }
+    Up.fire(3)
+end
+Up.fire(4)
+relay({ fire = function(_n: number) end })
+";
+    fs::write(dir.join("src/a.server.aly"), src).unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(usize, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| {
+            let line = src[..d.start as usize].matches('\n').count() + 1;
+
+            (line, d.message.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        got,
+        [(12, "`Up` goes from the client; the server cannot fire it")]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 An imported struct gives its derives to this file: a field of it clones
 and serializes through it. The lookup took the first project struct of
 the name. A private `Inner` in another file then decided it: a clone

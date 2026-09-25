@@ -828,6 +828,8 @@ impl<'s> Desugar<'s> {
     }
 
     /// The remotes this file declares join the imported ones.
+    /// The remotes this file declares join the imported ones. In a file
+    /// with a side, the bindings that could shadow one are noted too.
     pub(crate) fn note_remote_sides(&mut self, block: &Block) {
         for stmt in &block.stmts {
             if let Stmt::Remote(r) = stmt.under_default() {
@@ -836,6 +838,31 @@ impl<'s> Desugar<'s> {
                     .insert(name, (r.from_client, r.from_server));
             }
         }
+
+        if self.file_side.is_none() || self.remote_sides.is_empty() {
+            return;
+        }
+
+        let heads: HashSet<&str> = self
+            .remote_sides
+            .keys()
+            .map(|k| k.split('.').next().unwrap_or(k))
+            .collect();
+        self.remote_shadows = crate::naming::scoped_bindings(self.src, self.toks, block)
+            .into_iter()
+            .filter(|(name, _)| heads.contains(name.as_str()))
+            .collect();
+    }
+
+    /// Whether a local, a parameter, or a loop variable of the name holds
+    /// the token at `at`, so the name there is no remote.
+    fn shadows_remote(&self, name: &str, at: usize) -> bool {
+        self.remote_shadows.iter().any(|(n, reach)| {
+            n == name
+                && reach
+                    .as_ref()
+                    .is_none_or(|ranges| ranges.iter().any(|&(a, b)| a <= at && at < b))
+        })
     }
 
     /*
@@ -846,7 +873,9 @@ impl<'s> Desugar<'s> {
     `Player` and did not name the side.
 
     A file with a side runs on that side alone, so the check is sound
-    there. A shared file may run on either side and gets no report.
+    there. A shared file may run on either side and gets no report. A
+    local, a parameter, or a loop variable of the remote's name is some
+    other value, so a call through it gets none either.
     */
     pub(crate) fn check_remote_side(&mut self, e: &Expr) {
         use crate::directives::Side;
@@ -872,6 +901,12 @@ impl<'s> Desugar<'s> {
         let Some(&(from_client, from_server)) = self.remote_sides.get(&receiver) else {
             return;
         };
+        let head = receiver.split('.').next().unwrap_or(&receiver);
+
+        if self.shadows_remote(head, object.span().start as usize) {
+            return;
+        }
+
         let verb = self.text_of(*verb).to_string();
         let (sends, receives) = match side {
             Side::Client => (from_client, from_server),

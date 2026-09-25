@@ -1231,6 +1231,61 @@ fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSe
     }
 }
 
+/// A binding's name, with the token ranges its scope holds; `None` for
+/// a scope the walk does not know.
+pub(crate) type ScopedBinding = (String, Option<Vec<(usize, usize)>>);
+
+/// Each value binding of a block, other than an import or a remote,
+/// with the token ranges its scope holds, end exclusive: a local, a
+/// parameter, a loop variable, a function. `None` stands for a scope
+/// the walk does not know, such as a name a pattern binds, and a
+/// reader takes it to hold every token.
+pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<ScopedBinding> {
+    let mut w = Walk {
+        src,
+        toks,
+        decls: Vec::new(),
+        roles: vec![Role::Unknown; toks.len()],
+        exported: Vec::new(),
+    };
+    w.block(&block.stmts, toks.len(), true, false);
+
+    let imports: HashSet<usize> = block
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Import(i) => Some(crate::desugar::import_names(i)),
+
+            _ => None,
+        })
+        .flatten()
+        .map(|t| t.start as usize)
+        .collect();
+
+    w.decls
+        .iter()
+        .filter(|d| !imports.contains(&d.tok))
+        .filter(|d| {
+            !d.kind.is_some_and(|k| {
+                k.is_member()
+                    || k.is_type()
+                    || matches!(k, Kind::Remote | Kind::Attribute | Kind::Macro)
+            })
+        })
+        .map(|d| {
+            let reach = match &d.reach {
+                Reach::Scope(ranges) => Some(ranges.clone()),
+
+                Reach::File => Some(vec![(0, toks.len())]),
+
+                Reach::None => None,
+            };
+
+            (w.text(d.tok).to_string(), reach)
+        })
+        .collect()
+}
+
 pub(crate) fn lints(
     src: &str,
     toks: &[Tok],

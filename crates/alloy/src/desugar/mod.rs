@@ -599,6 +599,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         // `main.server.aly` the server half.
         file_side: crate::directives::file_side(&options.file_name),
         remote_sides: options.import_remotes.iter().cloned().collect(),
+        remote_shadows: Vec::new(),
         own_names: top_level_names(src, toks, chunk),
         exports: Vec::new(),
         has_default_export: false,
@@ -1235,6 +1236,9 @@ struct Desugar<'s> {
     /// Each remote a name here reaches, declared or imported, with
     /// whether the client and the server fire it.
     remote_sides: HashMap<String, (bool, bool)>,
+    /// The bindings of this file that share a name with a remote, with
+    /// the tokens each one holds; see `naming::scoped_bindings`.
+    remote_shadows: Vec<crate::naming::ScopedBinding>,
     /// Every name the top level of this file binds.
     own_names: HashSet<String>,
     /// Names the module exports, as `name = value` pairs for the table.

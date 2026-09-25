@@ -2987,12 +2987,21 @@ impl<'s> Desugar<'s> {
             });
         }
 
+        // `import { Box as B }` binds the type as `B`, and `import * as
+        // M` as `M.Box`. The index keys it by the name the module
+        // declares.
+        let declared = match name.split_once('.') {
+            Some((head, rest)) if self.star_modules.contains(head) => rest,
+
+            _ => self.import_renames.get(name).map_or(name, String::as_str),
+        };
+
         if self.enums.contains_key(name)
-            || self
-                .options
-                .import_types
-                .iter()
-                .any(|(_, names)| names.iter().any(|n| crate::modules::type_head(n) == name))
+            || self.options.import_types.iter().any(|(_, names)| {
+                names
+                    .iter()
+                    .any(|n| crate::modules::type_head(n) == declared)
+            })
             || ALIAS_DATATYPES.contains(&name)
         {
             return Some(name.to_string());
@@ -4394,6 +4403,29 @@ mod tests {
             "local x = ((x :: any) :: Box)",
             "local y = ((y :: any) :: Color)",
             "local z = ((z :: any) :: Box)",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+    }
+
+    /// `import { Box as B }` binds the type as `B`, and `if v is B` gave
+    /// the runtime test with no cast, so `v.n` reported on `unknown`.
+    /// The import index keys the type by the name the module declares;
+    /// a rename and a star import now read through it.
+    #[test]
+    fn a_narrowing_test_reads_through_an_import_alias() {
+        let options = crate::EmitOptions {
+            import_types: vec![("./box".to_string(), vec!["Box".to_string()])],
+            check: true,
+            ..crate::EmitOptions::default()
+        };
+        let src = "import { Box as B } from \"./box\"\nimport * as M from \"./box\"\nlocal function f(v: unknown)\n    if v is B then\n        print(v.n)\n    end\n    if v is M.Box then\n        print(v.n)\n    end\nend\nf(1)\n";
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "local v = ((v :: any) :: B)",
+            "local v = ((v :: any) :: M.Box)",
         ] {
             assert!(out.check.contains(want), "{want}\n{}", out.check);
         }

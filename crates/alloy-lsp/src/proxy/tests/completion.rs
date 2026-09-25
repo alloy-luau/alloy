@@ -277,6 +277,66 @@ fn a_namespace_path_completes_its_attributes() {
     assert_eq!(labels("@K."), ["Inner", "tag"]);
     assert_eq!(labels("@K.Inner."), ["deep"]);
 }
+
+/// A bare `@` lists a namespace that holds an attribute for the spot:
+/// the file's own, and one a named import brings. A namespace whose
+/// attributes go elsewhere stays out.
+#[test]
+fn a_bare_sigil_lists_a_namespace_of_attributes() {
+    let dir = std::env::temp_dir().join(format!("alloy-attr-namespace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    std::fs::write(
+        dir.join("src/tags.aly"),
+        "export namespace Tags\n    attribute station on struct\nend\n",
+    )
+    .expect("tags.aly");
+    let src = concat!(
+        "import { Tags } from \"./tags\"\n",
+        "namespace K\n",
+        "    attribute tag on struct\n",
+        "end\n",
+        "namespace F\n",
+        "    attribute only on field\n",
+        "end\n",
+        "@\n",
+        "struct A\n",
+        "    x: number\n",
+        "end\n",
+    );
+    let path = dir.join("src/main.aly");
+    std::fs::write(&path, src).expect("main.aly");
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let uri = path_to_uri(&path);
+    let (options, jsx) = st.options_for(&uri);
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(src.to_string(), 1, &options, &jsx, None),
+    );
+
+    let offset = src.find("@\n").unwrap() + 1;
+    let ctx = context::detect(src, offset).expect("an attribute");
+    let items = st.context_items(&uri, offset, &ctx);
+    let label = |l: &str| items.iter().find(|i| i["label"] == l);
+
+    assert_eq!(
+        label("@K").map(|i| &i["textEdit"]["newText"]),
+        Some(&json!("@K."))
+    );
+    assert!(label("@Tags").is_some(), "{items:?}");
+    assert!(label("@F").is_none(), "{items:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
 /// A whole keyword with more names behind it keeps the list, and
 /// takes the first row. `else` is `elseif` as far as the letters go,
 /// so the reader still needs to see both.

@@ -145,6 +145,52 @@ impl State {
                         items.push(item);
                     }
                 }
+
+                // A namespace that holds an attribute for this spot is
+                // the head of a path: `@Tags` goes on to `@Tags.station`.
+                // The file's own namespaces count, and the ones a named
+                // import brings.
+                let holds = |decls: &[(String, alloy::desugar::AttrDecl)], path: &str| {
+                    decls.iter().any(|(key, decl)| {
+                        let targets: Vec<&str> = decl.targets.iter().map(String::as_str).collect();
+
+                        key.strip_prefix(path).is_some_and(|r| r.starts_with('.')) && fits(&targets)
+                    })
+                };
+                let own = alloy::modules::attribute_paths(&doc.source);
+                let mut heads: Vec<String> = own
+                    .iter()
+                    .filter_map(|(key, _)| key.split_once('.').map(|(ns, _)| ns.to_string()))
+                    .filter(|ns| holds(&own, ns))
+                    .collect();
+
+                for e in crate::proxy::navigation::import_entries(&doc.source) {
+                    let text = self
+                        .resolve_spec(uri, &e.spec)
+                        .and_then(|p| imports::module_file(&imports::module_path(&p)))
+                        .and_then(|file| self.module_text(&file));
+
+                    if let Some(text) = text
+                        && holds(&alloy::modules::exported_attribute_decls(&text), &e.name)
+                    {
+                        heads.push(e.bound);
+                    }
+                }
+
+                for head in heads {
+                    let label = format!("@{head}");
+
+                    if seen.insert(label.clone()) {
+                        let mut item = word(&label, 9, None, *sigil);
+                        item["detail"] = json!("namespace");
+                        item["textEdit"]["newText"] = json!(format!("{label}."));
+                        item["command"] = json!({
+                            "title": "Suggest",
+                            "command": "editor.action.triggerSuggest",
+                        });
+                        items.push(item);
+                    }
+                }
             }
 
             // `@serde.|` lists the std module's attributes, and `@M.|`

@@ -479,3 +479,82 @@ fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/*
+A remote's wire layout reads a type name through the imports of the file
+that writes it. The layout took "the one project type of this name", so
+a private `Inner` in a file nothing imports stripped the layout: the enum
+slot went, the array item read `any`, a star path lost its wire, and the
+declaring file stopped registering its table.
+
+Every build compiles every file, so a change to a shape reaches the
+remote file on the next build.
+*/
+#[test]
+fn a_private_type_of_the_same_name_leaves_a_wire_layout_alone() {
+    let dir = temp_project("wire-scope");
+    fs::create_dir_all(dir.join("src/shared")).unwrap();
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/shared/inner.aly"),
+        "export struct Inner\n    n: number\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/kind.aly"),
+        "import { Inner } from \"./inner\"\nexport enum Kind\n    Big(Inner)\n    Small\nend\nexport struct Holder\n    k: Kind\n    list: { Inner }\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/net.aly"),
+        "import * as K from \"./shared/kind\"\nimport { Holder } from \"./shared/kind\"\nimport * as S from \"./shared/inner\"\nexport remote R1(k: K.Kind) from client\nexport remote R2(h: Holder) from client\nexport remote R3(i: S.Inner) from client\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/other.aly"),
+        "struct Inner\n    label: string\nend\nprint(new Inner { label = \"x\" })\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let build = || alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let report = build();
+    assert!(report.is_clean(), "{report:?}");
+
+    let read = |file: &str| fs::read_to_string(dir.join("dist").join(file)).unwrap();
+    let net = read("net.luau");
+    let inner = "{ fields = { { \"n\", \"f64\" } }, struct = \"shared/inner.aly:Inner\" }";
+
+    for layout in [
+        format!("slots = {{ Big = {{ {inner} }} }}"),
+        format!("{{ \"list\", {{ item = {inner}, array = true }} }}"),
+        "wire = { { fields = { { \"n\", \"f64\" } }, struct = S.Inner } }".to_string(),
+    ] {
+        assert!(net.contains(&layout), "{layout}\n{net}");
+    }
+
+    assert!(
+        read("shared/inner.luau")
+            .contains("__alloy.wire.types[\"shared/inner.aly:Inner\"] = Inner")
+    );
+    assert!(!read("other.luau").contains("wire.types"));
+
+    // A field added to `Inner` reaches the layout on the next build.
+    fs::write(
+        dir.join("src/shared/inner.aly"),
+        "export struct Inner\n    n: number\n    tag: string\nend\n",
+    )
+    .unwrap();
+    let report = build();
+    assert!(
+        report.written.contains(&PathBuf::from("net.luau")),
+        "{report:?}"
+    );
+    assert!(
+        read("net.luau").contains("{ { \"n\", \"f64\" }, { \"tag\", \"str\" } }"),
+        "{}",
+        read("net.luau")
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -138,48 +138,68 @@ pub fn check(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report>
 
 /// The structs the sources declare, with each field's type and width,
 /// for the wire layout of a remote, and the enums with their variants.
-/// `base` is the project's `in` folder, which each shape's module is
-/// relative to. A source that does not parse contributes nothing; its
-/// own compile reports the error.
-pub fn struct_shapes(sources: &[PathBuf], base: &Path) -> Vec<crate::StructShape> {
+/// Each source also gives its imports, so a layout reads a type name
+/// the way the file that writes it does. `base` is the project's `in`
+/// folder, which each module is relative to. A source that does not
+/// parse contributes nothing; its own compile reports the error.
+pub fn struct_shapes(
+    sources: &[PathBuf],
+    base: &Path,
+    aliases: &[(String, PathBuf)],
+) -> (Vec<crate::StructShape>, Vec<crate::WireScope>) {
     let mut shapes = Vec::new();
+    let mut scopes = Vec::new();
+    let base = crate::modules::normalize(base);
+    let module_of = |path: &Path| {
+        let path = crate::modules::normalize(path);
+
+        path.strip_prefix(&base)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
 
     for path in sources {
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
         };
-        let module = path
-            .strip_prefix(base)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let module = module_of(path);
         let Ok(parsed) = alloy_syntax::parse_one(&src) else {
             continue;
         };
+        // A barrel's `export { Inner } from "./inner"` binds the name
+        // for an importer the way an import does.
+        let passed =
+            crate::modules::reexports(&src)
+                .into_iter()
+                .filter_map(|(name, exported, spec)| {
+                    let target = crate::modules::resolve(&spec, path, aliases)?;
+
+                    Some((exported, module_of(&target), name))
+                });
+        scopes.push(crate::WireScope {
+            module: module.clone(),
+            names: crate::modules::named_specs(&src, path, aliases)
+                .into_iter()
+                .map(|(target, name, local)| (local, module_of(&target), name))
+                .chain(passed)
+                .collect(),
+            stars: crate::modules::star_locals(&src, path, aliases)
+                .into_iter()
+                .map(|(target, local)| (local, module_of(&target)))
+                .collect(),
+        });
         let text =
             |span: alloy_syntax::ast::TokSpan| span.text(&src, &parsed.lexed.toks).to_string();
-        // A field type names this file's own declarations, which an
-        // importer cannot see: a unit enum crosses as its string, and an
-        // alias as its value, so the importer's layout reads the type the
-        // declaring file meant, not a Roblox class of the same name.
-        let mut unit_enums = std::collections::HashSet::new();
-        let mut aliases = std::collections::HashMap::new();
+        // A field type may name an alias of this file, which an
+        // importer cannot see, so it reads as its value.
+        let mut type_aliases = std::collections::HashMap::new();
 
         for stmt in &parsed.chunk.block.stmts {
-            match stmt.under_default() {
-                alloy_syntax::ast::Stmt::Enum(e)
-                    if e.variants.iter().all(|v| v.payload.is_empty()) =>
-                {
-                    unit_enums.insert(text(e.name));
-                }
-
-                alloy_syntax::ast::Stmt::TypeAlias(t) => {
-                    if let Some((_, value)) = text(t.span).split_once('=') {
-                        aliases.insert(text(t.name), value.trim().to_string());
-                    }
-                }
-
-                _ => {}
+            if let alloy_syntax::ast::Stmt::TypeAlias(t) = stmt.under_default()
+                && let Some((_, value)) = text(t.span).split_once('=')
+            {
+                type_aliases.insert(text(t.name), value.trim().to_string());
             }
         }
 
@@ -187,9 +207,7 @@ pub fn struct_shapes(sources: &[PathBuf], base: &Path) -> Vec<crate::StructShape
             let base = ty.trim_end_matches('?').trim();
             let optional = &ty[base.len()..];
 
-            if unit_enums.contains(base) {
-                format!("string{optional}")
-            } else if let Some(value) = aliases.get(base) {
+            if let Some(value) = type_aliases.get(base) {
                 match optional.is_empty() {
                     true => value.clone(),
 
@@ -266,7 +284,7 @@ pub fn struct_shapes(sources: &[PathBuf], base: &Path) -> Vec<crate::StructShape
         }
     }
 
-    shapes
+    (shapes, scopes)
 }
 
 /// The Alloy sources under `input`, sorted.
@@ -344,8 +362,11 @@ fn run_inner(
 
     // The structs of every source, so a remote in one file packs a
     // struct another file declares.
+    let module_aliases = crate::modules::aliases(root, &tree);
+    let (shapes, wire_scopes) = struct_shapes(&sources, &input, &module_aliases);
     let base_options = EmitOptions {
-        shapes: struct_shapes(&sources, &input),
+        shapes,
+        wire_scopes,
         ..base_options
     };
 
@@ -510,7 +531,6 @@ fn run_inner(
     // A table that does not load is one mistake, in the file that holds
     // it, however many `.alx` files it stops.
     let mut markup_reported = false;
-    let module_aliases = crate::modules::aliases(root, &tree);
 
     // An alias the project declares wrongly is a failure of the
     // project, not of one file. The path is absolute, so the report

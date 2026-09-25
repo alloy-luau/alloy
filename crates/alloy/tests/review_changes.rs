@@ -100,8 +100,15 @@ fn a_struct_elsewhere_shapes_a_remote_only_when_imported() {
                 width: None,
             }],
             derives: Vec::new(),
+            module: "p.aly".into(),
             ..Default::default()
         }],
+        wire_scopes: vec![alloy::WireScope {
+            module: "main.aly".into(),
+            names: vec![("Player".into(), "p.aly".into(), "Player".into())],
+            ..Default::default()
+        }],
+        file_name: "main.aly".into(),
         ..alloy::EmitOptions::default()
     };
     let remote = "remote Hit(target: Player) from client\nprint(Hit)\n";

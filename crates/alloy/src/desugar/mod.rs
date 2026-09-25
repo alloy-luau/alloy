@@ -85,6 +85,9 @@ pub struct EmitOptions {
     /// The structs of the whole project, for the wire layout of a
     /// remote that carries one from another file.
     pub shapes: Vec<StructShape>,
+    /// The imports of each project module. A wire layout reads a type
+    /// name through the imports of the file that writes it.
+    pub wire_scopes: Vec<WireScope>,
     /// Render the check artifact: a call to an extension method on a
     /// foreign type stays as written, and `self` in such an impl carries
     /// the target type, so the analyzer types both. The ship artifact
@@ -294,6 +297,21 @@ impl StructShape {
     }
 }
 
+/// The imports of one project module. A type name in the module means
+/// the type these imports bind, so a same-named type elsewhere in the
+/// project does not change the layout.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WireScope {
+    /// The module, relative to the project's `in` folder, as in
+    /// `StructShape::module`.
+    pub module: String,
+    /// Each name an import binds, with the module and the name there:
+    /// `import { Inner as I }` binds `I` to `Inner`.
+    pub names: Vec<(String, String, String)>,
+    /// Each `import * as K`, with its module.
+    pub stars: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireField {
     pub name: String,
@@ -371,6 +389,7 @@ impl Default for EmitOptions {
             erase_type_imports: false,
             macros: Vec::new(),
             shapes: Vec::new(),
+            wire_scopes: Vec::new(),
             check: false,
             extensions: Vec::new(),
             std_globals: crate::std_names::Globals::All,

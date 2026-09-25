@@ -258,6 +258,48 @@ describe("wire", function()
 		end).toThrow("is not a table")
 	end)
 
+	it("checks an imported unit enum and restores a keyed struct in an array", function()
+		-- The layout another module writes for `struct Holder` with
+		-- `rarity: Rarity?` and `list: { Inner }`. The unit enum crossed
+		-- as a plain string, and the array item as `any`.
+		local Inner = {}
+		Inner.__index = Inner
+		function Inner.double(self)
+			return self.n * 2
+		end
+		wire.types["shared/inner.aly:Inner"] = Inner
+		local layout = {
+			{
+				fields = {
+					{ "rarity", "one:Common,Rare?" },
+					{
+						"list",
+						{ item = { fields = { { "n", "f64" } }, struct = "shared/inner.aly:Inner" }, array = true },
+					},
+				},
+			},
+		}
+		local sent = { rarity = "Rare", list = { setmetatable({ n = 2 }, Inner) } }
+		-- The table road: the engine copies the value and drops the
+		-- metatable of each item.
+		local out = wire.restore(layout, engine_copy({ n = 1, sent }))[1]
+		expect(out.rarity).toBe("Rare")
+		expect(getmetatable(out.list[1])).toBe(Inner)
+		expect(out.list[1]:double()).toBe(4)
+		-- The buffer road carries the same layout.
+		local buf, rest = wire.pack(layout, { sent }, "T")
+		local packed = wire.unpack(layout, buf, engine_copy(rest))[1]
+		expect(packed.list[1]:double()).toBe(4)
+		expect(wire.restore(layout, { n = 1, { list = {} } })[1].rarity).toBe(nil)
+		-- A name that is no variant is forged, on either road.
+		expect(function()
+			wire.restore(layout, { n = 1, { rarity = "Legendary", list = {} } })
+		end).toThrow("Legendary is no variant of the enum")
+		expect(function()
+			wire.pack(layout, { { rarity = "Legendary", list = {} } }, "T")
+		end).toThrow("Legendary is no variant of the enum")
+	end)
+
 	it("writes a long string's length in more bytes", function()
 		local text = string.rep("x", 300)
 		local out, buf = roundtrip({ "str" }, { text })

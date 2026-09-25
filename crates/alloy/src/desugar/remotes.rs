@@ -398,32 +398,83 @@ pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
 }
 
 impl<'s> Desugar<'s> {
-    /// The fields of a struct another file declares, when this file
-    /// imports it. A struct of the same name that this file never
-    /// imports is not the type the parameter names: a `Player` struct
-    /// elsewhere made `target: Player` a table layout, and the remote
-    /// then refused every real Player.
-    fn imported_shape(&self, name: &str) -> Option<Vec<crate::WireField>> {
-        if !self.imported_names.contains(name) {
+    /// The module this file is, as the project shapes name it: the
+    /// longest one its path ends with. A test build names the file
+    /// `src/types.aly`, and the module is `types.aly`.
+    fn own_module(&self) -> Option<&str> {
+        let path = std::path::Path::new(&self.options.file_name);
+
+        self.options
+            .wire_scopes
+            .iter()
+            .map(|s| s.module.as_str())
+            .filter(|m| !m.is_empty() && path.ends_with(m))
+            .max_by_key(|m| m.len())
+    }
+
+    /*
+    The project struct or enum that `ty` names in `module`: one the
+    module declares, or one an import there binds, followed to the
+    module that declares it. `K.Kind` reads through the star import `K`.
+
+    A layout read "the one project type of this name". A private struct of
+    the same name in an unrelated file then made the name ambiguous, and
+    the layout lost its struct, its enum slots, or its registration.
+    */
+    fn project_type(&self, module: &str, ty: &str, hops: usize) -> Option<&crate::StructShape> {
+        // Two modules that import a name from each other would loop.
+        if hops > 8 {
             return None;
         }
 
-        // `import { Shot as S }` binds `S` to the struct named `Shot`.
-        let declared = self.import_renames.get(name).map_or(name, String::as_str);
+        let scope = self.options.wire_scopes.iter().find(|s| s.module == module);
 
-        self.options
+        if let Some((star, name)) = ty.split_once('.') {
+            let (_, target) = scope?.stars.iter().find(|(local, _)| local == star)?;
+
+            return self.project_type(target, name, hops + 1);
+        }
+
+        if let Some(shape) = self
+            .options
             .shapes
             .iter()
-            .find(|sh| sh.name == declared && sh.variants.is_empty())
-            .map(|sh| sh.fields.clone())
+            .find(|sh| sh.module == module && sh.name == ty)
+        {
+            return Some(shape);
+        }
+
+        let (_, target, name) = scope?.names.iter().find(|(local, ..)| local == ty)?;
+
+        self.project_type(target, name, hops + 1)
     }
 
-    /// The layout of each variant of an enum, from the payload types. A
-    /// `foreign` enum is written in another file, whose names they are.
+    /// The struct or enum another file declares, for a name an import
+    /// of this file binds: `Item` by a named import, or `Ty.Item`
+    /// through a star import. A struct of the same name that this file
+    /// never imports is not the type the parameter names: a `Player`
+    /// struct elsewhere made `target: Player` a table layout, and the
+    /// remote then refused every real Player.
+    fn imported_type(&self, ty: &str) -> Option<&crate::StructShape> {
+        let bound = match ty.split_once('.') {
+            Some((star, _)) => self.star_modules.contains(star),
+
+            None => self.imported_names.contains(ty),
+        };
+
+        if !bound {
+            return None;
+        }
+
+        self.project_type(self.own_module()?, ty, 0)
+    }
+
+    /// The layout of each variant of an enum, from the payload types. An
+    /// enum of another file names its `module`, whose names they are.
     fn variant_wires(
         &self,
         variants: &[(String, Vec<String>)],
-        foreign: bool,
+        module: Option<&str>,
         depth: usize,
     ) -> Vec<(String, Vec<Wire>)> {
         variants
@@ -431,41 +482,12 @@ impl<'s> Desugar<'s> {
             .map(|(v, types)| {
                 let wires = types
                     .iter()
-                    .map(|t| self.wire_of_type(t, None, depth + 1, foreign))
+                    .map(|t| self.wire_of_type(t, None, depth + 1, module))
                     .collect();
 
                 (v.clone(), wires)
             })
             .collect()
-    }
-
-    /// The enum another file declares, for an import this file names it
-    /// by: `Item` bound by a named import, or `Ty.Item` through a star
-    /// import. One project enum of the name, or none: a payload layout
-    /// read off the wrong enum would refuse the right values.
-    fn imported_enum(&self, ty: &str) -> Option<&crate::StructShape> {
-        let declared = match ty.split_once('.') {
-            Some((module, name)) if self.star_modules.contains(module) => name,
-
-            Some(_) => return None,
-
-            None if self.imported_names.contains(ty) => {
-                self.import_renames.get(ty).map_or(ty, String::as_str)
-            }
-
-            None => return None,
-        };
-        let mut named = self
-            .options
-            .shapes
-            .iter()
-            .filter(|sh| sh.name == declared && !sh.variants.is_empty());
-
-        match (named.next(), named.next()) {
-            (Some(shape), None) => Some(shape),
-
-            _ => None,
-        }
     }
 
     /// The layout of each field of a struct another file declares. The
@@ -475,7 +497,8 @@ impl<'s> Desugar<'s> {
             .fields
             .iter()
             .map(|f| {
-                let w = self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, true);
+                let w =
+                    self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, Some(&shape.module));
 
                 (f.name.clone(), w)
             })
@@ -496,25 +519,33 @@ impl<'s> Desugar<'s> {
             return String::new();
         }
 
-        let mut named = self.options.shapes.iter().filter(|sh| sh.name == name);
-        let (Some(shape), None) = (named.next(), named.next()) else {
+        let Some(own) = self.own_module() else {
             return String::new();
         };
-        let here = std::path::Path::new(&self.options.file_name).ends_with(&shape.module);
+        let Some(shape) = self
+            .options
+            .shapes
+            .iter()
+            .find(|sh| sh.module == own && sh.name == name)
+        else {
+            return String::new();
+        };
+        // A field names this table when its module's imports lead to it.
         let in_a_field = self.options.shapes.iter().any(|sh| {
             sh.fields
                 .iter()
                 .map(|f| &f.ty)
                 .chain(sh.variants.iter().flat_map(|(_, p)| p))
                 .any(|ty| {
-                    ty.split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .any(|w| w == name)
+                    ty.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+                        .filter_map(|w| self.project_type(&sh.module, w, 0))
+                        .any(|t| std::ptr::eq(t, shape))
                 })
         });
         // A unit enum crosses as a string and needs no table.
         let unit = !shape.variants.is_empty() && shape.variants.iter().all(|(_, p)| p.is_empty());
 
-        if !here || !in_a_field || unit {
+        if !in_a_field || unit {
             return String::new();
         }
 
@@ -529,11 +560,15 @@ impl<'s> Desugar<'s> {
         offender(
             ty,
             &|name| {
-                let declared = self
-                    .struct_wire
-                    .get(name)
-                    .cloned()
-                    .or_else(|| self.imported_shape(name))?;
+                let declared = match self.struct_wire.get(name) {
+                    Some(fields) => fields.clone(),
+
+                    None => self
+                        .imported_type(name)
+                        .filter(|sh| sh.variants.is_empty())?
+                        .fields
+                        .clone(),
+                };
 
                 Some(
                     declared
@@ -858,7 +893,7 @@ impl<'s> Desugar<'s> {
 
             // A default fills before the pack and after the read, so the
             // value is never nil on the wire.
-            let wire = self.wire_of_type(&ty, width.as_deref(), 0, false);
+            let wire = self.wire_of_type(&ty, width.as_deref(), 0, None);
             kinds.push(wire);
         }
 
@@ -869,18 +904,19 @@ impl<'s> Desugar<'s> {
     /// project opens to its fields; a record type to its members; `T[]`,
     /// `{ T }`, and `Array<T>` to their item. Anything else is `any`.
     /*
-    The layout of a type as written. `foreign` marks a type written in
-    another file, a field of an imported struct: its names belong to that
-    file, so this file's enums, aliases, and structs do not answer for
-    them. There a name is a project struct, one of the two engine names a
-    file never shadows, a datatype, or a value the layout leaves alone.
+    The layout of a type as written. `foreign` names the module of a type
+    written in another file, a field of an imported struct: its names
+    belong to that file, so this file's enums, aliases, and structs do not
+    answer for them. There a name is a project type that the module's
+    imports reach, one of the two engine names a file never shadows, a
+    datatype, or a value the layout leaves alone.
     */
     pub(crate) fn wire_of_type(
         &self,
         text: &str,
         width: Option<&str>,
         depth: usize,
-        foreign: bool,
+        foreign: Option<&str>,
     ) -> Wire {
         let mut ty = text.trim();
         let mut optional = false;
@@ -985,18 +1021,21 @@ impl<'s> Desugar<'s> {
         }
 
         let is_name = ty.chars().all(|c| c.is_alphanumeric() || c == '_');
+        let is_path = ty
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
 
-        if is_name && foreign {
-            // One project struct or enum of the name. Its table is not in
-            // scope here, so the layout names the key the declaring file
-            // registers the table under.
-            let mut named = self.options.shapes.iter().filter(|sh| sh.name == ty);
-
-            if let (Some(shape), None) = (named.next(), named.next()) {
+        if let Some(module) = foreign
+            && is_path
+        {
+            // The project struct or enum the module's imports reach. Its
+            // table is not in scope here, so the layout names the key the
+            // declaring file registers the table under.
+            if let Some(shape) = self.project_type(module, ty, 0) {
                 let key = luau_string(&shape.wire_key());
 
                 if !shape.variants.is_empty() {
-                    let variants = self.variant_wires(&shape.variants, true, depth);
+                    let variants = self.variant_wires(&shape.variants, Some(&shape.module), depth);
 
                     return enum_wire(key, variants, optional);
                 }
@@ -1017,52 +1056,33 @@ impl<'s> Desugar<'s> {
             };
         }
 
-        if is_name {
-            // A struct of this file reads its fields here; an imported one
-            // reads them in the file that declares it.
-            let (declared, fields_foreign) = match self.struct_wire.get(ty).cloned() {
-                Some(d) => (Some(d), false),
+        // A struct of this file reads its fields here. An imported one,
+        // by its name or through a star import as `Ty.Stats`, is in
+        // scope under what the file writes, and reads its fields in the
+        // file that declares it.
+        if is_name && let Some(declared) = self.struct_wire.get(ty) {
+            let fields = declared
+                .iter()
+                .map(|f| {
+                    let w = self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, None);
 
-                None => (self.imported_shape(ty), true),
+                    (f.name.clone(), w)
+                })
+                .collect();
+
+            return Wire::Table {
+                fields,
+                struct_name: Some(ty.to_string()),
+                optional,
             };
-
-            if let Some(declared) = declared {
-                let fields = declared
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.name.clone(),
-                            self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, fields_foreign),
-                        )
-                    })
-                    .collect();
-
-                return Wire::Table {
-                    fields,
-                    struct_name: Some(ty.to_string()),
-                    optional,
-                };
-            }
         }
 
-        // A struct through a star import, `Ty.Stats`, is in scope under
-        // its path.
-        if let Some((module, name)) = ty.split_once('.')
-            && self.star_modules.contains(module)
-        {
-            let mut named = self
-                .options
-                .shapes
-                .iter()
-                .filter(|sh| sh.name == name && sh.variants.is_empty());
-
-            if let (Some(shape), None) = (named.next(), named.next()) {
-                return Wire::Table {
-                    fields: self.shape_fields(shape, depth),
-                    struct_name: Some(ty.to_string()),
-                    optional,
-                };
-            }
+        if let Some(shape) = self.imported_type(ty).filter(|sh| sh.variants.is_empty()) {
+            return Wire::Table {
+                fields: self.shape_fields(shape, depth),
+                struct_name: Some(ty.to_string()),
+                optional,
+            };
         }
 
         // The file's own type wins over a Roblox class of the same name,
@@ -1071,10 +1091,7 @@ impl<'s> Desugar<'s> {
         // unit enum crosses as its string, and any other declaration, or
         // an import, as a value the layout leaves to the checker. An
         // enum through a star import reads under its path, `Ty.Item`.
-        if ty
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-        {
+        if is_path {
             if let Some(value) = self.alias_values.get(ty).cloned() {
                 let value = if optional {
                     format!("({value})?")
@@ -1082,7 +1099,7 @@ impl<'s> Desugar<'s> {
                     value
                 };
 
-                return self.wire_of_type(&value, width, depth + 1, false);
+                return self.wire_of_type(&value, width, depth + 1, None);
             }
 
             // An enum of this file reads its payload types here; an
@@ -1090,10 +1107,12 @@ impl<'s> Desugar<'s> {
             // neither, a payload value crosses as it is.
             if let Some(variants) = self.enum_decls.get(ty) {
                 let variants = match self.enum_payloads.get(ty) {
-                    Some(payloads) => self.variant_wires(payloads, false, depth),
+                    Some(payloads) => self.variant_wires(payloads, None, depth),
 
-                    None => match self.imported_enum(ty) {
-                        Some(shape) => self.variant_wires(&shape.variants, true, depth),
+                    None => match self.imported_type(ty).filter(|sh| !sh.variants.is_empty()) {
+                        Some(shape) => {
+                            self.variant_wires(&shape.variants, Some(&shape.module), depth)
+                        }
 
                         None => variants
                             .iter()
@@ -1306,6 +1325,26 @@ impl<'s> Desugar<'s> {
 mod tests {
     use crate::EmitOptions;
 
+    /// The imports of `module`: each name with the module and the name
+    /// there, and each star import with its module.
+    fn scope(
+        module: &str,
+        names: &[(&str, &str, &str)],
+        stars: &[(&str, &str)],
+    ) -> crate::WireScope {
+        crate::WireScope {
+            module: module.into(),
+            names: names
+                .iter()
+                .map(|(l, m, n)| (l.to_string(), m.to_string(), n.to_string()))
+                .collect(),
+            stars: stars
+                .iter()
+                .map(|(l, m)| (l.to_string(), m.to_string()))
+                .collect(),
+        }
+    }
+
     fn messages(src: &str) -> Vec<String> {
         crate::compile(src)
             .unwrap()
@@ -1385,6 +1424,15 @@ mod tests {
                 shape("Outer", vec![field("s", "Stats")], Vec::new()),
                 shape("Bag", vec![field("one", "Item")], Vec::new()),
             ],
+            wire_scopes: vec![
+                scope("types.aly", &[], &[]),
+                scope(
+                    "net.aly",
+                    &[("Bag", "types.aly", "Bag"), ("Outer", "types.aly", "Outer")],
+                    &[("Ty", "types.aly")],
+                ),
+            ],
+            file_name: "net.aly".into(),
             import_enums: vec![(
                 "Ty.Item".to_string(),
                 vec![("Sword".to_string(), 1), ("Nothing".to_string(), 0)],
@@ -1429,6 +1477,113 @@ mod tests {
         }
 
         assert_eq!(out.ship.matches("wire.types").count(), 2, "{}", out.ship);
+    }
+
+    /// A layout reads a type name through the imports of the file that
+    /// writes it. A private `Inner` in an unrelated module made the name
+    /// ambiguous: the enum slot went, the array item read `any`, and the
+    /// declaring file stopped registering. A unit enum field of an
+    /// imported struct crossed as a plain string.
+    #[test]
+    fn a_layout_reads_a_type_through_the_imports_of_its_file() {
+        let field = |name: &str, ty: &str| crate::WireField {
+            name: name.into(),
+            ty: ty.into(),
+            width: None,
+        };
+        let shape = |module: &str, name: &str, fields, variants| crate::StructShape {
+            name: name.into(),
+            fields,
+            module: module.into(),
+            variants,
+            ..Default::default()
+        };
+        let kind = "shared/kind.aly";
+        let options = EmitOptions {
+            shapes: vec![
+                shape(
+                    "other.aly",
+                    "Inner",
+                    vec![field("label", "string")],
+                    Vec::new(),
+                ),
+                shape(
+                    "shared/inner.aly",
+                    "Inner",
+                    vec![field("n", "number")],
+                    Vec::new(),
+                ),
+                shape(
+                    kind,
+                    "Kind",
+                    Vec::new(),
+                    vec![
+                        ("Big".into(), vec!["Inner".into()]),
+                        ("Small".into(), Vec::new()),
+                    ],
+                ),
+                shape(
+                    kind,
+                    "Rarity",
+                    Vec::new(),
+                    vec![("Common".into(), Vec::new()), ("Rare".into(), Vec::new())],
+                ),
+                shape(
+                    kind,
+                    "Holder",
+                    vec![field("list", "{ Inner }"), field("rarity", "Rarity?")],
+                    Vec::new(),
+                ),
+            ],
+            wire_scopes: vec![
+                scope("other.aly", &[], &[]),
+                scope("shared/inner.aly", &[], &[]),
+                scope(kind, &[("Inner", "shared/inner.aly", "Inner")], &[]),
+                scope("net.aly", &[("Holder", kind, "Holder")], &[("K", kind)]),
+            ],
+            file_name: "net.aly".into(),
+            import_enums: vec![(
+                "K.Kind".into(),
+                vec![("Big".into(), 1), ("Small".into(), 0)],
+            )],
+            ..EmitOptions::default()
+        };
+        let src = "import * as K from \"./shared/kind\"\nimport { Holder } from \"./shared/kind\"\nremote R1(k: K.Kind) from client\nremote R2(h: Holder) from client\n";
+        let out = crate::compile_with(src, &options).unwrap();
+        let inner = "{ fields = { { \"n\", \"f64\" } }, struct = \"shared/inner.aly:Inner\" }";
+
+        for layout in [
+            format!(
+                "{{ enum = K.Kind, tags = {{ Big = 1, Small = 0 }}, slots = {{ Big = {{ {inner} }} }} }}"
+            ),
+            format!(
+                "{{ fields = {{ {{ \"list\", {{ item = {inner}, array = true }} }}, {{ \"rarity\", \"one:Common,Rare?\" }} }}, struct = Holder }}"
+            ),
+        ] {
+            assert!(out.ship.contains(&layout), "{layout}\n{}", out.ship);
+        }
+
+        // The declaring file registers its table, and the private one
+        // registers nothing.
+        let registers = |file: &str, src: &str| {
+            let options = EmitOptions {
+                file_name: file.into(),
+                ..options.clone()
+            };
+
+            crate::compile_with(src, &options)
+                .unwrap()
+                .ship
+                .contains("wire.types")
+        };
+        assert!(registers(
+            "src/shared/inner.aly",
+            "export struct Inner\n    n: number\nend\n"
+        ));
+        assert!(!registers(
+            "src/other.aly",
+            "struct Inner\n    label: string\nend\n"
+        ));
     }
 
     /// A struct inside a variant's payload keeps its metatable: the
@@ -1493,6 +1648,11 @@ end
                     ..Default::default()
                 },
             ],
+            wire_scopes: vec![
+                scope("shop.aly", &[], &[]),
+                scope("net.aly", &[("Purchase", "shop.aly", "Purchase")], &[]),
+            ],
+            file_name: "net.aly".into(),
             import_enums: vec![("Purchase".into(), vec![("Bought".into(), 1)])],
             ..EmitOptions::default()
         };

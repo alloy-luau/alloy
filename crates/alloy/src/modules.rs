@@ -985,7 +985,7 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
 /// by, the name it goes out under here, and the spec that names it. A
 /// barrel writes `export { Point } from "./model"`, or imports `Point`
 /// and names it in an `export { ... }` list of its own.
-fn reexports(source: &str) -> Vec<(String, String, String)> {
+pub(crate) fn reexports(source: &str) -> Vec<(String, String, String)> {
     use alloy_syntax::ast::{ImportKind, Stmt};
 
     if !source.contains("export") {
@@ -1122,7 +1122,7 @@ pub fn import_shapes(
 /// an index keyed by the declared name alone holds one of them. The
 /// name this file binds is a key of its own, and it names the right
 /// module.
-fn named_specs(
+pub(crate) fn named_specs(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
@@ -1174,7 +1174,11 @@ fn named_specs(
 /// The module each `import * as X` binds, with the local name it binds
 /// it under. A star import binds the module table, so a declaration of
 /// the module reads one level deeper here: `X.State`.
-fn star_locals(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Vec<(PathBuf, String)> {
+pub(crate) fn star_locals(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(PathBuf, String)> {
     use alloy_syntax::ast::{ImportKind, Stmt};
 
     let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
@@ -1939,19 +1943,31 @@ impl crate::EmitOptions {
     /// `imports`, with the project read from the nearest `alloy.toml`.
     /// One file compiled on its own reads the structs of the modules it
     /// imports, so an imported struct clones, defaults, and crosses a
-    /// remote the way the project build writes it.
+    /// remote the way the project build writes it. The file itself
+    /// joins them, since its imports say what a name in it means.
     pub fn imports_for_file(self, path: &Path, source: &str) -> Self {
         let (from, aliases, config) = project_context(path);
-        let std_globals = config.map(|c| c.std.globals).unwrap_or_default();
-        let imported: Vec<PathBuf> = import_specs(source)
-            .iter()
-            .filter_map(|spec| resolve(spec, &from, &aliases))
+        let files: Vec<PathBuf> = std::iter::once(from.clone())
+            .chain(
+                import_specs(source)
+                    .iter()
+                    .filter_map(|spec| resolve(spec, &from, &aliases)),
+            )
             .filter(|p| is_alloy(p))
             .collect();
+        // The project's `in` folder keys each module as the project
+        // build does, so a key here names the table a build registers.
+        let base = match &config {
+            Some((root, c)) => root.join(&c.build.input),
+
+            None => from.parent().unwrap_or(&from).to_path_buf(),
+        };
+        let (shapes, wire_scopes) = crate::build::struct_shapes(&files, &base, &aliases);
 
         Self {
-            std_globals,
-            shapes: crate::build::struct_shapes(&imported, from.parent().unwrap_or(&from)),
+            std_globals: config.map(|(_, c)| c.std.globals).unwrap_or_default(),
+            shapes,
+            wire_scopes,
             ..self.imports(source, &from, &aliases)
         }
     }
@@ -1988,22 +2004,25 @@ fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
     (from, aliases)
 }
 
-/// `file_context`, with the configuration it read.
-fn project_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>, Option<Config>) {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let config = Config::find(dir).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
-    let aliases = match &config {
-        Some((config_path, config)) => {
-            let root = config_path.parent().unwrap_or(dir);
+/// A project's configuration, with the folder it sits in.
+type Project = Option<(PathBuf, Config)>;
 
-            aliases(root, &crate::project::Tree::load(root, config))
-        }
+/// `file_context`, with the configuration it read and its root.
+fn project_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>, Project) {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let config = Config::find(dir).and_then(|p| {
+        let root = p.parent().unwrap_or(dir).to_path_buf();
+
+        Config::load(&p).ok().map(|c| (root, c))
+    });
+    let aliases = match &config {
+        Some((root, config)) => aliases(root, &crate::project::Tree::load(root, config)),
 
         None => Vec::new(),
     };
     let from = normalize(&std::env::current_dir().unwrap_or_default().join(path));
 
-    (from, aliases, config.map(|(_, c)| c))
+    (from, aliases, config)
 }
 
 /// The specs of a source whose module has no export table: a `.luau`

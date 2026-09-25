@@ -226,7 +226,12 @@ pub fn rewrite_emitted_name(
         && message.ends_with("does not have key 'new'")
         && let Some(name) = word_after(text, "new ")
     {
-        return Some((format!("`new` needs a struct; `{name}` is a {owner}"), None));
+        let a = crate::desugar::article(owner);
+
+        return Some((
+            format!("`new` needs a struct; `{name}` is {a} {owner}"),
+            None,
+        ));
     }
 
     None
@@ -1327,7 +1332,8 @@ fn contains_report(message: &str, text: &str) -> Option<Resited> {
     Some(Resited {
         kind: "TypeError",
         message: format!(
-            "`in` needs an Array, a Set, a HashMap, or a string; `{operand}` is a {got}"
+            "`in` needs an Array, a Set, a HashMap, or a string; `{operand}` is {} {got}",
+            crate::desugar::article(got)
         ),
         at: None,
     })
@@ -1346,7 +1352,10 @@ fn after_report(message: &str, text: &str) -> Option<Resited> {
 
     Some(Resited {
         kind: "TypeError",
-        message: format!("`after` needs a number of seconds; `{seconds}` is a {got}"),
+        message: format!(
+            "`after` needs a number of seconds; `{seconds}` is {} {got}",
+            crate::desugar::article(got)
+        ),
         at: None,
     })
 }
@@ -1384,7 +1393,8 @@ fn destroy_report(message: &str, text: &str) -> Option<Resited> {
     Some(Resited {
         kind: "TypeError",
         message: format!(
-            "`destroy` needs an Instance or a value with a destroy method; `{operand}` is a {got}"
+            "`destroy` needs an Instance or a value with a destroy method; `{operand}` is {} {got}",
+            crate::desugar::article(got)
         ),
         at: None,
     })

@@ -2353,6 +2353,16 @@ fn expr_needs_desugar(e: &Expr) -> bool {
 }
 
 /// Backticked names joined with commas and a final `and`.
+/// `a` or `an` for the word a report puts after it. The test reads both
+/// cases, or a type named `E` takes `a`.
+pub fn article(word: &str) -> &'static str {
+    match word.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
+        true => "an",
+
+        false => "a",
+    }
+}
+
 pub(crate) fn list_names(names: &[&str]) -> String {
     let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
 

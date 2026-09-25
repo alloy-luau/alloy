@@ -586,7 +586,7 @@ fn a_dotted_attribute_is_checked_against_its_declaration() {
         [
             "\"@alloy/std/serde\" has no attribute `renme`; its attributes are `rename`, `rename_all`, `skip` and `deny_unknown_fields`",
             "`M` exports no attribute `tga`; it exports `price`",
-            "the attribute `M.price` has no meaning on a enum; it goes on `struct` and `function`",
+            "the attribute `M.price` has no meaning on an enum; it goes on `struct` and `function`",
         ]
     );
     assert!(

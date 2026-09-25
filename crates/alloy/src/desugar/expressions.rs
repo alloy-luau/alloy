@@ -77,16 +77,6 @@ fn child_op(wait: bool) -> &'static str {
     }
 }
 
-/// `a` or `an` for the type name a report quotes. The test reads both
-/// cases, or a type named `E` takes `a`.
-fn article(ty: &str) -> &'static str {
-    match ty.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
-        true => "an",
-
-        false => "a",
-    }
-}
-
 /// The first `...`, `break`, or `continue` in a value block's body that
 /// would leave it: `...` anywhere outside a nested function, and a
 /// `break` or `continue` outside a loop of the block's own.

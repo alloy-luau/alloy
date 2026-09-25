@@ -1175,7 +1175,11 @@ fn check_literal(lexed: &Lexed, at: usize, node: &Value, path: &[Seg]) -> Option
             _ => type_label(node),
         };
 
-        return Some(problem(format!("{name} takes a {wanted}; this is a {got}")));
+        let a = alloy::desugar::article(&wanted);
+
+        return Some(problem(format!(
+            "{name} takes {a} {wanted}; this is a {got}"
+        )));
     }
 
     let values = enum_values(node);

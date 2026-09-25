@@ -88,7 +88,8 @@ impl<'s> Desugar<'s> {
 
             if !CONTRACT_TARGETS.contains(&target) {
                 let message = format!(
-                    "a `requires` clause reads the members of what the attribute sits on, and a {target} has none; the targets that carry members are {}",
+                    "a `requires` clause reads the members of what the attribute sits on, and {} {target} has none; the targets that carry members are {}",
+                    super::article(target),
                     list_names(CONTRACT_TARGETS)
                 );
                 self.diagnose(*t, &message);
@@ -134,8 +135,9 @@ impl<'s> Desugar<'s> {
                 Some(t) if is_list_type(t) => {}
 
                 Some(t) => {
+                    let a = super::article(t);
                     let message =
-                        format!("`each {name}` needs a list parameter; `{name}` is a `{t}`");
+                        format!("`each {name}` needs a list parameter; `{name}` is {a} `{t}`");
                     self.diagnose(n, &message);
                 }
             }

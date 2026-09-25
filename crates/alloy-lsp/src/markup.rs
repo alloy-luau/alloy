@@ -867,8 +867,10 @@ pub fn hover(
                     .unwrap_or_else(|| format!("{holder}.{}", m.name));
 
                 format!(
-                    "```alloy\n{code}\n```\n`{holder}.{}`: a {}. A tag stands on a function.",
-                    m.name, m.detail
+                    "```alloy\n{code}\n```\n`{holder}.{}`: {} {}. A tag stands on a function.",
+                    m.name,
+                    alloy::desugar::article(&m.detail),
+                    m.detail
                 )
             } else if roblox::is_class(name) {
                 let props = roblox::properties(name).count();

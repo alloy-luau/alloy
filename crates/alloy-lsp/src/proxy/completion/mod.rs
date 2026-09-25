@@ -187,7 +187,10 @@ impl State {
                 item["detail"] = json!("(any) -> boolean");
                 item["documentation"] = json!({
                     "kind": "markdown",
-                    "value": format!("Whether a value is a `{enum_name}`."),
+                    "value": format!(
+                        "Whether a value is {} `{enum_name}`.",
+                        alloy::desugar::article(&enum_name)
+                    ),
                 });
 
                 continue;

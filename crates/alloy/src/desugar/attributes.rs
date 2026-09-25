@@ -419,7 +419,8 @@ impl<'s> Desugar<'s> {
             if !targets.iter().any(|t| t == target) {
                 let list: Vec<&str> = targets.iter().map(String::as_str).collect();
                 let message = format!(
-                    "the attribute `{name}` has no meaning on a {target}; it goes on {}",
+                    "the attribute `{name}` has no meaning on {} {target}; it goes on {}",
+                    article(target),
                     list_names(&list)
                 );
                 self.diagnose(a.span, &message);
@@ -447,7 +448,8 @@ impl<'s> Desugar<'s> {
 
         if target != "function" {
             let message = format!(
-                "Luau's attribute list goes on a function, and this is a {target}; write the Alloy form, `@name`"
+                "Luau's attribute list goes on a function, and this is {} {target}; write the Alloy form, `@name`",
+                article(target)
             );
             self.diagnose(a.span, &message);
 
@@ -2614,6 +2616,23 @@ print(a)
             "{:?}",
             messages(target)
         );
+
+        // A target that starts with a vowel takes `an`.
+        for (src, target) in [
+            ("@inline\nenum E as\n    A\nend\n", "an enum"),
+            (
+                "@inline\ninterface I as\n    x: number\nend\n",
+                "an interface",
+            ),
+            (
+                "struct S as\n    x: number\nend\n@inline\nimpl S as\nend\n",
+                "an impl",
+            ),
+        ] {
+            let want =
+                format!("the attribute `inline` has no meaning on {target}; it goes on `function`");
+            assert!(messages(src).contains(&want), "{want}\n{:?}", messages(src));
+        }
 
         let both = "@inline\n@noinline\nlocal function seven() end\nprint(seven)\n";
         assert!(

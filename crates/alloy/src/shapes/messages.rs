@@ -106,7 +106,8 @@ pub fn plain_table_hint(message: &str) -> Option<String> {
     }
 
     Some(format!(
-        "a `{{ ... }}` is a plain table, not a `{want}`; an Array literal is `[ ... ]`"
+        "a `{{ ... }}` is a plain table, not {} `{want}`; an Array literal is `[ ... ]`",
+        crate::desugar::article(want)
     ))
 }
 
@@ -205,7 +206,8 @@ fn negation_failure(message: &str) -> Option<String> {
         .next()?;
 
     Some(format!(
-        "`~` negates a {kind} type, which Luau cannot negate; negate a primitive, a singleton, a class, or a union of them"
+        "`~` negates {} {kind} type, which Luau cannot negate; negate a primitive, a singleton, a class, or a union of them",
+        crate::desugar::article(kind)
     ))
 }
 

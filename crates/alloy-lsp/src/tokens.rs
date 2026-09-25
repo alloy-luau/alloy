@@ -77,8 +77,15 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
     }
 
     // The child's tokens stand first, so a word both of them describe
-    // keeps the child's reading.
-    tokens.extend(alloy_tokens(doc, types, modifiers));
+    // keeps the child's reading. A variant is the exception: the child
+    // reads the key the emit writes, `property`, and in a macro argument
+    // the proxy's `enumMember` is the only token. Both places now agree.
+    let variant = type_index(types, "enumMember");
+    let (variants, own): (Vec<Token>, Vec<Token>) = alloy_tokens(doc, types, modifiers)
+        .into_iter()
+        .partition(|t| Some(t.3) == variant);
+    tokens.splice(0..0, variants);
+    tokens.extend(own);
     tokens.sort_by_key(|t| (t.0, t.1));
     tokens.dedup_by_key(|t| (t.0, t.1));
 
@@ -443,6 +450,45 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
             i += 1;
 
             continue;
+        }
+
+        // `new Pet { id = "a" }`: each key names a field. The child
+        // draws the key of the table the emit writes, and in a macro
+        // argument, which the lowering rewrites, it draws nothing.
+        if text == "new" && (i == 0 || !matches!(toks[i - 1].text(src), "." | ":")) {
+            let mut j = i + 1;
+
+            while toks
+                .get(j)
+                .is_some_and(|t| matches!(t.kind, TokKind::Ident | TokKind::Dot))
+            {
+                j += 1;
+            }
+
+            let mut depth = 0;
+            let braced = toks.get(j).is_some_and(|t| t.text(src) == "{");
+
+            for k in (j..toks.len()).filter(|_| braced) {
+                match toks[k].text(src) {
+                    "{" | "(" | "[" => depth += 1,
+
+                    "}" | ")" | "]" => depth -= 1,
+
+                    _ if depth == 1
+                        && toks[k].kind == TokKind::Ident
+                        && toks.get(k + 1).is_some_and(|t| t.text(src) == "=")
+                        && matches!(toks[k - 1].text(src), "{" | "," | ";") =>
+                    {
+                        push(toks[k].start, toks[k].end, "property", 0);
+                    }
+
+                    _ => {}
+                }
+
+                if depth == 0 {
+                    break;
+                }
+            }
         }
 
         // The name a hole reads. The child sees the same bytes, and it
@@ -1331,5 +1377,41 @@ mod tests {
 
         assert_eq!(kind("describe)"), Some("method"), "{drawn:?}");
         assert_eq!(kind("Fast)"), Some("enumMember"), "{drawn:?}");
+    }
+    /// A variant draws as `enumMember` in a macro argument and outside
+    /// one. The child reads the key the emit writes, `property`, and its
+    /// token used to win outside. A key of `new S { }` draws as a
+    /// property in a macro argument too, where the child draws nothing.
+    #[test]
+    fn a_variant_and_a_field_draw_alike_in_a_macro_argument() {
+        const SRC: &str = "enum Mode\n  Fast\nend\n\nstruct Box\n  mode: Mode\nend\n\nprint(Mode.Fast)\n$dbg(new Box { mode = Mode.Fast })\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let property = types.iter().position(|t| t == "property").unwrap() as u64;
+        let shadow = doc.shadow.lines().nth(8).unwrap();
+        let fast = shadow.find("Fast").unwrap() as u64;
+        let out = remap(&[8, fast, 4, property, 0], &doc, &types, &[]);
+        let kind_at = |line: u64, column: u64| {
+            let (mut l, mut c) = (0, 0);
+
+            out.chunks_exact(5).find_map(|t| {
+                l += t[0];
+                c = if t[0] > 0 { t[1] } else { c + t[1] };
+
+                (l == line && c == column).then(|| types[t[3] as usize].as_str())
+            })
+        };
+        let column =
+            |line: usize, needle: &str| SRC.lines().nth(line).unwrap().find(needle).unwrap() as u64;
+
+        assert_eq!(kind_at(8, column(8, "Fast")), Some("enumMember"), "{out:?}");
+        assert_eq!(kind_at(9, column(9, "mode =")), Some("property"), "{out:?}");
+        assert_eq!(kind_at(9, column(9, "Fast")), Some("enumMember"), "{out:?}");
     }
 }

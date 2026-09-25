@@ -33,6 +33,21 @@ pub(crate) fn join_tests(tests: &[String]) -> String {
     }
 }
 
+/// The sides of `a or b or c`, in order; any other pattern is its own
+/// one side.
+fn or_sides(p: &Pattern) -> Vec<&Pattern> {
+    match p {
+        Pattern::Or(a, b, _) => {
+            let mut sides = or_sides(a);
+            sides.extend(or_sides(b));
+
+            sides
+        }
+
+        other => vec![other],
+    }
+}
+
 /// The test that a value is one variant: `type(v) == "table" and
 /// v.tag == "Sword"`.
 fn variant_test(at: &str, variant: &str) -> String {
@@ -1832,30 +1847,122 @@ impl<'s> Desugar<'s> {
     }
 
     /// Reports if the payload rows of one variant cover every payload.
-    ///
-    /// A row of irrefutable patterns covers. Otherwise one field must be
-    /// the only refutable field in every row, and that field's column must
-    /// cover on its own.
+    /// The arity check reports a row with the wrong count of payloads.
+    /// Here a missing payload reads as `_`, and an extra one drops.
     pub(crate) fn payloads_cover(&self, rows: &[&Vec<&Pattern>], arity: usize) -> bool {
-        if rows.iter().any(|r| r.iter().all(|p| self.irrefutable(p))) {
+        let rows = rows
+            .iter()
+            .map(|r| (0..arity).map(|i| r.get(i).copied()).collect())
+            .collect();
+
+        self.matrix_covers(rows, arity)
+    }
+
+    /*
+    The payload slots of a variant form a product, so the rows are a
+    pattern matrix with one column per slot. `None` in a row is `_`.
+
+    A row that covers in every slot covers the matrix. Otherwise the
+    first column that names an enum splits the rows by variant: a row
+    that names the variant gives its payloads in place of the slot, and
+    a row that covers the slot gives one `_` per payload. Each variant's
+    rows must then cover what is left. `Pair(Landed(n), Landed(l))`,
+    `Pair(Landed(n), Missed)` and `Pair(Missed, _)` cover `Pair` that
+    way, and no slot covers on its own.
+
+    With no enum column, one slot must be the only refutable slot in
+    every row, and its column must cover on its own: array lengths, a
+    struct pattern.
+    */
+    fn matrix_covers<'p>(&self, rows: Vec<Vec<Option<&'p Pattern>>>, width: usize) -> bool {
+        let covers = |p: &Option<&Pattern>| p.is_none_or(|p| self.struct_pattern_covers(p));
+
+        if rows.iter().any(|r| r.iter().all(covers)) {
             return true;
         }
 
-        (0..arity).any(|j| {
-            let others_bind = rows.iter().all(|r| {
-                r.iter()
-                    .enumerate()
-                    .all(|(i, p)| i == j || self.irrefutable(p))
-            });
+        let split = (0..width).find_map(|j| {
+            rows.iter()
+                .filter_map(|r| r[j])
+                .flat_map(or_sides)
+                .find_map(|p| self.variant_of_pattern(p))
+                .map(|(e, ..)| (j, e))
+        });
 
-            if !others_bind {
-                return false;
+        let Some((j, e)) = split else {
+            return (0..width).any(|j| {
+                let others_cover = rows
+                    .iter()
+                    .all(|r| r.iter().enumerate().all(|(i, p)| i == j || covers(p)));
+                let column: Vec<&Pattern> = rows.iter().filter_map(|r| r[j]).collect();
+
+                others_cover && self.column_covers(&column)
+            });
+        };
+
+        self.enums[&e].iter().all(|(v, arity)| {
+            let mut split_rows = Vec::new();
+
+            for r in &rows {
+                let sides =
+                    r[j].map_or(vec![None], |p| or_sides(p).into_iter().map(Some).collect());
+
+                for side in sides {
+                    let mut head: Vec<Option<&'p Pattern>> = match side {
+                        Some(p) if !self.struct_pattern_covers(p) => {
+                            match self.variant_of_pattern(p) {
+                                Some((pe, pv, args)) if pe == e && pv == *v => {
+                                    (0..*arity).map(|i| args.get(i)).collect()
+                                }
+
+                                _ => continue,
+                            }
+                        }
+
+                        _ => vec![None; *arity],
+                    };
+                    head.extend(r[..j].iter().chain(&r[j + 1..]).copied());
+                    split_rows.push(head);
+                }
             }
 
-            let column: Vec<&Pattern> = rows.iter().filter_map(|r| r.get(j).copied()).collect();
-
-            self.column_covers(&column)
+            self.matrix_covers(split_rows, width - 1 + arity)
         })
+    }
+
+    /// The enum and the variant a pattern names, with its payload
+    /// patterns: `Missed`, `Outcome.Missed`, or `Landed(n)`. `None` for
+    /// any other pattern.
+    fn variant_of_pattern<'p>(&self, p: &'p Pattern) -> Option<(String, String, &'p [Pattern])> {
+        match p {
+            Pattern::Bind(n) => {
+                let name = self.text_of(*n).to_string();
+
+                Some((self.unit_variant_of(&name)?, name, &[]))
+            }
+
+            // A path compares by value, so it matches a unit variant only.
+            Pattern::Path(span) => {
+                let (e, v) = self.enum_of_path(self.text_of(*span))?;
+                let unit = self.enums.get(&e)?.iter().any(|(n, c)| *n == v && *c == 0);
+
+                unit.then_some((e, v, &[]))
+            }
+
+            Pattern::Variant { name, args, .. } => {
+                let (vname, path_enum) = self.pattern_variant(*name);
+                let owner = path_enum.or_else(|| {
+                    self.enums
+                        .iter()
+                        .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                        .map(|(e, _)| e.clone())
+                })?;
+
+                Some((owner, vname, args))
+            }
+
+            _ => None,
+        }
     }
 
     /// `match` as a statement: an if-chain on temps, one arm per line.
@@ -3735,6 +3842,30 @@ mod tests {
             2,
             "{}",
             out.ship
+        );
+    }
+
+    /// The payload slots of a variant are a product: arms that cover it
+    /// only together, with no slot that covers alone, still cover it.
+    /// An arm list that leaves one pair out still reports.
+    #[test]
+    fn payload_slots_cover_as_a_product() {
+        let head = "enum Hit as\n    Landed(number)\n    Missed\nend\nenum Wrap as\n    Pair(Hit, Hit)\n    Empty\nend\nlocal function f(w: Wrap): number\n    return match w with\n        case Empty then 0\n        case Pair(Missed, _) then 1\n";
+        let full = format!(
+            "{head}        case Pair(Landed(n), Landed(l)) then n + l\n        case Pair(Landed(n), Missed) then n\n    end\nend\nprint(f)\n"
+        );
+        let gap = format!(
+            "{head}        case Pair(Landed(n), Landed(l)) then n + l\n    end\nend\nprint(f)\n"
+        );
+        let either = format!(
+            "{head}        case Pair(Landed(_), Landed(_) or Missed) then 2\n    end\nend\nprint(f)\n"
+        );
+
+        assert!(messages(&full).is_empty(), "{:?}", messages(&full));
+        assert!(messages(&either).is_empty(), "{:?}", messages(&either));
+        assert_eq!(
+            messages(&gap),
+            vec!["this match is not exhaustive; add a `default` arm"]
         );
     }
 }

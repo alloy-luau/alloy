@@ -719,8 +719,8 @@ pub fn luau_sourcemap(root: &Path, config: &Config) -> Option<String> {
         .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
 }
 
-/// A sourcemap with each script path passed through `f`. A text that
-/// does not parse comes back as it is.
+/// A sourcemap with each script path passed through `f`, as luau-lsp
+/// reads it. A text that does not parse comes back as it is.
 pub fn map_sourcemap(text: &str, f: &dyn Fn(&str) -> String) -> String {
     fn walk(v: &mut Value, f: &dyn Fn(&str) -> String) {
         match v {
@@ -735,6 +735,11 @@ pub fn map_sourcemap(text: &str, f: &dyn Fn(&str) -> String) -> String {
                                     *s = f(s);
                                 }
                             }
+                        }
+
+                        ("children", Value::Array(kids)) => {
+                            kids.iter_mut().for_each(|k| walk(k, f));
+                            distinct_scripts(kids);
                         }
 
                         (_, v) => walk(v, f),
@@ -752,6 +757,33 @@ pub fn map_sourcemap(text: &str, f: &dyn Fn(&str) -> String) -> String {
     walk(&mut json, f);
 
     serde_json::to_string(&json).unwrap_or_else(|_| text.to_string())
+}
+
+/// luau-lsp names a module by its instance path, so two siblings of one
+/// name are one module to it: `duel.client.aly` then checks the text of
+/// `duel.server.aly`. No code requires a script, so a script that shares
+/// its name with a sibling takes its side as well, `duel.client`.
+fn distinct_scripts(kids: &mut [Value]) {
+    let names: Vec<Option<String>> = kids
+        .iter()
+        .map(|k| k["name"].as_str().map(str::to_string))
+        .collect();
+
+    for (kid, name) in kids.iter_mut().zip(&names) {
+        let side = match kid["className"].as_str() {
+            Some("Script") => "server",
+
+            Some("LocalScript") => "client",
+
+            _ => continue,
+        };
+
+        if let Some(name) = name
+            && names.iter().filter(|n| n.as_ref() == Some(name)).count() > 1
+        {
+            kid["name"] = Value::String(format!("{name}.{side}"));
+        }
+    }
 }
 
 /// The Luau file luau-lsp reads for a script path of a sourcemap. An
@@ -1033,6 +1065,26 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         assert_eq!(ui["className"], "LocalScript");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// luau-lsp keys a module on its instance path, so `duel.client`
+    /// and `duel.server` must not share one. A module keeps its name.
+    #[test]
+    fn scripts_of_one_stem_reach_luau_lsp_apart() {
+        let text = r#"{"name":"game","children":[
+            {"name":"duel","className":"LocalScript","filePaths":["src/duel.client.aly"]},
+            {"name":"duel","className":"Script","filePaths":["src/duel.server.aly"]},
+            {"name":"duel","className":"ModuleScript","filePaths":["src/duel.aly"]},
+            {"name":"hud","className":"LocalScript","filePaths":["src/hud.client.aly"]}]}"#;
+        let map: Value = serde_json::from_str(&map_sourcemap(text, &luau_script_path)).unwrap();
+        let names: Vec<&str> = map["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["duel.client", "duel.server", "duel", "hud"]);
+        assert_eq!(map["children"][0]["filePaths"][0], "src/duel.client.luau");
     }
 
     /// A root whose tree is its own project file, with the aliases in

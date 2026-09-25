@@ -3939,3 +3939,30 @@ fn a_struct_constructor_shows_the_call_around_it() {
     assert!(!in_constructor_braces("f({ ", 4));
     assert!(!in_constructor_braces("f(renew { ", 10));
 }
+
+/// `new V(1, 2)` lowers to `V.new(1, 2)`. The arguments now copy in
+/// place, so a caret inside them maps into that call and the child
+/// answers. A file that stops at `new V(1, )` has no artifact; the `new`
+/// an impl of `V` declares answers there, as `V.new(` would.
+#[test]
+fn a_new_call_shows_the_constructor() {
+    let head = "struct V\n  x: number\nend\n\nimpl V\n  function new(x: number, y: number): V\n    return new V { x = x }\n  end\nend\n\n";
+    let closed = format!("{head}local a = new V(1, 2)\n");
+    let out = alloy::compile_with(&closed, &alloy::EmitOptions::default()).expect("compile");
+    let one = closed.find("(1, 2)").expect("call") as u32 + 1;
+
+    assert!(out.check.contains("local a = V.new(1, 2)"), "{}", out.check);
+    assert!(
+        out.map.to_output(one).is_some(),
+        "the `1` maps into the call"
+    );
+
+    let (st, uri) = one_file(&format!("{head}local b = new V(1, )\n"));
+    let help = st.declared_signature_help(uri, 10, 19).expect("help");
+
+    assert_eq!(
+        help["signatures"][0]["label"],
+        json!("function V.new(x: number, y: number): V")
+    );
+    assert_eq!(help["activeParameter"], json!(1));
+}

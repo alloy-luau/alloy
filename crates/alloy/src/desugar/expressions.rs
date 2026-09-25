@@ -574,6 +574,15 @@ impl<'s> Desugar<'s> {
                         self.new_head(name, *type_args, args.as_ref(), init.as_deref(), *span);
                     self.generate(anchor, &head);
 
+                    // `new V(a, b)` copies its arguments in place, so a
+                    // caret inside them maps into the `V.new(a, b)` of the
+                    // artifact, and signature help reads that call.
+                    if let (Some(CallArgs::Paren(list)), None) = (args.as_ref(), init.as_deref()) {
+                        let open = self.new_args_start(name, *type_args);
+                        let children: Vec<Child<'_>> = list.iter().map(Child::Expr).collect();
+                        self.stitch_between(open, self.byte_end(*span), &children);
+                    }
+
                     if let Some(table) = init.as_deref() {
                         let written = self.text_of(name.span()).trim().to_string();
                         self.expect_field_types(&written, name, table);
@@ -1413,6 +1422,9 @@ impl<'s> Desugar<'s> {
         };
 
         match (args, init) {
+            // The caller copies a parenthesized list in place.
+            (Some(CallArgs::Paren(_)), None) => format!("{n}.{ctor}{t}"),
+
             (Some(a), None) => {
                 let a = self.args_text(a);
 
@@ -1451,6 +1463,14 @@ impl<'s> Desugar<'s> {
                 }
             }
         }
+    }
+
+    /// The byte offset of the `(` that opens the arguments of `new V(...)`:
+    /// the token after the name, or after its type arguments.
+    fn new_args_start(&self, name: &Expr, type_args: Option<TokSpan>) -> u32 {
+        let after = type_args.map_or(name.span().end, |t| t.end);
+
+        self.toks[after as usize].start
     }
 
     /// `{ ...a, x = 1, ...b }` becomes `spread(a, { x = 1 }, b)`, with the

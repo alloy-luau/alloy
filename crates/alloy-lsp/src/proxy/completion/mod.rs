@@ -358,14 +358,26 @@ impl State {
         let doc = self.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let (key, active) = open_call(&doc.source, offset)?;
+        let sources = || {
+            std::iter::once(doc.source.as_str())
+                .chain(doc.import_sources.iter().map(String::as_str))
+        };
         // The declaration index reads a parse, and a file with an
         // unclosed call has none; the source line still has the
         // signature. A module the file imports answers the same way.
         let (label, parameters) = match key.starts_with('@') {
             true => attribute_signature(doc, &key, offset),
 
-            false => std::iter::once(doc.source.as_str())
-                .chain(doc.import_sources.iter().map(String::as_str))
+            // `new V(1, )` calls the `new` an impl of `V` declares.
+            false if constructs(&doc.source, offset) => sources()
+                .find_map(|src| callable_signature(constructor_line(src, &key)?))
+                .map(|(label, parameters)| {
+                    let label = label.replacen("function new(", &format!("function {key}.new("), 1);
+
+                    (label, parameters)
+                }),
+
+            false => sources()
                 .find_map(|src| callable_signature(declared_line(src, &key)?))
                 .or_else(|| intrinsic_signature(&key)),
         }?;
@@ -1204,6 +1216,42 @@ pub(crate) fn declares_params(src: &str, start: usize) -> bool {
     let (s, e) = keywords::word_range(src, before.len() - 1);
 
     matches!(&src[s..e], "function" | "remote" | "macro" | "attribute")
+}
+
+/// Whether the innermost call open at `offset` is `new V(`.
+fn constructs(src: &str, offset: usize) -> bool {
+    open_paren_word(src, offset).is_some_and(|(start, _, _)| {
+        src[..start]
+            .trim_end()
+            .strip_suffix("new")
+            .is_some_and(|rest| !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+    })
+}
+
+/// The line an `impl` of `name` declares its `new` on, which `new V(...)`
+/// calls. The search in each block stops at the next `impl`.
+pub(crate) fn constructor_line<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let lexed = alloy_syntax::lexer::lex(src).ok()?;
+    let toks = &lexed.toks;
+    let text = |i: usize| toks[i].text(src);
+    // The header names the target on the line of `impl`.
+    let names = |i: usize| {
+        (i + 1..toks.len())
+            .take_while(|&j| !src[toks[j - 1].end as usize..toks[j].start as usize].contains('\n'))
+            .any(|j| text(j) == name)
+    };
+    let at = (0..toks.len())
+        .filter(|&i| text(i) == "impl" && names(i))
+        .find_map(|i| {
+            (i + 1..toks.len().saturating_sub(1))
+                .take_while(|&j| text(j) != "impl")
+                .find(|&j| text(j) == "function" && text(j + 1) == "new")
+        })?;
+    let at = toks[at].start as usize;
+    let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = src[at..].find('\n').map_or(src.len(), |i| at + i);
+
+    Some(&src[start..end])
 }
 
 /// The line a source declares a callable name on: a `function`, a

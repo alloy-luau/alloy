@@ -672,6 +672,25 @@ impl<'s> Desugar<'s> {
         self.namespaces.contains_key(&path.replace('.', "_"))
     }
 
+    /// The key of the namespace the head of a path names. A nested
+    /// namespace reads by its own name inside the one that declares it,
+    /// so `Deep.Pos` inside `Combat` is `Combat.Deep.Pos`. The innermost
+    /// namespace under render answers first, then the file. A member of
+    /// that name that is no namespace shadows the file's namespace.
+    fn ns_head_key(&self, head: &str) -> Option<String> {
+        for frame in self.ns_stack.iter().rev() {
+            if let Some(m) = self
+                .namespaces
+                .get(&frame.key)
+                .and_then(|info| info.member(head))
+            {
+                return m.nested.then(|| key_of(Some(&frame.key), head));
+            }
+        }
+
+        self.namespaces.contains_key(head).then(|| head.to_string())
+    }
+
     /// The rendered name a dotted path through the file's namespaces
     /// names: `Zoo.Lion` is `Zoo_Lion`, and `A.B.S` through a nested
     /// namespace is `A_B_S`. `None` when the head names no namespace,
@@ -679,7 +698,7 @@ impl<'s> Desugar<'s> {
     pub(crate) fn ns_path_name(&self, path: &str) -> Option<String> {
         let parts: Vec<&str> = path.split('.').map(str::trim).collect();
         let (head, rest) = parts.split_first()?;
-        let mut key = (*head).to_string();
+        let mut key = self.ns_head_key(head)?;
         let mut info = self.namespaces.get(&key)?;
         let mut at = 0;
 
@@ -801,8 +820,9 @@ impl<'s> Desugar<'s> {
         let (s, e) = (self.byte_start(span), self.byte_end(span));
 
         // `Math.Vec2`, and `Outer.Inner.Point` through a nested one.
-        if let Some(info) = self.namespaces.get(&name) {
-            let mut key = name.clone();
+        if let Some(mut key) = self.ns_head_key(&name)
+            && let Some(info) = self.namespaces.get(&key)
+        {
             let mut info = info;
 
             for (at, (member, fe)) in self.dotted_chain(span)?.iter().enumerate() {
@@ -1080,9 +1100,8 @@ impl<'s> Desugar<'s> {
     /// nested namespaces.
     pub(crate) fn namespace_path_name(&self, path: &str) -> Option<String> {
         let mut parts = path.split('.');
-        let head = parts.next()?;
-        let mut key = head.to_string();
-        let mut info = self.namespaces.get(head)?;
+        let mut key = self.ns_head_key(parts.next()?)?;
+        let mut info = self.namespaces.get(&key)?;
 
         for part in parts {
             let m = info.member(part)?;

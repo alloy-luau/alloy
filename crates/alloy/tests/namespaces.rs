@@ -1500,3 +1500,44 @@ fn a_namespace_type_warns_of_an_identity_compare() {
         ]
     );
 }
+
+/// Inside a namespace a type path reads from the namespace outward, as a
+/// value path does: `Deep.Pos` inside `Combat` names `Combat.Deep.Pos`,
+/// and so does `Pos` inside `Deep`. The emit left `Deep.Pos` as written,
+/// and the checker reported "Unknown type 'Deep.Pos'".
+#[test]
+fn a_type_path_reads_from_the_enclosing_namespace() {
+    let src = "namespace Combat\n    struct Box<T>\n        v: T\n    end\n    namespace Deep\n        struct Pos\n            @u8 x: number\n        end\n        function mid(p: Pos): Pos\n            return new Pos { x = p.x }\n        end\n    end\n    struct Hit\n        at: Deep.Pos\n        boxed: Box<Deep.Pos>\n    end\n    function place(p: Deep.Pos): Deep.Pos\n        local b: Box<Deep.Pos> = new Box<<Deep.Pos>> { v = p }\n        return new Deep.Pos { x = b.v.x }\n    end\nend\nremote Land(hit: Combat.Hit) from client\n";
+    let (ship, check, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+
+    for text in [
+        "function Combat_Deep_mid(p: Combat_Deep_Pos): Combat_Deep_Pos",
+        "at: Combat_Deep_Pos, boxed: Combat_Box<Combat_Deep_Pos>",
+        "function Combat_place(p: Combat_Deep_Pos): Combat_Deep_Pos",
+        "local b: Combat_Box<Combat_Deep_Pos> = Combat_Box.__new<<Combat_Deep_Pos>>(",
+        "return Combat_Deep_Pos.__new({ x = b.v.x })",
+    ] {
+        assert!(check.contains(text), "{text}\n{check}");
+    }
+
+    let pos = "{ fields = { { \"x\", \"u8\" } }, struct = Combat_Deep_Pos }";
+    assert!(ship.contains(&format!("{{ \"at\", {pos} }}")), "{ship}");
+
+    // Another module reads the field in the module that declares it.
+    let dir = temp_project("relative");
+    fs::write(dir.join("src/rel.aly"), format!("export {src}")).unwrap();
+    fs::write(
+        dir.join("src/use.aly"),
+        "import { Combat } from \"./rel\"\nexport remote Land2(hit: Combat.Hit) from client\n",
+    )
+    .unwrap();
+    let report = build(&dir);
+    assert!(report.diagnostics.is_empty(), "{report:?}");
+
+    let used = fs::read_to_string(dir.join("out/use.luau")).unwrap();
+    let pos = "{ fields = { { \"x\", \"u8\" } }, struct = \"rel.aly:Combat_Deep_Pos\" }";
+    assert!(used.contains(&format!("{{ \"at\", {pos} }}")), "{used}");
+
+    let _ = fs::remove_dir_all(&dir);
+}

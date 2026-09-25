@@ -123,12 +123,20 @@ pub fn to_source(lints: &mut [Lint], src: &str, map: &crate::render::SpanMap) {
     }
 }
 
-/// Applies the fixes of `lints` to `src`, last to first so the offsets
-/// hold. Two fixes that overlap keep the first, and a fix lands with all
-/// its edits or none.
+/// Applies the fixes of `lints` to `src`. Two fixes that overlap keep
+/// the first, a fix lands with all its edits or none, and a fix that
+/// breaks the parse does not land. See `sound`.
 pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
     let chosen = compatible(src, lints.iter().filter_map(|l| l.fix.as_ref()));
-    let mut edits: Vec<&Fix> = chosen.iter().flat_map(|f| f.edits()).collect();
+    let (kept, _) = sound(src, chosen);
+
+    (apply(src, &kept), kept.len())
+}
+
+/// The text of `src` with the edits of `fixes`, last to first so the
+/// offsets hold. The fixes must not overlap: see `compatible`.
+pub fn apply(src: &str, fixes: &[&Fix]) -> String {
+    let mut edits: Vec<&Fix> = fixes.iter().flat_map(|f| f.edits()).collect();
     edits.sort_by_key(|e| (e.start, e.end));
     let mut out = src.to_string();
 
@@ -136,7 +144,29 @@ pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
         out.replace_range(e.start as usize..e.end as usize, &e.replacement);
     }
 
-    (out, chosen.len())
+    out
+}
+
+/// Splits `fixes` into the ones that keep `src` parsing and the ones
+/// that break it. A lint that misreads its code can write text that
+/// does not parse, as `if return f() then` once did. `--fix` and the
+/// editor refuse that rewrite and keep the file. A sound set costs one
+/// parse. A source that does not parse refuses nothing.
+pub fn sound<'a>(src: &str, fixes: Vec<&'a Fix>) -> (Vec<&'a Fix>, Vec<&'a Fix>) {
+    let parses = |fixes: &[&Fix]| alloy_syntax::parse_one(&apply(src, fixes)).is_ok();
+
+    if fixes.is_empty() || parses(&fixes) || alloy_syntax::parse_one(src).is_err() {
+        return (fixes, Vec::new());
+    }
+
+    let (kept, broken): (Vec<&Fix>, Vec<&Fix>) = fixes.iter().copied().partition(|f| parses(&[*f]));
+
+    // Two fixes that parse alone can still break the parse together.
+    if parses(&kept) {
+        (kept, broken)
+    } else {
+        (Vec::new(), fixes)
+    }
 }
 
 /// The fixes that land together, in source order: each still reads

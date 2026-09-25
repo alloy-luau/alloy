@@ -710,12 +710,41 @@ pub(crate) fn apply_lint_fixes(
         let mut live = live;
         let mut written = 0;
         let mut failed = false;
+        let mut refused: Vec<Lint> = Vec::new();
 
         // One rewrite can expose the next: collapsing an `if` chain
         // leaves another collapsible pair. The fixer runs again over
         // what it wrote, so one `--fix` reaches the fixed point.
         for _ in 0..FIX_PASSES {
-            let (text, n) = lint::apply_fixes(&source, &live);
+            let chosen = lint::compatible(&source, live.iter().filter_map(|l| l.fix.as_ref()));
+            let (kept, broken) = lint::sound(&source, chosen);
+
+            // The file keeps the code, and the lint stays in the report.
+            // A later pass reads the same lint again, so it prints once.
+            for l in live
+                .iter()
+                .filter(|l| l.fix.as_ref().is_some_and(|f| broken.contains(&f)))
+            {
+                if refused
+                    .iter()
+                    .any(|r| r.name == l.name && r.message == l.message)
+                {
+                    continue;
+                }
+
+                let line = alloy::directives::line_of(&source, l.start as usize) + 1;
+                eprintln!(
+                    "{}",
+                    p.warn(&format!(
+                        "{}:{line}: refused the `{}` rewrite: the result does not parse",
+                        path.display(),
+                        l.name
+                    ))
+                );
+                refused.push(l.clone());
+            }
+
+            let (text, n) = (lint::apply(&source, &kept), kept.len());
 
             if n == 0 || text == source {
                 break;
@@ -747,6 +776,12 @@ pub(crate) fn apply_lint_fixes(
             remaining.extend(live.into_iter().map(|l| (rel.clone(), l)));
 
             continue;
+        }
+
+        // A write lints the file again below; with none, the refused
+        // lints go back to the report here.
+        if written == 0 {
+            remaining.extend(refused.into_iter().map(|l| (rel.clone(), l)));
         }
 
         if written > 0 {

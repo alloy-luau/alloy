@@ -758,6 +758,7 @@ impl<'s> Scan<'s> {
         for i in 0..self.toks.len() {
             if !(self.at(i, "local") || self.at(i, "const"))
                 || !self.statement_start(i)
+                || self.cond_binding(i)
                 || !self.is_name(i + 1)
                 || !self.at(i + 2, "=")
             {
@@ -1601,6 +1602,56 @@ mod tests {
     fn an_if_expression_in_an_arm_keeps_the_impl_open() {
         let src = "enum C as\n    A(number)\n    B\nend\n\nstruct R as\n    private xs: number[]\nend\n\nimpl R as\n    public function viamatch(self, c: C): number\n        return match c with\n            case A(n) then if #self.xs > 0 then n else 0\n            case B then 0\n        end\n    end\n\n    public function stmt(self, c: C)\n        match c with\n            case A(n) then self.xs:push(n)\n            case B then print(\"b\")\n        end\n    end\nend\n\nreturn R\n";
         assert_eq!(names(src), Vec::<&str>::new());
+    }
+
+    /// The binding of a condition is not a statement. `if local r = f()`
+    /// then `return r` read as one, and `--fix` wrote `if return f() then`.
+    #[test]
+    fn a_condition_binding_takes_no_return_rewrite() {
+        for head in [
+            "if local r = f() then",
+            "if const r = t[1] then",
+            "while local r = f() do",
+            "if not local q = f() then\n        return 0\n    elseif local r = f() then",
+            "if local a = f(); local r = g(a) then",
+        ] {
+            let src = format!("local function use()\n    {head}\n        return r\n    end\nend\n");
+            assert!(!names(&src).contains(&"local_then_return"), "{src}");
+        }
+        // A plain `local` after a condition still takes it.
+        assert_eq!(
+            fixed("if ok then\n    local r = f()\n    return r\nend\n"),
+            "if ok then\n    return (f())\nend\n"
+        );
+    }
+
+    /// A rewrite that breaks the parse does not land, and one beside it
+    /// that keeps the parse still does.
+    #[test]
+    fn a_fix_that_breaks_the_parse_is_refused() {
+        let src = "local a = 1\nif a then\n    print(a)\nend\n";
+        let fix = |from: &str, to: &str| {
+            let at = src.find(from).unwrap() as u32;
+
+            crate::Lint {
+                name: "test",
+                start: at,
+                end: at,
+                message: String::new(),
+                fix: Some(crate::lint::Fix::new(src, at, at + from.len() as u32, to)),
+            }
+        };
+        let (text, n) = apply_fixes(
+            src,
+            &[
+                fix("if a then", "if return a then"),
+                fix("local a", "const a"),
+            ],
+        );
+        assert_eq!(
+            (text.as_str(), n),
+            ("const a = 1\nif a then\n    print(a)\nend\n", 1)
+        );
     }
 
     #[test]

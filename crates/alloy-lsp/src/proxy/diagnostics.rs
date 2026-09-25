@@ -765,6 +765,12 @@ impl State {
                 continue;
             }
 
+            // A rewrite that breaks the parse is a lint's mistake, and
+            // `--fix` refuses it too.
+            if !alloy::lint::sound(&doc.source, vec![fix]).1.is_empty() {
+                continue;
+            }
+
             // A fix with no replacement deletes, so the title names
             // what goes away: `Rewrite as ``` says nothing.
             let (verb, text) = match fix.replacement.trim().is_empty() {
@@ -835,6 +841,7 @@ impl State {
             // Two rewrites that overlap keep the first, as `--fix` does,
             // and a rename lands with every edit it makes.
             let chosen = alloy::lint::compatible(&doc.source, fixes);
+            let (chosen, _) = alloy::lint::sound(&doc.source, chosen);
             let kept: Vec<Value> = chosen.iter().flat_map(|f| edits_of(f)).collect();
 
             actions.push(json!({

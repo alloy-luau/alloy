@@ -130,8 +130,27 @@ impl<'s> Scan<'s> {
             )
             // `local a = 1  local b = 2` is two statements on one line.
             // No expression holds a `local` or a `const`, so each one
-            // opens a statement wherever it stands.
+            // opens a declaration wherever it stands. The binding of a
+            // condition is a declaration too, but not a statement: see
+            // `cond_binding`.
             || matches!(self.t(i), "local" | "const")
+    }
+
+    /// Whether the `local` or `const` at `i` binds in a condition, as in
+    /// `if local x = f() then` or `while const v = g() do`. A rewrite of
+    /// a whole statement must skip it: the `then` or `do` follows it.
+    pub(crate) fn cond_binding(&self, i: usize) -> bool {
+        match self.prev(i) {
+            "if" | "elseif" | "while" | "not" => true,
+
+            // `if local a = f(); local b = g(a) then` stacks two.
+            ";" => (0..i - 1)
+                .rev()
+                .find(|&k| matches!(self.t(k), "local" | "const"))
+                .is_some_and(|k| self.cond_binding(k)),
+
+            _ => false,
+        }
     }
 
     /// The token that ends the block a declaration at `d` stands in: the

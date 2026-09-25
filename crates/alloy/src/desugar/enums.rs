@@ -643,7 +643,10 @@ impl<'s> Desugar<'s> {
     /// type it has.
     fn castable_enum(&self, e: &str) -> Option<String> {
         let name = self.enum_type_name(e);
-        let generic = self.generic_types.contains(e) || self.generic_types.contains(&name);
+        // `Result` is the runtime's generic enum. The file binds no
+        // table of that name, so it has no constructor to read.
+        let generic =
+            e == "Result" || self.generic_types.contains(e) || self.generic_types.contains(&name);
 
         (!generic).then_some(name)
     }
@@ -3555,6 +3558,22 @@ mod tests {
             messages(src),
             ["`Itme` is not an enum in scope; `Item` has the variant `Sword`"]
         );
+    }
+
+    /// `Result` is the runtime's generic enum, and the file binds no
+    /// `Result` table. A name under `Ok` reads its type through the
+    /// parent, as under any generic enum.
+    #[test]
+    fn a_name_under_a_nested_result_reads_no_result_table() {
+        let src = "enum Loaded as\n    Some(Result<number, string>)\n    None\nend\nlocal l = Loaded.None\nmatch l with\n    case Loaded.Some(Ok(n)) then print(n)\n    default print(0)\nend\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.check.contains("Result.Ok("), "{}", out.check);
+        assert!(out.check.contains("_x.tag == \"Ok\""), "{}", out.check);
     }
 
     /// A name that a nested variant binds takes the payload type in the

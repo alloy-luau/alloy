@@ -394,6 +394,9 @@ require. `import { g } from "./other"` in `src/init.aly` emitted
 
 The emit writes the path from the folder Luau resolves it from. Only an
 `init` module moves; every other file keeps the path the source wrote.
+A file inside the `init`'s own folder is `@self/...`: the folder's name
+on disk can differ from its instance name, so `./build/other` fails in
+Roblox and under a sourcemap.
 */
 #[test]
 fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
@@ -440,9 +443,9 @@ fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
     for (out, specs) in [
         (
             "build/init.luau",
-            ["./build/other", "./build/widget", "./build/legacy"].as_slice(),
+            ["@self/other", "@self/widget", "@self/legacy"].as_slice(),
         ),
-        ("build/deep/init.luau", ["./deep/sib", "./other"].as_slice()),
+        ("build/deep/init.luau", ["@self/sib", "./other"].as_slice()),
         // A file that is no `init` keeps the path the source wrote.
         ("build/plain.luau", ["./other"].as_slice()),
     ] {
@@ -455,13 +458,16 @@ fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
             );
 
             // The folder Luau starts the require from: the file's own,
-            // and the one above it for an `init.luau`.
+            // and the one above it for an `init.luau`. `@self` is the
+            // `init`'s own folder.
             let path = dir.join(out);
             let folder = path.parent().unwrap();
-            let folder = match out.ends_with("init.luau") {
-                true => folder.parent().unwrap(),
+            let (folder, spec) = match (spec.strip_prefix("@self/"), out.ends_with("init.luau")) {
+                (Some(inner), _) => (folder, inner),
 
-                false => folder,
+                (None, true) => (folder.parent().unwrap(), *spec),
+
+                (None, false) => (folder, *spec),
             };
 
             assert!(

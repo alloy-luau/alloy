@@ -38,8 +38,9 @@ pub(crate) fn the_mirror_config_names_the_runtime_and_the_mounts() {
 }
 /// Luau reads `src/init.luau` as the module `src`, so a relative
 /// require in it names a file beside `src`. The shadow of an `init.aly`
-/// writes the path from there. Without it the child resolves no module
-/// and every imported name reads as `unknown`.
+/// names a file of its own folder as `@self/...`, which holds under a
+/// sourcemap too. Without it the child resolves no module and every
+/// imported name reads as `unknown`.
 #[test]
 pub(crate) fn an_init_shadow_requires_a_sibling_through_its_folder() {
     let dir = std::env::temp_dir().join(format!("alloy-init-require-{}", std::process::id()));
@@ -69,7 +70,7 @@ pub(crate) fn an_init_shadow_requires_a_sibling_through_its_folder() {
     };
     let shadow = init("src/init.aly");
 
-    assert!(shadow.contains("require(\"./src/scheduler\")"), "{shadow}");
+    assert!(shadow.contains("require(\"@self/scheduler\")"), "{shadow}");
 
     // A file that is no `init` keeps the path the source wrote.
     let shadow = init("src/other.aly");

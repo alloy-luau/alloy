@@ -83,6 +83,17 @@ impl<'s> Desugar<'s> {
         let dir = rel.parent().unwrap_or(std::path::Path::new(""));
         let target = crate::modules::normalize(&dir.join(path));
 
+        // A file inside the folder is `@self/...`. The folder's instance
+        // name can differ from its name on disk, so `./src/x` fails in
+        // Roblox and under a sourcemap.
+        if let Ok(inner) = target.strip_prefix(dir)
+            && !inner.starts_with("..")
+        {
+            let inner: Vec<_> = inner.iter().map(|c| c.to_string_lossy()).collect();
+
+            return Some(format!("@self/{}", inner.join("/")));
+        }
+
         Some(crate::build::relative_require(
             &crate::build::module_base(rel),
             &target,

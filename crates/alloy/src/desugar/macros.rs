@@ -58,14 +58,19 @@ pub(crate) fn body_locals(body: &str) -> Vec<String> {
             .next()
             .is_some_and(|c| c.is_alphabetic() || c == '_')
             && w.chars().all(|c| c.is_alphanumeric() || c == '_')
-            && !matches!(w, "function" | "in" | "do" | "end" | "local" | "for")
+            && !matches!(
+                w,
+                "function" | "in" | "do" | "end" | "local" | "const" | "for"
+            )
     };
     let mut out = Vec::new();
     let mut i = 0;
 
     while i < words.len() {
         match words[i] {
-            "local" => {
+            // A `const` binds a name the same way, and the caller may
+            // hold one of the same name.
+            "local" | "const" => {
                 let mut j = i + 1;
 
                 if words.get(j) == Some(&"function") {
@@ -1005,6 +1010,21 @@ mod tests {
 
         let used = "local e: Result<number, string> = Ok(1)\nprint($matches(e, Ok(_)))\n";
         assert!(messages(used).is_empty(), "{:?}", messages(used));
+    }
+
+    /// A `const` in a macro body kept its name, so `$m(tmp)` read the
+    /// macro's own `tmp` in place of the caller's.
+    #[test]
+    fn a_const_in_a_macro_body_takes_a_fresh_name() {
+        assert_eq!(super::body_locals("const tmp = 1 print(x)"), vec!["tmp"]);
+
+        let src = "macro m(x)\n    const tmp = 1\n    print(tmp, x)\nend\nlocal tmp = 2\n$m(tmp)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship.contains("tmp__m1 = 1 print(tmp__m1, tmp)"),
+            "{}",
+            out.ship
+        );
     }
 
     /// `$map` takes pairs. A flat list reads as one pair and built a

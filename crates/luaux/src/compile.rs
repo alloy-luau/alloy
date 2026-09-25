@@ -751,13 +751,23 @@ mod tests {
         );
     }
 
+    /// Text between the tags sets `Text`, so a `Text` attribute too is a
+    /// conflict. The tags used to win, and the attribute's expression left
+    /// the output with no report.
     #[test]
-    fn text_children_override_a_text_attribute() {
-        // PROPOSAL.md Rule 5.
-        assert_eq!(
-            build(r#"local e = <TextLabel Text="A">B</TextLabel>"#),
-            "local e = create(\"TextLabel\")({ Text = \"B\" })"
-        );
+    fn a_text_attribute_and_text_children_conflict() {
+        for source in [
+            r#"local e = <TextLabel Text="A">B</TextLabel>"#,
+            "local e = <TextLabel Text={tostring(n)}>{label}</TextLabel>",
+        ] {
+            let error = try_build(source).expect_err(source);
+
+            assert!(error.message.contains("`Text` is set twice"), "{error:?}");
+            assert_eq!(
+                &format!("{BINDING}{source}")[error.offset..error.offset + error.length],
+                source[source.find("Text=").unwrap()..source.find('>').unwrap()].trim_end(),
+            );
+        }
     }
 
     #[test]
@@ -2053,7 +2063,8 @@ fragment = \"Frag\"
     /// The spelling is `=` rather than a bare `{Text}` because a bare hole in
     /// attribute position already means a spread, and one syntax cannot mean two
     /// things. Everything after the name is decided stays shared with a written
-    /// attribute: aliases, the property check, event wrapping, and Rule 5.
+    /// attribute: aliases, the property check, event wrapping, and the `Text`
+    /// conflict.
     mod inferred {
         use super::*;
 
@@ -2159,17 +2170,18 @@ fragment = \"Frag\"
             );
         }
 
-        /// Rule 5 applies to an inferred `Text` exactly as to a written one.
+        /// The `Text` conflict applies to an inferred `Text` exactly as to a
+        /// written one.
         #[test]
-        fn text_between_the_tags_still_wins() {
-            assert_eq!(
-                build("local e = <TextLabel ={props.Text}>Body</TextLabel>"),
-                "local e = create(\"TextLabel\")({ Text = \"Body\" })"
-            );
+        fn an_inferred_text_conflicts_with_text_between_the_tags() {
+            let error = try_build("local e = <TextLabel ={props.Text}>Body</TextLabel>")
+                .expect_err("should fail");
+
+            assert!(error.message.contains("`Text` is set twice"), "{error:?}");
         }
 
-        /// Resolving before the skip also means a *retired* spelling is now
-        /// rejected here, where Rule 5 used to drop it unexamined. That is the
+        /// Resolving before the conflict check also means a *retired* spelling
+        /// is rejected here, where the old skip dropped it unexamined. That is the
         /// README's exclusive-rename rule applied consistently: once a property
         /// is renamed the old spelling is an error everywhere, and the presence
         /// of text children is no reason to exempt it.
@@ -2188,23 +2200,20 @@ fragment = \"Frag\"
             assert!(error.message.contains("use text"), "{error:?}");
         }
 
-        /// Rule 5 compares the **canonical** name. Compared against what was
-        /// written, any rename slipped past it and the property was emitted
-        /// twice in one table — Luau takes the last, so the tags won by accident
-        /// rather than by rule. Both spellings are checked because the written
-        /// form had the bug too; the shorthand only made it easy to hit.
+        /// The conflict check compares the **canonical** name. Compared
+        /// against what was written, any rename slipped past it and the
+        /// property was emitted twice in one table. Both spellings are
+        /// checked because the written form had the bug too; the shorthand
+        /// only made it easy to hit.
         #[test]
-        fn a_renamed_text_property_does_not_emit_twice() {
+        fn a_renamed_text_property_still_conflicts() {
             for source in [
                 "local e = <TextLabel text={props.x}>Body</TextLabel>",
                 "local e = <TextLabel ={props.text}>Body</TextLabel>",
             ] {
-                let compiled = build_with(source, "[properties]\nall = \"camelCase\"\n");
+                let error = build_with_err(source, "[properties]\nall = \"camelCase\"\n");
 
-                assert_eq!(
-                    compiled, "local e = create(\"TextLabel\")({ Text = \"Body\" })",
-                    "{source}"
-                );
+                assert!(error.contains("`Text` is set twice"), "{source}: {error}");
             }
         }
 

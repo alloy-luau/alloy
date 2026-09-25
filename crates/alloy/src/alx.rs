@@ -133,6 +133,26 @@ pub fn compile_alx(
     // the wrong offset and writes over the author's code.
     crate::lint::to_source(&mut output.lints, src, &lowering);
 
+    // A markup error can drop the code it covers from the lowering, as
+    // `Text={pad(x)}` beside text between the tags. A name that only this
+    // code reads is not unused: the error is the fix, not the import.
+    let dropped: Vec<&str> = compiled
+        .errors
+        .iter()
+        .filter_map(|e| src.get(e.offset..e.offset + e.length))
+        .collect();
+
+    output.lints.retain(|l| {
+        !matches!(
+            l.name,
+            "unused_import" | "unused_variable" | "unused_function"
+        ) || !l.message.split('`').nth(1).is_some_and(|name| {
+            dropped
+                .iter()
+                .any(|code| whole_word_from(code, name, 0).is_some())
+        })
+    });
+
     for e in compiled.errors {
         output.diagnostics.push(Diagnostic {
             start: e.offset as u32,
@@ -1139,6 +1159,36 @@ mod tests {
                 .contains("<Frame Name=\"x\"> <TextLabel /> </Frame>"),
             "{}",
             lint.message
+        );
+    }
+
+    /// A `Text` attribute beside text between the tags is a markup
+    /// error. The lowering drops the attribute, so the import only it
+    /// reads must not also read as unused.
+    #[test]
+    fn a_text_conflict_reports_and_keeps_its_names_used() {
+        let src = "import { pad } from \"./util\"\nlocal function create(n: string): any return n end\nreturn <TextLabel Text={pad(\"x\")}>hello</TextLabel>\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+        let errors: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            errors,
+            [
+                "markup: `Text` is set twice: by this attribute and by the text between the tags (remove the attribute, or the text between the tags)"
+            ]
+        );
+        assert_eq!(
+            &src[out.diagnostics[0].start as usize..out.diagnostics[0].end as usize],
+            "Text={pad(\"x\")}"
+        );
+        assert!(
+            !out.lints.iter().any(|l| l.name == "unused_import"),
+            "{:?}",
+            out.lints.iter().map(|l| &l.message).collect::<Vec<_>>()
         );
     }
 

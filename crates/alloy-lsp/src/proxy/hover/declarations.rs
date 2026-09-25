@@ -1228,14 +1228,24 @@ impl State {
     ) -> Option<Vec<alloy::declarations::Declaration>> {
         let entry = self.import_entry_at(source, offset)?;
         let target = imports::module_path(&self.resolve_spec(uri, &entry.spec)?);
-        let open = self
-            .docs
-            .iter()
-            .find(|(u, _)| uri_to_path(u).is_some_and(|p| imports::module_path(&p) == target))
-            .map(|(_, d)| d.source.clone());
-        let text = open.or_else(|| std::fs::read_to_string(imports::module_file(&target)?).ok())?;
+        let open = self.docs.iter().find_map(|(u, d)| {
+            let path = uri_to_path(u)?;
 
-        Some(alloy::declarations::summaries(&text, false))
+            (imports::module_path(&path) == target).then(|| (path, d.source.clone()))
+        });
+        let (path, text) = match open {
+            Some(pair) => pair,
+
+            None => {
+                let file = imports::module_file(&target)?;
+                let text = std::fs::read_to_string(&file).ok()?;
+
+                (file, text)
+            }
+        };
+
+        // A barrel's `export { T } from` reads as the module it names.
+        Some(alloy::modules::sent_summaries(&path, &text))
     }
 }
 

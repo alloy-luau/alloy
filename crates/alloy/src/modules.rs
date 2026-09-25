@@ -2137,6 +2137,40 @@ pub fn import_sources_for_file(path: &Path, source: &str) -> Vec<String> {
     out
 }
 
+/// The declarations of every module a file imports, under the names
+/// each module sends them out as. A barrel's `export { T } from` reads
+/// as the declaration of the module it names.
+pub fn import_summaries_for_file(
+    path: &Path,
+    source: &str,
+) -> Vec<crate::declarations::Declaration> {
+    let (from, aliases) = file_context(path);
+
+    module_decls(source, &from, &aliases, summary_pairs)
+        .into_iter()
+        .flat_map(|(_, decls)| decls)
+        .map(|(name, d)| crate::declarations::Declaration { name, ..d })
+        .collect()
+}
+
+/// The declarations the module at `path` sends out, its text given.
+/// A name a barrel passes on reads as the module it names declares it.
+pub fn sent_summaries(path: &Path, text: &str) -> Vec<crate::declarations::Declaration> {
+    let (_, aliases) = file_context(path);
+
+    sent_decls(path, text, &aliases, &summary_pairs, BARREL_DEPTH)
+        .into_iter()
+        .map(|(name, d)| crate::declarations::Declaration { name, ..d })
+        .collect()
+}
+
+fn summary_pairs(text: &str) -> Vec<(String, crate::declarations::Declaration)> {
+    crate::declarations::summaries(text, false)
+        .into_iter()
+        .map(|d| (d.name.clone(), d))
+        .collect()
+}
+
 pub fn import_shapes_for_file(path: &Path, source: &str) -> Vec<crate::declarations::Shape> {
     let (from, aliases) = file_context(path);
 
@@ -3640,6 +3674,42 @@ mod tests {
         );
         // A function the module keeps to itself is no key.
         assert!(!options.import_callables.iter().any(|(k, _)| k == "hidden"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name a barrel passes on with `export { T } from` reads as the
+    /// declaration of the module it names, under the name the barrel
+    /// sends out. The editor hover of an import through a barrel read
+    /// only the barrel, and found no enum there.
+    #[test]
+    fn a_barrel_passes_the_declaration_on() {
+        let dir = std::env::temp_dir().join(format!("alloy-barrel-decls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/leaf.aly"),
+            "-- The tier of a thing.\nexport enum Tier\n    Low\n    High\nend\n",
+        )
+        .expect("module");
+        let barrel = "export { Tier, Tier as Rank } from \"./leaf\"\n";
+        std::fs::write(dir.join("src/barrel.aly"), barrel).expect("module");
+        let hover = |decls: &[crate::declarations::Declaration], name: &str| {
+            decls
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.hover.clone())
+        };
+
+        let sent = sent_summaries(&dir.join("src/barrel.aly"), barrel);
+        let tier = hover(&sent, "Tier").expect("the barrel sends Tier on");
+        assert!(tier.contains("export enum Tier"), "{tier}");
+        assert!(tier.contains("The tier of a thing."), "{tier}");
+        assert_eq!(hover(&sent, "Rank"), Some(tier.clone()));
+
+        let src = "import { Tier } from \"./barrel\"\nprint(Tier.Low)\n";
+        let imported = import_summaries_for_file(&dir.join("src/use.aly"), src);
+        assert_eq!(hover(&imported, "Tier"), Some(tier));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

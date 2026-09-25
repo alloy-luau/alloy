@@ -437,11 +437,12 @@ impl Doc {
             .iter()
             .flat_map(|text| alloy::shapes::interfaces(text))
             .collect();
-        self.import_decls = self
-            .import_sources
-            .iter()
-            .flat_map(|text| alloy::declarations::summaries(text, false))
-            .collect();
+        // A name a barrel passes on reads as the module it names
+        // declares it, under the name the barrel sends it out as.
+        self.import_decls = alloy::modules::import_summaries_for_file(
+            std::path::Path::new(&options.file_name),
+            text,
+        );
         // `file_name` is the real path, which is what the ingots see.
         let compiled =
             alloy::compile_file(&options.file_name, &self.source, options, Some(jsx), ingots);

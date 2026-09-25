@@ -194,9 +194,25 @@ fn settled_type(declared: &str) -> Option<String> {
 
     let t = declared.trim();
     let open = t.find('<')?;
-    let inner = t[open + 1..].strip_suffix('>')?;
+    let inner = t[open + 1..].strip_suffix('>')?.trim();
 
-    Some(inner.trim().to_string())
+    // `Future<A, B>` settles with two values, and a return type of two
+    // values takes parens.
+    match split_top_level(inner, ',').len() {
+        1 => Some(inner.to_string()),
+
+        _ => Some(format!("({inner})")),
+    }
+}
+
+/// The types inside the parens of a return pack, `(A, B)`, when the
+/// parens hold the whole text. `(A) -> B` is a function type and gives
+/// `None`.
+pub(crate) fn pack_inner(declared: &str) -> Option<&str> {
+    let t = declared.trim();
+
+    (t.starts_with('(') && super::types::group_len(t, '(', ')') == Some(t.len()))
+        .then(|| t[1..t.len() - 1].trim())
 }
 
 impl<'s> Desugar<'s> {
@@ -3179,6 +3195,15 @@ impl<'s> Desugar<'s> {
                     self.generate(rs, &format!("{std}.Future<nil>"));
                 } else if names_a_future(&declared) {
                     self.copy(rs, re);
+                } else if pack_inner(&declared).is_some() {
+                    // `(A, B)` is a type pack, and a pack is no type
+                    // argument. The Future takes the values one by one,
+                    // `Future<A, B>`, so the parens go.
+                    let open = self.toks[rt.start as usize].end;
+                    let close = self.toks[rt.end as usize - 1].start;
+                    self.generate(rs, &format!("{std}.Future<"));
+                    self.copy(open, close);
+                    self.generate(close, ">");
                 } else {
                     self.generate(rs, &format!("{std}.Future<"));
                     self.copy(rs, re);
@@ -4499,6 +4524,24 @@ mod tests {
             out.ship
         );
         assert_eq!(out.ship.lines().count(), src.lines().count());
+    }
+
+    /// An async function that returns two values settles a Future of
+    /// both. `(A, B)` in the header wrote `Future<(A, B)>`, and the
+    /// checker read a pack where a type argument goes.
+    #[test]
+    fn an_async_return_pack_names_each_value() {
+        let src = "async function f(): (number, string)\n    return 1, \"x\"\nend\nasync function g(): Future<number, string>\n    return 1, \"x\"\nend\nlocal h: Future<number, string> = async do\n    return 1, \"x\"\nend\nprint(f, g, h)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for line in [
+            "local function f(): __alloy.Future<number, string> return __alloy.future(function(): (number, string)",
+            "local function g(): __alloy.Future<number, string> return __alloy.future(function(): (number, string)",
+            "local h: __alloy.Future<number, string> = __alloy.future(function(): (number, string)",
+        ] {
+            assert!(out.check.contains(line), "{line}\n{}", out.check);
+        }
     }
 
     /// The expression form still binds: the value is a Future.

@@ -550,15 +550,27 @@ end
 -- Every member reads only, so the type is covariant: a `Future<number>`
 -- sits in a `{ Future<number | string> }`, and `race` over a mixed list
 -- yields the union.
-export type Future<T> = {
-	-- In the type alone: a generic reads `T` off a Future it is handed.
+-- `R...` holds the values after the first. `return 1, "x"` settles a
+-- `Future<number, string>`, and `Future<number>` settles with one value.
+export type Future<T, R... = ()> = {
+	-- In the type alone: a generic reads `T` off a Future it is handed,
+	-- and `await` reads `R...` off `__rest`.
 	read __value: T,
-	read andThen: (self: Future<T>, on_resolve: ((T) -> ...any)?, on_reject: ((any) -> ...any)?) -> Future<T>,
+	read __rest: (R...) -> (),
+	read andThen: (
+		self: Future<T, R...>,
+		on_resolve: ((T, R...) -> ...any)?,
+		on_reject: ((any) -> ...any)?
+	) -> Future<T, R...>,
 	-- The snake_case twin of `andThen`, the one camelCase name the std
 	-- carries. Both name the same function.
-	read and_then: (self: Future<T>, on_resolve: ((T) -> ...any)?, on_reject: ((any) -> ...any)?) -> Future<T>,
-	read cancel: (self: Future<T>) -> (),
-	read is_settled: (self: Future<T>) -> boolean,
+	read and_then: (
+		self: Future<T, R...>,
+		on_resolve: ((T, R...) -> ...any)?,
+		on_reject: ((any) -> ...any)?
+	) -> Future<T, R...>,
+	read cancel: (self: Future<T, R...>) -> (),
+	read is_settled: (self: Future<T, R...>) -> boolean,
 }
 
 local Future = {}
@@ -601,15 +613,18 @@ end
 local PENDING, RESOLVED, REJECTED, CANCELLED = 0, 1, 2, 3
 
 local function new_future()
-	return setmetatable({ state = PENDING, value = nil, trace = nil, waiters = {} }, Future)
+	return setmetatable({ state = PENDING, value = nil, values = nil, trace = nil, waiters = {} }, Future)
 end
 
-local function settle(self, state, value, trace)
+-- `value` is the first value, or the error. `values` is the whole
+-- result as `table.pack` holds it, when a body returns more than one.
+local function settle(self, state, value, trace, values)
 	if self.state ~= PENDING then
 		return
 	end
 	self.state = state
 	self.value = value
+	self.values = values
 	self.trace = trace
 	local waiters = self.waiters
 	self.waiters = {}
@@ -618,26 +633,45 @@ local function settle(self, state, value, trace)
 	end
 end
 
---- Runs `f` on a new thread and returns its Future.
--- `...T` takes a body that returns nothing as well as one that returns
--- a value, so an async function with no return type is a `Future`.
-function alloy.future<T>(f: (...any) -> ...T, ...: any): Future<T>
+-- Every value a settled Future carries: the whole result of its body,
+-- or the one value `resolve` or a race gave it.
+local function settled_values(f)
+	local values = f.values
+	if values then
+		return table.unpack(values, 1, values.n)
+	end
+	return f.value
+end
+
+local function run_future(f: (...any) -> ...any, ...: any)
 	local self = new_future()
 	local args = table.pack(...)
 	task_lib.spawn(function()
-		local ok, result = xpcall(function()
+		local out = table.pack(xpcall(function()
 			return f(table.unpack(args, 1, args.n))
 		end, function(e)
 			return { err = e, trace = debug.traceback(tostring(e), 2) }
-		end)
-		if ok then
-			settle(self, RESOLVED, result, nil)
+		end))
+		if not out[1] then
+			settle(self, REJECTED, out[2].err, out[2].trace)
+		elseif out.n > 2 then
+			-- `return 1, 2`: the Future keeps both, and `await` gives both.
+			settle(self, RESOLVED, out[2], nil, table.pack(table.unpack(out, 2, out.n)))
 		else
-			settle(self, REJECTED, result.err, result.trace)
+			settle(self, RESOLVED, out[2], nil)
 		end
 	end)
-	return (self :: any) :: Future<T>
+	return self
 end
+
+--- Runs `f` on a new thread and returns its Future.
+-- Two signatures: a body that returns values settles with all of them,
+-- and a body that returns nothing settles with `nil`. One `(T, R...)`
+-- signature refuses the empty body, and `...T` joins every value in `T`.
+alloy.future = (run_future :: any) :: (<T, R...>(f: (...any) -> (T, R...), ...any) -> Future<T, R...>) & ((
+	f: (...any) -> (),
+	...any
+) -> Future<nil>)
 
 function Future.resolve<T>(value: T): Future<T>
 	local self = new_future()
@@ -673,7 +707,7 @@ function Future.andThen<T>(
 	local f = self :: any
 	local function run()
 		if f.state == RESOLVED and on_resolve then
-			on_resolve(f.value)
+			on_resolve(settled_values(f))
 		elseif f.state ~= RESOLVED and on_reject then
 			on_reject(f.value)
 		end
@@ -725,11 +759,35 @@ export type Settled<T> = {
 	read andThen: (self: any, on_resolve: any, on_reject: any) -> any,
 }
 
+-- The first value `await` gives: the `__value` of a Future, the union
+-- of them for a union, and `any` for an awaitable with `andThen` alone.
+-- `index<A, "__value">` reported that missing key once `await` read
+-- `R...` off the operand as well.
+type function __settled_value(A)
+	local shape: any = A
+
+	if shape:is("union") then
+		local parts: { any } = {}
+
+		for _, part in shape:components() do
+			parts[#parts + 1] = __settled_value(part)
+		end
+
+		return types.unionof(table.unpack(parts))
+	end
+
+	return __try_member(A, types.singleton("__value")) or types.any
+end
+
 --- `await`: a Future, or anything with `andThen`. Yields until settled,
---- returns the value, rethrows the error it settled with.
--- The extra values type as `any`: a `wait` on a remote settles with the
--- whole payload, and `local a, b = await f` is then no error.
-function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
+--- returns every value it settled with, rethrows the error.
+-- The values after the first come off `__rest`: `local a, b = await f`
+-- types `b` from a `Future<number, string>`, and reports it on a
+-- `Future<number>`. `__rest` is optional, so a hand-written awaitable
+-- with `andThen` alone still fits.
+function alloy.await<A, R...>(
+	target: A & Settled<any> & { read __rest: ((R...) -> ())? }
+): (__settled_value<A>, R...)
 	if type(target) == "table" and getmetatable(target) == Future then
 		if target.state == PENDING then
 			local thread = coroutine.running()
@@ -739,7 +797,7 @@ function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
 			coroutine.yield()
 		end
 		if target.state == RESOLVED then
-			return target.value
+			return settled_values(target)
 		end
 		-- The value alone, at level 0. The stored trace opens with the
 		-- same message, so a rethrow of both printed the failure twice
@@ -751,19 +809,27 @@ function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
 	end
 	if type(target) == "table" and type(target.andThen) == "function" then
 		local thread = coroutine.running()
-		local done, ok, value = false, false, nil
-		target:andThen(function(v)
-			ok, value, done = true, v, true
-			task_lib.spawn(thread)
+		local done, ok, value, values = false, false, nil, nil
+		-- An `andThen` that calls back at once finds the thread running,
+		-- and a resume of a running thread fails. Only a parked one wakes.
+		local parked = false
+		target:andThen(function(...)
+			ok, values, done = true, table.pack(...), true
+			if parked then
+				task_lib.spawn(thread)
+			end
 		end, function(e)
 			ok, value, done = false, e, true
-			task_lib.spawn(thread)
+			if parked then
+				task_lib.spawn(thread)
+			end
 		end)
 		if not done then
+			parked = true
 			coroutine.yield()
 		end
 		if ok then
-			return value
+			return table.unpack(values, 1, values.n)
 		end
 		error(value, 2)
 	end
@@ -813,8 +879,8 @@ end
 function Future.race<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	local winner = new_future()
 	for _, f in futures do
-		f:andThen(function(v)
-			settle(winner, RESOLVED, v, nil)
+		f:andThen(function(v, ...)
+			settle(winner, RESOLVED, v, nil, table.pack(v, ...))
 		end, function(e)
 			settle(winner, REJECTED, e, nil)
 		end)
@@ -826,8 +892,8 @@ function Future.any<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	local winner = new_future()
 	local failed = 0
 	for _, f in futures do
-		f:andThen(function(v)
-			settle(winner, RESOLVED, v, nil)
+		f:andThen(function(v, ...)
+			settle(winner, RESOLVED, v, nil, table.pack(v, ...))
 		end, function(e)
 			failed += 1
 			if failed == #futures then
@@ -3294,11 +3360,11 @@ export type Remote = {
 	fire: (...any) -> (),
 	fire_all: (...any) -> (),
 	fire_except: (...any) -> (),
-	call: (...any) -> Future<any>,
+	call: (...any) -> Future<any, ...any>,
 	on: (handler: (...any) -> ...any) -> any,
 	once: (handler: (...any) -> ...any) -> any,
 	on_ratelimited: (handler: (...any) -> ...any) -> any,
-	wait: () -> Future<any>,
+	wait: () -> Future<any, ...any>,
 }
 
 -- ---------------------------------------------------------------------------

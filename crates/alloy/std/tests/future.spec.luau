@@ -132,6 +132,44 @@ describe("Future", function()
 		end)
 		expect(seen).toBe(3)
 	end)
+
+	-- `async function pair() return 1, 2 end`: the Future kept only the
+	-- first value, and `local a, b = await pair()` read `b` as nil.
+	it("keeps every value the body returns", function()
+		local f = alloy.future(function()
+			return 1, nil, 3
+		end)
+		local a, b, c = alloy.await(f)
+		expect(a).toBe(1)
+		expect(b).toBeNil()
+		expect(c).toBe(3)
+		expect(select("#", alloy.await(f))).toBe(3)
+		local seen
+		f:andThen(function(...)
+			seen = table.pack(...)
+		end)
+		expect(seen.n).toBe(3)
+		expect(seen[3]).toBe(3)
+		local x, y = alloy.await(Future.race({ alloy.future(function()
+			return "a", "b"
+		end) }))
+		expect(x).toBe("a")
+		expect(y).toBe("b")
+	end)
+
+	it("awaits every value a hand-written andThen gives", function()
+		local obj = {
+			andThen = function(_, on_resolve)
+				on_resolve("p", "q")
+			end,
+		}
+		-- The foreign path resumes the thread that waits, so it runs on one.
+		local p, q = alloy.await(alloy.future(function()
+			return alloy.await(obj)
+		end))
+		expect(p).toBe("p")
+		expect(q).toBe("q")
+	end)
 end)
 
 return nil

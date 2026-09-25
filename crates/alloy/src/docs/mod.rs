@@ -377,7 +377,7 @@ mod tests {
 
         // The members of the type: `read name: (...) -> ...`.
         let at = crate::RUNTIME
-            .find("export type Future<T> = {")
+            .find("export type Future<T, R... = ()> = {")
             .expect("Future type");
         let body = &crate::RUNTIME[at..];
         let end = body.find("\n}").expect("end of the type");

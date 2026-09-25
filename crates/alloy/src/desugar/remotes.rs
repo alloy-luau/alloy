@@ -1337,14 +1337,16 @@ impl<'s> Desugar<'s> {
             .map(|t| self.copy_type_to_string(t).trim().to_string())
             .unwrap_or_else(|| "()".to_string());
         // A server handler of a remote function may answer with a Future.
-        // `Future<()>` is no type, so an event's `call` yields any.
+        // `Future<()>` is no type, so an event's `call` yields any. A
+        // pack, `(A, B)`, is no type argument: the Future takes `A, B`.
+        let settles = super::statements::pack_inner(&ret).unwrap_or(&ret);
         let answer = if r.is_function && ret != "()" {
-            format!("{ret} | {std}.Future<{ret}>")
+            format!("{ret} | {std}.Future<{settles}>")
         } else {
             ret.clone()
         };
         let future = if r.is_function && ret != "()" {
-            format!("{std}.Future<{ret}>")
+            format!("{std}.Future<{settles}>")
         } else {
             format!("{std}.Future<any>")
         };
@@ -1442,19 +1444,24 @@ impl<'s> Desugar<'s> {
             members.push(format!("on: {ty}"));
             members.push(format!("once: {ty}"));
             // `wait` settles with the payload the handler would get, and
-            // `await` yields the first of those values. With both sides
+            // `await` yields every value of it. With both sides
             // handling, the two payloads differ and the type stays open.
-            let waited = match (client_handles, server_handles) {
-                (true, false) => handler_params
-                    .first()
-                    .and_then(|p| p.split_once(": "))
-                    .map(|(_, t)| t.to_string()),
+            let payload = handler_params
+                .iter()
+                .filter_map(|p| p.split_once(": "))
+                .map(|(_, t)| t);
+            let waited: Vec<&str> = match (client_handles, server_handles) {
+                (true, false) => payload.collect(),
 
-                (false, true) => Some("Player".to_string()),
+                (false, true) => std::iter::once("Player").chain(payload).collect(),
 
-                _ => None,
+                _ => vec!["any", "...any"],
             };
-            let waited = waited.unwrap_or_else(|| "any".to_string());
+            let waited = match waited.is_empty() {
+                true => "any".to_string(),
+
+                false => waited.join(", "),
+            };
             members.push(format!("wait: () -> {std}.Future<{waited}>"));
         }
 
@@ -2031,11 +2038,22 @@ remote Chain(n: Node) from client
             out.check
         );
         // The server handles a client's fire, and the sender comes first.
+        // `await` gives every value of the payload, so the Future names
+        // each one.
         let up = crate::compile("export remote Buy(offer_id: number) from client\n").unwrap();
         assert!(
-            up.check.contains("wait: () -> __alloy.Future<Player>"),
+            up.check
+                .contains("wait: () -> __alloy.Future<Player, number>"),
             "{}",
             up.check
+        );
+        let two =
+            crate::compile("export remote Join(name: string, team: number) from server\n").unwrap();
+        assert!(
+            two.check
+                .contains("wait: () -> __alloy.Future<string, number>"),
+            "{}",
+            two.check
         );
     }
 

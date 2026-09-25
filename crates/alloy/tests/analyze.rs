@@ -755,6 +755,50 @@ fn a_reject_and_a_hand_written_awaitable_analyze() {
     analyze(REJECTED, "rejected");
 }
 
+/// `await` gives every value a Future settles with. `local a, b = await
+/// pair()` read `b` as `any` and got nil at run time. Now `b` takes the
+/// second value's type, and a second name on a one-value Future reports.
+#[test]
+fn an_await_types_every_value_the_future_carries() {
+    let src = "async function pair()
+    return 1, \"x\"
+end
+
+async function typed(): (number, string)
+    return 1, \"x\"
+end
+
+async function one(): number
+    return 1
+end
+
+async function main()
+    local a, b = await pair()
+    local wrong: number = b
+    local c, d = await typed()
+    local right: string = d
+    local e, f = await one()
+    print(a, wrong, c, right, e, f)
+end
+main()
+";
+    let Some(bad) = reports(src, "await-pack") else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 2, "{}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(15,") && bad[0].contains("'number', but got 'string'"),
+        "{}",
+        bad.join("\n")
+    );
+    assert!(
+        bad[1].contains("(18,") && bad[1].contains("only returns 1 value"),
+        "{}",
+        bad.join("\n")
+    );
+}
+
 /// A `try do` block around an `await` carries the awaited type: the
 /// two blocks read `Result<number, any>`, so both annotations report.
 /// The result of `await` is an `index<A, "__value">` type function,

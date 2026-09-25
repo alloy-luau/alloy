@@ -1877,6 +1877,7 @@ const HIDDEN_FIELDS: &[&str] = &[
     "__new",
     "__ok",
     "__private",
+    "__rest",
     "__value",
     // The Luau metamethods.
     "__add",
@@ -2100,6 +2101,28 @@ mod tests {
         assert_eq!(
             fold("local Position: {\n    __T: T\n}", &known),
             "local Position: {\n    __T: T\n}"
+        );
+    }
+
+    /// A Future of two values carries the second in `__rest`, and the
+    /// name the hover prints holds both.
+    #[test]
+    fn a_future_of_two_values_names_both() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "local f: { read __rest: (string) -> (), read __value: number, read andThen: (self: any) -> any }",
+                &known
+            ),
+            "local f: Future<number, string>"
+        );
+        assert_eq!(
+            fold(
+                "local f: { read __rest: () -> (), read __value: number, read andThen: (self: any) -> any }",
+                &known
+            ),
+            "local f: Future<number>"
         );
     }
 

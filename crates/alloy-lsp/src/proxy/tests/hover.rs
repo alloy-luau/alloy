@@ -1,5 +1,6 @@
 use super::super::hover::{
-    impl_self_type, intrinsic_code_home, member_doc, shadow_home, shadows_an_import, source_type,
+    child_cast, impl_self_type, intrinsic_code_home, member_doc, shadow_home, shadows_an_import,
+    source_type,
 };
 use super::super::*;
 use super::support::one_file;
@@ -2045,4 +2046,157 @@ fn an_aliased_variant_hovers_as_its_enum_s() {
 
     let sent = String::from_utf8_lossy(&log.lock().expect("the log")).into_owned();
     assert!(sent.contains("Status.Active"), "{sent}");
+}
+
+/// A child lookup hovers with the type the compiler cast it to, so a
+/// `wait_timeout` makes `=>` optional and a lookup inside a chain reads
+/// `any`, as the check artifact says.
+#[test]
+fn a_child_lookup_hovers_with_the_compiler_s_cast() {
+    let src = "const a = workspace=>Baseplate\nconst b = workspace->Baseplate\nconst c = workspace->Model->Part\nprint(a, b, c)\n";
+    let doc = |wait_timeout| {
+        let options = EmitOptions {
+            wait_timeout,
+            ..EmitOptions::default()
+        };
+
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let cast = |d: &Doc, needle: &str| child_cast(d, src.find(needle).expect("the lookup") + 2);
+    let timed = doc(Some(5.0));
+
+    assert_eq!(cast(&timed, "=>Baseplate").as_deref(), Some("Instance?"));
+    assert_eq!(cast(&timed, "->Baseplate").as_deref(), Some("Instance?"));
+    assert_eq!(cast(&timed, "->Model").as_deref(), Some("any"));
+    assert_eq!(cast(&timed, "->Part").as_deref(), Some("Instance?"));
+    assert_eq!(cast(&doc(None), "=>Baseplate").as_deref(), Some("Instance"));
+
+    let hover = keywords::child_hover(src, src.find("=>Baseplate").unwrap() + 2, |at| {
+        child_cast(&timed, at)
+    })
+    .expect("a hover");
+    assert!(
+        hover
+            .2
+            .starts_with("```alloy\nworkspace=>Baseplate: Instance?\n```"),
+        "{}",
+        hover.2
+    );
+}
+
+/// A completion after `->` asks inside the string the lookup lowers to,
+/// where the child lists the children. With no name yet the name is the
+/// word the parser took from the next line, or the repair's placeholder.
+#[test]
+fn a_child_completion_lands_in_the_string_of_its_call() {
+    for (src, typed, written) in [
+        ("const up = script.Parent->sys\n", "->sys", "sys\""),
+        ("const up = script.Parent=>\nprint(up)\n", "=>", "print\""),
+        ("print(script.Parent->)\n", "->", "__alloy_hole\""),
+    ] {
+        let (st, uri) = one_file(src);
+        let doc = st.docs.get(uri).expect("doc");
+        let caret = src.find(typed).expect("the lookup") + typed.len();
+        let start = context::child_name_start(src, caret).expect("a child name");
+        let (_, text, name) = child_call(doc, start).unwrap_or_else(|| panic!("{src}"));
+
+        assert_eq!(start, src.find(typed).unwrap() + 2, "{src}");
+        assert!(text[name..].starts_with(written), "{src}: {text}");
+    }
+
+    // A function type holds no call.
+    let (st, uri) = one_file("local f: (number) -> string = tostring\n");
+    let doc = st.docs.get(uri).expect("doc");
+    assert!(child_call(doc, doc.source.find("string").unwrap()).is_none());
+}
+
+/// A hover shows the value the declaration wrote, and only where the
+/// binding still holds it: not under a `local` with no value, and not
+/// at a use once a later statement assigns it again. A `const` keeps
+/// its value.
+#[test]
+fn an_initializer_shows_only_while_the_binding_holds_it() {
+    let src = concat!(
+        "struct P as\n",
+        "    n: number\n",
+        "end\n",
+        "\n",
+        "local p = new P { n = 1 }\n",
+        "p = new P { n = 2 }\n",
+        "print(p)\n",
+        "local q: P\n",
+        "q = new P { n = 3 }\n",
+        "print(q)\n",
+        "const c = new P { n = 4 }\n",
+        "print(c)\n",
+        "local k = new P { n = 5 }\n",
+        "print(k)\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let hover = |name: &str, line: u32| {
+        append_initializer(&format!("```alloy\nlocal {name}: P\n```"), doc, line, 6)
+    };
+
+    assert!(hover("p", 4).is_some_and(|t| t.contains("n = 1")));
+    assert_eq!(hover("p", 6), None);
+    assert_eq!(hover("q", 7), None);
+    assert_eq!(hover("q", 9), None);
+    assert!(hover("c", 11).is_some_and(|t| t.contains("n = 4")));
+    assert!(hover("k", 13).is_some_and(|t| t.contains("n = 5")));
+}
+
+/// A name a std import binds hovers as the std: a star alias as its
+/// module, an alias as the name it renames, and a type with no doc
+/// entry as the runtime declares it.
+#[test]
+fn a_std_import_name_hovers_as_the_std() {
+    let src = concat!(
+        "import * as serde from \"@alloy/std/serde\"\n",
+        "import { HashMap as Map } from \"@alloy/std/collections\"\n",
+        "import { SignalConnection } from \"@alloy/std/signal\"\n",
+        "local m = new Map<<string, number>>()\n",
+        "local c: SignalConnection? = nil\n",
+        "print(m, c, x.serde)\n",
+    );
+    let at = |needle: &str| {
+        let start = src.find(needle).expect("the name");
+        let word = needle
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .next()
+            .unwrap();
+
+        super::super::hover::std_import_hover(src, word, start)
+    };
+
+    let module = at("serde from").expect("the module");
+    assert!(
+        module.starts_with("```alloy\nimport * as serde from \"@alloy/std/serde\"\n```"),
+        "{module}"
+    );
+    assert!(
+        module.contains("`Serialize`") && module.contains("`@rename`"),
+        "{module}"
+    );
+    assert!(!module.contains("try_block"), "{module}");
+
+    let alias = at("Map<<").expect("the alias");
+    assert!(
+        alias.contains("The std `HashMap`, imported as `Map`"),
+        "{alias}"
+    );
+    assert!(alias.contains("Members: "), "{alias}");
+
+    let runtime = at("SignalConnection?").expect("the type");
+    assert!(runtime.contains("type SignalConnection = {"), "{runtime}");
+    assert!(runtime.contains("Disconnect"), "{runtime}");
+
+    // A member named like the alias is the member's.
+    assert_eq!(at("serde)"), None);
 }

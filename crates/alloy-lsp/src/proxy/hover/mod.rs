@@ -9,7 +9,7 @@ mod restyle;
 
 pub(crate) use declarations::{
     binds_a_value, case_arm_of_binding, case_binding_span, case_binding_text, formatted_hover,
-    import_alias_source, let_else_binding,
+    import_alias_source, let_else_binding, split_top,
 };
 pub(crate) use fields::{
     declared_field_hover, declared_field_owner, declared_parameter_hover,
@@ -22,7 +22,7 @@ pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 
 #[cfg(test)]
 #[cfg(test)]
-pub(crate) use modules::shadows_an_import;
+pub(crate) use modules::{shadows_an_import, std_import_hover};
 pub(crate) use restyle::group_len;
 pub(crate) use restyle::{
     close_empty_packs, close_item_packs, declared_annotation, declared_head, declared_signature,
@@ -180,6 +180,27 @@ impl Server {
         Some((shadow_line_no, shadow_line[..column].chars().count() as u32))
     }
 
+    /// The shadow position a completion after `->` or `=>` belongs at:
+    /// inside the `FindFirstChild("` or `WaitForChild("` string the
+    /// lookup lowers to, where the child lists the children and nothing
+    /// else. `None` when the caret names no child, or the shadow holds
+    /// no such call: a `->` of a function type is one.
+    pub(crate) fn child_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
+        if !is_alloy_uri(uri) {
+            return None;
+        }
+
+        let (line, character) = position_of_message(message)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let start = context::child_name_start(&doc.source, offset)?;
+        let (shadow_line, text, name) = child_call(doc, start)?;
+        let at = (name + offset - start).min(text.len());
+
+        Some((shadow_line, text[..at].chars().count() as u32))
+    }
+
     /// The shadow position a hover on a guarded index belongs at.
     /// `mo?[k]` lowers to `(if mo == nil then nil else mo[k])` and
     /// `mo![k]` to `(if mo == nil then error(..) else mo)[k]`, so the
@@ -282,7 +303,7 @@ impl Server {
         // A std name the file binds itself, through an import or a
         // declaration, is the file's: the child answers for that one.
         let owned = keywords::attribute_argument_hover(&doc.source, offset)
-            .or_else(|| keywords::child_hover(&doc.source, offset));
+            .or_else(|| keywords::child_hover(&doc.source, offset, |at| child_cast(doc, at)));
         let hit = keywords::hover(&doc.source, offset).filter(|(start, end, _)| {
             let word = &doc.source[*start..*end];
             let is_std = alloy::desugar::AMBIENT.contains(&word)
@@ -527,6 +548,88 @@ impl State {
 
         std::fs::read_to_string(imports::module_file(&target)?).ok()
     }
+}
+
+/// The check artifact's call for the child lookup whose name starts at
+/// `start`, the byte after its `->` or `=>` and any blank: the shadow
+/// line, its text, and the byte of the name inside `FindFirstChild("`
+/// or `WaitForChild("`. The emit keeps the line, so the call is the one
+/// with the same method and name, counted from the left. A lookup with
+/// no name yet has the repair's placeholder there.
+pub(crate) fn child_call(doc: &Doc, start: usize) -> Option<(u32, &str, usize)> {
+    let src = &doc.source;
+    let head = src[..start].trim_end_matches([' ', '\t']);
+    let (arrow, method) = if head.ends_with("->") {
+        ("->", ":FindFirstChild(\"")
+    } else if head.ends_with("=>") {
+        ("=>", ":WaitForChild(\"")
+    } else {
+        return None;
+    };
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let name_at = |from: usize| {
+        let end = src[from..]
+            .find(|c| !word(c))
+            .map_or(src.len(), |i| from + i);
+
+        &src[from..end]
+    };
+    // `x->` at the end of a line: the parser reads the word that opens
+    // the next line as the name.
+    let name = match name_at(start) {
+        "" => name_at(src.len() - src[start..].trim_start().len()),
+
+        name => name,
+    };
+    let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
+    // The earlier lookups of the same child on the line.
+    let earlier = src[line_start..head.len() - 2]
+        .match_indices(arrow)
+        .filter(|(i, _)| {
+            let rest = src[line_start + i + 2..].trim_start_matches([' ', '\t']);
+
+            rest.starts_with(name) && !rest[name.len()..].starts_with(word)
+        })
+        .count();
+    let written = match name.is_empty() {
+        true => crate::doc::HOLE.trim_end_matches("()"),
+
+        false => name,
+    };
+    let (line, character) = position_of(src, start);
+    let (shadow_line, _) = doc.to_shadow(line, character);
+    let text = doc.shadow.lines().nth(shadow_line as usize)?;
+    let call = text
+        .match_indices(&format!("{method}{written}\""))
+        .nth(earlier)?
+        .0;
+
+    Some((shadow_line, text, call + method.len()))
+}
+
+/// The type the check artifact casts a child lookup to: the `T` of
+/// `(x:FindFirstChild("a") :: T)`. The compiler decides it, from the
+/// operator and the place of the lookup in its chain.
+pub(crate) fn child_cast(doc: &Doc, start: usize) -> Option<String> {
+    let (_, text, name) = child_call(doc, start)?;
+    // The name is a string, so its closing quote ends it.
+    let args = name + text[name..].find('"')?;
+    let close = args + text[args..].find(')')?;
+    let rest = text[close + 1..].strip_prefix(" :: ")?;
+    let mut depth = 0i32;
+    let end = rest.find(|c: char| {
+        match c {
+            '(' | '{' | '<' | '[' => depth += 1,
+
+            ')' | '}' | '>' | ']' => depth -= 1,
+
+            _ => {}
+        }
+
+        depth < 0
+    })?;
+
+    Some(rest[..end].trim().to_string())
 }
 
 /// Maps positions and ranges in request params into the shadow.

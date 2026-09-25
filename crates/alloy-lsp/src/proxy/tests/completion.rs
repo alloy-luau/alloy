@@ -165,6 +165,77 @@ fn context_labels(src: &str, head: &str) -> Vec<String> {
         .filter_map(|i| i["label"].as_str().map(str::to_string))
         .collect()
 }
+/// A star import of a std module reaches its types in a type slot, and
+/// no value of the module.
+#[test]
+fn a_std_star_import_lists_its_types_in_a_type_slot() {
+    let src = concat!(
+        "import * as coll from \"@alloy/std/collections\"\n",
+        "import * as res from \"@alloy/std/result\"\n",
+        "local m: coll.\n",
+        "local function f(r: res.)\nend\n",
+    );
+    let labels = context_labels(src, "m: coll.");
+
+    for name in ["HashMap", "Set", "BitSet", "Queue", "Heap", "Array"] {
+        assert!(labels.contains(&name.to_string()), "{labels:?}");
+    }
+
+    assert!(!labels.contains(&"Symbol".to_string()), "{labels:?}");
+    assert_eq!(context_labels(src, "r: res."), ["Result"]);
+}
+/// A list offers no name it already holds, whichever side of the
+/// caret holds it.
+#[test]
+fn a_list_offers_no_name_it_already_holds() {
+    let derive = context_labels(
+        "@derive(Eq, serde.Serialize, )\nstruct A as\n    x: number\nend\n",
+        "Serialize, ",
+    );
+    assert!(!derive.contains(&"Eq".to_string()), "{derive:?}");
+    assert!(!derive.contains(&"Serialize".to_string()), "{derive:?}");
+    assert!(derive.contains(&"Clone".to_string()), "{derive:?}");
+
+    let luau = context_labels("@[, native]\nlocal function f() end\n", "@[");
+    assert_eq!(luau, ["checked", "deprecated"]);
+
+    let names = context_labels(
+        "import { HashMap, Set,  } from \"@alloy/std/collections\"\n",
+        "Set, ",
+    );
+    assert!(!names.contains(&"HashMap".to_string()), "{names:?}");
+    assert!(!names.contains(&"Set".to_string()), "{names:?}");
+    assert!(names.contains(&"Queue".to_string()), "{names:?}");
+}
+/// `@serde.` offers what goes on the declaration under it, as a bare
+/// `@` does.
+#[test]
+fn a_dotted_attribute_follows_the_declaration_under_it() {
+    let src = concat!(
+        "import * as serde from \"@alloy/std/serde\"\n",
+        "@serde.\n",
+        "struct A as\n",
+        "    @serde.\n",
+        "    x: number\n",
+        "end\n",
+    );
+    let at = |nth: usize| {
+        let offset = src.match_indices("@serde.").nth(nth).unwrap().0 + "@serde.".len();
+        let (st, uri) = one_file(src);
+        let ctx = context::detect(src, offset).expect("an attribute path");
+        let mut labels: Vec<String> = st
+            .context_items(uri, offset, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect();
+        labels.sort();
+
+        labels
+    };
+
+    assert_eq!(at(0), ["deny_unknown_fields", "rename_all"]);
+    assert_eq!(at(1), ["rename", "skip"]);
+}
 /// A whole keyword with more names behind it keeps the list, and
 /// takes the first row. `else` is `elseif` as far as the letters go,
 /// so the reader still needs to see both.

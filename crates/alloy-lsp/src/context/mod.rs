@@ -55,7 +55,13 @@ pub enum Context {
         bare: bool,
     },
     /// `@serde.ren|`: an attribute of the module a star import binds.
-    AttributePath { alias: String, prefix: String },
+    /// `target` and `bare` read as they do for `Attribute`.
+    AttributePath {
+        alias: String,
+        prefix: String,
+        target: Option<&'static str>,
+        bare: bool,
+    },
     /// `@derive(Eq, De|`: a derive name.
     DeriveArg { prefix: String },
     /// `@allow(too_many|` or `@allow(flux.too|`: a lint or a group.
@@ -450,6 +456,21 @@ fn inside_string(before: &str) -> bool {
     open.is_some() && hole == 0
 }
 
+/// The start of the child name the caret sits in or after: `sys` in
+/// `script.Parent->sys`, or the caret itself right after a `->` or
+/// `=>`. `None` anywhere else.
+pub fn child_name_start(src: &str, offset: usize) -> Option<usize> {
+    let offset = offset.min(src.len());
+    let start = src[..offset]
+        .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_')
+        .len();
+    let head = src[..start].trim_end_matches([' ', '\t']);
+
+    (head.ends_with("->") || head.ends_with("=>"))
+        .then_some(start)
+        .filter(|_| !in_string(src, offset))
+}
+
 /// Whether the caret sits inside a quoted string on its own line.
 pub fn in_string(src: &str, offset: usize) -> bool {
     let offset = offset.min(src.len());
@@ -574,9 +595,13 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             .all(|c| c.is_alphanumeric() || c == '_')
         && at + 1 < path.len()
     {
+        let (target, bare) = bodies::attribute_target(src, line_start, line_end, head);
+
         return Some(Context::AttributePath {
             alias: path[at + 1..].to_string(),
             prefix: prefix.to_string(),
+            target,
+            bare,
         });
     }
 
@@ -677,8 +702,9 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         });
     }
 
-    // `parent=>Name` waits for a child by name. No type carries the
-    // children of an instance, so no list belongs here.
+    // `parent=>Name` waits for a child by name. The server asks the
+    // child inside the `WaitForChild("` string first; with no such call
+    // in the artifact, no type carries the children, so no list fits.
     if head.ends_with("=>") {
         return Some(Context::Nothing);
     }

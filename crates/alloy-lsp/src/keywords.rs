@@ -138,10 +138,16 @@ fn in_std_import(source: &str, at: usize) -> bool {
 }
 
 /// The hover of the name after a child lookup: `->systems` finds the
-/// child with `FindFirstChild`, so the value is an `Instance` or nil, and
-/// `=>systems` waits for it with `WaitForChild`. The name is a string in
-/// the emit, so the child has nothing to answer for it.
-pub fn child_hover(source: &str, offset: usize) -> Option<(usize, usize, String)> {
+/// child with `FindFirstChild`, and `=>systems` waits for it with
+/// `WaitForChild`. The name is a string in the emit, so the child has
+/// nothing to answer for it. `ty` gives the type the compiler wrote for
+/// the lookup that starts at a byte offset. The compiler owns that
+/// rule, so the hover does not repeat it.
+pub fn child_hover(
+    source: &str,
+    offset: usize,
+    ty: impl Fn(usize) -> Option<String>,
+) -> Option<(usize, usize, String)> {
     let bytes = source.as_bytes();
 
     if offset >= bytes.len() || !is_word(bytes[offset]) {
@@ -163,21 +169,21 @@ pub fn child_hover(source: &str, offset: usize) -> Option<(usize, usize, String)
         .map_or(0, |i| i + 1);
     let receiver = head[from..].trim_start_matches(['=', '-', '>']);
     let name = &source[start..end];
-    let (arrow, ty, how) = match wait {
-        true => ("=>", "Instance", "waits for it with `WaitForChild`"),
+    let (arrow, how) = match wait {
+        true => ("=>", "waits for it with `WaitForChild`"),
 
         false => (
             "->",
-            "Instance?",
             "finds it with `FindFirstChild`, and gives nil when there is none",
         ),
     };
+    let ty = ty(start).map(|t| format!(": {t}")).unwrap_or_default();
 
     Some((
         start,
         end,
         format!(
-            "```alloy\n{receiver}{arrow}{name}: {ty}\n```\nThe child of `{receiver}` named `{name}`. `{arrow}` {how}. The source names no class, so `is` or a cast says which one it is."
+            "```alloy\n{receiver}{arrow}{name}{ty}\n```\nThe child of `{receiver}` named `{name}`. `{arrow}` {how}. The source names no class, so `is` or a cast says which one it is."
         ),
     ))
 }

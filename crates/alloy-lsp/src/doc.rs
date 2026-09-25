@@ -73,7 +73,7 @@ pub struct Doc {
     pub error: Option<alloy::CompileError>,
     pub is_alx: bool,
     /// The repair pass's compile, when a dangling `.`, `:`, `?.`,
-    /// `!.`, `?:`, `!:`, `[`, `?[` or `![` stopped the parser.
+    /// `!.`, `?:`, `!:`, `[`, `?[`, `![`, `->` or `=>` stopped the parser.
     /// `shadow` and every position map come
     /// from it while it stands; `output` stays the author's own
     /// compile, so the diagnostics still name what they always did.
@@ -112,7 +112,7 @@ fn plain_enough(source: &str) -> String {
 /// The name the repair pass writes after a dangling member operator.
 /// The call keeps the statement a call, the one expression Luau reads
 /// as a statement, so `HashMap.new().` repairs in every position.
-const HOLE: &str = "__alloy_hole()";
+pub(crate) const HOLE: &str = "__alloy_hole()";
 
 /// The same for a bracket that never closed: `x[` becomes
 /// `x[__alloy_hole()]`, one index the parser reads through. The
@@ -179,7 +179,7 @@ fn closes_an_expression(text: &str) -> bool {
 
 /// The byte offsets where an access operator wants a name and none
 /// follows: `a.`, `a:`, `a?.`, `a!.`, `a?:`, `a!:`, `a[`, `a?[`,
-/// `a![`. Each carries the text the repair writes there. The parser
+/// `a![`, `a->`, `a=>`. Each carries the text the repair writes there. The parser
 /// wants a name after a separator and a key inside a bracket.
 ///
 /// A bracket goes by the end of the line alone: `x[]` closes itself,
@@ -203,6 +203,11 @@ fn dangling_members(source: &str) -> Vec<(usize, &'static str)> {
             }
 
             TokKind::Symbol if tok.text(source) == "[" => (BRACKET_HOLE, false),
+
+            // `script.Parent->` wants the name of a child. The hole
+            // lowers to a `FindFirstChild("` string, where the child
+            // lists the children the sourcemap gives.
+            TokKind::Symbol if matches!(tok.text(source), "->" | "=>") => (HOLE, true),
 
             _ => continue,
         };

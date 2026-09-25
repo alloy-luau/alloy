@@ -225,7 +225,10 @@ pub(crate) fn append_initializer(
         let is_decl = matches!(head, "local" | "const" | "export local" | "export const")
             && !keywords::is_word_at(&doc.source, at + word.len());
 
-        let eq = after.find('=');
+        // The `=` of `local q: T` with no value is the next statement's:
+        // `q = new T {}` on a later line sets the value, and the
+        // declaration holds none.
+        let eq = after.find('=').filter(|e| !after[..*e].contains('\n'));
         let between = eq.map(|e| after[..e].trim_start()).unwrap_or("x");
 
         if is_decl
@@ -248,9 +251,18 @@ pub(crate) fn append_initializer(
                     word,
                 );
 
+            // At a use, a `local` that takes a new value later may hold
+            // that one, so only the declaration shows the first value.
+            // A `const` keeps its value.
+            let at_use = offset > at + word.len();
+            let reassigned = at_use
+                && !head.ends_with("const")
+                && reassigns(&doc.source[at + word.len()..], word);
+
             if rhs.starts_with("new ")
                 && !hovered_before
                 && !rebound
+                && !reassigned
                 && let Some(open) = rhs[..line_end].find('{')
                 && let Some(close) = matching_brace(rhs, open)
             {
@@ -334,6 +346,35 @@ pub(crate) fn rebinds(text: &str, name: &str) -> bool {
 
         false
     })
+}
+
+/// Whether a stretch of source gives `name` a new value: `name = v`,
+/// `name += 1`, or `a, name = f()`, each at the start of a statement.
+/// A key of a table literal on its own line reads the same way, so the
+/// answer can be yes for a binding that keeps its value. The hover then
+/// leaves the value out, which is the safe side.
+pub(crate) fn reassigns(text: &str, name: &str) -> bool {
+    text.lines()
+        .flat_map(|line| line.split(" then "))
+        .flat_map(|part| part.split(" do "))
+        .flat_map(|part| part.split(" else "))
+        .any(|statement| {
+            let bytes = statement.as_bytes();
+            // The `=` of an assignment: not one of `==`, `~=`, `<=`,
+            // `>=`, or `=>`.
+            let eq = (0..bytes.len()).find(|&i| {
+                bytes[i] == b'='
+                    && !matches!(bytes.get(i + 1), Some(b'=' | b'>'))
+                    && !(i > 0 && matches!(bytes[i - 1], b'=' | b'~' | b'<' | b'>'))
+            });
+
+            eq.is_some_and(|eq| {
+                statement[..eq]
+                    .trim_end_matches(['+', '-', '*', '/', '%', '^', '.'])
+                    .split(',')
+                    .any(|target| target.trim() == name)
+            })
+        })
 }
 
 /// The index of the `}` that closes the `{` at `open`.

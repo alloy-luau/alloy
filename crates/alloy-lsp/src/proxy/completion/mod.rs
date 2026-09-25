@@ -25,6 +25,7 @@ pub(crate) use members::{
 pub(crate) use namespaces::namespace_before;
 pub(crate) use std_completions::{
     StdReach, complete_std_members, complete_std_module, fix_edits, roblox_enum_names,
+    std_module_names,
 };
 
 use super::documents::{normalize, project_aliases};

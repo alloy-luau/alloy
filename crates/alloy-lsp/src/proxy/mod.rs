@@ -62,7 +62,7 @@ use hints::{
 #[allow(unused_imports)]
 use hover::{
     OPEN_ATTRIBUTES, attach_std_member_docs, binds_a_value, case_arm_of_binding, case_binding_span,
-    case_binding_text, close_empty_packs, close_item_packs, declared_annotation,
+    case_binding_text, child_call, close_empty_packs, close_item_packs, declared_annotation,
     declared_attribute_targets, declared_field_hover, declared_field_owner,
     declared_parameter_hover, declared_signature, declares_a_name_at, drop_bound_intersections,
     empty_parameter_names, field_key, fold_std_shapes, foreign_method_hover, import_alias_source,
@@ -72,7 +72,8 @@ use hover::{
     name_solver_struct, name_solver_variable, name_trait_method, names_a_key, optional_index_hover,
     prefer_constructed_struct, receiver_type, record_entry, remote_parameter_hover, remote_spec,
     restates_itself, restore_struct_arguments, restyle_hover, restyle_signatures, service_hover,
-    std_member_hover, unlocal_parameter, used_field_hover, used_field_owner, without_self,
+    split_top, std_member_hover, unlocal_parameter, used_field_hover, used_field_owner,
+    without_self,
 };
 #[allow(unused_imports)]
 use navigation::{

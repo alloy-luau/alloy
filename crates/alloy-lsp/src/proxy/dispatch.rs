@@ -737,6 +737,17 @@ impl Server {
                     return true;
                 }
 
+                // `script.Parent->sys`: the name lowers to the string of
+                // a `FindFirstChild("`, where the child lists the
+                // children the sourcemap gives, and nothing else.
+                if m == "textDocument/completion"
+                    && let Some(home) = self.child_home(&uri, &message)
+                {
+                    self.forward_request_at(message, method.as_deref(), home);
+
+                    return true;
+                }
+
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
                     && self.context_completion(&uri, &message, &id)
@@ -2049,7 +2060,14 @@ impl Server {
                             .get(uri)
                             .and_then(|d| offset_of(&d.source, line, character))
                             .zip(st.docs.get(uri))
-                            .is_some_and(|(at, d)| context::in_string(&d.source, at));
+                            .is_some_and(|(at, d)| {
+                                // A child name was asked inside the string
+                                // its lookup lowers to.
+                                context::in_string(&d.source, at)
+                                    || context::child_name_start(&d.source, at)
+                                        .and_then(|start| child_call(d, start))
+                                        .is_some()
+                            });
                         // A member list names what the value has; an
                         // auto-import is a new name, which cannot follow
                         // a `.` or a `:`.
@@ -2182,9 +2200,11 @@ fn parameter_labels_as_text(result: &mut Value) {
     }
 }
 
-/// The parameters back as UTF-16 offsets into the final label, found
-/// in order after its `(`, so the editor marks the active one exactly.
-/// A text the label no longer holds stays text.
+/// The parameters back as UTF-16 offsets into the final label, so the
+/// editor marks the active one exactly. Each one is found in order
+/// among the entries of the label's list, not in its text: `self:
+/// Signal<number, string>` holds the words of the entries after it. A
+/// text the label no longer holds stays text.
 fn parameter_labels_as_offsets(result: &mut Value) {
     for sig in result
         .get_mut("signatures")
@@ -2193,7 +2213,8 @@ fn parameter_labels_as_offsets(result: &mut Value) {
         .flatten()
     {
         let label = sig["label"].as_str().unwrap_or("").to_string();
-        let mut from = label.find('(').map_or(0, |i| i + 1);
+        let entries = label_entries(&label);
+        let mut next = 0;
         let units = |bytes: usize| label[..bytes].encode_utf16().count();
 
         for p in sig
@@ -2205,13 +2226,73 @@ fn parameter_labels_as_offsets(result: &mut Value) {
             let Some(text) = p["label"].as_str().filter(|t| !t.is_empty()) else {
                 continue;
             };
+            let rest = entries.get(next..).unwrap_or_default();
+            // The entry that is the parameter, else the first that
+            // starts with it or holds it.
+            let found = rest
+                .iter()
+                .position(|&(s, e)| &label[s..e] == text)
+                .or_else(|| {
+                    rest.iter()
+                        .position(|&(s, e)| label[s..e].starts_with(text))
+                })
+                .or_else(|| rest.iter().position(|&(s, e)| label[s..e].contains(text)));
 
-            if let Some(at) = label[from..].find(text).map(|i| from + i) {
-                from = at + text.len();
-                p["label"] = json!([units(at), units(from)]);
+            if let Some(k) = found {
+                let (s, e) = rest[k];
+                let at = s + label[s..e].find(text).unwrap_or_default();
+                next += k + 1;
+                p["label"] = json!([units(at), units(at + text.len())]);
             }
         }
     }
+}
+
+/// The byte range of each entry of a label's parameter list, split at
+/// the commas outside every bracket. The `>` of a `->` closes nothing.
+fn label_entries(label: &str) -> Vec<(usize, usize)> {
+    let Some(open) = label.find('(') else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    let mut depth = 0i32;
+    let mut start = open + 1;
+    let mut prev = '(';
+    let mut push = |from: usize, to: usize| {
+        let text = &label[from..to];
+        let from = from + (text.len() - text.trim_start().len());
+
+        entries.push((from, from + text.trim().len()));
+    };
+
+    for (i, c) in label[open + 1..].char_indices() {
+        let at = open + 1 + i;
+
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+
+            '>' if prev == '-' => {}
+
+            ')' if depth == 0 => {
+                push(start, at);
+
+                break;
+            }
+
+            ')' | ']' | '}' | '>' => depth -= 1,
+
+            ',' if depth == 0 => {
+                push(start, at);
+                start = at + 1;
+            }
+
+            _ => {}
+        }
+
+        prev = c;
+    }
+
+    entries
 }
 
 /// The child's "Prefix 'x' with '_'" where the `unused_variable` lint
@@ -2327,6 +2408,42 @@ mod signature_tests {
         assert_eq!(
             help["signatures"][0]["parameters"][1]["label"],
             json!([24, 33])
+        );
+    }
+
+    /// The type of `self` holds the words of the parameters after it;
+    /// each parameter marks its own entry of the list.
+    #[test]
+    fn a_parameter_marks_its_own_entry_past_the_self_type() {
+        let label = "function Signal:Fire(self: Signal<number, string>, number, string): ()";
+        let mut help = json!({ "signatures": [{
+            "label": label,
+            "parameters": [{ "label": "number" }, { "label": "string" }],
+        }] });
+        super::parameter_labels_as_offsets(&mut help);
+
+        let marked = |i: usize| {
+            let span = &help["signatures"][0]["parameters"][i]["label"];
+            let (s, e) = (span[0].as_u64().unwrap(), span[1].as_u64().unwrap());
+
+            (s, &label[s as usize..e as usize])
+        };
+
+        assert_eq!(marked(0), (51, "number"));
+        assert_eq!(marked(1), (59, "string"));
+
+        // A function type in the list: its `->` closes no bracket.
+        let label = "function f(g: (number) -> Map<string, number>, n: number): ()";
+        let mut help = json!({ "signatures": [{
+            "label": label,
+            "parameters": [{ "label": "g: (number) -> Map<string, number>" }, { "label": "n: number" }],
+        }] });
+        super::parameter_labels_as_offsets(&mut help);
+
+        let n = label.find("n: number").unwrap();
+        assert_eq!(
+            help["signatures"][0]["parameters"][1]["label"],
+            json!([n, n + "n: number".len()])
         );
     }
 }

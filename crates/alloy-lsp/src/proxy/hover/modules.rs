@@ -46,6 +46,11 @@ impl Server {
         let inner = |answer: Option<String>| answer.filter(|_| !shadowed);
         let answer = inner(remote_hover(&doc.source, &word))
             .or_else(|| inner(imported()))
+            .or_else(|| {
+                (!quoted)
+                    .then(|| inner(std_import_hover(&doc.source, &word, start)))
+                    .flatten()
+            })
             .or_else(|| service_hover(&doc.source, &word, spec_line))
             .or_else(|| {
                 let dir = path
@@ -291,6 +296,102 @@ pub(crate) fn module_hover(
     // No link: the editor's document links already offer to follow the
     // path, on the same characters.
     Some(format!("```alloy\n{}\n```", line.trim()))
+}
+
+/// The hover of a name a std import binds. The emit reads the std from
+/// the runtime, so the child prints the whole runtime table or an alias
+/// of its own. A star import's alias hovers as its module: the import
+/// line and what the module exports, the list `std.` completes. An
+/// alias of a std name, `HashMap as Map`, hovers as that name. A std
+/// type with no doc entry, `SignalConnection`, hovers as the runtime
+/// declares it.
+pub(crate) fn std_import_hover(source: &str, word: &str, start: usize) -> Option<String> {
+    // `x.serde` is a member, not the alias.
+    if source[..start].ends_with(['.', ':']) {
+        return None;
+    }
+
+    if let Some(names) = crate::proxy::completion::std_module_names(source, word) {
+        let line = source.lines().map(str::trim).find(|l| {
+            l.starts_with("import ")
+                && l.contains(&format!(" as {word} "))
+                && import_spec(l).is_some_and(|s| alloy::std_names::module_of_spec(&s).is_some())
+        })?;
+        let module = alloy::std_names::module_of_spec(&import_spec(line)?)?.to_string();
+        let attributes = alloy::std_names::ATTRIBUTES
+            .iter()
+            .filter(|(m, _)| module.is_empty() || *m == module)
+            .flat_map(|(_, names)| names.iter().map(|n| format!("`@{n}`")));
+        let exports: Vec<String> = names
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .chain(attributes)
+            .collect();
+
+        return Some(format!(
+            "```alloy\n{line}\n```\nExports: {}",
+            exports.join(", ")
+        ));
+    }
+
+    let entry = super::super::navigation::import_entries(source)
+        .into_iter()
+        .find(|e| {
+            e.bound == word
+                && alloy::std_names::module_of_spec(&e.spec).is_some()
+                && alloy::std_names::is_std_name(&e.name)
+        })?;
+    let documented = alloy::docs::type_markdown(&entry.name)
+        .or_else(|| keywords::doc(&entry.name).map(str::to_string));
+
+    match (entry.alias_at, documented) {
+        (Some(_), Some(text)) => Some(format!(
+            "The std `{}`, imported as `{word}`.\n\n{text}",
+            entry.name
+        )),
+
+        (Some(_), None) => Some(format!(
+            "The std `{}`, imported as `{word}`.\n\n{}",
+            entry.name,
+            runtime_type(&entry.name)?
+        )),
+
+        // A documented name keeps the hover the keyword pass gives it.
+        (None, Some(_)) => None,
+
+        (None, None) => runtime_type(&entry.name),
+    }
+}
+
+/// A std type as the runtime declares it, its comments aside.
+fn runtime_type(name: &str) -> Option<String> {
+    let head = format!("export type {name}");
+    let mut out: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+
+    for line in alloy::RUNTIME
+        .lines()
+        .skip_while(|l| !(l.starts_with(&head) && l[head.len()..].starts_with([' ', '<', '='])))
+    {
+        let code = line.split("--").next().unwrap_or_default().trim_end();
+
+        if code.trim().is_empty() {
+            continue;
+        }
+
+        depth += code.matches(['{', '(']).count() as i32;
+        depth -= code.matches(['}', ')']).count() as i32;
+        out.push(code.replace('\t', "    "));
+
+        // A union goes on past a `}` that ends in `|`.
+        if depth <= 0 && !code.ends_with(['|', '=', ',']) {
+            break;
+        }
+    }
+
+    let text = out.join("\n");
+
+    (!text.is_empty()).then(|| format!("```alloy\n{}\n```", text.trim_start_matches("export ")))
 }
 
 /// Whether an import path holds `word` as one of its segments, the

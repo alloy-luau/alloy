@@ -1,14 +1,51 @@
 use super::*;
 
 impl State {
-    /// The items for a completion context. A sigil item replaces the
-    /// sigil too, since the editor's word never includes it.
+    /// The items for a completion context, less the names its list
+    /// already holds: `@derive(Serialize, |` offers no second
+    /// `Serialize`, and `import { Coins, |` no second `Coins`.
     pub(crate) fn context_items(
         &self,
         uri: &str,
         offset: usize,
         ctx: &context::Context,
     ) -> Vec<Value> {
+        use crate::context::Context;
+
+        let mut items = self.context_rows(uri, offset, ctx);
+        let brackets = match ctx {
+            Context::DeriveArg { .. } => Some(('(', ')')),
+
+            Context::LuauAttrList {
+                in_table: false, ..
+            } => Some(('[', ']')),
+
+            Context::LuauAttrList { in_table: true, .. } | Context::ImportNames { .. } => {
+                Some(('{', '}'))
+            }
+
+            _ => None,
+        };
+
+        if let Some((open, close)) = brackets
+            && let Some(doc) = self.docs.get(uri)
+        {
+            let written = written_entries(&doc.source, offset, open, close);
+
+            items.retain(|i| {
+                let label = i["label"].as_str().unwrap_or_default();
+                let name = label.rsplit(' ').next().unwrap_or(label);
+
+                !written.contains(&name.trim_start_matches('@'))
+            });
+        }
+
+        items
+    }
+
+    /// The rows of a completion context. A sigil item replaces the
+    /// sigil too, since the editor's word never includes it.
+    fn context_rows(&self, uri: &str, offset: usize, ctx: &context::Context) -> Vec<Value> {
         use crate::context::Context;
 
         let Some(doc) = self.docs.get(uri) else {
@@ -61,21 +98,8 @@ impl State {
                 bare,
                 ..
             } => {
-                // Only the attributes that go on what the position
-                // names. With nothing under the caret to carry one, the
-                // list holds the attributes that go anywhere: every
-                // other one names a target the reader has not written.
-                // `attribute X on function` covers a method too, so a
-                // method position takes what a function takes.
-                let fits = |targets: &[&str]| match target {
-                    Some("method") => targets.contains(&"method") || targets.contains(&"function"),
-
-                    Some(t) => targets.contains(t),
-
-                    None if *bare => targets.is_empty(),
-
-                    None => true,
-                };
+                // Only the attributes that go on what the position names.
+                let fits = |targets: &[&str]| fits_target(targets, *target, *bare);
 
                 for key in keywords::keys_with_prefix("@") {
                     let ok = match (target, *bare) {
@@ -125,7 +149,13 @@ impl State {
 
             // `@serde.|` lists the std module's attributes, and `@M.|`
             // the ones a module of the project exports.
-            Context::AttributePath { alias, .. } => {
+            // The target decides here as it does after a bare `@`.
+            Context::AttributePath {
+                alias,
+                target,
+                bare,
+                ..
+            } => {
                 let Some(spec) = crate::proxy::navigation::module_bindings(&doc.source)
                     .into_iter()
                     .find(|(bound, _)| bound == alias)
@@ -139,6 +169,10 @@ impl State {
                         if module.is_empty() || module == *m {
                             for name in *names {
                                 let key = format!("@{name}");
+
+                                if !fits_target(builtin_attribute_targets(&key), *target, *bare) {
+                                    continue;
+                                }
                                 let mut item = json!({ "label": name, "kind": 14 });
 
                                 if let Some(d) = keywords::doc(&key) {
@@ -156,7 +190,9 @@ impl State {
                     && let Some(text) = self.module_text(&file)
                 {
                     for d in alloy::declarations::summaries(&text, false) {
-                        if let Some(name) = d.name.strip_prefix('@') {
+                        if let Some(name) = d.name.strip_prefix('@')
+                            && fits_target(&declared_attribute_targets(&d.hover), *target, *bare)
+                        {
                             items.push(json!({
                                 "label": name,
                                 "kind": 14,
@@ -780,6 +816,25 @@ impl State {
                         }
 
                         items.push(item);
+                    }
+
+                    // `m: coll.|` under `import * as coll from
+                    // "@alloy/std/collections"`: the types of that module.
+                    // The module is the runtime, which no file holds.
+                    if let Some(names) =
+                        super::std_completions::std_module_names(&doc.source, &path)
+                    {
+                        for name in names
+                            .into_iter()
+                            .filter(|n| super::std_completions::is_std_type(n))
+                        {
+                            let text = alloy::docs::type_markdown(name)
+                                .or_else(|| keywords::doc(name).map(str::to_string));
+                            let mut item = word(name, 7, text, from);
+                            let module = alloy::std_names::module_of(name).unwrap_or_default();
+                            item["detail"] = json!(format!("alloy:std:{module}"));
+                            items.push(item);
+                        }
                     }
 
                     // `local b: Enum.|`: the engine's enums. That path
@@ -2594,6 +2649,101 @@ fn attribute_target_doc(target: &str) -> Option<&'static str> {
     };
 
     Some(doc)
+}
+
+/// The names a bracketed list holds besides the entry at the caret:
+/// `Eq` of `@derive(Eq, Se|)`, `native` of `@[native, |]`, and `Coins`
+/// of `import { Coins, | }`. An entry reads as its first name, past
+/// `type` and `@`, and a dotted path as its last part. After the caret
+/// the list reads to the end of the line, since an open list runs on
+/// into the next statement.
+fn written_entries(src: &str, offset: usize, open: char, close: char) -> Vec<&str> {
+    // The bracket that opens the list: the nearest one before the caret
+    // that nothing closes.
+    let mut depth = 0;
+    let mut start = None;
+
+    for (i, c) in src[..offset].char_indices().rev() {
+        match c {
+            ')' | ']' | '}' => depth += 1,
+
+            '(' | '[' | '{' if depth > 0 => depth -= 1,
+
+            c if c == open => {
+                start = Some(i + c.len_utf8());
+
+                break;
+            }
+
+            '(' | '[' | '{' => return Vec::new(),
+
+            _ => {}
+        }
+    }
+
+    let Some(start) = start else {
+        return Vec::new();
+    };
+    let mut depth = 0;
+    let mut end = src.len();
+
+    for (i, c) in src[offset..].char_indices() {
+        match c {
+            '\n' => {
+                end = offset + i;
+
+                break;
+            }
+
+            '(' | '[' | '{' => depth += 1,
+
+            ')' | ']' | '}' if depth > 0 => depth -= 1,
+
+            c if c == close => {
+                end = offset + i;
+
+                break;
+            }
+
+            _ => {}
+        }
+    }
+
+    let mut before = split_top(&src[start..offset]);
+    before.pop();
+    let after = split_top(&src[offset..end]).into_iter().skip(1);
+
+    before
+        .into_iter()
+        .chain(after)
+        .filter_map(|entry| {
+            let entry = entry.trim_start();
+            let entry = entry.strip_prefix("type ").unwrap_or(entry).trim_start();
+            let entry = entry.trim_start_matches('@');
+            let path = entry
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                .next()?;
+
+            path.rsplit('.').next().filter(|name| !name.is_empty())
+        })
+        .collect()
+}
+
+/// Whether an attribute with these targets goes on what the position
+/// names. With nothing under the caret to carry one, only an attribute
+/// that goes anywhere fits: every other one names a target the reader
+/// has not written. `attribute X on function` covers a method too, so a
+/// method position takes what a function takes.
+fn fits_target(targets: &[&str], target: Option<&str>, bare: bool) -> bool {
+    match target {
+        Some("method") => targets.contains(&"method") || targets.contains(&"function"),
+
+        Some(t) => targets.contains(&t),
+
+        None if bare => targets.is_empty(),
+
+        None => true,
+    }
 }
 
 #[cfg(test)]

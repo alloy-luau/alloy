@@ -950,7 +950,14 @@ pub fn rename_edits(
                     continue;
                 }
 
-                let target = map_path(&lexical(dir, tail), renames);
+                let old_target = lexical(dir, tail);
+                let target = map_path(&old_target, renames);
+
+                // A spec of a file that stays keeps its text, a `..`
+                // in it too.
+                if target == old_target {
+                    continue;
+                }
 
                 match target.strip_prefix(dir) {
                     Ok(rest) if rest.as_os_str().is_empty() => format!("@{name}"),
@@ -961,7 +968,14 @@ pub fn rename_edits(
                         .unwrap_or_else(|| relative_spec(new_dir, &target)),
                 }
             } else if spec.starts_with("./") || spec.starts_with("../") {
-                relative_spec(new_dir, &map_path(&lexical(old_dir, spec), renames))
+                let old_target = lexical(old_dir, spec);
+                let target = map_path(&old_target, renames);
+
+                if target == old_target && new_dir == old_dir {
+                    continue;
+                }
+
+                relative_spec(new_dir, &target)
             } else {
                 continue;
             };
@@ -1360,6 +1374,35 @@ namespace Inner as end
             "{edits:?}"
         );
         assert_eq!(edits.len(), 2);
+    }
+
+    /// A move of `Placement.aly` also rewrote the unrelated
+    /// `../../shared/util/../util/Path` of an importer to its short
+    /// form. Only a spec whose target moves changes.
+    #[test]
+    fn a_rename_leaves_a_spec_of_a_file_that_stays() {
+        let docs = vec![(
+            "file:///w/src/client/ui/Round.aly".to_string(),
+            PathBuf::from("/w/src/client/ui/Round.aly"),
+            concat!(
+                "import Placement from '@shared/Placement'\n",
+                "import { make_path } from '../../shared/util/../util/Path'\n",
+                "import { a } from '@shared/util/../util/Path'\n",
+            )
+            .to_string(),
+        )];
+        let aliases = |_: &Path| vec![("shared".to_string(), PathBuf::from("/w/src/shared"))];
+        let renames = vec![Rename {
+            old: PathBuf::from("/w/src/shared/Placement.aly"),
+            new: PathBuf::from("/w/src/shared/game/Placement.aly"),
+        }];
+        let edits = rename_edits(&docs, &renames, &aliases);
+        let texts: Vec<&str> = edits["file:///w/src/client/ui/Round.aly"]
+            .iter()
+            .filter_map(|e| e["newText"].as_str())
+            .collect();
+
+        assert_eq!(texts, ["@shared/game/Placement"]);
     }
 
     /// A spec through a `.luaurc` alias keeps the alias while the target

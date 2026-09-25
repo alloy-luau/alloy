@@ -606,7 +606,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "a `local` that nothing assigns again",
-        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A local whose value a line writes into, `t.x = 1`, stays `local`, so `prefer_const` and `const_mutation` never disagree. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
+        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A local whose value the file writes into, with `t.x = 1` or with a call such as `t:push(v)` in any expression, stays `local`, so `prefer_const` and `const_mutation` never disagree. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
     },
     LintInfo {
         name: "redundant_as",

@@ -941,6 +941,16 @@ impl<'s> Scan<'s> {
     /// `X:push(v)` calls a method that changes it. The binding itself
     /// stands.
     fn value_write(&self, i: usize) -> Option<ValueWrite<'s>> {
+        // A method call changes the value wherever it stands, so
+        // `local r = bag:add(s)` writes into `bag` as `bag:add(s)` does.
+        if !matches!(self.prev(i), "." | ":" | "?." | "?:")
+            && self.at(i + 1, ":")
+            && MUTATING_METHODS.contains(&self.t(i + 2))
+            && self.is_member(i + 2)
+        {
+            return Some(ValueWrite::Method(self.t(i + 2)));
+        }
+
         if !self.statement_start(i) {
             return None;
         }
@@ -953,12 +963,7 @@ impl<'s> Scan<'s> {
             }
         };
 
-        if assigned {
-            return Some(ValueWrite::Assign);
-        }
-
-        (self.at(i + 1, ":") && self.is_name(i + 2) && MUTATING_METHODS.contains(&self.t(i + 2)))
-            .then(|| ValueWrite::Method(self.t(i + 2)))
+        assigned.then_some(ValueWrite::Assign)
     }
 
     /// Whether token `k` assigns: `=`, a compound operator such as `+=`

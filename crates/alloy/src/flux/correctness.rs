@@ -1560,6 +1560,31 @@ mod tests {
         );
     }
 
+    /// A method that changes the value writes into it in any expression.
+    /// `bag:add(s)` kept `bag` a `local`, but `local r = bag:add(s)` drew
+    /// `prefer_const`, and `const_mutation` saw only the statement.
+    #[test]
+    fn a_method_call_writes_into_the_value_in_any_expression() {
+        let lines = |src: &str, lint: &str| -> Vec<usize> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == lint)
+                .map(|l| src[..l.start as usize].matches('\n').count() + 1)
+                .collect()
+        };
+        let src = "local a = {}\na:push(1)\nlocal b = {}\nlocal r = b:push(2)\nlocal c = {}\nlocal n = c:len()\nprint(a, b, r, c, n, t.b:push(3))\n";
+        assert_eq!(lines(src, "prefer_const"), [4, 5, 6]);
+        assert_eq!(
+            lines(
+                "const B = {}\nlocal r = B:push(1)\nB:push(2)\nprint(r, B:len())\n",
+                "const_mutation"
+            ),
+            [2, 3]
+        );
+    }
+
     /// One name given a body twice: the second replaces the first, and
     /// the checker's `DuplicateFunction` gives way to this one.
     #[test]

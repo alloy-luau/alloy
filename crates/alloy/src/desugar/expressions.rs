@@ -1457,7 +1457,7 @@ impl<'s> Desugar<'s> {
         self.check_child_chain(base, &links);
         let timed_waits = self.options.wait_timeout.is_some();
         let casts: Vec<Option<&'static str>> = (0..links.len())
-            .map(|i| Self::child_cast(&links, i, target, bare))
+            .map(|i| Self::child_cast(&links, i, target, bare, timed_waits))
             .collect();
         // A timed `WaitForChild` can return nil, so the link after it guards.
         let mut pending_guard = false;
@@ -1627,7 +1627,12 @@ impl<'s> Desugar<'s> {
                 other => other,
             };
             pending_guard = false;
-            self.child_cast = cast;
+            // A guarded link is optional already.
+            self.child_cast = match link {
+                Link::Optional(_) if cast == Some("?") => None,
+
+                _ => cast,
+            };
 
             match link {
                 Link::Plain(step) => {
@@ -1717,7 +1722,17 @@ impl<'s> Desugar<'s> {
     /// not nil: a `->` or a timed `=>` guards it, and a `=>` with no
     /// timeout gives one. Only a `->` before an unguarded `=>` casts to
     /// `Instance`. `bare` drops every guard, see `require_arg`.
-    fn child_cast(links: &[Link<'_>], i: usize, target: bool, bare: bool) -> Option<&'static str> {
+    ///
+    /// luau-lsp types a timed `WaitForChild` by the sourcemap alone and
+    /// drops the nil the timeout gives. `?` casts the last link to its
+    /// own type made optional.
+    fn child_cast(
+        links: &[Link<'_>],
+        i: usize,
+        target: bool,
+        bare: bool,
+        timed: bool,
+    ) -> Option<&'static str> {
         let (Link::Plain(Step::Child { wait, .. }) | Link::Optional(Step::Child { wait, .. })) =
             &links[i]
         else {
@@ -1727,12 +1742,19 @@ impl<'s> Desugar<'s> {
         match links.get(i + 1) {
             None if target => Some("any"),
 
-            None => None,
+            None => (timed && *wait && !bare).then_some("?"),
 
             // A `=>` with no timeout gives an `Instance`. A timed one
-            // makes the next link optional, see `pending_guard`.
+            // makes the next link optional, see `pending_guard`, and
+            // its own value too.
             Some(next @ (Link::Plain(Step::Child { .. }) | Link::Optional(Step::Child { .. }))) => {
-                (!bare && !*wait && matches!(next, Link::Plain(_))).then_some("Instance")
+                if bare {
+                    None
+                } else if *wait {
+                    timed.then_some("?")
+                } else {
+                    matches!(next, Link::Plain(_)).then_some("Instance")
+                }
             }
 
             Some(_) => Some("any"),
@@ -1893,6 +1915,8 @@ impl<'s> Desugar<'s> {
                 };
 
                 match self.child_cast {
+                    Some("?") if self.options.check => format!("({call} :: typeof({call})?)"),
+
                     Some(ty) if self.options.check => format!("({call} :: {ty})"),
 
                     _ => call,

@@ -279,6 +279,24 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     );
     lints.extend(rendered.lints);
 
+    // `[emit] wait_timeout` gives `=>` a limit, so the rewrite of an
+    // untimed `WaitForChild` can return nil where the call waited on.
+    // The lint stays, and the change is the author's to make.
+    if let Some(t) = options.wait_timeout {
+        for l in &mut lints {
+            if l.name == "manual_child_lookup"
+                && l.fix
+                    .as_ref()
+                    .is_some_and(|f| f.replacement.starts_with("=>"))
+            {
+                l.fix = None;
+                l.message.push_str(&format!(
+                    ", but `=>` waits at most {t} seconds under `wait_timeout` and gives nil after that"
+                ));
+            }
+        }
+    }
+
     // A config names each value once, and the loader's Luau has no
     // `const`, so fmt keeps its locals and the lint says nothing there.
     // A local of a config therefore keeps the variable style.
@@ -985,6 +1003,62 @@ mod tests {
         assert_eq!(
             out.ship,
             "local h = gui:WaitForChild(\"Hud\"):WaitForChild(\"Health\")\n"
+        );
+    }
+
+    /// An untimed `WaitForChild` waits on; `=>` under `wait_timeout`
+    /// gives nil after the limit. The lint says so and writes nothing.
+    /// The check artifact types a timed lookup as optional, since the
+    /// sourcemap types the call alone.
+    #[test]
+    fn a_wait_timeout_keeps_the_child_lookup_lint_from_rewriting() {
+        let src = "local a = workspace:WaitForChild(\"Arena\")\nlocal b = workspace:FindFirstChild(\"Arena\")\nprint(a, b)\n";
+        let lint = |wait_timeout| {
+            let options = EmitOptions {
+                wait_timeout,
+                ..EmitOptions::default()
+            };
+
+            compile_with(src, &options)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == "manual_child_lookup")
+                .map(|l| (l.message, l.fix.is_some()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            lint(Some(5.0)),
+            vec![
+                (
+                    "`:WaitForChild(\"Arena\")` is `=>Arena`, but `=>` waits at most 5 seconds under `wait_timeout` and gives nil after that".to_string(),
+                    false
+                ),
+                ("`:FindFirstChild(\"Arena\")` is `->Arena`".to_string(), true),
+            ]
+        );
+        assert!(lint(None).iter().all(|(_, fix)| *fix));
+
+        let options = EmitOptions {
+            wait_timeout: Some(5.0),
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = compile_with(
+            "local a = workspace=>Arena\nlocal s = workspace=>Arena=>Spawn\n",
+            &options,
+        )
+        .unwrap();
+        assert!(
+            out.check.contains("local a = (workspace:WaitForChild(\"Arena\", 5) :: typeof(workspace:WaitForChild(\"Arena\", 5))?)\n"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("local _1 = (workspace:WaitForChild(\"Arena\", 5) :: typeof(workspace:WaitForChild(\"Arena\", 5))?) local s = (if _1 == nil then nil else _1:WaitForChild(\"Spawn\", 5))"),
+            "{}",
+            out.check
         );
     }
 

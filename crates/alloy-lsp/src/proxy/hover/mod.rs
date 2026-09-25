@@ -619,7 +619,12 @@ pub(crate) fn child_cast(doc: &Doc, start: usize) -> Option<String> {
     // A lookup the compiler leaves uncast is the plain call, so Luau's
     // own signature types it: `FindFirstChild` and a `WaitForChild` with
     // a timeout give `Instance?`. A sourcemap can narrow it further.
-    let Some(rest) = text[close + 1..].strip_prefix(" :: ") else {
+    // A timed wait casts to its own type made optional, so it reads as
+    // the plain call does.
+    let Some(rest) = text[close + 1..]
+        .strip_prefix(" :: ")
+        .filter(|r| !r.starts_with("typeof("))
+    else {
         let optional =
             text[..name].ends_with("FindFirstChild(\"") || text[args..close].contains(',');
 

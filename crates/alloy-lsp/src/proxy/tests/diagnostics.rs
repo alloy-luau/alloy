@@ -1671,3 +1671,72 @@ fn an_extract_stays_only_where_the_file_keeps_parsing() {
         edit((0, 0), (6, 3), "extracted"),
     ]))));
 }
+
+/// An action whose resolve carries no edit goes from the list. The
+/// child inlines a `local` or a `const` that holds a value, and a
+/// parameter, an import, or a function has none. A type and a
+/// parameter name hold no value to extract.
+#[test]
+fn an_action_with_no_edit_leaves_the_list() {
+    let src = "import { Pet } from './pet'\n\nlocal function feed(pet: Pet, amount: number): number\n  const bonus = 1\n  return pet.level + amount + bonus\nend\n\nprint(feed, Pet)\n";
+    let (st, uri) = one_file(src);
+    let at = |l: u32, c: u32| Some(((l, c), (l, c)));
+    let inline = |name: &str| json!({ "title": format!("Inline variable '{name}'"), "kind": "refactor.inline", "data": { "type": "inlineVariable" } });
+    let extract =
+        json!({ "title": "x", "kind": "refactor.extract", "data": { "type": "extractVariable" } });
+
+    assert!(st.keeps_child_action(&inline("bonus"), uri, at(4, 30)));
+
+    for name in ["pet", "Pet", "feed"] {
+        assert!(
+            !st.keeps_child_action(&inline(name), uri, at(4, 9)),
+            "{name}"
+        );
+    }
+
+    // `pet`, `Pet`, the space before `number`, and the return type.
+    for c in [20, 25, 38, 39, 48] {
+        assert!(!st.keeps_child_action(&extract, uri, at(2, c)), "2:{c}");
+    }
+    assert!(st.keeps_child_action(&extract, uri, at(4, 20)));
+}
+
+/// A field one edit away from a field the struct has: the report
+/// names it, and the quick fix renames the word the file wrote. The
+/// constructor lists the fields, and the nearest one answers.
+#[test]
+fn a_field_typo_has_a_quick_fix() {
+    let src = "struct Pet\n  level: number\n  xp: number\nend\n\nconst p = new Pet { levl = 1, xp = 0 }\nprint(p.levl)\n";
+    let (mut st, uri) = one_file(src);
+    let whole = ((0, 0), (99, 0));
+    let actions = st.compiler_actions(uri, whole);
+
+    assert_eq!(actions[0]["title"], "Rename to `level`", "{actions:?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri][0]["range"]["start"],
+        json!({ "line": 5, "character": 20 })
+    );
+
+    st.child_diagnostics.insert(
+        uri.to_string(),
+        vec![json!({
+            "range": { "start": { "line": 6, "character": 8 }, "end": { "line": 6, "character": 12 } },
+            "severity": 1,
+            "message": "StructError: `Pet` has no field `levl`; did you mean `level`?",
+        })],
+    );
+    let actions = st.compiler_actions(uri, whole);
+    let fix = actions
+        .iter()
+        .find(|a| a["edit"]["changes"][uri][0]["range"]["start"]["line"] == 6)
+        .expect("the access has a fix");
+
+    assert_eq!(fix["title"], "Rename to `level`");
+    assert_eq!(
+        fix["edit"]["changes"][uri],
+        json!([{
+            "range": { "start": { "line": 6, "character": 8 }, "end": { "line": 6, "character": 12 } },
+            "newText": "level",
+        }])
+    );
+}

@@ -317,8 +317,9 @@ impl State {
 
     Each one says what the file is missing, so the edit writes it: the
     `new` a construction wants, the arms a `match` does not cover, the
-    variant a misspelling meant, and the verb a remote's member meant.
-    The child reads the emit, where none of the four is left to see.
+    variant or the field a misspelling meant, and the verb a remote's
+    member meant. The child reads the emit, where none of them is left
+    to see.
     */
     pub(crate) fn compiler_actions(
         &self,
@@ -550,10 +551,15 @@ impl State {
             let Some((wrote, name)) = remote_verb_fix(message) else {
                 continue;
             };
-            let Some(i) = text[from..].find(&format!(".{wrote}")) else {
+            // A field report starts on the name, after its `.` or `:`.
+            let head = from.saturating_sub(1);
+            let Some(i) = text.get(head..).and_then(|rest| {
+                rest.find(&format!(".{wrote}"))
+                    .or_else(|| rest.find(&format!(":{wrote}")))
+            }) else {
                 continue;
             };
-            let start = utf16_column(doc, sl, from + i + 2);
+            let start = utf16_column(doc, sl, head + i + 2);
             let end = start + wrote.encode_utf16().count() as u32;
 
             actions.push(json!({
@@ -1968,6 +1974,15 @@ pub(crate) fn alloy_wording(
     }
 }
 
+/// Whether the word at `start` names a parameter of a function the
+/// source declares: `function f(a, b: T)` at `a` or `b`.
+fn names_a_parameter(src: &str, start: usize) -> bool {
+    let declared = super::completion::open_paren_word(src, start)
+        .is_some_and(|(word, _, _)| super::completion::declares_params(src, word));
+
+    declared && src[..start].trim_end().ends_with(['(', ','])
+}
+
 /// The names a message writes in backticks.
 fn quoted_names(text: &str) -> Vec<String> {
     text.split('`')
@@ -1977,12 +1992,20 @@ fn quoted_names(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The variant a misspelling meant: the one name of the list the report
-/// prints that stands within two edits of the word the file wrote. Two
-/// names that near say nothing about which one, so neither answers.
+/// The variant or the field a misspelling meant: the one name of the
+/// list the report prints that stands within two edits of the word the
+/// file wrote. Two names that near say nothing about which one, so
+/// neither answers.
 fn nearest_variant_fix(message: &str) -> Option<String> {
-    let (head, tail) = message.split_once("; its variants are ")?;
-    let wrote = quoted_names(head.split(" has no variant ").nth(1)?).pop()?;
+    let (head, tail) = message
+        .split_once("; its variants are ")
+        .or_else(|| message.split_once("; its fields are "))?;
+    let wrote = quoted_names(
+        head.split(" has no variant ")
+            .nth(1)
+            .or_else(|| head.split(" has no field ").nth(1))?,
+    )
+    .pop()?;
     let near: Vec<String> = quoted_names(tail)
         .into_iter()
         .filter(|v| edit_distance(v, &wrote) <= 2)
@@ -1995,12 +2018,14 @@ fn nearest_variant_fix(message: &str) -> Option<String> {
     }
 }
 
-/// The member a remote typo meant, with the member the file wrote:
-/// the compiler's sentence names both.
+/// The member a remote typo or a struct field typo meant, with the
+/// member the file wrote: the compiler's sentence names both.
 fn remote_verb_fix(message: &str) -> Option<(String, String)> {
     let (head, tail) = message.split_once("; did you mean ")?;
+    let remote = head.contains("remote `") && head.contains("` has no `");
+    let member = head.contains("` has no field `") || head.contains("` has no method `");
 
-    if !head.contains("remote `") || !head.contains("` has no `") {
+    if !remote && !member {
         return None;
     }
 
@@ -2565,6 +2590,11 @@ impl State {
 
             Some("extractVariable") if !self.extracts_at(uri, range) => return false,
 
+            // The child inlines a `local` or a `const` that holds a
+            // value. A parameter, an import, or a function has none, and
+            // its resolve carries no edit.
+            Some("inlineVariable") if !self.inlines(uri, action) => return false,
+
             _ => {}
         }
 
@@ -2618,8 +2648,16 @@ impl State {
                 Some("if" | "elseif" | "else")
             );
 
+        // A type has no value to extract, and neither has a parameter.
+        // A caret on the space before a word reads the head up to it.
+        let rest = &doc.source[start..];
+        let word_at = start + rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let head = &doc.source[line_start..word_at];
+
         !branch
             && !declares_a_name_at(&doc.source, at)
+            && !crate::context::takes_a_type(head)
+            && !names_a_parameter(&doc.source, start)
             && !matches!(
                 word,
                 "local"
@@ -2636,6 +2674,27 @@ impl State {
                     | "continue"
                     | "export"
             )
+    }
+
+    /// Whether the name an "Inline variable" action names is a `local`
+    /// or a `const` of the file, which the child can inline.
+    fn inlines(&self, uri: &str, action: &Value) -> bool {
+        let name = action
+            .get("title")
+            .and_then(Value::as_str)
+            .and_then(|t| t.strip_prefix("Inline variable '"))
+            .and_then(|t| t.strip_suffix('\''));
+        let Some((name, doc)) = name.zip(self.docs.get(uri)) else {
+            return true;
+        };
+
+        doc.bindings.iter().any(|b| {
+            let words: Vec<&str> = b.prefix.split_whitespace().collect();
+
+            b.name == name
+                && words.iter().any(|w| matches!(*w, "local" | "const"))
+                && !words.contains(&"function")
+        })
     }
 
     /// Whether a resolved "Extract to local variable" leaves each

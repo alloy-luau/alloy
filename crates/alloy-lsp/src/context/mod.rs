@@ -39,6 +39,8 @@ pub use scope::{
 };
 #[allow(unused_imports)]
 pub use strings::block_closers;
+#[allow(unused_imports)]
+pub(crate) use types::takes_a_type;
 
 /// What the cursor sits in, from the text of its line.
 #[derive(Debug, Clone, PartialEq, Eq)]

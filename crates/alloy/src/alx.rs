@@ -42,7 +42,7 @@ pub fn compile_alx(
     // A reactive library takes a source where a property wants a value,
     // so only a plain lowering types a Roblox tag's attributes.
     let plain = config.interpolate == luaux::config::Interpolate::Plain;
-    let (problems, typed) = component_props_problems(src, &bound, plain);
+    let (problems, typed) = component_props_problems(src, &bound, plain, options.new_solver);
 
     let compiled = match config.backend {
         luaux::config::BackendKind::Table => {
@@ -71,28 +71,21 @@ pub fn compile_alx(
     // component, which `[lint.naming] component` styles.
     let mut options = options.clone();
     options.markup = crate::naming::Markup::of(src, &compiled.regions);
-    // A lone `{expr}` that the markup gives as `Text`, as bytes of the
-    // lowered text. A hole that held markup of its own has no copied
-    // bytes to map, and goes unchecked.
-    options.text_holes = compiled
-        .text_holes
-        .iter()
-        .filter_map(|&(open, close)| {
-            let inner = src.get(open + 1..close.checked_sub(1)?)?;
-            let start = open + 1 + inner.len() - inner.trim_start().len();
-            let end = open + 1 + inner.trim_end().len();
+    // A lone `{expr}` that the markup gives as `Text` is a string or a
+    // number, or a binding of one, as `Text={expr}` is. A hole that held
+    // markup of its own has no copied bytes to map, and goes unchecked.
+    let text = bindable("string | number", options.new_solver);
+    let holes = compiled.text_holes.iter().filter_map(|&(open, close)| {
+        let inner = src.get(open + 1..close.checked_sub(1)?)?;
+        let start = open + 1 + inner.len() - inner.trim_start().len();
+        let end = open + 1 + inner.trim_end().len();
 
-            (start < end).then_some(())?;
-
-            Some((
-                lowering.to_output(start as u32)?,
-                lowering.to_output(end as u32 - 1)? + 1,
-            ))
-        })
-        .collect();
+        (start < end).then(|| (start, end, text.clone()))
+    });
     // An attribute value the walk typed, as bytes of the lowered text.
     options.attribute_types = typed
         .into_iter()
+        .chain(holes)
         .filter_map(|(start, end, ty)| {
             Some((
                 lowering.to_output(start as u32)?,
@@ -342,11 +335,13 @@ type Typed = (usize, usize, String);
 /// component declares: a prop it does not take, a required prop the tag
 /// leaves out, and a literal of the wrong type. The second list holds
 /// each other value a declared type covers, for the check artifact. With
-/// `plain` false, a Roblox tag adds nothing to it.
+/// `plain` false, a Roblox tag adds nothing to it. `new_solver` says
+/// which Luau solver reads the check artifact, see `bindable`.
 fn component_props_problems(
     src: &str,
     bound: &HashSet<String>,
     plain: bool,
+    new_solver: bool,
 ) -> (Vec<Diagnostic>, Vec<Typed>) {
     let Ok(spans) = luaux::compile::markup_spans(src) else {
         return (Vec::new(), Vec::new());
@@ -358,7 +353,7 @@ fn component_props_problems(
         let Ok((node, _)) = luaux::markup::parse_node(src, start) else {
             continue;
         };
-        check_node(&node, src, bound, plain, &mut out, &mut typed);
+        check_node(&node, src, bound, plain, new_solver, &mut out, &mut typed);
     }
 
     out.sort_by_key(|d| d.start);
@@ -374,6 +369,7 @@ fn check_node(
     src: &str,
     bound: &HashSet<String>,
     plain: bool,
+    new_solver: bool,
     out: &mut Vec<Diagnostic>,
     typed: &mut Vec<Typed>,
 ) {
@@ -381,7 +377,7 @@ fn check_node(
 
     let children = match node {
         Node::Element(e) => {
-            check_element(e, src, bound, plain, out, typed);
+            check_element(e, src, bound, plain, new_solver, out, typed);
             &e.children
         }
 
@@ -390,7 +386,7 @@ fn check_node(
 
     for child in children {
         match child {
-            Child::Node(n) => check_node(n, src, bound, plain, out, typed),
+            Child::Node(n) => check_node(n, src, bound, plain, new_solver, out, typed),
 
             // A tag inside a hole is one expression to the markup
             // parser, so its own region is parsed from the text.
@@ -402,7 +398,7 @@ fn check_node(
 
                     match luaux::markup::parse_node(src, at) {
                         Ok((inner, next)) => {
-                            check_node(&inner, src, bound, plain, out, typed);
+                            check_node(&inner, src, bound, plain, new_solver, out, typed);
                             at = next.max(at + 1);
                         }
 
@@ -423,6 +419,7 @@ fn check_element(
     src: &str,
     bound: &HashSet<String>,
     plain: bool,
+    new_solver: bool,
     out: &mut Vec<Diagnostic>,
     typed: &mut Vec<Typed>,
 ) {
@@ -431,7 +428,7 @@ fn check_element(
     let name = element.name.as_written();
 
     if luaux::roblox::is_class(&name) {
-        check_intrinsic(element, &name, src, plain.then_some(typed), out);
+        check_intrinsic(element, &name, src, plain.then_some(typed), new_solver, out);
 
         return;
     }
@@ -539,10 +536,19 @@ fn check_element(
     }
 }
 
-/// A Roblox tag's attributes against the class: a literal where the
-/// property takes another type, and a literal on an event, which takes
-/// a function. A property the class does not have is luaux's report.
-/// Each other value of a typed property goes to `typed`, when given.
+/// A value of type `want`, or a React binding of one, for the check
+/// artifact. React reads a binding through `getValue`. The new solver
+/// takes an `any` parameter as a hidden error, so `(any) -> T` passed a
+/// binding of any `T`. It checks a read-only `(never) -> T` in full. The
+/// old solver rejects `read`, and checks `(any) -> T` in full.
+fn bindable(want: &str, new_solver: bool) -> String {
+    match new_solver {
+        true => format!("{want} | {{ read getValue: (never) -> ({want}) }}"),
+
+        false => format!("{want} | {{ getValue: (any) -> ({want}) }}"),
+    }
+}
+
 /// A property type as Luau code names it. The class list writes an
 /// enum as `EnumSortOrder`, and a script names it `Enum.SortOrder`. A
 /// string-backed type is a `string`. `None` for a type the Roblox
@@ -566,11 +572,16 @@ fn luau_property_type(ty: &str) -> Option<String> {
     }
 }
 
+/// A Roblox tag's attributes against the class: a literal where the
+/// property takes another type, and a literal on an event, which takes
+/// a function. A property the class does not have is luaux's report.
+/// Each other value of a typed property goes to `typed`, when given.
 fn check_intrinsic(
     element: &luaux::markup::Element,
     class: &str,
     src: &str,
     mut typed: Option<&mut Vec<Typed>>,
+    new_solver: bool,
     out: &mut Vec<Diagnostic>,
 ) {
     use luaux::markup::{Attribute, AttributeValue};
@@ -586,15 +597,14 @@ fn check_intrinsic(
         let Some(got) = literal_type(value) else {
             // A nil field of the props table leaves the property unset,
             // so the value may be nil too: `if on then red else nil`.
-            // React takes a binding where a property wants a value, and
-            // a binding reads through `getValue`.
+            // React takes a binding where a property wants a value.
             if let (Some(typed), AttributeValue::Expression(_)) = (typed.as_mut(), value)
                 && !luaux::roblox::is_event(class, name)
                 && let Some(want) =
                     crate::roblox_props::property_type(class, name).and_then(luau_property_type)
                 && let Some((start, end)) = value_bytes(src, *span)
             {
-                typed.push((start, end, format!("({want} | {{ getValue: any }})?")));
+                typed.push((start, end, format!("({})?", bindable(&want, new_solver))));
             }
 
             continue;
@@ -1333,11 +1343,12 @@ mod tests {
         );
     }
 
-    /// A lone `{expr}` that becomes `Text` must be a string or a number.
-    /// With no reactivity, the check artifact passes it through
-    /// `__alloy.text`, and the ship artifact keeps it bare. Text with
-    /// holes is a string already. A reactive library takes a source
-    /// there, so its hole stays bare in both.
+    /// A lone `{expr}` that becomes `Text` must be a string or a number,
+    /// or a React binding of one, as `Text={expr}` may be. With no
+    /// reactivity, the check artifact passes it through `__alloy.prop`,
+    /// and the ship artifact keeps it bare. Text with holes is a string
+    /// already. A reactive library takes a source there, so its hole
+    /// stays bare in both.
     #[test]
     fn a_lone_text_hole_checks_its_type() {
         let src = "local function create(n: string): any return n end\nlocal function Corner(): any return 1 end\nreturn <Frame><TextLabel>{Corner()}</TextLabel><TextBox>n: {Corner()}</TextBox></Frame>\n";
@@ -1348,8 +1359,11 @@ mod tests {
             .expect("the markup compiles")
             .output;
 
+        let text = "string | number | { read getValue: (never) -> (string | number) }";
         assert!(
-            out.check.contains("Text = __alloy.text(Corner())"),
+            out.check.contains(&format!(
+                "Text = (__alloy.prop :: ({text}) -> ({text}))(Corner())"
+            )),
             "{}",
             out.check
         );
@@ -1366,7 +1380,7 @@ mod tests {
             .expect("the markup compiles")
             .output;
 
-        assert!(!out.check.contains("__alloy.text"), "{}", out.check);
+        assert!(!out.check.contains("__alloy.prop"), "{}", out.check);
     }
 
     /// An attribute value that is no literal must fit its property or
@@ -1398,7 +1412,7 @@ mod tests {
             .output;
 
         for want in [
-            "Text = (__alloy.prop :: ((string | { getValue: any })?) -> ((string | { getValue: any })?))(n)",
+            "Text = (__alloy.prop :: ((string | { read getValue: (never) -> (string) })?) -> ((string | { read getValue: (never) -> (string) })?))(n)",
             "item = (__alloy.prop :: (Item) -> (Item))(5)",
             "count = 1",
         ] {

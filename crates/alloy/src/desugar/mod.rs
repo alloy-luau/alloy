@@ -213,14 +213,14 @@ pub struct EmitOptions {
     pub naming: crate::naming::Naming,
     /// The markup of an `.alx` file, for the component names.
     pub markup: crate::naming::Markup,
-    /// The byte ranges of the lowered `.alx` text that hold a lone
-    /// `{expr}` the markup gives as `Text`. The check artifact passes
-    /// each one through `__alloy.text`, which takes a string or a number.
-    pub text_holes: Vec<(u32, u32)>,
     /// The byte ranges of the lowered `.alx` text that hold an attribute
-    /// value, with the type the property or the prop declares. The check
-    /// artifact passes each one through `__alloy.prop`, cast to that type.
+    /// value or a lone `{expr}` that sets `Text`, with the type it must
+    /// have. The check artifact passes each one through `__alloy.prop`,
+    /// cast to that type.
     pub attribute_types: Vec<(u32, u32, String)>,
+    /// The check artifact goes to Luau's new solver, `[flux] new_solver`.
+    /// A type that only one solver reads right picks its form by it.
+    pub new_solver: bool,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -450,8 +450,8 @@ impl Default for EmitOptions {
             macro_depth: 0,
             naming: crate::naming::Naming::default(),
             markup: crate::naming::Markup::default(),
-            text_holes: Vec::new(),
             attribute_types: Vec::new(),
+            new_solver: true,
         }
     }
 }

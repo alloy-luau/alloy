@@ -298,6 +298,7 @@ fn run() -> ExitCode {
         let mut st = server.state.lock().expect("state");
         st.definitions = given;
         st.definition_sources = sources;
+        st.old_solver = !child_args.iter().any(|a| a == "--flag:LuauSolverV2=true");
     }
 
     // Child -> editor on its own thread.

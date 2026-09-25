@@ -1618,3 +1618,48 @@ fn a_match_that_is_not_exhaustive_reports_once() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// React takes a binding where a Roblox property wants a value. The
+/// check took any binding there, so a `Binding<string>` passed as a
+/// `Size`. The value the binding holds is checked now, in either solver,
+/// and a lone `{expr}` that sets `Text` takes a binding as `Text=` does.
+#[test]
+fn a_binding_on_a_roblox_tag_checks_its_value_in_either_solver() {
+    let src = "type Binding<T> = { getValue: (self: Binding<T>) -> T }\nlocal React = {}\nfunction React.createElement(kind: any, props: any, ...: any): any\n    return props\nend\nlocal function View(label: Binding<string>, flag: Binding<boolean>)\n    return (\n        <Frame>\n            <TextLabel Text={label} Visible={flag} />\n            <TextLabel>{label}</TextLabel>\n            <TextLabel Size={label} Text={flag} />\n            <TextLabel>{flag}</TextLabel>\n        </Frame>\n    )\nend\nprint(View)\n";
+
+    for new_solver in [true, false] {
+        let dir =
+            std::env::temp_dir().join(format!("alloy-binding-{new_solver}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("alloy.toml"),
+            format!(
+                "[build]\nin = \"src\"\nout = \"build\"\n\n[flux]\nnew_solver = {new_solver}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/view.alx"), src).unwrap();
+
+        let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+        let report = alloy::build::flux_project(&dir, &config).unwrap();
+        let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
+            eprintln!("skipped: luau-lsp is not installed");
+
+            return;
+        };
+        let errors: Vec<(usize, String)> = analysis
+            .diagnostics
+            .iter()
+            .filter(|d| d.is_error())
+            .map(|d| (d.line, d.message.clone()))
+            .collect();
+        let lines: Vec<usize> = errors.iter().map(|e| e.0).collect();
+
+        assert_eq!(lines, vec![11, 11, 12], "{new_solver}: {errors:?}");
+        assert!(errors[0].1.contains("got 'Binding<string>'"), "{errors:?}");
+        assert!(errors[2].1.contains("got 'Binding<boolean>'"), "{errors:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

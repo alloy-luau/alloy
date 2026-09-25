@@ -109,6 +109,9 @@ pub(crate) struct State {
     /// in it, with the line that file starts on. The child reports on
     /// the file it read, and the report belongs on the `.d.aly`.
     pub(crate) definition_sources: Vec<(PathBuf, alloy::declarations::Segment)>,
+    /// The child runs Luau's old solver, which types some checks of the
+    /// check artifact in another form. See `EmitOptions::new_solver`.
+    pub(crate) old_solver: bool,
     /// The `@roblox/globaltype/Class.Member` entries of that file, read
     /// once on the first list that needs one. The file is 7 MB, so a
     /// read at startup would cost every session that never opens a
@@ -612,6 +615,7 @@ impl State {
         options.foreign_impls = project.methods.clone();
         options.foreign_privates = project.privates.clone();
         options.shapes = self.project_shapes().to_vec();
+        options.new_solver = !self.old_solver;
 
         (options, jsx)
     }

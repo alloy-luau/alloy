@@ -26,15 +26,9 @@ local function sorted_keys(t: { [any]: any }): { any }
 	return keys
 end
 
---- The `Text` of a lone `{expr}` in markup. Only the check artifact
---- calls it: the parameter type makes any other value a type error.
-function alloy.text(v: string | number): string
-	return tostring(v)
-end
-
---- An attribute value in markup. Only the check artifact calls it, cast
---- to a function of the property's type or the prop's type, so another
---- value is a type error at the attribute.
+--- An attribute value in markup, or a lone `{expr}` that sets `Text`.
+--- Only the check artifact calls it, cast to a function of the type the
+--- value must have, so another value is a type error there.
 function alloy.prop(v: any): any
 	return v
 end

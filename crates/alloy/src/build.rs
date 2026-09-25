@@ -478,6 +478,7 @@ fn run_inner(
         naming: config.lint.naming.clone(),
         test_runner: config.test.lest,
         std_globals: config.std.globals.clone(),
+        new_solver: config.flux.new_solver,
         ..EmitOptions::default()
     };
     let input = root.join(&build.input);

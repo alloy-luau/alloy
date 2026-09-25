@@ -242,20 +242,11 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        // A lone `{expr}` that markup gives as `Text` must be a string or
-        // a number. The check artifact passes it through `__alloy.text`,
-        // typed `(string | number) -> string`, so another value reports.
-        let (start, end) = (self.byte_start(e.span()), self.byte_end(e.span()));
-        let text_hole = self.options.check && self.options.text_holes.contains(&(start, end));
-
-        if text_hole {
-            let std = self.std();
-            self.generate(start, &format!("{std}.text("));
-        }
-
         // An attribute value in markup must fit the type its property or
-        // its prop declares. The check artifact passes it through
-        // `__alloy.prop`, cast to a function of that type.
+        // its prop declares, and a lone `{expr}` that sets `Text` must
+        // too. The check artifact passes it through `__alloy.prop`, cast
+        // to a function of that type.
+        let (start, end) = (self.byte_start(e.span()), self.byte_end(e.span()));
         let attribute_type = match self.options.check {
             true => self
                 .options
@@ -286,7 +277,7 @@ impl<'s> Desugar<'s> {
             self.expr_node(e);
         }
 
-        if text_hole || attribute_type.is_some() {
+        if attribute_type.is_some() {
             self.generate(end, ")");
         }
 

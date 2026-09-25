@@ -26,12 +26,26 @@ impl Server {
         // A `remote` or an exported `const` the file imported is
         // declared somewhere else; the child reads the emitted local
         // and calls it a `local`.
+        let declared = |text: &str, name: &str| {
+            remote_hover(text, name)
+                .or_else(|| const_hover(text, name))
+                .or_else(|| function_hover(text, name))
+        };
+        // A barrel's `export { NAMES } from "./m"` declares nothing,
+        // so a name it passes on reads in the module it names.
         let imported = || {
-            doc.import_sources.iter().find_map(|text| {
-                remote_hover(text, &word)
-                    .or_else(|| const_hover(text, &word))
-                    .or_else(|| function_hover(text, &word))
-            })
+            doc.import_sources
+                .iter()
+                .find_map(|text| declared(text, &word))
+                .or_else(|| {
+                    let entry = super::super::navigation::import_entries(&doc.source)
+                        .into_iter()
+                        .find(|e| e.bound == word)?;
+                    let (text, name) =
+                        alloy::modules::import_home(path.as_deref()?, &entry.spec, &entry.name)?;
+
+                    declared(&text, &name)
+                })
         };
         let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
         let quoted = doc.source[line_start..start].matches('"').count() % 2 == 1

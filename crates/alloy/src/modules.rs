@@ -2265,6 +2265,31 @@ pub fn sent_summaries(path: &Path, text: &str) -> Vec<crate::declarations::Decla
         .collect()
 }
 
+/// The text of the module that declares the name `spec` sends out as
+/// `name`, and the name that module declares it under. A barrel's
+/// `export { T } from` holds no declaration, so the walk follows it to
+/// the module it names.
+pub fn import_home(path: &Path, spec: &str, name: &str) -> Option<(String, String)> {
+    let (from, aliases) = file_context(path);
+    let mut target = resolve(spec, &from, &aliases)?;
+    let mut name = name.to_string();
+
+    for _ in 0..=BARREL_DEPTH {
+        let text = module_text(&target).ok()?;
+        let Some((own, _, spec)) = reexports(&text)
+            .into_iter()
+            .find(|(_, sent, _)| *sent == name)
+        else {
+            return Some((text, name));
+        };
+
+        target = resolve(&spec, &target, &aliases).filter(|t| *t != target)?;
+        name = own;
+    }
+
+    None
+}
+
 fn summary_pairs(text: &str) -> Vec<(String, crate::declarations::Declaration)> {
     crate::declarations::summaries(text, false)
         .into_iter()
@@ -3889,6 +3914,35 @@ mod tests {
         let src = "import { Tier } from \"./barrel\"\nprint(Tier.Low)\n";
         let imported = import_summaries_for_file(&dir.join("src/use.aly"), src);
         assert_eq!(hover(&imported, "Tier"), Some(tier));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `const` or a function a barrel passes on has its declaration in
+    /// the module the barrel names. The editor hover read the barrel's
+    /// text, found no `export const NAMES` there, and the child printed
+    /// `local NAMES: t2[]`.
+    #[test]
+    fn a_barrel_name_finds_the_module_that_declares_it() {
+        let dir = std::env::temp_dir().join(format!("alloy-barrel-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/lib")).expect("temp dir");
+        let leaf = "-- The names.\nexport const NAMES = [1]\n";
+        std::fs::write(dir.join("src/lib/m.aly"), leaf).expect("module");
+        std::fs::write(
+            dir.join("src/lib/init.aly"),
+            "export { NAMES, NAMES as ALL } from \"./m\"\n",
+        )
+        .expect("module");
+        let file = dir.join("src/use.aly");
+
+        let home = |name: &str| import_home(&file, "./lib", name);
+        assert_eq!(home("NAMES"), Some((leaf.to_string(), "NAMES".to_string())));
+        assert_eq!(home("ALL"), Some((leaf.to_string(), "NAMES".to_string())));
+        assert_eq!(
+            import_home(&file, "./lib/m", "NAMES"),
+            Some((leaf.to_string(), "NAMES".to_string()))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

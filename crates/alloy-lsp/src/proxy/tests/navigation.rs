@@ -1397,6 +1397,46 @@ fn a_receiver_typed_by_the_trait_is_a_site_of_its_method() {
     assert_eq!(got, wanted, "{edit}");
 }
 
+/// A trait in a namespace bounds a parameter by its path,
+/// `<T: Abilities.Ability>`. The bound scan compared the whole path to
+/// `Ability`, so references and rename found the declaration alone.
+#[test]
+fn a_bound_by_a_namespace_trait_path_reaches_its_method() {
+    const SRC: &str = concat!(
+        "namespace Abilities\n",
+        "    trait Ability\n",
+        "        function power(self): number\n",
+        "    end\n",
+        "end\n",
+        "local function two<T: Abilities.Ability>(a: T, b: T): number return a:power() + b:power() end\n",
+        "print(two)\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let wanted: Vec<usize> = SRC.match_indices("power(").map(|(i, _)| i).collect();
+    assert_eq!(wanted.len(), 3);
+
+    for at in &wanted {
+        let Some(Target::Method { trait_name, name }) = st.name_target(uri, *at) else {
+            panic!("no trait method at {at}");
+        };
+        assert_eq!((trait_name.as_str(), name.as_str()), ("Ability", "power"));
+    }
+
+    let edit = st
+        .method_edits("Ability", "power", "strength")
+        .expect("edit");
+    let got: Vec<usize> = edit["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .map(|e| {
+            let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+            offset_of(SRC, line, column).expect("offset")
+        })
+        .collect();
+    assert_eq!(got, wanted, "{edit}");
+}
+
 /// A definitions file names a type with no import of it, so the rename
 /// walk, which reads the import lists, left it behind. An ambient
 /// declaration stands in scope everywhere, and only a type reaches one:

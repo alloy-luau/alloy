@@ -2897,7 +2897,9 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
 }
 
 /// Whether a source bounds the type parameter `ty` by `trait_name`:
-/// `<T: Trait>` or `<T: A & B>` anywhere in the file.
+/// `<T: Trait>` or `<T: A & B>` anywhere in the file. A trait in a
+/// namespace bounds by its path, `<T: Abilities.Ability>`, and the site
+/// scan names it `Ability`, so the last segment of a path counts.
 ///
 /// ponytail: a file-wide scan; two functions that bound one parameter
 /// name by different traits read as both. Walk the enclosing header
@@ -2913,7 +2915,11 @@ fn bound_by(src: &str, ty: &str, trait_name: &str) -> bool {
                 return false;
             };
 
-            name.trim() == ty && bounds.split(['&', '+']).any(|b| b.trim() == trait_name)
+            name.trim() == ty
+                && bounds
+                    .split(['&', '+'])
+                    .map(str::trim)
+                    .any(|b| b == trait_name || b.rsplit('.').next() == Some(trait_name))
         })
     })
 }

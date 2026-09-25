@@ -644,7 +644,7 @@ mod tests {
 
     /// The sources here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        lints_of(src, &["unused_variable"])
+        lints_of(src, &["unused_variable", "redundant_as"])
     }
 
     fn fixed(src: &str) -> String {

@@ -505,6 +505,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "`case target then`, with `target` a local or a parameter, reads as a comparison and is a binding: the arm takes every value, and a `default` or a later arm never runs. Compare in a guard, `case v where v == target`, or bind a name no local holds. A const or a SCREAMING_CASE name is an error for the same reason.",
     },
     LintInfo {
+        name: "redundant_as",
+        group: Group::Style,
+        default: Level::Warn,
+        summary: "`as` before a declaration body on the next line",
+        detail: "`as` joins a header to a body on the same line, `enum Dir as Up, Down end`. A body on the next line needs none, as Luau's block headers read, so `struct P as` over its fields writes `struct P`. `alloy fmt` and `alloy flux --fix` drop the word.",
+    },
+    LintInfo {
         name: "match_guard_and",
         group: Group::Style,
         default: Level::Warn,
@@ -1034,7 +1041,7 @@ mod tests {
             .map(|l| l.name)
             .filter(|n| {
                 level_of(&config, n) != Level::Allow
-                    && !matches!(*n, "unused_variable" | "unused_function")
+                    && !matches!(*n, "unused_variable" | "unused_function" | "redundant_as")
             })
             .collect()
     }

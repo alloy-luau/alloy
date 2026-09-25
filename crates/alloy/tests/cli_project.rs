@@ -34,7 +34,7 @@ fn run(root: &Path, args: &[&str]) -> (i32, String) {
 const TOML: &str = "[build]\nin = \"src\"\nout = \"build\"\n";
 
 /// An exported struct with no comment above it: one warning, no error.
-const WARNS: &str = "export struct Box as\n    value: number\nend\nprint(Box)\n";
+const WARNS: &str = "export struct Box\n    value: number\nend\nprint(Box)\n";
 
 #[test]
 fn deny_warnings_fails_the_project_check() {

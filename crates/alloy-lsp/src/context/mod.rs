@@ -54,6 +54,8 @@ pub enum Context {
         target: Option<&'static str>,
         bare: bool,
     },
+    /// `@serde.ren|`: an attribute of the module a star import binds.
+    AttributePath { alias: String, prefix: String },
     /// `@derive(Eq, De|`: a derive name.
     DeriveArg { prefix: String },
     /// `@allow(too_many|` or `@allow(flux.too|`: a lint or a group.
@@ -563,6 +565,20 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
     let line = &src[line_start..line_end];
     let prefix = trailing_word(before);
     let head = &before[..before.len() - prefix.len()];
+
+    // `@serde.|`: a module's attribute, through a star import.
+    if let Some(path) = head.strip_suffix('.')
+        && let Some(at) = path.rfind('@')
+        && path[at + 1..]
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_')
+        && at + 1 < path.len()
+    {
+        return Some(Context::AttributePath {
+            alias: path[at + 1..].to_string(),
+            prefix: prefix.to_string(),
+        });
+    }
 
     // A sigil right before the word.
     if head.ends_with('@') {

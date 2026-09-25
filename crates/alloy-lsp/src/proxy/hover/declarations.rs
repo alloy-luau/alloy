@@ -89,9 +89,11 @@ impl Server {
         let found = found.or_else(|| {
             let (decls, name) = module_decls.as_ref()?.as_ref()?;
 
+            // `@M.tag` and `M.tag` read the module's attribute too.
             decls
                 .iter()
                 .find(|d| d.name == *name && declares_a_type(&d.hover))
+                .or_else(|| decls.iter().find(|d| d.name == format!("@{name}")))
         });
 
         // `Light.Active` under `import { Status as Light }`: the path

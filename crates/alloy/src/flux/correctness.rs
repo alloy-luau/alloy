@@ -886,7 +886,12 @@ mod tests {
             &[],
         )
         .into_iter()
-        .filter(|l| !matches!(l.name, "unused_variable" | "unused_function"))
+        .filter(|l| {
+            !matches!(
+                l.name,
+                "unused_variable" | "unused_function" | "redundant_as"
+            )
+        })
         .collect()
     }
 

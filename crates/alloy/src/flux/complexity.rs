@@ -518,7 +518,7 @@ mod tests {
     use super::super::helpers::{fixed_by, lints as lints_of, names_of};
     use crate::lint::Thresholds;
 
-    const UNUSED: &[&str] = &["unused_variable", "unused_function"];
+    const UNUSED: &[&str] = &["unused_variable", "unused_function", "redundant_as"];
 
     /// The sources here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {

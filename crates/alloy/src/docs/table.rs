@@ -348,11 +348,11 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@rename_all",
-        "```alloy\n@derive(Serialize, Deserialize)\n@rename_all(\"camelCase\")\nstruct Save\n    max_health: number    -- the key is maxHealth\nend\n```\nThe case every key of the derived table takes, serde's styles: `\"lowercase\"`, `\"UPPERCASE\"`, `\"PascalCase\"`, `\"camelCase\"`, `\"snake_case\"`, `\"SCREAMING_SNAKE_CASE\"`, `\"kebab-case\"`, and `\"SCREAMING-KEBAB-CASE\"`. A field's `@rename` wins over it. It needs `Serialize` or `Deserialize` derived.\n\n**Applies to** `struct`",
+        "```alloy\n@derive(Serialize, Deserialize)\n@rename_all(\"camelCase\")\nstruct Save\n    max_health: number    -- the key is maxHealth\nend\n```\nThe case every key of the derived table takes, serde's styles: `\"lowercase\"`, `\"UPPERCASE\"`, `\"PascalCase\"`, `\"camelCase\"`, `\"snake_case\"`, `\"SCREAMING_SNAKE_CASE\"`, `\"kebab-case\"`, and `\"SCREAMING-KEBAB-CASE\"`. A field's `@rename` wins over it. It needs `Serialize` or `Deserialize` derived. It comes from `@alloy/std/serde` with the derives: `import { rename_all } from \"@alloy/std/serde\"`, or `@serde.rename_all` under `import * as serde from \"@alloy/std/serde\"`.\n\n**Applies to** `struct`",
     ),
     (
         "@deny_unknown_fields",
-        "```alloy\n@derive(Deserialize)\n@deny_unknown_fields\nstruct Settings\n    volume: number\nend\n\nSettings.from_table({ volume = 1, volumme = 2 })  -- raises: Settings has no field volumme\n```\n`from_table` raises on a key the struct neither names nor aliases, as serde's option does. A typo in stored data then shows up at the load instead of as a field that quietly keeps its default. It needs `Deserialize` derived.\n\n**Applies to** `struct`",
+        "```alloy\n@derive(Deserialize)\n@deny_unknown_fields\nstruct Settings\n    volume: number\nend\n\nSettings.from_table({ volume = 1, volumme = 2 })  -- raises: Settings has no field volumme\n```\n`from_table` raises on a key the struct neither names nor aliases, as serde's option does. A typo in stored data then shows up at the load instead of as a field that quietly keeps its default. It needs `Deserialize` derived. It comes from `@alloy/std/serde` with the derives: `import { deny_unknown_fields } from \"@alloy/std/serde\"`, or `@serde.deny_unknown_fields` under `import * as serde from \"@alloy/std/serde\"`.\n\n**Applies to** `struct`",
     ),
     (
         "@wire",
@@ -372,7 +372,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@deprecated",
-        "```alloy\n@deprecated(message: string)\n\n@deprecated\nfunction old() end\n\n@[deprecated {use = \"new_name\", reason = \"slow\"}]\nfunction older() end\n```\nLuau's own: a call to the function is a lint. The emit writes the message as Luau reads it, `@[deprecated {reason = message}]`. Luau's list form passes through as written, and its table takes `use`, the name to call instead, and `reason`, each a string.",
+        "```alloy\n@deprecated(message: string)\n@deprecated({ use = \"new_name\", reason = \"slow\" })\n\n@deprecated({ use = \"mix\", reason = \"renamed\" })\nfunction blend() end\n\n@deprecated(\"renamed to mix\")\nfunction fade() end\n```\nLuau's own: a call to the function is a lint. The argument is a message, or the table Luau's list takes: `use`, the name to call instead, and `reason`, each a string. The emit writes both as Luau reads them, `@[deprecated {reason = message}]` for a message and the table as written. Luau's list form, `@[deprecated {use = \"mix\"}]`, passes through too.",
     ),
     (
         "@inline",
@@ -384,11 +384,11 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@rename",
-        "```alloy\n@rename(\"regen_per_second\")\nregen: number\n```\nThe key a field takes in the tables `@derive(Serialize)` writes and reads. The key is the text the literal stands for, so `'it\\'s'` and `\"it's\"` name one key.\n\n**Applies to** `field`",
+        "```alloy\n@rename(\"regen_per_second\")\nregen: number\n```\nThe key a field takes in the tables `@derive(Serialize)` writes and reads. The key is the text the literal stands for, so `'it\\'s'` and `\"it's\"` name one key. It comes from `@alloy/std/serde` with the derives: `import { rename } from \"@alloy/std/serde\"`, or `@serde.rename` under `import * as serde from \"@alloy/std/serde\"`.\n\n**Applies to** `field`",
     ),
     (
         "@skip",
-        "```alloy\n@skip\nconnection: RBXScriptConnection?\n```\nLeaves a field out of the tables `@derive(Serialize)` writes and reads: a handle, a cache, anything that is not data.\n\n**Applies to** `field`",
+        "```alloy\n@skip\nconnection: RBXScriptConnection?\n```\nLeaves a field out of the tables `@derive(Serialize)` writes and reads: a handle, a cache, anything that is not data. It comes from `@alloy/std/serde` with the derives: `import { skip } from \"@alloy/std/serde\"`, or `@serde.skip` under `import * as serde from \"@alloy/std/serde\"`.\n\n**Applies to** `field`",
     ),
     (
         "@test",

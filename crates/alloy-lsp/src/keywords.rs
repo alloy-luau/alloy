@@ -15,6 +15,39 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
         let (start, end) = word_at(bytes, offset);
         let word = &source[start..end];
 
+        let line_start = source[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_before = &source[line_start..start];
+
+        // `@serde.rename` and `@derive(serde.Serialize)`: a name through a
+        // star import reads the doc of the name it reaches.
+        if let Some(path) = line_before.strip_suffix('.') {
+            let holder = path.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+
+            if holder.ends_with('@')
+                && holder.len() < path.len()
+                && let Some(text) = lookup(&format!("@{word}"))
+            {
+                return Some((start, end, text));
+            }
+
+            if let Some(i) = line_before.rfind("@derive(")
+                && !line_before[i..].contains(')')
+                && let Some(text) = lookup(&format!("derive:{word}"))
+            {
+                return Some((start, end, text));
+            }
+        }
+
+        // A name in an import list of the std: a derive or an attribute
+        // has no entry under its bare name.
+        if in_std_import(source, start) && lookup(word).is_none() {
+            let text = lookup(&format!("derive:{word}")).or_else(|| lookup(&format!("@{word}")));
+
+            if let Some(text) = text {
+                return Some((start, end, text));
+            }
+        }
+
         // A keyword used as a name is the name: `function new`, `T.new`,
         // `obj:match`, and `new = ...` in a table. The child answers.
         let before = source[..start].trim_end();
@@ -48,8 +81,7 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
         }
 
         // A derive name inside `@derive( )` has its own entry.
-        let line_start = source[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let before = &source[line_start..start];
+        let before = line_before;
 
         if let Some(i) = before.rfind("@derive(")
             && !before[i..].contains(')')
@@ -81,6 +113,28 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
     }
 
     best
+}
+
+/// Whether the byte sits inside the braces of an `import { ... } from`
+/// whose spec names the std.
+fn in_std_import(source: &str, at: usize) -> bool {
+    let Some(open) = source[..at].rfind('{') else {
+        return false;
+    };
+
+    if source[open..at].contains('}') || !source[..open].trim_end().ends_with("import") {
+        return false;
+    }
+
+    let Some(close) = source[at..].find('}') else {
+        return false;
+    };
+    let rest = source[at + close + 1..].trim_start();
+
+    rest.strip_prefix("from")
+        .map(str::trim_start)
+        .and_then(|r| r.strip_prefix(['"', '\'']))
+        .is_some_and(|r| r.starts_with("@alloy/std"))
 }
 
 /// The hover of a word inside `@allow( )` or Luau's `@[ ]`: a lint's

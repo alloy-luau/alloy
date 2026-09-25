@@ -248,3 +248,52 @@ fn a_std_import_binds_its_aliases_alone() {
         ["S", "sig", "a"]
     );
 }
+
+/// serde's options sit in `@alloy/std/serde`: the `@` row writes the
+/// import, `@serde.` lists them through a star import, and a name in
+/// the import list hovers as the attribute or the derive it is.
+#[test]
+fn a_serde_option_imports_and_reads_through_its_module() {
+    let src = "import * as serde from \"@alloy/std/serde\"\nimport { Serialize, rename } from \"@alloy/std/serde\"\n\n@serde.\nstruct S\n    @ren\n    x: number\nend\n";
+    let (st, uri) = none_file(src);
+    let at = |needle: &str| src.find(needle).unwrap() + needle.len();
+
+    let offset = at("@serde.");
+    let ctx = context::detect(src, offset).expect("a path context");
+    let items = st.context_items(uri, offset, &ctx);
+    let mut labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+    labels.sort_unstable();
+    assert_eq!(
+        labels,
+        ["deny_unknown_fields", "rename", "rename_all", "skip"]
+    );
+
+    // `rename` is imported; `skip` is not, so its row writes the import.
+    let offset = at("    @ren");
+    let ctx = context::detect(src, offset).expect("an attribute context");
+    let items = st.context_items(uri, offset, &ctx);
+    assert!(row(&items, "@rename").get("additionalTextEdits").is_none());
+    assert_eq!(
+        row(&items, "@skip")["additionalTextEdits"][0]["newText"],
+        ", skip"
+    );
+
+    for word in ["Serialize", "rename"] {
+        let offset = src
+            .find(&format!("{word},"))
+            .or_else(|| src.find(&format!("{word} }}")))
+            .unwrap();
+        let (_, _, text) = keywords::hover(src, offset).expect("a hover in the import list");
+        assert!(
+            text.contains(&format!(
+                "@{}",
+                if word == "rename" {
+                    "rename"
+                } else {
+                    "derive(Serialize"
+                }
+            )),
+            "{word}: {text}"
+        );
+    }
+}

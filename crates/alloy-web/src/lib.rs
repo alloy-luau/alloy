@@ -406,6 +406,17 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            // `@serde.|`: the std module's attributes. The playground has
+            // one file, so a star import of the std is the only kind.
+            Context::AttributePath { prefix, .. } => {
+                for (_, names) in alloy::std_names::ATTRIBUTES {
+                    for name in *names {
+                        let key = format!("@{name}");
+                        items.push(word(name, "attribute", keywords::doc(&key).map(str::to_string), offset - prefix.len()));
+                    }
+                }
+            }
+
             Context::DeriveArg { prefix } => {
                 for key in keywords::keys_with_prefix("derive:") {
                     let name = &key["derive:".len()..];

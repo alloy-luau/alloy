@@ -615,7 +615,7 @@ fn hover_completion_and_extensions() {
     );
     let h = s.hover(&uri, 76, 7);
     assert!(
-        h.contains("local box: Part") && h.contains("Initialized with"),
+        h.contains("local box: Part = new Instance(\"Part\") {") && !h.contains("Initialized with"),
         "init: {h}"
     );
 

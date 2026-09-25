@@ -870,7 +870,7 @@ pub(crate) fn a_three_line_import_cuts_the_dead_name_alone() {
 #[test]
 pub(crate) fn a_pull_lists_what_a_push_publishes() {
     let (st, uri) = one_file(
-        "struct Pt as\n    x: number\nend\nlocal p = new Pt { x = 1, y = 2 }\nlocal n: number = \"s\"\n",
+        "struct Pt\n    x: number\nend\nlocal p = new Pt { x = 1, y = 2 }\nlocal n: number = \"s\"\n",
     );
     let checker = json!({
         "message": "TypeError: Expected this to be 'number', but got 'string'",

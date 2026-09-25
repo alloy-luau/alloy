@@ -507,6 +507,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         field_expected: HashMap::new(),
         value_sink: None,
         for_header: 0,
+        last_link: false,
         expected_payload: None,
         result_asyncs: options.import_result_asyncs.iter().cloned().collect(),
         // Luau reads a reserved word as a key only in brackets.
@@ -920,11 +921,15 @@ fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
 /// The std names a file's imports bind under their own names, then the
 /// locals its star imports of the std bind. A name under an alias binds
 /// the alias, a local the import writes.
-fn std_imports(src: &str, toks: &[Tok], chunk: &Chunk) -> (HashSet<String>, HashSet<String>) {
+fn std_imports(
+    src: &str,
+    toks: &[Tok],
+    chunk: &Chunk,
+) -> (HashSet<String>, HashMap<String, String>) {
     use alloy_syntax::ast::ImportKind;
 
     let mut out = HashSet::new();
-    let mut stars = HashSet::new();
+    let mut stars = HashMap::new();
 
     for stmt in &chunk.block.stmts {
         let Stmt::Import(i) = stmt else {
@@ -932,12 +937,12 @@ fn std_imports(src: &str, toks: &[Tok], chunk: &Chunk) -> (HashSet<String>, Hash
         };
         let spec = i.path.text(src, toks).trim_matches(['"', '\'']);
 
-        if crate::std_names::module_of_spec(spec).is_none() {
+        let Some(module) = crate::std_names::module_of_spec(spec) else {
             continue;
-        }
+        };
 
         if let ImportKind::Namespace(n, _) = &i.kind {
-            stars.insert(n.text(src, toks).to_string());
+            stars.insert(n.text(src, toks).to_string(), module.to_string());
         }
 
         if let ImportKind::Named(specs)
@@ -1039,6 +1044,9 @@ struct Desugar<'s> {
     /// Above zero while the check artifact renders a for-in header; see
     /// the `return` cast in `statements`.
     for_header: u32,
+    /// Whether the link under render ends its chain; a child lookup
+    /// there keeps its `Instance` type in the check artifact.
+    last_link: bool,
     /// `local f: Future<T> = async do ... end`: the payload type `T`,
     /// so the block's closure carries it. Without it the checker infers
     /// the closure's result, and an open result lands on `unknown`. An
@@ -1310,8 +1318,9 @@ struct Desugar<'s> {
     /// The std names this file imports under their own names. Each
     /// renders as `__alloy.Name`, the way an ambient one does.
     std_imports: HashSet<String>,
-    /// The locals a star import of the std binds, `import * as s`.
-    std_namespaces: HashSet<String>,
+    /// The locals a star import of the std binds, `import * as s`, each
+    /// with the module it names; the facade is `""`.
+    std_namespaces: HashMap<String, String>,
     /// The std names already reported as missing their import. The first
     /// use carries the report, and its fix writes the one line.
     std_reported: HashSet<String>,

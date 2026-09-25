@@ -224,6 +224,12 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
                 .iter()
                 .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
                 .flat_map(|a| a.args.iter().map(|x| text(x.span())))
+                // `serde.Serialize` through a star import of the std.
+                .map(|d: String| match d.rsplit_once('.') {
+                    Some((_, n)) if crate::std_names::is_std_name(n) => n.to_string(),
+
+                    _ => d,
+                })
                 .collect();
             shapes.push(crate::StructShape {
                 name: text(st.name),

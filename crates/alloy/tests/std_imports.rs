@@ -143,3 +143,34 @@ fn serde_splits_and_imports() {
     let imported = format!("import {{ Serialize, Deserialize }} from \"@alloy/std/serde\"\n{src}");
     assert!(messages(&imported, Globals::None).is_empty());
 }
+
+/// serde's options live in `@alloy/std/serde` beside the derives. A bare
+/// one needs its import; a star import reaches each as `@serde.name`,
+/// and a derive as `serde.Serialize`.
+#[test]
+fn a_serde_option_needs_its_import_or_a_star_path() {
+    let bare = "import { Serialize } from \"@alloy/std/serde\"\n@derive(Serialize)\n@rename_all(\"camelCase\")\nstruct S\n    @skip\n    x: number = 1\nend\nprint(S)\n";
+
+    assert_eq!(
+        messages(bare, Globals::None),
+        [
+            "`rename_all` is in the std; write `import { rename_all } from \"@alloy/std/serde\"`",
+            "`skip` is in the std; write `import { skip } from \"@alloy/std/serde\"`",
+        ]
+    );
+    assert!(messages(bare, Globals::All).is_empty());
+
+    let star = "import * as serde from \"@alloy/std/serde\"\n@derive(serde.Serialize, serde.Deserialize)\n@serde.rename_all(\"camelCase\")\n@serde.deny_unknown_fields\nstruct S\n    @serde.rename(\"y\")\n    long_name: number\n    @serde.skip\n    x: number = 1\nend\nprint(S.from_table({ y = 1 }):to_table())\n";
+    let out = compile(star, Globals::None);
+
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.ship.contains("return { y = self.long_name }"),
+        "{}",
+        out.ship
+    );
+    assert!(out.ship.contains("for k in pairs(t) do"), "{}", out.ship);
+
+    let named = "import { Deserialize, deny_unknown_fields } from \"@alloy/std/serde\"\n@derive(Deserialize)\n@deny_unknown_fields\nstruct S\n    x: number\nend\nprint(S)\n";
+    assert!(messages(named, Globals::None).is_empty());
+}

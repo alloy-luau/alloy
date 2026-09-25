@@ -974,8 +974,14 @@ impl<'s> Desugar<'s> {
 
             if self.text_of(aname) == "derive" {
                 for arg in &a.args {
-                    let which = self.text_of(arg.span()).to_string();
-                    self.check_std_name(arg.span(), &which);
+                    let which = self.derive_name(arg);
+
+                    // A path through a star import needs no import of the
+                    // name; the star import is one.
+                    if self.text_of(arg.span()) == which {
+                        self.check_std_name(arg.span(), &which);
+                    }
+
                     derives_debug |= which == "Debug";
 
                     // `Eq` and `PartialEq` write the same `__eq`; naming
@@ -1211,7 +1217,7 @@ impl<'s> Desugar<'s> {
 
         for a in attrs {
             let Some(n) = a.name else { continue };
-            let name = self.text_of(n).to_string();
+            let name = self.attr_name(n);
 
             // `@wire(buffer)` names a mode with a bare word, which would
             // emit the `buffer` library; the runtime reads `pack` instead.
@@ -1491,7 +1497,7 @@ impl<'s> Desugar<'s> {
                     .next();
                 let deny = struct_attrs.iter().any(|a| {
                     a.name
-                        .is_some_and(|n| self.text_of(n) == "deny_unknown_fields")
+                        .is_some_and(|n| self.attr_name(n) == "deny_unknown_fields")
                 });
                 let mut known: Vec<String> = Vec::new();
                 let mut to = Vec::new();
@@ -1503,7 +1509,7 @@ impl<'s> Desugar<'s> {
                     let skip = f
                         .attributes
                         .iter()
-                        .any(|a| a.name.map(|n| self.text_of(n) == "skip").unwrap_or(false));
+                        .any(|a| a.name.is_some_and(|n| self.attr_name(n) == "skip"));
 
                     if skip {
                         continue;
@@ -1522,7 +1528,7 @@ impl<'s> Desugar<'s> {
                     let key = f
                         .attributes
                         .iter()
-                        .find(|a| a.name.map(|n| self.text_of(n) == "rename").unwrap_or(false))
+                        .find(|a| a.name.is_some_and(|n| self.attr_name(n) == "rename"))
                         .and_then(|a| a.args.first())
                         .map(|e| {
                             // The key is the text the literal stands for,
@@ -1680,7 +1686,7 @@ impl<'s> Desugar<'s> {
         let derives = |which: &str| {
             st.attributes.iter().any(|a| {
                 a.name.is_some_and(|n| self.text_of(n) == "derive")
-                    && a.args.iter().any(|x| self.text_of(x.span()) == which)
+                    && a.args.iter().any(|x| self.derive_name(x) == which)
             })
         };
         let (ser, de) = (derives("Serialize"), derives("Deserialize"));
@@ -1689,7 +1695,7 @@ impl<'s> Desugar<'s> {
         for a in &st.attributes {
             let Some(n) = a.name else { continue };
 
-            match self.text_of(n) {
+            match self.attr_name(n).as_str() {
                 "rename_all" if !ser && !de => hits.push((
                     a.span,
                     "`@rename_all` sets the keys `Serialize` and `Deserialize` use; derive one of them".to_string(),
@@ -1738,7 +1744,7 @@ impl<'s> Desugar<'s> {
     pub(crate) fn attr_strings(&self, attrs: &[Attr], name: &str) -> Vec<String> {
         attrs
             .iter()
-            .filter(|a| a.name.is_some_and(|n| self.text_of(n) == name))
+            .filter(|a| a.name.is_some_and(|n| self.attr_name(n) == name))
             .flat_map(|a| a.args.iter())
             .filter_map(|e| crate::data::literal_text(self.text_of(e.span())))
             .collect()
@@ -2438,7 +2444,7 @@ impl<'s> Desugar<'s> {
             .filter(|f| {
                 !f.attributes
                     .iter()
-                    .any(|a| a.name.is_some_and(|n| self.text_of(n) == "skip"))
+                    .any(|a| a.name.is_some_and(|n| self.attr_name(n) == "skip"))
             })
             .map(|f| WireField {
                 name: self.text_of(f.name).to_string(),

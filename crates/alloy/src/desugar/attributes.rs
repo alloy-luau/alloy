@@ -362,7 +362,19 @@ impl<'s> Desugar<'s> {
 
                 continue;
             };
-            let name = self.text_of(n).to_string();
+            let name = self.attr_name(n);
+
+            // serde's options live in `@alloy/std/serde`, as the derives
+            // that read them do. A path through a star import reaches
+            // one; a bare name needs its import.
+            if self.text_of(n) == name
+                && crate::std_names::is_std_attribute(&name)
+                && !self.options.std_globals.ambient(&name)
+                && !self.std_imports.contains(&name)
+                && self.std_reported.insert(name.clone())
+            {
+                self.diagnose(n, &crate::std_names::missing_message(&name));
+            }
 
             match name.as_str() {
                 "inline" => inline = Some(a.span),
@@ -387,7 +399,7 @@ impl<'s> Desugar<'s> {
                 (None, None) => {
                     // An imported attribute keeps its targets in the
                     // module that declares it.
-                    if !self.imported_names.contains(&name) {
+                    if !self.imported_names.contains(&name) && !self.star_path(&name) {
                         // A namespace holds the name, so the report
                         // names the path that reaches it.
                         let message = self
@@ -599,6 +611,47 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The name an attribute use reads. `@serde.rename` through
+    /// `import * as serde from "@alloy/std/serde"` is the std's `rename`.
+    pub(crate) fn attr_name(&self, n: TokSpan) -> String {
+        let text = self.text_of(n);
+
+        self.std_member(text, crate::std_names::attribute_module)
+            .unwrap_or(text)
+            .to_string()
+    }
+
+    /// A derive's name, read through a star import of the std the same
+    /// way: `@derive(serde.Serialize)` derives `Serialize`.
+    pub(crate) fn derive_name(&self, arg: &Expr) -> String {
+        let text = self.text_of(arg.span());
+
+        self.std_member(text, crate::std_names::module_of)
+            .unwrap_or(text)
+            .to_string()
+    }
+
+    /// The member of `alias.member` when `alias` is a star import of the
+    /// std module that holds it, or of the facade.
+    fn std_member<'t>(
+        &self,
+        text: &'t str,
+        home: fn(&str) -> Option<&'static str>,
+    ) -> Option<&'t str> {
+        let (head, member) = text.split_once('.')?;
+        let module = self.std_namespaces.get(head)?;
+        let at = home(member)?;
+
+        (module.is_empty() || module == at).then_some(member)
+    }
+
+    /// Whether a name is a path through a star import of a module,
+    /// `@M.tag`. The module keeps the attribute's targets.
+    fn star_path(&self, name: &str) -> bool {
+        name.split_once('.')
+            .is_some_and(|(head, _)| self.star_modules.contains(head))
+    }
+
     /// The declaration one attribute name reads. A member of the
     /// namespace under render wins over a name of the file, and a
     /// path names the member it writes.
@@ -624,8 +677,12 @@ impl<'s> Desugar<'s> {
 
         let head = owner.split('.').next().unwrap_or(owner);
 
-        // A module keeps its attributes. One of its own comes in under
-        // its name, which is how every other import reads.
+        // `import * as M`: `@M.tag` names the module's own attribute.
+        if self.star_path(name) {
+            return None;
+        }
+
+        // A named import binds a module's attribute under its own name.
         if self.imported_names.contains(head) {
             return Some(format!(
                 "an attribute of a module is used by its bare name; import it with `import {{ {member} }} from ...`"
@@ -650,7 +707,7 @@ impl<'s> Desugar<'s> {
 
             // An imported attribute keeps its targets in the module
             // that declares it; nothing here can say no.
-            (None, None) => self.imported_names.contains(name),
+            (None, None) => self.imported_names.contains(name) || self.star_path(name),
         }
     }
 
@@ -771,18 +828,29 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        // Luau takes a string for `@deprecated` and reports anything
-        // else on the declaration below, which is not the line the
-        // author wrote it on.
+        // `@deprecated("why")`, or the table Luau's own list takes,
+        // `@deprecated({ use = "f", reason = "why" })`. Luau reports any
+        // other argument on the declaration below, which is not the line
+        // the author wrote it on.
         if name == "deprecated"
             && let Some(arg) = a.args.first()
-            && let Some(got) = literal_kind(arg)
-            && got != "string"
         {
-            let message = format!("the attribute `deprecated` takes a string message, {got} given");
-            self.diagnose(arg.span(), &message);
+            if matches!(arg, Expr::Table { .. }) {
+                self.check_deprecated_table(arg.span());
 
-            return;
+                return;
+            }
+
+            if let Some(got) = literal_kind(arg)
+                && got != "string"
+            {
+                let message = format!(
+                    "the attribute `deprecated` takes a string message or a table of `use` and `reason`, {got} given"
+                );
+                self.diagnose(arg.span(), &message);
+
+                return;
+            }
         }
 
         let Some(decl) = decl else {
@@ -1057,7 +1125,7 @@ impl<'s> Desugar<'s> {
                 let derives = |which: &str| {
                     s.attributes.iter().any(|a| {
                         a.name.is_some_and(|n| self.text_of(n) == "derive")
-                            && a.args.iter().any(|x| self.text_of(x.span()) == which)
+                            && a.args.iter().any(|x| self.derive_name(x) == which)
                     })
                 };
                 let (ser, de) = (derives("Serialize"), derives("Deserialize"));
@@ -1911,8 +1979,13 @@ impl<'s> Desugar<'s> {
                             a.args.iter().map(|e| self.render_to_string(e)).collect();
 
                         // Luau reads the message of `@deprecated` from a
-                        // table: `@[deprecated {reason = "..."}]`.
+                        // table: `@[deprecated {reason = "..."}]`. A table
+                        // the source wrote goes as it is.
                         match n {
+                            "deprecated" if matches!(a.args[0], Expr::Table { .. }) => {
+                                upstream.push(format!("@[deprecated {}]", args[0]));
+                            }
+
                             "deprecated" => upstream
                                 .push(format!("@[deprecated {{reason = {}}}]", args.join(", "))),
 
@@ -2355,7 +2428,9 @@ mod tests {
         );
         assert_eq!(
             got,
-            vec!["the attribute `deprecated` takes a string message, number given"]
+            vec![
+                "the attribute `deprecated` takes a string message or a table of `use` and `reason`, number given"
+            ]
         );
         assert!(
             messages("@deprecated(\"use `new`\")\nlocal function old(): number\n    return 1\nend\nprint(old())\n")

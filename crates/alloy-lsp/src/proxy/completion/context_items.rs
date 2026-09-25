@@ -52,6 +52,7 @@ impl State {
             item
         };
         let mut items = Vec::new();
+        let reach = StdReach::of(doc);
 
         match ctx {
             Context::Attribute {
@@ -89,12 +90,18 @@ impl State {
                     };
 
                     if ok {
-                        items.push(word(
-                            key,
-                            14,
-                            keywords::doc(key).map(str::to_string),
-                            *sigil,
-                        ));
+                        let mut item =
+                            word(key, 14, keywords::doc(key).map(str::to_string), *sigil);
+                        let name = &key[1..];
+
+                        // serde's options come from `@alloy/std/serde`:
+                        // the row writes the import the file lacks.
+                        if alloy::std_names::is_std_attribute(name) && !reach.reaches(name) {
+                            let fixes = alloy::std_names::import_fixes(&doc.source, &[name]);
+                            item["additionalTextEdits"] = json!(fix_edits(&doc.source, &fixes));
+                        }
+
+                        items.push(item);
                     }
                 }
 
@@ -112,6 +119,50 @@ impl State {
                         }
 
                         items.push(item);
+                    }
+                }
+            }
+
+            // `@serde.|` lists the std module's attributes, and `@M.|`
+            // the ones a module of the project exports.
+            Context::AttributePath { alias, .. } => {
+                let Some(spec) = crate::proxy::navigation::module_bindings(&doc.source)
+                    .into_iter()
+                    .find(|(bound, _)| bound == alias)
+                    .map(|(_, spec)| spec)
+                else {
+                    return items;
+                };
+
+                if let Some(module) = alloy::std_names::module_of_spec(&spec) {
+                    for (m, names) in alloy::std_names::ATTRIBUTES {
+                        if module.is_empty() || module == *m {
+                            for name in *names {
+                                let key = format!("@{name}");
+                                let mut item = json!({ "label": name, "kind": 14 });
+
+                                if let Some(d) = keywords::doc(&key) {
+                                    item["documentation"] =
+                                        json!({ "kind": "markdown", "value": d });
+                                }
+
+                                items.push(item);
+                            }
+                        }
+                    }
+                } else if let Some(file) = self
+                    .resolve_spec(uri, &spec)
+                    .and_then(|p| imports::module_file(&imports::module_path(&p)))
+                    && let Some(text) = self.module_text(&file)
+                {
+                    for d in alloy::declarations::summaries(&text, false) {
+                        if let Some(name) = d.name.strip_prefix('@') {
+                            items.push(json!({
+                                "label": name,
+                                "kind": 14,
+                                "documentation": { "kind": "markdown", "value": d.hover },
+                            }));
+                        }
                     }
                 }
             }

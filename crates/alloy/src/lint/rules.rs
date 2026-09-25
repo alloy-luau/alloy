@@ -345,10 +345,39 @@ fn deprecated_namespaces(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
             .args
             .first()
             .map(|e| {
-                let s = &src[toks[e.span().start as usize].start as usize
-                    ..toks[e.span().end as usize - 1].end as usize];
+                let text_of = |e: &alloy_syntax::ast::Expr| {
+                    src[toks[e.span().start as usize].start as usize
+                        ..toks[e.span().end as usize - 1].end as usize]
+                        .trim_matches(['"', '\''])
+                        .to_string()
+                };
 
-                format!("; {}", s.trim_matches(['"', '\'']))
+                // `{ use = "New", reason = "why" }` reads as the reason,
+                // then the name to use.
+                let alloy_syntax::ast::Expr::Table { fields, .. } = e else {
+                    return format!("; {}", text_of(e));
+                };
+                let key = |k: &str| {
+                    fields.iter().find_map(|f| match f {
+                        alloy_syntax::ast::TableField::Named { name, value }
+                            if text(*name) == k =>
+                        {
+                            Some(text_of(value))
+                        }
+
+                        _ => None,
+                    })
+                };
+
+                match (key("reason"), key("use")) {
+                    (Some(r), Some(u)) => format!("; {r}; use `{u}`"),
+
+                    (Some(r), None) => format!("; {r}"),
+
+                    (None, Some(u)) => format!("; use `{u}`"),
+
+                    (None, None) => String::new(),
+                }
             })
             .unwrap_or_default();
         let start = toks[ns.span.start as usize].start;
@@ -388,6 +417,76 @@ fn deprecated_namespaces(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
             message: format!("`{name}` is deprecated{note}"),
             fix: None,
         });
+    }
+
+    out
+}
+
+/// `struct P as` over a body on the next line. `as` joins a header to a
+/// body on its own line, `enum Dir as Up, Down end`; below it, the line
+/// break opens the body, so each layout has one spelling. fmt drops the
+/// word too.
+fn redundant_as(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
+    fn headers(stmt: &Stmt, out: &mut Vec<alloy_syntax::ast::TokSpan>) {
+        match stmt.under_default() {
+            Stmt::Namespace(ns) => {
+                out.push(ns.span);
+
+                for m in &ns.members {
+                    headers(&m.stmt, out);
+                }
+            }
+
+            Stmt::Struct(s) => out.push(s.span),
+
+            Stmt::Enum(e) => out.push(e.span),
+
+            Stmt::Trait(t) => out.push(t.span),
+
+            Stmt::Interface(i) => out.push(i.span),
+
+            Stmt::Impl(i) => out.push(i.span),
+
+            _ => {}
+        }
+    }
+
+    let mut spans = Vec::new();
+
+    for stmt in &chunk.block.stmts {
+        headers(stmt, &mut spans);
+    }
+
+    let same_line =
+        |a: usize, b: usize| !src[toks[a].end as usize..toks[b].start as usize].contains('\n');
+    let mut out = Vec::new();
+
+    for span in spans {
+        let (start, end) = (span.start as usize, (span.end as usize).min(toks.len()));
+        let Some(word) = (start..end).find(|&i| {
+            matches!(
+                toks[i].text(src),
+                "struct" | "enum" | "trait" | "interface" | "namespace" | "impl"
+            )
+        }) else {
+            continue;
+        };
+        // The last token of the header's line.
+        let mut last = word;
+
+        while last + 1 < end && same_line(last, last + 1) {
+            last += 1;
+        }
+
+        if last > word && last + 1 < end && toks[last].text(src) == "as" {
+            out.push(Lint {
+                name: "redundant_as",
+                start: toks[last].start,
+                end: toks[last].end,
+                message: "`as` joins a header to a body on the same line; this body starts on the next line, so drop `as`".to_string(),
+                fix: Some(Fix::new(src, toks[last - 1].end, toks[last].end, "")),
+            });
+        }
     }
 
     out
@@ -520,6 +619,7 @@ pub fn run(
     }
 
     lints.extend(directive_lints(src));
+    lints.extend(redundant_as(src, toks, chunk));
     lints.extend(deprecated_namespaces(src, toks, chunk));
     lints.extend(game_alias(src, toks, chunk));
     if !ingot_rewrite {

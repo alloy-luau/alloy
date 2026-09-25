@@ -50,6 +50,27 @@ pub const MODULES: &[(&str, &[&str])] = &[
     ("roblox", &["R15Character", "R6Character", "Attributes"]),
 ];
 
+/// The attributes each std module holds. serde's options go with the
+/// derives that read them, so a file imports them the way it imports
+/// `Serialize`, or reaches them through a star import: `@serde.skip`.
+pub const ATTRIBUTES: &[(&str, &[&str])] = &[(
+    "serde",
+    &["rename", "rename_all", "skip", "deny_unknown_fields"],
+)];
+
+/// The module a std attribute sits in.
+pub fn attribute_module(name: &str) -> Option<&'static str> {
+    ATTRIBUTES
+        .iter()
+        .find(|(_, names)| names.contains(&name))
+        .map(|(module, _)| *module)
+}
+
+/// Whether a name is an attribute the std exports.
+pub fn is_std_attribute(name: &str) -> bool {
+    attribute_module(name).is_some()
+}
+
 /// The module a std name sits in.
 pub fn module_of(name: &str) -> Option<&'static str> {
     MODULES
@@ -60,7 +81,9 @@ pub fn module_of(name: &str) -> Option<&'static str> {
 
 /// The spec that imports a std name: `@alloy/std/collections`.
 pub fn spec_of(name: &str) -> Option<String> {
-    module_of(name).map(|m| format!("{PREFIX}/{m}"))
+    module_of(name)
+        .or_else(|| attribute_module(name))
+        .map(|m| format!("{PREFIX}/{m}"))
 }
 
 /// Whether a name is one the std exports.
@@ -81,22 +104,26 @@ pub fn module_of_spec(spec: &str) -> Option<&str> {
     }
 }
 
-/// The names a std module holds, `None` when the std has no such
-/// module. The facade holds every name.
+/// The names a std module holds, its attributes included, `None` when
+/// the std has no such module. The facade holds every name.
 pub fn names_in(module: &str) -> Option<Vec<&'static str>> {
     if module.is_empty() {
         return Some(
             MODULES
                 .iter()
+                .chain(ATTRIBUTES)
                 .flat_map(|(_, n)| n.iter().copied())
                 .collect(),
         );
     }
 
-    MODULES
+    let names = MODULES.iter().find(|(m, _)| *m == module)?.1;
+    let attributes = ATTRIBUTES
         .iter()
         .find(|(m, _)| *m == module)
-        .map(|(_, n)| n.to_vec())
+        .map_or(&[][..], |(_, n)| *n);
+
+    Some(names.iter().chain(attributes).copied().collect())
 }
 
 /// Whether the language owns a name: a keyword, a literal, or an
@@ -174,7 +201,7 @@ impl<'de> Deserialize<'de> for Globals {
                 let mut names = Vec::new();
 
                 while let Some(name) = seq.next_element::<String>()? {
-                    if !is_std_name(&name) {
+                    if !is_std_name(&name) && !is_std_attribute(&name) {
                         return Err(de::Error::custom(format!(
                             "`{name}` is no std name; the std exports {}",
                             every_name().join(", ")
@@ -209,7 +236,9 @@ pub fn missing_name(message: &str) -> Option<&str> {
     let rest = message.strip_prefix('`')?;
     let (name, tail) = rest.split_once('`')?;
 
-    (tail.starts_with(" is in the std; write `import {") && is_std_name(name)).then_some(name)
+    (tail.starts_with(" is in the std; write `import {")
+        && (is_std_name(name) || is_std_attribute(name)))
+    .then_some(name)
 }
 
 /// The std names the imports of a source bind under their own names:
@@ -313,7 +342,7 @@ pub fn import_fixes(src: &str, names: &[&str]) -> Vec<Fix> {
     let mut seen: HashSet<&str> = HashSet::new();
 
     for name in names {
-        let Some(module) = module_of(name) else {
+        let Some(module) = module_of(name).or_else(|| attribute_module(name)) else {
             continue;
         };
 

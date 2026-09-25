@@ -652,7 +652,7 @@ impl<'s> Desugar<'s> {
             matches!(e, Expr::Index { object, key: IndexKey::Field(k), .. }
                 if self.text_of(*k) == "Signal"
                     && matches!(object.as_ref(), Expr::Name(n)
-                        if self.std_namespaces.contains(self.text_of(*n))))
+                        if self.std_namespaces.contains_key(self.text_of(*n))))
         };
 
         (matches!(object.as_ref(), Expr::Name(n)
@@ -1574,13 +1574,16 @@ impl<'s> Desugar<'s> {
             };
         }
 
-        for link in links {
+        let count = links.len();
+
+        for (i, link) in links.into_iter().enumerate() {
             let link = match link {
                 Link::Plain(step) if pending_guard => Link::Optional(step),
 
                 other => other,
             };
             pending_guard = false;
+            self.last_link = i + 1 == count;
 
             match link {
                 Link::Plain(step) => {
@@ -1797,11 +1800,22 @@ impl<'s> Desugar<'s> {
                     (false, _) => format!("{prefix}:FindFirstChild({n})"),
                 };
 
-                // The checker types the child as `Instance`, which has no
-                // `CFrame`; the source names no class, so the check
-                // artifact lets the chain continue untyped.
+                // The source names no class. A chain that goes on past the
+                // child continues untyped, since `Instance` has no
+                // `CFrame`. A child that ends the chain is what the call
+                // returns: `->` finds an `Instance` or nil, so `is`
+                // narrows it, and `=>` an `Instance`, as Roblox types
+                // `WaitForChild` with a timeout too.
                 if self.options.check {
-                    format!("({call} :: any)")
+                    let ty = match (*wait, self.last_link) {
+                        (_, false) => "any",
+
+                        (true, true) => "Instance",
+
+                        (false, true) => "Instance?",
+                    };
+
+                    format!("({call} :: {ty})")
                 } else {
                     call
                 }

@@ -165,7 +165,7 @@ impl<'s> Desugar<'s> {
                 .iter()
                 .filter(|a| a.name.is_some_and(|n| self.text_of(n) == "derive"))
                 .flat_map(|a| a.args.iter())
-                .any(|arg| self.text_of(arg.span()) == "Clone");
+                .any(|arg| self.derive_name(arg) == "Clone");
 
             self.enum_alias_methods(&name, derives_clone)
         } else {
@@ -322,8 +322,12 @@ impl<'s> Desugar<'s> {
             }
 
             for arg in &a.args {
-                let which = self.text_of(arg.span()).to_string();
-                self.check_std_name(arg.span(), &which);
+                let which = self.derive_name(arg);
+
+                if self.text_of(arg.span()) == which {
+                    self.check_std_name(arg.span(), &which);
+                }
+
                 // `Eq` and `PartialEq` write the same `__eq`.
                 let key = if which == "PartialEq" { "Eq" } else { &which };
 

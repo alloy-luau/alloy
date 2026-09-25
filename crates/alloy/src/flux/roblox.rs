@@ -571,9 +571,17 @@ impl<'s> Scan<'s> {
 
                     None => None,
                 };
+                // `@M.tag` and `@serde.rename_all(...)` name a path.
+                let head = name_at.filter(|n| self.is_name(*n)).map(|mut n| {
+                    while n >= 2 && self.t(n - 1) == "." && self.is_name(n - 2) {
+                        n -= 2;
+                    }
 
-                match name_at {
-                    Some(n) if n > 0 && self.is_name(n) && self.t(n - 1) == "@" => top = n - 1,
+                    n
+                });
+
+                match head {
+                    Some(n) if n > 0 && self.t(n - 1) == "@" => top = n - 1,
 
                     _ => break,
                 }
@@ -829,6 +837,20 @@ mod tests {
         );
         assert_eq!(names("local v = bag:remove(\"key\")\n"), Vec::<&str>::new());
         assert_eq!(names("local c = t:clone(1)\n"), Vec::<&str>::new());
+    }
+
+    /// The doc sits above the attributes, and an attribute through a
+    /// path, `@M.tag`, is one of them. The walk stopped at the path, so a
+    /// documented export reported.
+    #[test]
+    fn a_doc_sits_above_a_dotted_attribute() {
+        for attr in ["@M.tag", "@serde.rename_all(\"camelCase\")", "@A.B.tag(1)"] {
+            let src = format!("-- Doc.\n{attr}\nexport struct E as\n    x: number\nend\n");
+            assert_eq!(all(&src), Vec::<&str>::new(), "{src}");
+
+            let bare = format!("{attr}\nexport struct E as\n    x: number\nend\n");
+            assert_eq!(all(&bare), vec!["missing_doc"], "{bare}");
+        }
     }
 
     #[test]

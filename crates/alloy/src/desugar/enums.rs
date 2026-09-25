@@ -1075,6 +1075,55 @@ impl<'s> Desugar<'s> {
             || self.enums.contains_key(name)
     }
 
+    /// The enum that payload slot `slot` of a variant pattern holds, by
+    /// the type the declaration writes there: `Tool(Kind, number)` holds
+    /// `Kind` at slot 0. `within` is the enum of the pattern's own place,
+    /// when that is known. `None` when no one enum owns the variant, or
+    /// the slot's type is no enum here.
+    fn slot_enum(&self, name: TokSpan, within: Option<&str>, slot: usize) -> Option<String> {
+        let (vname, path_enum) = self.pattern_variant(name);
+        let owner = match path_enum {
+            Some(e) => e,
+
+            None => {
+                let mut owners = self.enums.iter().filter(|(e, vs)| {
+                    within.is_none_or(|w| w == e.as_str()) && vs.iter().any(|(v, _)| *v == vname)
+                });
+                let (e, _) = owners.next()?;
+
+                if owners.next().is_some() {
+                    return None;
+                }
+
+                e.clone()
+            }
+        };
+        let payloads = match self.enum_payloads.get(&owner) {
+            Some(vs) => vs,
+
+            None => &self.imported_type(&owner)?.variants,
+        };
+        let (_, types) = payloads.iter().find(|(v, _)| *v == vname)?;
+
+        self.enum_named(types.get(slot)?)
+    }
+
+    /// The enum a match head's type names, when the file says: a name
+    /// with an annotation, or `self` in an enum's impl.
+    fn scrutinee_enum(&self, head: &Expr) -> Option<String> {
+        match head {
+            Expr::Paren { inner, .. } => self.scrutinee_enum(inner),
+
+            Expr::Name(n) if self.text_of(*n) == "self" => {
+                self.enum_named(self.impl_target.as_deref()?)
+            }
+
+            Expr::Name(n) => self.enum_named(self.binding_types.get(self.text_of(*n))?),
+
+            _ => None,
+        }
+    }
+
     /// The type of one payload slot of a variant pattern, read off the
     /// constructor: `typeof(Item.Sword(nil :: any)._1)`. `None` when no
     /// one enum owns the variant, or the enum is generic.
@@ -1139,28 +1188,40 @@ impl<'s> Desugar<'s> {
     ///
     /// A pattern whose variant belongs to a known enum must bind the
     /// payload the variant carries. A name no enum owns is a missing
-    /// variant of the enum the other arms name.
-    pub(crate) fn check_variant_patterns(&mut self, arms: &[&[Pattern]]) -> bool {
+    /// variant of the enum its place holds: the payload type of a slot,
+    /// or at the top the enum the other arms name or the head's type.
+    pub(crate) fn check_variant_patterns(
+        &mut self,
+        arms: &[&[Pattern]],
+        scrutinees: &[Expr],
+    ) -> bool {
         let mut reported = false;
-        let mut flat: Vec<(TokSpan, usize)> = Vec::new();
+        // Each variant name, with the payload count the pattern binds,
+        // the column of a name at the top, and the enum of a payload slot.
+        let mut flat: Vec<(TokSpan, usize, Option<usize>, Option<String>)> = Vec::new();
         let mut paths: Vec<TokSpan> = Vec::new();
 
         for pats in arms {
-            let mut stack: Vec<&Pattern> = pats.iter().collect();
+            let mut stack: Vec<(&Pattern, Option<usize>, Option<String>)> = pats
+                .iter()
+                .enumerate()
+                .map(|(col, p)| (p, Some(col), None))
+                .collect();
 
-            while let Some(p) = stack.pop() {
+            while let Some((p, col, slot)) = stack.pop() {
                 match p {
                     Pattern::Or(a, b, _) => {
-                        stack.push(a);
-                        stack.push(b);
+                        stack.push((a, col, slot.clone()));
+                        stack.push((b, col, slot));
                     }
 
                     Pattern::Variant { name, args, .. } => {
-                        flat.push((*name, args.len()));
-
-                        for a in args {
-                            stack.push(a);
+                        for (i, a) in args.iter().enumerate() {
+                            let inner = self.slot_enum(*name, slot.as_deref(), i);
+                            stack.push((a, None, inner));
                         }
+
+                        flat.push((*name, args.len(), col, slot));
                     }
 
                     Pattern::Path(span) => paths.push(*span),
@@ -1170,7 +1231,7 @@ impl<'s> Desugar<'s> {
                     // capital says the author meant a variant, so a name
                     // no enum owns is a typo, not a catch-all.
                     Pattern::Bind(name) if is_variant_name(self.text_of(*name)) => {
-                        flat.push((*name, 0));
+                        flat.push((*name, 0, col, slot));
                     }
 
                     // `case target then` with `target` in scope binds a
@@ -1214,20 +1275,34 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        // The enum of the match: the first variant name a declared enum
-        // owns. A name none owns is then a variant that enum lacks.
-        let owner = flat.iter().find_map(|(name, _)| {
-            let (vname, path_enum) = self.pattern_variant(*name);
+        // The enum of each column: the first variant name at the top that
+        // a declared enum owns, or else the enum the head's type names. A
+        // name none owns is then a variant that enum lacks. A name in a
+        // payload slot answers to the slot's type instead.
+        let owners: Vec<Option<String>> = (0..scrutinees.len().max(1))
+            .map(|c| {
+                flat.iter()
+                    .filter(|(_, _, col, _)| *col == Some(c))
+                    .find_map(|(name, ..)| {
+                        let (vname, path_enum) = self.pattern_variant(*name);
 
-            path_enum.or_else(|| {
-                self.enums
-                    .iter()
-                    .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
-                    .map(|(e, _)| e.clone())
+                        path_enum.or_else(|| {
+                            self.enums
+                                .iter()
+                                .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                                .map(|(e, _)| e.clone())
+                        })
+                    })
+                    .or_else(|| scrutinees.get(c).and_then(|s| self.scrutinee_enum(s)))
             })
-        });
+            .collect();
 
-        for (name, binds) in flat {
+        for (name, binds, col, slot) in flat {
+            let owner = match col {
+                Some(c) => owners.get(c).cloned().flatten(),
+
+                None => slot,
+            };
             let (vname, path_enum) = self.pattern_variant(name);
 
             // `Itme.Sword(d)`: the head of the path names nothing in
@@ -1293,23 +1368,30 @@ impl<'s> Desugar<'s> {
                     {
                         let names: Vec<&str> = vs.iter().map(|(v, _)| v.as_str()).collect();
                         let message = format!(
-                            "`{e}` has no variant `{vname}`; its variants are {}",
+                            "`{}` has no variant `{vname}`; its variants are {}",
+                            self.display_name(e),
                             list_names(&names)
                         );
                         self.diagnose(name, &message);
                         reported = true;
-                    } else if binds == 0 && (self.is_local(&vname) || is_screaming(&vname)) {
+                    } else if binds == 0 {
                         // `case MAX then` reads as a comparison and binds a
                         // new `MAX` that takes every value, so a `default`
-                        // below it never runs and nothing says so.
-                        let message = match self.is_local(&vname) {
-                            true => format!(
+                        // below it never runs and nothing says so. A
+                        // binding starts lowercase or with `_`, so any
+                        // other capital is a variant this file cannot see.
+                        let message = if self.is_local(&vname) {
+                            format!(
                                 "`{vname}` names a value, and a bare name in a pattern binds a new one, so this arm takes every value; compare in a guard: `case n where n == {vname}`"
-                            ),
-
-                            false => format!(
+                            )
+                        } else if is_screaming(&vname) {
+                            format!(
                                 "`{vname}` is written as a constant's name, and a bare name in a pattern binds a new one that takes every value; bind a lowercase name, or compare in a guard: `case n where n == {vname}`"
-                            ),
+                            )
+                        } else {
+                            format!(
+                                "`{vname}` is no variant of an enum in scope, and a bare name in a pattern binds a new one that takes every value; import the enum that declares it, or bind a name that starts lowercase"
+                            )
                         };
                         self.diagnose(name, &message);
                         reported = true;
@@ -2094,7 +2176,7 @@ impl<'s> Desugar<'s> {
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
-        let bad_arm = self.check_variant_patterns(&pats);
+        let bad_arm = self.check_variant_patterns(&pats, scrutinees);
 
         // A match the parse recovered in lost the arm it could not
         // read, so what is left proves nothing about coverage.
@@ -2206,7 +2288,7 @@ impl<'s> Desugar<'s> {
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
-        let bad_arm = self.check_variant_patterns(&pats);
+        let bad_arm = self.check_variant_patterns(&pats, &m.scrutinees);
 
         if m.default.is_none() && !exhaustive && !bad_arm && !m.recovered {
             let msg = self.not_exhaustive_message(&pats);
@@ -3546,6 +3628,50 @@ mod tests {
         assert_eq!(
             got[0],
             "`Msg` has no variant `Quit`; its variants are `Join` and `Chat`"
+        );
+    }
+
+    /// A misspelt unit variant beside `default` read as a binding that
+    /// takes every value: no other arm named the enum, so nothing
+    /// reported it, and the emit wrote `if true`. The head's type names
+    /// the enum, and a capital that no enum owns never binds.
+    #[test]
+    fn a_misspelt_unit_variant_beside_default_is_an_error() {
+        let decl = "enum Kind\n    Pickaxe\n    Axe\nend\n";
+        let expr = format!(
+            "{decl}local function h(k: Kind): string\n    return match k with\n        case Pickax then \"p\"\n        default \"x\"\n    end\nend\nprint(h)\n"
+        );
+        let stmt = format!(
+            "{decl}local function s(k: Kind)\n    match k with\n        case Pickax then print(1)\n        default print(2)\n    end\nend\nprint(s)\n"
+        );
+        let want = "`Kind` has no variant `Pickax`; its variants are `Pickaxe` and `Axe`";
+
+        assert_eq!(messages(&expr), [want]);
+        assert_eq!(messages(&stmt), [want]);
+
+        // No enum in scope to name: the capital still does not bind.
+        let untyped = "local function u(x: number): string\n    return match x with\n        case Big then \"b\"\n        default \"x\"\n    end\nend\nprint(u)\n";
+        let got = messages(untyped);
+        assert!(
+            got.len() == 1 && got[0].starts_with("`Big` is no variant of an enum in scope"),
+            "{got:?}"
+        );
+
+        // A lowercase name binds, as before.
+        let bind = format!(
+            "{decl}local function b(k: Kind): string\n    return match k with\n        case Axe then \"a\"\n        case other then \"o\"\n    end\nend\nprint(b)\n"
+        );
+        assert!(messages(&bind).is_empty(), "{:?}", messages(&bind));
+    }
+
+    /// A misspelt bare variant in a payload slot named the enum of the
+    /// match. The slot's declared type is the enum it lacks.
+    #[test]
+    fn a_misspelt_variant_in_a_payload_slot_names_the_slot_enum() {
+        let src = "enum Kind\n    Pickaxe\n    Axe\nend\nenum Item\n    Tool(Kind, number)\n    Junk\nend\nlocal function h(i: Item): string\n    return match i with\n        case Tool(Pickax, _) then \"p\"\n        default \"x\"\n    end\nend\nprint(h)\n";
+        assert_eq!(
+            messages(src),
+            ["`Kind` has no variant `Pickax`; its variants are `Pickaxe` and `Axe`"]
         );
     }
 

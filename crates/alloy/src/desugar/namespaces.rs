@@ -1073,6 +1073,14 @@ impl<'s> Desugar<'s> {
         // join drops the spaces out again.
         let text: String = text.split_whitespace().collect();
         let (head, variant) = text.rsplit_once('.')?;
+
+        Some((self.enum_named(head)?, variant.to_string()))
+    }
+
+    /// The key `enums` holds for the enum a type names: `Kind`,
+    /// `Geo.Kind`, `Kind?`, or `Opt<number>`.
+    pub(crate) fn enum_named(&self, ty: &str) -> Option<String> {
+        let head = ty.trim().trim_end_matches('?').split('<').next()?.trim();
         // A namespace this file declares renders its enum under one
         // name, `Geo_Kind`. An imported namespace has no declaration
         // here, so the enum index keys it by the path the source writes,
@@ -1081,12 +1089,12 @@ impl<'s> Desugar<'s> {
         // Inside its namespace an enum reads by its own name, `Kind`,
         // which renders as `Geo_Kind`.
         let member = self.ns_member_name(head);
-        let name = [rendered.as_deref(), member.as_deref(), Some(head)]
+
+        [rendered.as_deref(), member.as_deref(), Some(head)]
             .into_iter()
             .flatten()
-            .find(|n| self.enums.contains_key(*n))?;
-
-        Some((name.to_string(), variant.to_string()))
+            .find(|n| self.enums.contains_key(*n))
+            .map(str::to_string)
     }
 
     /// The path a message names a declaration by. `Math_Vec2` is the

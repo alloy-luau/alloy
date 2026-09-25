@@ -187,7 +187,8 @@ impl<'s> Formatter<'s> {
             Contract,
             Match,
             Arm,
-            ExprIf,
+            /// An `if` expression, with the bracket depth it opened at.
+            ExprIf(usize),
             /// The body of a `declare class` or of an extern type's
             /// `with`. Its methods are signatures and open nothing.
             Class,
@@ -196,7 +197,17 @@ impl<'s> Formatter<'s> {
         let mut stack: Vec<Frame> = Vec::new();
         let mut depths = vec![0usize; self.items.len()];
         let mut signature = vec![false; self.items.len()];
-        let level = |stack: &Vec<Frame>| stack.iter().filter(|f| **f != Frame::ExprIf).count();
+        let level = |stack: &Vec<Frame>| {
+            stack
+                .iter()
+                .filter(|f| !matches!(f, Frame::ExprIf(_)))
+                .count()
+        };
+        let in_expr_if = |stack: &Vec<Frame>| matches!(stack.last(), Some(Frame::ExprIf(_)));
+        // The open brackets before the item. A closer ends only an `if`
+        // expression that opened inside its group, so the `)` of a call
+        // in a branch leaves the `if` open.
+        let mut brackets = 0usize;
 
         for i in 0..self.items.len() {
             let it = &self.items[i];
@@ -213,19 +224,23 @@ impl<'s> Formatter<'s> {
             // A line that opens the body of a branch continues the `if`
             // expression, so it sits one level in like the `else` does.
             let opens_expr_branch = it.newlines_before > 0
-                && stack.last() == Some(&Frame::ExprIf)
+                && in_expr_if(&stack)
                 && matches!(prev, Some("then") | Some("else"));
 
             // A `then`, `else`, or `elseif` that opens a line continues
             // the `if` expression above it; any other token ends it.
             let continues_expr_if = matches!(text, "else" | "elseif")
-                || (text == "then" && stack.last() == Some(&Frame::ExprIf))
+                || (text == "then" && in_expr_if(&stack))
                 || opens_expr_branch;
 
             if it.newlines_before > 0 && !continues_expr_if {
-                while stack.last() == Some(&Frame::ExprIf) {
+                while in_expr_if(&stack) {
                     stack.pop();
                 }
+            }
+
+            if opens(text) {
+                brackets += 1;
             }
 
             match text {
@@ -268,9 +283,7 @@ impl<'s> Formatter<'s> {
                     if let_else {
                         depths[i] = level(&stack);
                         stack.push(Frame::Block);
-                    } else if stack.last() == Some(&Frame::ExprIf)
-                        || (mid_line && self.line_has_before(i, "if"))
-                    {
+                    } else if in_expr_if(&stack) || (mid_line && self.line_has_before(i, "if")) {
                         // A `then` or `else` that opens a line inside an
                         // `if` expression continues it, one level in.
                         depths[i] = level(&stack) + usize::from(!mid_line);
@@ -295,14 +308,15 @@ impl<'s> Formatter<'s> {
 
                 ")" | "]" | "}" | ">>" => {
                     depths[i] = level(&stack);
+                    brackets = brackets.saturating_sub(1);
 
-                    // An expression `if` ends at a closer.
-                    while stack.last() == Some(&Frame::ExprIf) {
+                    // An expression `if` ends at the closer of its group.
+                    while matches!(stack.last(), Some(Frame::ExprIf(b)) if *b > brackets) {
                         stack.pop();
                     }
                 }
 
-                "then" if stack.last() == Some(&Frame::ExprIf) && it.newlines_before > 0 => {
+                "then" if in_expr_if(&stack) && it.newlines_before > 0 => {
                     depths[i] = level(&stack) + 1;
                 }
 
@@ -313,10 +327,9 @@ impl<'s> Formatter<'s> {
                         && ((prev.is_some_and(expression_context)
                             && !(self.first_on_line(i)
                                 && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>"))))
-                            || (matches!(prev, Some("then") | Some("else"))
-                                && stack.last() == Some(&Frame::ExprIf)))
+                            || (matches!(prev, Some("then") | Some("else")) && in_expr_if(&stack)))
                     {
-                        stack.push(Frame::ExprIf);
+                        stack.push(Frame::ExprIf(brackets));
                     } else if text == "match" && !it.name_here && self.starts_block(i) {
                         stack.push(Frame::Match);
                     } else if text == "trait" && self.starts_block(i) {

@@ -1019,6 +1019,35 @@ mod tests {
         assert_eq!(fmt(short), short);
     }
 
+    /// The `)` of a call in a branch ended the `if` expression, so the
+    /// `else` of a broken `local` or `const` fell to column 0. A closer
+    /// now ends only an `if` that opened inside its group.
+    #[test]
+    fn a_call_in_a_branch_keeps_the_else_in_the_if() {
+        let config = FmtConfig {
+            prefer_const: false,
+            indent_width: 4,
+            ..FmtConfig::default()
+        };
+        let value = "if props.unlocked then Difficulty.color(props.stage.difficulty) else Color3.fromRGB(90, 90, 90)";
+
+        for word in ["local", "const"] {
+            let src = format!(
+                "local function view(props: any)\n    {word} color = {value}\n    print(color)\nend\n"
+            );
+            let want = format!(
+                "local function view(props: any)\n    {word} color = if props.unlocked then\n        Difficulty.color(props.stage.difficulty)\n        else\n        Color3.fromRGB(90, 90, 90)\n    print(color)\nend\n"
+            );
+
+            assert_eq!(format_file(&src, &config).unwrap(), want);
+            assert_eq!(format_file(&want, &config).unwrap(), want);
+        }
+
+        // A closer still ends an `if` that opened inside its group.
+        let inner = "print(f(if a then g(1) else h(2)), { k = if a then g(1) else 2 })\n";
+        assert_eq!(format_file(inner, &config).unwrap(), inner);
+    }
+
     /// An `if` inside an interpolation hole is an expression, so it
     /// opens no block and the `end` of the function stays at column 0.
     /// A long one breaks inside the hole. Luau reads that form: the

@@ -500,8 +500,10 @@ impl Server {
                 }
 
                 // A file the editor shows compiled with the old config,
-                // and no edit comes to compile it again.
+                // and no edit comes to compile it again. The reports on
+                // the config files follow the disk too.
                 if config_changed {
+                    self.publish_alias_problems();
                     let open: Vec<String> = self
                         .state
                         .lock()

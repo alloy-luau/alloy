@@ -1383,7 +1383,8 @@ fn a_config_std_name_typo_sits_on_its_string() {
 /// An `[alx.factory]` the markup compiler refuses: the build skips the
 /// file and names the table, and the editor compiled it with the default
 /// backend and named `React`. A fix on disk left that report in place
-/// until the next keystroke.
+/// until the next keystroke. The report sits on the key in alloy.toml,
+/// not on the first line of each `.alx` file.
 #[test]
 fn a_broken_markup_config_is_named_and_a_fix_on_disk_clears_it() {
     use super::documents::{Recorder, alias_root};
@@ -1421,8 +1422,27 @@ fn a_broken_markup_config_is_named_and_a_fix_on_disk_clears_it() {
     server.publish(&uri);
 
     let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
-    assert!(sent.contains("needs a backend"), "{sent}");
+    assert!(!sent.contains("needs a backend"), "{sent}");
     assert!(!sent.contains("`React` is not in scope"), "{sent}");
+
+    log.lock().expect("the log").clear();
+    server.publish_alias_problems();
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+    let toml = sent
+        .split("Content-Length")
+        .find(|m| m.contains("alloy.toml"))
+        .expect("a report on alloy.toml");
+    assert!(
+        toml.contains("MarkupError: [alx.factory] needs a backend"),
+        "{toml}"
+    );
+    // The report names no key the table writes, so it sits on the
+    // table's header.
+    assert!(
+        toml.contains(r#""start":{"line":4,"character":0}"#),
+        "{toml}"
+    );
 
     log.lock().expect("the log").clear();
     std::fs::write(

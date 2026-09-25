@@ -1225,14 +1225,19 @@ fn a_trait_method_renames_the_trait_every_impl_and_the_calls() {
     let call = USER.find("b:hello").expect("the call") + 2;
     let target = st.name_target("file:///u.aly", call);
 
-    let Some(Target::Method { trait_name, name }) = target else {
+    let Some(Target::Method {
+        trait_name,
+        name,
+        home,
+    }) = target
+    else {
         panic!("the caret names no trait method");
     };
 
     assert_eq!((trait_name.as_str(), name.as_str()), ("Greet", "hello"));
 
     let edit = st
-        .method_edits(&trait_name, &name, "greetings")
+        .method_edits(&trait_name, home.as_ref(), &name, "greetings")
         .expect("edit");
     let at = |uri: &str, src: &str| -> Vec<usize> {
         edit["changes"][uri]
@@ -1311,12 +1316,14 @@ fn a_method_rename_reaches_a_returned_and_a_field_receiver() {
     for at in &calls {
         let target = st.name_target("file:///main.aly", *at);
         assert!(
-            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Gadget" && name == "spin"),
+            matches!(&target, Some(Target::Method { trait_name, name, .. }) if trait_name == "Gadget" && name == "spin"),
             "{at}: {target:?}"
         );
     }
 
-    let edit = st.method_edits("Gadget", "spin", "twirl").expect("edit");
+    let edit = st
+        .method_edits("Gadget", None, "spin", "twirl")
+        .expect("edit");
     let at = |uri: &str, src: &str| -> Vec<usize> {
         edit["changes"][uri]
             .as_array()
@@ -1378,13 +1385,18 @@ fn a_receiver_typed_by_the_trait_is_a_site_of_its_method() {
     assert_eq!(sites.len(), 7);
 
     for at in [wanted[0], wanted[3], wanted[4]] {
-        let Some(Target::Method { trait_name, name }) = st.name_target(uri, at) else {
+        let Some(Target::Method {
+            trait_name, name, ..
+        }) = st.name_target(uri, at)
+        else {
             panic!("no trait method at {at}");
         };
         assert_eq!((trait_name.as_str(), name.as_str()), ("Speaker", "speak"));
     }
 
-    let edit = st.method_edits("Speaker", "speak", "talk").expect("edit");
+    let edit = st
+        .method_edits("Speaker", None, "speak", "talk")
+        .expect("edit");
     let got: Vec<usize> = edit["changes"][uri]
         .as_array()
         .expect("edits")
@@ -1416,14 +1428,17 @@ fn a_bound_by_a_namespace_trait_path_reaches_its_method() {
     assert_eq!(wanted.len(), 3);
 
     for at in &wanted {
-        let Some(Target::Method { trait_name, name }) = st.name_target(uri, *at) else {
+        let Some(Target::Method {
+            trait_name, name, ..
+        }) = st.name_target(uri, *at)
+        else {
             panic!("no trait method at {at}");
         };
         assert_eq!((trait_name.as_str(), name.as_str()), ("Ability", "power"));
     }
 
     let edit = st
-        .method_edits("Ability", "power", "strength")
+        .method_edits("Ability", None, "power", "strength")
         .expect("edit");
     let got: Vec<usize> = edit["changes"][uri]
         .as_array()
@@ -1435,6 +1450,124 @@ fn a_bound_by_a_namespace_trait_path_reaches_its_method() {
         })
         .collect();
     assert_eq!(got, wanted, "{edit}");
+}
+
+/// Two files that import nothing from each other each declare a trait
+/// `Mover`. The rename walk keyed a trait by its name, so a rename in one
+/// file edited the other, and `impl Motion.Mover for Slider` read as a
+/// trait `Motion` and missed the rename of `Motion.Mover`. A barrel
+/// passes a third file's `Mover` on, and its impl follows that trait.
+#[test]
+fn a_trait_method_rename_keeps_to_its_own_trait() {
+    const A: &str = concat!(
+        "namespace Motion\n",
+        "    trait Mover\n",
+        "        function step(self)\n",
+        "    end\n",
+        "end\n",
+        "struct Slider\n",
+        "    t: number\n",
+        "end\n",
+        "impl Motion.Mover for Slider\n",
+        "    function step(self)\n",
+        "        self.t += 1\n",
+        "    end\n",
+        "end\n",
+    );
+    const B: &str = concat!(
+        "trait Mover\n",
+        "    function step(self)\n",
+        "end\n",
+        "struct Car\n",
+        "    n: number\n",
+        "end\n",
+        "impl Mover for Car\n",
+        "    function step(self)\n",
+        "        self.n += 1\n",
+        "    end\n",
+        "end\n",
+    );
+    const LEAF: &str = "export trait Mover\n    function step(self)\nend\n";
+    const BARREL: &str = "export { Mover } from \"./leaf\"\n";
+    const USER: &str = concat!(
+        "import { Mover } from \"./barrel\"\n",
+        "struct Boat\n",
+        "    n: number\n",
+        "end\n",
+        "impl Mover for Boat\n",
+        "    function step(self)\n",
+        "        self.n += 1\n",
+        "    end\n",
+        "end\n",
+    );
+    let st = super::support::files(&[
+        ("file:///a.aly", A),
+        ("file:///b.aly", B),
+        ("file:///leaf.aly", LEAF),
+        ("file:///barrel.aly", BARREL),
+        ("file:///user.aly", USER),
+    ]);
+    let renamed = |uri: &str, at: usize| -> Vec<(String, usize)> {
+        let Some(Target::Method {
+            trait_name,
+            name,
+            home,
+        }) = st.name_target(uri, at)
+        else {
+            panic!("no trait method at {uri} {at}");
+        };
+        let edit = st
+            .method_edits(&trait_name, home.as_ref(), &name, "advance")
+            .expect("edit");
+        let mut out: Vec<(String, usize)> = Vec::new();
+
+        for (u, src) in [
+            ("file:///a.aly", A),
+            ("file:///b.aly", B),
+            ("file:///leaf.aly", LEAF),
+            ("file:///user.aly", USER),
+        ] {
+            for e in edit["changes"][u]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+                out.push((u.to_string(), offset_of(src, line, column).expect("offset")));
+            }
+        }
+
+        out
+    };
+    let a = |n: usize| {
+        (
+            "file:///a.aly".to_string(),
+            A.match_indices("step").nth(n).expect("a").0,
+        )
+    };
+    let b = |n: usize| {
+        (
+            "file:///b.aly".to_string(),
+            B.match_indices("step").nth(n).expect("b").0,
+        )
+    };
+
+    assert_eq!(renamed("file:///a.aly", a(0).1), [a(0), a(1)]);
+    assert_eq!(renamed("file:///a.aly", a(1).1), [a(0), a(1)]);
+    assert_eq!(renamed("file:///b.aly", b(1).1), [b(0), b(1)]);
+    assert_eq!(
+        renamed("file:///user.aly", USER.find("step").expect("impl")),
+        [
+            (
+                "file:///leaf.aly".to_string(),
+                LEAF.find("step").expect("trait")
+            ),
+            (
+                "file:///user.aly".to_string(),
+                USER.find("step").expect("impl")
+            ),
+        ]
+    );
 }
 
 /// A definitions file names a type with no import of it, so the rename
@@ -2259,12 +2392,14 @@ fn a_struct_method_renames_the_declaration_and_every_call() {
         let target = st.name_target(uri, caret);
 
         assert!(
-            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Counter" && name == "bump"),
+            matches!(&target, Some(Target::Method { trait_name, name, .. }) if trait_name == "Counter" && name == "bump"),
             "{caret}: {target:?}"
         );
     }
 
-    let edit = st.method_edits("Counter", "bump", "poke").expect("edit");
+    let edit = st
+        .method_edits("Counter", None, "bump", "poke")
+        .expect("edit");
 
     assert_eq!(
         sites(&edit, "file:///counter.aly", COUNTER),
@@ -2290,7 +2425,8 @@ fn a_struct_method_renames_the_declaration_and_every_call() {
     assert!(matches!(&reset, Some(Target::Method { name, .. }) if name == "reset"));
     assert_eq!(
         sites(
-            &st.method_edits("Counter", "reset", "clear").expect("edit"),
+            &st.method_edits("Counter", None, "reset", "clear")
+                .expect("edit"),
             "file:///counter.aly",
             COUNTER
         ),
@@ -2332,11 +2468,13 @@ fn a_struct_method_reaches_a_call_through_an_import_alias() {
     let target = st.name_target("file:///dep/gadget.aly", at(GADGET, "spin(self)"));
 
     assert!(
-        matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Gadget" && name == "spin"),
+        matches!(&target, Some(Target::Method { trait_name, name, .. }) if trait_name == "Gadget" && name == "spin"),
         "{target:?}"
     );
 
-    let edit = st.method_edits("Gadget", "spin", "whirl").expect("edit");
+    let edit = st
+        .method_edits("Gadget", None, "spin", "whirl")
+        .expect("edit");
     let (line, column) = position_of(MAIN, at(MAIN, "gizmo:spin") + 6);
 
     assert_eq!(
@@ -2386,12 +2524,14 @@ fn a_default_method_reaches_a_struct_with_an_empty_impl() {
         let target = st.name_target(uri, caret);
 
         assert!(
-            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Greeter" && name == "greet"),
+            matches!(&target, Some(Target::Method { trait_name, name, .. }) if trait_name == "Greeter" && name == "greet"),
             "{caret}: {target:?}"
         );
     }
 
-    let edit = st.method_edits("Greeter", "greet", "hello").expect("edit");
+    let edit = st
+        .method_edits("Greeter", None, "greet", "hello")
+        .expect("edit");
     let starts: Vec<usize> = edit["changes"][uri]
         .as_array()
         .expect("edits")
@@ -2553,7 +2693,9 @@ pub(crate) fn a_receiver_from_new_through_a_star_alias_is_a_method_use() {
         );
     }
 
-    let edit = st.method_edits("Gadget", "spin", "spin").expect("edits");
+    let edit = st
+        .method_edits("Gadget", None, "spin", "spin")
+        .expect("edits");
     let _ = std::fs::remove_dir_all(&dir);
     let changes = edit["changes"].as_object().expect("changes");
     let user_uri = format!("file://{}", dir.join("src/use.aly").display());

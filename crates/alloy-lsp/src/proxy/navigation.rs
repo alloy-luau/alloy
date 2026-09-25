@@ -257,13 +257,15 @@ impl Server {
                 }
             }
 
-            Target::Method { trait_name, name } => {
-                match st.method_edits(&trait_name, &name, &new_name) {
-                    Some(edit) => edit,
+            Target::Method {
+                trait_name,
+                name,
+                home,
+            } => match st.method_edits(&trait_name, home.as_ref(), &name, &new_name) {
+                Some(edit) => edit,
 
-                    None => return false,
-                }
-            }
+                None => return false,
+            },
 
             // The child reads every value of the struct, typed by the
             // checker, so it answers from the field list the artifact
@@ -357,13 +359,15 @@ impl Server {
                 }
             }
 
-            Target::Method { trait_name, name } => {
-                match st.method_edits(&trait_name, &name, &name) {
-                    Some(edit) => locations_of(&edit),
+            Target::Method {
+                trait_name,
+                name,
+                home,
+            } => match st.method_edits(&trait_name, home.as_ref(), &name, &name) {
+                Some(edit) => locations_of(&edit),
 
-                    None => return false,
-                }
-            }
+                None => return false,
+            },
 
             Target::Field { owner, name } => match shadow_field(doc, &owner, &name) {
                 Some(at) => {
@@ -1096,7 +1100,7 @@ impl State {
 
             // A trait's method: the trait declares it once and every
             // `impl` writes it again, so the three places are one name.
-            if let Some(target) = self.method_target(doc, offset) {
+            if let Some(target) = self.method_target(uri, doc, offset) {
                 return Some(target);
             }
 
@@ -1222,7 +1226,7 @@ impl State {
     /// method of an `impl Trait for S`, or a call on a value whose
     /// struct has such an impl. `None` for anything else, and for a
     /// method of a plain `impl S`, which no trait declares.
-    fn method_target(&self, doc: &Doc, offset: usize) -> Option<Target> {
+    fn method_target(&self, uri: &str, doc: &Doc, offset: usize) -> Option<Target> {
         let (s, e) = keywords::word_range(&doc.source, offset);
         let name = doc.source[s..e].to_string();
         let here = trait_method_sites(&doc.source)
@@ -1232,10 +1236,16 @@ impl State {
         // A plain `impl S` declares the method on `S` itself, so the
         // struct stands where a trait would.
         if let Some(site) = here {
+            let home = self.site_home(uri, doc, &site);
+
             return site
                 .trait_name
                 .or(site.target)
-                .map(|trait_name| Target::Method { trait_name, name });
+                .map(|trait_name| Target::Method {
+                    trait_name,
+                    name,
+                    home,
+                });
         }
 
         // `b:hello()`: the struct the receiver holds says which trait,
@@ -1258,41 +1268,50 @@ impl State {
             dot.then(|| self.impl_target_at(doc, head.len() - 1))
                 .flatten()
         });
-        let mut traits: Vec<String> = Vec::new();
+        let mut traits: Vec<(String, Option<TraitHome>)> = Vec::new();
 
-        for site in self
-            .docs
-            .values()
-            .flat_map(|d| trait_method_sites(&d.source))
-        {
-            let Some(trait_name) = site.trait_name.clone().or(site.target.clone()) else {
-                continue;
-            };
-            let mine = match (&owner, &site.target) {
-                // The receiver is the trait itself, or a type parameter
-                // the trait bounds: `s: Speaker`, `<T: Speaker>`.
-                (Some(o), _) if *o == trait_name || bound_by(&doc.source, o, &trait_name) => true,
+        for (u, d) in &self.docs {
+            for site in trait_method_sites(&d.source) {
+                let Some(trait_name) = site.trait_name.clone().or(site.target.clone()) else {
+                    continue;
+                };
 
-                (Some(o), Some(t)) => o == t,
+                if site.name != name {
+                    continue;
+                }
 
-                // The trait's own body: an `impl Trait for S` with no
-                // method of its own still hands `S` the default.
-                (Some(o), None) => self.implements(o, &trait_name),
+                let home = self.site_home(u, d, &site);
+                let mine = match (&owner, &site.target) {
+                    // The receiver is the trait itself, or a type
+                    // parameter the trait bounds: `s: Speaker`,
+                    // `<T: Speaker>`.
+                    (Some(o), _) if *o == trait_name || bound_by(&doc.source, o, &trait_name) => {
+                        true
+                    }
 
-                // A receiver with no type of its own: one trait that
-                // declares the name is still the one the call means.
-                (None, _) => true,
-            };
+                    (Some(o), Some(t)) => o == t,
 
-            if site.name == name && mine && !traits.contains(&trait_name) {
-                traits.push(trait_name);
+                    // The trait's own body: an `impl Trait for S` with no
+                    // method of its own still hands `S` the default.
+                    (Some(o), None) => self.implements(o, &trait_name, home.as_ref()),
+
+                    // A receiver with no type of its own: one trait that
+                    // declares the name is still the one the call means.
+                    (None, _) => true,
+                };
+                let pair = (trait_name, home);
+
+                if mine && !traits.contains(&pair) {
+                    traits.push(pair);
+                }
             }
         }
 
         match traits.as_slice() {
-            [trait_name] => Some(Target::Method {
+            [(trait_name, home)] => Some(Target::Method {
                 trait_name: trait_name.clone(),
                 name,
+                home: home.clone(),
             }),
 
             // Two traits of one method name say nothing about which one
@@ -1322,11 +1341,134 @@ impl State {
 
     /// Whether any file writes `impl Trait for S`, with or without a
     /// method in the block.
-    fn implements(&self, owner: &str, trait_name: &str) -> bool {
+    fn implements(&self, owner: &str, trait_name: &str, home: Option<&TraitHome>) -> bool {
+        self.impl_targets(trait_name, home)
+            .iter()
+            .any(|t| t == owner)
+    }
+
+    /// Every type an `impl Trait for S` of the trait targets, with or
+    /// without a method in the block.
+    fn impl_targets(&self, trait_name: &str, home: Option<&TraitHome>) -> Vec<String> {
         self.docs
-            .values()
-            .flat_map(|d| &d.impl_blocks)
-            .any(|b| b.target == owner && b.trait_name.as_deref() == Some(trait_name))
+            .iter()
+            .flat_map(|(u, d)| d.impl_blocks.iter().map(move |b| (u, d, b)))
+            .filter(|(u, d, b)| {
+                b.trait_name
+                    .as_deref()
+                    .is_some_and(|t| self.is_trait(u, d, &path_head(t), b.start, trait_name, home))
+            })
+            .map(|(_, _, b)| b.target.clone())
+            .collect()
+    }
+
+    /// The trait a method site belongs to, where it lives. `None` for a
+    /// plain `impl S`, and for a trait no scope of the file reaches.
+    fn site_home(&self, uri: &str, doc: &Doc, site: &MethodSite) -> Option<TraitHome> {
+        self.trait_home(uri, doc, site.trait_path.as_deref()?, site.header)
+    }
+
+    /// Whether the trait `written` names at `at` is the one `home`
+    /// points at. Where either side has no home, the names decide.
+    fn is_trait(
+        &self,
+        uri: &str,
+        doc: &Doc,
+        written: &str,
+        at: usize,
+        trait_name: &str,
+        home: Option<&TraitHome>,
+    ) -> bool {
+        match (home, self.trait_home(uri, doc, written, at)) {
+            (Some(h), Some(here)) => *h == here,
+
+            _ => last_name(written) == trait_name,
+        }
+    }
+
+    /*
+    Where the trait a file writes as `written` at byte `at` lives.
+
+    The file's own trait answers first, read from the innermost
+    namespace around `at` outward: `trait Mover` inside `namespace
+    Motion` is `Motion.Mover`. Else an import binds the first name of
+    the path, and a barrel passes it on to the module that declares it.
+    Two files that each declare a `Mover` hold two traits.
+    */
+    fn trait_home(&self, uri: &str, doc: &Doc, written: &str, at: usize) -> Option<TraitHome> {
+        let mut scopes: Vec<&str> = doc
+            .namespace_ranges
+            .iter()
+            .filter(|n| n.start <= at && at < n.end)
+            .map(|n| n.path.as_str())
+            .collect();
+        scopes.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        let own = scopes
+            .iter()
+            .map(|s| format!("{s}.{written}"))
+            .chain([written.to_string()])
+            .find(|path| doc.decls.iter().any(|d| d.name == *path));
+
+        if let Some(path) = own {
+            return Some((imports::module_path(&uri_to_path(uri)?), path));
+        }
+
+        let (head, rest) = match written.split_once('.') {
+            Some((h, r)) => (h, Some(r)),
+
+            None => (written, None),
+        };
+        let (spec, name, rest) = match import_entries(&doc.source)
+            .into_iter()
+            .find(|e| e.bound == head)
+        {
+            Some(e) => (e.spec, e.name, rest),
+
+            // `import * as Lib`: `Lib.Mover` names the module's export.
+            None => {
+                let (_, spec) = module_bindings(&doc.source)
+                    .into_iter()
+                    .find(|(alias, _)| alias == head)?;
+                let rest = rest?;
+                let (name, deeper) = match rest.split_once('.') {
+                    Some((n, d)) => (n, Some(d)),
+
+                    None => (rest, None),
+                };
+
+                (spec, name.to_string(), deeper)
+            }
+        };
+        let (module, own) = self.declaring_module(uri, &spec, &name)?;
+
+        Some(match rest {
+            Some(rest) => (module, format!("{own}.{rest}")),
+
+            None => (module, own),
+        })
+    }
+
+    /// The module that declares what `spec` sends out as `name`, read
+    /// from the file at `uri`, and the name it declares it under. A
+    /// barrel's `export { T } from` passes the walk on.
+    fn declaring_module(&self, uri: &str, spec: &str, name: &str) -> Option<TraitHome> {
+        let (mut uri, mut spec, mut name) = (uri.to_string(), spec.to_string(), name.to_string());
+
+        for _ in 0..4 {
+            let Some((text, file)) = self.module_source(&uri, &spec) else {
+                break;
+            };
+            let Some(entry) = reexport_entries(&text)
+                .into_iter()
+                .find(|e| e.bound == name)
+            else {
+                break;
+            };
+
+            (uri, spec, name) = (path_to_uri(&file), entry.spec, entry.name);
+        }
+
+        Some((imports::module_path(&self.resolve_spec(&uri, &spec)?), name))
     }
 
     /*
@@ -1348,38 +1490,39 @@ impl State {
     pub(crate) fn method_edits(
         &self,
         trait_name: &str,
+        home: Option<&TraitHome>,
         name: &str,
         new_name: &str,
     ) -> Option<Value> {
-        let sites: Vec<(String, MethodSite)> = self
+        // The trait of each site is settled once, here: two files may
+        // each declare a trait of this name.
+        let sites: Vec<(String, MethodSite, bool)> = self
             .docs
             .iter()
             .flat_map(|(u, d)| {
                 trait_method_sites(&d.source)
                     .into_iter()
-                    .map(move |site| (u.clone(), site))
+                    .filter(|s| s.name == name)
+                    .map(move |site| {
+                        let mine = match &site.trait_path {
+                            Some(t) => self.is_trait(u, d, t, site.header, trait_name, home),
+
+                            None => site.target.as_deref() == Some(trait_name),
+                        };
+
+                        (u.clone(), site, mine)
+                    })
             })
             .collect();
-        let mine = |s: &MethodSite| {
-            s.name == name
-                && match &s.trait_name {
-                    Some(t) => t == trait_name,
-
-                    None => s.target.as_deref() == Some(trait_name),
-                }
-        };
         // Every struct the trait reaches, an empty `impl Trait for S`
         // among them; the struct itself for a plain `impl S`.
         let targets: Vec<String> = self
-            .docs
-            .values()
-            .flat_map(|d| &d.impl_blocks)
-            .filter(|b| b.trait_name.as_deref() == Some(trait_name))
-            .map(|b| b.target.clone())
+            .impl_targets(trait_name, home)
+            .into_iter()
             .chain([trait_name.to_string()])
             .collect();
         // The name belongs to this trait alone: nothing else declares it.
-        let only_one = !sites.iter().any(|(_, s)| s.name == name && !mine(s));
+        let only_one = sites.iter().all(|(_, _, mine)| *mine);
         // The modules that declare a target. An importer names one by
         // its module path, the way the export rename finds importers.
         let declared: Vec<PathBuf> = self
@@ -1393,8 +1536,8 @@ impl State {
         for (u, d) in &self.docs {
             let mut edits: Vec<Value> = sites
                 .iter()
-                .filter(|(owner, s)| owner == u && mine(s))
-                .map(|(_, s)| text_edit(&d.source, s.at.0, s.at.1, new_name))
+                .filter(|(owner, _, mine)| owner == u && *mine)
+                .map(|(_, s, _)| text_edit(&d.source, s.at.0, s.at.1, new_name))
                 .collect();
             // `import { Gadget as Gizmo }`: this file writes the target
             // under its alias, so a receiver of that type holds it too.
@@ -2806,17 +2949,27 @@ pub(crate) fn impl_method_span(src: &str, name: &str) -> Option<(usize, usize)> 
     found
 }
 
+/// Where a trait lives: the module path that declares it, and its path
+/// there, `Motion.Mover`.
+pub(crate) type TraitHome = (PathBuf, String);
+
 /// One place a method of a trait is written: the trait's own body, or
 /// an `impl` block.
 pub(crate) struct MethodSite {
     /// The trait the site belongs to: the trait itself, or the one an
-    /// `impl Trait for S` meets. `None` for a plain `impl S`.
+    /// `impl Trait for S` meets. `None` for a plain `impl S`. A path
+    /// gives its last name, `Mover` for `impl Motion.Mover for S`.
     pub trait_name: Option<String>,
+    /// The trait as the header writes it: `Motion.Mover`.
+    pub trait_path: Option<String>,
     /// The type an `impl` targets. `None` inside a trait's own body.
     pub target: Option<String>,
     pub name: String,
     /// The byte range of the method's name.
     pub at: (usize, usize),
+    /// The byte offset of the block's header. The namespaces around it
+    /// say which trait the header names.
+    pub header: usize,
 }
 
 /// The leading name of a text: `Alpha<T> as` gives `Alpha`.
@@ -2827,13 +2980,30 @@ fn name_head(text: &str) -> String {
         .collect()
 }
 
+/// The leading path of a text: `Motion.Mover<T> for` gives
+/// `Motion.Mover`.
+fn path_head(text: &str) -> String {
+    let path: String = text
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+
+    path.trim_end_matches('.').to_string()
+}
+
+/// The last name of a path: `Mover` for `Motion.Mover`.
+fn last_name(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
+
 /// Every method a source writes inside a `trait` body or an `impl`
 /// block. A trait and an impl both stand at the margin and both close
 /// with an `end` there, so the header above a line says which block it
 /// belongs to.
 pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
     let mut out = Vec::new();
-    let mut head: Option<(Option<String>, Option<String>)> = None;
+    let mut head: Option<(Option<String>, Option<String>, usize)> = None;
     let mut at = 0;
 
     for line in src.lines() {
@@ -2845,16 +3015,16 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
         let bare = bare.strip_prefix("global ").unwrap_or(bare);
 
         if let Some(rest) = bare.strip_prefix("trait ") {
-            head = Some((Some(name_head(rest)), None));
+            head = Some((Some(name_head(rest)), None, start));
 
             continue;
         }
 
         if let Some(rest) = bare.strip_prefix("impl ") {
             head = match rest.split_once(" for ") {
-                Some((t, s)) => Some((Some(name_head(t)), Some(name_head(s)))),
+                Some((t, s)) => Some((Some(path_head(t)), Some(name_head(s)), start)),
 
-                None => Some((None, Some(name_head(rest)))),
+                None => Some((None, Some(name_head(rest)), start)),
             };
 
             continue;
@@ -2866,7 +3036,7 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
             head = None;
         }
 
-        let Some((trait_name, target)) = &head else {
+        let Some((trait_path, target, header)) = &head else {
             continue;
         };
         let body = text
@@ -2886,10 +3056,12 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
         let offset = start + indent + (text.len() - body.len()) + "function ".len();
         let at = (offset, offset + name.len());
         out.push(MethodSite {
-            trait_name: trait_name.clone(),
+            trait_name: trait_path.as_deref().map(|p| last_name(p).to_string()),
+            trait_path: trait_path.clone(),
             target: target.clone(),
             name,
             at,
+            header: *header,
         });
     }
 
@@ -3562,8 +3734,13 @@ pub(crate) enum Target {
     /// value; the emit types the receiver as `any`, so the child ties
     /// none of the three together. A method of a plain `impl S` is
     /// the struct's: `trait_name` holds `S`, and the child finds no
-    /// site of it through a `:` call.
-    Method { trait_name: String, name: String },
+    /// site of it through a `:` call. `home` is where the trait lives,
+    /// so two traits that share a name stay apart.
+    Method {
+        trait_name: String,
+        name: String,
+        home: Option<TraitHome>,
+    },
     /// An `import` statement holds no other name either answer can
     /// reach: not the keywords, not the module path. The child would
     /// point at a byte the emit wrote.

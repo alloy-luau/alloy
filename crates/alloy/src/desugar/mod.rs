@@ -187,6 +187,10 @@ pub struct EmitOptions {
     /// those namespaces in full, so `@M.tag` or `@M.Ns.tag` that names
     /// none of them reports. See `crate::modules::import_star_modules`.
     pub import_star_modules: Vec<(String, Vec<String>, Vec<String>)>,
+    /// The private attributes of the namespaces the imported modules
+    /// export, by the path this file writes, so a use of one reports
+    /// that it is private. See `crate::modules::import_private_attributes`.
+    pub import_private_attributes: Vec<String>,
     /// The enums the file around a macro expansion declares. A macro
     /// body compiles as a fragment of its own, and a `match` in it
     /// covers the enums of the file it lands in. See `compile_fragment`.
@@ -422,6 +426,7 @@ impl Default for EmitOptions {
             ambient_names: Vec::new(),
             import_attributes: Vec::new(),
             import_star_modules: Vec::new(),
+            import_private_attributes: Vec::new(),
             macro_enums: Vec::new(),
             macro_depth: 0,
             naming: crate::naming::Naming::default(),

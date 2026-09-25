@@ -624,7 +624,7 @@ fn a_namespace_attribute_is_checked_through_a_star_import() {
         messages,
         [
             "`M.Ns` exports no attribute `tga`; it exports `tag`",
-            "`M.Ns` exports no attribute `hidden`; it exports `tag`",
+            "`hidden` is private to `M.Ns`",
             "`M` exports no `Nx`, so `@M.Nx.tag` names no attribute",
             "`M` declares no namespace `Ns.Dx`, so `@M.Ns.Dx.low` names no attribute",
             "the attribute `M.Ns.tag` has no meaning on a struct; it goes on `function`",
@@ -634,6 +634,40 @@ fn a_namespace_attribute_is_checked_through_a_star_import() {
         out.ship.contains("__alloy.attach(a, { tag = { 3 } })"),
         "{}",
         out.ship
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `@Kit.tag` through `import { Kit }` of a namespace reports as the
+/// local namespace and the star import do: a private attribute is
+/// private to `Kit`, and a missing one names the exports. Both read
+/// "an attribute of a module is used by its bare name".
+#[test]
+fn a_namespace_attribute_is_checked_through_a_named_import() {
+    let dir = scratch("named-namespace-attribute");
+    std::fs::write(
+        dir.join("kit.aly"),
+        "export namespace Kit
+    private attribute secret on struct
+    attribute open on struct
+end
+",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let source = "import { Kit } from \"./kit\"\n@Kit.secret\nstruct A\n    x: number\nend\n@Kit.nope\nstruct B\n    x: number\nend\n@Kit.open\nstruct C\n    x: number\nend\nprint(A, B, C)\n";
+    std::fs::write(&main, source).unwrap();
+    let options = alloy::EmitOptions::default().imports(source, &main, &[]);
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert_eq!(
+        messages,
+        [
+            "`secret` is private to `Kit`",
+            "`Kit` exports no attribute `nope`; it exports `open`",
+        ]
     );
 
     let _ = std::fs::remove_dir_all(&dir);

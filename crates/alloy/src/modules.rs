@@ -1565,7 +1565,7 @@ pub fn import_star_modules(
         .map(|(path, local)| {
             let text = module_text(&path).unwrap_or_default();
             let mut namespaces = Vec::new();
-            attribute_walk(&text, &mut Vec::new(), &mut namespaces);
+            attribute_walk(&text, &mut Vec::new(), &mut namespaces, &mut Vec::new());
 
             (local, namespaces, exported_names(&text))
         })
@@ -1576,18 +1576,55 @@ pub fn import_star_modules(
 /// imports it, with the public attributes of its exported namespaces.
 pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
     let mut out = Vec::new();
-    attribute_walk(src, &mut out, &mut Vec::new());
+    attribute_walk(src, &mut out, &mut Vec::new(), &mut Vec::new());
 
     out
 }
 
+/// The private attributes of the namespaces the modules a source
+/// imports export, by the path this file would write: `Kit.secret`
+/// through `import { Kit }`, `P.Kit.secret` through `import * as P`.
+/// A use of one reports that it is private, not that it is missing.
+pub fn import_private_attributes(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<String> {
+    let modules = module_decls(source, from, aliases, |text| {
+        let mut private = Vec::new();
+        attribute_walk(text, &mut Vec::new(), &mut Vec::new(), &mut private);
+
+        private.into_iter().map(|p| (p, ())).collect()
+    });
+    let bound: HashSet<String> = named_specs(source, from, aliases)
+        .into_iter()
+        .map(|(_, _, local)| local)
+        .chain(
+            star_locals(source, from, aliases)
+                .into_iter()
+                .map(|(_, l)| l),
+        )
+        .collect();
+
+    keyed_by_local(source, from, aliases, &modules)
+        .into_iter()
+        .map(|(key, ())| key)
+        .filter(|key| {
+            key.split_once('.')
+                .is_some_and(|(head, _)| bound.contains(head))
+        })
+        .collect()
+}
+
 /// The attributes a module exports, and the path of every namespace
 /// the walk reads them from. A top-level declaration counts when it is
-/// exported, and a namespace member when it is not private.
+/// exported, and a namespace member when it is not private. `private`
+/// gets the path of each private attribute of those namespaces.
 fn attribute_walk(
     src: &str,
     out: &mut Vec<(String, crate::desugar::AttrDecl)>,
     namespaces: &mut Vec<String>,
+    private: &mut Vec<String>,
 ) {
     use alloy_syntax::ast::Stmt;
 
@@ -1598,6 +1635,7 @@ fn attribute_walk(
         prefix: &str,
         out: &mut Vec<(String, crate::desugar::AttrDecl)>,
         namespaces: &mut Vec<String>,
+        private: &mut Vec<String>,
     ) {
         match stmt {
             Stmt::Attribute(a) => out.push((
@@ -1608,8 +1646,24 @@ fn attribute_walk(
             Stmt::Namespace(ns) => {
                 let path = format!("{prefix}{}", token_text(src, toks, ns.name));
 
-                for m in ns.members.iter().filter(|m| !m.is_private(src, toks)) {
-                    walk(src, toks, &m.stmt, &format!("{path}."), out, namespaces);
+                for m in &ns.members {
+                    match (m.is_private(src, toks), &m.stmt) {
+                        (false, stmt) => walk(
+                            src,
+                            toks,
+                            stmt,
+                            &format!("{path}."),
+                            out,
+                            namespaces,
+                            private,
+                        ),
+
+                        (true, Stmt::Attribute(a)) => {
+                            private.push(format!("{path}.{}", token_text(src, toks, a.name)))
+                        }
+
+                        (true, _) => {}
+                    }
                 }
 
                 namespaces.push(path);
@@ -1634,7 +1688,7 @@ fn attribute_walk(
         };
 
         if exported {
-            walk(src, toks, stmt, "", out, namespaces);
+            walk(src, toks, stmt, "", out, namespaces, private);
         }
     }
 }
@@ -1994,6 +2048,7 @@ impl crate::EmitOptions {
         self.import_struct_ctors = import_struct_ctors(source, from, aliases);
         self.import_private_views = import_private_views(source, from, aliases);
         self.import_attributes = import_attributes(source, from, aliases);
+        self.import_private_attributes = import_private_attributes(source, from, aliases);
         self.import_star_modules = import_star_modules(source, from, aliases);
         self.macros = import_macros(source, from, aliases);
         self.plain_modules = plain_modules(source, from, aliases);

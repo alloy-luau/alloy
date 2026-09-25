@@ -703,6 +703,17 @@ impl<'s> Desugar<'s> {
             });
         }
 
+        // A private attribute of an imported namespace, as the local
+        // namespace reports it.
+        if self
+            .options
+            .import_private_attributes
+            .iter()
+            .any(|p| p == name)
+        {
+            return Some(format!("`{member}` is private to `{owner}`"));
+        }
+
         // `import * as M`: `@M.tag` names the module's own attribute,
         // and `@M.Ns.tag` one of its namespaces. The import index lists
         // every attribute an Alloy module and its namespaces export.
@@ -710,8 +721,20 @@ impl<'s> Desugar<'s> {
             return self.star_attr_error(owner, member);
         }
 
-        // A named import binds a module's attribute under its own name.
         if self.imported_names.contains(head) {
+            // `import { Kit }` of a namespace: the index holds each
+            // attribute it exports, as it does through `* as M`.
+            let held = self.held_attributes(owner);
+
+            if !held.is_empty() {
+                return Some(format!(
+                    "`{owner}` exports no attribute `{member}`; it exports {}",
+                    list_names(&held)
+                ));
+            }
+
+            // A named import binds a module's attribute under its own
+            // name.
             return Some(format!(
                 "an attribute of a module is used by its bare name; import it with `import {{ {member} }} from ...`"
             ));
@@ -738,14 +761,7 @@ impl<'s> Desugar<'s> {
             .import_star_modules
             .iter()
             .find(|(local, _, _)| local == head)?;
-        let prefix = format!("{owner}.");
-        let mut held: Vec<&str> = self
-            .attr_decls
-            .keys()
-            .filter_map(|k| k.strip_prefix(&prefix))
-            .filter(|rest| !rest.contains('.'))
-            .collect();
-        held.sort_unstable();
+        let held = self.held_attributes(owner);
         let first = path.split('.').next().unwrap_or(path);
         let whole = path.is_empty() || !held.is_empty() || namespaces.iter().any(|n| n == path);
 
@@ -773,6 +789,20 @@ impl<'s> Desugar<'s> {
                 list_names(&held)
             ),
         })
+    }
+
+    /// The attributes a namespace path holds one level down, by name.
+    fn held_attributes(&self, owner: &str) -> Vec<&str> {
+        let prefix = format!("{owner}.");
+        let mut held: Vec<&str> = self
+            .attr_decls
+            .keys()
+            .filter_map(|k| k.strip_prefix(&prefix))
+            .filter(|rest| !rest.contains('.'))
+            .collect();
+        held.sort_unstable();
+
+        held
     }
 
     /// Whether an attribute reaches a target. `check_attrs` reports the

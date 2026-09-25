@@ -1179,6 +1179,19 @@ mod tests {
             unused("for _, v in t do\n    print(v)\nend\n"),
             Vec::<&str>::new()
         );
+        // A function above a top-level `const` reads it. The read is a
+        // global, which the checker reports; the const is not unused.
+        assert_eq!(
+            unused(
+                "local function f(): number\n    return LIMIT\nend\nconst LIMIT = 1\nprint(f())\n"
+            ),
+            Vec::<&str>::new()
+        );
+        // A read at the top level above it is no use of the const.
+        assert_eq!(
+            unused("print(LIMIT)\nconst LIMIT = 1\n"),
+            vec!["unused_variable"]
+        );
         assert_eq!(
             unused("local function helper() end\nlocal x: number = 1\nprint(x)\n"),
             vec!["unused_function"]

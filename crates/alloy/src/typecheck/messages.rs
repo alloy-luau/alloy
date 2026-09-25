@@ -219,6 +219,17 @@ pub fn rewrite_emitted_name(
                 None,
             ));
         }
+
+        // A function reads a top-level `const` or `local` that a line
+        // below it declares. A local is in scope from its declaration
+        // on, so the read is a global, and the checker's advice is to
+        // assign that global.
+        if let Some(word) = declared_below(source, line, name) {
+            return Some((
+                format!("`{name}` is declared below this function; move the {word} above it"),
+                None,
+            ));
+        }
     }
 
     // `new n { }`, where `n` is a value: the emit asks it for `new`.
@@ -364,6 +375,33 @@ fn declares_type_only(source: &str, name: &str) -> bool {
                     !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_')
                 })
             })
+        })
+    })
+}
+
+/// The word, `const` or `local`, of a top-level declaration of the name
+/// below a line that a top-level function holds. The nearest line at
+/// column 0 at or above the line is the head of that function.
+fn declared_below(source: &str, line: usize, name: &str) -> Option<&'static str> {
+    let lines: Vec<&str> = source.lines().collect();
+    let head = lines
+        .get(..line.min(lines.len()))?
+        .iter()
+        .rev()
+        .find(|l| l.starts_with(|c: char| !c.is_whitespace()))?;
+
+    if !names_word(head, "function") {
+        return None;
+    }
+
+    lines.get(line..)?.iter().find_map(|l| {
+        let l = l.strip_prefix("export ").unwrap_or(l);
+
+        ["const", "local"].into_iter().find(|word| {
+            l.strip_prefix(word)
+                .and_then(|rest| rest.strip_prefix(' '))
+                .and_then(|rest| rest.strip_prefix(name))
+                .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
         })
     })
 }
@@ -3450,6 +3488,36 @@ end
             ),
             Some(("`Both` is a type, not a value".to_string(), None))
         );
+    }
+
+    /// A function reads a `const` that a line below it declares. Luau
+    /// reads a global there and advises assigning to it. The report now
+    /// says to move the declaration. A read at the top level, and a
+    /// name with no declaration below, keep the checker's words.
+    #[test]
+    fn a_const_below_the_function_that_reads_it_says_so() {
+        let src = "local function speed(): number\n    return LIMIT * 2\nend\nconst LIMIT = 16\nlocal step = 1\nprint(speed(), step)\n";
+        let unknown =
+            |name: &str| format!("Unknown global '{name}'; consider assigning to it first");
+
+        assert_eq!(
+            rewrite_emitted_name(&unknown("LIMIT"), src, 2),
+            Some((
+                "`LIMIT` is declared below this function; move the const above it".to_string(),
+                None
+            ))
+        );
+        assert_eq!(
+            rewrite_emitted_name(&unknown("step"), &src.replace("LIMIT * 2", "step"), 2),
+            Some((
+                "`step` is declared below this function; move the local above it".to_string(),
+                None
+            ))
+        );
+        assert_eq!(rewrite_emitted_name(&unknown("nope"), src, 2), None);
+
+        let top = "print(LIMIT)\nconst LIMIT = 16\n";
+        assert_eq!(rewrite_emitted_name(&unknown("LIMIT"), top, 1), None);
     }
 
     #[test]

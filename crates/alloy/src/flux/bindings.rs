@@ -1270,12 +1270,24 @@ impl<'s> Scan<'s> {
             // the emit declares the name on the first line, so the
             // read counts, as it does for `function f`.
             let from_start = is_function && !self.inside_any_block(i);
+            // A body above a top-level `local` or `const` reads a global
+            // of that name, since a local is not hoisted. The checker
+            // reports that read and says to move the declaration up, so
+            // the name counts as read.
+            let top_value = !is_function && self.t(i) != "for" && !self.inside_any_block(i);
 
             for n in names {
                 let name = self.t(n);
                 let from = if from_start { 0 } else { n + 1 };
+                let read_above = top_value
+                    && (0..i).any(|j| {
+                        self.toks[j].kind == TokKind::Ident
+                            && self.t(j) == name
+                            && !self.is_member(j)
+                            && self.inside_block(j, &["function"])
+                    });
 
-                if name.starts_with('_') || self.read_after(n, from) {
+                if name.starts_with('_') || self.read_after(n, from) || read_above {
                     continue;
                 }
 

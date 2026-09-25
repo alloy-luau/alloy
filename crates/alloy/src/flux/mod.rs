@@ -43,6 +43,32 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     out
 }
 
+/// A function a call can name, as `Scan::callables` finds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Callable {
+    /// The parameters, `self` counted. `None` when a vararg, a default,
+    /// or a second declaration makes the count a range.
+    pub params: Option<usize>,
+    /// The note of its `@deprecated`: empty for a mark with no note.
+    pub deprecated: Option<String>,
+    /// Whether another module reaches it: an `export function`, or a
+    /// method or a static of a struct.
+    pub exported: bool,
+}
+
+/// The functions a module sends out, keyed the way `Scan::callables`
+/// keys them. A source that does not lex sends none.
+pub fn exported_callables(src: &str) -> Vec<(String, Callable)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let st = crate::fmt::structure::structure(src, &lexed.toks);
+    let mut out = Scan::new(src, &lexed.toks, &st).callables();
+    out.retain(|(_, c)| c.exported);
+
+    out
+}
+
 /// The rewrites `prefer_const` writes, `local` to `const`, for `alloy
 /// fmt` to apply. A source that does not lex gets none.
 pub(crate) fn prefer_const_fixes(src: &str) -> Vec<crate::lint::Fix> {

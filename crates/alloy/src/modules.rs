@@ -1460,6 +1460,20 @@ pub fn import_privates(
     keyed_by_local(source, from, aliases, &modules)
 }
 
+/// The functions every module the source imports sends out: an
+/// `export function` and each method and static of a struct, with the
+/// parameter count and the `@deprecated` note. `argument_count` and
+/// `deprecated_call` read a call of one through it.
+pub fn import_callables(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, crate::flux::Callable)> {
+    let modules = module_decls(source, from, aliases, crate::flux::exported_callables);
+
+    keyed_by_local(source, from, aliases, &modules)
+}
+
 /// The private fields of the imported structs of a file under the
 /// nearest `alloy.toml`.
 pub fn import_privates_for_file(path: &Path, source: &str) -> Vec<(String, Vec<String>)> {
@@ -1975,6 +1989,7 @@ impl crate::EmitOptions {
         self.import_enums = import_enums(source, from, aliases);
         self.import_remotes = import_remotes(source, from, aliases);
         self.import_privates = import_privates(source, from, aliases);
+        self.import_callables = import_callables(source, from, aliases);
         self.import_struct_fields = import_struct_fields(source, from, aliases);
         self.import_struct_ctors = import_struct_ctors(source, from, aliases);
         self.import_private_views = import_private_views(source, from, aliases);
@@ -3374,6 +3389,46 @@ mod tests {
             "{:?}",
             import_problems(src, Path::new("src/main.aly"), &from, &[])
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A call of an imported function or method reads the count and the
+    /// `@deprecated` note the module declares. Luau's solver misses a
+    /// call with too many arguments.
+    #[test]
+    fn an_imported_function_carries_its_arity_and_deprecation() {
+        let dir = std::env::temp_dir().join(format!("alloy-callables-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/lib.aly"),
+            "export function one(x: number): number\n    return x\nend\n\nlocal function hidden(x: number): number\n    return x\nend\n\nexport struct Crate\n    v: number\nend\n\nimpl Crate\n    @deprecated(\"use get\")\n    function value(self): number\n        return self.v + hidden(1)\n    end\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let src = "import { one, Crate } from \"./lib\"\nimport * as M from \"./lib\"\n\nconst a: Crate = new Crate { v = 1 }\nprint(one(1, 2), M.one(1, 2), a:value(3), one(1), a:value())\n";
+        let options = crate::EmitOptions::default().imports(src, &from, &[]);
+        let out = crate::compile_with(src, &options).expect("compile");
+        let messages: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| matches!(l.name, "argument_count" | "deprecated_call"))
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "`one` takes 1 argument; this call passes 2",
+                "`M.one` takes 1 argument; this call passes 2",
+                "`a:value` takes 0 arguments; this call passes 1",
+                "`Crate:value` is deprecated; use get",
+                "`Crate:value` is deprecated; use get",
+            ]
+        );
+        // A function the module keeps to itself is no key.
+        assert!(!options.import_callables.iter().any(|(k, _)| k == "hidden"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -26,6 +26,7 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.unused_variable(&mut out);
     s.private_access(&mut out);
     s.deprecated_call(&mut out);
+    s.argument_count(&mut out);
     s.const_mutation(&mut out);
     s.duplicate_function(&mut out);
     s.prefer_const(&mut out);
@@ -888,6 +889,7 @@ mod tests {
             false,
             &crate::lint::Thresholds::default(),
             &[],
+            &[],
         )
         .into_iter()
         .filter(|l| {
@@ -1349,6 +1351,7 @@ mod tests {
             false,
             &crate::lint::Thresholds::default(),
             &privates,
+            &[],
         )
         .into_iter()
         .filter(|l| l.name == "private_access")

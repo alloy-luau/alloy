@@ -371,7 +371,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "a call passes more arguments than the function takes",
-        detail: "The extra values are evaluated and dropped, so a mistake in the argument order reads as working code. The lint counts only the functions the file declares by a plain name with a fixed parameter list; a vararg, a default, or a name declared twice makes the count a range and the lint stands down. The checker reports the other direction, a call with too few arguments.",
+        detail: "The extra values are evaluated and dropped, so a mistake in the argument order reads as working code. The lint counts a call of a function with a fixed parameter list that the file or an imported module declares: a plain name, `M.f` through `import * as M`, a static, a method on a value the file types with an annotation or a `new`, and a function in a table a local holds. A vararg, a default, or a name declared twice makes the count a range and the lint stands down. The checker reports the other direction, a call with too few arguments.",
     },
     LintInfo {
         name: "unreachable_default",
@@ -470,7 +470,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Suspicious,
         default: Level::Warn,
         summary: "a `:` call of an impl method declared `@deprecated`",
-        detail: "Flux. Luau reports `Box.value(b)` on a method marked `@deprecated`, but its lint does not follow `b:value()` through the metatable. This lint reports the method call when the file types the receiver as the struct: an annotation, `b: Box`, or the struct a `new Box { }` builds. A receiver of no known type stays quiet. The message the attribute carries prints after the name.",
+        detail: "Flux. Luau reports `Box.value(b)` on a method marked `@deprecated`, but its lint does not follow `b:value()` through the metatable. This lint reports the method call when the file types the receiver as the struct: an annotation, `b: Box`, or the struct a `new Box { }` builds. The impl may sit in this file or in a module the file imports. A receiver of no known type stays quiet. The message the attribute carries prints after the name.",
     },
     LintInfo {
         name: "and_or_ternary",
@@ -1222,6 +1222,48 @@ mod tests {
         assert_eq!(
             names(
                 "local function step(n: number, by: number = 1): number\n    return n + by\nend\nprint(step(1, 2))\n"
+            ),
+            Vec::<&str>::new()
+        );
+    }
+
+    /// A method on a value the file types, a static, and a function in
+    /// a local table count their arguments too.
+    #[test]
+    fn a_method_a_static_and_a_table_field_count_their_arguments() {
+        let head = "struct W as\n    d: number\nend\n\nimpl W as\n    function make(d: number): W\n        return new W { d = d }\n    end\n\n    function dps(self, rate: number): number\n        return self.d * rate\n    end\nend\n\nconst w = W.make(1)\nconst v = new W { d = 2 }\nconst t = { f = function(x: number): number return x end }\n";
+
+        for (call, fires) in [
+            ("print(v:dps(1, 2))", true),
+            ("print(v:dps(1))", false),
+            ("print(W.make(1, 2))", true),
+            ("print(W.dps(v, 1, 2))", true),
+            ("print(W.dps(v, 1))", false),
+            ("print(t.f(1, 2))", true),
+            ("print(t.f(1))", false),
+            // `w` has no type the file writes, so the count stands down.
+            ("print(w:dps(1, 2))", false),
+        ] {
+            let src = format!("{head}{call}\nprint(w)\n");
+            let want: Vec<&str> = if fires {
+                vec!["argument_count"]
+            } else {
+                vec![]
+            };
+            assert_eq!(names(&src), want, "{call}");
+        }
+
+        // A parameter of the table's name is some other value, and a
+        // later write puts another function in the field.
+        assert_eq!(
+            names(
+                "const t = { f = function(x: number): number return x end }\nlocal function g(t: { f: (number, number) -> number }): number\n    return t.f(1, 2)\nend\nprint(g, t)\n"
+            ),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(
+                "local t = { f = function(x: number): number return x end }\nt.f = function(a: number, b: number): number return a + b end\nprint(t.f(1, 2))\n"
             ),
             Vec::<&str>::new()
         );

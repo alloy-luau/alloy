@@ -148,6 +148,11 @@ pub struct EmitOptions {
     /// so `private_access` reports a read across a module boundary. See
     /// `crate::modules::import_privates`.
     pub import_privates: Vec<(String, Vec<String>)>,
+    /// The functions the imported modules declare, with their parameter
+    /// counts and deprecation notes, so `argument_count` and
+    /// `deprecated_call` read a call across a module boundary. See
+    /// `crate::modules::import_callables`.
+    pub import_callables: Vec<(String, crate::flux::Callable)>,
     /// Per struct an imported module declares, each field with whether
     /// it carries a default, so `new Box { }` here reports the fields it
     /// leaves unset. See `crate::modules::import_struct_fields`.
@@ -409,6 +414,7 @@ impl Default for EmitOptions {
             import_trait_methods: Vec::new(),
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
+            import_callables: Vec::new(),
             import_struct_fields: Vec::new(),
             import_struct_ctors: Vec::new(),
             import_private_views: Vec::new(),

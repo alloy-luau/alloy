@@ -6,6 +6,7 @@
 
 use alloy_syntax::lexer::TokKind;
 
+use super::Callable;
 use super::scan::Scan;
 use crate::lint::Lint;
 
@@ -180,14 +181,10 @@ impl<'s> Scan<'s> {
         .then(|| self.last_segment(i + 3))
     }
 
-    /// `b:value()` where `value` is a method its impl marks
-    /// `@deprecated`, and the file types `b` as the struct: an
-    /// annotation, or the struct a `new` builds. Luau reports
-    /// `Box.value(b)`, but its lint does not follow a method call
-    /// through the metatable.
-    pub(crate) fn deprecated_call(&self, out: &mut Vec<Lint>) {
-        // Each marked method: its struct, its name, and the note.
-        let mut marked: Vec<(&'s str, &'s str, String)> = Vec::new();
+    /// Each function a `@deprecated` marks: its `function` token and
+    /// the note.
+    fn deprecations(&self) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
 
         for i in 0..self.toks.len() {
             if !(self.at(i, "@") && self.at(i + 1, "deprecated")) {
@@ -209,33 +206,338 @@ impl<'s> Scan<'s> {
                         let Some(close) = self.matching(j) else { break };
                         j = close + 1;
                     }
-                } else if matches!(self.t(j), "private" | "public" | "async") {
+                } else if matches!(self.t(j), "private" | "public" | "async" | "export") {
                     j += 1;
                 } else {
                     break;
                 }
             }
 
-            if !self.at(j, "function") {
+            if self.at(j, "function") {
+                out.push((j, note));
+            }
+        }
+
+        out
+    }
+
+    /// Every function a call can name, keyed the way the call spells
+    /// it: `heal`, `Box.new`, `Box:value`, or `t.f` for a function in
+    /// the table a local holds. A method that takes `self` answers to
+    /// `Box.value` as well. A function inside a `trait` has no body a
+    /// call reaches, so it is left out.
+    pub(crate) fn callables(&self) -> Vec<(String, Callable)> {
+        let notes = self.deprecations();
+        let mut out: Vec<(String, Callable)> = Vec::new();
+        let mut add = |key: String, c: Callable| match out.iter_mut().find(|(k, _)| *k == key) {
+            // Two declarations of one name make the count a range.
+            Some((_, seen)) => {
+                seen.params = None;
+                seen.exported |= c.exported;
+                seen.deprecated = seen.deprecated.take().or(c.deprecated);
+            }
+
+            None => out.push((key, c)),
+        };
+
+        for f in 0..self.toks.len() {
+            if !self.at(f, "function") || matches!(self.prev(f), "." | ":" | "type") {
                 continue;
             }
 
-            // `function Box:value` names its struct; `function value`
-            // inside `impl Box` takes the impl's.
-            let owner = match self.path_end(j + 1) {
-                Some(end) if self.at(end, ":") && self.is_name(end + 1) => {
-                    Some((self.t(end - 1), self.t(end + 1)))
+            let mut open = f + 1;
+
+            while self.is_name(open) || self.at(open, ".") || self.at(open, ":") {
+                open += 1;
+            }
+
+            let name_end = open;
+
+            // The generic parameters of `function pick<T>(...)`.
+            if self.at(open, "<") {
+                let mut depth = 0i32;
+
+                while open < self.toks.len() {
+                    depth += match self.t(open) {
+                        "<" => 1,
+
+                        ">" => -1,
+
+                        _ => 0,
+                    };
+                    open += 1;
+
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+
+            if !self.at(open, "(") {
+                continue;
+            }
+
+            let params = self.param_count(open);
+            let exported = self.prev(f) == "export"
+                || (self.prev(f) == "async" && f >= 2 && self.at(f - 2, "export"));
+            let make = |params: Option<usize>, exported: bool| Callable {
+                params,
+                deprecated: notes
+                    .iter()
+                    .find(|(at, _)| *at == f)
+                    .map(|(_, n)| n.clone()),
+                exported,
+            };
+            let written = self.slice(f + 1, name_end);
+            let block = self.enclosing_block(f, &["function", "struct", "impl", "trait"]);
+
+            if written.contains(':') {
+                // `function Box:value(n)` takes `self` without writing it.
+                let params = params.map(|p| p + 1);
+                add(written.replacen(':', ".", 1), make(params, true));
+                add(written.to_string(), make(params, true));
+            } else if name_end == f + 2
+                && block.is_some_and(|b| matches!(self.t(b), "struct" | "impl"))
+            {
+                let Some(owner) = self.enclosing_owner(f) else {
+                    continue;
+                };
+                let name = self.t(f + 1);
+
+                if self.at(open + 1, "self") {
+                    add(format!("{owner}:{name}"), make(params, true));
                 }
 
-                Some(end) if end == j + 2 => self.enclosing_owner(j).map(|o| (o, self.t(j + 1))),
+                add(format!("{owner}.{name}"), make(params, true));
+            } else if block.is_some_and(|b| self.at(b, "trait")) {
+                continue;
+            } else if name_end > f + 1 {
+                add(written.to_string(), make(params, exported));
+            } else if f >= 2 && self.at(f - 1, "=") && self.is_name(f - 2) {
+                // `local heal = function` and `{ heal = function }`.
+                let name = self.t(f - 2);
 
-                _ => None,
-            };
-
-            if let Some((owner, name)) = owner {
-                marked.push((owner, name, note));
+                if matches!(self.prev(f - 2), "local" | "const") {
+                    add(name.to_string(), make(params, false));
+                } else if matches!(self.prev(f - 2), "{" | ",")
+                    && let Some(table) = self.table_local(f - 2)
+                {
+                    add(format!("{table}.{name}"), make(params, false));
+                }
             }
         }
+
+        // A write to `t.f` after the table puts another function there.
+        for i in 0..self.toks.len() {
+            if let Some(end) = self.path_end(i)
+                && end > i + 1
+                && self.at(end, "=")
+                && self.statement_start(i)
+                && let Some((_, c)) = out.iter_mut().find(|(k, _)| k == self.slice(i, end))
+            {
+                c.params = None;
+            }
+        }
+
+        out
+    }
+
+    /// The innermost block of one of `kinds` that encloses token `j`.
+    fn enclosing_block(&self, j: usize, kinds: &[&str]) -> Option<usize> {
+        (0..j)
+            .rev()
+            .find(|&i| kinds.contains(&self.t(i)) && self.st.ends[i].is_some_and(|e| j < e))
+    }
+
+    /// The local a table constructor goes into, `t` in `local t = {`,
+    /// for the field name at `k` inside it.
+    fn table_local(&self, k: usize) -> Option<&'s str> {
+        let mut depth = 0i32;
+
+        for i in (0..k).rev() {
+            match self.t(i) {
+                ")" | "]" | "}" => depth += 1,
+
+                "(" | "[" => depth -= 1,
+
+                "{" if depth == 0 => {
+                    return (i >= 3
+                        && self.at(i - 1, "=")
+                        && self.is_name(i - 2)
+                        && matches!(self.t(i - 3), "local" | "const"))
+                    .then(|| self.t(i - 2));
+                }
+
+                "{" => depth -= 1,
+
+                _ => {}
+            }
+        }
+
+        None
+    }
+
+    /// The parameters of the list that opens at `open`, `self` counted.
+    /// `None` when a vararg or a default makes the count a range. A
+    /// destructured parameter counts as the one argument it takes.
+    fn param_count(&self, open: usize) -> Option<usize> {
+        let close = self.matching(open)?;
+        let mut depth = 0i32;
+        let mut slots = usize::from(close > open + 1);
+
+        for k in open + 1..close {
+            let t = self.t(k);
+
+            if t.ends_with('(') || t.ends_with('[') || t.ends_with('{') || t == "<" {
+                depth += 1;
+            } else if matches!(t, ")" | "]" | "}" | ">") {
+                depth -= 1;
+            } else if depth == 0 && t == "," {
+                slots += 1;
+            } else if depth == 0 && (t == "..." || t == "=") {
+                return None;
+            }
+        }
+
+        Some(slots)
+    }
+
+    /// The `)` of the call whose `(` is at `open`, and the arguments the
+    /// call passes. A string holds no bracket, and an interpolated
+    /// string opens at its head and closes at its tail, so a comma in a
+    /// hole stays inside it.
+    fn call_args(&self, open: usize) -> Option<(usize, usize)> {
+        let mut depth = 0i32;
+        let mut commas = 0;
+
+        for k in open..self.toks.len() {
+            let text = self.t(k);
+            depth += match self.toks[k].kind {
+                TokKind::InterpHead => 1,
+
+                TokKind::InterpTail => -1,
+
+                TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpMid => 0,
+
+                _ if text.ends_with('(') || text.ends_with('[') || text.ends_with('{') => 1,
+
+                _ if matches!(text, ")" | "]" | "}") => -1,
+
+                _ => 0,
+            };
+
+            if depth == 0 {
+                return Some((k, if k == open + 1 { 0 } else { commas + 1 }));
+            }
+
+            if depth == 1 && text == "," {
+                commas += 1;
+            }
+        }
+
+        None
+    }
+
+    /// A call with more arguments than the function takes. Luau's
+    /// solver reports too few and misses too many, and the extra values
+    /// are dropped in silence. The count is exact for a function the
+    /// file or an imported module declares once with a fixed list: a
+    /// plain name, `M.f`, a static, a method on a value the file types,
+    /// and a function in a local table.
+    pub(crate) fn argument_count(&self, out: &mut Vec<Lint>) {
+        let own = self.callables();
+        let find = |key: &str| {
+            own.iter()
+                .chain(self.callables)
+                .find(|(k, _)| k == key)
+                .and_then(|(_, c)| c.params)
+        };
+
+        for i in 0..self.toks.len() {
+            if !self.is_name(i)
+                || matches!(
+                    self.prev(i),
+                    "." | ":" | "?." | "?:" | "function" | "local" | "const"
+                )
+            {
+                continue;
+            }
+
+            let Some(end) = self.path_end(i) else {
+                continue;
+            };
+            let (key, open, colon) = if self.at(end, "(") {
+                // A parameter of that name is some other value.
+                if end > i + 1
+                    && self
+                        .binding_at(i)
+                        .is_some_and(|d| !(self.at(d + 1, "=") && self.at(d + 2, "{")))
+                {
+                    continue;
+                }
+
+                (self.slice(i, end).to_string(), end, false)
+            } else if end == i + 1
+                && self.at(end, ":")
+                && self.is_name(end + 1)
+                && self.at(end + 2, "(")
+            {
+                let ty = match self.t(i) {
+                    "self" => self.enclosing_owner(i),
+
+                    _ => self.type_at(i),
+                };
+                let Some(ty) = ty else { continue };
+
+                (format!("{ty}:{}", self.t(end + 1)), end + 2, true)
+            } else {
+                continue;
+            };
+            let Some(takes) = find(&key) else { continue };
+            let Some((close, given)) = self.call_args(open) else {
+                continue;
+            };
+            // A `:` call passes the value as `self`, which no one wrote.
+            let takes = if colon {
+                takes.saturating_sub(1)
+            } else {
+                takes
+            };
+
+            if given <= takes {
+                continue;
+            }
+
+            let word = |n: usize| if n == 1 { "argument" } else { "arguments" };
+            self.lint(
+                out,
+                "argument_count",
+                i,
+                close,
+                format!(
+                    "`{}` takes {takes} {}; this call passes {given}",
+                    self.slice(i, open),
+                    word(takes)
+                ),
+                None,
+            );
+        }
+    }
+
+    /// `b:value()` where `value` is a method its impl marks
+    /// `@deprecated`, and the file types `b` as the struct: an
+    /// annotation, or the struct a `new` builds. The impl may sit in
+    /// this file or in a module the file imports. Luau reports
+    /// `Box.value(b)`, but its lint does not follow a method call
+    /// through the metatable.
+    pub(crate) fn deprecated_call(&self, out: &mut Vec<Lint>) {
+        let own = self.callables();
+        let marked: Vec<(&str, &str)> = own
+            .iter()
+            .chain(self.callables.iter())
+            .filter(|(k, _)| k.contains(':'))
+            .filter_map(|(k, c)| Some((k.as_str(), c.deprecated.as_deref()?)))
+            .collect();
 
         if marked.is_empty() {
             return;
@@ -252,9 +554,8 @@ impl<'s> Scan<'s> {
             }
 
             let Some(ty) = self.type_at(i) else { continue };
-            let method = self.t(i + 2);
-            let Some((owner, _, note)) = marked.iter().find(|(o, m, _)| *o == ty && *m == method)
-            else {
+            let key = format!("{ty}:{}", self.t(i + 2));
+            let Some((_, note)) = marked.iter().find(|(k, _)| *k == key) else {
                 continue;
             };
 
@@ -263,7 +564,7 @@ impl<'s> Scan<'s> {
                 "deprecated_call",
                 i + 2,
                 i + 2,
-                format!("`{owner}:{method}` is deprecated{note}"),
+                format!("`{key}` is deprecated{note}"),
                 None,
             );
         }

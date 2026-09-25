@@ -15,6 +15,9 @@ pub(crate) struct Scan<'s> {
     /// Per struct an imported module declares, its private field names.
     /// The file's own privates come from its tokens instead.
     pub(crate) privates: &'s [(String, Vec<String>)],
+    /// The functions the imported modules declare, keyed the way this
+    /// file calls them. See `crate::modules::import_callables`.
+    pub(crate) callables: &'s [(String, super::Callable)],
 }
 
 pub(crate) const KEYWORDS: &[&str] = &[
@@ -63,12 +66,19 @@ impl<'s> Scan<'s> {
             toks,
             st,
             privates: &[],
+            callables: &[],
         }
     }
 
     /// The same scan, with the private fields of the imported structs.
     pub(crate) fn with_privates(mut self, privates: &'s [(String, Vec<String>)]) -> Self {
         self.privates = privates;
+        self
+    }
+
+    /// The same scan, with the functions of the imported modules.
+    pub(crate) fn with_callables(mut self, callables: &'s [(String, super::Callable)]) -> Self {
+        self.callables = callables;
         self
     }
 

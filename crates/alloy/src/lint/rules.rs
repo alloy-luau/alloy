@@ -2,7 +2,7 @@
 //! statements of one file and reports every hit. `directive_lints`,
 //! `const_reassignments`, and `matching` are its private helpers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use alloy_syntax::ast::{Chunk, ImportKind, Stmt};
 use alloy_syntax::lexer::{Tok, TokKind};
@@ -547,6 +547,7 @@ pub fn run(
     definitions: bool,
     thresholds: &Thresholds,
     import_privates: &[(String, Vec<String>)],
+    import_callables: &[(String, crate::flux::Callable)],
 ) -> Vec<Lint> {
     let mut lints = Vec::new();
 
@@ -1146,104 +1147,6 @@ pub fn run(
         }
     }
 
-    // argument_count: a call with more arguments than the function
-    // takes. Luau's solver reports too few and misses too many, and the
-    // extra values are dropped in silence.
-    {
-        // The functions the file declares once, by a plain name, with a
-        // fixed parameter list: their arity is exact.
-        let mut arity: HashMap<&str, Option<usize>> = HashMap::new();
-
-        for f in &fns {
-            if f.path.len() != 1 || f.in_impl {
-                continue;
-            }
-
-            let name = text(f.path[0]);
-            let mut depth = 0i32;
-            let mut fixed = true;
-            // One slot per comma at depth zero, so a destructured
-            // parameter counts as the one argument it takes.
-            let mut slots = usize::from(f.close > f.open + 1);
-
-            for k in f.open + 1..f.close {
-                let tt = text(k);
-
-                if tt.ends_with('(') || tt.ends_with('[') || tt.ends_with('{') || tt == "<" {
-                    depth += 1;
-                } else if matches!(tt, ")" | "]" | "}" | ">") {
-                    depth -= 1;
-                } else if depth == 0 && tt == "," {
-                    slots += 1;
-                } else if depth == 0 && (tt == "..." || tt == "=") {
-                    // A vararg or a default makes the count a range.
-                    fixed = false;
-
-                    break;
-                }
-            }
-
-            if word(f.open + 1) == "self" {
-                slots = slots.saturating_sub(1);
-            }
-
-            let takes = fixed.then_some(slots);
-
-            arity.entry(name).and_modify(|e| *e = None).or_insert(takes);
-        }
-
-        for i in 0..toks.len() {
-            if toks[i].kind != TokKind::Ident
-                || matches!(
-                    i.checked_sub(1).map(text),
-                    Some("." | ":" | "?." | "?:" | "function" | "local")
-                )
-                || toks.get(i + 1).map(|t| t.text(src)) != Some("(")
-            {
-                continue;
-            }
-
-            let Some(Some(takes)) = arity.get(text(i)).copied() else {
-                continue;
-            };
-            let Some(close) = matching(src, toks, i + 1) else {
-                continue;
-            };
-
-            if close == i + 2 {
-                continue;
-            }
-
-            let mut depth = 0i32;
-            let mut given = 1usize;
-
-            for t in &toks[i + 2..close] {
-                depth += depth_step(t, src);
-
-                if depth == 0 && t.text(src) == "," {
-                    given += 1;
-                }
-            }
-
-            if given <= takes {
-                continue;
-            }
-
-            let name = text(i);
-            let word = |n: usize| if n == 1 { "argument" } else { "arguments" };
-            lints.push(Lint {
-                name: "argument_count",
-                start: toks[i].start,
-                end: toks[close].end,
-                message: format!(
-                    "`{name}` takes {takes} {}; this call passes {given}",
-                    word(takes)
-                ),
-                fix: None,
-            });
-        }
-    }
-
     // deprecated_global.
     for (i, t) in toks.iter().enumerate() {
         let name = t.text(src);
@@ -1340,7 +1243,9 @@ pub fn run(
         }
     }
 
-    let scan = crate::flux::scan::Scan::new(src, toks, &st).with_privates(import_privates);
+    let scan = crate::flux::scan::Scan::new(src, toks, &st)
+        .with_privates(import_privates)
+        .with_callables(import_callables);
     lints.extend(crate::flux::run(&scan));
     lints.extend(crate::flux::correctness::run(&scan));
     lints.extend(crate::flux::complexity::run(&scan, thresholds));

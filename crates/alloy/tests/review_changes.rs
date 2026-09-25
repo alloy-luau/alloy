@@ -215,7 +215,7 @@ fn a_block_arm_needs_a_statement_to_lift_into() {
 /// `-y` on its own line starts a value; fmt keeps it off the line above.
 #[test]
 fn fmt_keeps_a_block_arm_value() {
-    let src = "local v = match 1 with\n  case 1 then\n    print('x')\n    -1\n  default 2\nend\nprint(v)\n";
+    let src = "const v = match 1 with\n  case 1 then\n    print('x')\n    -1\n  default 2\nend\nprint(v)\n";
 
     assert_eq!(alloy::fmt::format(src).unwrap(), src);
 }

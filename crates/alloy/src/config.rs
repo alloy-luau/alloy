@@ -297,6 +297,9 @@ pub struct FmtConfig {
     /// Alloy's own: an `import { }` or `export { }` list with more than
     /// one name breaks one name per line, whatever its width.
     pub expand_imports: bool,
+    /// Alloy's own: a `local` that nothing assigns again becomes a
+    /// `const`, as the `prefer_const` lint asks.
+    pub prefer_const: bool,
     /// Paths the formatter leaves alone. A `*` matches any run of
     /// characters: `"vendor/*"`, `"*.gen.aly"`.
     pub exclude: Vec<String>,
@@ -333,6 +336,7 @@ impl Default for FmtConfig {
             space_inside_array: true,
             align_struct_fields: false,
             expand_imports: false,
+            prefer_const: true,
             exclude: Vec::new(),
             alx: AlxFmt::default(),
             detect_indent: false,
@@ -358,6 +362,7 @@ impl FmtConfig {
             leading_zero: LeadingZero::Preserve,
             call_parentheses: CallParentheses::Input,
             block_newline_gaps: BlockGaps::Preserve,
+            prefer_const: false,
             detect_indent: true,
             alx: AlxFmt {
                 attribute_quotes: AttributeQuotes::Preserve,

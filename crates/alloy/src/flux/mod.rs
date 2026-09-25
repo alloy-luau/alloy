@@ -43,6 +43,19 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     out
 }
 
+/// The rewrites `prefer_const` writes, `local` to `const`, for `alloy
+/// fmt` to apply. A source that does not lex gets none.
+pub(crate) fn prefer_const_fixes(src: &str) -> Vec<crate::lint::Fix> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let st = crate::fmt::structure::structure(src, &lexed.toks);
+    let mut out = Vec::new();
+    Scan::new(src, &lexed.toks, &st).prefer_const(&mut out);
+
+    out.into_iter().filter_map(|l| l.fix).collect()
+}
+
 impl<'s> Scan<'s> {
     // --- the lints -----------------------------------------------------------------------
 
@@ -919,7 +932,7 @@ mod tests {
 
     /// The sources here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        lints_of(src, &["unused_variable", "redundant_as"])
+        lints_of(src, &["unused_variable", "redundant_as", "prefer_const"])
     }
 
     fn fixed(src: &str) -> String {
@@ -1172,7 +1185,7 @@ mod tests {
     #[test]
     fn a_pattern_binds_its_locals_only() {
         let src = "local t = { a = 1, b = 2 }\nlocal { a, b } = t\nlocal { a: number, c = d } = t\nprint(a, d)\nfor _, { a = q } in { t } do print(q) end\n";
-        let lints = lints_of(src, &[]);
+        let lints = lints_of(src, &["prefer_const"]);
 
         assert_eq!(names_of(&lints), vec!["unused_variable"], "{lints:?}");
         assert_eq!(
@@ -1191,7 +1204,11 @@ mod tests {
             "export default local settings = { a = 1 }\n",
             "export default function make()\nend\n",
         ] {
-            assert_eq!(names_of(&lints_of(src, &[])), Vec::<&str>::new(), "{src}");
+            assert_eq!(
+                names_of(&lints_of(src, &["prefer_const"])),
+                Vec::<&str>::new(),
+                "{src}"
+            );
         }
     }
 }

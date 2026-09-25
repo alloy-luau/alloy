@@ -272,11 +272,16 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         &parsed.lexed.toks,
         &parsed.chunk,
         options.definitions,
-        options.ingot_rewrite,
         &options.thresholds,
         &options.privates(),
     );
     lints.extend(rendered.lints);
+
+    // A config names each value once, and the loader's Luau has no
+    // `const`, so fmt keeps its locals and the lint says nothing there.
+    if options.file_name.ends_with(config_aly::FILE_NAME) {
+        lints.retain(|l| l.name != "prefer_const");
+    }
 
     // A file the parser reported on has a tree its recovery invented:
     // a statement lands in the block the parser could close, not the
@@ -344,33 +349,28 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         }
     }
 
-    let imports = parsed
-        .chunk
-        .block
-        .stmts
-        .iter()
-        .filter_map(|s| match s {
-            alloy_syntax::ast::Stmt::Import(i) => {
-                let t = parsed.lexed.toks[i.path.start as usize];
-                let text = t.text(src);
-                let path = text
-                    .get(1..text.len().saturating_sub(1))
-                    .unwrap_or(text)
-                    .to_string();
+    // An import inside a function counts too: it resolves where it
+    // stands, and the module it names is a dependency all the same.
+    let imports = desugar::imports_in(&parsed.chunk.block)
+        .into_iter()
+        .filter_map(|i| {
+            let t = parsed.lexed.toks[i.path.start as usize];
+            let text = t.text(src);
+            let path = text
+                .get(1..text.len().saturating_sub(1))
+                .unwrap_or(text)
+                .to_string();
 
-                // The std is no module on disk: its import writes nothing.
-                if std_names::module_of_spec(&path).is_some() {
-                    return None;
-                }
-
-                Some(ImportRef {
-                    start: t.start,
-                    end: t.end,
-                    path,
-                })
+            // The std is no module on disk: its import writes nothing.
+            if std_names::module_of_spec(&path).is_some() {
+                return None;
             }
 
-            _ => None,
+            Some(ImportRef {
+                start: t.start,
+                end: t.end,
+                path,
+            })
         })
         .collect();
 
@@ -408,17 +408,6 @@ pub fn compile_file(
     let ingots = ingots.filter(|i| !i.is_empty());
     let layer = ingots.map(|i| i.before(path, source));
     let text = layer.as_ref().map_or(source, |l| l.text.as_str());
-    // An ingot's own statements stand where it put them, so a lint
-    // about the order of the source has nothing to read.
-    let rewritten = layer.as_ref().is_some_and(|l| l.text != source);
-    let options = &match rewritten {
-        true => EmitOptions {
-            ingot_rewrite: true,
-            ..options.clone()
-        },
-
-        false => options.clone(),
-    };
     let mut out = if path.ends_with(".alx") {
         compile_alx(text, options, jsx.cloned().unwrap_or_default())?.output
     } else {

@@ -2032,6 +2032,7 @@ impl Server {
 
                         if let Some(doc) = st.docs.get(uri) {
                             complete_std_members(doc, line, character, st.snippets, result);
+                            complete_std_module(doc, line, character, result);
                             attach_std_member_docs(result, doc, line, character);
                         }
 

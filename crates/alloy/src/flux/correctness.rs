@@ -28,6 +28,7 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.private_access(&mut out);
     s.const_mutation(&mut out);
     s.duplicate_function(&mut out);
+    s.prefer_const(&mut out);
     out
 }
 
@@ -881,7 +882,6 @@ mod tests {
             &parsed.lexed.toks,
             &parsed.chunk,
             false,
-            false,
             &crate::lint::Thresholds::default(),
             &[],
         )
@@ -889,7 +889,7 @@ mod tests {
         .filter(|l| {
             !matches!(
                 l.name,
-                "unused_variable" | "unused_function" | "redundant_as"
+                "unused_variable" | "unused_function" | "redundant_as" | "prefer_const"
             )
         })
         .collect()
@@ -1155,8 +1155,13 @@ mod tests {
         };
         let src = "local count = 1\nlocal used = 2\nprint(used)\n";
         let out = crate::compile(src).unwrap();
+        let kept: Vec<_> = out
+            .lints
+            .into_iter()
+            .filter(|l| l.name != "prefer_const")
+            .collect();
         assert_eq!(
-            apply_fixes(src, &out.lints).0,
+            apply_fixes(src, &kept).0,
             "local _count = 1\nlocal used = 2\nprint(used)\n"
         );
         assert_eq!(
@@ -1236,8 +1241,13 @@ mod tests {
         // The fix no longer offers `_SCHEMA` for an export.
         let src = "export const SCHEMA = 1\nlocal unused = 1\n";
         let out = crate::compile(src).unwrap();
+        let kept: Vec<_> = out
+            .lints
+            .into_iter()
+            .filter(|l| l.name != "prefer_const")
+            .collect();
         assert_eq!(
-            apply_fixes(src, &out.lints).0,
+            apply_fixes(src, &kept).0,
             "export const SCHEMA = 1\nlocal _unused = 1\n"
         );
     }
@@ -1295,10 +1305,12 @@ mod tests {
         );
         let src = "local f = function() end\n";
         let out = crate::compile(src).unwrap();
-        assert_eq!(
-            apply_fixes(src, &out.lints).0,
-            "local _f = function() end\n"
-        );
+        let kept: Vec<_> = out
+            .lints
+            .into_iter()
+            .filter(|l| l.name != "prefer_const")
+            .collect();
+        assert_eq!(apply_fixes(src, &kept).0, "local _f = function() end\n");
     }
 
     #[test]
@@ -1366,7 +1378,6 @@ mod tests {
             src,
             &parsed.lexed.toks,
             &parsed.chunk,
-            false,
             false,
             &crate::lint::Thresholds::default(),
             &privates,

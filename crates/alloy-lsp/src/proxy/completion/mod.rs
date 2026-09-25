@@ -23,7 +23,9 @@ pub(crate) use members::{
     module_entries, payload_types, plain_snippet, private_fields, sep_of, set_call,
 };
 pub(crate) use namespaces::namespace_before;
-pub(crate) use std_completions::{StdReach, complete_std_members, fix_edits, roblox_enum_names};
+pub(crate) use std_completions::{
+    StdReach, complete_std_members, complete_std_module, fix_edits, roblox_enum_names,
+};
 
 use super::documents::{normalize, project_aliases};
 use super::hints::writable_type;

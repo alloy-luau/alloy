@@ -492,69 +492,6 @@ fn redundant_as(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
     out
 }
 
-/// An `import` under a statement that runs. The emit lifts every
-/// `require` to the top of the file, so the line reads in an order the
-/// run does not follow.
-fn import_order(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
-    let mut out = Vec::new();
-    let mut ran = false;
-    // The line a statement opens, as the source wrote it. An ingot
-    // rewrites the source before the lints read it, and a statement it
-    // wrote lands on a line the reader did not write code on.
-    let line_of = |stmt: &Stmt| -> &str {
-        let Some(tok) = toks.get(stmt.span().start as usize) else {
-            return "";
-        };
-        let at = tok.start as usize;
-        let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
-        let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
-
-        src[start..end].trim()
-    };
-
-    for stmt in &chunk.block.stmts {
-        let Stmt::Import(i) = stmt else {
-            // The markup lowering prepends its helpers in front of the
-            // file, and the lints read the lowered text. A name that
-            // starts with `__` is the emit's, not the author's, so it
-            // puts no code in front of an import.
-            if let Stmt::LocalFunction(f) = stmt
-                && src[toks[f.name.start as usize].start as usize
-                    ..toks[f.name.end as usize - 1].end as usize]
-                    .starts_with("__")
-            {
-                continue;
-            }
-
-            // A declaration binds a name and a call runs; both stand
-            // in front of the import in the source and behind it in the
-            // emit.
-            let text = line_of(stmt);
-            ran |= !matches!(stmt, Stmt::Empty(_)) && !text.is_empty() && !text.starts_with("--");
-
-            continue;
-        };
-
-        if !ran {
-            continue;
-        }
-
-        let start = toks[i.span.start as usize].start;
-        let end = toks[i.span.end as usize - 1].end;
-        out.push(Lint {
-            name: "import_order",
-            start,
-            end,
-            message:
-                "this `import` runs before the code above it; the imports go at the top of the file"
-                    .to_string(),
-            fix: None,
-        });
-    }
-
-    out
-}
-
 /// `import Players from "game:Players"`: the service path of the
 /// release before this one. The fix writes the alias form, `"@game"`
 /// and `"@game/Players"`, and keeps the quote the line wrote.
@@ -608,7 +545,6 @@ pub fn run(
     toks: &[Tok],
     chunk: &Chunk,
     definitions: bool,
-    ingot_rewrite: bool,
     thresholds: &Thresholds,
     import_privates: &[(String, Vec<String>)],
 ) -> Vec<Lint> {
@@ -622,9 +558,6 @@ pub fn run(
     lints.extend(redundant_as(src, toks, chunk));
     lints.extend(deprecated_namespaces(src, toks, chunk));
     lints.extend(game_alias(src, toks, chunk));
-    if !ingot_rewrite {
-        lints.extend(import_order(src, toks, chunk));
-    }
 
     let text = |i: usize| toks[i].text(src);
     let st = structure(src, toks);

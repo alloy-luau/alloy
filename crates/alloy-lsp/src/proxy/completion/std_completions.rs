@@ -466,6 +466,80 @@ pub(crate) fn roblox_enum_names() -> Vec<&'static str> {
         .collect()
 }
 
+/// `std.` under `import * as std from "@alloy/std/signal"`: the local is
+/// the runtime, so the child lists all of it, the emit's helpers
+/// included. The module exports its own names alone, so the list keeps
+/// those and adds the ones the child left out.
+pub(crate) fn complete_std_module(doc: &Doc, line: u32, character: u32, result: &mut Value) {
+    let Some(offset) = offset_of(&doc.source, line, character) else {
+        return;
+    };
+    let head = doc.source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+    let Some(path) = head.strip_suffix('.') else {
+        return;
+    };
+    let from = path
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map_or(0, |i| i + 1);
+
+    // `a.std.` is a field of `a`, not the import.
+    if path[..from].ends_with(['.', ':']) {
+        return;
+    }
+
+    let alias = &path[from..];
+    let Some(module) = crate::proxy::navigation::module_bindings(&doc.source)
+        .into_iter()
+        .find(|(bound, _)| bound == alias)
+        .and_then(|(_, spec)| alloy::std_names::module_of_spec(&spec).map(str::to_string))
+    else {
+        return;
+    };
+    let Some(names) = alloy::std_names::names_in(&module) else {
+        return;
+    };
+    // An attribute is no value of the runtime; `@std.name` reaches it.
+    let names: Vec<&str> = names
+        .into_iter()
+        .filter(|n| !alloy::std_names::is_std_attribute(n))
+        .collect();
+
+    if result.is_null() {
+        *result = json!([]);
+    }
+
+    let items = match result.get_mut("items").and_then(Value::as_array_mut) {
+        Some(items) => items,
+
+        None => match result.as_array_mut() {
+            Some(items) => items,
+
+            None => return,
+        },
+    };
+
+    items.retain(|i| {
+        i.get("label")
+            .and_then(Value::as_str)
+            .is_some_and(|l| names.contains(&l))
+    });
+
+    let held: HashSet<String> = items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(Value::as_str).map(str::to_string))
+        .collect();
+
+    for name in names.into_iter().filter(|n| !held.contains(*n)) {
+        let mut item = json!({ "label": name, "kind": 7, "detail": format!("alloy:std:{}", alloy::std_names::module_of(name).unwrap_or_default()) });
+
+        if let Some(d) = keywords::doc(name) {
+            item["documentation"] = json!({ "kind": "markdown", "value": d });
+        }
+
+        items.push(item);
+    }
+}
+
 /// The std type a member position reads, with whether the receiver is
 /// the type itself. `HashMap.` names the type; `prices.` names a value.
 pub(crate) fn std_member_receiver(

@@ -281,7 +281,8 @@ impl Server {
 
         // A std name the file binds itself, through an import or a
         // declaration, is the file's: the child answers for that one.
-        let owned = keywords::attribute_argument_hover(&doc.source, offset);
+        let owned = keywords::attribute_argument_hover(&doc.source, offset)
+            .or_else(|| keywords::child_hover(&doc.source, offset));
         let hit = keywords::hover(&doc.source, offset).filter(|(start, end, _)| {
             let word = &doc.source[*start..*end];
             let is_std = alloy::desugar::AMBIENT.contains(&word)

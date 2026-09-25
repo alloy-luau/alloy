@@ -177,10 +177,6 @@ pub struct EmitOptions {
     /// expansion of a macro that calls itself has no end, so a depth
     /// of 16 stops it. See `expand_macro`.
     pub macro_depth: usize,
-    /// An ingot rewrote the source before the compile read it. The
-    /// order of the statements is then the ingot's, not the author's,
-    /// so `import_order` says nothing about it.
-    pub ingot_rewrite: bool,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -371,7 +367,6 @@ impl Default for EmitOptions {
             import_attributes: Vec::new(),
             macro_enums: Vec::new(),
             macro_depth: 0,
-            ingot_rewrite: false,
         }
     }
 }
@@ -667,7 +662,6 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.check_namespaces(&chunk.block);
     d.check_duplicate_decls(&chunk.block);
     d.check_exports(&chunk.block);
-    d.check_import_places(&chunk.block);
 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
@@ -677,6 +671,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.scan_reduce_inserts(&chunk.block);
     d.scan_static_checks(&chunk.block);
     d.check_await_spots(&chunk.block);
+
+    if !d.std_namespaces.is_empty() {
+        d.check_std_star_members(&chunk.block);
+    }
     d.check_negations();
 
     // Leading trivia, the block, trailing trivia: the printer's shape. The
@@ -931,10 +929,7 @@ fn std_imports(
     let mut out = HashSet::new();
     let mut stars = HashMap::new();
 
-    for stmt in &chunk.block.stmts {
-        let Stmt::Import(i) = stmt else {
-            continue;
-        };
+    for i in imports_in(&chunk.block) {
         let spec = i.path.text(src, toks).trim_matches(['"', '\'']);
 
         let Some(module) = crate::std_names::module_of_spec(spec) else {
@@ -957,6 +952,48 @@ fn std_imports(
     }
 
     (out, stars)
+}
+
+/// Every `import` of a block at any depth, in source order. An import
+/// resolves where it stands, so a function or a `do` block may hold one
+/// for its own scope; each scan of what a file imports reads them all.
+pub fn imports_in(block: &Block) -> Vec<&alloy_syntax::ast::Import> {
+    fn walk<'a>(block: &'a Block, out: &mut Vec<&'a alloy_syntax::ast::Import>) {
+        for stmt in &block.stmts {
+            if let Stmt::Import(i) = stmt {
+                out.push(i);
+
+                continue;
+            }
+
+            for child in stmt_children(stmt) {
+                match child {
+                    Child::Block(b) => walk(b, out),
+
+                    Child::Function(f) => walk(&f.block, out),
+
+                    Child::Expr(e) => expr_imports(e, out),
+                }
+            }
+        }
+    }
+
+    // A closure inside an expression holds a block of its own.
+    fn expr_imports<'a>(e: &'a Expr, out: &mut Vec<&'a alloy_syntax::ast::Import>) {
+        for child in expr_children(e) {
+            match child {
+                Child::Block(b) => walk(b, out),
+
+                Child::Function(f) => walk(&f.block, out),
+
+                Child::Expr(x) => expr_imports(x, out),
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(block, &mut out);
+    out
 }
 
 /// Every name an `import` binds.

@@ -297,3 +297,27 @@ fn a_serde_option_imports_and_reads_through_its_module() {
         );
     }
 }
+
+/// `sig.` under a star import of `@alloy/std/signal` lists the module's
+/// names alone: the child sees the whole runtime, helpers included.
+#[test]
+fn a_std_star_import_lists_its_module() {
+    let (st, uri) = none_file("import * as sig from \"@alloy/std/signal\"\nlocal a = sig.\n");
+    let doc = st.docs.get(uri).expect("doc");
+    let mut result = json!([
+        { "label": "try_block", "kind": 3 },
+        { "label": "wire", "kind": 5 },
+        { "label": "HashMap", "kind": 7 },
+        { "label": "Signal", "kind": 7 },
+    ]);
+    complete_std_module(doc, 1, 14, &mut result);
+    let mut labels: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    labels.sort_unstable();
+
+    assert_eq!(labels, ["Signal", "SignalConnection", "Signalish"]);
+}

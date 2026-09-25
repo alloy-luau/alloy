@@ -602,6 +602,12 @@ pub const TABLES: &[Table] = &[
                 "Alloy's own: an `import { }` or `export { }` list with more than one name breaks one name per line. Off, a trailing comma in the list asks for the same.",
             ),
             key(
+                "prefer_const",
+                BOOL,
+                "true",
+                "Alloy's own: a `local` that nothing assigns again becomes a `const`, as the `prefer_const` lint asks. `recommended = false` leaves it off.",
+            ),
+            key(
                 "exclude",
                 Ty::StrList,
                 "[]",

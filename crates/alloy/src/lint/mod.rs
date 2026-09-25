@@ -505,6 +505,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "`case target then`, with `target` a local or a parameter, reads as a comparison and is a binding: the arm takes every value, and a `default` or a later arm never runs. Compare in a guard, `case v where v == target`, or bind a name no local holds. A const or a SCREAMING_CASE name is an error for the same reason.",
     },
     LintInfo {
+        name: "prefer_const",
+        group: Group::Style,
+        default: Level::Warn,
+        summary: "a `local` that nothing assigns again",
+        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A `const` value stays mutable, so `t.x = 1` still works. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
+    },
+    LintInfo {
         name: "redundant_as",
         group: Group::Style,
         default: Level::Warn,
@@ -766,13 +773,6 @@ pub const LINTS: &[LintInfo] = &[
         default: Level::Allow,
         summary: "an exported `type` alias or `interface` with no comment above it",
         detail: "Pedantic, and `strict` leaves it alone: a type alias and an interface say what they are in their own shape, while a function or a const does not, so `missing_doc` exempts the two and this lint covers them. A project that documents every export as well writes `[lint.rules] missing_doc_type = \"warn\"`. A struct, an enum, a function, a const, and a remote stay with `missing_doc`.",
-    },
-    LintInfo {
-        name: "import_order",
-        group: Group::Pedantic,
-        default: Level::Allow,
-        summary: "an `import` under code that runs",
-        detail: "Pedantic. The emit lifts every `require` to the top of the file, the way TypeScript hoists an import, so a module loads before the line above the import runs. The line reads as if the order were the other way. Move the imports to the top of the file.",
     },
     // --- naming ----------------------------------------------------------------
     LintInfo {
@@ -1041,7 +1041,10 @@ mod tests {
             .map(|l| l.name)
             .filter(|n| {
                 level_of(&config, n) != Level::Allow
-                    && !matches!(*n, "unused_variable" | "unused_function" | "redundant_as")
+                    && !matches!(
+                        *n,
+                        "unused_variable" | "unused_function" | "redundant_as" | "prefer_const"
+                    )
             })
             .collect()
     }

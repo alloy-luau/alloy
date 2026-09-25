@@ -137,6 +137,51 @@ fn in_std_import(source: &str, at: usize) -> bool {
         .is_some_and(|r| r.starts_with("@alloy/std"))
 }
 
+/// The hover of the name after a child lookup: `->systems` finds the
+/// child with `FindFirstChild`, so the value is an `Instance` or nil, and
+/// `=>systems` waits for it with `WaitForChild`. The name is a string in
+/// the emit, so the child has nothing to answer for it.
+pub fn child_hover(source: &str, offset: usize) -> Option<(usize, usize, String)> {
+    let bytes = source.as_bytes();
+
+    if offset >= bytes.len() || !is_word(bytes[offset]) {
+        return None;
+    }
+
+    let (start, end) = word_at(bytes, offset);
+    let before = source[..start].trim_end();
+    let wait = before.ends_with("=>");
+
+    if !wait && !before.ends_with("->") {
+        return None;
+    }
+
+    // The receiver: the path in front of the arrow, on this line.
+    let head = &before[..before.len() - 2];
+    let from = head
+        .rfind(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '-' | '>' | '=')))
+        .map_or(0, |i| i + 1);
+    let receiver = head[from..].trim_start_matches(['=', '-', '>']);
+    let name = &source[start..end];
+    let (arrow, ty, how) = match wait {
+        true => ("=>", "Instance", "waits for it with `WaitForChild`"),
+
+        false => (
+            "->",
+            "Instance?",
+            "finds it with `FindFirstChild`, and gives nil when there is none",
+        ),
+    };
+
+    Some((
+        start,
+        end,
+        format!(
+            "```alloy\n{receiver}{arrow}{name}: {ty}\n```\nThe child of `{receiver}` named `{name}`. `{arrow}` {how}. The source names no class, so `is` or a cast says which one it is."
+        ),
+    ))
+}
+
 /// The hover of a word inside `@allow( )` or Luau's `@[ ]`: a lint's
 /// doc, a group, a tool prefix, or one of Luau's attributes and the keys
 /// `deprecated` takes. The text is built, so it is owned.

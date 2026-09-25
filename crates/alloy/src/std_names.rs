@@ -245,7 +245,7 @@ pub fn missing_name(message: &str) -> Option<&str> {
 /// `import { HashMap } from "@alloy/std/collections"` binds `HashMap`.
 /// A name under an alias binds the alias, which is no std name.
 pub fn imported(source: &str) -> HashSet<String> {
-    use alloy_syntax::ast::{ImportKind, Stmt};
+    use alloy_syntax::ast::ImportKind;
 
     let mut out = HashSet::new();
     let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
@@ -253,10 +253,7 @@ pub fn imported(source: &str) -> HashSet<String> {
     };
     let toks = &parsed.lexed.toks;
 
-    for stmt in &parsed.chunk.block.stmts {
-        let Stmt::Import(i) = stmt else {
-            continue;
-        };
+    for i in crate::desugar::imports_in(&parsed.chunk.block) {
         let spec = i.path.text(source, toks).trim_matches(['"', '\'']);
 
         if module_of_spec(spec).is_none() {

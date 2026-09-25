@@ -37,9 +37,9 @@ use capabilities::edit_capabilities;
 #[allow(unused_imports)]
 use completion::{
     MatchKind, call_snippet, callable_signature, clean_completion, complete_std_members,
-    declared_line, drop_internal_items, drop_receiver, hide_private, hide_record, import_temps,
-    lands_on_member, member_position, module_entries, open_call, payload_types, plain_snippet,
-    strip_import_temps, strip_std_prefix,
+    complete_std_module, declared_line, drop_internal_items, drop_receiver, hide_private,
+    hide_record, import_temps, lands_on_member, member_position, module_entries, open_call,
+    payload_types, plain_snippet, strip_import_temps, strip_std_prefix,
 };
 #[allow(unused_imports)]
 use diagnostics::{

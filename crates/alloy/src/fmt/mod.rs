@@ -258,6 +258,16 @@ pub fn format_file(src: &str, options: &FmtConfig) -> Result<String, String> {
         return Err(format!("{UNPARSED}: {message}"));
     }
 
+    // `local x` that nothing assigns again reads as `const x`.
+    let written;
+    let src = match options.prefer_const {
+        true => {
+            written = crate::std_names::apply(src, &crate::flux::prefer_const_fixes(src));
+            written.as_str()
+        }
+
+        false => src,
+    };
     let text = format_with(src, options)?;
 
     // A formatter never writes a file it cannot read back: the input
@@ -838,8 +848,33 @@ fn is_closer(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// These tests read the layout; `prefer_const` has tests of its own.
+    fn format(src: &str) -> Result<String, String> {
+        format_file(
+            src,
+            &FmtConfig {
+                prefer_const: false,
+                ..FmtConfig::default()
+            },
+        )
+    }
+
     fn fmt(s: &str) -> String {
         format(s).unwrap()
+    }
+
+    /// A `local` that nothing assigns again becomes a `const`; one that
+    /// takes a later write, or whose value a line writes into, stays.
+    /// A project that keeps its files as written keeps its locals.
+    #[test]
+    fn a_local_nothing_assigns_again_becomes_const() {
+        let src = "local a = 1\nlocal b = 2\nb = 3\nlocal t = { n = 1 }\nt.n = 2\nlocal c\nc = 1\nprint(a, b, t, c)\n";
+
+        assert_eq!(
+            format_file(src, &FmtConfig::default()).unwrap(),
+            "const a = 1\nlocal b = 2\nb = 3\nlocal t = { n = 1 }\nt.n = 2\nlocal c\nc = 1\nprint(a, b, t, c)\n"
+        );
+        assert_eq!(format_file(src, &FmtConfig::preserving()).unwrap(), src);
     }
 
     #[test]

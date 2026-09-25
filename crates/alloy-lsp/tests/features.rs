@@ -717,7 +717,7 @@ fn code_actions_offer_the_lint_rewrites() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let src =
-        "local p = workspace\nlocal n = p and p.Name\nlocal q = math.floor(#n / 2)\nprint(n, q)\n";
+        "const p = workspace\nconst n = p and p.Name\nconst q = math.floor(#n / 2)\nprint(n, q)\n";
     let file = dir.join("fix.aly");
     std::fs::write(&file, src).unwrap();
 
@@ -946,11 +946,11 @@ fn formatting_reads_the_project_layout() {
     let text = r[0]["newText"].as_str().unwrap_or_default().to_string();
 
     assert!(
-        text.contains("\n  local x = 1"),
+        text.contains("\n  const x = 1"),
         "the project asked for two spaces: {text:?}"
     );
     assert!(
-        !text.contains("\n    local x = 1"),
+        !text.contains("\n    const x = 1"),
         "four spaces is the default, not this project's: {text:?}"
     );
 

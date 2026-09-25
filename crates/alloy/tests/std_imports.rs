@@ -174,3 +174,19 @@ fn a_serde_option_needs_its_import_or_a_star_path() {
     let named = "import { Deserialize, deny_unknown_fields } from \"@alloy/std/serde\"\n@derive(Deserialize)\n@deny_unknown_fields\nstruct S\n    x: number\nend\nprint(S)\n";
     assert!(messages(named, Globals::None).is_empty());
 }
+
+/// A star import of the std binds the runtime, and the reach stops at
+/// the names the module exports: the emit's own helpers are not the
+/// std's, and another module's name names its home.
+#[test]
+fn a_star_import_reaches_its_module_alone() {
+    let src = "import * as std from \"@alloy/std\"\nimport * as sig from \"@alloy/std/signal\"\nlocal a = std.try_block\nlocal b = sig.HashMap\nlocal c = sig.Signal.new()\nlocal d = std.HashMap.new()\nprint(a, b, c, d)\n";
+
+    assert_eq!(
+        messages(src, Globals::None),
+        [
+            "\"@alloy/std\" has no `try_block`",
+            "\"@alloy/std/signal\" has no `HashMap`; it is in \"@alloy/std/collections\"",
+        ]
+    );
+}

@@ -51,7 +51,6 @@ fn main() {
         &parsed.lexed.toks,
         &parsed.chunk,
         false,
-        false,
         &Default::default(),
         &[],
     );

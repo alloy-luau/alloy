@@ -118,6 +118,8 @@ const KIND_RULES: &[(&[&str], &str)] = &[
             "is no std module",
             "the std has no",
             "; it is in \"@alloy/std",
+            "\"@alloy/std\" has no",
+            "\"@alloy/std/",
         ],
         "ImportError",
     ),

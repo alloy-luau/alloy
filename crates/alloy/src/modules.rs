@@ -1006,10 +1006,7 @@ fn reexports(source: &str) -> Vec<(String, String, String)> {
     // the name that module knows it by.
     let mut bound: Vec<(String, String, String)> = Vec::new();
 
-    for stmt in &parsed.chunk.block.stmts {
-        let Stmt::Import(i) = stmt else {
-            continue;
-        };
+    for i in crate::desugar::imports_in(&parsed.chunk.block) {
         let specs = match &i.kind {
             ImportKind::Named(v)
             | ImportKind::TypeOnly(v)
@@ -2003,25 +2000,22 @@ pub fn import_problems_for_file(
 /// `name`: where a name the file forgot to import belongs. The checker
 /// calls it an unknown global, and the fix is one word in that list.
 pub fn import_that_exports(path: &Path, source: &str, name: &str) -> Option<String> {
-    use alloy_syntax::ast::Stmt;
-
     let (from, aliases) = file_context(path);
     let parsed = alloy_syntax::parse_lenient(source, Default::default()).ok()?;
     let toks = &parsed.lexed.toks;
 
-    parsed.chunk.block.stmts.iter().find_map(|stmt| {
-        let Stmt::Import(i) = stmt else {
-            return None;
-        };
-        let spec = i.path.text(source, toks).trim_matches(['"', '\'']);
-        let target = resolve(spec, &from, &aliases)?;
-        let text = module_text(&target).ok()?;
+    crate::desugar::imports_in(&parsed.chunk.block)
+        .into_iter()
+        .find_map(|i| {
+            let spec = i.path.text(source, toks).trim_matches(['"', '\'']);
+            let target = resolve(spec, &from, &aliases)?;
+            let text = module_text(&target).ok()?;
 
-        exported_names(&text)
-            .iter()
-            .any(|n| n == name)
-            .then(|| spec.to_string())
-    })
+            exported_names(&text)
+                .iter()
+                .any(|n| n == name)
+                .then(|| spec.to_string())
+        })
 }
 
 /// A type or interface that a module exports.

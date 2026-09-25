@@ -346,7 +346,13 @@ pub fn format(src: &str, options: &crate::config::FmtConfig) -> Result<String, S
         text.replace_range(start..end, &stub(i));
     }
 
-    let mut out = crate::fmt::format_file(&text, options)?;
+    // The loader's Luau has no `const`, and a config names its values
+    // once anyway, so its locals stay as written.
+    let options = crate::config::FmtConfig {
+        prefer_const: false,
+        ..options.clone()
+    };
+    let mut out = crate::fmt::format_file(&text, &options)?;
 
     for (i, &(start, end)) in tables.iter().enumerate() {
         out = out.replacen(&stub(i), &src[start..end], 1);

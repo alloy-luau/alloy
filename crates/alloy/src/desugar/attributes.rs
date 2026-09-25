@@ -1065,6 +1065,49 @@ impl<'s> Desugar<'s> {
 
         let stmts: Vec<&Stmt> = block.stmts.iter().collect();
         self.prescan_stmts(&stmts);
+
+        // An import inside a function binds its names in that scope. The
+        // checks here read the file's names as one set, so it joins them.
+        let top: Vec<*const alloy_syntax::ast::Import> = block
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Import(i) => Some(std::ptr::from_ref(i)),
+
+                _ => None,
+            })
+            .collect();
+
+        for i in super::imports_in(block) {
+            if !top.contains(&std::ptr::from_ref(i)) {
+                self.note_import(i);
+            }
+        }
+    }
+
+    /// The names one import binds, for the checks that read them.
+    fn note_import(&mut self, i: &alloy_syntax::ast::Import) {
+        match &i.kind {
+            ImportKind::Default(n) => {
+                self.imported_names.insert(self.text_of(*n).to_string());
+            }
+
+            ImportKind::Namespace(n, specs) => {
+                let module = self.text_of(*n).to_string();
+                self.star_modules.insert(module.clone());
+                self.imported_names.insert(module);
+                self.note_specs(specs);
+            }
+
+            ImportKind::Both(n, specs) => {
+                self.imported_names.insert(self.text_of(*n).to_string());
+                self.note_specs(specs);
+            }
+
+            ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
+                self.note_specs(specs);
+            }
+        }
     }
 
     /// The trait each parameter of a bounded signature asks of its
@@ -1295,27 +1338,7 @@ impl<'s> Desugar<'s> {
                         .insert(self.decl_name(r.name), "remote");
                 }
 
-                Stmt::Import(i) => match &i.kind {
-                    ImportKind::Default(n) => {
-                        self.imported_names.insert(self.text_of(*n).to_string());
-                    }
-
-                    ImportKind::Namespace(n, specs) => {
-                        let module = self.text_of(*n).to_string();
-                        self.star_modules.insert(module.clone());
-                        self.imported_names.insert(module);
-                        self.note_specs(specs);
-                    }
-
-                    ImportKind::Both(n, specs) => {
-                        self.imported_names.insert(self.text_of(*n).to_string());
-                        self.note_specs(specs);
-                    }
-
-                    ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
-                        self.note_specs(specs);
-                    }
-                },
+                Stmt::Import(i) => self.note_import(i),
 
                 // A function body reads an enum declared below it, and
                 // its `match` covers the variants before the

@@ -1516,7 +1516,6 @@ impl<'s> Desugar<'s> {
                 if l.names.len() == 1
                     && l.values.len() == 1
                     && l.names[0].destructure.is_none()
-                    && !l.is_const
                     && block_arm_match(&l.values[0]).is_some() =>
             {
                 let m = block_arm_match(&l.values[0]).expect("matched above");
@@ -1525,7 +1524,18 @@ impl<'s> Desugar<'s> {
                     .ty
                     .map_or(self.byte_end(name.name), |t| self.byte_end(t));
                 let m_start = self.byte_start(m.span);
-                self.copy(self.byte_start(l.span), head_end);
+
+                // Luau's `const` takes its value on its own line, and the
+                // arms set it below; the emit writes `local`, and the
+                // compiler's own check still refuses a later write.
+                if l.is_const {
+                    let kw = self.byte_start(l.keyword);
+                    self.copy(self.byte_start(l.span), kw);
+                    self.generate(kw, "local");
+                    self.copy(self.byte_end(l.keyword), head_end);
+                } else {
+                    self.copy(self.byte_start(l.span), head_end);
+                }
 
                 // A bare `local x` is nil until an arm sets it, so the
                 // checker reads it `T?` at the name. `never` adds nothing

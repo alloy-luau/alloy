@@ -262,7 +262,7 @@ pub(crate) fn a_region_reads_the_kind_the_author_sees() {
 pub(crate) fn an_unmet_expectation_carries_its_reason() {
     // The covered line must come clean, so it holds no lint of
     // its own: an unused local would meet the expectation.
-    let source = "--@alloy-expect-error a negative count is refused\nlocal a = 1\nprint(a)\n";
+    let source = "--@alloy-expect-error a negative count is refused\nconst a = 1\nprint(a)\n";
     let (st, uri) = one_file(source);
     let doc = st.docs.get(uri).unwrap();
     let items = unmet_expectations(doc, &[]);
@@ -870,7 +870,7 @@ pub(crate) fn a_three_line_import_cuts_the_dead_name_alone() {
 #[test]
 pub(crate) fn a_pull_lists_what_a_push_publishes() {
     let (st, uri) = one_file(
-        "struct Pt\n    x: number\nend\nlocal p = new Pt { x = 1, y = 2 }\nlocal n: number = \"s\"\n",
+        "struct Pt\n    x: number\nend\nconst p = new Pt { x = 1, y = 2 }\nconst n: number = \"s\"\n",
     );
     let checker = json!({
         "message": "TypeError: Expected this to be 'number', but got 'string'",

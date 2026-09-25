@@ -1889,7 +1889,7 @@ impl crate::EmitOptions {
 
         Self {
             std_globals,
-            shapes: crate::build::struct_shapes(&imported),
+            shapes: crate::build::struct_shapes(&imported, from.parent().unwrap_or(&from)),
             ..self.imports(source, &from, &aliases)
         }
     }

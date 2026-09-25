@@ -137,15 +137,22 @@ pub fn check(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report>
 }
 
 /// The structs the sources declare, with each field's type and width,
-/// for the wire layout of a remote. A source that does not parse
-/// contributes nothing; its own compile reports the error.
-pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
+/// for the wire layout of a remote, and the enums with their variants.
+/// `base` is the project's `in` folder, which each shape's module is
+/// relative to. A source that does not parse contributes nothing; its
+/// own compile reports the error.
+pub fn struct_shapes(sources: &[PathBuf], base: &Path) -> Vec<crate::StructShape> {
     let mut shapes = Vec::new();
 
     for path in sources {
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
         };
+        let module = path
+            .strip_prefix(base)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let Ok(parsed) = alloy_syntax::parse_one(&src) else {
             continue;
         };
@@ -194,6 +201,19 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
         };
 
         for stmt in &parsed.chunk.block.stmts {
+            if let alloy_syntax::ast::Stmt::Enum(e) = stmt.under_default() {
+                shapes.push(crate::StructShape {
+                    name: text(e.name),
+                    module: module.clone(),
+                    variants: e
+                        .variants
+                        .iter()
+                        .map(|v| (text(v.name), v.payload.len()))
+                        .collect(),
+                    ..Default::default()
+                });
+            }
+
             let alloy_syntax::ast::Stmt::Struct(st) = stmt.under_default() else {
                 continue;
             };
@@ -235,6 +255,8 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
                 name: text(st.name),
                 fields,
                 derives,
+                module: module.clone(),
+                variants: Vec::new(),
             });
         }
     }
@@ -318,7 +340,7 @@ fn run_inner(
     // The structs of every source, so a remote in one file packs a
     // struct another file declares.
     let base_options = EmitOptions {
-        shapes: struct_shapes(&sources),
+        shapes: struct_shapes(&sources, &input),
         ..base_options
     };
 

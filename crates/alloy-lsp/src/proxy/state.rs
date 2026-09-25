@@ -183,7 +183,10 @@ impl State {
             return Arc::clone(held);
         }
 
-        let held = Arc::new(alloy::build::struct_shapes(&self.project_sources()));
+        // The editor runs no wire, so the root serves as the base of
+        // each shape's module; the keys only have to agree here.
+        let base = self.root.clone().unwrap_or_default();
+        let held = Arc::new(alloy::build::struct_shapes(&self.project_sources(), &base));
         *self.project_shapes.borrow_mut() = Some(Arc::clone(&held));
 
         held

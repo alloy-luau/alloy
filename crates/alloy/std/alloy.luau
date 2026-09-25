@@ -3280,7 +3280,8 @@ local WIRE_RANGE = {
 -- table: `{ fields = { { name, kind }, ... }, struct = Metatable? }` for a
 -- record, `{ item = kind }` for an array, `{ enum = Enum, tags = { A = 0,
 -- B = 1 } }` for an enum with each variant's payload count, each with
--- `optional = true` when nil is fine. The codec reads each layout once into nodes, so a fire
+-- `optional = true` when nil is fine. A `struct` or an `enum` can be a key
+-- of `wire.types` in place of the table. The codec reads each layout once into nodes, so a fire
 -- parses no string.
 type WireNode = {
 	base: string,
@@ -3527,9 +3528,22 @@ local function wire_instance(node: WireNode, v: any): any
 	return v
 end
 
+-- The struct and enum tables a layout names by key, `"types.aly:Stats"`.
+-- A field of an imported struct can name a table the importer cannot
+-- reach, so the declaring module registers it here when it loads. The
+-- key comes from the source path, so it is the same on both sides.
+local wire_types: { [string]: any } = {}
+
 -- A struct comes back through its constructor, so a field the wire
 -- skipped takes its default; a plain metatable takes the table as it is.
+-- A key names a registered table; with none, the table stays plain.
 local function wire_struct(struct: any, t: any): any
+	if type(struct) == "string" then
+		struct = wire_types[struct]
+		if struct == nil then
+			return t
+		end
+	end
 	local meta = getmetatable(struct)
 	if type(meta) == "table" and meta.__call ~= nil then
 		return struct(t)
@@ -3559,7 +3573,11 @@ local function wire_variant(node: WireNode, v: any): any
 	if type(v) ~= "table" or type(v.tag) ~= "string" or (tags[v.tag] or 0) == 0 then
 		error(`wire: {typeof(v)} is no variant of the enum`, 0)
 	end
-	return setmetatable(v, node.enum)
+	local enum = node.enum
+	if type(enum) == "string" then
+		enum = wire_types[enum]
+	end
+	return if enum ~= nil then setmetatable(v, enum) else v
 end
 
 local function wire_read(node: WireNode, buf: buffer, at: number, rest: { any }, ri: number): (any, number, number)
@@ -3692,6 +3710,10 @@ local function wire_restore(node: WireNode, v: any): any
 end
 
 local wire = {}
+
+--- The tables a layout names by key. A module registers a struct or
+--- an enum here when a field of another struct names it.
+wire.types = wire_types
 
 --- Packs the arguments of one fire by the layout: the buffer, then the
 --- values the layout marks `any`, in the order the packer met them.

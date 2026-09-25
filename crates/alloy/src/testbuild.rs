@@ -615,7 +615,7 @@ fn write_modules(
     let sources = crate::build::sources(&input, &written)?;
     // The build's view of other files' structs: an imported struct
     // clones and serializes through its own derives in a test as well.
-    let shapes = crate::build::struct_shapes(&sources);
+    let shapes = crate::build::struct_shapes(&sources, &input);
 
     for path in sources {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
@@ -838,12 +838,10 @@ pub fn spec(
     let aliases = crate::modules::aliases(root, &tree);
     // ponytail: every spec reads the project's structs again; cache them
     // per run if a project with many specs makes `alloy test` slow.
-    let shapes = crate::build::sources(
-        &root.join(&config.build.input),
-        &crate::build::written_dirs(root, config),
-    )
-    .map(|s| crate::build::struct_shapes(&s))
-    .unwrap_or_default();
+    let input = root.join(&config.build.input);
+    let shapes = crate::build::sources(&input, &crate::build::written_dirs(root, config))
+        .map(|s| crate::build::struct_shapes(&s, &input))
+        .unwrap_or_default();
     let options = EmitOptions {
         file_name: source_rel.to_string_lossy().into_owned(),
         std_require: relative_require(source_rel, &runtime),

@@ -159,6 +159,64 @@ describe("wire", function()
 		expect(wire.restore({ { enum = Boost, tags = { None = 0 }, optional = true } }, { n = 1 })[1]).toBe(nil)
 	end)
 
+	it("restores a struct and an enum that a layout names by key", function()
+		-- Roblox copies a table across a remote and drops every metatable.
+		local function engine_copy(v)
+			if type(v) ~= "table" then
+				return v
+			end
+			local t = {}
+			for k, x in v do
+				t[k] = engine_copy(x)
+			end
+			return t
+		end
+		local Stats = {}
+		Stats.__index = Stats
+		setmetatable(Stats, {
+			__call = function(_, f)
+				return setmetatable(f, Stats)
+			end,
+		})
+		function Stats.double(self)
+			return self.hp * 2
+		end
+		local Item = {}
+		Item.__index = Item
+		function Item.Sword(n)
+			return setmetatable({ tag = "Sword", _1 = n }, Item)
+		end
+		local Outer = {}
+		Outer.__index = Outer
+		-- The declaring module registers its tables when it loads.
+		wire.types["keys.aly:Stats"] = Stats
+		wire.types["keys.aly:Item"] = Item
+		local layout = {
+			{
+				fields = {
+					{ "s", { fields = { { "hp", "f64" } }, struct = "keys.aly:Stats" } },
+					{ "one", { enum = "keys.aly:Item", tags = { Sword = 1, Nothing = 0 } } },
+				},
+				struct = Outer,
+			},
+		}
+		local sent = { setmetatable({ s = Stats({ hp = 4 }), one = Item.Sword(2) }, Outer) }
+		-- The table road: the engine copies the whole value.
+		local out = wire.restore(layout, engine_copy({ n = 1, sent[1] }))
+		expect(getmetatable(out[1])).toBe(Outer)
+		expect(out[1].s:double()).toBe(8)
+		expect(getmetatable(out[1].one)).toBe(Item)
+		-- The buffer road: the enum crosses beside the buffer as a copy.
+		local buf, rest = wire.pack(layout, sent, "T")
+		local packed = wire.unpack(layout, buf, engine_copy(rest))
+		expect(packed[1].s:double()).toBe(8)
+		expect(getmetatable(packed[1].one)).toBe(Item)
+		-- A key that no module registered leaves the table plain.
+		local plain = wire.restore({ { fields = { { "hp", "f64" } }, struct = "keys.aly:Gone" } }, { n = 1, { hp = 1 } })
+		expect(getmetatable(plain[1])).toBe(nil)
+		expect(plain[1].hp).toBe(1)
+	end)
+
 	it("writes a long string's length in more bytes", function()
 		local text = string.rep("x", 300)
 		local out, buf = roundtrip({ "str" }, { text })

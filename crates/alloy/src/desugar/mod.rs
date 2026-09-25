@@ -266,11 +266,25 @@ pub use structs::RENAME_STYLES;
 /// A struct another file declares, for the wire layout of a remote
 /// that carries it: each field with its type text and its width, and the
 /// derives it takes, so an importer's own derives reach through it.
+/// An enum rides the same list with its variants and no fields.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StructShape {
     pub name: String,
     pub fields: Vec<WireField>,
     pub derives: Vec<String>,
+    /// The declaring source, relative to the project's `in` folder. It
+    /// keys the table the runtime registers for the wire.
+    pub module: String,
+    /// Each variant with its payload count; empty for a struct.
+    pub variants: Vec<(String, usize)>,
+}
+
+impl StructShape {
+    /// The key the declaring file registers the table under, and the
+    /// layout of a file that cannot name the table.
+    pub fn wire_key(&self) -> String {
+        format!("{}:{}", self.module, self.name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1083,6 +1083,7 @@ impl<'s> Desugar<'s> {
         }
 
         tail.push_str(&self.foreign_impl_lines(&name));
+        tail.push_str(&self.wire_registration(&name));
         self.generate(end_tok.start, &format!(" {tail}"));
 
         if st.exported {

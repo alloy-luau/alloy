@@ -100,6 +100,7 @@ fn a_struct_elsewhere_shapes_a_remote_only_when_imported() {
                 width: None,
             }],
             derives: Vec::new(),
+            ..Default::default()
         }],
         ..alloy::EmitOptions::default()
     };

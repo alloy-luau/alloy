@@ -1671,7 +1671,12 @@ impl<'s> Desugar<'s> {
 
             // A struct another file declares derives for this file too:
             // a field of it clones, defaults, and serializes through it.
-            if let Some(shape) = self.options.shapes.iter().find(|s| s.name == name) {
+            if let Some(shape) = self
+                .options
+                .shapes
+                .iter()
+                .find(|s| s.name == name && s.variants.is_empty())
+            {
                 for d in &shape.derives {
                     let set = match d.as_str() {
                         "Clone" => &mut self.cloneable,

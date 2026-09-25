@@ -397,6 +397,9 @@ impl<'s> Desugar<'s> {
                 variant_attrs.join(", ")
             ));
         }
+
+        printer.push_str(&self.wire_registration(&name));
+
         // An enum with no variant has no type to write: `type E = `
         // is not Luau, so the artifact says `never` and the report
         // names what the body wants.

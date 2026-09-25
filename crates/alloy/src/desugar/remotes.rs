@@ -331,6 +331,26 @@ fn offender(
     None
 }
 
+/// The layout of an enum whose table `name` reads. A unit enum crosses
+/// as one of its names; the reader refuses any other string, so a forged
+/// `"Nuke"` reaches no handler.
+fn enum_wire(name: String, variants: &[(String, usize)], optional: bool) -> Wire {
+    if variants.iter().all(|(_, n)| *n == 0) {
+        let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
+
+        return Wire::Scalar {
+            kind: format!("one:{}", names.join(",")),
+            optional,
+        };
+    }
+
+    Wire::Enum {
+        name,
+        variants: variants.to_vec(),
+        optional,
+    }
+}
+
 pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
     if ty.contains("->") {
         return Some("is a function type");
@@ -373,8 +393,59 @@ impl<'s> Desugar<'s> {
         self.options
             .shapes
             .iter()
-            .find(|sh| sh.name == declared)
+            .find(|sh| sh.name == declared && sh.variants.is_empty())
             .map(|sh| sh.fields.clone())
+    }
+
+    /// The layout of each field of a struct another file declares. The
+    /// field types belong to that file.
+    fn shape_fields(&self, shape: &crate::StructShape, depth: usize) -> Vec<(String, Wire)> {
+        shape
+            .fields
+            .iter()
+            .map(|f| {
+                let w = self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, true);
+
+                (f.name.clone(), w)
+            })
+            .collect()
+    }
+
+    /*
+    The registration of a struct or an enum of this file, for the wire of
+    another file. A remote there that carries a struct from here reads
+    each field's type in this file, and a field can name a table that
+    file cannot reach. Its layout names the key instead, and the reader
+    takes the table from the registry. Only a type that a struct field of
+    the project names registers, so the output of other types stays as
+    it was.
+    */
+    pub(crate) fn wire_registration(&mut self, name: &str) -> String {
+        if !self.at_top_level() || self.options.macro_depth > 0 {
+            return String::new();
+        }
+
+        let mut named = self.options.shapes.iter().filter(|sh| sh.name == name);
+        let (Some(shape), None) = (named.next(), named.next()) else {
+            return String::new();
+        };
+        let here = std::path::Path::new(&self.options.file_name).ends_with(&shape.module);
+        let in_a_field = self.options.shapes.iter().any(|sh| {
+            sh.fields.iter().any(|f| {
+                f.ty.split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|w| w == name)
+            })
+        });
+        // A unit enum crosses as a string and needs no table.
+        let unit = !shape.variants.is_empty() && shape.variants.iter().all(|(_, n)| *n == 0);
+
+        if !here || !in_a_field || unit {
+            return String::new();
+        }
+
+        let key = luau_string(&shape.wire_key());
+
+        format!(" {}.wire.types[{key}] = {name}", self.std())
     }
 
     /// `wire_offender` with the structs of this file, so a parameter
@@ -841,24 +912,21 @@ impl<'s> Desugar<'s> {
         let is_name = ty.chars().all(|c| c.is_alphanumeric() || c == '_');
 
         if is_name && foreign {
-            // One project struct of the name; its table is not in scope
-            // here, so the value decodes without a metatable.
+            // One project struct or enum of the name. Its table is not in
+            // scope here, so the layout names the key the declaring file
+            // registers the table under.
             let mut named = self.options.shapes.iter().filter(|sh| sh.name == ty);
 
             if let (Some(shape), None) = (named.next(), named.next()) {
-                let fields = shape
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let w = self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, true);
+                let key = luau_string(&shape.wire_key());
 
-                        (f.name.clone(), w)
-                    })
-                    .collect();
+                if !shape.variants.is_empty() {
+                    return enum_wire(key, &shape.variants, optional);
+                }
 
                 return Wire::Table {
-                    fields,
-                    struct_name: None,
+                    fields: self.shape_fields(shape, depth),
+                    struct_name: Some(key),
                     optional,
                 };
             }
@@ -900,12 +968,36 @@ impl<'s> Desugar<'s> {
             }
         }
 
+        // A struct through a star import, `Ty.Stats`, is in scope under
+        // its path.
+        if let Some((module, name)) = ty.split_once('.')
+            && self.star_modules.contains(module)
+        {
+            let mut named = self
+                .options
+                .shapes
+                .iter()
+                .filter(|sh| sh.name == name && sh.variants.is_empty());
+
+            if let (Some(shape), None) = (named.next(), named.next()) {
+                return Wire::Table {
+                    fields: self.shape_fields(shape, depth),
+                    struct_name: Some(ty.to_string()),
+                    optional,
+                };
+            }
+        }
+
         // The file's own type wins over a Roblox class of the same name,
         // as a struct does above: an `enum Team` sent as `inst:Team` made
         // the reader refuse every packet. An alias reads as its value, a
         // unit enum crosses as its string, and any other declaration, or
-        // an import, as a value the layout leaves to the checker.
-        if ty.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        // an import, as a value the layout leaves to the checker. An
+        // enum through a star import reads under its path, `Ty.Item`.
+        if ty
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        {
             if let Some(value) = self.alias_values.get(ty).cloned() {
                 let value = if optional {
                     format!("({value})?")
@@ -916,21 +1008,8 @@ impl<'s> Desugar<'s> {
                 return self.wire_of_type(&value, width, depth + 1, false);
             }
 
-            // A unit enum crosses as one of its names; the reader refuses
-            // any other string, so a forged `"Nuke"` reaches no handler.
             if let Some(variants) = self.enum_decls.get(ty) {
-                let unit = variants.iter().all(|(_, n)| *n == 0);
-                let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
-
-                return match unit {
-                    true => scalar(&format!("one:{}", names.join(","))),
-
-                    false => Wire::Enum {
-                        name: ty.to_string(),
-                        variants: variants.clone(),
-                        optional,
-                    },
-                };
+                return enum_wire(ty.to_string(), variants, optional);
             }
 
             if self.declared_types.contains(ty) || self.imported_names.contains(ty) {
@@ -1180,6 +1259,77 @@ mod tests {
                 "parameter `boost` of remote `Grant` names `Boost`, which is declared below the remote; move the declaration above it"
             ]
         );
+    }
+
+    /// A type from another module keeps its metatable across the wire. A
+    /// star path is in scope, so the layout names it. A field of an
+    /// imported struct can name a table this file cannot reach, so the
+    /// layout names a key, and the declaring file registers the table
+    /// under it. The layouts had no enum at all, `"any"`, and a record
+    /// with no struct.
+    #[test]
+    fn a_type_from_another_module_keeps_its_metatable() {
+        let field = |name: &str, ty: &str| crate::WireField {
+            name: name.into(),
+            ty: ty.into(),
+            width: None,
+        };
+        let shape = |name: &str, fields, variants| crate::StructShape {
+            name: name.into(),
+            fields,
+            module: "types.aly".into(),
+            variants,
+            ..Default::default()
+        };
+        let variants = vec![("Sword".to_string(), 1), ("Nothing".to_string(), 0)];
+        let options = EmitOptions {
+            shapes: vec![
+                shape("Item", Vec::new(), variants.clone()),
+                shape("Stats", vec![field("hp", "number")], Vec::new()),
+                shape("Outer", vec![field("s", "Stats")], Vec::new()),
+                shape("Bag", vec![field("one", "Item")], Vec::new()),
+            ],
+            import_enums: vec![("Ty.Item".to_string(), variants)],
+            ..EmitOptions::default()
+        };
+        let src = "import { Bag, Outer } from \"./types\"\nimport * as Ty from \"./types\"\nremote R3(bag: Bag) from server\nremote R5(it: Ty.Item) from server\nremote R6(o: Outer) from server\nremote R7(s: Ty.Stats) from server\n";
+        let out = crate::compile_with(src, &options).unwrap();
+        let item = "tags = { Sword = 1, Nothing = 0 } }";
+
+        for layout in [
+            format!("{{ fields = {{ {{ \"one\", {{ enum = \"types.aly:Item\", {item} }} }}, struct = Bag }}"),
+            format!("wire = {{ {{ enum = Ty.Item, {item} }}"),
+            "{ fields = { { \"s\", { fields = { { \"hp\", \"f64\" } }, struct = \"types.aly:Stats\" } } }, struct = Outer }".to_string(),
+            "{ fields = { { \"hp\", \"f64\" } }, struct = Ty.Stats }".to_string(),
+        ] {
+            assert!(out.ship.contains(&layout), "{layout}\n{}", out.ship);
+        }
+
+        // The declaring file registers what a field names, on the line
+        // of its `end`, and nothing else.
+        let types = "export enum Item\n    Sword(number)\n    Nothing\nend\nexport struct Stats\n    hp: number\nend\nexport struct Outer\n    s: Stats\nend\nexport struct Bag\n    one: Item\nend\n";
+        let declaring = EmitOptions {
+            file_name: "types.aly".into(),
+            ..options
+        };
+        let out = crate::compile_with(types, &declaring).unwrap();
+        assert_eq!(
+            out.ship.lines().count(),
+            types.lines().count(),
+            "{}",
+            out.ship
+        );
+
+        for (line, name) in [(3, "Item"), (6, "Stats")] {
+            let registers = format!("__alloy.wire.types[\"types.aly:{name}\"] = {name}");
+            assert!(
+                out.ship.lines().nth(line).unwrap().contains(&registers),
+                "{}",
+                out.ship
+            );
+        }
+
+        assert_eq!(out.ship.matches("wire.types").count(), 2, "{}", out.ship);
     }
 
     /// A remote's surface is a type the checker reads, so `T[]` lowers

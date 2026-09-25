@@ -2195,6 +2195,19 @@ impl<'s> Desugar<'s> {
             first_tok += 1;
         }
 
+        // `@attr export default function f()`: both words go, and
+        // `local` takes their place. The module exports `f` as its
+        // default, so the name goes out under no key of its own.
+        let default = !exported
+            && self
+                .toks
+                .get(first_tok as usize)
+                .is_some_and(|t| t.text(self.src) == "export");
+
+        if default {
+            first_tok += 2;
+        }
+
         // The first line declared the name: a `local` here would open
         // a second slot and leave the first one nil.
         if hoisted && is_local {
@@ -2218,7 +2231,7 @@ impl<'s> Desugar<'s> {
 
         let forced = std::mem::take(&mut self.ns_force_local);
 
-        if (((is_test || exported) && !is_local) || forced) && !hoisted {
+        if (((is_test || exported || default) && !is_local) || forced) && !hoisted {
             lead.push_str("local ");
         }
 

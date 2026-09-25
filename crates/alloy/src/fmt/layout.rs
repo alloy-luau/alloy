@@ -63,6 +63,11 @@ impl<'s> Formatter<'s> {
                     && (self.items[i].newlines_before > 0
                         || i == 0
                         || matches!(prev, Some("export" | "global" | "public" | "private"))
+                        || (prev == Some("default")
+                            && self
+                                .prev_code(i)
+                                .and_then(|p| self.prev_code(p))
+                                .is_some_and(|p| self.items[p].text == "export"))
                         || self.attributes_open_line(i))
             }
 

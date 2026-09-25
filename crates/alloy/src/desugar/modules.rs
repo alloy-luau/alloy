@@ -1070,8 +1070,9 @@ impl<'s> Desugar<'s> {
                 }
 
                 // `function f()` at the top level is a global; the name
-                // a module exports is its own.
-                if matches!(inner.as_ref(), Stmt::Function(_)) {
+                // a module exports is its own. A function under
+                // attributes writes the word itself, after them.
+                if matches!(inner.as_ref(), Stmt::Function(f) if f.attrs.is_empty()) {
                     self.generate(self.byte_start(inner.span()), "local ");
                 }
 
@@ -1355,6 +1356,39 @@ print(ex)
                 "{text}"
             );
             assert_eq!(text.lines().count(), src.lines().count(), "{text}");
+        }
+    }
+
+    /// An attribute above `export default` was a syntax error: the
+    /// reader took `export` and then asked for `function`. The
+    /// attribute now goes on the declaration, as under `export`.
+    #[test]
+    fn an_attribute_over_export_default_goes_on_the_declaration() {
+        for (src, want) in [
+            (
+                "@derive(Debug)\nexport default struct Bag\n    n: number\nend\n",
+                "function Bag.debug(self)",
+            ),
+            (
+                "@deprecated\nexport default function old(): number\n    return 1\nend\n",
+                "\n@deprecated local function old(): number",
+            ),
+            (
+                "@inline\nexport default function small(): number\n    return 1\nend\n",
+                "\nlocal function small(): number",
+            ),
+        ] {
+            let out = crate::compile(src).unwrap();
+            assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+            assert!(out.ship.contains(want), "{}", out.ship);
+            assert!(out.ship.contains("return { default = "), "{}", out.ship);
+            assert!(!out.ship.contains("export default"), "{}", out.ship);
+            assert_eq!(
+                out.ship.lines().count(),
+                src.lines().count(),
+                "{}",
+                out.ship
+            );
         }
     }
 

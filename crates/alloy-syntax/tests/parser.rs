@@ -252,6 +252,9 @@ const CORPUS: &[&str] = &[
     "export { a } from './m'",
     "export type { T } from './m'",
     "export default { x = 1 }",
+    // An attribute goes on the declaration a default exports.
+    "@derive(Debug)\nexport default struct S as\n\tn: number\nend",
+    "@deprecated\nexport default function f() end",
     // The Roblox services: one service by path, or a list from `game`.
     "import Players from 'game:Players'",
     "import { Players, ReplicatedStorage } from 'game'",

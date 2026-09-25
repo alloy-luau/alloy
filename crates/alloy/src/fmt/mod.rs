@@ -886,6 +886,19 @@ mod tests {
         assert_eq!(format_file(src, &FmtConfig::preserving()).unwrap(), src);
     }
 
+    /// `export default struct` opened no block, so its fields lost
+    /// their indent. `default` after `export` now opens it, as `export`
+    /// alone does.
+    #[test]
+    fn a_default_export_indents_its_body() {
+        let src = "@derive(Debug)\nexport default struct Bag\nn: number\nend\n";
+
+        assert_eq!(
+            fmt(src),
+            "@derive(Debug)\nexport default struct Bag\n  n: number\nend\n"
+        );
+    }
+
     #[test]
     fn a_negation_holds_its_operand() {
         assert_eq!(

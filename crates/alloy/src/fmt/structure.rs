@@ -300,6 +300,9 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 "struct" | "enum" | "trait" | "impl" | "interface" | "macro" | "namespace"
                     if (first_on_line(src, toks, i)
                         || matches!(prev, Some("export" | "global" | "public" | "private"))
+                        || (prev == Some("default")
+                            && i >= 2
+                            && toks[i - 2].text(src) == "export")
                         || after_attributes(src, toks, i))
                         && alloy_syntax::contextual::keyword_at(src, toks, i) =>
                 {

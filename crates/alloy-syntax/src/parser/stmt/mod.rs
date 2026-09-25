@@ -818,6 +818,26 @@ impl<'a> Parser<'a> {
 
         let exported = self.eat("export") || was_global;
 
+        // `@attr export default <declaration>`: the attributes go on the
+        // declaration, and its span opens on the first of them, as under
+        // `export`. The module exports it as its default.
+        if exported && self.at("default") && !self.newline_after(0) {
+            self.bump();
+
+            if !self.default_decl_follows() {
+                return Err(self.err(
+                    "an attribute needs a declaration; `export default` of a value takes none",
+                ));
+            }
+
+            let decl = self.attributed_stmt(start, attrs)?;
+
+            return Ok(Stmt::ExportDefault {
+                value: DefaultExport::Decl(Box::new(decl)),
+                span: TokSpan::new(start, self.pos),
+            });
+        }
+
         match self.text() {
             "struct" if self.name_at(1) => {
                 return self.struct_decl(start, attrs, exported);

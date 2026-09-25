@@ -709,6 +709,28 @@ fn a_match_head_without_an_alias_name_reports_once() {
     assert_eq!((errors, diagnostics), (0, 1));
 }
 
+/// A `case` the author is still typing reports once, on the `case`. The
+/// arms around it, the `end` of the match, and the `end` of the function
+/// all parse, in the value form and in the statement form.
+#[test]
+fn a_bare_case_reports_once_on_the_case() {
+    for src in [
+        "local function f(x: number): string\n    local label = match x with\n        case 0 then \"zero\"\n        case\n    end\n    return label\nend\n",
+        "match x with\n    case\n    case 1 then print(1)\n    default print(2)\nend\nprint(3)\n",
+    ] {
+        let (errors, diagnostics) = lenient(src);
+        assert_eq!((errors, diagnostics), (0, 1), "for {src:?}");
+
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(diagnostics[0].message, "expected a pattern after `case`");
+        assert!(
+            src[diagnostics[0].offset..].starts_with("case\n"),
+            "for {src:?}"
+        );
+    }
+}
+
 /// Two values of one head under one name: the second would shadow the
 /// first. The report lands on the second name, once.
 #[test]

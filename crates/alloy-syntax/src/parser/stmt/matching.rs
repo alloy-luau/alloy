@@ -11,6 +11,7 @@ const ARM_GIVES_NO_VALUE: &str =
     "this arm gives no value: end it with the value, or leave with `return`";
 const RUST_ARM: &str = "an arm reads `case Ok(v) then ...`; `=>` after a pattern is Rust's arm";
 const STMT_ARM_TAKES_STATEMENT: &str = "a statement arm takes a statement; write `local x = match ... with` to read the arms as values";
+const BARE_CASE: &str = "expected a pattern after `case`";
 
 /// Whether an expression stands alone as a statement: a call, the three
 /// words that wrap one, a macro call, `$assert(x)`, and a `match`, which
@@ -102,6 +103,11 @@ impl<'a> Parser<'a> {
                 }
 
                 let arm_start = self.bump();
+
+                if self.bare_case(arm_start)? {
+                    continue;
+                }
+
                 let (patterns, guard) = self.arm_head()?;
                 self.check_alias_binds(&aliases, &patterns)?;
                 // A broken head, one the author is still typing, keeps no
@@ -304,6 +310,29 @@ impl<'a> Parser<'a> {
         };
 
         Ok((patterns, guard))
+    }
+
+    /// Whether the `case` at `at` has no pattern, as while the author
+    /// types it: the next token ends the arm. A lenient parse reports it
+    /// on the `case` and reads on, so the other arms and the `end` of the
+    /// match report nothing.
+    fn bare_case(&mut self, at: usize) -> Result<bool, ParseError> {
+        if !self.arm_ends() {
+            return Ok(false);
+        }
+
+        let offset = self.toks[at].start as usize;
+
+        if !self.lenient {
+            return Err(ParseError {
+                offset,
+                message: BARE_CASE.to_string(),
+            });
+        }
+
+        self.report_at(offset, BARE_CASE);
+
+        Ok(true)
     }
 
     /// The `then` after an arm's patterns. `=>` there is Rust's arm.
@@ -556,6 +585,11 @@ impl<'a> Parser<'a> {
                 }
 
                 let arm_start = self.bump();
+
+                if self.bare_case(arm_start)? {
+                    continue;
+                }
+
                 let (patterns, guard) = self.arm_head()?;
                 self.check_alias_binds(&aliases, &patterns)?;
                 // A broken head, one the author is still typing, keeps no

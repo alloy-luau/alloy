@@ -22,7 +22,7 @@ pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 
 #[cfg(test)]
 #[cfg(test)]
-pub(crate) use modules::{shadows_an_import, std_import_hover};
+pub(crate) use modules::{shadows_an_import, star_module_hover, std_import_hover};
 pub(crate) use restyle::group_len;
 pub(crate) use restyle::{
     close_empty_packs, close_item_packs, declared_annotation, declared_head, declared_signature,

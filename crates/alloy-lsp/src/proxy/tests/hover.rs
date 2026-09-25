@@ -1,6 +1,6 @@
 use super::super::hover::{
     child_cast, impl_self_type, intrinsic_code_home, member_doc, shadow_home, shadows_an_import,
-    source_type,
+    source_type, star_module_hover,
 };
 use super::super::*;
 use super::support::one_file;
@@ -337,6 +337,39 @@ pub(crate) fn a_module_import_hovers_as_the_module() {
 
     // A path that names no file is the child's to answer.
     assert_eq!(module_hover(src, "gone", Some(&from), &aliases, true), None);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A star alias of an Alloy module hovers as a std star alias does:
+/// the import line and the names the module exports. The child printed
+/// the module's table, with its types as `t7`.
+#[test]
+fn a_star_alias_of_an_alloy_module_hovers_as_the_module() {
+    let dir = std::env::temp_dir().join(format!("alloy-star-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("types.aly"),
+        "export struct Blade as damage: number end\nexport enum Hit\n    Miss\nend\nexport type Id = number\nlocal hidden = 1\n",
+    )
+    .expect("module");
+    std::fs::write(dir.join("lib.luau"), "return { a = 1 }\n").expect("module");
+    let src = "import * as Ty from \"./types\"\nimport * as L from \"./lib\"\nprint(Ty.Hit.Miss, x.Ty, L)\n";
+    let from = dir.join("main.aly");
+    let hover = |needle: &str, word: &str| {
+        let start = src.find(needle).expect("the name");
+
+        star_module_hover(src, word, start, Some(&from), &[])
+    };
+
+    assert_eq!(
+        hover("Ty from", "Ty").as_deref(),
+        Some("```alloy\nimport * as Ty from \"./types\"\n```\nExports: `Blade`, `Hit`, `Id`")
+    );
+    assert_eq!(hover("Ty.Hit", "Ty"), hover("Ty from", "Ty"));
+    // A member of another name, and a Luau module, keep the child's answer.
+    assert_eq!(hover("Ty, L", "Ty"), None);
+    assert_eq!(hover("L)", "L"), None);
 
     std::fs::remove_dir_all(&dir).ok();
 }

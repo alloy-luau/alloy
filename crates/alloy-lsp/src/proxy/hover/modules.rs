@@ -60,7 +60,18 @@ impl Server {
                     .to_path_buf();
                 let aliases = project_aliases(&dir, st.root.as_deref());
 
-                module_hover(&doc.source, &word, path.as_deref(), &aliases, quoted)
+                (!quoted)
+                    .then(|| {
+                        inner(star_module_hover(
+                            &doc.source,
+                            &word,
+                            start,
+                            path.as_deref(),
+                            &aliases,
+                        ))
+                    })
+                    .flatten()
+                    .or_else(|| module_hover(&doc.source, &word, path.as_deref(), &aliases, quoted))
             });
 
         let Some(answer) = answer else {
@@ -296,6 +307,49 @@ pub(crate) fn module_hover(
     // No link: the editor's document links already offer to follow the
     // path, on the same characters.
     Some(format!("```alloy\n{}\n```", line.trim()))
+}
+
+/// The alias of `import * as Ty from "./types"`, where the path names
+/// an Alloy module. The child prints the module's table with its types
+/// as `t7`, so the alias hovers as a std star alias does: the import
+/// line and the names the module exports. A Luau module keeps the
+/// child's answer.
+pub(crate) fn star_module_hover(
+    source: &str,
+    word: &str,
+    start: usize,
+    from: Option<&Path>,
+    aliases: &[(String, PathBuf)],
+) -> Option<String> {
+    // `x.Ty` is a member, not the alias.
+    if source[..start].ends_with(['.', ':']) {
+        return None;
+    }
+
+    let line = source
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("import * as ") && l.contains(&format!(" as {word} from ")))?;
+    let target = module_target(&import_spec(line)?, from, aliases)?;
+
+    if !target.extension().is_some_and(|e| e == "aly" || e == "alx") {
+        return None;
+    }
+
+    let mut names: Vec<String> = Vec::new();
+
+    for export in imports::exports_of_file(&target, 0) {
+        if !export.is_default && !names.contains(&export.name) {
+            names.push(export.name);
+        }
+    }
+
+    let exports: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+
+    Some(format!(
+        "```alloy\n{line}\n```\nExports: {}",
+        exports.join(", ")
+    ))
 }
 
 /// The hover of a name a std import binds. The emit reads the std from

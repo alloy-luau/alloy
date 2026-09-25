@@ -745,7 +745,7 @@ impl State {
         let lint_config = self.lint_config();
         let directives = alloy::directives::scan(&doc.source);
         let ((from_line, _), (to_line, _)) = range;
-        let mut all_fixes: Vec<&alloy::lint::Fix> = Vec::new();
+        let mut all_fixes: Vec<(&str, &alloy::lint::Fix)> = Vec::new();
         let edits_of = |fix: &alloy::lint::Fix| -> Vec<Value> {
             fix.edits()
                 .map(|e| {
@@ -774,7 +774,7 @@ impl State {
                 continue;
             }
 
-            all_fixes.push(fix);
+            all_fixes.push((l.name, fix));
 
             let (ll, lc) = position_of(&doc.source, l.start as usize);
             let (le, lec) = position_of(&doc.source, l.end.max(l.start) as usize);
@@ -817,9 +817,42 @@ impl State {
         }
 
         if all_fixes.len() > 1 {
+            // `prefer_const` goes first, as in `alloy fmt`: a local it
+            // makes a `const` takes the const style, so the renames come
+            // from the text with the `const`s in it.
+            let consts: Vec<alloy::lint::Fix> = all_fixes
+                .iter()
+                .filter(|(name, _)| *name == "prefer_const")
+                .map(|(_, f)| (*f).clone())
+                .collect();
+            let renames = match consts.is_empty() || uri.ends_with(".alx") {
+                true => Vec::new(),
+
+                false => {
+                    alloy::naming::lints_after_consts(&doc.source, &consts, &lint_config.naming)
+                }
+            };
+            let renamed: Vec<&alloy::lint::Fix> = renames
+                .iter()
+                .filter(|l| {
+                    let line = alloy::directives::line_of(&doc.source, l.start as usize);
+
+                    alloy::lint::level_in(&lint_config, &directives, l.name)
+                        != alloy::lint::Level::Allow
+                        && directives.allows_lint(line, l.name)
+                        && !directives.preserves(line)
+                })
+                .filter_map(|l| l.fix.as_ref())
+                .collect();
+            let keep_names = renamed.is_empty();
+            let fixes = all_fixes
+                .iter()
+                .filter(|(name, _)| keep_names || *name != alloy::naming::LINT)
+                .map(|(_, f)| *f)
+                .chain(renamed);
             // Two rewrites that overlap keep the first, as `--fix` does,
             // and a rename lands with every edit it makes.
-            let chosen = alloy::lint::compatible(&doc.source, all_fixes);
+            let chosen = alloy::lint::compatible(&doc.source, fixes);
             let kept: Vec<Value> = chosen.iter().flat_map(|f| edits_of(f)).collect();
 
             actions.push(json!({

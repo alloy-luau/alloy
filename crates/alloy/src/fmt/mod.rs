@@ -248,9 +248,22 @@ pub fn format_named(name: &str, src: &str, options: &FmtConfig) -> Result<String
     } else if name.ends_with(".d.aly") {
         format_file(src, options)
     } else {
-        let renamed = crate::naming::renamed(src, options);
+        // `prefer_const` goes first. A local it makes a `const` takes
+        // the const style, so a second run renames nothing.
+        let src = with_consts(src, options);
+        let renamed = crate::naming::renamed(&src, options);
 
-        format_file(renamed.as_deref().unwrap_or(src), options)
+        format_file(renamed.as_deref().unwrap_or(&src), options)
+    }
+}
+
+/// The source with the `prefer_const` rewrites: a `local` that nothing
+/// assigns again reads as `const`, unless `[fmt] prefer_const = false`.
+fn with_consts<'a>(src: &'a str, options: &FmtConfig) -> std::borrow::Cow<'a, str> {
+    match options.prefer_const {
+        true => crate::std_names::apply(src, &crate::flux::prefer_const_fixes(src)).into(),
+
+        false => src.into(),
     }
 }
 
@@ -264,17 +277,7 @@ pub fn format_file(src: &str, options: &FmtConfig) -> Result<String, String> {
         return Err(format!("{UNPARSED}: {message}"));
     }
 
-    // `local x` that nothing assigns again reads as `const x`.
-    let written;
-    let src = match options.prefer_const {
-        true => {
-            written = crate::std_names::apply(src, &crate::flux::prefer_const_fixes(src));
-            written.as_str()
-        }
-
-        false => src,
-    };
-    let text = format_with(src, options)?;
+    let text = format_with(&with_consts(src, options), options)?;
 
     // A formatter never writes a file it cannot read back: the input
     // parsed, so output that does not is a bug here, and the caller

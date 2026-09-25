@@ -1366,6 +1366,25 @@ pub fn renamed(src: &str, options: &crate::config::FmtConfig) -> Option<String> 
     (n > 0).then_some(text)
 }
 
+/// The rename lints of `src` once the `prefer_const` rewrites `consts`
+/// land. A local that becomes a `const` then takes the const style, as
+/// in `alloy fmt`. `local` and `const` have one length, so each offset
+/// holds in `src`.
+pub fn lints_after_consts(src: &str, consts: &[Fix], naming: &Naming) -> Vec<Lint> {
+    let text = crate::std_names::apply(src, consts);
+    let Ok(parsed) = alloy_syntax::parse_lenient(&text, crate::fmt::parse_options()) else {
+        return Vec::new();
+    };
+
+    lints(
+        &text,
+        &parsed.lexed.toks,
+        &parsed.chunk,
+        naming,
+        &Markup::default(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

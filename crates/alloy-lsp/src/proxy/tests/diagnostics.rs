@@ -348,6 +348,55 @@ pub(crate) fn a_fix_that_deletes_names_what_it_removes() {
         "  match p with"
     );
 }
+/// The fix-all takes `prefer_const` first, as `alloy fmt` does: a local
+/// it makes a `const` takes the const style, not the variable style.
+#[test]
+pub(crate) fn the_fix_all_names_a_new_const_in_the_const_style() {
+    let config = alloy::config::Config::parse(
+        "[lint.naming]\nvariable = \"camelCase\"\nconst = \"SCREAMING_SNAKE_CASE\"\n",
+        std::path::Path::new("alloy.toml"),
+    )
+    .unwrap();
+    let source = "local max_hp = 100\nprint(max_hp)\n";
+    let uri = "file:///t.aly";
+    let options = EmitOptions {
+        naming: config.lint.naming.clone(),
+        ..EmitOptions::default()
+    };
+    let mut st = State {
+        root: Some(PathBuf::from("/")),
+        mirror: PathBuf::from("/m"),
+        ..State::default()
+    };
+    st.docs.insert(
+        uri.to_string(),
+        Doc::new(
+            source.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    st.configs.borrow_mut().insert(
+        PathBuf::from("/"),
+        Some(std::sync::Arc::new((PathBuf::from("/alloy.toml"), config))),
+    );
+    let actions = st.lint_actions(uri, ((0, 0), (2, 0)));
+    let all = actions
+        .iter()
+        .find(|a| a["kind"] == "source.fixAll")
+        .expect("the fix-all");
+    let texts: Vec<&str> = all["edit"]["changes"][uri]
+        .as_array()
+        .expect("the edits")
+        .iter()
+        .map(|e| e["newText"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(texts, vec!["const", "MAX_HP", "MAX_HP"]);
+}
+
 /// A rename writes the new name at each read in one quick fix, and the
 /// fix-all takes every edit of it beside the other rewrites.
 #[test]

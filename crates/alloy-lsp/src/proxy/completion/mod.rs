@@ -358,9 +358,20 @@ impl State {
         let doc = self.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let (key, active) = open_call(&doc.source, offset)?;
+        // A barrel's `export { Spinner } from` declares nothing, so the
+        // module it names answers for the name.
+        let home = uri_to_path(uri).and_then(|path| {
+            let head = key.trim_start_matches(['$', '@']);
+            let entry = super::navigation::import_entries(&doc.source)
+                .into_iter()
+                .find(|e| e.bound == head)?;
+
+            alloy::modules::import_home(&path, &entry.spec, &entry.name).map(|(text, _)| text)
+        });
         let sources = || {
             std::iter::once(doc.source.as_str())
                 .chain(doc.import_sources.iter().map(String::as_str))
+                .chain(home.as_deref())
         };
         // The declaration index reads a parse, and a file with an
         // unclosed call has none; the source line still has the

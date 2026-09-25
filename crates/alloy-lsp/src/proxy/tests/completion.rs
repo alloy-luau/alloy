@@ -3168,6 +3168,64 @@ fn a_macro_and_an_unclosed_call_answer_from_the_declaration() {
     assert!(st3.declared_signature_help(uri3, 1, 16).is_none());
 }
 
+/// `new Spinner(part, ` in a file that imports `Spinner` through a
+/// barrel had no help: the barrel declares no `impl Spinner`. The
+/// module the barrel names answers for it.
+#[test]
+fn a_constructor_through_a_barrel_has_signature_help() {
+    const SRC: &str = "import { Spinner } from \"./obby\"\nlocal sp = new Spinner(part, \n";
+    let dir = std::env::temp_dir().join(format!("alloy-barrel-sig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/obby")).expect("temp dir");
+    std::fs::write(
+        dir.join("src/obby/platforms.aly"),
+        concat!(
+            "export struct Spinner\n    speed: number\nend\n",
+            "export impl Spinner\n",
+            "    function new(part: BasePart, speed: number): Spinner\n",
+            "        return new Spinner { speed = speed }\n",
+            "    end\n",
+            "end\n",
+        ),
+    )
+    .expect("module");
+    std::fs::write(
+        dir.join("src/obby/init.aly"),
+        "export { Spinner } from \"./platforms\"\n",
+    )
+    .expect("module");
+    let uri = format!("file://{}", dir.join("src/main.aly").display());
+    let st = files(&[(&uri, SRC)]);
+
+    let help = st
+        .declared_signature_help(&uri, 1, SRC.lines().nth(1).expect("line").len() as u32)
+        .expect("help");
+    assert_eq!(
+        help["signatures"][0]["label"],
+        json!("function Spinner.new(part: BasePart, speed: number): Spinner")
+    );
+    assert_eq!(help["activeParameter"], json!(1));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The child answers no signature help on the base of an index, `Mode`
+/// in `Mode.speed(Mode.Walk, 2)`, and none for the call the source opens
+/// around `new Car { }`, which lowers to `Car.__new({ })`. The caret
+/// moves past the base, and past the lowered call.
+#[test]
+fn a_signature_caret_leaves_an_index_base_and_a_lowered_constructor() {
+    use super::super::hover::past_index_base;
+
+    let shadow = "print(Mode.speed(Mode.Walk, 2))\nprint(Car.drive(Car.__new({ n = 2 }), 3))\n";
+
+    assert_eq!(past_index_base(shadow, (0, 17)), Some((0, 21)));
+    assert_eq!(past_index_base(shadow, (0, 19)), Some((0, 21)));
+    assert_eq!(past_index_base(shadow, (0, 22)), None);
+    assert_eq!(past_index_base(shadow, (0, 28)), None);
+    assert_eq!(past_index_base(shadow, (1, 26)), Some((1, 36)));
+}
+
 /// A declaration's parameter list is no call: `remote test(` shows no
 /// `function test()` while the reader writes the parameters, whether
 /// the list is still open or closed. A call of the remote answers.

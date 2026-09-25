@@ -106,8 +106,8 @@ impl Server {
     }
 
     /// The shadow position of a signature-help caret inside a call in
-    /// an intrinsic's argument, where the argument stands as code.
-    /// `None` when no such call is open at the caret.
+    /// an intrinsic's argument, where the argument stands as code, or
+    /// on the base of an index. `None` for any other caret.
     pub(crate) fn signature_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
         if !is_alloy_uri(uri) {
             return None;
@@ -116,9 +116,10 @@ impl Server {
         let (line, character) = position_of_message(message)?;
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
-        let (shadow_line, _) = doc.to_shadow(line, character);
+        let shadow = doc.to_shadow(line, character);
 
-        intrinsic_code_home(&doc.source, &doc.shadow, line, shadow_line, character)
+        intrinsic_code_home(&doc.source, &doc.shadow, line, shadow.0, character)
+            .or_else(|| past_index_base(&doc.shadow, shadow))
     }
 
     /// The shadow position a member completion belongs at. `a?.b` and
@@ -849,6 +850,59 @@ pub(crate) fn shadow_home(shadow: &str, line: u32, word: &str) -> Option<(u32, u
 
         Some((i as u32, text[..byte].chars().count() as u32))
     })
+}
+
+/// The child answers no signature help on the base of an index, `T` in
+/// `f(T.x)` or `Mode` in `Mode.speed(Mode.Walk, 2)`, and it does on the
+/// `.` after it. A caret on such a word moves to that `.` or `:`, which
+/// stands in the same argument.
+///
+/// `new Car { n = 2 }` lowers to `Car.__new({ n = 2 })`, and a caret on
+/// `new` or on `Car` maps to the `{`, inside a call the source never
+/// writes. Past the `)` that closes it, the child answers for the call
+/// the source opens.
+pub(crate) fn past_index_base(shadow: &str, (line, character): (u32, u32)) -> Option<(u32, u32)> {
+    let text = shadow.lines().nth(line as usize)?;
+    let at = offset_of(text, 0, character)?;
+    let column = |end: usize| (line, text[..end].encode_utf16().count() as u32);
+
+    if text[..at].ends_with(".__new(") {
+        let mut depth = 1;
+        let mut quote: Option<char> = None;
+
+        for (i, c) in text[at..].char_indices() {
+            match (quote, c) {
+                (Some(q), _) if c == q => quote = None,
+
+                (Some(_), _) => {}
+
+                (None, '"' | '\'' | '`') => quote = Some(c),
+
+                (None, '(') => depth += 1,
+
+                (None, ')') => {
+                    depth -= 1;
+
+                    if depth == 0 {
+                        return Some(column(at + i + 1));
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        return None;
+    }
+
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let end = text[at..]
+        .find(|c: char| !is_word(c))
+        .map_or(text.len(), |i| at + i);
+    let rest = &text[end..];
+    let base = rest.starts_with(['.', ':']) && !rest.starts_with("..") && !rest.starts_with("::");
+
+    (base && end > at).then(|| column(end))
 }
 
 /// Where a caret inside a call in an intrinsic's argument stands in

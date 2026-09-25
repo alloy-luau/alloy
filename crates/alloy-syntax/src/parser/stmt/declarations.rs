@@ -236,8 +236,9 @@ impl<'a> Parser<'a> {
             return self.local_function(start, attributes, is_const);
         }
 
-        // `local Ok(v) = e [else ... end]`: a pattern binding.
-        if self.at_name() && self.text_at(1) == "(" && self.pattern_local_follows() {
+        // `local Ok(v) = e [else ... end]` and `local P { x } = e`: a
+        // pattern binding.
+        if self.pattern_local_follows() {
             let keyword = TokSpan::new(keyword_at, keyword_at + 1);
             let pattern = self.pattern()?;
             self.expect("=")?;

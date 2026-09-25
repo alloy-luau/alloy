@@ -657,8 +657,20 @@ impl<'s> Scan<'s> {
         }
 
         // `local Pat(x) = e` binds through a pattern, not by this name.
-        if self.is_name(j) && self.at(j + 1, "(") {
+        // So does `local Pt { x } = e`: `Pt` names the struct, and the
+        // braces hold the names. Either one can take a dotted path.
+        let mut head = j;
+
+        while self.is_name(head) && self.at(head + 1, ".") && self.is_name(head + 2) {
+            head += 2;
+        }
+
+        if self.is_name(head) && self.at(head + 1, "(") {
             return out;
+        }
+
+        if self.is_name(head) && self.at(head + 1, "{") {
+            return self.pattern_names(head + 1).0;
         }
 
         // `local { a, b = c } = t` and `local [ x, ...rest ] = t` bind
@@ -733,7 +745,15 @@ impl<'s> Scan<'s> {
                     continue;
                 }
 
-                _ if self.is_name(j) && !self.at(j + 1, "=") => out.push(j),
+                // A name before `(`, `{` or `.`, or after `.`, names a
+                // variant or a struct in a nested pattern: `Some(v)`,
+                // `Pt { x }`, `Kind.Big`.
+                _ if self.is_name(j)
+                    && !matches!(self.t(j + 1), "=" | "(" | "{" | ".")
+                    && self.prev(j) != "." =>
+                {
+                    out.push(j)
+                }
 
                 _ => {}
             }

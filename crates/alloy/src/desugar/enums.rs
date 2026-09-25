@@ -2305,7 +2305,24 @@ impl<'s> Desugar<'s> {
     pub(crate) fn pattern_local(&mut self, p: &PatternLocal) {
         let anchor = self.byte_start(p.span);
         let value = self.render_to_string(&p.value);
-        let temp = self.hoist_text(value, anchor);
+        // The check artifact gives each pattern a local of its own. Two
+        // patterns that share a temp give it the union of both values,
+        // and a struct test does not narrow a union.
+        let temp = match self.options.check {
+            true => {
+                self.bump_temp();
+                let name = format!("_v{}", self.temp_next);
+                self.hoists.push(Hoist::Fresh {
+                    name: name.clone(),
+                    value: HoistValue::Text(value),
+                    anchor,
+                });
+
+                name
+            }
+
+            false => self.hoist_text(value, anchor),
+        };
         let mut c = Compiled::default();
         self.compile_pattern(&p.pattern, &temp, &mut c);
         let test = join_tests(&c.tests);
@@ -3881,5 +3898,42 @@ mod tests {
             messages(&gap),
             vec!["this match is not exhaustive; add a `default` arm"]
         );
+    }
+
+    /// `local Pt { x = y } = s` binds through a struct pattern, as the
+    /// `if local` form does. `Pt` names the struct: the unused-name lint
+    /// reads the names in the braces, and a nested `Pt { x }` too. The
+    /// check artifact gives each pattern a local of its own, so two
+    /// patterns over two structs do not share one union.
+    #[test]
+    fn a_struct_pattern_local_binds_the_names_in_its_braces() {
+        let head = "struct Pt as\n    x: number\nend\nstruct Seg as\n    a: Pt\nend\nconst s = new Seg { a = new Pt { x = 1 } }\n";
+        let src = format!(
+            "{head}if local Pt {{ x }} = s.a then\n    print(x)\nend\nlocal Seg {{ a = Pt {{ x = ax }} }} = s\nconst Pt {{ x = only }} = s.a\nprint(ax, only)\n"
+        );
+        let out = crate::compile(&src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(unused(&out.lints).is_empty(), "{:?}", out.lints);
+        assert!(
+            out.ship.contains("local ax = _1.a.x") && out.ship.contains("const only = _1.x"),
+            "{}",
+            out.ship
+        );
+
+        assert!(
+            out.check.contains("\nlocal _v1 = s if not")
+                && out.check.contains("\nlocal _v1 = s.a if not"),
+            "{}",
+            out.check
+        );
+
+        let unread =
+            crate::compile(&format!("{head}if local Pt {{ x }} = s.a then\nend\n")).unwrap();
+        let fixes: Vec<String> = unused(&unread.lints)
+            .iter()
+            .filter_map(|l| l.fix.as_ref().map(|f| f.replacement.clone()))
+            .collect();
+        assert_eq!(fixes, ["x = _x"]);
     }
 }

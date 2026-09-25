@@ -109,6 +109,12 @@ impl<'a> Parser<'a> {
 
                         let path = TokSpan::new(name_start, self.pos);
 
+                        // `B.Gem { n }` names a struct through a module
+                        // or a namespace.
+                        if self.at("{") {
+                            return self.struct_pattern(Some(path), start);
+                        }
+
                         if !self.at("(") {
                             return Ok(Pattern::Path(path));
                         }

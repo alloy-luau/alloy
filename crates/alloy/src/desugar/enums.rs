@@ -921,7 +921,11 @@ impl<'s> Desugar<'s> {
 
             Pattern::Struct { name, fields, .. } => {
                 let test = |d: &Self, at: &str| match name {
-                    Some(n) => format!("getmetatable({}) == {}", d.any_cast(at), d.text_of(*n)),
+                    Some(n) => format!(
+                        "getmetatable({}) == {}",
+                        d.any_cast(at),
+                        d.struct_pattern_name(*n)
+                    ),
 
                     None => format!("type({at}) == \"table\""),
                 };
@@ -1778,8 +1782,21 @@ impl<'s> Desugar<'s> {
         })
     }
 
+    /// The name a struct pattern's test compares the metatable with. A
+    /// namespace member renders under one flat name, `N_P`, both by its
+    /// path and by its own name inside the namespace.
+    fn struct_pattern_name(&self, n: TokSpan) -> String {
+        // A macro body joins its tokens with spaces; see `enum_of_path`.
+        let text: String = self.text_of(n).split_whitespace().collect();
+
+        self.namespace_path_name(&text)
+            .or_else(|| self.ns_member_name(&text))
+            .unwrap_or(text)
+    }
+
     /// Whether a struct pattern covers the shape it names: the name is
-    /// a struct this file declares, and every field it names binds.
+    /// a struct this file declares or imports, and every field it names
+    /// binds.
     fn struct_pattern_covers(&self, p: &Pattern) -> bool {
         let Pattern::Struct { name, fields, .. } = p else {
             return self.irrefutable(p);
@@ -1787,8 +1804,13 @@ impl<'s> Desugar<'s> {
         let Some(n) = name else {
             return false;
         };
+        // The import index keys a struct by the name the source writes,
+        // `Gem`, `B.Gem` or `Zoo.Box`.
+        let written: String = self.text_of(*n).split_whitespace().collect();
+        let known = self.structs.contains(&self.struct_pattern_name(*n))
+            || self.declared_fields(&written).is_some();
 
-        self.structs.contains(self.text_of(*n))
+        known
             && fields.iter().all(|f| match &f.pattern {
                 None => true,
 
@@ -3675,5 +3697,44 @@ mod tests {
             assert_eq!(out.map.to_source(name_at), want, "{generated}");
             assert!(!out.map.is_generated(name_at), "{generated}");
         }
+    }
+
+    /// A struct pattern of an imported struct covers it, as one of this
+    /// file's own does. A dotted path names a struct through a module
+    /// or a namespace, and a namespace member tests its flat name.
+    #[test]
+    fn a_struct_pattern_covers_an_imported_or_qualified_struct() {
+        let gem = || vec![("n".to_string(), false)];
+        let options = EmitOptions {
+            import_struct_fields: vec![("Gem".to_string(), gem()), ("B.Gem".to_string(), gem())],
+            ..EmitOptions::default()
+        };
+        let compile = |src: &str| crate::compile_with(src, &options).unwrap();
+
+        let out = compile(
+            "import { Gem } from \"./gem\"\nlocal function f(g: Gem): number\n    return match g with\n        case Gem { n } then n\n    end\nend\nprint(f)\n",
+        );
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        let out = compile(
+            "import * as B from \"./gem\"\nlocal function f(g: B.Gem | number): number\n    return match g with\n        case B.Gem { n } then n\n        case _ then 0\n    end\nend\nprint(f)\n",
+        );
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("getmetatable(g) == B.Gem then g.n"),
+            "{}",
+            out.ship
+        );
+
+        let out = compile(
+            "namespace N\n    struct P\n        x: number\n    end\n    function g(p: P | number): number\n        return match p with\n            case P { x } then x\n            case _ then 0\n        end\n    end\nend\nlocal function f(p: N.P | number): number\n    return match p with\n        case N.P { x } then x\n        case _ then 0\n    end\nend\nprint(f, N.g)\n",
+        );
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            out.ship.matches("getmetatable(p) == N_P then p.x").count(),
+            2,
+            "{}",
+            out.ship
+        );
     }
 }

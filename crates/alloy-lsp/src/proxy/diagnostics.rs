@@ -2633,7 +2633,9 @@ impl State {
             // The child inlines a `local` or a `const` that holds a
             // value. A parameter, an import, or a function has none, and
             // its resolve carries no edit.
-            Some("inlineVariable") if !self.inlines(uri, action) => return false,
+            Some("inlineVariable") if !self.inlines(uri, action, range.map(|r| r.1.0)) => {
+                return false;
+            }
 
             _ => {}
         }
@@ -2679,6 +2681,13 @@ impl State {
         let Some(at) = offset_of(&doc.source, line, character) else {
             return false;
         };
+
+        // A `.config.aly` is one `export default` table, and the child
+        // writes the new `local` between `export default` and `const`.
+        if crate::config_aly::is_config(uri) {
+            return false;
+        }
+
         let (start, end) = keywords::word_range(&doc.source, at);
         let word = &doc.source[start..end];
         let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
@@ -2693,8 +2702,34 @@ impl State {
         let rest = &doc.source[start..];
         let word_at = start + rest.len() - rest.trim_start_matches([' ', '\t']).len();
         let head = &doc.source[line_start..word_at];
+        // A key, `{ alpha = 1 }`, and a method name, `cp:advance`, name
+        // no value: the child writes `local extracted = alpha`. The
+        // braces of `new S { }` and a `?.` or `!.` chain lower to
+        // generated text, and there the child's edit comes back empty.
+        let before = doc.source[..start].trim_end();
+        let after = &doc.source[end..];
+        let key = before.ends_with(['{', ',', ';'])
+            && after.trim_start().starts_with('=')
+            && !after.trim_start().starts_with("==");
+        let method = doc.source[..start].ends_with(':') && !doc.source[..start].ends_with("::");
+        let chain = doc.source[line_start..start]
+            .rsplit(|c: char| !(c.is_alphanumeric() || "_.:?![]".contains(c)))
+            .next()
+            .unwrap_or("");
+        let nil_safe = ["?.", "!.", "?[", "!["]
+            .iter()
+            .any(|s| chain.contains(s) || after.starts_with(s));
+        // A caret on the `{` of `new S {` sits in the braces too.
+        let past = doc.source[at..]
+            .chars()
+            .next()
+            .map_or(at, |c| at + c.len_utf8());
 
         !branch
+            && !key
+            && !method
+            && !nil_safe
+            && !super::completion::in_constructor_braces(&doc.source, past)
             && !declares_a_name_at(&doc.source, at)
             && !crate::context::takes_a_type(head)
             && !names_a_parameter(&doc.source, start)
@@ -2718,7 +2753,11 @@ impl State {
 
     /// Whether the name an "Inline variable" action names is a `local`
     /// or a `const` of the file, which the child can inline.
-    fn inlines(&self, uri: &str, action: &Value) -> bool {
+    ///
+    /// The child deletes the line that declares the name and writes its
+    /// value at each use. A line the lowering rewrote, `local cp = new S
+    /// { }`, gives an edit over generated text, and resolve drops it.
+    fn inlines(&self, uri: &str, action: &Value, line: Option<u32>) -> bool {
         let name = action
             .get("title")
             .and_then(Value::as_str)
@@ -2727,22 +2766,94 @@ impl State {
         let Some((name, doc)) = name.zip(self.docs.get(uri)) else {
             return true;
         };
-
-        doc.bindings.iter().any(|b| {
+        let bound = doc.bindings.iter().any(|b| {
             let words: Vec<&str> = b.prefix.split_whitespace().collect();
 
             b.name == name
                 && words.iter().any(|w| matches!(*w, "local" | "const"))
                 && !words.contains(&"function")
-        })
+        });
+        let declares = |text: &str| {
+            let text = text.trim_start();
+            let text = text.strip_prefix("export ").unwrap_or(text);
+            let text = text.strip_prefix("global ").unwrap_or(text);
+
+            ["local ", "const "].iter().any(|k| {
+                text.strip_prefix(k).is_some_and(|rest| {
+                    rest.strip_prefix(name).is_some_and(|tail| {
+                        !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                    })
+                })
+            })
+        };
+        let Some((at, text)) = doc
+            .source
+            .lines()
+            .enumerate()
+            .take(line.map_or(usize::MAX, |l| l as usize + 1))
+            .filter(|(_, text)| declares(text))
+            .last()
+        else {
+            return bound;
+        };
+        let at = at as u32;
+        let width = text.encode_utf16().count() as u32;
+
+        bound && doc.copies_source(doc.to_shadow(at, 0), doc.to_shadow(at, width))
     }
 
-    /// Whether a resolved "Extract to local variable" leaves each
-    /// source it edits parsing. The child reads the lowered Luau and
-    /// can write `local extracted = local function`. The check is the
-    /// one `--fix` gives a lint's rewrite. Other actions pass.
+    /// Puts parentheses around a value a resolved "Inline variable"
+    /// writes where the use goes on with `.`, `:`, `[` or `(`. The child
+    /// writes `{ stage = 2 }.stage` and `"hi":upper()`, and neither
+    /// parses. A name, a call, or an index needs none.
+    pub(crate) fn wrap_inlined(&self, action: &mut Value) {
+        if action.pointer("/data/type").and_then(Value::as_str) != Some("inlineVariable") {
+            return;
+        }
+
+        let Some(changes) = action
+            .pointer_mut("/edit/changes")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+
+        for (uri, edits) in changes.iter_mut() {
+            let Some(doc) = self.docs.get(uri) else {
+                continue;
+            };
+
+            for e in edits.as_array_mut().into_iter().flatten() {
+                let end = e
+                    .get("range")
+                    .and_then(range_of)
+                    .and_then(|(_, (l, c))| offset_of(&doc.source, l, c));
+                let text = e.get("newText").and_then(Value::as_str).unwrap_or("");
+                let goes_on = end.is_some_and(|end| {
+                    let rest = &doc.source[end..];
+
+                    rest.starts_with(['.', ':', '[', '(']) && !rest.starts_with("..")
+                });
+                // `x.y = 1` parses only where `x` is a prefix expression.
+                let prefix = alloy_syntax::parse_one(&format!("{text}.y = 1")).is_ok();
+
+                if goes_on && !text.is_empty() && !prefix {
+                    e["newText"] = json!(format!("({text})"));
+                }
+            }
+        }
+    }
+
+    /// Whether a resolved "Extract to local variable" or "Inline
+    /// variable" leaves each source it edits parsing. The child reads
+    /// the lowered Luau and can write `local extracted = local function`.
+    /// The check is the one `--fix` gives a lint's rewrite. Other
+    /// actions pass.
     pub(crate) fn extract_parses(&self, action: &Value) -> bool {
-        if action.pointer("/data/type").and_then(Value::as_str) != Some("extractVariable") {
+        if !matches!(
+            action.pointer("/data/type").and_then(Value::as_str),
+            Some("extractVariable" | "inlineVariable")
+        ) {
             return true;
         }
 

@@ -1713,8 +1713,12 @@ impl Server {
 
             map_from_shadow(result, ctx.as_deref(), &st);
 
-            // An extract that breaks the parse applies nothing, and its
-            // rename has no name to rename.
+            if method == "codeAction/resolve" {
+                st.wrap_inlined(result);
+            }
+
+            // An extract or an inline that breaks the parse applies
+            // nothing, and an extract's rename has no name to rename.
             if method == "codeAction/resolve"
                 && !st.extract_parses(result)
                 && let Some(action) = result.as_object_mut()
@@ -1726,7 +1730,7 @@ impl Server {
                     "method": "window/showMessage",
                     "params": {
                         "type": 2,
-                        "message": "Alloy: this extract would leave code that does not parse, so it does not apply here.",
+                        "message": "Alloy: this refactor would leave code that does not parse, so it does not apply here.",
                     },
                 }));
             }

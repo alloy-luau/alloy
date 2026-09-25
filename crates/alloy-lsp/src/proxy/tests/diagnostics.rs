@@ -1770,6 +1770,78 @@ fn an_action_with_no_edit_leaves_the_list() {
     assert!(st.keeps_child_action(&extract, uri, at(4, 20)));
 }
 
+/// A key and a method name hold no value, and the child extracted
+/// `local extracted = alpha`. The braces of `new S { }`, a `?.` or `!.`
+/// chain, and the `local` a `new` fills lower to generated text, and
+/// there the resolve came back with no edit. Each one leaves the list.
+#[test]
+fn a_refactor_over_a_key_or_lowered_text_leaves_the_list() {
+    let src = concat!(
+        "struct S\n",
+        "  n: number\n",
+        "end\n",
+        "impl S\n",
+        "  function m(self): number return self.n end\n",
+        "end\n",
+        "local cp = new S { n = 1 }\n",
+        "local t = { alpha = 1 }\n",
+        "local s: S? = cp\n",
+        "print(cp:m(), s?.n, s!.n, t)\n",
+    );
+    let (st, uri) = one_file(src);
+    let at = |l: u32, c: u32| Some(((l, c), (l, c)));
+    let inline = |name: &str| json!({ "title": format!("Inline variable '{name}'"), "kind": "refactor.inline", "data": { "type": "inlineVariable" } });
+    let extract =
+        json!({ "title": "x", "kind": "refactor.extract", "data": { "type": "extractVariable" } });
+
+    // `{`, the key and the value of `new S { n = 1 }`, the key `alpha`,
+    // the method `m`, and the field of `s?.n` and of `s!.n`.
+    for (l, c) in [(6, 17), (6, 19), (6, 23), (7, 12), (9, 9), (9, 17), (9, 23)] {
+        assert!(!st.keeps_child_action(&extract, uri, at(l, c)), "{l}:{c}");
+    }
+    assert!(st.keeps_child_action(&extract, uri, at(9, 26)));
+
+    assert!(!st.keeps_child_action(&inline("cp"), uri, at(9, 6)));
+    assert!(st.keeps_child_action(&inline("t"), uri, at(9, 26)));
+}
+
+/// "Inline variable" wrote `{ stage = 2 }.stage`, which does not parse.
+/// A value that is no prefix expression takes parentheses where the use
+/// goes on with `.`, `:`, `[` or `(`; a name needs none.
+#[test]
+fn an_inlined_table_takes_parentheses_before_a_member() {
+    let src = "local tb = { stage = 2 }\nlocal n = tb\nprint(tb.stage, n.stage, tb)\n";
+    let (st, uri) = one_file(src);
+    let edit = |(l, c): (u32, u32), width: u32, text: &str| {
+        json!({
+            "range": {
+                "start": { "line": l, "character": c },
+                "end": { "line": l, "character": c + width },
+            },
+            "newText": text,
+        })
+    };
+    let mut action = json!({
+        "data": { "type": "inlineVariable" },
+        "edit": { "changes": { uri: [
+            edit((2, 6), 2, "{ stage = 2 }"),
+            edit((2, 16), 1, "tb"),
+            edit((2, 25), 2, "{ stage = 2 }"),
+        ] } },
+    });
+
+    st.wrap_inlined(&mut action);
+
+    let texts: Vec<&str> = action["edit"]["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .filter_map(|e| e["newText"].as_str())
+        .collect();
+    assert_eq!(texts, ["({ stage = 2 })", "tb", "{ stage = 2 }"]);
+    assert!(st.extract_parses(&action));
+}
+
 /// A field one edit away from a field the struct has: the report
 /// names it, and the quick fix renames the word the file wrote. The
 /// constructor lists the fields, and the nearest one answers.

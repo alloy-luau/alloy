@@ -705,7 +705,7 @@ impl<'a> Parser<'a> {
         // `local n = v as number` leaves `as number` behind: the parser
         // reaches it as a statement of its own.
         if self.at("as") {
-            return Err(self.err("`as` is not a cast here; use `::`"));
+            return Err(self.err(super::super::AS_CAST));
         }
 
         if matches!(self.text(), "new" | "try" | "await") && self.prefix_word_here() {

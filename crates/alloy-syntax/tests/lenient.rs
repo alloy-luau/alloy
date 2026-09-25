@@ -966,3 +966,23 @@ fn a_not_equal_typo_is_one_report() {
     );
     assert!(parser::parse(src, &lexed.toks).is_err());
 }
+
+/// `print(n as number)` drew "expected `)`, found `as`", and three casts
+/// in one `new` drew 13 reports. Each `x as T` in a value position now
+/// draws the `::` advice once, and the lenient parse reads it as `::`.
+/// A match head keeps `as` for its alias, and `as` stays a name.
+#[test]
+fn an_as_cast_is_one_report_at_every_value_position() {
+    let src = "print(n as number)\nlocal t = { n as number, [n as number] }\nlocal p = (n as number)\nlocal i = if c then n as number else 0\nprint(new P { a = x as number, b = x as string })\nlocal r = match f(x as number) as v with\n    case 1 then v\n    default 0\nend\nlocal as = 2\nprint(as, t, p, i, r)\n";
+    assert_eq!(lenient(src), (0, 8));
+
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.message == "`as` is not a cast here; use `::`"),
+        "{diagnostics:?}"
+    );
+    assert!(parser::parse(src, &lexed.toks).is_err());
+}

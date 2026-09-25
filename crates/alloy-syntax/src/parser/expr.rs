@@ -63,10 +63,11 @@ impl<'a> Parser<'a> {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
     ) -> Result<T, ParseError> {
-        let saved = self.no_method_call;
+        let saved = (self.no_method_call, self.match_head);
         self.no_method_call = 0;
+        self.match_head = 0;
         let r = f(self);
-        self.no_method_call = saved;
+        (self.no_method_call, self.match_head) = saved;
 
         r
     }
@@ -170,7 +171,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn simple_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
-        let mut e = match self.text() {
+        let e = match self.text() {
             "nil" => {
                 self.bump();
 
@@ -319,10 +320,22 @@ impl<'a> Parser<'a> {
             },
         };
 
-        // `expr :: T`, `expr is T`, and `expr satisfies T` bind more tightly
-        // than any binary operator.
+        self.type_suffixes(start, e)
+    }
+
+    /*
+    `expr :: T`, `expr is T`, and `expr satisfies T` bind more tightly
+    than any binary operator.
+
+    The loop has a frame of its own. `simple_expr` sits on the stack once
+    per level of nesting, and a larger frame there overflowed the stack
+    of a test thread before the depth guard stopped the parse.
+    */
+    #[inline(never)]
+    fn type_suffixes(&mut self, start: usize, mut e: Expr) -> Result<Expr, ParseError> {
         loop {
-            if self.at("::") {
+            if self.at("::") || self.as_cast_here() {
+                self.as_cast_report()?;
                 self.bump();
                 let ty = self.type_()?;
                 e = Expr::TypeAssert {
@@ -354,6 +367,34 @@ impl<'a> Parser<'a> {
         }
 
         Ok(e)
+    }
+
+    /// `as T` after a value on one line: a cast another language writes.
+    /// `as` is a name in Luau, but no Luau statement reads `x as T`, so
+    /// a name after the word marks the cast. A match head keeps `as` for
+    /// the alias of its value.
+    fn as_cast_here(&self) -> bool {
+        self.at("as")
+            && self.match_head == 0
+            && !self.newline_before_pos()
+            && matches!(self.kind_at(1), Some(TokKind::Ident))
+    }
+
+    /// `n as number` is another language's cast. The report names the
+    /// Luau form, and the editor reads `as` as `::`, so one cast is one
+    /// report.
+    fn as_cast_report(&mut self) -> Result<(), ParseError> {
+        if !self.at("as") {
+            return Ok(());
+        }
+
+        if !self.lenient {
+            return Err(self.err(AS_CAST));
+        }
+
+        self.report(AS_CAST);
+
+        Ok(())
     }
 
     /// The report for `f(x)?`, Rust's early return, with the call the

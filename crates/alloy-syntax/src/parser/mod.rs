@@ -146,6 +146,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         pattern_arg: 0,
         value_block: false,
         value_lines: 0,
+        match_head: 0,
     };
 
     let block = p.block()?;
@@ -173,6 +174,9 @@ pub const MAX_DIAGNOSTICS: usize = 200;
 /// every token, so the formatter reads such a file and writes the `as`
 /// in, and the server offers the same rewrite as a quick fix.
 pub const NEEDS_AS: &str = "needs `as` before its body";
+
+/// The report for `x as T`, a cast another language writes.
+const AS_CAST: &str = "`as` is not a cast here; use `::`";
 
 /*
 Parses with recovery. The tree always covers every token: a stretch the
@@ -204,6 +208,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         pattern_arg: 0,
         value_block: false,
         value_lines: 0,
+        match_head: 0,
     };
 
     let mut stmts = Vec::new();
@@ -287,6 +292,9 @@ struct Parser<'a> {
     /// or a `[` that opens a line starts the next thing, not a call or an
     /// index of the line above; Luau code outside keeps Luau's reading.
     value_lines: u32,
+    /// Above zero in the scrutinees of a match head, where `as` names
+    /// the alias of the value, `match x as v with`, and is no cast.
+    match_head: u32,
 }
 
 impl<'a> Parser<'a> {

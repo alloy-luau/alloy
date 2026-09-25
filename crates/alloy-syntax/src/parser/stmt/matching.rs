@@ -179,7 +179,10 @@ impl<'a> Parser<'a> {
         let mut aliases = Vec::new();
 
         loop {
-            scrutinees.push(self.expr()?);
+            self.match_head += 1;
+            let scrutinee = self.expr();
+            self.match_head -= 1;
+            scrutinees.push(scrutinee?);
             aliases.push(self.match_alias()?);
 
             if !self.eat(",") {

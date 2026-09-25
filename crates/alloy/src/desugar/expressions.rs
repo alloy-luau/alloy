@@ -241,17 +241,24 @@ impl<'s> Desugar<'s> {
                 args,
                 ..
             } if self.is_signal_new(func) => {
+                // An alias of the std `Signal` is a local the import
+                // writes, and the call reads through it.
+                let mut head = format!("{}.Signal", self.std());
+
                 if let Expr::Index { object, .. } = func.as_ref()
                     && let Expr::Name(n) = object.as_ref()
                 {
-                    self.check_std_name(*n, "Signal");
+                    match self.is_signal_alias(self.text_of(*n)) {
+                        true => head = self.text_of(*n).to_string(),
+
+                        false => self.check_std_name(*n, "Signal"),
+                    }
                 }
 
-                let std = self.std();
                 let text = self.text_of(*t).to_string();
                 let targs = pack_type_args(&self.lower_type_args(&text));
                 let a = self.args_text(args);
-                self.generate(anchor, &format!("{std}.Signal.new{targs}{a}"));
+                self.generate(anchor, &format!("{head}.new{targs}{a}"));
             }
 
             // An element read out of a bounded `T[]`. The cast is the
@@ -646,9 +653,16 @@ impl<'s> Desugar<'s> {
         };
 
         (matches!(object.as_ref(), Expr::Name(n)
-            if self.text_of(*n) == "Signal" && !self.is_local("Signal"))
+            if (self.text_of(*n) == "Signal" && !self.is_local("Signal"))
+                || self.is_signal_alias(self.text_of(*n)))
             || through_std(object))
             && self.text_of(*f) == "new"
+    }
+
+    /// Whether a name is the alias an import gives the std `Signal`:
+    /// `import { Signal as Sig } from "@alloy/std/signal"`.
+    pub(crate) fn is_signal_alias(&self, name: &str) -> bool {
+        self.std_aliases.get(name).is_some_and(|n| n == "Signal")
     }
 
     pub(crate) fn is_coalesce(&self, op: TokSpan) -> bool {
@@ -1763,7 +1777,11 @@ impl<'s> Desugar<'s> {
                 };
                 // `Signal.new<T...>` takes a type pack, not a list of
                 // type parameters, so its arguments go in parentheses.
-                let t = if prefix == "__alloy.Signal.new" {
+                let t = if prefix == "__alloy.Signal.new"
+                    || prefix
+                        .strip_suffix(".new")
+                        .is_some_and(|head| self.is_signal_alias(head))
+                {
                     pack_type_args(&t)
                 } else {
                     t
@@ -2183,6 +2201,15 @@ mod tests {
             "{}",
             out.check
         );
+
+        // An alias of the import takes the pack too, alone or in a chain.
+        let aliased = "import { Signal as Sig } from \"@alloy/std/signal\"\nlocal s = Sig.new<<number>>()\nlocal c = Sig.new<<string>>():Connect(print)\nprint(s, c)\n";
+        let out = crate::compile(aliased).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in ["Sig.new<<(number)>>()", "Sig.new<<(string)>>():Connect"] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
     }
 
     #[test]

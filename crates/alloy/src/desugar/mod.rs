@@ -517,6 +517,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ),
     });
 
+    let (std_imports, std_namespaces, std_aliases) = std_imports(src, toks, chunk);
     let mut d = Desugar {
         src,
         toks,
@@ -636,8 +637,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         deserializable: HashSet::new(),
         cloneable: HashSet::new(),
         defaultable: HashSet::new(),
-        std_imports: std_imports(src, toks, chunk).0,
-        std_namespaces: std_imports(src, toks, chunk).1,
+        std_imports,
+        std_namespaces,
+        std_aliases,
         std_reported: HashSet::new(),
         private_types: HashSet::new(),
         self_prologue: None,
@@ -947,17 +949,23 @@ fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
 }
 
 /// The std names a file's imports bind under their own names, then the
-/// locals its star imports of the std bind. A name under an alias binds
-/// the alias, a local the import writes.
+/// locals its star imports of the std bind, then each alias of a std
+/// name with the name. A name under an alias binds the alias, a local
+/// the import writes.
 fn std_imports(
     src: &str,
     toks: &[Tok],
     chunk: &Chunk,
-) -> (HashSet<String>, HashMap<String, String>) {
+) -> (
+    HashSet<String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+) {
     use alloy_syntax::ast::ImportKind;
 
     let mut out = HashSet::new();
     let mut stars = HashMap::new();
+    let mut aliases = HashMap::new();
 
     for i in imports_in(&chunk.block) {
         let spec = i.path.text(src, toks).trim_matches(['"', '\'']);
@@ -975,13 +983,23 @@ fn std_imports(
         | ImportKind::Both(_, specs)
         | ImportKind::Namespace(_, specs) = &i.kind
         {
-            for s in specs.iter().filter(|s| s.alias.is_none()) {
-                out.insert(s.name.text(src, toks).to_string());
+            for s in specs {
+                let name = s.name.text(src, toks).to_string();
+
+                match s.alias {
+                    Some(a) => {
+                        aliases.insert(a.text(src, toks).to_string(), name);
+                    }
+
+                    None => {
+                        out.insert(name);
+                    }
+                }
             }
         }
     }
 
-    (out, stars)
+    (out, stars, aliases)
 }
 
 /// Every `import` of a block at any depth, in source order. An import
@@ -1391,6 +1409,9 @@ struct Desugar<'s> {
     /// The locals a star import of the std binds, `import * as s`, each
     /// with the module it names; the facade is `""`.
     std_namespaces: HashMap<String, String>,
+    /// Each alias an import gives a std name, `Signal as Sig`, with the
+    /// name.
+    std_aliases: HashMap<String, String>,
     /// The std names already reported as missing their import. The first
     /// use carries the report, and its fix writes the one line.
     std_reported: HashSet<String>,

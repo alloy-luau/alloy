@@ -2706,3 +2706,21 @@ fn a_list_over_several_lines_hovers_as_its_declarations() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A hover on a method name binds the receiver's type arguments, as
+/// signature help does: `parts:take()` on a `Pool<Part>` reads
+/// `take(): Part`, not the `T` of the impl.
+#[test]
+fn a_method_hover_binds_the_receiver_arguments() {
+    let src = "struct Pool<T>\n  free: { T }\nend\n\nimpl Pool<T>\n  function take(self): T\n    return self.free[1]\n  end\nend\n\nlocal parts: Pool<Part> = new Pool { free = {} }\nprint(parts:take())\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed = "```alloy\nfunction Pool:take(): T\n```";
+
+    assert_eq!(
+        bind_hover_receiver(printed, doc, 11, 13).as_deref(),
+        Some("```alloy\nfunction Pool:take(): Part\n```")
+    );
+    // Off a call there is no receiver to bind.
+    assert_eq!(bind_hover_receiver(printed, doc, 10, 6), None);
+}

@@ -1398,6 +1398,12 @@ impl Server {
                                 text = named;
                             }
 
+                            // `parts:take()` on a `Pool<Part>` binds the
+                            // `T` of the impl, as signature help does.
+                            if let Some(bound) = bind_hover_receiver(&text, doc, line, character) {
+                                text = bound;
+                            }
+
                             if let Some(dropped) = drop_bound_intersections(&text, doc) {
                                 text = dropped;
                             }

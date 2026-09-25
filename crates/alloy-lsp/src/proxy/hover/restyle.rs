@@ -1711,6 +1711,29 @@ pub(crate) fn bind_receiver_arguments(
     (out != body).then(|| format!("{fence}\n{out}\n```{tail}"))
 }
 
+/// `bind_receiver_arguments` for a hover on the method's name:
+/// `parts:take()` on `local parts: Pool<Part>` reads `take(): Part`.
+/// The caret sits on the name, so the call's `(` stands after the word.
+pub(crate) fn bind_hover_receiver(
+    value: &str,
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let text = doc.source.lines().nth(line as usize)?;
+    let rest = text.chars().skip(character as usize);
+    let word = rest
+        .clone()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .count();
+
+    if rest.clone().nth(word) != Some('(') {
+        return None;
+    }
+
+    bind_receiver_arguments(value, doc, line, character + word as u32 + 1)
+}
+
 /// The column of the callee's name on the cursor's line, for a
 /// signature label `function Owner:name(` or `function name(`.
 fn callee_column(doc: &Doc, label: &str, line: u32, character: u32) -> Option<u32> {

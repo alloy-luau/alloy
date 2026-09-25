@@ -1,6 +1,7 @@
 local lest = require("@lest")
 local describe, it, expect = lest.describe, lest.it, lest.expect
 local shim = require("../shim")
+local alloy = require("../alloy")
 -- Each chunk has its own globals on this VM, so the doubles bind here.
 local typeof, Vector3, Color3, UDim2, Enum, Instance, task, game, workspace =
 	shim.typeof, shim.Vector3, shim.Color3, shim.UDim2, shim.Enum, shim.Instance, shim.task, shim.game, shim.workspace
@@ -62,5 +63,26 @@ describe("shim", function()
 		expect(count).toBe(0)
 		expect(shim.step()).toBe(1)
 		expect(count).toBe(1)
+	end)
+
+	-- An async test runs on a thread that cannot yield; the spec hands
+	-- its Future to `settle`, which steps the parked threads.
+	it("settles a Future whose thread a wait parked", function()
+		local f = alloy.future(function()
+			task.wait()
+			task.wait(1)
+			return 5
+		end)
+		expect(f:is_settled()).toBe(false)
+		expect(alloy.await(shim.settle(f))).toBe(5)
+	end)
+
+	it("fails a Future that no parked thread settles", function()
+		local f = alloy.future(function()
+			coroutine.yield()
+		end)
+		expect(function()
+			shim.settle(f)
+		end).toThrow("the test awaits a Future that no parked thread settles")
 	end)
 end)

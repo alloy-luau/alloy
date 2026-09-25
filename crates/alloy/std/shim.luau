@@ -28,6 +28,9 @@ if game ~= nil then
 		step = function()
 			return 0
 		end,
+		settle = function(future)
+			return future
+		end,
 	}
 end
 
@@ -807,6 +810,20 @@ function shim.step()
 		end
 	end
 	return #threads
+end
+
+-- The runner calls an async test on its own thread, which cannot yield,
+-- so the spec hands the test's Future here first. The parked threads
+-- step until it settles. The cap stops a loop that parks forever.
+function shim.settle(future)
+	local steps = 0
+	while not future:is_settled() do
+		steps += 1
+		if steps > 10000 or shim.step() == 0 then
+			error("the test awaits a Future that no parked thread settles", 0)
+		end
+	end
+	return future
 end
 
 -- Debris: the one service with behavior of its own. `AddItem` parks the

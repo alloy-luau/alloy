@@ -899,8 +899,16 @@ pub fn spec(
 
     for (test, is_async) in &out.tests {
         if *is_async {
+            // lest calls the test on a thread that cannot yield. The shim
+            // steps the threads a `task.wait` parked until the Future
+            // settles, so the `await` here returns at once.
+            let future = if config.test.shim {
+                format!("__shim.settle({test}())")
+            } else {
+                format!("{test}()")
+            };
             text.push_str(&format!(
-                "    __lest.it({}, function()\n        __alloy.await({test}())\n    end)\n",
+                "    __lest.it({}, function()\n        __alloy.await({future})\n    end)\n",
                 luau_string(test)
             ));
         } else {
@@ -1342,8 +1350,28 @@ mod tests {
         );
         assert!(text.contains("__lest.describe(\"m\", function()"), "{text}");
         assert!(text.contains("__lest.it(\"plain\", plain)"), "{text}");
-        assert!(text.contains("__alloy.await(later())"), "{text}");
+        // lest calls a test on a thread that cannot yield, so the shim
+        // steps the parked threads until the Future settles.
+        assert!(
+            text.contains("__alloy.await(__shim.settle(later()))"),
+            "{text}"
+        );
         assert!(!text.contains("__alloy.test("), "{text}");
+
+        // Without the shim nothing parks, and the Future goes to `await`.
+        let mut plain = Config::default();
+        plain.test.shim = false;
+        let (text, _, _) = spec(
+            &plain,
+            Path::new("/none"),
+            Path::new("src/m.aly"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert!(text.contains("__alloy.await(later())"), "{text}");
     }
 
     /// A `.alx` file writes a spec too. The slice follows the names the

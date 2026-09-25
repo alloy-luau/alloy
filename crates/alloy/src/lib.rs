@@ -591,6 +591,24 @@ mod tests {
         // `let` stays a name.
         assert!(messages("local let = 1\nprint(let)\n").is_empty());
 
+        // `export *` said only that the line was not a statement. The
+        // report names the forms Alloy takes, with the path written.
+        let star = "export * from \"./kinds\"\n";
+        assert_eq!(
+            messages(star),
+            vec![
+                "Alloy has no `export *`; name each export, `export { A, B } from \"./kinds\"`, or write `import * as M from \"./kinds\"` and then `export { M }`"
+            ]
+        );
+        assert_eq!(docs::kind_for(&messages(star)[0]), "ImportError");
+        assert_eq!(compile(star).unwrap().diagnostics[0].start, 0);
+        assert_eq!(
+            messages("export * as K from './kinds'\n"),
+            vec![
+                "Alloy has no `export * as`; write `import * as K from './kinds'` and then `export { K }`"
+            ]
+        );
+
         // A declaration `declare` does not take, in a definitions file.
         let options = EmitOptions {
             definitions: true,

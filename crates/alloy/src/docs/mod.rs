@@ -98,8 +98,9 @@ const KIND_RULES: &[(&[&str], &str)] = &[
         "TypeError",
     ),
     // The removal report names a declaration kind, which the rules
-    // below would read as the kind's own family.
-    (&["`global` is removed"], "ImportError"),
+    // below would read as the kind's own family. The `export *` report
+    // names the forms Alloy takes, and the same holds.
+    (&["`global` is removed", "has no `export *"], "ImportError"),
     // An attribute's argument list that never closes. The report names
     // the attribute, which could reach any rule below.
     (&["and never closes it; write"], "SyntaxError"),

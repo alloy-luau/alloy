@@ -524,6 +524,34 @@ impl<'a> Parser<'a> {
 
             "export" if self.text_at(1) == "{" => self.export_list(start, false),
 
+            // `export * from "./m"` is another language's barrel. The
+            // report names the forms Alloy takes, with the path written.
+            "export" if self.text_at(1) == "*" => {
+                let from = (2..6)
+                    .find(|&n| self.text_at(n) == "from")
+                    .map(|n| self.text_at(n + 1))
+                    .filter(|s| s.starts_with(['"', '\'']))
+                    .unwrap_or("\"./m\"");
+                let message = match self.text_at(2) == "as" && self.name_at(3) {
+                    true => {
+                        let local = self.text_at(3);
+
+                        format!(
+                            "Alloy has no `export * as`; write `import * as {local} from {from}` and then `export {{ {local} }}`"
+                        )
+                    }
+
+                    false => format!(
+                        "Alloy has no `export *`; name each export, `export {{ A, B }} from {from}`, or write `import * as M from {from}` and then `export {{ M }}`"
+                    ),
+                };
+
+                Err(ParseError {
+                    offset: self.toks[start].start as usize,
+                    message,
+                })
+            }
+
             "export" if self.text_at(1) == "type" && self.text_at(2) == "{" => {
                 self.bump();
                 self.export_list(start, true)

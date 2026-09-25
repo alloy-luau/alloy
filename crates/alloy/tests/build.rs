@@ -819,6 +819,79 @@ relay({ fire = function(_n: number) end })
 }
 
 /*
+A remote in a namespace skipped the side check: the server fired
+`Net.Up`, which goes from the client, and nothing reported it. The check
+reads the remote by its path, in the file and through a named import, a
+rename, or a star path. A parameter of the namespace's name is no remote.
+*/
+#[test]
+fn a_remote_in_a_namespace_keeps_its_side() {
+    let dir = temp_project("remote-namespace");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/net.aly"),
+        "export namespace Net\n    remote Up(id: string) from client\n    remote Down(n: number) from server\nend\n",
+    )
+    .unwrap();
+    let src = "import { Net } from \"./net\"
+import { Net as N } from \"./net\"
+import * as S from \"./net\"
+namespace Own
+    namespace Inner
+        remote Ping(n: number) from client
+    end
+end
+Net.Up.fire(\"x\")
+N.Down.on(function(n) print(n) end)
+S.Net.Up.fire(\"y\")
+Own.Inner.Ping.fire(1)
+Net.Down.fire_all(1)
+Own.Inner.Ping.on(function(p, n) print(p, n) end)
+local function relay(Own: any)
+    Own.Inner.Ping.fire(2)
+end
+relay(nil)
+";
+    fs::write(dir.join("src/a.server.aly"), src).unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(usize, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| {
+            let line = src[..d.start as usize].matches('\n').count() + 1;
+
+            (line, d.message.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        got,
+        [
+            (
+                9,
+                "`Net.Up` goes from the client; the server cannot fire it"
+            ),
+            (
+                10,
+                "`N.Down` goes from the server; the server cannot handle it"
+            ),
+            (
+                11,
+                "`S.Net.Up` goes from the client; the server cannot fire it"
+            ),
+            (
+                12,
+                "`Own.Inner.Ping` goes from the client; the server cannot fire it"
+            ),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 An imported struct gives its derives to this file: a field of it clones
 and serializes through it. The lookup took the first project struct of
 the name. A private `Inner` in another file then decided it: a clone

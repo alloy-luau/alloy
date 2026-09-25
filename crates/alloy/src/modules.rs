@@ -1371,11 +1371,17 @@ fn keyed_by_binding<T: Clone>(
 
     for (path, decls) in modules {
         for (name, payload) in decls {
+            // `Net.Up` is a member of `Net`, so `import { Net as N }`
+            // reaches it as `N.Up`.
+            let (head, rest) = name
+                .find(['.', ':'])
+                .map_or((name.as_str(), ""), |at| name.split_at(at));
+
             for (_, _, local) in named
                 .iter()
-                .filter(|(p, declared, _)| p == path && declared == name)
+                .filter(|(p, declared, _)| p == path && declared == head)
             {
-                push(local.clone(), payload);
+                push(format!("{local}{rest}"), payload);
             }
 
             for (_, local) in stars.iter().filter(|(p, _)| p == path) {
@@ -1400,24 +1406,46 @@ pub fn import_remotes(
         let Ok(parsed) = alloy_syntax::parse_lenient(text, Default::default()) else {
             return Vec::new();
         };
+        let mut out = Vec::new();
 
-        parsed
-            .chunk
-            .block
-            .stmts
-            .iter()
-            .filter_map(|s| match s.under_default() {
-                alloy_syntax::ast::Stmt::Remote(d) => Some((
-                    d.name.text(text, &parsed.lexed.toks).to_string(),
-                    (d.from_client, d.from_server),
-                )),
+        for stmt in &parsed.chunk.block.stmts {
+            remote_sides(text, &parsed.lexed.toks, stmt, "", &mut out);
+        }
 
-                _ => None,
-            })
-            .collect()
+        out
     });
 
     keyed_by_binding(source, from, aliases, &modules)
+}
+
+/// The remote a statement declares, by its path from the top of the
+/// file, with whether the client and the server fire it. A remote in
+/// `namespace Net` is `Net.Up`, so the side check reads `Net.Up.fire`.
+pub(crate) fn remote_sides(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    stmt: &alloy_syntax::ast::Stmt,
+    prefix: &str,
+    out: &mut Vec<(String, (bool, bool))>,
+) {
+    use alloy_syntax::ast::Stmt;
+
+    match stmt.under_default() {
+        Stmt::Remote(r) => out.push((
+            format!("{prefix}{}", r.name.text(src, toks)),
+            (r.from_client, r.from_server),
+        )),
+
+        Stmt::Namespace(n) => {
+            let prefix = format!("{prefix}{}.", n.name.text(src, toks));
+
+            for m in &n.members {
+                remote_sides(src, toks, &m.stmt, &prefix, out);
+            }
+        }
+
+        _ => {}
+    }
 }
 
 /// The fields of every struct a module the source imports declares,

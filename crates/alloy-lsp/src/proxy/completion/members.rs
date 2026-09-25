@@ -328,22 +328,25 @@ impl State {
             return;
         };
 
-        if base.contains('.') {
-            return;
-        }
-
-        let here = remote_spec(&doc.source, &base);
+        // `Net.Up` is the remote `Up` in a namespace or a star import:
+        // the file binds the head, and the declaration names the last.
+        // ponytail: the last name alone picks the declaration, so two
+        // namespaces with a remote of one name read the first.
+        let head = base.split('.').next().unwrap_or(&base);
+        let name = base.rsplit('.').next().unwrap_or(&base);
+        let here = remote_spec(&doc.source, name);
         let spec = match here {
             Some(spec) => Some(spec),
 
             // The declaration sits in the module the file imports it
             // from; a name no import bound is not this remote.
             None => imports::bound_names(&doc.source)
-                .contains(&base)
+                .iter()
+                .any(|b| b == head)
                 .then(|| {
                     self.docs
                         .values()
-                        .find_map(|d| remote_spec(&d.source, &base))
+                        .find_map(|d| remote_spec(&d.source, name))
                 })
                 .flatten(),
         };

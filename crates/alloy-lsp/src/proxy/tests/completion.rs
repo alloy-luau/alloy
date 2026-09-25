@@ -1038,6 +1038,45 @@ pub(crate) fn a_remote_offers_the_members_its_side_reaches() {
     assert!(chat.holds("fire", None) && chat.holds("on", None));
     assert!(!chat.holds("call", None));
 }
+/// A remote in a namespace keeps its side in the list: the server's
+/// `Net.Up.` offered `fire` for a remote that goes from the client.
+#[test]
+pub(crate) fn a_remote_in_a_namespace_offers_its_side() {
+    let (mut st, one) = one_file("");
+    st.docs.remove(one);
+    let doc = |src: &str| {
+        Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let uri = "file:///main.server.aly";
+    let src = "import { Net } from \"./net\"\nnamespace Own\n    remote Ping(n: number) from server\nend\nNet.Up.fire(\"x\")\nOwn.Ping.fire_all(1)\n";
+    st.docs.insert(
+        "file:///net.aly".to_string(),
+        doc("export namespace Net\n    remote Up(id: string) from client\nend\n"),
+    );
+    st.docs.insert(uri.to_string(), doc(src));
+    let labels = |line: u32, character: u32| -> Vec<String> {
+        let mut result = json!(
+            ["spec", "instance", "fire", "fire_all", "on", "wait"].map(|l| json!({ "label": l }))
+        );
+        st.filter_remote_members(uri, line, character, &mut result);
+
+        result
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(labels(4, 7), ["spec", "instance", "on", "wait"]);
+    assert_eq!(labels(5, 9), ["spec", "instance", "fire", "fire_all"]);
+}
 /// The first line of the emit binds the module of each global under
 /// `_g1`, and a module's own `global local` values under `_gs`. No
 /// source writes either name, so no list offers one.

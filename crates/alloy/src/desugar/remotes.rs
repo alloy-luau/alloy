@@ -1,6 +1,6 @@
 //! Remote declarations and their wire layout.
 
-use alloy_syntax::ast::{Block, Expr, IndexKey, RemoteDecl, Stmt};
+use alloy_syntax::ast::{Block, Expr, IndexKey, RemoteDecl};
 
 use super::types::{group_len, split_top_level};
 use super::*;
@@ -827,17 +827,17 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// The remotes this file declares join the imported ones.
-    /// The remotes this file declares join the imported ones. In a file
-    /// with a side, the bindings that could shadow one are noted too.
+    /// The remotes this file declares join the imported ones, a remote
+    /// in a namespace by its path. In a file with a side, the bindings
+    /// that could shadow one are noted too.
     pub(crate) fn note_remote_sides(&mut self, block: &Block) {
+        let mut own = Vec::new();
+
         for stmt in &block.stmts {
-            if let Stmt::Remote(r) = stmt.under_default() {
-                let name = self.text_of(r.name).to_string();
-                self.remote_sides
-                    .insert(name, (r.from_client, r.from_server));
-            }
+            crate::modules::remote_sides(self.src, self.toks, stmt, "", &mut own);
         }
+
+        self.remote_sides.extend(own);
 
         if self.file_side.is_none() || self.remote_sides.is_empty() {
             return;

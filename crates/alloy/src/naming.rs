@@ -1235,9 +1235,10 @@ fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSe
 /// a scope the walk does not know.
 pub(crate) type ScopedBinding = (String, Option<Vec<(usize, usize)>>);
 
-/// Each value binding of a block, other than an import or a remote,
-/// with the token ranges its scope holds, end exclusive: a local, a
-/// parameter, a loop variable, a function. `None` stands for a scope
+/// Each value binding of a block, other than an import, a remote or a
+/// namespace, with the token ranges its scope holds, end exclusive: a
+/// local, a parameter, a loop variable, a function. A namespace holds
+/// remotes as `Net.Up`, so it is no shadow. `None` stands for a scope
 /// the walk does not know, such as a name a pattern binds, and a
 /// reader takes it to hold every token.
 pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<ScopedBinding> {
@@ -1271,7 +1272,10 @@ pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<Sco
             !d.kind.is_some_and(|k| {
                 k.is_member()
                     || k.is_type()
-                    || matches!(k, Kind::Remote | Kind::Attribute | Kind::Macro)
+                    || matches!(
+                        k,
+                        Kind::Remote | Kind::Namespace | Kind::Attribute | Kind::Macro
+                    )
             })
         })
         .map(|d| {

@@ -1924,6 +1924,40 @@ fn a_key_of_a_const_table_hovers_as_its_entry() {
     assert_eq!(record_entry(printed, &["y".to_string()]), None);
 }
 
+/// `Hit.Swing` reads the variant, not the remote `Swing` the file
+/// imports: the member is the enum's. The bare name and a path through
+/// a star import still read the remote's declaration.
+#[test]
+pub(crate) fn a_variant_of_an_imported_name_is_no_import_hover() {
+    let src = "import { Swing } from \"./net\"\nimport * as Net from \"./net\"\nenum Hit as\n    Swing(number)\n    Miss\nend\nprint(Hit.Swing(1), Swing, Net.Swing)\n";
+    let mut state = super::support::files(&[("file:///f.aly", src)]);
+    state
+        .docs
+        .get_mut("file:///f.aly")
+        .expect("doc")
+        .import_sources = vec!["export remote Swing(n: number) from client\n".to_string()];
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(std::io::sink()),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let at = |needle: &str| {
+        let (line, character) = position_of(src, src.find(needle).expect("the name"));
+
+        json!({ "params": {
+            "textDocument": { "uri": "file:///f.aly" },
+            "position": { "line": line, "character": character },
+        } })
+    };
+    let hover = |needle: &str| server.source_binding_hover("file:///f.aly", &at(needle), &json!(1));
+
+    assert!(!hover("Swing(1)"));
+    assert!(hover("Swing, Net"));
+    assert!(hover("Swing)\n"));
+}
+
 /// A method's name belongs to the file that declares it. Another file
 /// may declare a struct of the same spelling, and that declaration is
 /// no answer for the method: the child types the method itself.

@@ -43,7 +43,22 @@ impl Server {
             .map_or(doc.source.len(), |i| start + i);
         let spec_line = quoted.then(|| &doc.source[line_start..line_end]);
         let shadowed = shadows_an_import(&doc.source, &word, start);
-        let inner = |answer: Option<String>| answer.filter(|_| !shadowed);
+        // `Hit.Swing` reads a member of `Hit`, not the `Swing` an import
+        // binds. The alias of a star import holds what its module
+        // exports, so `Net.Swing` still reads the declaration.
+        let member = doc.source[..start]
+            .strip_suffix(['.', ':'])
+            .is_some_and(|head| {
+                let from = head
+                    .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map_or(0, |i| i + 1);
+                let star = format!("import * as {} ", &head[from..]);
+
+                !doc.source
+                    .lines()
+                    .any(|l| l.trim_start().starts_with(&star))
+            });
+        let inner = |answer: Option<String>| answer.filter(|_| !shadowed && !member);
         let answer = inner(remote_hover(&doc.source, &word))
             .or_else(|| inner(imported()))
             .or_else(|| {

@@ -1353,6 +1353,23 @@ mod tests {
         );
     }
 
+    /// A namespace member's summary started at its attribute line, so the
+    /// hover wrote `@derive(...)` twice: once from the summary and once
+    /// from the source above the name.
+    #[test]
+    fn a_namespace_struct_hover_names_its_derives_once() {
+        let src = "namespace N\n  -- An entry.\n  @derive(Eq, Debug)\n  struct Entry\n    wins: number\n  end\nend\n";
+        let decl = alloy::declarations::summaries(src, false)
+            .into_iter()
+            .find(|d| d.name == "N.Entry")
+            .unwrap();
+
+        assert_eq!(
+            super::with_derives(&decl.hover, src, decl.offset),
+            "```alloy\n@derive(Eq, Debug)\nstruct N.Entry\n  wins: number\nend\n```\n\nAn entry."
+        );
+    }
+
     /// `where` is the guard word, as `and` is, so it ends the pattern and
     /// the payload binding hovers with its type.
     #[test]

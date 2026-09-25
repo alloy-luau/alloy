@@ -518,14 +518,19 @@ fn namespace_summaries(
         // shows its header alone; a body says nothing a hover needs.
         let body = text(m.stmt.span());
         let at = start_of(member) - start_of(m.stmt.span());
+        // The span starts at an attribute line above the declaration.
+        // The hover adds the `@derive` lines itself, so the head is the
+        // declaration's own line.
+        let own = &body[..at];
+        let own = own.rfind('\n').map_or(own, |i| own[i + 1..].trim_start());
         // `local` and `const` take a bare name, never a path, so the
         // word goes and the path stands alone: `Outer.VERSION = 1`.
-        let head = body[..at].trim_end();
+        let head = own.trim_end();
         let head = head
             .strip_suffix("local")
             .or_else(|| head.strip_suffix("const"))
             .map(str::trim_end)
-            .unwrap_or(&body[..at]);
+            .unwrap_or(own);
         let shown = format!("{head}{path}.{}", &body[at..]);
         let shown = match m.stmt.under_default() {
             Stmt::Function(_) | Stmt::LocalFunction(_) => {

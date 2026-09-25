@@ -1129,6 +1129,28 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
         }])
     );
 
+    // `x as T` is `x :: T`: the edit takes `as` alone, in a call and in
+    // a whole `local`.
+    for (source, line, at) in [
+        ("local n: unknown = 1\nprint(n as number)\n", 1, 8),
+        (
+            "local n: unknown = 1\nlocal x = n as number\nprint(x)\n",
+            1,
+            12,
+        ),
+    ] {
+        let (st, uri) = one_file(source);
+        let actions = st.compiler_actions(uri, whole);
+        assert_eq!(title(&actions), "Write `::`", "{source}");
+        assert_eq!(
+            edit(&actions, uri),
+            json!([{
+                "range": { "start": { "line": line, "character": at }, "end": { "line": line, "character": at + 2 } },
+                "newText": "::",
+            }])
+        );
+    }
+
     // `let` is `local`: the edit takes the word alone.
     let (st, uri) = one_file("local a = 1\nlet b = a\nprint(b)\n");
     let actions = st.compiler_actions(uri, whole);

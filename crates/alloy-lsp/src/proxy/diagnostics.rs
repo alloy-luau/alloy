@@ -384,6 +384,19 @@ impl State {
                         "newText": "~=",
                     }]),
                 ))
+            } else if d.message.starts_with("`as` is not a cast here")
+                && doc.source.get(start..start + 2) == Some("as")
+            {
+                // The report sits on `as`; the type after it stands.
+                let (el, ec) = position_of(&doc.source, start + 2);
+
+                Some((
+                    "Write `::`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": "::",
+                    }]),
+                ))
             } else if d.message.starts_with("Alloy has no `let`")
                 && doc.source.get(start..start + 3) == Some("let")
             {

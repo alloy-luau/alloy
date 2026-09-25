@@ -98,9 +98,11 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // below would read as the kind's own family.
     (&["`global` is removed"], "ImportError"),
     // Luau's attribute list and `@allow`. The words of a lint name in
-    // the report could reach any rule below.
+    // the report could reach any rule below. A std module's attribute
+    // path names the module, which the std rule below would read.
     (
         &[
+            "has no attribute `",
             "in this list twice",
             "`deprecated` takes",
             "`native` takes no argument",

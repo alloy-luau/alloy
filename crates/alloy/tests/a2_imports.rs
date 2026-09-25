@@ -562,6 +562,43 @@ fn an_attribute_is_imported_with_its_sigil() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `@M.tag` through a star import reads the declaration `@tag` reads:
+/// the targets hold, and the defaults fill. A name the module does not
+/// export reports, and so does `@serde.x` that names no std attribute.
+/// Each one passed in silence, and `@M.price` stored no default.
+#[test]
+fn a_dotted_attribute_is_checked_against_its_declaration() {
+    let dir = scratch("dotted-attribute");
+    std::fs::write(
+        dir.join("tags.aly"),
+        "export attribute price(amount: number = 5) on struct, function\n",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let source = "import * as serde from \"@alloy/std/serde\"\nimport * as M from \"./tags\"\n@derive(serde.Serialize)\nstruct Save as\n    @serde.renme(\"i\")\n    items: { string }\nend\n@M.tga\nfunction f()\nend\n@M.price\nenum E as\n    A\nend\n@M.price\nstruct Priced as\n    x: number\nend\nprint(Save, f, E, Priced)\n";
+    std::fs::write(&main, source).unwrap();
+    let options = alloy::EmitOptions::default().imports(source, &main, &[]);
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert_eq!(
+        messages,
+        [
+            "\"@alloy/std/serde\" has no attribute `renme`; its attributes are `rename`, `rename_all`, `skip` and `deny_unknown_fields`",
+            "`M` exports no attribute `tga`; it exports `price`",
+            "the attribute `M.price` has no meaning on a enum; it goes on `struct` and `function`",
+        ]
+    );
+    assert!(
+        out.ship
+            .contains("__alloy.attrs(Priced, { own = { price = { 5 } }"),
+        "{}",
+        out.ship
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `import * as M, { a }` binds the whole module and names from it, the
 /// way `import M, { a }` binds the default and names from it.
 #[test]

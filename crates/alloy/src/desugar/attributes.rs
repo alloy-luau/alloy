@@ -677,9 +677,54 @@ impl<'s> Desugar<'s> {
 
         let head = owner.split('.').next().unwrap_or(owner);
 
+        // `import * as serde from "@alloy/std/serde"`: `attr_name` reads
+        // every attribute the module holds, so this path names none.
+        if let Some(module) = self.std_namespaces.get(head) {
+            let spec = match module.is_empty() {
+                true => crate::std_names::PREFIX.to_string(),
+
+                false => format!("{}/{module}", crate::std_names::PREFIX),
+            };
+            let held: Vec<&str> = crate::std_names::ATTRIBUTES
+                .iter()
+                .filter(|(m, _)| module.is_empty() || m == module)
+                .flat_map(|(_, names)| names.iter().copied())
+                .collect();
+
+            return Some(match held.is_empty() {
+                true => format!("\"{spec}\" has no attribute `{member}`"),
+
+                false => format!(
+                    "\"{spec}\" has no attribute `{member}`; its attributes are {}",
+                    list_names(&held)
+                ),
+            });
+        }
+
         // `import * as M`: `@M.tag` names the module's own attribute.
+        // The import index lists every attribute an Alloy module
+        // exports; another module's are out of reach, so it passes.
         if self.star_path(name) {
-            return None;
+            if owner != head || !self.options.import_star_modules.iter().any(|m| m == head) {
+                return None;
+            }
+
+            let prefix = format!("{head}.");
+            let mut exported: Vec<&str> = self
+                .attr_decls
+                .keys()
+                .filter_map(|k| k.strip_prefix(&prefix))
+                .collect();
+            exported.sort_unstable();
+
+            return Some(match exported.is_empty() {
+                true => format!("`{head}` exports no attribute `{member}`"),
+
+                false => format!(
+                    "`{head}` exports no attribute `{member}`; it exports {}",
+                    list_names(&exported)
+                ),
+            });
         }
 
         // A named import binds a module's attribute under its own name.

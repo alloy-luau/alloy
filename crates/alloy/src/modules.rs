@@ -1453,38 +1453,33 @@ states.
 An attribute contract is checked where the attribute is used, and a use
 in this file reaches the declaration through an import. Without this the
 check would hold only inside the declaring module.
+
+Each one is keyed as a use spells it: `price` for a named import, and
+`M.price` through `import * as M`, so the path fills the defaults and
+checks the targets the way the bare name does.
 */
 pub fn import_attributes(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, crate::desugar::AttrDecl)> {
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let mut out: Vec<(String, crate::desugar::AttrDecl)> = Vec::new();
+    let modules = module_decls(source, from, aliases, exported_attribute_decls);
 
-    for spec in import_specs(source) {
-        let Some(path) = resolve(&spec, from, aliases) else {
-            continue;
-        };
+    keyed_by_local(source, from, aliases, &modules)
+}
 
-        if seen.contains(&path) {
-            continue;
-        }
-
-        seen.push(path.clone());
-
-        let Ok(text) = module_text(&path) else {
-            continue;
-        };
-
-        for (name, decl) in exported_attribute_decls(&text) {
-            if !out.iter().any(|(n, _)| *n == name) {
-                out.push((name, decl));
-            }
-        }
-    }
-
-    out
+/// The locals of the star imports that name an Alloy module. Such a
+/// module lists every attribute it exports.
+pub fn import_star_modules(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<String> {
+    star_locals(source, from, aliases)
+        .into_iter()
+        .filter(|(path, _)| is_alloy(path))
+        .map(|(_, local)| local)
+        .collect()
 }
 
 /// The `export attribute` declarations of one source, for a file that
@@ -1865,6 +1860,7 @@ impl crate::EmitOptions {
         self.import_struct_ctors = import_struct_ctors(source, from, aliases);
         self.import_private_views = import_private_views(source, from, aliases);
         self.import_attributes = import_attributes(source, from, aliases);
+        self.import_star_modules = import_star_modules(source, from, aliases);
         self.macros = import_macros(source, from, aliases);
         self.plain_modules = plain_modules(source, from, aliases);
         self.import_result_asyncs = import_result_asyncs(source, from, aliases);

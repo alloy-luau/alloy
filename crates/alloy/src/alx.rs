@@ -563,12 +563,14 @@ fn check_intrinsic(
         let Some(got) = literal_type(value) else {
             // A nil field of the props table leaves the property unset,
             // so the value may be nil too: `if on then red else nil`.
+            // React takes a binding where a property wants a value, and
+            // a binding reads through `getValue`.
             if let (Some(typed), AttributeValue::Expression(_)) = (typed.as_mut(), value)
                 && !luaux::roblox::is_event(class, name)
                 && let Some(want) = crate::roblox_props::property_type(class, name)
                 && let Some((start, end)) = value_bytes(src, *span)
             {
-                typed.push((start, end, format!("{want}?")));
+                typed.push((start, end, format!("({want} | {{ getValue: any }})?")));
             }
 
             continue;
@@ -1359,7 +1361,7 @@ mod tests {
             .output;
 
         for want in [
-            "Text = (__alloy.prop :: (string?) -> (string?))(n)",
+            "Text = (__alloy.prop :: ((string | { getValue: any })?) -> ((string | { getValue: any })?))(n)",
             "item = (__alloy.prop :: (Item) -> (Item))(5)",
             "count = 1",
         ] {

@@ -2142,6 +2142,8 @@ impl Server {
                             clean_completion(result, doc, line, character, st.snippets);
                         }
 
+                        st.child_name_details(uri, line, character, result);
+
                         st.filter_remote_members(uri, line, character, result);
                         // A static of an `impl` sits on the same table as
                         // the methods, so the child offers it after a

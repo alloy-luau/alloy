@@ -3630,3 +3630,42 @@ fn a_filter_being_typed_offers_the_loop_names() {
     assert!(labels.contains(&"x".to_string()), "{labels:?}");
     assert!(labels.contains(&"xs".to_string()), "{labels:?}");
 }
+
+/// After `->` the child answers inside the string of `FindFirstChild("`
+/// and details each child as `string`. The sourcemap gives the class,
+/// and a name whose class it cannot pin down shows no detail.
+#[test]
+fn a_child_name_takes_its_class_from_the_sourcemap() {
+    let tree = json!({
+        "name": "Game", "className": "DataModel", "children": [
+            { "name": "ReplicatedStorage", "className": "ReplicatedStorage", "children": [
+                { "name": "Assets", "className": "Folder", "children": [
+                    { "name": "Swords", "className": "Folder" },
+                ] },
+                { "name": "Alloy", "className": "ModuleScript" },
+            ] },
+            { "name": "Workspace", "className": "Workspace", "children": [
+                { "name": "Swords", "className": "Model" },
+            ] },
+        ]
+    });
+    let item = |label: &str| json!({ "label": label, "kind": 21, "detail": "string" });
+    let details = |labels: &[&str]| -> Vec<Option<String>> {
+        let mut items: Vec<Value> = labels.iter().map(|l| item(l)).collect();
+        super::super::completion::child_details(&tree, &mut items);
+
+        items
+            .iter()
+            .map(|i| i.get("detail").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    };
+
+    assert_eq!(
+        details(&["Assets", "Alloy"]),
+        [Some("Folder".to_string()), Some("ModuleScript".to_string())]
+    );
+    // Two instances hold a `Swords`, of two classes.
+    assert_eq!(details(&["Swords"]), [None]);
+    // A name the sourcemap does not hold shows no detail.
+    assert_eq!(details(&["Nope"]), [None]);
+}

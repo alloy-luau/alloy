@@ -170,6 +170,54 @@ impl State {
         });
     }
 
+    /// The details of a list after `->`. The name lowers to the string
+    /// of a `FindFirstChild("`, so the child details each child as
+    /// `string`. The sourcemap gives the class, when it has one.
+    pub(crate) fn child_name_details(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let asks_a_child = offset_of(&doc.source, line, character)
+            .and_then(|at| context::child_name_start(&doc.source, at))
+            .and_then(|start| child_call(doc, start))
+            .is_some();
+
+        if !asks_a_child {
+            return;
+        }
+
+        let sourcemap = self
+            .settings
+            .pointer("/sourcemap/sourcemapFile")
+            .and_then(Value::as_str)
+            .unwrap_or("sourcemap.json");
+        let tree = self
+            .root
+            .as_deref()
+            .and_then(|root| std::fs::read_to_string(root.join(sourcemap)).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null);
+        let items = match result {
+            Value::Array(v) => v,
+
+            Value::Object(o) => match o.get_mut("items").and_then(Value::as_array_mut) {
+                Some(v) => v,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+
+        child_details(&tree, items);
+    }
+
     /// The members a dotted value path reaches, for a path the child
     /// could not follow. `import M from "./m"` on a module with an
     /// export table binds the `default` field, and the child has no
@@ -622,6 +670,66 @@ pub(crate) fn hide_private(detail: &str, private: &HashSet<String>) -> String {
         kept.join(", "),
         &detail[open + close + 2..]
     )
+}
+
+/// Sets the detail of each child name to its class in the sourcemap.
+/// The list names every child of one instance, so each node whose
+/// children hold all the names may be that instance. A name takes a
+/// class when those nodes agree on it, and else shows no detail.
+pub(crate) fn child_details(tree: &Value, items: &mut [Value]) {
+    fn walk<'a>(node: &'a Value, names: &[&str], out: &mut HashMap<&'a str, HashSet<&'a str>>) {
+        let children = node
+            .get("children")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let holds_all = names
+            .iter()
+            .all(|n| children.iter().any(|c| c["name"] == *n));
+
+        for child in children {
+            if holds_all
+                && let Some(name) = child["name"].as_str()
+                && let Some(class) = child["className"].as_str()
+            {
+                out.entry(name).or_default().insert(class);
+            }
+
+            walk(child, names, out);
+        }
+    }
+
+    let names: Vec<String> = items
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut classes = HashMap::new();
+
+    if !names.is_empty() {
+        walk(tree, &names, &mut classes);
+    }
+
+    for item in items {
+        let class = item["label"]
+            .as_str()
+            .and_then(|l| classes.get(l))
+            .filter(|c| c.len() == 1)
+            .and_then(|c| c.iter().next().map(|c| c.to_string()));
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+
+        match class {
+            Some(class) => {
+                obj.insert("detail".to_string(), json!(class));
+            }
+
+            None => {
+                obj.remove("detail");
+            }
+        }
+    }
 }
 
 /// The entries a module path can continue with: the project's aliases

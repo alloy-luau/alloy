@@ -181,6 +181,46 @@ pub(crate) fn bound_spots(ty: &str, bounds: &[(String, String)]) -> Vec<(usize, 
     out
 }
 
+/// Rewrites each bare name in a type to the path `path_of` gives it:
+/// `Pos[]` inside `namespace Combat` is `Combat.Pos[]`. A field name
+/// `pos:` and a member `X.Pos` stay as the source wrote them.
+pub(crate) fn qualify_names(ty: &str, path_of: &dyn Fn(&str) -> Option<String>) -> String {
+    let bytes = ty.as_bytes();
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = String::with_capacity(ty.len());
+    let (mut from, mut i) = (0, 0);
+
+    while i < bytes.len() {
+        if !is_word(bytes[i]) {
+            i += 1;
+
+            continue;
+        }
+
+        let start = i;
+
+        while i < bytes.len() && is_word(bytes[i]) {
+            i += 1;
+        }
+
+        let member = start > 0 && bytes[start - 1] == b'.';
+        let field = ty[i..].trim_start().starts_with(':');
+
+        if !member
+            && !field
+            && let Some(path) = path_of(&ty[start..i])
+        {
+            out.push_str(&ty[from..start]);
+            out.push_str(&path);
+            from = i;
+        }
+    }
+
+    out.push_str(&ty[from..]);
+
+    out
+}
+
 /// The word that ends at this byte: the head in front of a `<`.
 fn word_before(ty: &str, at: usize) -> &str {
     let bytes = ty.as_bytes();

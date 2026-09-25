@@ -434,10 +434,30 @@ impl<'s> Desugar<'s> {
 
         let scope = self.options.wire_scopes.iter().find(|s| s.module == module);
 
-        if let Some((star, name)) = ty.split_once('.') {
-            let (_, target) = scope?.stars.iter().find(|(local, _)| local == star)?;
+        if let Some((head, rest)) = ty.split_once('.') {
+            if let Some((_, target)) =
+                scope.and_then(|s| s.stars.iter().find(|(local, _)| local == head))
+            {
+                return self.project_type(target, rest, hops + 1);
+            }
 
-            return self.project_type(target, name, hops + 1);
+            // A namespace of the module keeps a type under one flat
+            // name, `Combat_Hit`. An imported namespace reads in the
+            // module that declares it.
+            let flat = ty.replace('.', "_");
+
+            if let Some(shape) = self
+                .options
+                .shapes
+                .iter()
+                .find(|sh| sh.module == module && sh.name == flat)
+            {
+                return Some(shape);
+            }
+
+            let (_, target, name) = scope?.names.iter().find(|(local, ..)| local == head)?;
+
+            return self.project_type(target, &format!("{name}.{rest}"), hops + 1);
         }
 
         if let Some(shape) = self
@@ -461,8 +481,11 @@ impl<'s> Desugar<'s> {
     /// struct elsewhere made `target: Player` a table layout, and the
     /// remote then refused every real Player.
     pub(crate) fn imported_type(&self, ty: &str) -> Option<&crate::StructShape> {
+        // `Combat.Hit` reads through an imported namespace `Combat`.
         let bound = match ty.split_once('.') {
-            Some((star, _)) => self.star_modules.contains(star),
+            Some((head, _)) => {
+                self.star_modules.contains(head) || self.imported_names.contains(head)
+            }
 
             None => self.imported_names.contains(ty),
         };
@@ -520,7 +543,9 @@ impl<'s> Desugar<'s> {
     it was.
     */
     pub(crate) fn wire_registration(&mut self, name: &str) -> String {
-        if !self.at_top_level() || self.options.macro_depth > 0 {
+        // A namespace opens no scope, and its member is a local of the
+        // file too.
+        if self.scopes.len() != self.top_scope + 1 || self.options.macro_depth > 0 {
             return String::new();
         }
 
@@ -565,7 +590,8 @@ impl<'s> Desugar<'s> {
         offender(
             ty,
             &|name| {
-                let declared = match self.struct_wire.get(name) {
+                let own = self.own_ns_type(name);
+                let declared = match self.struct_wire.get(own.as_deref().unwrap_or(name)) {
                     Some(fields) => fields.clone(),
 
                     None => self
@@ -686,6 +712,7 @@ impl<'s> Desugar<'s> {
 
             if let Some(s) = below {
                 let pname = self.text_of(p.name).to_string();
+                let s = self.display_name(&s);
                 self.diagnose(
                     p.name,
                     &format!(
@@ -1138,6 +1165,10 @@ impl<'s> Desugar<'s> {
             };
         }
 
+        // A type of a namespace here renders under one flat name,
+        // `Combat_Hit`, and every index of this file keys it by that name.
+        let own = foreign.is_none().then(|| self.own_ns_type(ty)).flatten();
+        let ty = own.as_deref().unwrap_or(ty);
         let is_name = ty.chars().all(|c| c.is_alphanumeric() || c == '_');
         let is_path = ty
             .chars()

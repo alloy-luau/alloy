@@ -2467,7 +2467,7 @@ impl<'s> Desugar<'s> {
             })
             .map(|f| WireField {
                 name: self.text_of(f.name).to_string(),
-                ty: self.text_of(f.ty).trim().to_string(),
+                ty: self.qualify_members(self.text_of(f.ty).trim()),
                 width: f.attributes.iter().find_map(|a| {
                     let n = self.text_of(a.name?).to_string();
 

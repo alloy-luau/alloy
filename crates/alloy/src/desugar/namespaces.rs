@@ -704,6 +704,37 @@ impl<'s> Desugar<'s> {
         None
     }
 
+    /// The flat name of a type this file declares in a namespace, for
+    /// `Combat.Hit`, or for `Hit` inside `namespace Combat`. An imported
+    /// namespace gives `None`: this file has no table of that name.
+    pub(crate) fn own_ns_type(&self, ty: &str) -> Option<String> {
+        self.ns_member_name(ty)
+            .or_else(|| self.ns_path_name(ty))
+            .filter(|n| {
+                self.struct_wire.contains_key(n)
+                    || self.enum_decls.contains_key(n)
+                    || self.alias_values.contains_key(n)
+            })
+    }
+
+    /// A type written inside a namespace, with each sibling type it
+    /// names as a path: `Pos[]` inside `namespace Combat` is
+    /// `Combat.Pos[]`. The wire layout reads it after the body closes.
+    pub(crate) fn qualify_members(&self, ty: &str) -> String {
+        if self.ns_stack.is_empty() {
+            return ty.to_string();
+        }
+
+        super::types::qualify_names(ty, &|w| {
+            self.ns_stack.iter().rev().find_map(|f| {
+                let info = self.namespaces.get(&f.key)?;
+                let m = info.member(w)?;
+
+                (m.ty || m.nested).then(|| format!("{}.{w}", info.path))
+            })
+        })
+    }
+
     /// The target an `impl` inside a namespace writes: a member of the
     /// namespace renders under its own name.
     pub(crate) fn impl_target_name(&self, span: TokSpan) -> String {

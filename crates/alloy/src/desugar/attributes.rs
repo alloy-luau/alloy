@@ -1494,7 +1494,7 @@ impl<'s> Desugar<'s> {
                             let types = v
                                 .payload
                                 .iter()
-                                .map(|t| self.text_of(*t).trim().to_string())
+                                .map(|t| self.qualify_members(self.text_of(*t).trim()))
                                 .collect();
 
                             (self.text_of(v.name).to_string(), types)

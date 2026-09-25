@@ -1374,3 +1374,72 @@ fn a_local_member_is_one_variable() {
 
     assert_eq!(out.trim(), "2\t3\n10\t11\t11", "{out}\n{ship}");
 }
+
+/// A struct or an enum of a namespace crosses a remote with the layout a
+/// top-level one gets. The layout read `Combat.Hit` as no type of the
+/// file: the spec had no wire, an array item read `any`, and `@u8` did
+/// nothing. A sibling that a field names by its own name reads too.
+#[test]
+fn a_namespace_type_crosses_a_remote_with_its_layout() {
+    let src = "namespace Combat\n    struct Hit\n        @u8 damage: number\n        kind: Kind\n    end\n    enum Kind\n        Slash\n        Burn(number)\n    end\nend\nremote Land(hit: Combat.Hit, rows: Combat.Hit[], k: Combat.Kind) from client\n";
+    let (ship, _, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+
+    let kind =
+        "{ enum = Combat_Kind, tags = { Slash = 0, Burn = 1 }, slots = { Burn = { \"f64\" } } }";
+    let hit = format!(
+        "{{ fields = {{ {{ \"damage\", \"u8\" }}, {{ \"kind\", {kind} }} }}, struct = Combat_Hit }}"
+    );
+    let wire = format!("wire = {{ {hit}, {{ item = {hit}, array = true }}, {kind} }}");
+    assert!(ship.contains(&wire), "{wire}\n{ship}");
+}
+
+/// A namespace of another module: the layout reads the member in the
+/// module that declares it, through a named import and a star import,
+/// and that module registers the table a field names.
+#[test]
+fn an_imported_namespace_type_crosses_a_remote_with_its_layout() {
+    let dir = temp_project("wire");
+    fs::write(
+        dir.join("src/net.aly"),
+        "export namespace Combat\n    struct Hit\n        @u8 damage: number\n        kind: Kind\n    end\n    enum Kind\n        Slash\n        Burn(number)\n    end\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/use.aly"),
+        "import { Combat } from \"./net\"\nimport * as Net from \"./net\"\nexport remote Land(hit: Combat.Hit) from client\nexport remote Star(hit: Net.Combat.Hit) from client\nprint(Combat.Kind.Burn(1) == Combat.Kind.Burn(1))\n",
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    assert!(report.diagnostics.is_empty(), "{report:?}");
+
+    let read = |file: &str| fs::read_to_string(dir.join("out").join(file)).unwrap();
+    let used = read("use.luau");
+    let kind = "{ enum = \"net.aly:Combat_Kind\", tags = { Slash = 0, Burn = 1 }, slots = { Burn = { \"f64\" } } }";
+
+    for path in ["Combat.Hit", "Net.Combat.Hit"] {
+        let layout = format!(
+            "wire = {{ {{ fields = {{ {{ \"damage\", \"u8\" }}, {{ \"kind\", {kind} }} }}, struct = {path} }} }}"
+        );
+        assert!(used.contains(&layout), "{layout}\n{used}");
+    }
+
+    assert!(
+        read("net.luau").contains("wire.types[\"net.aly:Combat_Kind\"] = Combat_Kind"),
+        "{}",
+        read("net.luau")
+    );
+
+    // The enum of an imported namespace compares by identity too.
+    assert!(
+        report
+            .lints
+            .iter()
+            .any(|(_, l)| l.name == "identity_compare" && l.message.contains("`Combat.Kind`")),
+        "{:?}",
+        report.lints
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

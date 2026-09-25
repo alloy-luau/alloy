@@ -308,19 +308,40 @@ fn file_shapes(
             .collect()
     };
 
-    for stmt in &parsed.chunk.block.stmts {
-        if let alloy_syntax::ast::Stmt::Enum(e) = stmt.under_default() {
+    let mut scoped = Vec::new();
+    let top: Vec<&alloy_syntax::ast::Stmt> = parsed.chunk.block.stmts.iter().collect();
+    scoped_stmts(&top, &text, &[], &mut scoped);
+
+    for (stmt, around) in scoped {
+        // A member names a sibling by its own name, and the shape keeps
+        // the path, `Combat.Pos`, that the layout reads in this module.
+        let field_type = |ty: String| {
+            resolve(crate::desugar::qualify_names(&ty, &|w| {
+                let (path, _) = around
+                    .iter()
+                    .rev()
+                    .find(|(_, names)| names.iter().any(|n| n == w))?;
+
+                Some(format!("{path}.{w}"))
+            }))
+        };
+        // A namespace member renders under one flat name, `Combat_Hit`.
+        let prefix: String = around
+            .last()
+            .map_or(String::new(), |(p, _)| format!("{}_", p.replace('.', "_")));
+
+        if let alloy_syntax::ast::Stmt::Enum(e) = stmt {
             let variants = e.variants.iter().map(|v| {
                 let types = v
                     .payload
                     .iter()
-                    .map(|t| resolve(text(*t).trim().to_string()))
+                    .map(|t| field_type(text(*t).trim().to_string()))
                     .collect();
 
                 (text(v.name), types)
             });
             shapes.push(crate::StructShape {
-                name: text(e.name),
+                name: format!("{prefix}{}", text(e.name)),
                 module: module.to_string(),
                 variants: variants.collect(),
                 derives: derives_of(&e.attributes),
@@ -328,7 +349,7 @@ fn file_shapes(
             });
         }
 
-        let alloy_syntax::ast::Stmt::Struct(st) = stmt.under_default() else {
+        let alloy_syntax::ast::Stmt::Struct(st) = stmt else {
             continue;
         };
         // A `@skip` field stays off the wire, as it stays out of
@@ -343,7 +364,7 @@ fn file_shapes(
             })
             .map(|f| crate::WireField {
                 name: text(f.name),
-                ty: resolve(text(f.ty).trim().to_string()),
+                ty: field_type(text(f.ty).trim().to_string()),
                 width: f.attributes.iter().find_map(|a| {
                     let n = text(a.name?);
 
@@ -355,7 +376,7 @@ fn file_shapes(
             .collect();
         let derives = derives_of(&st.attributes);
         shapes.push(crate::StructShape {
-            name: text(st.name),
+            name: format!("{prefix}{}", text(st.name)),
             fields,
             derives,
             module: module.to_string(),
@@ -364,6 +385,52 @@ fn file_shapes(
     }
 
     Some((shapes, scope))
+}
+
+/// A namespace around a statement: its path, `Combat.Deep`, and the
+/// types it declares.
+type Around = (String, Vec<String>);
+
+/// Each statement of a block, and of every namespace in it, with the
+/// namespaces around it, innermost last.
+fn scoped_stmts<'a>(
+    stmts: &[&'a alloy_syntax::ast::Stmt],
+    text: &dyn Fn(alloy_syntax::ast::TokSpan) -> String,
+    around: &[Around],
+    out: &mut Vec<(&'a alloy_syntax::ast::Stmt, Vec<Around>)>,
+) {
+    use alloy_syntax::ast::Stmt;
+
+    for stmt in stmts {
+        let stmt = stmt.under_default();
+
+        if let Stmt::Namespace(ns) = stmt {
+            let name = text(ns.name);
+            let path = match around.last() {
+                Some((p, _)) => format!("{p}.{name}"),
+
+                None => name,
+            };
+            let members: Vec<&Stmt> = ns.members.iter().map(|m| m.stmt.under_default()).collect();
+            let types = members
+                .iter()
+                .filter_map(|m| match m {
+                    Stmt::Struct(s) => Some(text(s.name)),
+
+                    Stmt::Enum(e) => Some(text(e.name)),
+
+                    Stmt::Namespace(n) => Some(text(n.name)),
+
+                    _ => None,
+                })
+                .collect();
+            let mut inner = around.to_vec();
+            inner.push((path, types));
+            scoped_stmts(&members, text, &inner, out);
+        }
+
+        out.push((stmt, around.to_vec()));
+    }
 }
 
 /// The Alloy sources under `input`, sorted.

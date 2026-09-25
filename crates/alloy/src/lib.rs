@@ -609,6 +609,36 @@ mod tests {
             ]
         );
 
+        // A call's type arguments in one `<...>` read as two comparisons,
+        // or did not parse. The report sits on the `<` and writes the
+        // call out.
+        let single =
+            "local function id<T>(x: T): T return x end\nlocal v = id<number>(5)\nprint(v)\n";
+        assert_eq!(
+            messages(single),
+            vec!["type arguments at a call take `<<...>>`: write `id<<number>>(5)`"]
+        );
+        assert_eq!(docs::kind_for(&messages(single)[0]), "SyntaxError");
+        let at = compile(single).unwrap().diagnostics[0].start as usize;
+        assert_eq!(&single[at..at + 8], "<number>");
+        assert_eq!(
+            messages(
+                "local s = Signal.new<string>()\nlocal m = HashMap.new<string, Array<number>>()\n"
+            ),
+            vec![
+                "type arguments at a call take `<<...>>`: write `Signal.new<<string>>()`",
+                "type arguments at a call take `<<...>>`: write `HashMap.new<<string, Array<number>>>()`",
+            ]
+        );
+        // A comparison stays one: the operands are no type list, or a
+        // space parts them from the operator.
+        assert!(
+            messages(
+                "local a, b, c, d = 1, 2, 3, 4\nprint(a < b and c > (d), a < b, c > (d), a<b)\n"
+            )
+            .is_empty()
+        );
+
         // A declaration `declare` does not take, in a definitions file.
         let options = EmitOptions {
             definitions: true,

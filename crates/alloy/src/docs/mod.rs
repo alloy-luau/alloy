@@ -155,7 +155,14 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     ),
     (&["a comment starts with"], "SyntaxError"),
     (&["interpolation hole is empty"], "SyntaxError"),
-    (&["has no `++`", "has no `let`"], "SyntaxError"),
+    (
+        &[
+            "has no `++`",
+            "has no `let`",
+            "type arguments at a call take",
+        ],
+        "SyntaxError",
+    ),
     // A pattern that binds the name the match head aliased, and two
     // values of one head under one name. No rule below reads either
     // sentence, and the default kind is not the one the parser

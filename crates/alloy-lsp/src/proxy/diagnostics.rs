@@ -394,6 +394,25 @@ impl State {
                         "newText": "local",
                     }]),
                 ))
+            } else if d.message.starts_with("type arguments at a call take")
+                && let Some(close) = angle_close(&doc.source, start)
+            {
+                // The report sits on the `<`; each bracket doubles.
+                let (cl, cc) = position_of(&doc.source, close);
+
+                Some((
+                    "Write `<<...>>`".to_string(),
+                    json!([
+                        {
+                            "range": { "start": { "line": sl, "character": sc }, "end": { "line": sl, "character": sc } },
+                            "newText": "<",
+                        },
+                        {
+                            "range": { "start": { "line": cl, "character": cc }, "end": { "line": cl, "character": cc } },
+                            "newText": ">",
+                        },
+                    ]),
+                ))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
             } else if let Some(name) = alloy::std_names::missing_name(&d.message) {
@@ -2693,6 +2712,30 @@ fn edit_count(edit: &Value) -> usize {
         );
 
     lists.filter_map(Value::as_array).map(Vec::len).sum()
+}
+
+/// The offset of the `>` that closes the `<` at `at`. The walk reads
+/// tokens, so the `>` of a `->` inside a function type does not count.
+fn angle_close(source: &str, at: usize) -> Option<usize> {
+    let toks = alloy_syntax::lexer::lex(source).ok()?.toks;
+    let first = toks.iter().position(|t| t.start as usize == at)?;
+    let mut depth = 0;
+
+    for t in &toks[first..] {
+        depth += match t.text(source) {
+            "<" => 1,
+
+            ">" => -1,
+
+            _ => 0,
+        };
+
+        if depth == 0 {
+            return Some(t.start as usize);
+        }
+    }
+
+    None
 }
 
 /// The written type and its simple form, from the report of a double

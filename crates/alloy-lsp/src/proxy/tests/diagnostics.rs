@@ -1121,6 +1121,25 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
             "newText": "local",
         }])
     );
+
+    // A call's `<...>` doubles each bracket; the `>` of a function
+    // type inside the list is not the close.
+    let (st, uri) = one_file("local s = Signal.new<(number) -> ()>()\nprint(s)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `<<...>>`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([
+            {
+                "range": { "start": { "line": 0, "character": 20 }, "end": { "line": 0, "character": 20 } },
+                "newText": "<",
+            },
+            {
+                "range": { "start": { "line": 0, "character": 35 }, "end": { "line": 0, "character": 35 } },
+                "newText": ">",
+            },
+        ])
+    );
 }
 
 /// The checker's report on a `.` call of a method, in the compiler's

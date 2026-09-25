@@ -79,7 +79,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn type_args_inner(&mut self) -> Result<(), ParseError> {
+    pub(super) fn type_args_inner(&mut self) -> Result<(), ParseError> {
         self.expect("<")?;
 
         while !self.at(">") {

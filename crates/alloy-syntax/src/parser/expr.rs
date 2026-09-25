@@ -841,6 +841,14 @@ impl<'a> Parser<'a> {
                     };
                 }
 
+                // `Signal.new<string>()`: see `single_angle_call`. Any
+                // other `<` is a comparison, which the caller reads.
+                "<" => match self.single_angle_call(start) {
+                    Some(e) => return Err(e),
+
+                    None => break,
+                },
+
                 "(" | "{" => {
                     /*
                     A `(` on a line of its own after a complete expression is
@@ -893,6 +901,85 @@ impl<'a> Parser<'a> {
         }
 
         Ok(e)
+    }
+
+    /*
+    `id<number>(5)` and `Signal.new<string>()` write the type arguments
+    of a call in one `<...>`, the way a declaration does. Luau reads the
+    first as two comparisons and cannot parse the second.
+
+    The test is the parser's own: the callee touches the `<`, a type
+    list follows, and its `>` touches the `(`. `a < b and c > (d)` has
+    no type list, and a comparison has spaces around its operator. The
+    probe restores the cursor and the type records, so a miss parses
+    on as a comparison.
+    */
+    fn single_angle_call(&mut self, start: usize) -> Option<ParseError> {
+        let lt = self.pos;
+
+        if !self.adjacent_before() {
+            return None;
+        }
+
+        let saved = (
+            self.type_edits.len(),
+            self.type_names.len(),
+            self.diagnostics.len(),
+        );
+        let list = self.type_args_inner().is_ok() && self.at("(") && self.adjacent_before();
+        let gt = self.pos - 1;
+
+        self.pos = lt;
+        self.type_edits.truncate(saved.0);
+        self.type_names.truncate(saved.1);
+        self.diagnostics.truncate(saved.2);
+
+        if !list {
+            return None;
+        }
+
+        // The argument list runs to the `)` that closes its `(`.
+        let mut depth = 0;
+        let close = self.toks[gt + 1..].iter().position(|t| {
+            depth += match t.text(self.src) {
+                "(" => 1,
+
+                ")" => -1,
+
+                _ => 0,
+            };
+
+            depth == 0
+        });
+        let text = |a: u32, b: u32| &self.src[a as usize..b as usize];
+        let callee = text(self.toks[start].start, self.toks[lt].start);
+        let types = text(self.toks[lt].end, self.toks[gt].start);
+        let written = close.map_or("", |i| text(self.toks[gt].end, self.toks[gt + 1 + i].end));
+        // A long or open argument list stays out of the sentence.
+        let args = match written.is_empty() || written.contains('\n') || written.len() > 40 {
+            true => "(...)",
+
+            false => written,
+        };
+
+        Some(ParseError {
+            offset: self.toks[lt].start as usize,
+            message: format!(
+                "type arguments at a call take `<<...>>`: write `{callee}<<{types}>>{args}`"
+            ),
+        })
+    }
+
+    /// Reports if the token at the cursor touches the one before it.
+    fn adjacent_before(&self) -> bool {
+        match (
+            self.pos.checked_sub(1).and_then(|i| self.toks.get(i)),
+            self.toks.get(self.pos),
+        ) {
+            (Some(a), Some(b)) => a.end == b.start,
+
+            _ => false,
+        }
     }
 
     /// The name after `->` or `=>`: a Name, a string, or `[expr]`.

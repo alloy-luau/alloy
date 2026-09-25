@@ -1156,7 +1156,7 @@ pub(crate) fn a_hint_names_a_module_type_by_its_path() {
 /// "Extract to local variable" sends `luau-lsp.rename` with the shadow's
 /// URI, a file of the mirror, and a place in the text it inserts. The
 /// command now names the source, at the new name there. A command whose
-/// place is in older text goes.
+/// place is in older text goes. The Alloy extension runs the command.
 #[test]
 pub(crate) fn a_refactor_follow_up_names_the_source() {
     let (mut st, uri) = one_file("local function f(w: number)\n    return w * 2\nend\n");
@@ -1180,6 +1180,8 @@ pub(crate) fn a_refactor_follow_up_names_the_source() {
         moved["command"]["arguments"],
         json!([uri, { "line": 1, "character": 10 }])
     );
+    // The Alloy extension runs the rename; luau-lsp's may be asleep.
+    assert_eq!(moved["command"]["command"], "alloy-luau.rename");
 
     // Line 2 after the edit is the old `return` line: no inserted text.
     let mut dropped = action(json!({ "line": 2, "character": 4 }));

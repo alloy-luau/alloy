@@ -1824,6 +1824,15 @@ pub(crate) fn map_follow_up(action: &mut Value, st: &State) {
         (Some((source, (l, c))), Some(Value::Array(args))) => {
             args[i] = json!(source);
             args[i + 1] = json!({ "line": l, "character": c });
+
+            // luau-lsp's extension owns `luau-lsp.rename`, and it
+            // registers the command only once it starts on a Luau file.
+            // The Alloy extension registers its own copy.
+            if let Some(command) = action.pointer_mut("/command/command")
+                && command == "luau-lsp.rename"
+            {
+                *command = json!("alloy-luau.rename");
+            }
         }
 
         _ => {

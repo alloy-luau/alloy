@@ -287,7 +287,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
             Stmt::Struct(d) => {
                 let name = text(d.name);
                 let generics = d.generics.map(text).unwrap_or("");
-                let mut lines = vec![format!("{}struct {name}{generics} as", export(d.exported))];
+                let mut lines = vec![format!("{}struct {name}{generics}", export(d.exported))];
                 lines.extend(d.fields.iter().map(|f| format!("    {}", text(f.span))));
                 lines.push("end".to_string());
 
@@ -305,7 +305,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                     format!(" extends {}", names.join(", "))
                 };
                 let mut lines = vec![format!(
-                    "{}interface {name}{generics}{extends} as",
+                    "{}interface {name}{generics}{extends}",
                     export(d.exported)
                 )];
                 lines.extend(d.fields.iter().map(|f| format!("    {}", text(f.span))));
@@ -317,7 +317,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
             Stmt::Enum(d) => {
                 let name = text(d.name);
                 let generics = d.generics.map(text).unwrap_or("");
-                let mut lines = vec![format!("{}enum {name}{generics} as", export(d.exported))];
+                let mut lines = vec![format!("{}enum {name}{generics}", export(d.exported))];
                 lines.extend(d.variants.iter().map(|v| format!("    {}", text(v.span))));
                 lines.push("end".to_string());
 
@@ -391,7 +391,7 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
 
             Stmt::Trait(d) => {
                 let name = text(d.name);
-                let mut lines = vec![format!("{}trait {name} as", export(d.exported))];
+                let mut lines = vec![format!("{}trait {name}", export(d.exported))];
                 lines.extend(
                     d.methods
                         .iter()
@@ -420,12 +420,12 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
             if !methods.is_empty() {
                 let generics = lines
                     .first()
-                    .and_then(|l| l.strip_suffix(" as"))
+                    .map(|l| l.strip_suffix(" as").unwrap_or(l))
                     .and_then(|l| l.split_once(name))
                     .map_or(String::new(), |(_, tail)| tail.to_string());
 
                 lines.push(String::new());
-                lines.push(format!("impl {name}{generics} as"));
+                lines.push(format!("impl {name}{generics}"));
                 lines.extend(methods.iter().map(|line| format!("    {line}")));
                 lines.push("end".to_string());
             }
@@ -590,7 +590,7 @@ fn namespace_summaries(
     // line per member, then `end`. A long namespace stops at the cap,
     // since a hover the reader has to scroll says less than a short one.
     let shown = members.len().min(MEMBER_CAP);
-    let mut lines = vec![format!("```alloy\n{modifier}namespace {path} as")];
+    let mut lines = vec![format!("```alloy\n{modifier}namespace {path}")];
     lines.extend(members.iter().take(shown).cloned());
 
     if members.len() > shown {
@@ -1261,7 +1261,7 @@ mod tests {
         assert_eq!(d[0].name, "Vec2");
         assert_eq!(
             d[0].hover,
-            "```alloy\nexport struct Vec2 as\n    x: number\n    y: number = 0\nend\n\nimpl Vec2 as\n    public function len(self)\n    public function to_string(self)\nend\n```\n\nImplements `Display`."
+            "```alloy\nexport struct Vec2\n    x: number\n    y: number = 0\nend\n\nimpl Vec2\n    public function len(self)\n    public function to_string(self)\nend\n```\n\nImplements `Display`."
         );
     }
 
@@ -1347,7 +1347,7 @@ mod tests {
         // member says so on its own line.
         assert_eq!(
             ns.hover,
-            "```alloy\nexport namespace Math as\n    public const PI: number\n    private const E: number\n    public struct Vec2\nend\n```\n\nNumbers."
+            "```alloy\nexport namespace Math\n    public const PI: number\n    private const E: number\n    public struct Vec2\nend\n```\n\nNumbers."
         );
 
         let vec2 = d.iter().find(|x| x.name == "Math.Vec2").unwrap();
@@ -1367,7 +1367,7 @@ mod tests {
         let ns = d.iter().find(|x| x.name == "Big").unwrap();
         assert_eq!(
             ns.hover,
-            "```alloy\nexport namespace Big as\n    public function helper(x: number): number\n    public enum Kind\n    public type Id = number\n    public interface Named\n    public trait Show\n    public namespace Inner\n    public const NAME: string\n    public const ON: boolean\nend\n```"
+            "```alloy\nexport namespace Big\n    public function helper(x: number): number\n    public enum Kind\n    public type Id = number\n    public interface Named\n    public trait Show\n    public namespace Inner\n    public const NAME: string\n    public const ON: boolean\nend\n```"
         );
     }
 
@@ -1402,7 +1402,7 @@ mod tests {
     #[test]
     fn a_function_member_hovers_by_its_header() {
         let src =
-            "namespace M as\n    function f(x: number): number\n        return x\n    end\nend\n";
+            "namespace M\n    function f(x: number): number\n        return x\n    end\nend\n";
         let d = summaries(src, false);
         let f = d.iter().find(|x| x.name == "M.f").unwrap();
         assert_eq!(f.hover, "```alloy\nfunction M.f(x: number): number\n```");
@@ -1476,7 +1476,7 @@ mod tests {
         assert_eq!(d.len(), 2);
         assert!(
             d[1].hover
-                .contains("interface Entity extends Named, Positioned as\n    id: number\nend")
+                .contains("interface Entity extends Named, Positioned\n    id: number\nend")
         );
     }
 
@@ -1490,7 +1490,7 @@ mod tests {
 
         assert!(
             opt.hover
-                .contains("export enum Opt<T> as\n    Some(T)\n    Nil\nend"),
+                .contains("export enum Opt<T>\n    Some(T)\n    Nil\nend"),
             "{}",
             opt.hover
         );
@@ -1504,12 +1504,12 @@ mod tests {
         assert!(
             find("Msg")
                 .hover
-                .contains("enum Msg as\n    Quit\n    Move(number, number)\nend")
+                .contains("enum Msg\n    Quit\n    Move(number, number)\nend")
         );
         assert!(
             find("Shape")
                 .hover
-                .contains("trait Shape as\n    function area(self): number\nend")
+                .contains("trait Shape\n    function area(self): number\nend")
         );
     }
 }

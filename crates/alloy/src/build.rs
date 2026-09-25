@@ -151,17 +151,65 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
         };
         let text =
             |span: alloy_syntax::ast::TokSpan| span.text(&src, &parsed.lexed.toks).to_string();
+        // A field type names this file's own declarations, which an
+        // importer cannot see: a unit enum crosses as its string, and an
+        // alias as its value, so the importer's layout reads the type the
+        // declaring file meant, not a Roblox class of the same name.
+        let mut unit_enums = std::collections::HashSet::new();
+        let mut aliases = std::collections::HashMap::new();
 
         for stmt in &parsed.chunk.block.stmts {
-            let alloy_syntax::ast::Stmt::Struct(st) = stmt else {
+            match stmt.under_default() {
+                alloy_syntax::ast::Stmt::Enum(e)
+                    if e.variants.iter().all(|v| v.payload.is_empty()) =>
+                {
+                    unit_enums.insert(text(e.name));
+                }
+
+                alloy_syntax::ast::Stmt::TypeAlias(t) => {
+                    if let Some((_, value)) = text(t.span).split_once('=') {
+                        aliases.insert(text(t.name), value.trim().to_string());
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        let resolve = |ty: String| -> String {
+            let base = ty.trim_end_matches('?').trim();
+            let optional = &ty[base.len()..];
+
+            if unit_enums.contains(base) {
+                format!("string{optional}")
+            } else if let Some(value) = aliases.get(base) {
+                match optional.is_empty() {
+                    true => value.clone(),
+
+                    false => format!("({value}){optional}"),
+                }
+            } else {
+                ty
+            }
+        };
+
+        for stmt in &parsed.chunk.block.stmts {
+            let alloy_syntax::ast::Stmt::Struct(st) = stmt.under_default() else {
                 continue;
             };
+            // A `@skip` field stays off the wire, as it stays out of
+            // the derived table.
             let fields = st
                 .fields
                 .iter()
+                .filter(|f| {
+                    !f.attributes
+                        .iter()
+                        .any(|a| a.name.map(&text).as_deref() == Some("skip"))
+                })
                 .map(|f| crate::WireField {
                     name: text(f.name),
-                    ty: text(f.ty).trim().to_string(),
+                    ty: resolve(text(f.ty).trim().to_string()),
                     width: f.attributes.iter().find_map(|a| {
                         let n = text(a.name?);
 
@@ -171,9 +219,22 @@ pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
                     }),
                 })
                 .collect();
+            let derives = st
+                .attributes
+                .iter()
+                .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
+                .flat_map(|a| a.args.iter().map(|x| text(x.span())))
+                // `serde.Serialize` through a star import of the std.
+                .map(|d: String| match d.rsplit_once('.') {
+                    Some((_, n)) if crate::std_names::is_std_name(n) => n.to_string(),
+
+                    _ => d,
+                })
+                .collect();
             shapes.push(crate::StructShape {
                 name: text(st.name),
                 fields,
+                derives,
             });
         }
     }
@@ -223,7 +284,9 @@ fn run_inner(
             .unwrap_or_else(|| "@alloy".to_string()),
         erase_type_imports: emit.erase_type_imports,
         thresholds: config.flux.thresholds(),
+        naming: config.lint.naming.clone(),
         test_runner: config.test.lest,
+        std_globals: config.std.globals.clone(),
         ..EmitOptions::default()
     };
     let input = root.join(&build.input);

@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use alloy_syntax::lexer::{Tok, TokKind};
+use alloy_syntax::lexer::TokKind;
 
 use crate::render::{Edit, SpanMap, apply_edits};
 use crate::{CompileError, Diagnostic, EmitOptions, Output};
@@ -31,7 +31,7 @@ pub struct AlxOutput {
 pub fn compile_alx(
     src: &str,
     options: &EmitOptions,
-    mut config: luaux::Config,
+    config: luaux::Config,
 ) -> Result<AlxOutput, CompileError> {
     let spans = luaux::compile::markup_spans(src).map_err(|e| CompileError {
         offset: e.offset,
@@ -39,7 +39,6 @@ pub fn compile_alx(
     })?;
     let blanked = luaux::resolve::blank_luaux_regions(src, &spans);
     let bound = bound_names(&blanked);
-    config.extra_bound = bound.clone();
 
     let compiled = match config.backend {
         luaux::config::BackendKind::Table => {
@@ -64,7 +63,12 @@ pub fn compile_alx(
     let lowering = lowering_map(src, &compiled);
     let preamble = compiled.preamble;
     let lowered = compiled.output;
-    let mut output = crate::compile_with(&lowered, options)?;
+    // A function that returns markup, or that a tag names, is a
+    // component, which `[lint.naming] component` styles.
+    let mut options = options.clone();
+    options.markup = crate::naming::Markup::of(src, &compiled.regions);
+
+    let mut output = crate::compile_with(&lowered, &options)?;
     let back = |offset: u32| lowering.to_source(offset);
 
     // The lowering prepends its helpers in front of the file. They are
@@ -82,10 +86,6 @@ pub fn compile_alx(
         d.start = back(d.start);
         d.end = back(d.end);
     }
-
-    // A component is a function a tag names, `<Row />`, so its name
-    // is PascalCase by the markup's own rule.
-    output.lints.retain(|l| l.name != "pascal_case_function");
 
     // A lint message may quote the lowered text. Where it quotes a
     // markup region, the reader sees the markup they wrote instead.
@@ -120,7 +120,7 @@ pub fn compile_alx(
         output.diagnostics.push(d);
     }
 
-    for d in struct_props_problems(&blanked, &spans, options) {
+    for d in struct_props_problems(&blanked, &spans, &options) {
         output.diagnostics.push(d);
     }
 
@@ -1026,120 +1026,7 @@ pub fn blank_markup(src: &str) -> Option<(Vec<(usize, usize)>, String)> {
     })
 }
 
-/// The names the file binds, by a token scan of the blanked source.
-///
-/// luaux collects bindings with full_moon, which does not read Alloy
-/// syntax; this scan sees `import`, `const`, `struct`, and the rest. A
-/// name that is not a binding but looks like one costs nothing: it only
-/// lets `<Name>` resolve to a component.
-pub fn bound_names(src: &str) -> HashSet<String> {
-    let mut names = HashSet::new();
-    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
-        return names;
-    };
-    let toks = &lexed.toks;
-    let text = |t: &Tok| t.text(src);
-    let is_ident = |t: &Tok| t.kind == TokKind::Ident;
-    let mut i = 0;
-
-    while i < toks.len() {
-        let word = text(&toks[i]);
-
-        match word {
-            "local" | "const" => {
-                i += 1;
-
-                if i < toks.len() && text(&toks[i]) == "function" {
-                    if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
-                        names.insert(text(t).to_string());
-                    }
-
-                    continue;
-                }
-
-                // `local a, b`, `local { a, b = c }`, `local [ x, ...rest ]`.
-                let mut depth = 0i32;
-
-                while i < toks.len() {
-                    let t = &toks[i];
-                    let s = text(t);
-
-                    match s {
-                        "{" | "[" => depth += 1,
-
-                        "}" | "]" => depth -= 1,
-
-                        "=" if depth == 0 => break,
-
-                        ":" if depth == 0 => break,
-
-                        _ if is_ident(t) => {
-                            // In a table destructure `a = b` binds `b`; the
-                            // name before `=` is a key. Keeping both is safe.
-                            names.insert(s.to_string());
-                        }
-
-                        _ => {}
-                    }
-
-                    if depth == 0
-                        && s != ","
-                        && !is_ident(t)
-                        && !matches!(s, "{" | "[" | "}" | "]" | "...")
-                    {
-                        break;
-                    }
-
-                    i += 1;
-                }
-
-                continue;
-            }
-
-            "function" => {
-                if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
-                    names.insert(text(t).to_string());
-                }
-            }
-
-            // A namespace holds components: `<Scope.card/>` names one.
-            "struct" | "enum" | "trait" | "interface" | "remote" | "attribute" | "macro"
-            | "class" | "namespace" => {
-                if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
-                    names.insert(text(t).to_string());
-                }
-            }
-
-            "import" => {
-                // `import * as N`, `import D from`, `import { a as b, c }`.
-                let mut j = i + 1;
-
-                while j < toks.len() {
-                    let t = &toks[j];
-                    let s = text(t);
-
-                    if s == "from" || matches!(t.kind, TokKind::Str { .. }) {
-                        break;
-                    }
-
-                    // An alias `a as b` binds `b`; keeping `a` too is
-                    // harmless, since a name only lets a tag resolve.
-                    if is_ident(t) && s != "type" && s != "as" {
-                        names.insert(s.to_string());
-                    }
-
-                    j += 1;
-                }
-            }
-
-            _ => {}
-        }
-
-        i += 1;
-    }
-
-    names
-}
+pub use luaux::resolve::bound_names;
 
 #[cfg(test)]
 mod tests {
@@ -1151,7 +1038,7 @@ mod tests {
     /// applier drops one that no longer covers what the lint read.
     #[test]
     fn a_rewrite_reads_the_source_the_author_wrote() {
-        let src = "import { create } from \"./util\"\n\nlocal function Cond(props: { open: boolean })\n    return <Frame>{function() return if props.open then <TextLabel /> else nil end}</Frame>\nend\n\nlocal function Dead(n: number)\n    return n\nend\n\nreturn Cond\n";
+        let src = "import { create } from \"./util\"\n\nlocal function Cond(props: { open: boolean })\n    return <Frame>{function() return if props.open then <TextLabel /> else nil end}</Frame>\nend\n\nlocal function dead(n: number)\n    return n\nend\n\nreturn Cond\n";
         let out = compile_alx(src, &EmitOptions::default(), luaux::Config::bare())
             .expect("the markup compiles")
             .output;
@@ -1159,7 +1046,7 @@ mod tests {
             .lints
             .iter()
             .find(|l| l.name == "unused_function")
-            .expect("`Dead` is never called");
+            .expect("`dead` is never called");
         let fix = lint.fix.as_ref().expect("the rewrite");
 
         assert_eq!(&src[fix.start as usize..fix.end as usize], fix.saw);
@@ -1167,7 +1054,7 @@ mod tests {
         let (text, n) = crate::lint::apply_fixes(src, &out.lints);
 
         assert_eq!(n, 1);
-        assert!(text.contains("local function _Dead(n: number)"), "{text}");
+        assert!(text.contains("local function _dead(n: number)"), "{text}");
 
         // The guard: a range the source moved under writes nothing.
         let moved = crate::lint::Fix {
@@ -1176,6 +1063,33 @@ mod tests {
         };
 
         assert!(!crate::lint::fix_applies(src, &moved));
+    }
+
+    /// A function that returns markup, or that a tag names, is a
+    /// component and takes `[lint.naming] component`, PascalCase by
+    /// default. Any other function takes the function style.
+    #[test]
+    fn a_component_takes_the_component_style() {
+        let src = "local function create(n: string): any return n end\nlocal function Row()\n    return <TextLabel />\nend\nlocal function main_panel()\n    return <Frame><Row /></Frame>\nend\nlocal function FormatText(s: string): string\n    return s:upper()\nend\nreturn { main_panel = main_panel, format = FormatText }\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+        let naming: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "naming_convention")
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            naming,
+            [
+                "`main_panel` is a component, and components are PascalCase here: `MainPanel`",
+                "`FormatText` is a function, and functions are snake_case here: `format_text`",
+            ]
+        );
     }
 
     /// A lint message quotes the markup the author wrote, not the
@@ -1236,6 +1150,20 @@ mod tests {
         }
 
         assert!(!names.contains("from"));
+
+        // What full_moon's walk used to add: parameters, loop names, and
+        // a global a statement assigns.
+        let names = bound_names(
+            "local function Wrap<T>(Inner, n: number, opt: { k: T } = d)\nend\nfor i, Item: T in items do end\nReceipt = function() end\n",
+        );
+
+        for n in ["Wrap", "Inner", "n", "opt", "i", "Item", "Receipt"] {
+            assert!(names.contains(n), "{n} missing from {names:?}");
+        }
+
+        for n in ["number", "k", "T", "d", "items"] {
+            assert!(!names.contains(n), "{n} is no binding: {names:?}");
+        }
     }
 
     /// A component whose props parameter names a struct: a tag's
@@ -1466,7 +1394,6 @@ return Panel\n";
     fn lower(src: &str) -> (luaux::compile::Compiled, SpanMap) {
         let mut config = luaux::Config::bare();
         config.create = "create".to_string();
-        config.extra_bound = bound_names(src);
         let compiled = luaux::compile::compile_recovering(src, &luaux::Table, config)
             .expect("the markup compiles");
         let map = lowering_map(src, &compiled);

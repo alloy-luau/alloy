@@ -40,13 +40,15 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
-            let visibility = if matches!(self.text(), "private" | "public") {
-                let i = self.bump();
+            // `private: number` is a field named private.
+            let visibility =
+                if matches!(self.text(), "private" | "public") && self.text_at(1) != ":" {
+                    let i = self.bump();
 
-                Some(TokSpan::new(i, i + 1))
-            } else {
-                None
-            };
+                    Some(TokSpan::new(i, i + 1))
+                } else {
+                    None
+                };
             let modifier = if matches!(self.text(), "read" | "write") && self.name_at(1) {
                 let i = self.bump();
 
@@ -175,7 +177,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        self.expect("as")?;
+        self.header_as(open);
         let fields = self.fields()?;
         self.expect_end(open)?;
 
@@ -221,7 +223,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect("as")?;
+        self.header_as(open);
         let fields = self.fields()?;
         self.expect_end(open)?;
 
@@ -292,7 +294,9 @@ impl<'a> Parser<'a> {
 
             // `async function f(self): T` is a signature too: the
             // answer it declares is `Future<T>`.
-            let heads = self.at("function") || (self.at("async") && self.text_at(1) == "function");
+            let heads = self.at("function")
+                || self.at("@")
+                || (self.at("async") && self.text_at(1) == "function");
 
             if self.body_ends_early() && (dedents || !heads) {
                 break;
@@ -300,6 +304,11 @@ impl<'a> Parser<'a> {
 
             let m_start = self.pos;
             member_column.get_or_insert_with(|| self.column_at(m_start));
+            let attributes = if self.at("@") {
+                self.attrs()?
+            } else {
+                Vec::new()
+            };
             let is_async = if self.at("async") && self.text_at(1) == "function" {
                 Some(TokSpan::new(self.bump(), self.pos))
             } else {
@@ -344,6 +353,7 @@ impl<'a> Parser<'a> {
             };
 
             methods.push(TraitMethod {
+                attributes,
                 name: mname,
                 is_async,
                 signature,
@@ -371,9 +381,11 @@ impl<'a> Parser<'a> {
 
         if !self.at(")") {
             loop {
-                if self.at("@") {
-                    self.attrs()?;
-                }
+                let attributes = match self.at("@") {
+                    true => self.attrs()?,
+
+                    false => Vec::new(),
+                };
 
                 if self.at("...") {
                     let i = self.bump();
@@ -383,6 +395,7 @@ impl<'a> Parser<'a> {
                         None
                     };
                     params.push(Param {
+                        attributes,
                         name: TokSpan::new(i, i + 1),
                         is_vararg: true,
                         ty,
@@ -400,6 +413,7 @@ impl<'a> Parser<'a> {
                     None
                 };
                 params.push(Param {
+                    attributes,
                     name: b.name,
                     is_vararg: false,
                     ty: b.ty,

@@ -47,6 +47,14 @@ pub fn is_contextual(word: &str) -> bool {
             | "import"
             | "requires"
             | "each"
+            | "trait"
+            | "impl"
+            | "remote"
+            | "macro"
+            | "attribute"
+            | "namespace"
+            | "private"
+            | "public"
     )
 }
 
@@ -138,8 +146,42 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
 
         // A declaration opens with its own name: `enum State as`,
         // `struct Vec2 as`, `interface Named as`.
-        "enum" | "struct" | "interface" => {
-            !newline_after(src, toks, i) && name_at(src, toks, i + 1)
+        // `match trait with`: a word that joins an expression is no
+        // declaration's name, though Luau reserves none of these.
+        "enum" | "struct" | "interface" | "trait" | "impl" | "attribute" | "macro"
+        | "namespace" => {
+            !newline_after(src, toks, i)
+                && name_at(src, toks, i + 1)
+                && !matches!(
+                    text(src, toks, i + 1),
+                    "with"
+                        | "then"
+                        | "do"
+                        | "is"
+                        | "as"
+                        | "from"
+                        | "where"
+                        | "satisfies"
+                        | "band"
+                        | "bor"
+                        | "bxor"
+                        | "shl"
+                        | "shr"
+                )
+        }
+
+        // `remote Hit(...)` and `remote function Ask(...)`. `local remote
+        // = folder.Hit` is the name Roblox code gives it.
+        "remote" => {
+            !newline_after(src, toks, i)
+                && (name_at(src, toks, i + 1) || text(src, toks, i + 1) == "function")
+        }
+
+        // `private hp: number`, `public function f()`. `local private =
+        // {}` and `private.x` are the name.
+        "private" | "public" => {
+            !newline_after(src, toks, i)
+                && (name_at(src, toks, i + 1) || text(src, toks, i + 1) == "function")
         }
 
         "import" => import_follows(src, toks, i),
@@ -566,7 +608,7 @@ pub fn name_before(word: &str, after: &str) -> bool {
     rest.starts_with(['(', '=', '.', ':', '[', ',', ')', '}', ';'])
 }
 
-/// The words Luau itself reserves, plus the two Alloy adds to a body.
+/// The words Luau itself reserves.
 pub fn is_luau_reserved(word: &str) -> bool {
     matches!(
         word,
@@ -591,8 +633,6 @@ pub fn is_luau_reserved(word: &str) -> bool {
             | "true"
             | "until"
             | "while"
-            | "private"
-            | "public"
     )
 }
 
@@ -828,8 +868,11 @@ mod tests {
         assert!(!name_before("import", "<<Config>>(name)"));
         assert!(name_before("import", ".cache = 1"));
 
+        // A declaration word is a name before `=`, the way `struct` is.
+        assert!(name_before("impl", " = 1"));
+        assert!(!name_before("impl", " Named for P as"));
         // A word with no name reading is never a name.
-        assert!(!name_before("impl", " = 1"));
+        assert!(!name_before("local", " = 1"));
     }
 
     /// The operand of a prefix word starts on the same line.

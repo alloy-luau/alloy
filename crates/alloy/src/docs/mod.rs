@@ -97,6 +97,32 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // The removal report names a declaration kind, which the rules
     // below would read as the kind's own family.
     (&["`global` is removed"], "ImportError"),
+    // Luau's attribute list and `@allow`. The words of a lint name in
+    // the report could reach any rule below.
+    (
+        &[
+            "in this list twice",
+            "`deprecated` takes",
+            "`native` takes no argument",
+            "`checked` takes no argument",
+            "`@allow`",
+            "and `@allow` quiets lints",
+        ],
+        "AttributeError",
+    ),
+    // A std name with no import, and a std import that names nothing.
+    // The name in the report could reach any rule below.
+    (
+        &[
+            "is in the std; write",
+            "is no std module",
+            "the std has no",
+            "; it is in \"@alloy/std",
+            "\"@alloy/std\" has no",
+            "\"@alloy/std/",
+        ],
+        "ImportError",
+    ),
     // A member of a namespace reached by its bare name. The author's
     // name sits in the report, so a name like `remote_ctl` or
     // `testatr` would reach the wire or the test rule below.
@@ -106,7 +132,7 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // The forms a Luau user writes from another language. Each names
     // the Alloy form, and the rules below would read the declaration
     // word in the sentence as that declaration's own family.
-    (&["body is `as ... end`"], "SyntaxError"),
+    (&["closes with `end`, not braces"], "SyntaxError"),
     (&["one name holds one declaration"], "DuplicateError"),
     // A variant or an enum method that takes a name the emit gives the
     // enum. The words `type test` and `field` in the sentence would
@@ -132,16 +158,24 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // An arm that holds the other form: a value where a statement arm
     // goes, and statements where an expression arm goes. The parser
     // reports both, and no rule below reads either sentence.
-    (
-        &["arm takes a statement", "arm is one expression"],
-        "SyntaxError",
-    ),
+    (&["arm takes a statement"], "SyntaxError"),
     (&["`declare` takes", "`declare` belongs"], "DeclareError"),
     // A header the parser cannot read. The `trait` rule below would
     // read the word as a contract report.
     (&["takes no type parameters"], "SyntaxError"),
     // A turbofish inside a type argument list; the parser reports it.
-    (&["a type is written"], "SyntaxError"),
+    (
+        &[
+            "a type is written",
+            "a type takes its arguments in one",
+            "is Rust's arm",
+            "a guard reads `where`",
+            "a match whose arms run statements",
+            "this arm gives no value",
+            "alternatives join with `or`",
+        ],
+        "SyntaxError",
+    ),
     (&["markup:"], "MarkupError"),
     (&["names no module"], "UnknownModule"),
     (&["is a script, not a module"], "UnknownModule"),
@@ -150,19 +184,34 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     (&["reserved word"], "ReservedWord"),
     (&["is already declared in"], "DeclareError"),
     (&["a definitions file cannot reach"], "DeclareError"),
-    // A namespace used above its declaration. The struct, enum, and
-    // function forms name their own kind in the sentence; a namespace
-    // has no section, so the report is about the declaration.
-    (&["move the namespace above it"], "DeclareError"),
+    // A namespace or a function used above its declaration. The struct
+    // and enum forms name their own kind in the sentence. The function
+    // form carries the author's name, and `remote` or `trait` as that
+    // name would reach the rules below.
+    (
+        &["move the namespace above it", "move the function above it"],
+        "DeclareError",
+    ),
     (
         &["in macro expansion", "returns from the function"],
         "MacroError",
     ),
-    (&["not exhaustive", "no arm for"], "ExhaustiveMatch"),
+    (
+        &[
+            "not exhaustive",
+            "no arm for",
+            "a bare name in a pattern binds",
+        ],
+        "ExhaustiveMatch",
+    ),
     // The `impl` header names a struct and an enum in one sentence;
     // the enum rule below would take it.
     (&["an `impl` targets"], "StructError"),
-    (&["remote"], "WireType"),
+    (
+        &["remote", "holds a whole number from", "`@wire`"],
+        "WireType",
+    ),
+    (&["cannot reach past a `try do`"], "ResultError"),
     (&["directive"], "DirectiveError"),
     (&["result"], "ResultError"),
     // After `result`, so `try await` on a Result keeps that kind.

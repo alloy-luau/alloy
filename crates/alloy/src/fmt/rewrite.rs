@@ -41,77 +41,46 @@ impl<'s> Formatter<'s> {
         self.header_as();
     }
 
-    /// `impl T end` and `trait T end` write `impl T as end` and
-    /// `trait T as end`. The header then closes the way a `struct`, an
-    /// `enum`, and an `interface` header closes. The parser reads both,
-    /// so a file written before `as` still builds.
+    /// `struct P as` over a body on the next line writes `struct P`: the
+    /// `as` separates a header from a body on its own line, and a line
+    /// break already does. `enum Color as Red, Green end` keeps it.
     fn header_as(&mut self) {
         let mut i = 0;
 
         while i < self.items.len() {
-            if !(self.items[i].is("impl") || self.items[i].is("trait")) || !self.starts_block(i) {
+            let opener = ["struct", "enum", "trait", "interface", "namespace", "impl"]
+                .iter()
+                .any(|w| self.items[i].is(w));
+
+            if !opener || !self.starts_block(i) {
                 i += 1;
 
                 continue;
             }
 
-            match self.header_end(i) {
-                Some(at) if !self.items[at].is("as") => {
-                    self.items.insert(
-                        at,
-                        Item {
-                            text: "as".to_string(),
-                            kind: ItemKind::Tok(TokKind::Ident),
-                            start: usize::MAX,
-                            newlines_before: 0,
-                            space_before: true,
-                            name_here: false,
-                        },
-                    );
-                    i = at + 1;
-                }
+            // The `as` sits on the header's line, after the name.
+            let mut j = i + 1;
 
-                _ => i += 1,
+            while j < self.items.len()
+                && self.items[j].newlines_before == 0
+                && !self.items[j].is("as")
+            {
+                j += 1;
             }
+
+            let body_below = j < self.items.len()
+                && self.items[j].is("as")
+                && self.items[j].newlines_before == 0
+                && self
+                    .next_code(j)
+                    .is_some_and(|n| self.items[n].newlines_before > 0);
+
+            if body_below {
+                self.items.remove(j);
+            }
+
+            i = j.max(i + 1);
         }
-    }
-
-    /// The item after an `impl` or `trait` header: the header holds
-    /// names, `.`, `for`, and a `<...>` group, and nothing else.
-    fn header_end(&self, open: usize) -> Option<usize> {
-        let mut j = open + 1;
-        let mut angle = 0usize;
-
-        while j < self.items.len() {
-            let it = &self.items[j];
-
-            if it.is_comment() {
-                break;
-            }
-
-            if angle > 0 {
-                if it.is("<") {
-                    angle += 1;
-                } else if it.is(">") {
-                    angle -= 1;
-                }
-
-                j += 1;
-
-                continue;
-            }
-
-            if it.is("<") {
-                angle += 1;
-                j += 1;
-            } else if it.is(".") || it.is("for") || (it.is_ident() && !it.is_keyword_here()) {
-                j += 1;
-            } else {
-                break;
-            }
-        }
-
-        (angle == 0 && j > open + 1 && j < self.items.len()).then_some(j)
     }
 
     /// Whether item `i` can be the callee of a call written without
@@ -170,7 +139,7 @@ impl<'s> Formatter<'s> {
         let mut i = 0;
 
         while i < self.items.len() {
-            if self.items[i].is_comment() || !self.callee_before(i) {
+            if self.items[i].is_comment() || !self.callee_before(i) || self.in_luau_attr_list(i) {
                 i += 1;
 
                 continue;

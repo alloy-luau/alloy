@@ -429,6 +429,13 @@ pub fn bound_names(src: &str) -> Vec<String> {
             .strip_prefix("type ")
             .map(str::trim_start)
             .unwrap_or(rest);
+        // A std name under its own name is no binding of the file: the
+        // emit reaches it through the runtime, and the std answers for
+        // it. Under an alias it is one.
+        let std = rest
+            .rfind(" from ")
+            .map(|at| rest[at + " from ".len()..].trim().trim_matches(['"', '\'']))
+            .is_some_and(|spec| alloy::std_names::module_of_spec(spec).is_some());
 
         if let Some(after_star) = rest.strip_prefix('*') {
             if let Some(name) = after_star.trim_start().strip_prefix("as ") {
@@ -459,7 +466,7 @@ pub fn bound_names(src: &str) -> Vec<String> {
                 let words: Vec<&str> = entry.split_whitespace().collect();
                 let bound = match words.as_slice() {
                     [_, "as", name] | ["type", _, "as", name] => name,
-                    ["type", name] | [name] => name,
+                    ["type", name] | [name] if !std => name,
                     _ => continue,
                 };
                 out.push((*bound).to_string());

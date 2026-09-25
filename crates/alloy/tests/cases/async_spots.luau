@@ -15,13 +15,13 @@ end) end
 
 -- An `async do` block stands alone as a statement.
 __alloy.future(function()
-    print(__alloy.await(rank(1)))
+    return print(__alloy.await(rank(1)))
 end)
 
 -- And inside a plain function, where it is the fix for a bare `await`.
 local function warm()
     __alloy.future(function()
-        print(__alloy.await(rank(2)))
+        return print(__alloy.await(rank(2)))
     end)
 end
 

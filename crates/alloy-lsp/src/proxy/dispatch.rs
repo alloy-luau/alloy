@@ -388,9 +388,16 @@ impl Server {
 
                 // The import checks read a module from disk, so the
                 // save is the moment an importer's report can change.
+                // The project's structs come from disk too.
                 if is_alloy_uri(&uri)
                     && let Some(path) = uri_to_path(&uri)
                 {
+                    self.state
+                        .lock()
+                        .expect("state")
+                        .project_shapes
+                        .borrow_mut()
+                        .take();
                     self.refresh_importers(&[path]);
                 }
             }
@@ -963,8 +970,11 @@ impl Server {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        // A rename carries its new name the same way, for the answer
+        // the proxy builds when the child has none.
         let query = message
             .pointer("/params/query")
+            .or_else(|| message.pointer("/params/newName"))
             .and_then(Value::as_str)
             .map(str::to_string);
 
@@ -1314,6 +1324,14 @@ impl Server {
                                 .map(str::to_string)
                         {
                             let mut text = value.clone();
+
+                            // Before any pass reads the `where` clause of
+                            // a solver variable as a type of its own.
+                            if let Some(named) = name_solver_local(&st, &text, doc, line, character)
+                                .or_else(|| name_solver_struct(&text, doc))
+                            {
+                                text = named;
+                            }
 
                             if let Some(rewritten) = restyle_hover(&text, doc, line, character) {
                                 text = rewritten;
@@ -1750,13 +1768,30 @@ impl Server {
             }
 
             // A site in generated text maps to its anchor, which spells
-            // another word: gone from a references list and a rename.
+            // another word: gone from a references list and a rename. The
+            // field mends read the child's whole answer first: a stray
+            // site on a struct's `end` names the struct.
+            let child = result.clone();
+
             if matches!(
                 method.as_str(),
                 "textDocument/references" | "textDocument/rename"
             ) && let Some(uri) = &ctx
                 && let Some((line, character)) = position
             {
+                // A rename the child could not answer still takes the
+                // field's own walk.
+                if method == "textDocument/rename"
+                    && result.is_null()
+                    && let Some(new_name) = &query
+                {
+                    *result = json!({ "changes": { uri.clone(): [] } });
+                    result["changes"][uri.as_str()] = json!([{
+                        "range": range_value((line, character), (line, character)),
+                        "newText": new_name,
+                    }]);
+                }
+
                 st.drop_stray_sites(uri, line, character, result);
             }
 
@@ -1772,6 +1807,7 @@ impl Server {
                     if let Some(uri) = &ctx
                         && let Some((line, character)) = position
                     {
+                        st.mend_field_definition(uri, line, character, result);
                         let child = result.clone();
                         st.drop_stray_sites(uri, line, character, result);
 
@@ -1842,7 +1878,7 @@ impl Server {
                     if let Some(uri) = &ctx
                         && let Some((line, character)) = position
                     {
-                        st.mend_field_rename(uri, line, character, result);
+                        st.mend_field_rename(uri, line, character, &child, result);
                         st.mend_export_list(uri, line, character, result);
                         st.mend_prop_attributes(uri, line, character, result);
                     }
@@ -1852,7 +1888,7 @@ impl Server {
                     if let Some(uri) = &ctx
                         && let Some((line, character)) = position
                     {
-                        st.mend_field_references(uri, line, character, result);
+                        st.mend_field_references(uri, line, character, &child, result);
                         st.mend_export_list(uri, line, character, result);
                         st.mend_prop_attributes(uri, line, character, result);
                     }
@@ -1996,6 +2032,7 @@ impl Server {
 
                         if let Some(doc) = st.docs.get(uri) {
                             complete_std_members(doc, line, character, st.snippets, result);
+                            complete_std_module(doc, line, character, result);
                             attach_std_member_docs(result, doc, line, character);
                         }
 

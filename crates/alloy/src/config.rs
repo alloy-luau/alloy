@@ -22,6 +22,7 @@ pub struct Config {
     pub roblox: RobloxConfig,
     pub test: TestConfig,
     pub project: Project,
+    pub std: StdConfig,
     /// The `[mount]` table: alias to `[path, mount]`. The folder at
     /// `path` lands at `mount` in the DataModel. The table is the tree
     /// when the project writes one, over any project file at the root.
@@ -296,16 +297,27 @@ pub struct FmtConfig {
     /// Alloy's own: an `import { }` or `export { }` list with more than
     /// one name breaks one name per line, whatever its width.
     pub expand_imports: bool,
+    /// Alloy's own: a `local` that nothing assigns again becomes a
+    /// `const`, as the `prefer_const` lint asks.
+    pub prefer_const: bool,
     /// Paths the formatter leaves alone. A `*` matches any run of
     /// characters: `"vendor/*"`, `"*.gen.aly"`.
     pub exclude: Vec<String>,
     /// The markup of `.alx` files.
     pub alx: AlxFmt,
+    /// Rename a name that breaks its `[lint.naming]` style, as `alloy
+    /// flux --fix` does, while the `naming_convention` lint is on.
+    pub fix_naming: bool,
     /// Read the indent of each file from the file itself. Set by
     /// `recommended = false` when the project names no indent, and
     /// never a key of the table.
     #[serde(skip)]
     pub detect_indent: bool,
+    /// The project's `[lint]` table: the styles `fix_naming` writes, and
+    /// the level that turns the renames on. The caller copies it in, and
+    /// it is never a key of `[fmt]`.
+    #[serde(skip)]
+    pub lint: LintConfig,
 }
 
 impl Default for FmtConfig {
@@ -332,9 +344,12 @@ impl Default for FmtConfig {
             space_inside_array: true,
             align_struct_fields: false,
             expand_imports: false,
+            prefer_const: true,
             exclude: Vec::new(),
             alx: AlxFmt::default(),
+            fix_naming: true,
             detect_indent: false,
+            lint: LintConfig::default(),
         }
     }
 }
@@ -357,6 +372,7 @@ impl FmtConfig {
             leading_zero: LeadingZero::Preserve,
             call_parentheses: CallParentheses::Input,
             block_newline_gaps: BlockGaps::Preserve,
+            prefer_const: false,
             detect_indent: true,
             alx: AlxFmt {
                 attribute_quotes: AttributeQuotes::Preserve,
@@ -639,6 +655,8 @@ pub struct LintConfig {
     pub warn: Vec<String>,
     /// Deprecated: lints that stay silent.
     pub allow: Vec<String>,
+    /// `[lint.naming]`: the case style of each kind of name.
+    pub naming: crate::naming::Naming,
 }
 
 /// The `[lint.rules]` table: a name to a level.
@@ -754,6 +772,7 @@ impl Default for LintConfig {
             deny: Vec::new(),
             warn: Vec::new(),
             allow: Vec::new(),
+            naming: crate::naming::Naming::default(),
         }
     }
 }
@@ -872,6 +891,16 @@ impl Default for TestConfig {
     }
 }
 
+/// The `[std]` table: how a file reaches the std.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct StdConfig {
+    /// The std names a file writes with no import: `"none"`, the
+    /// default, `"all"`, or a list of names. The names the language
+    /// owns, `Result` and the rest, need no import under any value.
+    pub globals: crate::std_names::Globals,
+}
+
 /// The `[emit]` table: the few knobs that change what emitted code does.
 /// Each one is a named exception to the razor, so the list stays short.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -951,6 +980,9 @@ artifact = "ship"
 wait_timeout = 5
 # std_require = "@alloy"
 # erase_type_imports = false
+
+[std]
+globals = "none"
 
 [fmt]
 recommended = true
@@ -1083,6 +1115,21 @@ impl Config {
                     "`[lint] {level}` is deprecated; write `[lint.rules] {name} = \"{level}\"`"
                 ));
             }
+        }
+
+        let lint = &self.lint;
+
+        for name in lint
+            .rules
+            .keys()
+            .chain(&lint.deny)
+            .chain(&lint.warn)
+            .chain(&lint.allow)
+            .filter(|n| crate::lint::OLD_NAMING.contains(&n.as_str()))
+        {
+            out.push(format!(
+                "`{name}` is now `naming_convention`; write `[lint.rules] naming_convention`, and set the case of each kind of name in `[lint.naming]`"
+            ));
         }
 
         if let Some(level) = &self.alx.lints.static_conditional_child {

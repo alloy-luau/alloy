@@ -388,6 +388,15 @@ impl State {
                 ))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
+            } else if let Some(name) = alloy::std_names::missing_name(&d.message) {
+                // A std name with no import: the line the report names.
+                let spec = alloy::std_names::spec_of(name).unwrap_or_default();
+                let fixes = alloy::std_names::import_fixes(&doc.source, &[name]);
+
+                Some((
+                    format!("Import `{name}` from \"{spec}\""),
+                    json!(super::completion::fix_edits(&doc.source, &fixes)),
+                ))
             } else {
                 nearest_variant_fix(&d.message).map(|name| {
                     (
@@ -411,6 +420,32 @@ impl State {
                     "message": alloy::docs::labeled(&d.message),
                 }],
                 "edit": { "changes": { uri: edits } },
+            }));
+        }
+
+        // Two std names or more with no import: one action writes every
+        // import, the way `alloy flux --fix` does.
+        let missing: Vec<&str> = doc
+            .output
+            .as_ref()
+            .map(|o| o.diagnostics.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|d| alloy::std_names::missing_name(&d.message))
+            .collect();
+
+        if missing.len() > 1
+            && actions.iter().any(|a| {
+                a["title"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("Import `") && t.contains("@alloy/std"))
+            })
+        {
+            let fixes = alloy::std_names::import_fixes(&doc.source, &missing);
+            actions.push(json!({
+                "title": "Import every std name this file uses",
+                "kind": "quickfix",
+                "edit": { "changes": { uri: super::completion::fix_edits(&doc.source, &fixes) } },
             }));
         }
 
@@ -710,7 +745,20 @@ impl State {
         let lint_config = self.lint_config();
         let directives = alloy::directives::scan(&doc.source);
         let ((from_line, _), (to_line, _)) = range;
-        let mut all_edits: Vec<Value> = Vec::new();
+        let mut all_fixes: Vec<&alloy::lint::Fix> = Vec::new();
+        let edits_of = |fix: &alloy::lint::Fix| -> Vec<Value> {
+            fix.edits()
+                .map(|e| {
+                    let (sl, sc) = position_of(&doc.source, e.start as usize);
+                    let (el, ec) = position_of(&doc.source, e.end as usize);
+
+                    json!({
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": e.replacement,
+                    })
+                })
+                .collect()
+        };
 
         for l in &out.lints {
             let Some(fix) = &l.fix else { continue };
@@ -726,13 +774,7 @@ impl State {
                 continue;
             }
 
-            let (sl, sc) = position_of(&doc.source, fix.start as usize);
-            let (el, ec) = position_of(&doc.source, fix.end as usize);
-            let edit = json!({
-                "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
-                "newText": fix.replacement,
-            });
-            all_edits.push(edit.clone());
+            all_fixes.push(fix);
 
             let (ll, lc) = position_of(&doc.source, l.start as usize);
             let (le, lec) = position_of(&doc.source, l.end.max(l.start) as usize);
@@ -770,33 +812,18 @@ impl State {
                     "code": alloy::docs::LINT_CODE,
                     "message": format!("{}: {}\n`alloy flux --fix` rewrites it.", l.name, l.message),
                 }],
-                "edit": { "changes": { uri: [edit] } },
+                "edit": { "changes": { uri: edits_of(fix) } },
             }));
         }
 
-        if all_edits.len() > 1 {
-            // Two rewrites that overlap keep the first, as `--fix` does.
-            let mut kept: Vec<Value> = Vec::new();
-            let mut last_end: Option<(u64, u64)> = None;
-
-            for e in &all_edits {
-                let start = (
-                    e["range"]["start"]["line"].as_u64().unwrap_or(0),
-                    e["range"]["start"]["character"].as_u64().unwrap_or(0),
-                );
-                let end = (
-                    e["range"]["end"]["line"].as_u64().unwrap_or(0),
-                    e["range"]["end"]["character"].as_u64().unwrap_or(0),
-                );
-
-                if last_end.is_none_or(|l| l <= start) {
-                    kept.push(e.clone());
-                    last_end = Some(end);
-                }
-            }
+        if all_fixes.len() > 1 {
+            // Two rewrites that overlap keep the first, as `--fix` does,
+            // and a rename lands with every edit it makes.
+            let chosen = alloy::lint::compatible(&doc.source, all_fixes);
+            let kept: Vec<Value> = chosen.iter().flat_map(|f| edits_of(f)).collect();
 
             actions.push(json!({
-                "title": format!("Apply every Alloy rewrite in this file ({})", kept.len()),
+                "title": format!("Apply every Alloy rewrite in this file ({})", chosen.len()),
                 "kind": "source.fixAll",
                 "edit": { "changes": { uri: kept } },
             }));
@@ -1129,6 +1156,31 @@ pub(crate) fn collapse_diagnostics(items: &mut Vec<Value>) {
         !spans
             .iter()
             .any(|(other, span)| other == message && *span != range && covers(range, *span))
+    });
+
+    // A name the module does not export draws an `ImportError` and an
+    // `unused_import` on the same span, or on its alias: `Nope as N`
+    // reports `Nope` and `N`. The name is wrong, and the second report
+    // says nothing more.
+    let missing: Vec<Span> = items
+        .iter()
+        .filter(|d| {
+            d.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.starts_with("ImportError"))
+        })
+        .filter_map(|d| d.get("range").and_then(range_of))
+        .collect();
+
+    items.retain(|d| {
+        !d.get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.starts_with("unused_import"))
+            || d.get("range").and_then(range_of).is_none_or(|r| {
+                !missing
+                    .iter()
+                    .any(|m| *m == r || (m.1.0 == r.0.0 && m.1.1 + " as ".len() as u32 == r.0.1))
+            })
     });
 
     // A nil base makes every key on it unknown. `could be nil` names

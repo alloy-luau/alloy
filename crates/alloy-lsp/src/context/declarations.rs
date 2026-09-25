@@ -67,14 +67,22 @@ fn declared_in_line(line: &str, name: &str) -> Option<Declared> {
 /// What the nearest declaration of `name` above the caret says. A use
 /// of the name and a member access are not declarations.
 pub fn declared(src: &str, offset: usize, name: &str) -> Option<Declared> {
+    declared_at(src, offset, name).map(|(_, d)| d)
+}
+
+/// `declared` with the byte the declaring line starts at.
+pub fn declared_at(src: &str, offset: usize, name: &str) -> Option<(usize, Declared)> {
     if name.is_empty() {
         return None;
     }
 
-    src[..offset.min(src.len())]
-        .lines()
-        .rev()
-        .find_map(|line| declared_in_line(line, name))
+    let head = &src[..offset.min(src.len())];
+
+    head.lines().rev().find_map(|line| {
+        let start = line.as_ptr() as usize - head.as_ptr() as usize;
+
+        declared_in_line(line, name).map(|d| (start, d))
+    })
 }
 
 #[cfg(test)]

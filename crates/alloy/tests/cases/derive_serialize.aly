@@ -1,4 +1,4 @@
-@derive(Serialize, Clone)
+@derive(Serialize, Deserialize, Clone)
 struct Point as
 	x: number
 	@rename("label")

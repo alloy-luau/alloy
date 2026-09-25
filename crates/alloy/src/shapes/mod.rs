@@ -2145,6 +2145,23 @@ mod tests {
         );
     }
 
+    /// The std's `Iter` type function builds its methods with no
+    /// parameter names, and a step of the chain prints in place with its
+    /// metatable and the cycles cut. The hover reads as the method.
+    #[test]
+    fn a_map_hover_on_an_iter_step_names_the_types() {
+        let known = Known::default();
+        let step = "{ @metatable { __iter: (any) -> () -> U? }, { collect: <X>(self: { next: (self: any) -> X? }) -> { [number]: X, concat: (self: {read X}, other: *CYCLE*) -> *CYCLE*, push: (self: {read X}, ...X) -> *CYCLE* }, filter: ({ next: (any) -> U? }, (U) -> boolean) -> { @metatable { __iter: (any) -> () -> U? }, *CYCLE* }, next: ({ next: (any) -> U? }) -> U?, take_while: ({ next: (any) -> U? }, (U) -> boolean) -> { @metatable { __iter: (any) -> () -> U? }, *CYCLE* } } }";
+        let text = format!(
+            "```luau\nfunction xs:map<U>({{ next: (any) -> number? }}, (number) -> U): {step}\n```"
+        );
+
+        assert_eq!(
+            fold(&text, &known),
+            "```luau\nfunction Iter:map<U>(self: Iter<number>, (number) -> U): Iter<U>\n```"
+        );
+    }
+
     #[test]
     fn a_wrapped_chain_hover_names_the_receiver_type() {
         let known = Known::default();

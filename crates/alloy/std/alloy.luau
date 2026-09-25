@@ -44,6 +44,43 @@ function alloy.show_struct(name: string, s: any, fields: { string }): string
 end
 
 --- `Msg.Move(1, 2)`: the printer of an enum variant with a payload.
+--- A new table with `f` applied to each value, for a map of structs
+--- that `@derive(Serialize)` or `Deserialize` walks.
+function alloy.map_values(t: any, f: (any) -> any): any
+	local out = {}
+	for k, v in next, t do
+		out[k] = f(v)
+	end
+	return out
+end
+
+--- Equality by content, for `@derive(Eq)` over a field that holds a
+--- table: an array, a map, a set, or a plain record. A value with an
+--- `__eq` of its own, a struct or an enum, answers through `==`.
+function alloy.deep_eq(a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	local meta = getmetatable(a)
+	if meta ~= getmetatable(b) or (type(meta) == "table" and rawget(meta, "__eq") ~= nil) then
+		return false
+	end
+	for k, v in next, a do
+		if not alloy.deep_eq(v, rawget(b, k)) then
+			return false
+		end
+	end
+	for k in next, b do
+		if rawget(a, k) == nil then
+			return false
+		end
+	end
+	return true
+end
+
 function alloy.show_variant(name: string, v: any): string
 	local parts = {}
 	local i = 1
@@ -97,6 +134,9 @@ export type ResultMethods<T, E> = {
 	read is_ok: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> boolean,
 	read is_err: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> boolean,
 	read ok: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T?,
+	read and_then: <R>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (T) -> R) -> R,
+	read or_else: <R>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> R) -> R,
+	read unwrap_or_else: <D>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> D) -> T | D,
 }
 
 -- `__ok` and `__err` exist in the type alone: they carry `T` and `E` as
@@ -120,6 +160,11 @@ export type Result<T, E> = ResultOk<T, E> | ResultErr<T, E>
 -- reached by different routes. The side a map leaves alone reads `any`
 -- from there on.
 --
+-- `and_then` and `or_else` answer the callback's own return, which is
+-- the Result it builds. On the other tag they hand back `self`, a Result
+-- too, so the type is right at run time and names no rung, which keeps
+-- the solver off the alias loop the notes above describe.
+--
 -- `unwrap_or` answers `T | D`, the way it does one rung up, so a
 -- fallback of another type still names both sides. `map` and `map_err`
 -- climb to `Result3`, the last rung, so `r:map(f):map(g)` keeps the
@@ -133,6 +178,9 @@ export type ResultMethods2<T, E> = {
 	read is_ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
 	read is_err: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
 	read ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T?,
+	read and_then: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> R) -> R,
+	read or_else: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> R) -> R,
+	read unwrap_or_else: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> D) -> T | D,
 }
 
 export type Result2<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods2<T, E>
@@ -152,6 +200,9 @@ export type ResultMethods3<T, E> = {
 	read is_ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
 	read is_err: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
 	read ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T?,
+	read and_then: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> R) -> R,
+	read or_else: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> R) -> R,
+	read unwrap_or_else: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> D) -> T | D,
 }
 
 export type Result3<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods3<T, E>
@@ -203,6 +254,27 @@ function Result.map_err(self, f)
 		return self
 	end
 	return Err(f(self._1), self.trace)
+end
+
+function Result.and_then(self, f)
+	if self.tag == "Err" then
+		return self
+	end
+	return f(self._1)
+end
+
+function Result.or_else(self, f)
+	if self.tag == "Ok" then
+		return self
+	end
+	return f(self._1)
+end
+
+function Result.unwrap_or_else(self, f)
+	if self.tag == "Err" then
+		return f(self._1)
+	end
+	return self._1
 end
 
 function Result.is_ok(self)
@@ -754,6 +826,8 @@ export type Array<T> = {
 	is_empty: (self: { read [number]: T }) -> boolean,
 	push: (self: { read [number]: T }, ...T) -> Array<T>,
 	pop: (self: { read [number]: T }) -> T?,
+	remove: (self: { read [number]: T }, index: number) -> T?,
+	swap_remove: (self: { read [number]: T }, index: number) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
 	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array2<U>,
@@ -784,6 +858,8 @@ export type Array2<T> = {
 	is_empty: (self: { read [number]: T }) -> boolean,
 	push: (self: { read [number]: T }, ...T) -> Array2<T>,
 	pop: (self: { read [number]: T }) -> T?,
+	remove: (self: { read [number]: T }, index: number) -> T?,
+	swap_remove: (self: { read [number]: T }, index: number) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
 	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array3<U>,
@@ -808,6 +884,8 @@ export type Array3<T> = {
 	is_empty: (self: { read [number]: T }) -> boolean,
 	push: (self: { read [number]: T }, ...T) -> Array3<T>,
 	pop: (self: { read [number]: T }) -> T?,
+	remove: (self: { read [number]: T }, index: number) -> T?,
+	swap_remove: (self: { read [number]: T }, index: number) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
 	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> any,
@@ -876,14 +954,45 @@ function Array.is_empty(xs)
 end
 
 function Array.push(xs, ...)
-	for i = 1, select("#", ...) do
-		table.insert(xs, (select(i, ...)))
+	-- One value is the common call, and it skips the `select` loop: 1.2x.
+	if select("#", ...) == 1 then
+		table.insert(xs, (...))
+	else
+		for i = 1, select("#", ...) do
+			table.insert(xs, (select(i, ...)))
+		end
 	end
 	return xs
 end
 
+-- Written out, not `table.remove`: the builtin costs 20% more. An empty
+-- array returns no value, as `table.remove` does.
 function Array.pop(xs)
-	return table.remove(xs)
+	local n = #xs
+	if n == 0 then
+		return
+	end
+	local value = xs[n]
+	xs[n] = nil
+	return value
+end
+
+-- `table.remove`: the items after `index` move down one.
+function Array.remove(xs, index)
+	return table.remove(xs, index)
+end
+
+-- O(1): the last item fills the hole, so the order changes. An index
+-- outside 1 to `len` removes nothing and returns nil.
+function Array.swap_remove(xs, index)
+	local n = #xs
+	if index < 1 or index > n or index % 1 ~= 0 then
+		return nil
+	end
+	local value = xs[index]
+	xs[index] = xs[n]
+	xs[n] = nil
+	return value
 end
 
 function Array.first(xs)
@@ -903,10 +1012,11 @@ function Array.map<T, U>(xs: { read [number]: T }, f: (T, number) -> U): Array<U
 end
 
 function Array.filter(xs, f)
-	local out = {}
+	local out, n = {}, 0
 	for i, v in ipairs(xs) do
 		if f(v, i) then
-			table.insert(out, v)
+			n += 1
+			out[n] = v
 		end
 	end
 	return setmetatable(out, Array)
@@ -1005,7 +1115,9 @@ alloy.Array = Array
 -- HashMap and Set: Alloy structs with methods.
 -- ---------------------------------------------------------------------------
 
-export type HashMap<K, V> = {
+--- `for key, value in map` walks the pairs, as `entries` does. The
+--- metatable form carries `__iter`, so the loop types its variables.
+export type HashMap<K, V> = typeof(setmetatable({} :: {
 	get: (self: HashMap<K, V>, key: K) -> V?,
 	set: (self: HashMap<K, V>, key: K, value: V) -> HashMap<K, V>,
 	has: (self: HashMap<K, V>, key: K) -> boolean,
@@ -1017,7 +1129,7 @@ export type HashMap<K, V> = {
 	get_or_insert: (self: HashMap<K, V>, key: K, default: V) -> V,
 	clear: (self: HashMap<K, V>) -> (),
 	to_table: (self: HashMap<K, V>) -> { [K]: V },
-}
+}, {} :: { __iter: (self: any) -> (({ [K]: V }, K?) -> (K, V), { [K]: V }) }))
 
 local HashMap = {}
 HashMap.__index = HashMap
@@ -1027,11 +1139,21 @@ function HashMap.new<K, V>(): HashMap<K, V>
 end
 
 function HashMap.from<K, V>(t: { [K]: V }): HashMap<K, V>
-	local self = HashMap.new()
-	for k, v in pairs(t) do
-		self:set(k, v)
+	-- `table.clone` copies a plain table in one native call, 30x faster
+	-- than a `set` per pair. It would also copy a metatable, so a table
+	-- with one goes pair by pair.
+	local plain = getmetatable(t) == nil
+	local items = if plain then table.clone(t) else {}
+	if not plain then
+		for k, v in pairs(t) do
+			items[k] = v
+		end
 	end
-	return self
+	local count = 0
+	for _ in items do
+		count += 1
+	end
+	return (setmetatable({ _items = items, _count = count }, HashMap) :: any) :: HashMap<K, V>
 end
 
 function HashMap.get(self, key)
@@ -1066,17 +1188,19 @@ function HashMap.len(self)
 end
 
 function HashMap.keys(self)
-	local out = {}
-	for k in pairs(self._items) do
-		table.insert(out, k)
+	local out, n = {}, 0
+	for k in self._items do
+		n += 1
+		out[n] = k
 	end
 	return setmetatable(out, Array)
 end
 
 function HashMap.values(self)
-	local out = {}
-	for _, v in pairs(self._items) do
-		table.insert(out, v)
+	local out, n = {}, 0
+	for _, v in self._items do
+		n += 1
+		out[n] = v
 	end
 	return setmetatable(out, Array)
 end
@@ -1089,6 +1213,13 @@ function HashMap.entries(self)
 		key = k
 		return k, v
 	end
+end
+
+-- A loop over `next` calls it once per pair, since only a `for` that
+-- names `next` or `pairs` in its own header takes the builtin walk.
+-- `for k, v in map:to_table()` is the fast loop, 20x at a million pairs.
+function HashMap.__iter(self)
+	return next, self._items
 end
 
 function HashMap.get_or_insert(self, key, default)
@@ -1125,7 +1256,8 @@ end
 
 alloy.HashMap = HashMap
 
-export type Set<T> = {
+--- `for value in set` walks the members, in no set order.
+export type Set<T> = typeof(setmetatable({} :: {
 	add: (self: Set<T>, value: T) -> Set<T>,
 	has: (self: Set<T>, value: T) -> boolean,
 	remove: (self: Set<T>, value: T) -> boolean,
@@ -1135,7 +1267,7 @@ export type Set<T> = {
 	difference: (self: Set<T>, other: Set<T>) -> Set<T>,
 	to_array: (self: Set<T>) -> Array<T>,
 	to_table: (self: Set<T>) -> { [T]: boolean },
-}
+}, {} :: { __iter: (self: any) -> (({ [T]: boolean }, T?) -> (T, boolean), { [T]: boolean }) }))
 
 -- Operator traits, as the shape a bound `T: Display` names.
 -- The mapped types of the language. A type function builds each shape,
@@ -1268,11 +1400,14 @@ function Set.new<T>(): Set<T>
 end
 
 function Set.from<T>(t: { T }): Set<T>
-	local self = Set.new()
+	local items, count = {}, 0
 	for _, v in ipairs(t) do
-		self:add(v)
+		if not items[v] then
+			items[v] = true
+			count += 1
+		end
 	end
-	return self
+	return (setmetatable({ _items = items, _count = count }, Set) :: any) :: Set<T>
 end
 
 function Set.add(self, value)
@@ -1300,43 +1435,62 @@ function Set.len(self)
 	return self._count
 end
 
+-- The set ops write the new table directly. An `add` per member cost a
+-- method call each, and `table.clone` copies the larger side at once.
+local function set_of(items, count)
+	return setmetatable({ _items = items, _count = count }, Set)
+end
+
 function Set.union(self, other)
-	local out = Set.new()
-	for v in pairs(self._items) do
-		out:add(v)
+	local big, small = self, other
+	if other._count > self._count then
+		big, small = other, self
 	end
-	for v in pairs(other._items) do
-		out:add(v)
+	local items, count = table.clone(big._items), big._count
+	for v in small._items do
+		if not items[v] then
+			items[v] = true
+			count += 1
+		end
 	end
-	return out
+	return set_of(items, count)
 end
 
 function Set.intersection(self, other)
-	local out = Set.new()
-	for v in pairs(self._items) do
-		if other._items[v] then
-			out:add(v)
+	local theirs = other._items
+	local items, count = {}, 0
+	for v in self._items do
+		if theirs[v] then
+			items[v] = true
+			count += 1
 		end
 	end
-	return out
+	return set_of(items, count)
 end
 
 function Set.difference(self, other)
-	local out = Set.new()
-	for v in pairs(self._items) do
-		if not other._items[v] then
-			out:add(v)
+	local theirs = other._items
+	local items, count = {}, 0
+	for v in self._items do
+		if not theirs[v] then
+			items[v] = true
+			count += 1
 		end
 	end
-	return out
+	return set_of(items, count)
 end
 
 function Set.to_array(self)
-	local out = {}
-	for v in pairs(self._items) do
-		table.insert(out, v)
+	local out, n = {}, 0
+	for v in self._items do
+		n += 1
+		out[n] = v
 	end
 	return setmetatable(out, Array)
+end
+
+function Set.__iter(self)
+	return next, self._items
 end
 
 -- A write through the result skips the count, so `len` goes wrong.
@@ -1349,6 +1503,201 @@ function Set.__tostring(self)
 end
 
 alloy.Set = Set
+
+-- ---------------------------------------------------------------------------
+-- BitSet: a set of whole numbers, one bit each, in a buffer.
+-- ---------------------------------------------------------------------------
+
+--- A set of whole numbers from 0 up, one bit per number in a buffer. A
+--- `Set<number>` spends a table slot on each member; this spends a bit
+--- on each number up to the largest, and `add` and `has` run about 2x
+--- faster. The buffer grows to the largest member added. `for i in bits`
+--- walks the members in rising order.
+export type BitSet = typeof(setmetatable({} :: {
+	add: (self: BitSet, index: number) -> BitSet,
+	has: (self: BitSet, index: number) -> boolean,
+	remove: (self: BitSet, index: number) -> boolean,
+	len: (self: BitSet) -> number,
+	is_empty: (self: BitSet) -> boolean,
+	clear: (self: BitSet) -> (),
+	union: (self: BitSet, other: BitSet) -> BitSet,
+	intersection: (self: BitSet, other: BitSet) -> BitSet,
+	difference: (self: BitSet, other: BitSet) -> BitSet,
+	to_array: (self: BitSet) -> Array<number>,
+}, {} :: { __iter: (self: any) -> () -> number? }))
+
+-- The fields behind `BitSet`: the bits, and the count of set bits.
+type BitSetData = { _buf: buffer, _count: number }
+
+local BitSet = {}
+BitSet.__index = BitSet
+
+-- The bytes that hold `size` bits, in whole 32-bit words: the word
+-- loops read 4 bytes at a time and never read past the end.
+local function bitset_bytes(size: number): number
+	return math.max(4, math.ceil(size / 32) * 4)
+end
+
+-- Each set bit of the 32-bit words, counted in parallel within a word.
+local function bitset_popcount(buf: buffer): number
+	local count = 0
+	for at = 0, buffer.len(buf) - 4, 4 do
+		local x = buffer.readu32(buf, at)
+		if x ~= 0 then
+			x -= bit32.band(bit32.rshift(x, 1), 0x55555555)
+			x = bit32.band(x, 0x33333333) + bit32.band(bit32.rshift(x, 2), 0x33333333)
+			x = bit32.band(x + bit32.rshift(x, 4), 0x0F0F0F0F)
+			count += bit32.band(x + bit32.rshift(x, 8) + bit32.rshift(x, 16) + bit32.rshift(x, 24), 0x3F)
+		end
+	end
+	return count
+end
+
+local function bitset_of(buf: buffer, count: number): BitSet
+	return (setmetatable({ _buf = buf, _count = count }, BitSet) :: any) :: BitSet
+end
+
+--- An empty set with room for the numbers below `size`, 256 when not
+--- given. A larger number grows the buffer.
+function BitSet.new(size: number?): BitSet
+	return bitset_of(buffer.create(bitset_bytes(size or 256)), 0)
+end
+
+function BitSet.from(indices: { number }): BitSet
+	local self = BitSet.new()
+	for _, index in ipairs(indices) do
+		self:add(index)
+	end
+	return self
+end
+
+function BitSet.add(self: BitSetData, index: number): BitSet
+	if type(index) ~= "number" or index < 0 or index % 1 ~= 0 then
+		error(`BitSet: {tostring(index)} is not a whole number from 0 up`, 2)
+	end
+	local at = index // 8
+	local buf = self._buf
+	if at >= buffer.len(buf) then
+		-- Double at the least, so a run of adds grows O(log n) times.
+		local grown = buffer.create(bitset_bytes(math.max(index + 1, buffer.len(buf) * 16)))
+		buffer.copy(grown, 0, buf)
+		self._buf = grown
+		buf = grown
+	end
+	local byte = buffer.readu8(buf, at)
+	local bit = bit32.lshift(1, index % 8)
+	if not bit32.btest(byte, bit) then
+		buffer.writeu8(buf, at, bit32.bor(byte, bit))
+		self._count += 1
+	end
+	return (self :: any) :: BitSet
+end
+
+-- A number outside the buffer, below 0, or with a fraction is no member.
+function BitSet.has(self: BitSetData, index: number): boolean
+	local at = index // 8
+	if index % 1 ~= 0 or at < 0 or at >= buffer.len(self._buf) then
+		return false
+	end
+	return bit32.btest(buffer.readu8(self._buf, at), bit32.lshift(1, index % 8))
+end
+
+function BitSet.remove(self: BitSetData, index: number): boolean
+	local at = index // 8
+	if index % 1 ~= 0 or at < 0 or at >= buffer.len(self._buf) then
+		return false
+	end
+	local byte = buffer.readu8(self._buf, at)
+	local bit = bit32.lshift(1, index % 8)
+	if not bit32.btest(byte, bit) then
+		return false
+	end
+	buffer.writeu8(self._buf, at, bit32.band(byte, bit32.bnot(bit)))
+	self._count -= 1
+	return true
+end
+
+function BitSet.len(self: BitSetData): number
+	return self._count
+end
+
+function BitSet.is_empty(self: BitSetData): boolean
+	return self._count == 0
+end
+
+function BitSet.clear(self: BitSetData)
+	buffer.fill(self._buf, 0, 0)
+	self._count = 0
+end
+
+-- The set ops run a 32-bit word at a time, and the result keeps the
+-- size of the larger input for a union and of `self` for the others.
+function BitSet.union(self: BitSetData, other: BitSetData): BitSet
+	local big, small = self._buf, other._buf
+	if buffer.len(small) > buffer.len(big) then
+		big, small = small, big
+	end
+	local out = buffer.create(buffer.len(big))
+	buffer.copy(out, 0, big)
+	for at = 0, buffer.len(small) - 4, 4 do
+		buffer.writeu32(out, at, bit32.bor(buffer.readu32(out, at), buffer.readu32(small, at)))
+	end
+	return bitset_of(out, bitset_popcount(out))
+end
+
+function BitSet.intersection(self: BitSetData, other: BitSetData): BitSet
+	local mine, theirs = self._buf, other._buf
+	local out = buffer.create(buffer.len(mine))
+	for at = 0, math.min(buffer.len(mine), buffer.len(theirs)) - 4, 4 do
+		buffer.writeu32(out, at, bit32.band(buffer.readu32(mine, at), buffer.readu32(theirs, at)))
+	end
+	return bitset_of(out, bitset_popcount(out))
+end
+
+function BitSet.difference(self: BitSetData, other: BitSetData): BitSet
+	local mine, theirs = self._buf, other._buf
+	local out = buffer.create(buffer.len(mine))
+	buffer.copy(out, 0, mine)
+	for at = 0, math.min(buffer.len(mine), buffer.len(theirs)) - 4, 4 do
+		buffer.writeu32(out, at, bit32.band(buffer.readu32(mine, at), bit32.bnot(buffer.readu32(theirs, at))))
+	end
+	return bitset_of(out, bitset_popcount(out))
+end
+
+-- The members in rising order: each word that is not zero gives up its
+-- lowest set bit until it is zero.
+function BitSet.__iter(self: BitSetData): () -> number?
+	local buf = self._buf
+	local words = buffer.len(buf) // 4
+	local w, word = -1, 0
+	return function(): number?
+		while word == 0 do
+			w += 1
+			if w >= words then
+				return nil
+			end
+			word = buffer.readu32(buf, w * 4)
+		end
+		local bit = bit32.countrz(word)
+		word = bit32.band(word, word - 1)
+		return w * 32 + bit
+	end
+end
+
+function BitSet.to_array(self: BitSetData): Array<number>
+	local out, n = table.create(self._count), 0
+	for index in BitSet.__iter(self) do
+		n += 1
+		out[n] = index
+	end
+	return (setmetatable(out, Array) :: any) :: Array<number>
+end
+
+function BitSet.__tostring(self: BitSetData): string
+	return show_list(BitSet.to_array(self), "BitSet {", "}")
+end
+
+alloy.BitSet = BitSet
 
 -- ---------------------------------------------------------------------------
 -- Symbol: a unique key that no string can collide with.
@@ -1409,30 +1758,25 @@ export type Signalish<T...> = RBXScriptSignal<T...> | Signal<T...> | {
 local Connection = {}
 Connection.__index = Connection
 
+-- The list links both ways, so a disconnect unlinks in O(1). A walk to
+-- the previous node made 10000 disconnects take 1.2 s. The node keeps
+-- its `_next`, so a fire that stands on it walks on.
 function Connection.Disconnect(self)
 	if not self.Connected then
 		return
 	end
 	self.Connected = false
 	local signal = self._signal
-	if signal._head == self then
-		signal._head = self._next
+	local before, after = self._prev, self._next
+	if before ~= nil then
+		before._next = after
 	else
-		local prev = signal._head
-		while prev ~= nil and prev._next ~= self do
-			prev = prev._next
-		end
-		if prev ~= nil then
-			prev._next = self._next
-		end
+		signal._head = after
 	end
-	if signal._tail == self then
-		signal._tail = nil
-		local last = signal._head
-		while last ~= nil and last._next ~= nil do
-			last = last._next
-		end
-		signal._tail = last
+	if after ~= nil then
+		after._prev = before
+	else
+		signal._tail = before
 	end
 end
 
@@ -1489,6 +1833,7 @@ function Signal.Connect(self, handler)
 		Connected = true,
 		_signal = self,
 		_handler = handler,
+		_prev = self._tail,
 		_next = nil,
 	}, Connection)
 	if self._tail ~= nil then
@@ -1636,8 +1981,9 @@ alloy.Signal = Signal
 -- Queue, Heap, Scope, Iter: what a game loop reaches for next.
 -- ---------------------------------------------------------------------------
 
---- A first-in, first-out queue over a ring of indices. `push` appends,
---- `pop` takes the oldest. Iterating reads front to back without a pop.
+--- A first-in, first-out queue over a ring that doubles when full.
+--- `push` appends, `pop` takes the oldest. Iterating reads front to
+--- back without a pop.
 --- The `__iter` in the type is for the checker: a `for` over a plain
 --- table type reports, and the metatable form binds the element type.
 export type Queue<T> = typeof(setmetatable({} :: {
@@ -1654,8 +2000,11 @@ export type Queue<T> = typeof(setmetatable({} :: {
 local Queue = {}
 Queue.__index = Queue
 
+-- The slots are 1 to `_cap`, and the front sits at `_head`. A queue
+-- that slid its indices up and never emptied pushed its keys out of
+-- the array part, and ran 10x slower than this ring.
 function Queue.new<T>(): Queue<T>
-	return (setmetatable({ _items = {}, _head = 1, _tail = 0 }, Queue) :: any) :: Queue<T>
+	return (setmetatable({ _items = {}, _head = 1, _len = 0, _cap = 0 }, Queue) :: any) :: Queue<T>
 end
 
 function Queue.from<T>(t: { T }): Queue<T>
@@ -1666,23 +2015,42 @@ function Queue.from<T>(t: { T }): Queue<T>
 	return self
 end
 
+-- A full ring doubles. The copy unrolls it, so the front lands at 1.
+local function queue_grow(self)
+	local items, head, cap = self._items, self._head, self._cap
+	local size = if cap == 0 then 8 else cap * 2
+	local grown = table.create(size)
+	table.move(items, head, cap, 1, grown)
+	table.move(items, 1, head - 1, cap - head + 2, grown)
+	self._items = grown
+	self._head = 1
+	self._cap = size
+end
+
 function Queue.push(self, value)
-	self._tail += 1
-	self._items[self._tail] = value
+	local n = self._len
+	if n == self._cap then
+		queue_grow(self)
+	end
+	local at = self._head + n
+	if at > self._cap then
+		at -= self._cap
+	end
+	self._items[at] = value
+	self._len = n + 1
 end
 
 function Queue.pop(self)
-	if self._head > self._tail then
+	local n = self._len
+	if n == 0 then
 		return nil
 	end
-	local value = self._items[self._head]
-	self._items[self._head] = nil
-	self._head += 1
-	-- An empty queue starts its indices over, so they never run away.
-	if self._head > self._tail then
-		self._head = 1
-		self._tail = 0
-	end
+	local items, head = self._items, self._head
+	local value = items[head]
+	items[head] = nil
+	-- An empty queue starts its indices over at 1.
+	self._head = if n == 1 or head == self._cap then 1 else head + 1
+	self._len = n - 1
 	return value
 end
 
@@ -1691,41 +2059,48 @@ function Queue.peek(self)
 end
 
 function Queue.len(self)
-	return self._tail - self._head + 1
+	return self._len
 end
 
 function Queue.is_empty(self)
-	return self._head > self._tail
+	return self._len == 0
 end
 
 function Queue.clear(self)
 	self._items = {}
 	self._head = 1
-	self._tail = 0
+	self._len = 0
+	self._cap = 0
 end
 
 function Queue.to_array(self)
-	local out = {}
-	for i = self._head, self._tail do
-		table.insert(out, self._items[i])
-	end
+	local items, head, n = self._items, self._head, self._len
+	local out = table.create(n)
+	-- The slots from the front to the end of the ring, then the rest from 1.
+	local first = math.min(n, self._cap - head + 1)
+	table.move(items, head, head + first - 1, 1, out)
+	table.move(items, 1, n - first, first + 1, out)
 	return setmetatable(out, Array)
 end
 
--- The ring: the keys run from the head, which a pop moves up. Use
--- `to_array` for a list that starts at 1.
+-- The ring: the keys run from the head, which a pop moves up, and wrap
+-- past the end to 1. Use `to_array` for a list that starts at 1.
 function Queue.to_table(self)
 	return self._items
 end
 
 function Queue.__iter(self)
-	local i = self._head - 1
+	local k = 0
 	return function()
-		i += 1
-		if i > self._tail then
+		k += 1
+		if k > self._len then
 			return nil
 		end
-		return self._items[i]
+		local at = self._head + k - 1
+		if at > self._cap then
+			at -= self._cap
+		end
+		return self._items[at]
 	end
 end
 
@@ -1755,38 +2130,108 @@ export type Heap<T> = typeof(setmetatable({} :: {
 local Heap = {}
 Heap.__index = Heap
 
-local function heap_default_less(a, b)
-	return a < b
-end
-
+-- `_less` stays nil for the default order. The sifts then compare with
+-- `<` inline, twice as fast as a call per comparison.
 function Heap.new<T>(less: ((T, T) -> boolean)?): Heap<T>
-	return (setmetatable({ _items = {}, _less = less or heap_default_less }, Heap) :: any) :: Heap<T>
+	return (setmetatable({ _items = {}, _less = less }, Heap) :: any) :: Heap<T>
 end
 
+-- The sifts move a hole and write the value once, where it stops. A
+-- swap at each level wrote every slot twice.
+local function heap_sift_down(items, i, n, less)
+	local value = items[i]
+	if less == nil then
+		while true do
+			local child = i * 2
+			if child > n then
+				break
+			end
+			local below = items[child]
+			if child < n then
+				local right = items[child + 1]
+				if right < below then
+					child += 1
+					below = right
+				end
+			end
+			if not (below < value) then
+				break
+			end
+			items[i] = below
+			i = child
+		end
+	else
+		while true do
+			local child = i * 2
+			if child > n then
+				break
+			end
+			local below = items[child]
+			if child < n then
+				local right = items[child + 1]
+				if less(right, below) then
+					child += 1
+					below = right
+				end
+			end
+			if not less(below, value) then
+				break
+			end
+			items[i] = below
+			i = child
+		end
+	end
+	items[i] = value
+end
+
+-- Each parent sifts down, from the last one up: O(n), where a push per
+-- item costs O(n log n).
 function Heap.from<T>(t: { T }, less: ((T, T) -> boolean)?): Heap<T>
 	local self = Heap.new(less)
-	for _, v in ipairs(t) do
-		self:push(v)
+	local items = (self :: any)._items
+	for i, v in ipairs(t) do
+		items[i] = v
+	end
+	local n = #items
+	for i = n // 2, 1, -1 do
+		heap_sift_down(items, i, n, less)
 	end
 	return self
 end
 
 function Heap.push(self, value)
-	local items, less = self._items, self._less
-	table.insert(items, value)
-	local i = #items
-	while i > 1 do
-		local parent = i // 2
-		if not less(items[i], items[parent]) then
-			break
-		end
-		items[i], items[parent] = items[parent], items[i]
-		i = parent
+	-- `table.insert` of nil added nothing, and neither does this.
+	if value == nil then
+		return
 	end
+	local items, less = self._items, self._less
+	local i = #items + 1
+	if less == nil then
+		while i > 1 do
+			local parent = i // 2
+			local above = items[parent]
+			if not (value < above) then
+				break
+			end
+			items[i] = above
+			i = parent
+		end
+	else
+		while i > 1 do
+			local parent = i // 2
+			local above = items[parent]
+			if not less(value, above) then
+				break
+			end
+			items[i] = above
+			i = parent
+		end
+	end
+	items[i] = value
 end
 
 function Heap.pop(self)
-	local items, less = self._items, self._less
+	local items = self._items
 	local n = #items
 	if n == 0 then
 		return nil
@@ -1794,22 +2239,9 @@ function Heap.pop(self)
 	local top = items[1]
 	items[1] = items[n]
 	items[n] = nil
-	n -= 1
-	local i = 1
-	while true do
-		local left, right = i * 2, i * 2 + 1
-		local smallest = i
-		if left <= n and less(items[left], items[smallest]) then
-			smallest = left
-		end
-		if right <= n and less(items[right], items[smallest]) then
-			smallest = right
-		end
-		if smallest == i then
-			break
-		end
-		items[i], items[smallest] = items[smallest], items[i]
-		i = smallest
+	-- With one item left, it is the root already.
+	if n > 2 then
+		heap_sift_down(items, 1, n - 1, self._less)
 	end
 	return top
 end
@@ -1952,71 +2384,75 @@ end
 
 alloy.Scope = Scope
 
+-- `collect` answers an `Array`, which a type function cannot name, so
+-- the one function type below serves every step of a chain. It reads
+-- the element off `self`.
+type IterCollect = <X>(self: { next: (self: any) -> X? }) -> Array<X>
+
+-- Luau rejects an alias that names itself with other arguments, so an
+-- alias cannot give `map` the result `Iter<U>`. This type function
+-- builds the type graph itself. Two steps over the generics T and U
+-- point at each other, so a chain keeps its element type through any
+-- number of maps.
+--
+-- The result is the function `<T>(T) -> Iter<T>`, and `Iter<T>` reads
+-- it through a call. A type function of `T` stays unsolved inside a
+-- generic function, where every method call reports a missing key.
+type function IterSteps(collect)
+	local function step(item)
+		local maybe = types.optional(item)
+		local recv = types.newtable({
+			[types.singleton("next")] = types.newfunction({ head = { types.any } }, { head = { maybe } }),
+		})
+		local test = types.newfunction({ head = { item } }, { head = { types.boolean } })
+		local pull = types.newfunction({}, { head = { maybe } })
+		local meta = types.newtable({
+			[types.singleton("__iter")] = types.newfunction({ head = { types.any } }, { head = { pull } }),
+		})
+		local iter = types.newtable(nil, nil, meta)
+		local function method(name, params, result, generics)
+			iter:setproperty(types.singleton(name), types.newfunction({ head = params }, { head = { result } }, generics))
+		end
+		method("next", { recv }, maybe)
+		method("filter", { recv, test }, iter)
+		method("take", { recv, types.number }, iter)
+		method("skip", { recv, types.number }, iter)
+		method("take_while", { recv, test }, iter)
+		method("chain", { recv, iter }, iter)
+		method("any", { recv, test }, types.boolean)
+		method("all", { recv, test }, types.boolean)
+		method("find", { recv, test }, maybe)
+		method("first", { recv }, maybe)
+		method("last", { recv }, maybe)
+		method("count", { recv }, types.number)
+		method("to_table", { recv }, types.newtable(nil, { index = types.number, readresult = item, writeresult = item }))
+		iter:setproperty(types.singleton("collect"), collect)
+		local each = types.newfunction({ head = { item } }, {})
+		iter:setproperty(types.singleton("for_each"), types.newfunction({ head = { recv, each } }, {}))
+		local acc = types.generic("R")
+		local fold = types.newfunction({ head = { acc, item } }, { head = { acc } })
+		method("reduce", { recv, fold, acc }, acc, { acc })
+		return iter, recv
+	end
+	local t, u = types.generic("T"), types.generic("U")
+	local on_t, recv_t = step(t)
+	local on_u, recv_u = step(u)
+	local function map(recv, from, to, target)
+		local f = types.newfunction({ head = { from } }, { head = { to } })
+		return types.newfunction({ head = { recv, f } }, { head = { target } }, { to })
+	end
+	on_t:setproperty(types.singleton("map"), map(recv_t, t, u, on_u))
+	on_u:setproperty(types.singleton("map"), map(recv_u, u, t, on_t))
+	return types.newfunction({ head = { t } }, { head = { on_t } }, { t })
+end
+
+local iter_steps: IterSteps<IterCollect> = nil :: any
+
 --- A lazy iterator: a `next` that yields the next value or nil, with the
 --- chain methods on top. Nothing runs until `collect`, `for_each`, or a
 --- `for` loop pulls. `Iter.from` takes an array, a function, or anything
 --- with `__iter`; `Iter.range(a, b, step)` counts.
-export type Iter<T> = typeof(setmetatable({} :: {
-	next: (self: Iter<T>) -> T?,
-	map: <U>(self: Iter<T>, f: (T) -> U) -> Iter2<U>,
-	filter: (self: Iter<T>, f: (T) -> boolean) -> Iter<T>,
-	take: (self: Iter<T>, n: number) -> Iter<T>,
-	skip: (self: Iter<T>, n: number) -> Iter<T>,
-	take_while: (self: Iter<T>, f: (T) -> boolean) -> Iter<T>,
-	chain: (self: Iter<T>, other: Iter<T>) -> Iter<T>,
-	collect: (self: Iter<T>) -> Array<T>,
-	to_table: (self: Iter<T>) -> { T },
-	for_each: (self: Iter<T>, f: (T) -> ()) -> (),
-	count: (self: Iter<T>) -> number,
-	any: (self: Iter<T>, f: (T) -> boolean) -> boolean,
-	all: (self: Iter<T>, f: (T) -> boolean) -> boolean,
-	find: (self: Iter<T>, f: (T) -> boolean) -> T?,
-	reduce: <U>(self: Iter<T>, f: (U, T) -> U, init: U) -> U,
-	first: (self: Iter<T>) -> T?,
-	last: (self: Iter<T>) -> T?,
-}, {} :: { __iter: (self: any) -> () -> T? }))
-
--- `Iter2` and `Iter3`: the same shape one and two maps deep, for the
--- reason `Array2` gives.
-export type Iter2<T> = typeof(setmetatable({} :: {
-	next: (self: { next: (self: any) -> T? }) -> T?,
-	map: <U>(self: { next: (self: any) -> T? }, f: (T) -> U) -> Iter3<U>,
-	filter: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter2<T>,
-	take: (self: { next: (self: any) -> T? }, n: number) -> Iter2<T>,
-	skip: (self: { next: (self: any) -> T? }, n: number) -> Iter2<T>,
-	take_while: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter2<T>,
-	chain: (self: { next: (self: any) -> T? }, other: Iter2<T>) -> Iter2<T>,
-	collect: (self: { next: (self: any) -> T? }) -> Array<T>,
-	to_table: (self: { next: (self: any) -> T? }) -> { T },
-	for_each: (self: { next: (self: any) -> T? }, f: (T) -> ()) -> (),
-	count: (self: { next: (self: any) -> T? }) -> number,
-	any: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
-	all: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
-	find: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> T?,
-	reduce: <U>(self: { next: (self: any) -> T? }, f: (U, T) -> U, init: U) -> U,
-	first: (self: { next: (self: any) -> T? }) -> T?,
-	last: (self: { next: (self: any) -> T? }) -> T?,
-}, {} :: { __iter: (self: any) -> () -> T? }))
-
-export type Iter3<T> = typeof(setmetatable({} :: {
-	next: (self: { next: (self: any) -> T? }) -> T?,
-	map: <U>(self: { next: (self: any) -> T? }, f: (T) -> U) -> any,
-	filter: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter3<T>,
-	take: (self: { next: (self: any) -> T? }, n: number) -> Iter3<T>,
-	skip: (self: { next: (self: any) -> T? }, n: number) -> Iter3<T>,
-	take_while: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> Iter3<T>,
-	chain: (self: { next: (self: any) -> T? }, other: Iter3<T>) -> Iter3<T>,
-	collect: (self: { next: (self: any) -> T? }) -> Array<T>,
-	to_table: (self: { next: (self: any) -> T? }) -> { T },
-	for_each: (self: { next: (self: any) -> T? }, f: (T) -> ()) -> (),
-	count: (self: { next: (self: any) -> T? }) -> number,
-	any: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
-	all: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> boolean,
-	find: (self: { next: (self: any) -> T? }, f: (T) -> boolean) -> T?,
-	reduce: <U>(self: { next: (self: any) -> T? }, f: (U, T) -> U, init: U) -> U,
-	first: (self: { next: (self: any) -> T? }) -> T?,
-	last: (self: { next: (self: any) -> T? }) -> T?,
-}, {} :: { __iter: (self: any) -> () -> T? }))
+export type Iter<T> = typeof(iter_steps((nil :: any) :: T))
 
 local Iter = {}
 Iter.__index = Iter
@@ -2025,13 +2461,33 @@ local function iter_of(next)
 	return setmetatable({ _next = next }, Iter)
 end
 
-function Iter.from<T>(source: { read [number]: T } | (() -> T?) | Set<T> | Queue<T> | Heap<T> | HashMap<any, T>): Iter<T>
+-- The result reads `iter_steps` in place of `Iter<T>`: luau-lsp leaves
+-- the alias argument unsolved in the module that declares the alias.
+-- `Set<T>` and `HashMap<K, T>` take an overload each. In one union with
+-- the array form, an array argument bound `T` to `never`, so every callback down
+-- the chain read `unknown` and a wrong annotation passed in silence.
+type IterFrom =
+	(<T>(source: { read [number]: T } | (() -> T?) | Queue<T> | Heap<T>) -> typeof(iter_steps((nil :: any) :: T)))
+	& (<T>(source: Set<T>) -> typeof(iter_steps((nil :: any) :: T)))
+	& (<K, T>(source: HashMap<K, T>) -> typeof(iter_steps((nil :: any) :: T)))
+
+local function iter_from(source: any): any
 	if type(source) == "function" then
-		return (iter_of(source) :: any) :: Iter<T>
+		return iter_of(source) :: any
 	end
 	local mt = getmetatable(source)
 	if mt == Iter then
 		return source
+	end
+	-- A map's `__iter` yields the key first, and the iterator takes one
+	-- value a step: the map gives its values, as the type says.
+	if mt == HashMap then
+		local items, key = (source :: any)._items, nil
+		return (iter_of(function()
+			local k, v = next(items, key)
+			key = k
+			return v
+		end) :: any)
 	end
 	if type(mt) == "table" and mt.__iter ~= nil then
 		local f, s, c = mt.__iter(source)
@@ -2039,16 +2495,18 @@ function Iter.from<T>(source: { read [number]: T } | (() -> T?) | Set<T> | Queue
 			local value = f(s, c)
 			c = value
 			return value
-		end) :: any) :: Iter<T>
+		end) :: any)
 	end
 	local i = 0
 	return (iter_of(function()
 		i += 1
 		return source[i]
-	end) :: any) :: Iter<T>
+	end) :: any)
 end
 
-function Iter.range(from: number, to: number, step: number?): Iter<number>
+Iter.from = iter_from :: IterFrom
+
+function Iter.range(from: number, to: number, step: number?): typeof(iter_steps(0))
 	local by = step or 1
 	local at = from - by
 	return (iter_of(function()
@@ -2057,7 +2515,7 @@ function Iter.range(from: number, to: number, step: number?): Iter<number>
 			return nil
 		end
 		return at
-	end) :: any) :: Iter<number>
+	end) :: any)
 end
 
 function Iter.next(self)
@@ -2818,107 +3276,225 @@ local WIRE_RANGE = {
 	i32 = { -2147483648, 2147483647 },
 }
 
--- A kind is a string, `u8`, `str?`, `any`, or a table: `{ fields = {
--- { name, kind }, ... }, struct = Metatable? }` for a record, `{ item =
--- kind }` for an array, each with `optional = true` when nil is fine.
-local function wire_kind(kind: any): (any, boolean)
+-- A kind in a layout is a string, `u8`, `str?`, `any`, `inst:Player`, or a
+-- table: `{ fields = { { name, kind }, ... }, struct = Metatable? }` for a
+-- record, `{ item = kind }` for an array, `{ enum = Enum, tags = { A = 0,
+-- B = 1 } }` for an enum with each variant's payload count, each with
+-- `optional = true` when nil is fine. The codec reads each layout once into nodes, so a fire
+-- parses no string.
+type WireNode = {
+	base: string,
+	opt: boolean,
+	fields: { any }?,
+	item: any?,
+	struct: any?,
+	array: boolean?,
+	class: string?,
+	choices: { [string]: boolean }?,
+	enum: any?,
+	tags: { [string]: number }?,
+}
+
+local function wire_node(kind: any): WireNode
 	if type(kind) == "string" then
-		if string.sub(kind, -1) == "?" then
-			return string.sub(kind, 1, -2), true
+		local opt = string.sub(kind, -1) == "?"
+		local base = if opt then string.sub(kind, 1, -2) else kind
+		if string.sub(base, 1, 5) == "inst:" then
+			return { base = "inst", opt = opt, class = string.sub(base, 6) }
 		end
-		return kind, false
+		if string.sub(base, 1, 4) == "val:" then
+			return { base = "val", opt = opt, class = string.sub(base, 5) }
+		end
+		-- `one:Red,Blue`: a unit enum, a string that names a variant.
+		if string.sub(base, 1, 4) == "one:" then
+			local choices = {}
+			for name in string.gmatch(string.sub(base, 5), "[^,]+") do
+				choices[name] = true
+			end
+			return { base = "str", opt = opt, choices = choices }
+		end
+		return { base = base, opt = opt }
 	end
-	return kind, kind.optional == true
+	if kind.enum ~= nil then
+		return { base = "enum", opt = kind.optional == true, enum = kind.enum, tags = kind.tags }
+	end
+	local node: WireNode = {
+		base = if kind.fields ~= nil then "record" else "array",
+		opt = kind.optional == true,
+		struct = kind.struct,
+		array = kind.array,
+	}
+	if kind.fields ~= nil then
+		local fields = {}
+		for i, f in kind.fields do
+			fields[i] = { f[1], wire_node(f[2]) }
+		end
+		node.fields = fields
+	else
+		node.item = wire_node(kind.item)
+	end
+	return node
 end
 
-local function wire_check(label: string, base: string, v: any)
-	local range = WIRE_RANGE[base]
-	if range ~= nil then
-		if type(v) ~= "number" or v % 1 ~= 0 or v < range[1] or v > range[2] then
-			error(`{label}: {tostring(v)} does not fit @{base}`, 0)
+local wire_nodes: { [any]: { WireNode } } = setmetatable({}, { __mode = "k" }) :: any
+
+local function wire_compile(layout: { any }): { WireNode }
+	local nodes = wire_nodes[layout]
+	if nodes == nil then
+		nodes = {}
+		for i, kind in layout do
+			nodes[i] = wire_node(kind)
 		end
-	elseif base == "f32" or base == "f64" then
-		if type(v) ~= "number" then
-			error(`{label}: {tostring(v)} is not a number`, 0)
-		end
-	elseif base == "bool" then
-		if type(v) ~= "boolean" then
-			error(`{label}: {tostring(v)} is not a boolean`, 0)
-		end
-	elseif base == "str" then
-		if type(v) ~= "string" then
-			error(`{label}: {tostring(v)} is not a string`, 0)
-		end
-	elseif type(base) == "table" and type(v) ~= "table" then
-		error(`{label}: {tostring(v)} is not a table`, 0)
+		wire_nodes[layout] = nodes
 	end
+	return nodes
 end
 
--- The bytes one value takes under a kind; a nil where none is allowed
--- raises with the path of the value.
-local function wire_measure(kind: any, v: any, label: string): number
-	local base, optional = wire_kind(kind)
-	local size = 0
-	if base == "any" then
+-- A length or a count takes one byte under 128, as LEB128 writes it.
+local function varint_size(n: number): number
+	if n < 0x80 then
+		return 1
+	elseif n < 0x4000 then
+		return 2
+	elseif n < 0x200000 then
+		return 3
+	elseif n < 0x10000000 then
+		return 4
+	end
+	return 5
+end
+
+local function write_varint(buf: buffer, at: number, n: number): number
+	while n >= 0x80 do
+		buffer.writeu8(buf, at, n % 0x80 + 0x80)
+		n = n // 0x80
+		at += 1
+	end
+	buffer.writeu8(buf, at, n)
+	return at + 1
+end
+
+local function read_varint(buf: buffer, at: number): (number, number)
+	local n, scale = 0, 1
+	for _ = 1, 5 do
+		local b = buffer.readu8(buf, at)
+		at += 1
+		n += (b % 0x80) * scale
+		if b < 0x80 then
+			return n, at
+		end
+		scale *= 0x80
+	end
+	error("wire: a length runs past five bytes", 0)
+end
+
+-- The bytes one value packs to, or nil and why it does not fit. The why
+-- starts with the path under the value, `.hp` or `[3]`, so the report
+-- names the part; nothing is built for a value that fits.
+local function wire_measure(node: WireNode, v: any): (number?, string?)
+	local base = node.base
+	if base == "any" or base == "inst" or base == "val" or base == "enum" then
 		return 0
 	end
-	if optional then
-		size += 1
+	local size = 0
+	if node.opt then
+		size = 1
 		if v == nil then
 			return size
 		end
 	elseif v == nil then
-		error(`{label}: is nil`, 0)
+		return nil, ": is nil"
 	end
-	wire_check(label, base, v)
-	if type(base) == "table" then
-		if base.fields ~= nil then
-			for _, field in base.fields do
-				size += wire_measure(field[2], v[field[1]], `{label}.{field[1]}`)
-			end
-		else
-			size += 4
-			for i = 1, #v do
-				size += wire_measure(base.item, v[i], `{label}[{i}]`)
-			end
+	if base == "record" then
+		if type(v) ~= "table" then
+			return nil, `: {tostring(v)} is not a table`
 		end
+		for _, f in node.fields :: { any } do
+			local s, why = wire_measure(f[2], v[f[1]])
+			if s == nil then
+				return nil, `.{f[1]}{why}`
+			end
+			size += s
+		end
+		return size
+	elseif base == "array" then
+		if type(v) ~= "table" then
+			return nil, `: {tostring(v)} is not a table`
+		end
+		local n = #v
+		size += varint_size(n)
+		local item = node.item :: WireNode
+		for i = 1, n do
+			local s, why = wire_measure(item, v[i])
+			if s == nil then
+				return nil, `[{i}]{why}`
+			end
+			size += s
+		end
+		return size
 	elseif base == "str" then
-		size += 4 + #v
-	else
-		size += WIRE_SIZE[base]
+		if type(v) ~= "string" then
+			return nil, `: {tostring(v)} is not a string`
+		end
+		if node.choices ~= nil and not node.choices[v] then
+			return nil, `: {v} is no variant of the enum`
+		end
+		return size + varint_size(#v) + #v
+	elseif base == "bool" then
+		if type(v) ~= "boolean" then
+			return nil, `: {tostring(v)} is not a boolean`
+		end
+		return size + 1
 	end
-	return size
+	if type(v) ~= "number" then
+		return nil, `: {tostring(v)} is not a number`
+	end
+	local range = WIRE_RANGE[base]
+	if range ~= nil and (v % 1 ~= 0 or v < range[1] or v > range[2]) then
+		return nil, `: {tostring(v)} does not fit @{base}`
+	end
+	return size + WIRE_SIZE[base]
 end
 
-local function wire_write(kind: any, v: any, buf: buffer, at: number, rest: { any }): number
-	local base, optional = wire_kind(kind)
-	if base == "any" then
+local function wire_write(node: WireNode, v: any, buf: buffer, at: number, rest: { any }): number
+	local base = node.base
+	if base == "any" or base == "inst" or base == "val" or base == "enum" then
 		rest.n += 1
 		rest[rest.n] = v
 		return at
 	end
-	if optional then
+	if node.opt then
 		buffer.writeu8(buf, at, if v == nil then 0 else 1)
 		at += 1
 		if v == nil then
 			return at
 		end
 	end
-	if type(base) == "table" then
-		if base.fields ~= nil then
-			for _, field in base.fields do
-				at = wire_write(field[2], v[field[1]], buf, at, rest)
-			end
-		else
-			buffer.writeu32(buf, at, #v)
-			at += 4
-			for i = 1, #v do
-				at = wire_write(base.item, v[i], buf, at, rest)
-			end
+	if base == "record" then
+		for _, f in node.fields :: { any } do
+			at = wire_write(f[2], v[f[1]], buf, at, rest)
 		end
 		return at
-	end
-	if base == "u8" then
+	elseif base == "array" then
+		local n = #v
+		at = write_varint(buf, at, n)
+		local item = node.item :: WireNode
+		for i = 1, n do
+			at = wire_write(item, v[i], buf, at, rest)
+		end
+		return at
+	elseif base == "str" then
+		at = write_varint(buf, at, #v)
+		buffer.writestring(buf, at, v)
+		return at + #v
+	elseif base == "bool" then
+		buffer.writeu8(buf, at, if v then 1 else 0)
+		return at + 1
+	elseif base == "f64" then
+		buffer.writef64(buf, at, v)
+	elseif base == "f32" then
+		buffer.writef32(buf, at, v)
+	elseif base == "u8" then
 		buffer.writeu8(buf, at, v)
 	elseif base == "u16" then
 		buffer.writeu16(buf, at, v)
@@ -2930,55 +3506,124 @@ local function wire_write(kind: any, v: any, buf: buffer, at: number, rest: { an
 		buffer.writei16(buf, at, v)
 	elseif base == "i32" then
 		buffer.writei32(buf, at, v)
-	elseif base == "f32" then
-		buffer.writef32(buf, at, v)
-	elseif base == "f64" then
-		buffer.writef64(buf, at, v)
-	elseif base == "bool" then
-		buffer.writeu8(buf, at, if v then 1 else 0)
-	elseif base == "str" then
-		buffer.writeu32(buf, at, #v)
-		buffer.writestring(buf, at + 4, v)
-		return at + 4 + #v
 	end
 	return at + WIRE_SIZE[base]
 end
 
-local function wire_read(kind: any, buf: buffer, at: number, rest: { any }, ri: number): (any, number, number)
-	local base, optional = wire_kind(kind)
+-- An Instance crosses as the engine's reference. The sender is not
+-- trusted, so the reader checks the class the layout names.
+local function wire_instance(node: WireNode, v: any): any
+	if v == nil then
+		if not node.opt then
+			error(`wire: a {node.class} is missing`, 0)
+		end
+	elseif node.base == "val" then
+		if typeof(v) ~= node.class then
+			error(`wire: {typeof(v)} is not a {node.class}`, 0)
+		end
+	elseif typeof(v) ~= "Instance" or not (v :: Instance):IsA(node.class :: string) then
+		error(`wire: {typeof(v)} is not a {node.class}`, 0)
+	end
+	return v
+end
+
+-- A struct comes back through its constructor, so a field the wire
+-- skipped takes its default; a plain metatable takes the table as it is.
+local function wire_struct(struct: any, t: any): any
+	local meta = getmetatable(struct)
+	if type(meta) == "table" and meta.__call ~= nil then
+		return struct(t)
+	end
+	return setmetatable(t, struct)
+end
+
+-- An enum value crosses as Roblox copies a table, which drops the
+-- metatable. A unit variant is its name, and a payload variant is a
+-- table whose tag the layout lists with a payload; anything else is
+-- forged. The table gets the enum's metatable back. A payload value
+-- inside it keeps what Roblox gives, as a map does.
+local function wire_variant(node: WireNode, v: any): any
+	if v == nil then
+		if node.opt then
+			return nil
+		end
+		error("wire: a value is missing", 0)
+	end
+	local tags = node.tags :: { [string]: number }
+	if type(v) == "string" then
+		if tags[v] ~= 0 then
+			error(`wire: {v} is no variant of the enum`, 0)
+		end
+		return v
+	end
+	if type(v) ~= "table" or type(v.tag) ~= "string" or (tags[v.tag] or 0) == 0 then
+		error(`wire: {typeof(v)} is no variant of the enum`, 0)
+	end
+	return setmetatable(v, node.enum)
+end
+
+local function wire_read(node: WireNode, buf: buffer, at: number, rest: { any }, ri: number): (any, number, number)
+	local base = node.base
 	if base == "any" then
 		return rest[ri], at, ri + 1
+	elseif base == "enum" then
+		return wire_variant(node, rest[ri]), at, ri + 1
+	elseif base == "inst" or base == "val" then
+		return wire_instance(node, rest[ri]), at, ri + 1
 	end
-	if optional then
+	if node.opt then
 		local present = buffer.readu8(buf, at)
 		at += 1
 		if present == 0 then
 			return nil, at, ri
 		end
 	end
-	if type(base) == "table" then
+	if base == "record" then
 		local t = {}
-		if base.fields ~= nil then
-			for _, field in base.fields do
-				t[field[1]], at, ri = wire_read(field[2], buf, at, rest, ri)
-			end
-			if base.struct ~= nil then
-				setmetatable(t, base.struct)
-			end
-		else
-			local count = buffer.readu32(buf, at)
-			at += 4
-			for i = 1, count do
-				t[i], at, ri = wire_read(base.item, buf, at, rest, ri)
-			end
-			if base.array then
-				setmetatable(t, Array)
-			end
+		for _, f in node.fields :: { any } do
+			t[f[1]], at, ri = wire_read(f[2], buf, at, rest, ri)
+		end
+		if node.struct ~= nil then
+			t = wire_struct(node.struct, t)
 		end
 		return t, at, ri
+	elseif base == "array" then
+		local count
+		count, at = read_varint(buf, at)
+		-- Every item takes a byte or a value beside the buffer, so a
+		-- count past both is forged; reading it would hang the server.
+		if count > buffer.len(buf) - at + rest.n - ri + 1 then
+			error("wire: a count runs past the packet", 0)
+		end
+		local t = table.create(count)
+		local item = node.item :: WireNode
+		for i = 1, count do
+			t[i], at, ri = wire_read(item, buf, at, rest, ri)
+		end
+		if node.array then
+			setmetatable(t, Array)
+		end
+		return t, at, ri
+	elseif base == "str" then
+		local len
+		len, at = read_varint(buf, at)
+		if len > buffer.len(buf) - at then
+			error("wire: a string runs past the packet", 0)
+		end
+		local s = buffer.readstring(buf, at, len)
+		if node.choices ~= nil and not node.choices[s] then
+			error(`wire: {s} is no variant of the enum`, 0)
+		end
+		return s, at + len, ri
+	elseif base == "bool" then
+		return buffer.readu8(buf, at) == 1, at + 1, ri
 	end
 	local v
-	if base == "u8" then
+	if base == "f64" then
+		v = buffer.readf64(buf, at)
+	elseif base == "f32" then
+		v = buffer.readf32(buf, at)
+	elseif base == "u8" then
 		v = buffer.readu8(buf, at)
 	elseif base == "u16" then
 		v = buffer.readu16(buf, at)
@@ -2990,17 +3635,60 @@ local function wire_read(kind: any, buf: buffer, at: number, rest: { any }, ri: 
 		v = buffer.readi16(buf, at)
 	elseif base == "i32" then
 		v = buffer.readi32(buf, at)
-	elseif base == "f32" then
-		v = buffer.readf32(buf, at)
-	elseif base == "f64" then
-		v = buffer.readf64(buf, at)
-	elseif base == "bool" then
-		v = buffer.readu8(buf, at) == 1
-	elseif base == "str" then
-		local len = buffer.readu32(buf, at)
-		return buffer.readstring(buf, at + 4, len), at + 4 + len, ri
 	end
 	return v, at + WIRE_SIZE[base], ri
+end
+
+-- A value that crossed as Roblox encodes a table, checked against its
+-- node the way the reader checks a buffer. A record comes back with the
+-- keys its layout names alone, and with its metatable.
+local function wire_restore(node: WireNode, v: any): any
+	local base = node.base
+	if base == "any" then
+		return v
+	elseif base == "enum" then
+		return wire_variant(node, v)
+	elseif base == "inst" or base == "val" then
+		return wire_instance(node, v)
+	end
+	if v == nil then
+		if node.opt then
+			return nil
+		end
+		error("wire: a value is missing", 0)
+	end
+	if base == "record" then
+		if type(v) ~= "table" then
+			error(`wire: {typeof(v)} is not a table`, 0)
+		end
+		local t = {}
+		for _, f in node.fields :: { any } do
+			t[f[1]] = wire_restore(f[2], v[f[1]])
+		end
+		if node.struct ~= nil then
+			t = wire_struct(node.struct, t)
+		end
+		return t
+	elseif base == "array" then
+		if type(v) ~= "table" then
+			error(`wire: {typeof(v)} is not a table`, 0)
+		end
+		local n = #v
+		local t = table.create(n)
+		local item = node.item :: WireNode
+		for i = 1, n do
+			t[i] = wire_restore(item, v[i])
+		end
+		if node.array then
+			setmetatable(t, Array)
+		end
+		return t
+	end
+	local s, why = wire_measure(node, v)
+	if s == nil then
+		error(`wire{why}`, 0)
+	end
+	return v
 end
 
 local wire = {}
@@ -3008,30 +3696,61 @@ local wire = {}
 --- Packs the arguments of one fire by the layout: the buffer, then the
 --- values the layout marks `any`, in the order the packer met them.
 function wire.pack(layout: { any }, args: { any }, name: string?): (buffer, { any })
-	local label = name or "remote"
+	local nodes = wire_compile(layout)
 	local size = 0
-	for i, kind in layout do
-		size += wire_measure(kind, args[i], `{label}: argument {i}`)
+	for i, node in nodes do
+		local s, why = wire_measure(node, args[i])
+		if s == nil then
+			error(`{name or "remote"}: argument {i}{why}`, 0)
+		end
+		size += s
 	end
 	local buf = buffer.create(size)
 	local at = 0
 	local rest = { n = 0 }
-	for i, kind in layout do
-		at = wire_write(kind, args[i], buf, at, rest)
+	for i, node in nodes do
+		at = wire_write(node, args[i], buf, at, rest)
 	end
 	return buf, rest
 end
 
 --- Reads the arguments back: the buffer and the `any` values beside it,
---- as the packer laid them out.
+--- as the packer laid them out. A packet that does not fit raises.
 function wire.unpack(layout: { any }, buf: buffer, rest: { any }): { any }
-	local args = { n = #layout }
+	local nodes = wire_compile(layout)
+	if rest.n == nil then
+		rest.n = #rest
+	end
+	local args = { n = #nodes }
 	local at = 0
 	local ri = 1
-	for i, kind in layout do
-		args[i], at, ri = wire_read(kind, buf, at, rest, ri)
+	for i, node in nodes do
+		args[i], at, ri = wire_read(node, buf, at, rest, ri)
 	end
 	return args
+end
+
+--- Checks arguments that crossed as tables against the layout and puts
+--- their metatables back. A value that does not fit raises.
+function wire.restore(layout: { any }, args: { any }): { any }
+	local nodes = wire_compile(layout)
+	local out = { n = math.max(args.n or #args, #nodes) }
+	for i = 1, out.n do
+		local node = nodes[i]
+		out[i] = if node ~= nil then wire_restore(node, args[i]) else args[i]
+	end
+	return out
+end
+
+--- Checks arguments against the layout before a send, as the packer
+--- does; the report names the part that does not fit.
+function wire.check(layout: { any }, args: { any }, name: string?)
+	for i, node in wire_compile(layout) do
+		local s, why = wire_measure(node, args[i])
+		if s == nil then
+			error(`{name or "remote"}: argument {i}{why}`, 0)
+		end
+	end
 end
 
 alloy.wire = wire
@@ -3076,25 +3795,41 @@ function alloy.remote(spec: any): Remote
 		return true
 	end
 
+	-- Each default by the position of its parameter, read once.
+	local default_at = {}
+	for name, value in pairs(spec.defaults or {}) do
+		for i, pname in ipairs(spec.params) do
+			if pname == name then
+				default_at[i] = value
+			end
+		end
+	end
+
 	local function fill_defaults(args)
-		for name, value in pairs(spec.defaults or {}) do
-			for i, pname in ipairs(spec.params) do
-				if pname == name and args[i] == nil then
-					args[i] = value
-				end
+		for i, value in default_at do
+			if args[i] == nil then
+				args[i] = value
 			end
 		end
 		return args
 	end
 
-	-- The arguments as they cross: packed by the layout, or as given.
+	-- The arguments as they cross: packed into a buffer by the layout,
+	-- sent as Roblox encodes them and checked on arrival (`pack =
+	-- false`), or, with no layout, as given.
 	local layout = spec.wire
+	local packs = layout ~= nil and spec.pack ~= false
 
 	local function outgoing(...)
+		local args = fill_defaults(table.pack(...))
 		if layout == nil then
-			return table.pack(...)
+			return args
 		end
-		local buf, rest = wire.pack(layout, fill_defaults(table.pack(...)), spec.name)
+		if not packs then
+			wire.check(layout, args, spec.name)
+			return args
+		end
+		local buf, rest = wire.pack(layout, args, spec.name)
 		local out = { n = 1 + rest.n, buf }
 		for i = 1, rest.n do
 			out[i + 1] = rest[i]
@@ -3102,22 +3837,33 @@ function alloy.remote(spec: any): Remote
 		return out
 	end
 
+	-- The arguments of one packet, or nil when the packet does not fit
+	-- the layout. The other side may be anyone, so a forged packet drops
+	-- here instead of raising in the handler.
 	local function incoming(...)
 		if layout == nil then
 			return fill_defaults(table.pack(...))
 		end
-		local buf = ...
-		return fill_defaults(wire.unpack(layout, buf, { select(2, ...) }))
+		local ok, args
+		if packs then
+			local buf = ...
+			if type(buf) ~= "buffer" then
+				return nil
+			end
+			ok, args = pcall(wire.unpack, layout, buf, table.pack(select(2, ...)))
+		else
+			ok, args = pcall(wire.restore, layout, table.pack(...))
+		end
+		if not ok then
+			return nil
+		end
+		return fill_defaults(args)
 	end
 
-	local function accepted(player, ...)
-		if not allowed(player) then
-			return false
-		end
-		if validate ~= nil and not validate(player, ...) then
-			return false
-		end
-		return true
+	-- `@validate`, on arguments that decoded. The rate limit runs before
+	-- the decode, so a flood costs no reading.
+	local function valid(player, args)
+		return validate == nil or validate(player, table.unpack(args, 1, args.n))
 	end
 
 	local function timed(f)
@@ -3208,8 +3954,11 @@ function alloy.remote(spec: any): Remote
 			function remote.on(handler)
 				if is_function then
 					inst.OnServerInvoke = function(player, ...)
+						if not allowed(player) then
+							return nil
+						end
 						local args = incoming(...)
-						if not accepted(player, table.unpack(args, 1, args.n)) then
+						if args == nil or not valid(player, args) then
 							return nil
 						end
 						local result = handler(player, table.unpack(args, 1, args.n))
@@ -3221,8 +3970,11 @@ function alloy.remote(spec: any): Remote
 					return
 				end
 				return inst.OnServerEvent:Connect(function(player, ...)
+					if not allowed(player) then
+						return
+					end
 					local args = incoming(...)
-					if accepted(player, table.unpack(args, 1, args.n)) then
+					if args ~= nil and valid(player, args) then
 						handler(player, table.unpack(args, 1, args.n))
 					end
 				end)
@@ -3245,13 +3997,18 @@ function alloy.remote(spec: any): Remote
 				if is_function then
 					inst.OnClientInvoke = function(...)
 						local args = incoming(...)
+						if args == nil then
+							return nil
+						end
 						return handler(table.unpack(args, 1, args.n))
 					end
 					return
 				end
 				return inst.OnClientEvent:Connect(function(...)
 					local args = incoming(...)
-					handler(table.unpack(args, 1, args.n))
+					if args ~= nil then
+						handler(table.unpack(args, 1, args.n))
+					end
 				end)
 			end
 			function remote.call(...)

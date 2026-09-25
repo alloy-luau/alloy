@@ -87,7 +87,47 @@ fn article(ty: &str) -> &'static str {
     }
 }
 
-/// A source slice with every run of whitespace as one space, so it fits
+/// The first `...`, `break`, or `continue` in a value block's body that
+/// would leave it: `...` anywhere outside a nested function, and a
+/// `break` or `continue` outside a loop of the block's own.
+pub(crate) fn body_escape(block: &Block) -> Option<(TokSpan, &'static str)> {
+    fn in_expr(e: &Expr) -> Option<(TokSpan, &'static str)> {
+        if let Expr::Vararg(at) = e {
+            return Some((*at, "`...`"));
+        }
+
+        children(super::expr_children(e), false)
+    }
+
+    fn children(kids: Vec<super::Child<'_>>, in_loop: bool) -> Option<(TokSpan, &'static str)> {
+        kids.into_iter().find_map(|c| match c {
+            super::Child::Expr(e) => in_expr(e),
+
+            super::Child::Block(b) => in_block(b, in_loop),
+
+            // A nested function has `...` and loops of its own.
+            super::Child::Function(_) => None,
+        })
+    }
+
+    fn in_block(b: &Block, in_loop: bool) -> Option<(TokSpan, &'static str)> {
+        b.stmts.iter().find_map(|s| match s {
+            Stmt::Break(at) if !in_loop => Some((*at, "`break`")),
+
+            Stmt::Continue(at) if !in_loop => Some((*at, "`continue`")),
+
+            Stmt::While(_) | Stmt::Repeat(_) | Stmt::NumericFor(_) | Stmt::GenericFor(_) => {
+                children(super::stmt_children(s), true)
+            }
+
+            _ => children(super::stmt_children(s), in_loop),
+        })
+    }
+
+    in_block(block, false)
+}
+
+/// A source slice with every run of whitespace as one space, so it fits/// A source slice with every run of whitespace as one space, so it fits
 /// on the line the generated text sits on.
 pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -102,7 +142,26 @@ impl<'s> Desugar<'s> {
     `expr_in_place`.
     */
     pub(crate) fn expr(&mut self, e: &Expr) {
-        if self.lazy || self.effects || (self.reads && any_part(e, &calls_code)) {
+        // A field of `new S { }` constructs under its declared type.
+        if let Some(g) = self
+            .field_expected
+            .remove(&(std::ptr::from_ref(e) as usize))
+        {
+            let saved = self.expected_generic.replace(g);
+            self.expr(e);
+            self.expected_generic = saved;
+
+            return;
+        }
+
+        // A table literal runs nothing before its fields, so each field
+        // keeps its own hoists instead. A closure around the whole literal
+        // types it `{ x: number }`, and Luau rejects that where `{ x:
+        // number? }` is asked, because a table's fields are invariant.
+        let plain_table = matches!(e, Expr::Table { fields, .. }
+            if !fields.iter().any(|f| matches!(f, TableField::Spread(_))));
+
+        if !plain_table && (self.lazy || self.effects || (self.reads && any_part(e, &calls_code))) {
             self.expr_in_place(e, |d| d.expr_node(e));
         } else {
             self.expr_node(e);
@@ -125,6 +184,7 @@ impl<'s> Desugar<'s> {
                 if let Some(path) = self.renamed(name) {
                     self.generate(anchor, &path);
                 } else if AMBIENT.contains(&name) && !self.is_local(name) {
+                    self.check_std_name(*span, name);
                     let std = self.std();
                     self.generate(anchor, &format!("{std}.{name}"));
                 } else {
@@ -149,6 +209,31 @@ impl<'s> Desugar<'s> {
                     WordOp::Bit => format!("bit32.{name}({l}, {r})"),
 
                     WordOp::In => {
+                        // `2 in { 5, 6 }` searches a raw table by key, so
+                        // it holds. A `{ }` literal with items meant the
+                        // values; a keyed one, `{ rect = true }`, is the
+                        // Lua set idiom and reads right.
+                        let mut table = rhs.as_ref();
+
+                        while let Expr::Paren { inner, .. } = table {
+                            table = inner;
+                        }
+
+                        if let Expr::Table { fields, span } = table
+                            && fields
+                                .iter()
+                                .any(|f| matches!(f, TableField::Positional(_)))
+                        {
+                            // The array form of the literal as written.
+                            let written = one_line(self.text_of(*span));
+                            let items =
+                                written.trim_start_matches('{').trim_end_matches('}').trim();
+                            let message = format!(
+                                "`in` on a `{{ }}` literal searches its keys, 1, 2, and on, not its items; write `[ {items} ]` to search the items"
+                            );
+                            self.diagnose(*span, &message);
+                        }
+
                         let std = self.std();
 
                         format!("{std}.contains({r}, {l})")
@@ -166,6 +251,12 @@ impl<'s> Desugar<'s> {
                 args,
                 ..
             } if self.is_signal_new(func) => {
+                if let Expr::Index { object, .. } = func.as_ref()
+                    && let Expr::Name(n) = object.as_ref()
+                {
+                    self.check_std_name(*n, "Signal");
+                }
+
                 let std = self.std();
                 let text = self.text_of(*t).to_string();
                 let targs = pack_type_args(&self.lower_type_args(&text));
@@ -323,6 +414,24 @@ impl<'s> Desugar<'s> {
                         format!("{ctor}{t}(")
                     };
                     self.generate(anchor, &open);
+
+                    // A field's constructor takes the arguments its declared
+                    // type names, as a `local` under an annotation does.
+                    if let Expr::Table { fields, .. } = table
+                        && let Some(types) = self.struct_field_types.get(&n).cloned()
+                    {
+                        for f in fields {
+                            if let TableField::Named { name, value } = f
+                                && let Some(ft) =
+                                    types.iter().find(|t| t.name == self.text_of(*name))
+                                && let Some(g) = super::types::generic_head(self.text_of(ft.ty))
+                            {
+                                self.field_expected
+                                    .insert(std::ptr::from_ref(value) as usize, g);
+                            }
+                        }
+                    }
+
                     self.expr(table);
                     let close = if full_view {
                         format!(") :: any) :: {n}__all)")
@@ -362,6 +471,22 @@ impl<'s> Desugar<'s> {
 
             Expr::AsyncBlock { block, span } | Expr::TryBlock { block, span } => {
                 let is_try = matches!(e, Expr::TryBlock { .. });
+
+                // The body runs as a function of its own, so a `...`, a
+                // `break`, or a `continue` that reaches past it emits Luau
+                // the compiler refuses.
+                if let Some((at, what)) = body_escape(block) {
+                    let word = if is_try { "try do" } else { "async do" };
+                    let advice = match what {
+                        "`...`" => "copy it to a local before the block, `local args = { ... }`",
+
+                        _ => "give the block a value and act on it after the block",
+                    };
+                    let message = format!(
+                        "{what} cannot reach past a `{word}` block, which runs as a function of its own; {advice}"
+                    );
+                    self.diagnose(at, &message);
+                }
                 let helper = if is_try { "try_block" } else { "future" };
                 let std = self.std();
                 // A `try do` block hands its closure the `fail` a `try`
@@ -396,7 +521,11 @@ impl<'s> Desugar<'s> {
                 let body_start = self.block_start_or(block, end_tok.start);
                 self.copy(after_keywords, body_start);
                 self.try_targets.push(target);
+                // The body is a function of its own: its last line is its
+                // own `return`, whatever sink an arm around it writes.
+                let sink = self.value_sink.take();
                 self.block(block);
+                self.value_sink = sink;
                 self.try_targets.pop();
                 let after_block = self.block_end_or(block, body_start);
                 self.copy(after_block, end_tok.start);
@@ -414,6 +543,18 @@ impl<'s> Desugar<'s> {
                     let text = self.intrinsic(*name, args, *span);
                     self.generate(anchor, &text);
                 }
+            }
+
+            // A match whose arms run statements has no expression form:
+            // Luau's if-expression holds no statement, and a closure would
+            // stop a `return` in an arm from leaving the function.
+            Expr::Match(m) if super::statements::block_arm_match(e).is_some() => {
+                self.diagnose(
+                    m.span,
+                    "a match whose arms run statements stands after `local x =`, `x =`, or `return`; bind it to a local first",
+                );
+                self.blank_lines(anchor, self.byte_end(m.span));
+                self.generate(anchor, "nil");
             }
 
             Expr::Match(m) => self.match_expr(m),
@@ -496,7 +637,8 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// `Signal.new` on the std `Signal`, not on a local of that name.
+    /// `Signal.new` on the std `Signal`, not on a local of that name, or
+    /// `s.Signal.new` through a star import of the std.
     pub(crate) fn is_signal_new(&self, func: &Expr) -> bool {
         let Expr::Index {
             object,
@@ -506,9 +648,16 @@ impl<'s> Desugar<'s> {
         else {
             return false;
         };
+        let through_std = |e: &Expr| {
+            matches!(e, Expr::Index { object, key: IndexKey::Field(k), .. }
+                if self.text_of(*k) == "Signal"
+                    && matches!(object.as_ref(), Expr::Name(n)
+                        if self.std_namespaces.contains_key(self.text_of(*n))))
+        };
 
-        matches!(object.as_ref(), Expr::Name(n)
+        (matches!(object.as_ref(), Expr::Name(n)
             if self.text_of(*n) == "Signal" && !self.is_local("Signal"))
+            || through_std(object))
             && self.text_of(*f) == "new"
     }
 
@@ -593,11 +742,13 @@ impl<'s> Desugar<'s> {
             format!("typeof({x}) == \"EnumItem\" and {x}.EnumType == Enum.{item}")
         } else if INSTANCE_CLASSES.contains(&n.as_str()) {
             if n == "Instance" {
-                // The root class: `typeof` alone answers, and an `IsA`
-                // on a value typed `any` trips the solver.
+                // The root class: `typeof` alone answers.
                 format!("typeof({x}) == \"Instance\"")
             } else {
-                format!("typeof({x}) == \"Instance\" and {x}:IsA(\"{n}\")")
+                // The solver refines a value typed `any` through `typeof`
+                // to a type whose `IsA` it cannot call. The cast calls it
+                // on an Instance, and the solver still narrows `x`.
+                format!("typeof({x}) == \"Instance\" and ({x} :: Instance):IsA(\"{n}\")")
             }
         } else if DATATYPES.contains(&n.as_str()) {
             format!("typeof({x}) == \"{n}\"")
@@ -1091,7 +1242,12 @@ impl<'s> Desugar<'s> {
     ) -> String {
         self.check_new(name, args, init, whole);
         let ctor = self.constructor_of(name);
+        // The struct name counts as no read: the arguments cannot change
+        // what it holds, so their hoists may go in front of the statement.
+        // The closure a read forces defeats Luau's checker on `??`.
+        let reads = self.reads;
         let n = self.render_to_string(name);
+        self.reads = reads;
         let t = match type_args {
             Some(s) => {
                 let text = self.text_of(s).to_string();
@@ -1391,13 +1547,43 @@ impl<'s> Desugar<'s> {
             };
         }
 
-        for link in links {
+        // `c.HashMap.new()` through `import * as c` takes the same
+        // arguments, under `c.HashMap<K, V>` or a bare `HashMap<K, V>`.
+        if let (Expr::Name(n), Some((base_name, args_text))) = (base, self.expected_generic.clone())
+            && let [
+                Link::Plain(Step::Field(m)),
+                Link::Plain(Step::Field(f)),
+                Link::Plain(Step::Call {
+                    method: None,
+                    type_args: None,
+                    args,
+                }),
+            ] = links.as_slice()
+            && matches!(self.text_of(*f), "new" | "from" | "with_capacity")
+            && self.star_modules.contains(self.text_of(*n))
+            && (base_name == format!("{}.{}", self.text_of(*n), self.text_of(*m))
+                || base_name == self.text_of(*m))
+        {
+            let (ty, method) = (self.text_of(*m).to_string(), self.text_of(*f).to_string());
+            let a = self.args_text(args);
+            let targs = self.lower_type_args(&format!("<<{args_text}>>"));
+
+            return ChainParts {
+                guards: Vec::new(),
+                inner: format!("{inner}.{ty}.{method}{targs}{a}"),
+            };
+        }
+
+        let count = links.len();
+
+        for (i, link) in links.into_iter().enumerate() {
             let link = match link {
                 Link::Plain(step) if pending_guard => Link::Optional(step),
 
                 other => other,
             };
             pending_guard = false;
+            self.last_link = i + 1 == count;
 
             match link {
                 Link::Plain(step) => {
@@ -1614,11 +1800,22 @@ impl<'s> Desugar<'s> {
                     (false, _) => format!("{prefix}:FindFirstChild({n})"),
                 };
 
-                // The checker types the child as `Instance`, which has no
-                // `CFrame`; the source names no class, so the check
-                // artifact lets the chain continue untyped.
+                // The source names no class. A chain that goes on past the
+                // child continues untyped, since `Instance` has no
+                // `CFrame`. A child that ends the chain is what the call
+                // returns: `->` finds an `Instance` or nil, so `is`
+                // narrows it, and `=>` an `Instance`, as Roblox types
+                // `WaitForChild` with a timeout too.
                 if self.options.check {
-                    format!("({call} :: any)")
+                    let ty = match (*wait, self.last_link) {
+                        (_, false) => "any",
+
+                        (true, true) => "Instance",
+
+                        (false, true) => "Instance?",
+                    };
+
+                    format!("({call} :: {ty})")
                 } else {
                     call
                 }
@@ -1783,6 +1980,32 @@ mod tests {
             .collect()
     }
 
+    /// A hoist that must stay in place wraps the field value, never the
+    /// table around it: a closure types its table `{ x: number }`, which
+    /// Luau refuses where `{ x: number? }` is asked. A struct name read
+    /// before the fields keeps nothing in place.
+    #[test]
+    fn a_table_keeps_its_place_and_a_field_keeps_its_hoist() {
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with("take(g(), { x = tonumber(s) ?? 0 })\n", &options).unwrap();
+        assert!(
+            out.check
+                .contains("take(g(), { x = (function() local _1 = tonumber(s) return"),
+            "{}",
+            out.check
+        );
+
+        let out = crate::compile_with(
+            "import { P } from \"./p\"\nlocal p = new P { x = tonumber(s) ?? 0 }\n",
+            &options,
+        )
+        .unwrap();
+        assert!(!out.check.contains("(function()"), "{}", out.check);
+    }
+
     /// An empty `[ ]` carries `Array<any>` in the check artifact, so a
     /// binding of one reads as an array and not as `any`. Every typed
     /// position keeps the type it writes.
@@ -1801,7 +2024,7 @@ mod tests {
             "local a = []\n",
             "local b: number[] = []\n",
             "local filled = [1, 2]\n",
-            "local nested = [[], []]\n",
+            "local nested = [ [], [] ]\n",
             "take([])\n",
             "print(a, b, filled, nested, make(), Hub)\n",
         );
@@ -2097,7 +2320,7 @@ mod tests {
         for want in [
             "type(x) == \"number\"",
             "typeof(x) == \"Vector3\"",
-            "typeof(x) == \"Instance\" and x:IsA(\"Part\")",
+            "typeof(x) == \"Instance\" and (x :: Instance):IsA(\"Part\")",
             "typeof(x) == \"EnumItem\" and x.EnumType == Enum.Material",
             "getmetatable(x) == Box",
             "Color.is(x)",

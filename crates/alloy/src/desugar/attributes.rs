@@ -45,11 +45,31 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
 
         "native" | "checked" | "inline" | "noinline" => &["function"],
 
-        "unreliable" | "ratelimit" | "timeout" | "validate" | "immediate" => &["remote"],
+        "unreliable" | "ratelimit" | "timeout" | "validate" | "immediate" | "wire" => &["remote"],
 
         "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" => &["param", "field"],
 
-        "rename" | "skip" => &["field"],
+        "rename" | "skip" | "alias" => &["field"],
+
+        // serde's container options, on the struct the derive reads.
+        "deny_unknown_fields" | "rename_all" => &["struct"],
+
+        // `@allow(too_many_arguments)` quiets a lint over what it sits
+        // on, the way Rust's `#[allow]` does.
+        "allow" => &[
+            "function",
+            "local",
+            "struct",
+            "enum",
+            "namespace",
+            "trait",
+            "interface",
+            "impl",
+            "remote",
+            "type",
+            "field",
+            "variant",
+        ],
 
         _ => return None,
     })
@@ -264,6 +284,21 @@ impl<'s> Desugar<'s> {
 
             Stmt::Trait(t) => {
                 self.check_attrs(&t.attributes, "trait");
+
+                // A trait method emits no function of its own to carry an
+                // attribute; `@allow` reads the source, so it goes on one.
+                for a in t.methods.iter().flat_map(|m| &m.attributes) {
+                    let name = a.name.map(|n| self.text_of(n).to_string());
+
+                    match name.as_deref() {
+                        Some("allow") => self.check_attr_args(a, "allow", None),
+
+                        _ => self.diagnose(
+                            a.span,
+                            "a trait method takes `@allow` alone; put another attribute on the method of the `impl`",
+                        ),
+                    }
+                }
                 let name = self.text_of(t.name).to_string();
                 let members = self.trait_members(t);
                 self.check_contracts(
@@ -322,8 +357,24 @@ impl<'s> Desugar<'s> {
         let mut noinline: Option<TokSpan> = None;
 
         for a in attrs {
-            let Some(n) = a.name else { continue };
-            let name = self.text_of(n).to_string();
+            let Some(n) = a.name else {
+                self.check_luau_attr_list(a, target);
+
+                continue;
+            };
+            let name = self.attr_name(n);
+
+            // serde's options live in `@alloy/std/serde`, as the derives
+            // that read them do. A path through a star import reaches
+            // one; a bare name needs its import.
+            if self.text_of(n) == name
+                && crate::std_names::is_std_attribute(&name)
+                && !self.options.std_globals.ambient(&name)
+                && !self.std_imports.contains(&name)
+                && self.std_reported.insert(name.clone())
+            {
+                self.diagnose(n, &crate::std_names::missing_message(&name));
+            }
 
             match name.as_str() {
                 "inline" => inline = Some(a.span),
@@ -348,7 +399,7 @@ impl<'s> Desugar<'s> {
                 (None, None) => {
                     // An imported attribute keeps its targets in the
                     // module that declares it.
-                    if !self.imported_names.contains(&name) {
+                    if !self.imported_names.contains(&name) && !self.star_path(&name) {
                         // A namespace holds the name, so the report
                         // names the path that reaches it.
                         let message = self
@@ -387,6 +438,220 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// `@[native, deprecated {use = "f", reason = "..."}]`: Luau's own
+    /// attribute list, which Alloy passes through. It is valid Luau, so
+    /// a Luau file stays valid Alloy; the list takes Luau's attributes
+    /// alone, on a function, with the arguments Luau accepts.
+    fn check_luau_attr_list(&mut self, a: &Attr, target: &str) {
+        const LUAU: &[&str] = &["checked", "native", "deprecated"];
+
+        if target != "function" {
+            let message = format!(
+                "Luau's attribute list goes on a function, and this is a {target}; write the Alloy form, `@name`"
+            );
+            self.diagnose(a.span, &message);
+
+            return;
+        }
+
+        let (start, end) = (a.span.start as usize, a.span.end as usize);
+        let text = |i: usize| self.toks[i].text(self.src);
+        // Inside `@[` and before the closing `]`.
+        let mut i = start + 2;
+        let close = end.saturating_sub(1);
+        let mut seen: Vec<String> = Vec::new();
+
+        if i >= close {
+            self.diagnose(a.span, "Luau's attribute list cannot be empty: `@[native]`");
+
+            return;
+        }
+
+        while i < close {
+            let name = text(i).to_string();
+            let at = TokSpan::new(i, i + 1);
+            i += 1;
+
+            // The argument: a string, a table, or a parenthesized list.
+            let arg_start = i;
+
+            if matches!(text(i), "{" | "(") {
+                let mut depth = 0i32;
+
+                while i < close {
+                    match text(i) {
+                        "{" | "(" | "[" => depth += 1,
+
+                        "}" | ")" | "]" => depth -= 1,
+
+                        _ => {}
+                    }
+
+                    i += 1;
+
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            } else if matches!(self.toks[i].kind, TokKind::Str { .. }) {
+                i += 1;
+            }
+
+            let arg = TokSpan::new(arg_start, i);
+
+            if !LUAU.contains(&name.as_str()) {
+                let message = match builtin_attr_targets(&name).is_some()
+                    || self.attr_decl_of(&name).is_some()
+                {
+                    true => format!(
+                        "`@[{name}]` is Luau's attribute list, which takes `checked`, `native`, and `deprecated`; write `@{name}` for the Alloy attribute"
+                    ),
+
+                    false => format!(
+                        "Luau has no attribute `{name}`; its list takes `checked`, `native`, and `deprecated`"
+                    ),
+                };
+                self.diagnose(at, &message);
+            } else if seen.contains(&name) {
+                self.diagnose(at, &format!("`{name}` is in this list twice; keep one"));
+            } else if name != "deprecated" && !arg.is_empty() {
+                self.diagnose(arg, &format!("`{name}` takes no argument"));
+            } else if name == "deprecated" && !arg.is_empty() {
+                self.check_deprecated_table(arg);
+            }
+
+            seen.push(name);
+
+            if text(i) == "," {
+                i += 1;
+            } else if i < close {
+                self.diagnose(
+                    TokSpan::new(i, i + 1),
+                    "Luau's attribute list separates its entries with `,`",
+                );
+
+                return;
+            }
+        }
+    }
+
+    /// The argument of `deprecated` in Luau's list: one table of string
+    /// constants under `use` and `reason`, as Luau checks it.
+    fn check_deprecated_table(&mut self, arg: TokSpan) {
+        let (mut start, mut end) = (arg.start as usize, arg.end as usize);
+        let text = |i: usize| self.toks[i].text(self.src);
+
+        // `deprecated({ ... })` is the call form of the same table, and
+        // Luau reads both.
+        if end - start >= 2 && text(start) == "(" && text(end - 1) == ")" {
+            start += 1;
+            end -= 1;
+        }
+
+        if text(start) != "{" || text(end - 1) != "}" {
+            self.diagnose(
+                arg,
+                "`deprecated` takes a table: `@[deprecated {use = \"new_name\", reason = \"...\"}]`",
+            );
+
+            return;
+        }
+
+        let mut i = start + 1;
+
+        while i < end - 1 {
+            let key = text(i).to_string();
+
+            if !matches!(key.as_str(), "use" | "reason") || text(i + 1) != "=" {
+                self.diagnose(
+                    TokSpan::new(i, i + 1),
+                    "`deprecated` takes the keys `use` and `reason`, each a string",
+                );
+
+                return;
+            }
+
+            if !matches!(self.toks[i + 2].kind, TokKind::Str { .. }) {
+                let message = format!("`{key}` takes a string constant");
+                self.diagnose(TokSpan::new(i + 2, i + 3), &message);
+
+                return;
+            }
+
+            i += 3;
+
+            if matches!(text(i), "," | ";") {
+                i += 1;
+            }
+        }
+    }
+
+    /// `@allow(name, ...)`: each argument names a lint, a group, or a
+    /// lint under its tool, `flux.too_many_arguments`. `luau.` names a
+    /// checker kind and another prefix an ingot's lint, which the
+    /// compiler cannot list, so those pass.
+    fn check_allow_args(&mut self, a: &Attr) {
+        if a.args.is_empty() {
+            self.diagnose(
+                a.span,
+                "`@allow` names the lints it quiets: `@allow(too_many_arguments)`",
+            );
+
+            return;
+        }
+
+        for arg in &a.args {
+            let written: String = self.text_of(arg.span()).split_whitespace().collect();
+
+            match crate::directives::allow_check(&written) {
+                Ok(()) => {}
+
+                Err(message) => self.diagnose(arg.span(), &message),
+            }
+        }
+    }
+
+    /// The name an attribute use reads. `@serde.rename` through
+    /// `import * as serde from "@alloy/std/serde"` is the std's `rename`.
+    pub(crate) fn attr_name(&self, n: TokSpan) -> String {
+        let text = self.text_of(n);
+
+        self.std_member(text, crate::std_names::attribute_module)
+            .unwrap_or(text)
+            .to_string()
+    }
+
+    /// A derive's name, read through a star import of the std the same
+    /// way: `@derive(serde.Serialize)` derives `Serialize`.
+    pub(crate) fn derive_name(&self, arg: &Expr) -> String {
+        let text = self.text_of(arg.span());
+
+        self.std_member(text, crate::std_names::module_of)
+            .unwrap_or(text)
+            .to_string()
+    }
+
+    /// The member of `alias.member` when `alias` is a star import of the
+    /// std module that holds it, or of the facade.
+    fn std_member<'t>(
+        &self,
+        text: &'t str,
+        home: fn(&str) -> Option<&'static str>,
+    ) -> Option<&'t str> {
+        let (head, member) = text.split_once('.')?;
+        let module = self.std_namespaces.get(head)?;
+        let at = home(member)?;
+
+        (module.is_empty() || module == at).then_some(member)
+    }
+
+    /// Whether a name is a path through a star import of a module,
+    /// `@M.tag`. The module keeps the attribute's targets.
+    fn star_path(&self, name: &str) -> bool {
+        name.split_once('.')
+            .is_some_and(|(head, _)| self.star_modules.contains(head))
+    }
+
     /// The declaration one attribute name reads. A member of the
     /// namespace under render wins over a name of the file, and a
     /// path names the member it writes.
@@ -412,8 +677,12 @@ impl<'s> Desugar<'s> {
 
         let head = owner.split('.').next().unwrap_or(owner);
 
-        // A module keeps its attributes. One of its own comes in under
-        // its name, which is how every other import reads.
+        // `import * as M`: `@M.tag` names the module's own attribute.
+        if self.star_path(name) {
+            return None;
+        }
+
+        // A named import binds a module's attribute under its own name.
         if self.imported_names.contains(head) {
             return Some(format!(
                 "an attribute of a module is used by its bare name; import it with `import {{ {member} }} from ...`"
@@ -438,7 +707,7 @@ impl<'s> Desugar<'s> {
 
             // An imported attribute keeps its targets in the module
             // that declares it; nothing here can say no.
-            (None, None) => self.imported_names.contains(name),
+            (None, None) => self.imported_names.contains(name) || self.star_path(name),
         }
     }
 
@@ -472,6 +741,7 @@ impl<'s> Desugar<'s> {
             "test",
             "sealed",
             "skip",
+            "deny_unknown_fields",
             "unreliable",
             "immediate",
             "u8",
@@ -490,6 +760,64 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        if name == "allow" {
+            self.check_allow_args(a);
+
+            return;
+        }
+
+        // `@wire(buffer)` or `@wire(table)`: how a remote's payload
+        // travels.
+        if name == "wire" {
+            let arg: Vec<&str> = a.args.iter().map(|x| self.text_of(x.span())).collect();
+
+            if !matches!(arg.as_slice(), ["buffer"] | ["table"]) {
+                self.diagnose(
+                    a.span,
+                    "`@wire` takes `buffer` or `table`: `@wire(buffer)` packs the payload, `@wire(table)` sends it as Roblox encodes a table",
+                );
+            }
+
+            return;
+        }
+
+        // `@rename_all("camelCase")` takes one style, and `@alias`
+        // takes one key or more, each a string.
+        if name == "rename_all" || name == "alias" {
+            let strings: Vec<Option<String>> = a
+                .args
+                .iter()
+                .map(|e| crate::data::literal_text(self.text_of(e.span())))
+                .collect();
+            let styles = super::structs::RENAME_STYLES;
+            let message = match name {
+                "rename_all" => match strings.as_slice() {
+                    [Some(style)] if styles.contains(&style.as_str()) => None,
+
+                    _ => Some(format!(
+                        "`@rename_all` takes one style: {}",
+                        styles
+                            .iter()
+                            .map(|s| format!("\"{s}\""))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                },
+
+                _ if strings.is_empty() || strings.iter().any(Option::is_none) => {
+                    Some("`@alias` takes the other keys as strings: `@alias(\"hp\")`".to_string())
+                }
+
+                _ => None,
+            };
+
+            if let Some(message) = message {
+                self.diagnose(a.span, &message);
+            }
+
+            return;
+        }
+
         if name == "deprecated" && a.args.len() > 1 {
             let message = format!(
                 "the attribute `deprecated` takes one message, {} given",
@@ -500,18 +828,29 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        // Luau takes a string for `@deprecated` and reports anything
-        // else on the declaration below, which is not the line the
-        // author wrote it on.
+        // `@deprecated("why")`, or the table Luau's own list takes,
+        // `@deprecated({ use = "f", reason = "why" })`. Luau reports any
+        // other argument on the declaration below, which is not the line
+        // the author wrote it on.
         if name == "deprecated"
             && let Some(arg) = a.args.first()
-            && let Some(got) = literal_kind(arg)
-            && got != "string"
         {
-            let message = format!("the attribute `deprecated` takes a string message, {got} given");
-            self.diagnose(arg.span(), &message);
+            if matches!(arg, Expr::Table { .. }) {
+                self.check_deprecated_table(arg.span());
 
-            return;
+                return;
+            }
+
+            if let Some(got) = literal_kind(arg)
+                && got != "string"
+            {
+                let message = format!(
+                    "the attribute `deprecated` takes a string message or a table of `use` and `reason`, {got} given"
+                );
+                self.diagnose(arg.span(), &message);
+
+                return;
+            }
         }
 
         let Some(decl) = decl else {
@@ -726,6 +1065,49 @@ impl<'s> Desugar<'s> {
 
         let stmts: Vec<&Stmt> = block.stmts.iter().collect();
         self.prescan_stmts(&stmts);
+
+        // An import inside a function binds its names in that scope. The
+        // checks here read the file's names as one set, so it joins them.
+        let top: Vec<*const alloy_syntax::ast::Import> = block
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Import(i) => Some(std::ptr::from_ref(i)),
+
+                _ => None,
+            })
+            .collect();
+
+        for i in super::imports_in(block) {
+            if !top.contains(&std::ptr::from_ref(i)) {
+                self.note_import(i);
+            }
+        }
+    }
+
+    /// The names one import binds, for the checks that read them.
+    fn note_import(&mut self, i: &alloy_syntax::ast::Import) {
+        match &i.kind {
+            ImportKind::Default(n) => {
+                self.imported_names.insert(self.text_of(*n).to_string());
+            }
+
+            ImportKind::Namespace(n, specs) => {
+                let module = self.text_of(*n).to_string();
+                self.star_modules.insert(module.clone());
+                self.imported_names.insert(module);
+                self.note_specs(specs);
+            }
+
+            ImportKind::Both(n, specs) => {
+                self.imported_names.insert(self.text_of(*n).to_string());
+                self.note_specs(specs);
+            }
+
+            ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
+                self.note_specs(specs);
+            }
+        }
     }
 
     /// The trait each parameter of a bounded signature asks of its
@@ -782,14 +1164,32 @@ impl<'s> Desugar<'s> {
             // top-level declaration; the prescan reads through it.
             let stmt = stmt.under_default();
 
-            if let Stmt::Struct(s) = stmt
-                && s.attributes.iter().any(|a| {
-                    a.name.is_some_and(|n| self.text_of(n) == "derive")
-                        && a.args.iter().any(|x| self.text_of(x.span()) == "Serialize")
-                })
-            {
+            if let Stmt::Struct(s) = stmt {
+                let derives = |which: &str| {
+                    s.attributes.iter().any(|a| {
+                        a.name.is_some_and(|n| self.text_of(n) == "derive")
+                            && a.args.iter().any(|x| self.derive_name(x) == which)
+                    })
+                };
+                let (ser, de) = (derives("Serialize"), derives("Deserialize"));
+                let (clone, default) = (derives("Clone"), derives("Default"));
                 let name = self.decl_name(s.name);
-                self.serializable.insert(name);
+
+                if clone {
+                    self.cloneable.insert(name.clone());
+                }
+
+                if default {
+                    self.defaultable.insert(name.clone());
+                }
+
+                if ser {
+                    self.serializable.insert(name.clone());
+                }
+
+                if de {
+                    self.deserializable.insert(name);
+                }
             }
             let returns_result = |body: &FunctionBody| {
                 body.is_async.is_some()
@@ -938,27 +1338,7 @@ impl<'s> Desugar<'s> {
                         .insert(self.decl_name(r.name), "remote");
                 }
 
-                Stmt::Import(i) => match &i.kind {
-                    ImportKind::Default(n) => {
-                        self.imported_names.insert(self.text_of(*n).to_string());
-                    }
-
-                    ImportKind::Namespace(n, specs) => {
-                        let module = self.text_of(*n).to_string();
-                        self.star_modules.insert(module.clone());
-                        self.imported_names.insert(module);
-                        self.note_specs(specs);
-                    }
-
-                    ImportKind::Both(n, specs) => {
-                        self.imported_names.insert(self.text_of(*n).to_string());
-                        self.note_specs(specs);
-                    }
-
-                    ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
-                        self.note_specs(specs);
-                    }
-                },
+                Stmt::Import(i) => self.note_import(i),
 
                 // A function body reads an enum declared below it, and
                 // its `match` covers the variants before the
@@ -971,6 +1351,9 @@ impl<'s> Desugar<'s> {
                         .map(|v| (self.text_of(v.name).to_string(), v.payload.len()))
                         .collect();
                     self.enums.insert(name.clone(), variants.clone());
+                    // An `impl` above the enum writes onto a nil table.
+                    let at = self.byte_start(e.span);
+                    self.struct_at.entry(name.clone()).or_insert(at);
                     self.enum_decls.insert(name, variants);
                 }
 
@@ -1286,6 +1669,25 @@ impl<'s> Desugar<'s> {
                 None => name.clone(),
             };
 
+            // A struct another file declares derives for this file too:
+            // a field of it clones, defaults, and serializes through it.
+            if let Some(shape) = self.options.shapes.iter().find(|s| s.name == name) {
+                for d in &shape.derives {
+                    let set = match d.as_str() {
+                        "Clone" => &mut self.cloneable,
+
+                        "Default" => &mut self.defaultable,
+
+                        "Serialize" => &mut self.serializable,
+
+                        "Deserialize" => &mut self.deserializable,
+
+                        _ => continue,
+                    };
+                    set.insert(local.clone());
+                }
+            }
+
             if local != name {
                 self.import_renames.insert(local.clone(), name);
             }
@@ -1579,7 +1981,8 @@ impl<'s> Desugar<'s> {
 
                 // Luau has no `@inline` or `@noinline`; the emit would
                 // report an invalid attribute on the declaration's line.
-                Some("inline" | "noinline") => {}
+                // `@allow` is the lints' alone.
+                Some("inline" | "noinline" | "allow") => {}
 
                 // The count and the type checks report on the
                 // attribute; the emit would report again, on the
@@ -1599,8 +2002,13 @@ impl<'s> Desugar<'s> {
                             a.args.iter().map(|e| self.render_to_string(e)).collect();
 
                         // Luau reads the message of `@deprecated` from a
-                        // table: `@[deprecated {reason = "..."}]`.
+                        // table: `@[deprecated {reason = "..."}]`. A table
+                        // the source wrote goes as it is.
                         match n {
+                            "deprecated" if matches!(a.args[0], Expr::Table { .. }) => {
+                                upstream.push(format!("@[deprecated {}]", args[0]));
+                            }
+
                             "deprecated" => upstream
                                 .push(format!("@[deprecated {{reason = {}}}]", args.join(", "))),
 
@@ -1785,10 +2193,14 @@ impl<'s> Desugar<'s> {
                     Err(message) => self.diagnose(a.span, &message),
                 },
 
+                // The lints read `@allow` from the source; the emit
+                // writes nothing for it.
+                Some("allow") => {}
+
                 Some(n) => self.diagnose(
                     a.span,
                     &format!(
-                        "`@{n}` goes on a declaration; `@cfg` is the attribute a statement takes"
+                        "`@{n}` goes on a declaration; `@cfg` and `@allow` are the attributes a statement takes"
                     ),
                 ),
 
@@ -1964,7 +2376,7 @@ impl<'s> Desugar<'s> {
 
 /// The names a Luau or Roblox program already has. An attribute
 /// argument may name one of them.
-const LUAU_GLOBALS: &[&str] = &[
+pub(crate) const LUAU_GLOBALS: &[&str] = &[
     "_G",
     "_VERSION",
     "assert",
@@ -2039,7 +2451,9 @@ mod tests {
         );
         assert_eq!(
             got,
-            vec!["the attribute `deprecated` takes a string message, number given"]
+            vec![
+                "the attribute `deprecated` takes a string message or a table of `use` and `reason`, number given"
+            ]
         );
         assert!(
             messages("@deprecated(\"use `new`\")\nlocal function old(): number\n    return 1\nend\nprint(old())\n")

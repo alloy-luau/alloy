@@ -93,9 +93,16 @@ pub fn set_source(source: &str) -> String {
                         alloy::lint::Level::Warn => "warning",
                         alloy::lint::Level::Deny => "error",
                     };
-                    let fix = l.fix.as_ref().filter(|f| {
-                        !directives.preserves(alloy::directives::line_of(source, f.start as usize))
-                    });
+                    // The page takes one range per fix, so a rename that
+                    // writes several places goes as the span over them.
+                    let fix = l
+                        .fix
+                        .as_ref()
+                        .filter(|f| {
+                            !directives
+                                .preserves(alloy::directives::line_of(source, f.start as usize))
+                        })
+                        .map(|f| f.as_one(source));
 
                     Some(json!({
                         "name": l.name,
@@ -406,10 +413,40 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            // `@serde.|`: the std module's attributes. The playground has
+            // one file, so a star import of the std is the only kind.
+            Context::AttributePath { prefix, .. } => {
+                for (_, names) in alloy::std_names::ATTRIBUTES {
+                    for name in *names {
+                        let key = format!("@{name}");
+                        items.push(word(name, "attribute", keywords::doc(&key).map(str::to_string), offset - prefix.len()));
+                    }
+                }
+            }
+
             Context::DeriveArg { prefix } => {
                 for key in keywords::keys_with_prefix("derive:") {
                     let name = &key["derive:".len()..];
                     items.push(word(name, "constant", keywords::doc(key).map(str::to_string), offset - prefix.len()));
+                }
+            }
+
+            Context::AllowArg { prefix, tool } => {
+                let from = offset - prefix.len();
+
+                if matches!(tool.as_deref(), None | Some("flux")) {
+                    for l in alloy::lint::LINTS {
+                        items.push(word(l.name, "constant", Some(l.summary.to_string()), from));
+                    }
+                }
+            }
+
+            Context::LuauAttrList { prefix, in_table } => {
+                let from = offset - prefix.len();
+                let names: &[&str] = if *in_table { &["use", "reason"] } else { &["native", "checked", "deprecated"] };
+
+                for name in names {
+                    items.push(word(name, "keyword", None, from));
                 }
             }
 
@@ -660,7 +697,7 @@ pub fn complete(offset: u32) -> String {
                     }
                 }
 
-                for name in ["HashMap", "Set", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array"] {
+                for name in ["HashMap", "Set", "BitSet", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array"] {
                     items.push(word(name, "class", keywords::doc(name).map(str::to_string), from));
                 }
 

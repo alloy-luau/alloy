@@ -612,8 +612,12 @@ fn write_modules(
     let runtime = modules.join("alloy");
     let tree = crate::project::Tree::load(root, config);
     let aliases = crate::modules::aliases(root, &tree);
+    let sources = crate::build::sources(&input, &written)?;
+    // The build's view of other files' structs: an imported struct
+    // clones and serializes through its own derives in a test as well.
+    let shapes = crate::build::struct_shapes(&sources);
 
-    for path in crate::build::sources(&input, &written)? {
+    for path in sources {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
 
         if exclude.is_match(&rel) {
@@ -632,7 +636,9 @@ fn write_modules(
             std_require: relative_require(&source_rel, &runtime),
             wait_timeout: config.emit.wait_timeout,
             test_runner: config.test.lest,
+            std_globals: config.std.globals.clone(),
             extensions: extensions.to_vec(),
+            shapes: shapes.clone(),
             ..EmitOptions::default().imports(&source, &path, &aliases)
         };
         let compiled = crate::compile_file(
@@ -830,12 +836,22 @@ pub fn spec(
     let runtime = modules_dir(config).join("alloy");
     let tree = crate::project::Tree::load(root, config);
     let aliases = crate::modules::aliases(root, &tree);
+    // ponytail: every spec reads the project's structs again; cache them
+    // per run if a project with many specs makes `alloy test` slow.
+    let shapes = crate::build::sources(
+        &root.join(&config.build.input),
+        &crate::build::written_dirs(root, config),
+    )
+    .map(|s| crate::build::struct_shapes(&s))
+    .unwrap_or_default();
     let options = EmitOptions {
         file_name: source_rel.to_string_lossy().into_owned(),
         std_require: relative_require(source_rel, &runtime),
+        shapes,
         tests: true,
         wait_timeout: config.emit.wait_timeout,
         test_runner: config.test.lest,
+        std_globals: config.std.globals.clone(),
         extensions: extensions.to_vec(),
         ..EmitOptions::default().imports(source, &root.join(source_rel), &aliases)
     };
@@ -1499,9 +1515,9 @@ end
         assert_eq!(count, 0);
         assert!(!diagnostics.is_empty());
         assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message.contains("a namespace body is `as ... end`")),
+            diagnostics.iter().any(|d| d
+                .message
+                .contains("a namespace body goes on the lines below the header")),
             "{:?}",
             diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
         );

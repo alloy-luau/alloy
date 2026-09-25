@@ -158,6 +158,8 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
     }
 
     let parameters = declared_type_parameters(&doc.source);
+    let modules = whole_modules(doc);
+    let reach = super::completion::StdReach::of(doc);
 
     hints.retain_mut(|h| {
         // The label and the edit are one text.
@@ -181,7 +183,8 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
             }
         }
 
-        let label = hint_label(h);
+        // The child spells an `Iter` out as the table of its methods.
+        let label = super::hover::fold_std_shapes(&hint_label(h));
 
         if !label.starts_with(": ") {
             return true;
@@ -247,11 +250,13 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
             }
         };
 
+        let label = qualify_module_types(&label, &modules, doc);
         h["label"] = json!(label);
 
-        // A generic struct prints without its arguments: Luau names a
-        // metatable type and carries none. `: Slotted` would not
-        // compile, so the hint reads and inserts nothing.
+        // A generic struct or std collection prints without its
+        // arguments: Luau names a metatable type and carries none.
+        // `: HashMap` would not compile, so the hint reads and inserts
+        // nothing.
         if generic_struct(doc, label[2..].trim()) {
             h.as_object_mut().map(|o| o.remove("textEdits"));
 
@@ -265,10 +270,16 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
         }
 
         if let Some(position) = h.get("position").cloned() {
-            h["textEdits"] = json!([{
+            // A std type the file does not reach comes with its import,
+            // so the annotation the edit writes compiles.
+            let missing = unreached_std_names(&label, &reach, doc);
+            let fixes = alloy::std_names::import_fixes(&doc.source, &missing);
+            let mut edits = vec![json!({
                 "range": { "start": position.clone(), "end": position },
                 "newText": label,
-            }]);
+            })];
+            edits.extend(super::completion::fix_edits(&doc.source, &fixes));
+            h["textEdits"] = json!(edits);
         }
 
         true
@@ -291,15 +302,158 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
     }
 }
 
-/// Whether a printed type names a struct that takes type parameters
-/// and gives it none. Luau prints a struct by its metatable's name, so
-/// the arguments are gone, and `Slotted` or `Pair[]` names a type the
-/// source cannot write. The name may sit anywhere in the text.
+/// The modules a file binds whole, each as its local and the types it
+/// exports: `planck` for `import planck from "@pkg/planck"`. Only a
+/// local the check artifact binds to the module itself counts,
+/// `local planck = require(...)`; a default read through `.default`
+/// holds no types.
+fn whole_modules(doc: &Doc) -> Vec<(String, Vec<String>)> {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    if doc.import_types.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(&doc.source, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+
+    parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .filter_map(|stmt| {
+            let Stmt::Import(import) = stmt else {
+                return None;
+            };
+            let name = match &import.kind {
+                ImportKind::Default(n) | ImportKind::Both(n, _) | ImportKind::Namespace(n, _) => {
+                    n.text(&doc.source, toks)
+                }
+
+                _ => return None,
+            };
+            let spec = import
+                .path
+                .text(&doc.source, toks)
+                .trim_matches(['"', '\'']);
+            let binds = format!("local {name} = require(");
+            let whole = doc.shadow.lines().any(|line| {
+                let line = line.trim().trim_end_matches(';');
+
+                line.starts_with(&binds) && line.ends_with(')')
+            });
+            let (_, types) = doc.import_types.iter().find(|(s, _)| s == spec)?;
+
+            whole.then(|| (name.to_string(), types.clone()))
+        })
+        .collect()
+}
+
+/// A printed type with each type another module exports written the way
+/// the file reaches it. The checker prints `Scheduler<>` for the type
+/// planck exports, and a bare `Scheduler` names nothing in a file that
+/// imports planck whole; `planck.Scheduler<>` does. A name the file
+/// declares or imports itself stays as it is.
+pub(crate) fn qualify_module_types(
+    text: &str,
+    modules: &[(String, Vec<String>)],
+    doc: &Doc,
+) -> String {
+    if modules.is_empty() {
+        return text.to_string();
+    }
+
+    let bound = alloy::alx::bound_names(&doc.source);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+
+    while let Some(c) = text[at..].chars().next() {
+        if !is_word(c) {
+            out.push(c);
+            at += c.len_utf8();
+
+            continue;
+        }
+
+        let end = text[at..]
+            .find(|c: char| !is_word(c))
+            .map_or(text.len(), |n| at + n);
+        let word = &text[at..end];
+        // `a.B` is a path already, and `key: T` names a field.
+        let free = !text[..at].ends_with('.') && !text[end..].trim_start().starts_with(':');
+        let own = bound.contains(word) || doc.decls.iter().any(|d| d.name == word);
+        let module = modules
+            .iter()
+            .find(|(_, types)| types.iter().any(|t| alloy::modules::type_head(t) == word));
+
+        if let Some((name, _)) = module.filter(|_| free && !own) {
+            out.push_str(name);
+            out.push('.');
+        }
+
+        out.push_str(word);
+        at = end;
+    }
+
+    out
+}
+
+/// The std names a printed type holds that the file does not reach: no
+/// import binds them, `[std] globals` keeps them out, and the file
+/// declares none of its own by the name.
+fn unreached_std_names<'a>(
+    text: &'a str,
+    reach: &super::completion::StdReach,
+    doc: &Doc,
+) -> Vec<&'a str> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out: Vec<&str> = Vec::new();
+    let mut at = 0;
+
+    while let Some(c) = text[at..].chars().next() {
+        if !is_word(c) {
+            at += c.len_utf8();
+
+            continue;
+        }
+
+        let end = text[at..]
+            .find(|c: char| !is_word(c))
+            .map_or(text.len(), |n| at + n);
+        let word = &text[at..end];
+        // `a.B` is a path, and `key: T` names a field.
+        let free = !text[..at].ends_with('.') && !text[end..].trim_start().starts_with(':');
+
+        if free
+            && alloy::std_names::is_std_name(word)
+            && !reach.reaches(word)
+            && !doc.decls.iter().any(|d| d.name == word)
+            && !out.contains(&word)
+        {
+            out.push(word);
+        }
+
+        at = end;
+    }
+
+    out
+}
+
+/// Whether a printed type names a struct or a std type that takes type
+/// parameters and gives it none. Luau prints a struct by its
+/// metatable's name, so the arguments are gone, and `Slotted`, `Pair[]`
+/// or `HashMap` names a type the source cannot write. The name may sit
+/// anywhere in the text.
 pub(crate) fn generic_struct(doc: &Doc, text: &str) -> bool {
     let generics = |name: &str| {
         std::iter::once(&doc.source)
             .chain(doc.import_sources.iter())
             .any(|src| src.contains(&format!("struct {name}<")))
+            || (super::hover::std_generic(name) && !doc.decls.iter().any(|d| d.name == name))
     };
     let bytes = text.as_bytes();
     let mut at = 0;

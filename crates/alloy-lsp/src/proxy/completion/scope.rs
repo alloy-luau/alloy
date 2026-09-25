@@ -33,14 +33,25 @@ impl State {
         // The child answered: its list holds the scope, but for the
         // bindings of a `case` arm. A match expression reads its payload
         // through a temp, and an unclosed match does not compile, so the
-        // child never sees the name.
+        // child never sees the name. A file that does not compile, as
+        // `for _, x in xs where |` does not, leaves the child an older
+        // artifact, and the scope walk reads the source as it stands.
         if !child.is_empty() {
             let line = line as usize;
+            let compiles = doc
+                .output
+                .as_ref()
+                .is_some_and(|o| o.diagnostics.is_empty());
+
+            // A member list names what the value has, not the scope.
+            let starts = context::expression_start(&doc.source, offset);
 
             return context::locals_in_scope(&doc.source, offset)
                 .into_iter()
                 .filter(|l| !child.iter().any(|i| i["label"] == l.name.as_str()))
-                .filter(|l| case_arm_of_binding(doc, line, &l.name).is_some())
+                .filter(|l| {
+                    (!compiles && starts) || case_arm_of_binding(doc, line, &l.name).is_some()
+                })
                 .map(|l| {
                     json!({
                         "label": l.name,
@@ -159,6 +170,20 @@ impl State {
                 "keyword".to_string(),
                 keywords::doc(name).map(str::to_string),
             );
+        }
+
+        // A std row names its module, and writes the import a name the
+        // file does not reach needs.
+        let reach = super::std_completions::StdReach::of(doc);
+
+        for item in items.iter_mut().filter(|i| i["detail"] == "alloy:std") {
+            let name = item["label"].as_str().unwrap_or_default().to_string();
+            let kind = item["kind"].as_u64().unwrap_or(7);
+            let text = item
+                .pointer("/documentation/value")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            *item = super::std_completions::std_item(&doc.source, &reach, &name, kind, text);
         }
 
         items

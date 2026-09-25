@@ -89,10 +89,29 @@ impl Server {
         let found = found.or_else(|| {
             let (decls, name) = module_decls.as_ref()?.as_ref()?;
 
+            // `@M.tag` and `M.tag` read the module's attribute too.
             decls
                 .iter()
                 .find(|d| d.name == *name && declares_a_type(&d.hover))
+                .or_else(|| decls.iter().find(|d| d.name == format!("@{name}")))
         });
+
+        // `Light.Active` under `import { Status as Light }`: the path
+        // names the enum, and the module keys its variant under the
+        // enum's own name. Another module may declare a `Status` too, so
+        // the path answers before the name does.
+        let variant_decls = st.variant_home(uri, start).and_then(|(file, owner)| {
+            let variant = key.rsplit('.').next()?;
+
+            Some((
+                alloy::declarations::summaries(&st.module_text(&file)?, false),
+                format!("{owner}.{variant}"),
+            ))
+        });
+        let found = variant_decls
+            .as_ref()
+            .and_then(|(decls, name)| decls.iter().find(|d| d.name == *name))
+            .or(found);
 
         let Some(decl) = found else {
             return false;
@@ -103,6 +122,24 @@ impl Server {
         // hover writes one line per member instead of the clause.
         let hover = expand_each(&decl.hover, &doc.source, start);
         let hover = with_member_methods(&hover, doc, &key);
+        let hover = formatted_hover(&hover, &st.fmt_config(uri));
+        // The source the declaration sits in: this file, another open
+        // one, or a module an import reads.
+        let home = std::iter::once(&doc.source)
+            .chain(st.docs.values().map(|d| &d.source))
+            .chain(doc.import_sources.iter())
+            .find(|text| {
+                let bare = decl.name.rsplit('.').next().unwrap_or(&decl.name);
+
+                text.get(decl.offset..)
+                    .is_some_and(|rest| rest.starts_with(bare))
+                    && text[..decl.offset].ends_with(' ')
+            });
+        let hover = match home {
+            Some(text) => with_derives(&hover, text, decl.offset),
+
+            None => hover,
+        };
         let (sl, sc) = position_of(&doc.source, start);
         let (el, ec) = position_of(&doc.source, end);
         let result = json!({
@@ -427,9 +464,13 @@ pub(crate) fn case_binding_span(
     let case_line = case_binding_line(&lines, line)?;
     let pattern = case_pattern(lines[case_line])?;
 
+    // `case n then` binds the whole value, and no payload types it.
     if !pattern_bindings(&pattern, known, || array_element(&lines, case_line))
         .iter()
         .any(|(name, _, _)| name == word)
+        && !crate::context::pattern_names(&pattern)
+            .iter()
+            .any(|l| l.name == word)
     {
         return None;
     }
@@ -610,7 +651,10 @@ pub(crate) fn case_binding_text(
     let lines: Vec<&str> = doc.source.lines().collect();
     let case_line = case_binding_line(&lines, line)?;
     let pattern = case_pattern(lines[case_line])?;
-    let bindings = pattern_bindings(&pattern, known, || array_element(&lines, case_line));
+    let bindings = pattern_bindings(&pattern, known, || {
+        array_element(&lines, case_line)
+            .or_else(|| super::fields::element_of(&scrutinee_type(doc, case_line)?))
+    });
 
     // `b.amount` reads a field of what `case Buff(b)` bound; the child
     // sees the payload slot and answers `any`.
@@ -624,11 +668,185 @@ pub(crate) fn case_binding_text(
         return field_of_struct(doc, ty, word);
     }
 
-    let (_, ty, owner) = bindings.into_iter().find(|(n, _, _)| n == word)?;
+    if let Some((_, ty, owner)) = bindings.into_iter().find(|(n, _, _)| n == word) {
+        return Some(format!(
+            "```alloy\n{word}: {ty}\n```\nA binding of {owner}."
+        ));
+    }
+
+    // `case k where k > 5 then`: a bare name binds the whole value. An
+    // expression match lowers to one expression with no local for the
+    // name, so the child answers with the type of the arm's result.
+    if pattern != word {
+        return None;
+    }
+
+    let head = lines[match_head_line(&lines, case_line)?].trim();
+    let scrutinee = match_value(head)?;
+    let text = match scrutinee_type(doc, case_line) {
+        Some(ty) => format!("{word}: {ty}"),
+
+        // The statement form keeps a local the child types.
+        None if head.starts_with("match ") => return None,
+
+        None => word.to_string(),
+    };
 
     Some(format!(
-        "```alloy\n{word}: {ty}\n```\nA binding of {owner}."
+        "```alloy\n{text}\n```\nA binding of `match {scrutinee}`."
     ))
+}
+
+/// The value a `match` head reads: `n` of `local r = match n with`.
+fn match_value(head: &str) -> Option<&str> {
+    let at = head.find("match ")? + "match ".len();
+    let value = head[at..].trim_end().strip_suffix("with")?.trim();
+
+    Some(value.split(" as ").next().unwrap_or(value).trim())
+}
+
+/// The type of the value the `match` around `case_line` reads, from the
+/// declaration of the name: its annotation, or the literal or the `new`
+/// it starts from. An arm `case nil` above the line takes the nil out.
+fn scrutinee_type(doc: &Doc, case_line: usize) -> Option<String> {
+    let lines: Vec<&str> = doc.source.lines().collect();
+    let head_line = match_head_line(&lines, case_line)?;
+    let name = match_value(lines[head_line].trim())?;
+
+    if !is_binding(name) {
+        return None;
+    }
+
+    let at = offset_of(&doc.source, head_line as u32, 0)?;
+    let ty = match crate::context::declared(&doc.source, at, name)? {
+        crate::context::Declared::Annotation(t) => t,
+
+        crate::context::Declared::Init(v) => literal_type(doc, &v)?,
+    };
+    let nil_arm = lines[head_line + 1..case_line]
+        .iter()
+        .any(|l| l.trim().starts_with("case nil"));
+
+    Some(match nil_arm {
+        true => ty.trim_end_matches('?').to_string(),
+
+        false => ty,
+    })
+}
+
+/// The type of a value a declaration starts from, when the text alone
+/// says it: a number, a string, a boolean, a `new`, or an array of one
+/// of those.
+fn literal_type(doc: &Doc, value: &str) -> Option<String> {
+    let v = value.trim();
+
+    if let Some(rest) = v.strip_prefix("new ") {
+        return super::restyle::constructed_type(doc, rest);
+    }
+
+    let first = v.chars().next()?;
+
+    if first.is_ascii_digit() || (first == '-' && v[1..].starts_with(|c: char| c.is_ascii_digit()))
+    {
+        return Some("number".to_string());
+    }
+
+    if matches!(first, '"' | '\'' | '`') {
+        return Some("string".to_string());
+    }
+
+    if matches!(v, "true" | "false") {
+        return Some("boolean".to_string());
+    }
+
+    let inner = v
+        .strip_prefix('{')
+        .and_then(|r| r.strip_suffix('}'))
+        .or_else(|| v.strip_prefix('[').and_then(|r| r.strip_suffix(']')))?;
+    let item = split_top(inner).into_iter().next()?.trim();
+
+    (!item.is_empty() && !item.contains('='))
+        .then(|| literal_type(doc, item))
+        .flatten()
+        .map(|t| format!("{t}[]"))
+}
+
+/// A declaration hover with the `@derive(...)` lines the source writes
+/// above it. The derives say what the type can do, `clone` and
+/// `default`, and the index leaves the attribute lines out.
+pub(crate) fn with_derives(hover: &str, source: &str, offset: usize) -> String {
+    let line_start = source[..offset.min(source.len())]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let mut derives: Vec<&str> = source[..line_start]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .take_while(|l| l.starts_with('@') || l.starts_with("--"))
+        .filter(|l| l.starts_with("@derive("))
+        .collect();
+    derives.reverse();
+
+    match (derives.is_empty(), hover.split_once('\n')) {
+        (false, Some((fence, body))) if fence.starts_with("```") => {
+            format!("{fence}\n{}\n{body}", derives.join("\n"))
+        }
+
+        _ => hover.to_string(),
+    }
+}
+
+/// A declaration hover laid out the way `alloy fmt` writes the source.
+/// The index writes every header with `as` and indents by four spaces;
+/// fmt drops the `as` of a header whose body stands below it and
+/// indents by the project's unit. A one-line body keeps its `as`.
+pub(crate) fn formatted_hover(hover: &str, fmt: &alloy::config::FmtConfig) -> String {
+    let unit = match fmt.indent_type {
+        alloy::config::IndentType::Tabs => "\t".to_string(),
+
+        alloy::config::IndentType::Spaces => " ".repeat(fmt.indent_width),
+    };
+    let lines: Vec<&str> = hover.split('\n').collect();
+    // The index may write two spaces or four; its smallest indent is
+    // one level.
+    let step = lines
+        .iter()
+        .map(|l| l.len() - l.trim_start_matches(' ').len())
+        .filter(|n| *n > 0)
+        .min()
+        .unwrap_or(4);
+    let mut code = false;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+
+    for (i, line) in lines.iter().enumerate() {
+        if line.starts_with("```") {
+            code = !code;
+            out.push(line.to_string());
+
+            continue;
+        }
+
+        if !code {
+            out.push(line.to_string());
+
+            continue;
+        }
+
+        let spaces = line.len() - line.trim_start_matches(' ').len();
+        let text = &line[spaces - spaces % step..];
+        let body_below = lines
+            .get(i + 1)
+            .is_some_and(|next| !next.starts_with("```"));
+        let text = match text.strip_suffix(" as") {
+            Some(head) if body_below => head,
+
+            _ => text,
+        };
+
+        out.push(format!("{}{text}", unit.repeat(spaces / step)));
+    }
+
+    out.join("\n")
 }
 
 /// The hover of one field of a named struct, from the declaration index.
@@ -650,10 +868,10 @@ pub(crate) fn field_of_struct(doc: &Doc, name: &str, field: &str) -> Option<Stri
 }
 
 /// The pattern of a `case` line: what stands between `case` and the
-/// arm's `then`, or the guard's `and`.
+/// arm's `then`, or the guard's `where` or `and`.
 pub(crate) fn case_pattern(line: &str) -> Option<String> {
     let rest = line.trim().strip_prefix("case ")?;
-    let end = [rest.find(" then"), rest.find(" and ")]
+    let end = [rest.find(" then"), rest.find(" where "), rest.find(" and ")]
         .into_iter()
         .flatten()
         .min()
@@ -898,6 +1116,65 @@ mod tests {
             Some("```alloy\nlocal c = h()\n```")
         );
         assert_eq!(super::expression_binding_text(src, 1, "x"), None);
+    }
+
+    /// A declaration hover reads the way `alloy fmt` writes it: no `as`
+    /// over a body below, the project's indent, and a one-line body kept.
+    #[test]
+    fn a_declaration_hover_takes_the_fmt_layout() {
+        let fmt = alloy::config::FmtConfig::default();
+        let hover = "```alloy\nexport enum Phase as\n    Lobby\n    Countdown(number)\nend\n\nimpl Contestant as\n    public function add(self, n: number)\nend\n```\n\nA doc that says as";
+
+        assert_eq!(
+            super::formatted_hover(hover, &fmt),
+            "```alloy\nexport enum Phase\n  Lobby\n  Countdown(number)\nend\n\nimpl Contestant\n  public function add(self, n: number)\nend\n```\n\nA doc that says as"
+        );
+        assert_eq!(
+            super::formatted_hover("```alloy\nenum Team as Red, Blue end\n```", &fmt),
+            "```alloy\nenum Team as Red, Blue end\n```"
+        );
+
+        // An index that writes two spaces reads at the project's width.
+        let four = alloy::config::FmtConfig {
+            indent_width: 4,
+            ..fmt
+        };
+        assert_eq!(
+            super::formatted_hover("```alloy\nstruct P\n  x: number\nend\n```", &four),
+            "```alloy\nstruct P\n    x: number\nend\n```"
+        );
+    }
+
+    /// A struct's hover carries the derives the source writes above it.
+    #[test]
+    fn a_struct_hover_names_its_derives() {
+        let src = "-- Stats.\n@derive(Default, Clone)\n@rename_all(\"camelCase\")\nstruct Stats\n  level: number\nend\n";
+        let at = src.find("Stats\n").unwrap();
+
+        assert_eq!(
+            super::with_derives("```alloy\nstruct Stats\n  level: number\nend\n```", src, at),
+            "```alloy\n@derive(Default, Clone)\nstruct Stats\n  level: number\nend\n```"
+        );
+        assert_eq!(
+            super::with_derives("```alloy\nstruct P\nend\n```", "struct P\nend\n", 7),
+            "```alloy\nstruct P\nend\n```"
+        );
+    }
+
+    /// `where` is the guard word, as `and` is, so it ends the pattern and
+    /// the payload binding hovers with its type.
+    #[test]
+    fn a_where_guard_ends_the_case_pattern() {
+        let line = "    case Phase.Countdown(n) where n > 0 then Phase.Countdown(n - 1)";
+
+        assert_eq!(
+            super::case_pattern(line).as_deref(),
+            Some("Phase.Countdown(n)")
+        );
+        assert_eq!(
+            super::case_pattern("case n and n > 0 then 1").as_deref(),
+            Some("n")
+        );
     }
 
     use super::*;

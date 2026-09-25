@@ -26,6 +26,7 @@ impl<'a> Parser<'a> {
         // The flag belongs to this block alone: a block nested in a
         // value block takes no trailing expression of its own.
         let value_block = std::mem::take(&mut self.value_block);
+        self.value_lines += u32::from(value_block);
         let start = self.pos;
         let mut stmts = Vec::new();
 
@@ -67,18 +68,11 @@ impl<'a> Parser<'a> {
             };
 
             let stmt = match parsed {
-                // `try do ... await f() end`: an `await`, a `try`, or a
-                // `new` stands alone as a statement, so the statement
-                // parser takes it; at the end of a value block it is
-                // the value.
-                Ok(Stmt::Call(e, span))
-                    if value_block
-                        && self.at("end")
-                        && matches!(
-                            e,
-                            Expr::Await { .. } | Expr::Try { .. } | Expr::New { .. }
-                        ) =>
-                {
+                // `try do ... tonumber(s) end`: a call stands alone as a
+                // statement, so the statement parser takes it; at the end
+                // of a value block it is the value, as every other last
+                // line is. `try do f() end` gave `Ok(nil)` before.
+                Ok(Stmt::Call(e, span)) if value_block && self.at_block_end() => {
                     Stmt::Return(Return {
                         values: vec![e],
                         value_only: true,
@@ -136,6 +130,7 @@ impl<'a> Parser<'a> {
             }
         }
 
+        self.value_lines -= u32::from(value_block);
         self.leave();
         Ok(Block {
             stmts,
@@ -152,7 +147,8 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let value = self.expr().ok()?;
 
-        if !self.at("end") {
+        // The body ends at its `end`, or, as a match arm, at the next arm.
+        if !self.at_block_end() {
             return None;
         }
 
@@ -231,7 +227,11 @@ impl<'a> Parser<'a> {
             || (self.at("destroy") && self.name_at(1))
             || (self.at("after") && self.after_delay_follows())
             || (self.at("import") && self.import_follows())
-            || (self.at("enum") && self.name_at(1) && matches!(self.text_at(2), "as" | "<"))
+            || (self.at("enum")
+                && self.name_at(1)
+                && (matches!(self.text_at(2), "as" | "<" | "end")
+                    || self.newline_after(1)
+                    || self.name_at(2)))
             || (self.at("impl") && self.name_at(1))
             || (self.at("match") && self.match_follows())
             || (matches!(
@@ -455,7 +455,7 @@ impl<'a> Parser<'a> {
                     _ => "a",
                 };
                 let message = format!(
-                    "{article} {word} body is `as ... end`: `{word} {} as`",
+                    "{article} {word} body goes on the lines below the header and closes with `end`, not braces: `{word} {}`",
                     self.text_at(1)
                 );
                 self.pos += 2;
@@ -467,7 +467,10 @@ impl<'a> Parser<'a> {
             }
 
             "struct"
-                if self.name_at(1) && self.text_at(2) == "as"
+                if self.name_at(1)
+                    && (matches!(self.text_at(2), "as" | "end")
+                        || self.newline_after(1)
+                        || self.name_at(2))
                     || (self.at("struct") && self.name_at(1) && self.text_at(2) == "<") =>
             {
                 self.struct_decl(start, Vec::new(), false)
@@ -596,7 +599,12 @@ impl<'a> Parser<'a> {
 
             "import" if self.import_follows() => self.import_stmt(start),
 
-            "enum" if self.name_at(1) && matches!(self.text_at(2), "as" | "<") => {
+            "enum"
+                if self.name_at(1)
+                    && (matches!(self.text_at(2), "as" | "<" | "end")
+                        || self.newline_after(1)
+                        || self.name_at(2)) =>
+            {
                 self.enum_decl(start, false)
             }
 

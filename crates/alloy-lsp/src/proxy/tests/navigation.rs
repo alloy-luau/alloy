@@ -769,6 +769,67 @@ pub(crate) fn a_variant_renames_where_it_is_declared_and_used() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Another module may keep an enum of the same name to itself. A use of
+/// `Phase.Lobby` under `import { Phase }` names the imported enum's
+/// variant, for a rename and for a definition.
+#[test]
+fn a_variant_resolves_through_the_import() {
+    let types = "export enum Phase\n  Lobby\n  Countdown(number)\nend\n";
+    let user = "import { Phase } from \"./types\"\nlocal p: Phase = Phase.Lobby\nprint(p)\n";
+    let other = "enum Phase\n  Lobby\n  Done\nend\nlocal q: Phase = Phase.Lobby\nprint(q)\n";
+    let dir = std::env::temp_dir().join(format!("alloy-nav-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        snippets: true,
+        ..State::default()
+    };
+    let mut uris = Vec::new();
+
+    for (rel, src) in [
+        ("types.aly", types),
+        ("user.aly", user),
+        ("other.aly", other),
+    ] {
+        let path = dir.join("src").join(rel);
+        std::fs::write(&path, src).expect(rel);
+        let uri = format!("file://{}", path.display());
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            uri.clone(),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+        uris.push(uri);
+    }
+
+    let at = user.rfind("Lobby").expect("use");
+    let file = match st.name_target(&uris[1], at) {
+        Some(Target::Variant { file, .. }) => file,
+
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(file, dir.join("src").join("types.aly"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A variant's rename and its reference list reach the `case` patterns
 /// too: bare, dotted, a unit variant alone, one nested in a payload, and
 /// one inside a struct pattern. A local of the same name is no use.
@@ -888,7 +949,7 @@ fn a_field_rename_reaches_the_constructor_and_the_declaration() {
             ],
         },
     });
-    st.mend_field_rename(uri, 12, 13, &mut result);
+    st.mend_field_rename(uri, 12, 13, &Value::Null, &mut result);
 
     let edits: Vec<(u64, u64)> = result["changes"][uri]
         .as_array()
@@ -930,7 +991,7 @@ fn a_field_rename_reaches_a_parameter_pattern() {
             ],
         },
     });
-    st.mend_field_rename(uri, 2, 4, &mut result);
+    st.mend_field_rename(uri, 2, 4, &Value::Null, &mut result);
 
     let edits: Vec<(u64, u64, String)> = result["changes"][uri]
         .as_array()
@@ -1007,7 +1068,7 @@ fn a_field_rename_leaves_a_same_named_type_alone() {
         ),
     ]);
     let edits = st
-        .field_edits("Point", "x", "across")
+        .field_edits("file:///p.aly", "Point", "x", "across")
         .expect("the field edits");
     let files: Vec<&str> = edits["changes"]
         .as_object()
@@ -1043,7 +1104,7 @@ fn field_references_reach_the_constructor_and_the_declaration() {
         { "uri": uri, "range": range_value((7, 13), (7, 14)) },
         { "uri": uri, "range": range_value((2, 0), (2, 1)) },
     ]);
-    st.mend_field_references(uri, 7, 13, &mut result);
+    st.mend_field_references(uri, 7, 13, &Value::Null, &mut result);
 
     let mut sites: Vec<(u64, u64)> = result
         .as_array()
@@ -1364,7 +1425,7 @@ fn a_field_of_a_namespace_member_names_the_member() {
     // The declaration, the constructor key, and the read.
     assert_eq!(
         rows(
-            &st.field_edits("T", "amount", "qty")
+            &st.field_edits(uri, "T", "amount", "qty")
                 .expect("the field edits")
         ),
         [
@@ -1402,7 +1463,7 @@ fn a_declaration_names_a_field_and_a_local_struct() {
     // The declaration, the constructor key, and the read.
     assert_eq!(
         rows(
-            &st.field_edits("Widget", "x", "zz")
+            &st.field_edits(uri, "Widget", "x", "zz")
                 .expect("the field edits")
         ),
         [
@@ -2602,5 +2663,178 @@ fn a_component_and_its_props_reach_the_tags() {
             "ui.alx 5:33-38 -> text",
             "ui.alx 9:17-22 -> text",
         ]
+    );
+}
+
+/// `p.b` goes to the line of the struct body that declares `b`. The
+/// child lands on the struct's `end`, and the name alone finds the `b`
+/// that another file exports.
+#[test]
+fn a_field_read_defines_at_its_struct() {
+    let st = super::support::files(&[
+        (
+            "file:///a.aly",
+            "struct P as\n    a: number\n    b: string\nend\nlocal p = new P { a = 1, b = \"x\" }\nprint(p.b)\n",
+        ),
+        (
+            "file:///b.aly",
+            "export function b(): number\n    return 1\nend\n",
+        ),
+    ]);
+    let at = st.docs["file:///a.aly"].source.find("p.b)").unwrap() + 2;
+
+    assert_eq!(
+        st.field_definition("file:///a.aly", at),
+        Some(json!([{ "uri": "file:///a.aly", "range": range_value((2, 4), (2, 5)) }]))
+    );
+}
+
+/// A file that imports no struct by name still reads its field through
+/// a value: `make_item()` returns an `Item`, so a rename of the field
+/// reaches `gift.count` there.
+#[test]
+fn a_field_rename_reaches_a_value_of_the_struct() {
+    const ITEMS: &str = "export struct Item as\n    count: number\nend\n\nexport function make_item(): Item\n    return new Item { count = 1 }\nend\n";
+    let mut st = super::support::files(&[
+        ("file:///items.aly", ITEMS),
+        (
+            "file:///user.aly",
+            "import { make_item } from \"./items\"\nlocal gift = make_item()\nprint(gift.count)\n",
+        ),
+    ]);
+    st.docs
+        .get_mut("file:///user.aly")
+        .expect("user")
+        .import_sources
+        .push(ITEMS.to_string());
+    let edits = st
+        .field_edits("file:///items.aly", "Item", "count", "stack")
+        .expect("the field edits");
+
+    assert_eq!(
+        edits["changes"]["file:///user.aly"],
+        json!([{ "range": range_value((2, 11), (2, 16)), "newText": "stack" }]),
+        "{edits}"
+    );
+}
+
+/// Two modules each declare a `Door`. A rename of the field reaches the
+/// struct the file's import names and leaves the other one alone.
+#[test]
+fn a_field_rename_keeps_to_the_struct_the_import_names() {
+    let door = "export struct Door as\n    width: number\nend\n";
+    let st = super::support::files(&[
+        ("file:///a.aly", door),
+        (
+            "file:///b.aly",
+            "export struct Door as\n    width: number\nend\nlocal d = new Door { width = 2 }\nprint(d.width)\n",
+        ),
+        (
+            "file:///c.aly",
+            "import { Door } from \"./a\"\nlocal d = new Door { width = 1 }\nprint(d.width)\n",
+        ),
+    ]);
+    let edits = st
+        .field_edits("file:///c.aly", "Door", "width", "wide")
+        .expect("the field edits");
+    let mut files: Vec<&str> = edits["changes"]
+        .as_object()
+        .expect("changes")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    files.sort();
+
+    assert_eq!(files, ["file:///a.aly", "file:///c.aly"], "{edits}");
+    assert_eq!(
+        st.struct_home("file:///b.aly", "Door"),
+        Some(PathBuf::from("/b.aly"))
+    );
+}
+
+/// Two modules each declare a `Status`. The path in front of a variant
+/// names the enum: an alias, `Light.Active`, and a module binding,
+/// `B.Status.Active`, read the module the import names.
+#[test]
+fn a_variant_path_names_its_enum() {
+    let st = super::support::files(&[
+        (
+            "file:///a.aly",
+            "export enum Status\n  Active\n  Closed\nend\n",
+        ),
+        (
+            "file:///b.aly",
+            "export enum Status\n  Active\n  Off\nend\n",
+        ),
+        (
+            "file:///f.aly",
+            "import { Status } from \"./a\"\nimport { Status as Light } from \"./b\"\nimport * as B from \"./b\"\nprint(Status.Closed, Light.Active, B.Status.Active)\n",
+        ),
+    ]);
+    let src = &st.docs["file:///f.aly"].source;
+    let home = |needle: &str| {
+        let at = src.find(needle).unwrap() + needle.rfind('.').unwrap() + 1;
+
+        st.variant_home("file:///f.aly", at)
+            .map(|(file, owner)| (file.display().to_string(), owner))
+    };
+    let status = |file: &str| Some((file.to_string(), "Status".to_string()));
+
+    assert_eq!(home("Status.Closed"), status("/a.aly"));
+    assert_eq!(home("Light.Active"), status("/b.aly"));
+    assert_eq!(home("B.Status.Active"), status("/b.aly"));
+
+    // The rename of b's variant reaches both of its paths in the file,
+    // and a's `Status.Closed` stays.
+    let edits = st
+        .variant_edits(Path::new("/b.aly"), "Status", "Active", "On")
+        .expect("the edits");
+    assert_eq!(
+        edits["changes"]["file:///f.aly"].as_array().map(Vec::len),
+        Some(2),
+        "{edits}"
+    );
+}
+
+/// A receiver the checker typed alone, `stock:get("x")`: the child's
+/// answer lands on the struct's `end` line, where the emit writes the
+/// field list. The definition moves to the field's own line, and a
+/// rename from the read takes the declaration and the constructor key.
+#[test]
+fn a_field_read_the_checker_typed_reaches_its_struct() {
+    const ITEMS: &str =
+        "export struct Item as\n    price: number\nend\n\nlocal i = new Item { price = 1 }\n";
+    let st = super::support::files(&[
+        ("file:///a.aly", ITEMS),
+        (
+            "file:///c.aly",
+            "import { Item } from \"./a\"\nlocal got = stock:get(\"x\")\nprint(got.price)\n",
+        ),
+    ]);
+    let end_line =
+        json!({ "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 3 } });
+    let read =
+        json!({ "start": { "line": 2, "character": 10 }, "end": { "line": 2, "character": 15 } });
+
+    let mut definition = json!([{ "uri": "file:///a.aly", "range": end_line }]);
+    st.mend_field_definition("file:///c.aly", 2, 11, &mut definition);
+    assert_eq!(definition[0]["range"], range_value((1, 4), (1, 9)));
+
+    let child = json!({ "changes": {
+        "file:///a.aly": [{ "range": end_line, "newText": "cost" }],
+        "file:///c.aly": [{ "range": read, "newText": "cost" }],
+    } });
+    let mut result = json!({ "changes": {
+        "file:///c.aly": [{ "range": read, "newText": "cost" }],
+    } });
+    st.mend_field_rename("file:///c.aly", 2, 11, &child, &mut result);
+
+    assert_eq!(
+        result["changes"]["file:///a.aly"],
+        json!([
+            { "range": range_value((1, 4), (1, 9)), "newText": "cost" },
+            { "range": range_value((4, 21), (4, 26)), "newText": "cost" },
+        ]),
+        "{result}"
     );
 }

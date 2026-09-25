@@ -155,7 +155,7 @@ pub(crate) fn source_type(doc: &Doc, line: u32, character: u32) -> Option<String
     if name.starts_with(|c: char| c.is_ascii_uppercase())
         && let Some(args) = rest[name.len()..]
             .strip_prefix(".new<<")
-            .and_then(|a| a.find(">>").map(|e| a[..e].to_string()))
+            .and_then(explicit_arguments)
         && !args.is_empty()
     {
         return Some(format!("{name}<{args}>"));
@@ -428,13 +428,15 @@ pub(crate) fn constructed_type(doc: &Doc, after_new: &str) -> Option<String> {
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
         .collect();
 
-    if !declares_a_struct(doc, &name) {
+    // `new HashMap<<string, number>>()`: a std collection prints by its
+    // metatable too, so the `new` is the only place its arguments stand.
+    if !declares_a_struct(doc, &name) && !std_generic(&name) {
         return None;
     }
 
     let args = rest[name.len()..]
         .strip_prefix("<<")
-        .and_then(|a| a.find(">>").map(|e| a[..e].to_string()));
+        .and_then(explicit_arguments);
     let printed = match args {
         Some(a) => format!("{name}<{a}>"),
 
@@ -450,6 +452,34 @@ pub(crate) fn constructed_type(doc: &Doc, after_new: &str) -> Option<String> {
         .collect();
 
     Some(alloy::shapes::fill_generic_defaults(&printed, &shapes))
+}
+
+/// The arguments of `<<...>>`, from the text after the `<<`. The `>>`
+/// that closes the list stands at bracket depth zero, so a nested
+/// argument keeps its own `>`: `string, Array<number>>>()` gives
+/// `string, Array<number>`.
+fn explicit_arguments(after: &str) -> Option<String> {
+    let bytes = after.as_bytes();
+    let mut depth = 0i32;
+
+    for (i, c) in after.char_indices() {
+        match c {
+            '<' | '(' | '{' | '[' => depth += 1,
+
+            // The `>` of an arrow closes no bracket.
+            '>' if i > 0 && bytes[i - 1] == b'-' => {}
+
+            '>' if depth == 0 => {
+                return after[i..].starts_with(">>").then(|| after[..i].to_string());
+            }
+
+            '>' | ')' | '}' | ']' => depth -= 1,
+
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// Whether a name in reach declares a struct. `shapes` reads the top
@@ -496,12 +526,55 @@ pub(crate) fn declares_a_struct(doc: &Doc, name: &str) -> bool {
             .any(|d| d.name == name && struct_hover(&d.hover))
 }
 
+/// Whether a std type takes an argument that has no default:
+/// `HashMap<K, V>` does, `Clone<T = any>` does not. The source cannot
+/// write such a type bare.
+pub(crate) fn std_generic(name: &str) -> bool {
+    alloy::std_names::is_std_name(name)
+        && alloy::RUNTIME
+            .split_once(&format!("export type {name}<"))
+            .and_then(|(_, rest)| rest.split_once('>'))
+            .is_some_and(|(params, _)| params.split(',').any(|p| !p.contains('=')))
+}
+
 /// The child prints a std value's type as its whole shape. The shapes the
 /// runtime builds read as their names instead: the Future table becomes
 /// `Future<T>`, the Array metatable pair becomes `T[]`, and `Array<T>`
 /// with a plain element becomes `T[]` too.
 pub(crate) fn fold_std_shapes(value: &str) -> String {
     let mut out = value.to_string();
+
+    // Iter: `{ all: (self: Iter<number>, ...) -> boolean, ... 16 more ... }`.
+    // The type has no metatable name to print, and its first method
+    // takes the type itself as `self`.
+    let mut from = 0;
+
+    while let Some(i) = out[from..].find("{ ") {
+        let open = from + i;
+        let Some(len) = group_len(&out[open..], '{', '}') else {
+            break;
+        };
+        let body = &out[open + 2..open + len];
+        let receiver = body
+            .split_once(": (self: ")
+            .filter(|(key, _)| key.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .and_then(|(_, ty)| {
+                let head = ty.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+                let args = group_len(&ty[head..], '<', '>')?;
+
+                (ty[head..].starts_with('<') && alloy::std_names::is_std_name(&ty[..head]))
+                    .then(|| ty[..head + args].to_string())
+            });
+
+        match receiver {
+            Some(named) => {
+                out.replace_range(open..open + len, &named);
+                from = open + named.len();
+            }
+
+            None => from = open + 1,
+        }
+    }
 
     // Future: `{ andThen: (self: any, on_resolve: ((T) -> ())?, ... is_settled: (self: any) -> boolean }`.
     // A Future that carries `__value` names itself in `shapes::fold`,
@@ -1998,8 +2071,12 @@ pub(crate) fn unlocal_parameter(
         return None;
     }
 
-    // A name the file declares with a keyword is that declaration.
-    if doc.bindings.iter().any(|b| b.name == *word) {
+    // A name the file declares with a keyword is that declaration,
+    // unless a parameter of the same name is the one in scope here.
+    let parameter = context::binding_in_scope(&doc.source, start, word)
+        .is_some_and(|l| l.kind == context::LocalKind::Parameter);
+
+    if !parameter && doc.bindings.iter().any(|b| b.name == *word) {
         return None;
     }
 
@@ -2016,23 +2093,39 @@ pub(crate) fn unlocal_parameter(
 
     // The head the parameter belongs to is the nearest one above the
     // caret that writes the name: a lower function of its own may take
-    // one by the same name.
+    // one by the same name. A line may hold two heads,
+    // `Connect(function(player)`, and the last one is the nearest.
     let line_end = doc.source[end..]
         .find('\n')
         .map_or(doc.source.len(), |i| end + i);
     let owner = doc.source[..line_end].lines().rev().find_map(|l| {
-        let open = l.find('(')?;
-        let name = function_name_of(&l[..open])?;
+        l.rmatch_indices("function").find_map(|(at, _)| {
+            let after = l[at + "function".len()..].chars().next();
 
-        parameter_names(&l[open..])
-            .iter()
-            .any(|(n, _)| n == word)
-            .then_some(name)
+            if (at > 0 && keywords::is_word_at(l, at - 1))
+                || !matches!(after, Some(' ' | '(' | '<'))
+            {
+                return None;
+            }
+
+            let open = at + l[at..].find('(')?;
+            // A list that runs past the line keeps the rest of it.
+            let len = group_len(&l[open..], '(', ')').unwrap_or(l.len() - open);
+            let list = &l[open..open + len];
+
+            parameter_names(list)
+                .iter()
+                .any(|(n, _)| n == word)
+                .then(|| function_name_of(&l[at..open]))
+        })
     })?;
+    let owner = match owner {
+        Some(name) => format!("`function {name}`"),
 
-    Some(format!(
-        "{fence}\n{text}\n```\nA parameter of `function {owner}`."
-    ))
+        None => "an anonymous function".to_string(),
+    };
+
+    Some(format!("{fence}\n{text}\n```\nA parameter of {owner}."))
 }
 
 /// `self` inside an `impl`, by the name the `impl` head writes.

@@ -1,6 +1,6 @@
 --!strict
 local __alloy = require("@alloy") local v = (if c then "a" else "b")
-local w = (typeof(x) == "Instance" and x:IsA("Part"))
+local w = (typeof(x) == "Instance" and (x :: Instance):IsA("Part"))
 local u = (typeof(k) == "EnumItem" and k.EnumType == Enum.KeyCode)
 local s = (n ~= nil)
 local t = __alloy.contains(xs, 3)

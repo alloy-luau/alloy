@@ -38,6 +38,48 @@ describe("Signal", function()
 		expect(calls).toBe(1)
 	end)
 
+	it("keeps the order of the rest when any connection goes", function()
+		local s = Signal.new()
+		local seen = {}
+		local connections = {}
+		for i = 1, 6 do
+			connections[i] = s:Connect(function()
+				table.insert(seen, i)
+			end)
+		end
+		-- The last, the first, and one in the middle.
+		connections[6]:Disconnect()
+		connections[1]:Disconnect()
+		connections[3]:Disconnect()
+		s:Fire()
+		expect(seen).toEqual({ 2, 4, 5 })
+		s:Connect(function()
+			table.insert(seen, 7)
+		end)
+		table.clear(seen)
+		s:Fire()
+		expect(seen).toEqual({ 2, 4, 5, 7 })
+	end)
+
+	it("walks on when a handler disconnects itself and the next one", function()
+		local s = Signal.new()
+		local seen = {}
+		local a, b
+		a = s:Connect(function()
+			table.insert(seen, "a")
+			a:Disconnect()
+			b:Disconnect()
+		end)
+		b = s:Connect(function()
+			table.insert(seen, "b")
+		end)
+		s:Connect(function()
+			table.insert(seen, "c")
+		end)
+		s:Fire()
+		expect(seen).toEqual({ "a", "c" })
+	end)
+
 	it("Once fires one time and disconnects before its handler runs", function()
 		local o = Signal.new()
 		local calls = 0

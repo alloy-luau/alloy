@@ -114,7 +114,7 @@ pub fn value_openers(text: &str) -> i32 {
 
 /// Splits at the commas of the top level. A bracket, an angle bracket,
 /// and a string keep their own commas.
-fn split_top(text: &str) -> Vec<&str> {
+pub(super) fn split_top(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut angle = 0i32;
@@ -181,10 +181,30 @@ fn binding_entry(part: &str) -> Option<Local> {
     })
 }
 
-/// The names a `case` pattern binds: what its payload brackets hold.
-/// A bare variant and a literal bind nothing.
+/// The names a `case` pattern binds: what its payload brackets hold, or
+/// the bare name of `case n then`. A variant and a literal bind nothing.
 pub fn pattern_names(rest: &str) -> Vec<Local> {
-    let text = rest.split(" then").next().unwrap_or(rest);
+    // The pattern ends at the arm's `then`, or at its guard. The caret's
+    // own line may stop right after the guard's word.
+    let text = format!("{} ", rest.split(" then").next().unwrap_or(rest));
+    let text = text.split(" where ").next().unwrap_or(&text);
+    let text = text.split(" and ").next().unwrap_or(text);
+    let bare = text.trim();
+
+    // A bare name binds the whole value. A capital may name a unit
+    // variant, `case Nil`, which binds nothing.
+    if bare.starts_with(|c: char| c.is_lowercase() || c == '_')
+        && bare != "_"
+        && bare.chars().all(is_word)
+        && !matches!(bare, "nil" | "true" | "false")
+    {
+        return vec![Local {
+            name: bare.to_string(),
+            annotation: None,
+            kind: LocalKind::Variable,
+        }];
+    }
+
     let Some(open) = text.find(['(', '[', '{']) else {
         return Vec::new();
     };
@@ -199,7 +219,7 @@ pub fn pattern_names(rest: &str) -> Vec<Local> {
 
 /// The byte the group opened before `text` closes at, or the length of
 /// `text` when the line has no closing bracket yet.
-fn group_end(text: &str) -> usize {
+pub(super) fn group_end(text: &str) -> usize {
     let mut depth = 0i32;
     let mut quote: Option<char> = None;
 
@@ -667,5 +687,29 @@ mod tests {
                 .contains(&"hit".to_string())
         );
         assert!(scope_at("for _, p in players where p > | do\nend\n").contains(&"p".to_string()));
+    }
+
+    /// A guard ends the pattern, `where` as well as `and`, and a bare
+    /// name binds the whole value. A capital may name a unit variant.
+    #[test]
+    fn a_guard_ends_the_pattern_and_a_bare_name_binds() {
+        let names = |rest: &str| -> Vec<String> {
+            pattern_names(rest).into_iter().map(|l| l.name).collect()
+        };
+
+        assert_eq!(names("Countdown(n) where f(n) > 0 then n"), ["n"]);
+        assert_eq!(names("Countdown(n) and f(n) > 0 then n"), ["n"]);
+        assert_eq!(names("n where n >= 10 then 100"), ["n"]);
+        assert_eq!(names("who then who"), ["who"]);
+        assert!(names("Nil then 0").is_empty());
+        assert!(names("_ then 0").is_empty());
+        assert!(names("nil then 0").is_empty());
+
+        let src = "match x with\n    case n where | then 1\nend\n";
+        assert!(scope_at(src).contains(&"n".to_string()));
+        assert!(crate::context::expression_start(
+            &src.replace('|', ""),
+            src.find('|').unwrap()
+        ));
     }
 }

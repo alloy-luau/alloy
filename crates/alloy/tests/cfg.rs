@@ -216,7 +216,7 @@ fn another_attribute_on_a_statement_reports() {
     assert_eq!(m.len(), 1, "{m:?}");
     assert_eq!(
         m[0],
-        "`@derive` goes on a declaration; `@cfg` is the attribute a statement takes"
+        "`@derive` goes on a declaration; `@cfg` and `@allow` are the attributes a statement takes"
     );
 
     // An unknown condition word reads the same way it reads on a

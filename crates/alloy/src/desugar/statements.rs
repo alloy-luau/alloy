@@ -4,16 +4,16 @@ use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{
     After, Assign, Binding, Block, CallArgs, Cond, Declare, Destructure, Expr, FieldBinding,
-    Function, FunctionBody, GenericFor, ImportKind, IndexKey, Local, Param, Pattern, Return, Stmt,
-    TableField, TokSpan,
+    Function, FunctionBody, GenericFor, ImportKind, IndexKey, Local, MatchExpr, Param, Pattern,
+    Return, Stmt, TableField, TokSpan,
 };
 
 use crate::render::Renderer;
 
 use super::expressions::WORD_OPS;
 use super::types::{
-    apply_bounds, array_element, depth_step, generic_bounds, generic_head, split_top_level,
-    strip_bounds,
+    apply_bounds, array_element, bound_spots, depth_step, generic_bounds, generic_head,
+    generic_names, split_top_level, strip_bounds,
 };
 use super::*;
 
@@ -26,6 +26,17 @@ enum Timed {
     Method(&'static str),
     /// Nothing in the file names the type.
     Unknown,
+}
+
+/// Whether an expression holds a function literal, at any depth.
+fn holds_function(e: &Expr) -> bool {
+    expr_children(e).iter().any(|c| match c {
+        Child::Expr(x) => holds_function(x),
+
+        Child::Block(_) => false,
+
+        Child::Function(_) => true,
+    })
 }
 
 /// Whether a block, or a nested block of it, returns a value. A function
@@ -461,23 +472,30 @@ impl<'s> Desugar<'s> {
                 self.enums.insert(name, variants);
             }
 
-            Stmt::Import(i) => match &i.kind {
-                ImportKind::Default(n) => self.declare_name(*n),
+            Stmt::Import(i) => {
+                // A std name under its own name is no local: it renders
+                // as `__alloy.Name`. Under an alias it is one.
+                let spec = self.text_of(i.path).trim_matches(['"', '\'']);
+                let std = crate::std_names::module_of_spec(spec).is_some();
 
-                ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
-                    self.declare_name(*n);
+                match &i.kind {
+                    ImportKind::Default(n) => self.declare_name(*n),
 
-                    for sp in specs {
-                        self.declare_name(sp.alias.unwrap_or(sp.name));
+                    ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
+                        self.declare_name(*n);
+
+                        for sp in specs.iter().filter(|sp| !std || sp.alias.is_some()) {
+                            self.declare_name(sp.alias.unwrap_or(sp.name));
+                        }
+                    }
+
+                    ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
+                        for sp in specs.iter().filter(|sp| !std || sp.alias.is_some()) {
+                            self.declare_name(sp.alias.unwrap_or(sp.name));
+                        }
                     }
                 }
-
-                ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
-                    for sp in specs {
-                        self.declare_name(sp.alias.unwrap_or(sp.name));
-                    }
-                }
-            },
+            }
 
             Stmt::PatternLocal(p) => {
                 let names = pattern_binds(&p.pattern);
@@ -681,6 +699,16 @@ impl<'s> Desugar<'s> {
         // its own, and every reference to a sibling takes that name, so
         // the walk has to reach each statement.
         if !self.ns_stack.is_empty() {
+            return true;
+        }
+
+        // The check artifact casts each `return` of a function written in
+        // a for-in header, so the walk has to reach the loop and every
+        // statement of that function.
+        if self.options.check
+            && (self.for_header > 0
+                || matches!(s, Stmt::GenericFor(f) if f.exprs.iter().any(holds_function)))
+        {
             return true;
         }
 
@@ -1134,6 +1162,20 @@ impl<'s> Desugar<'s> {
         let Some(g) = generics else {
             return;
         };
+
+        // A std trait a bound names, `<T: Serialize>`, is a std name the
+        // file writes.
+        for i in g.start + 1..g.end {
+            let text = self.toks[i as usize].text(self.src);
+
+            if matches!(self.toks[i as usize - 1].text(self.src), ":" | "&")
+                && crate::std_names::is_std_name(text)
+                && !self.traits.contains_key(text)
+            {
+                self.check_std_name(TokSpan::new(i as usize, i as usize + 1), text);
+            }
+        }
+
         let mut hits: Vec<(TokSpan, String)> = Vec::new();
 
         for (_, bound) in generic_bounds(self.text_of(g)) {
@@ -1467,6 +1509,77 @@ impl<'s> Desugar<'s> {
                 self.copy_span(stmt.span());
             }
 
+            // A match whose arms run statements stands after `local x =`,
+            // `x =`, or `return`: it becomes a statement match whose arms
+            // end by writing the value there, with no closure.
+            Stmt::Local(l)
+                if l.names.len() == 1
+                    && l.values.len() == 1
+                    && l.names[0].destructure.is_none()
+                    && block_arm_match(&l.values[0]).is_some() =>
+            {
+                let m = block_arm_match(&l.values[0]).expect("matched above");
+                let name = &l.names[0];
+                let head_end = name
+                    .ty
+                    .map_or(self.byte_end(name.name), |t| self.byte_end(t));
+                let m_start = self.byte_start(m.span);
+
+                // Luau's `const` takes its value on its own line, and the
+                // arms set it below; the emit writes `local`, and the
+                // compiler's own check still refuses a later write.
+                if l.is_const {
+                    let kw = self.byte_start(l.keyword);
+                    self.copy(self.byte_start(l.span), kw);
+                    self.generate(kw, "local");
+                    self.copy(self.byte_end(l.keyword), head_end);
+                } else {
+                    self.copy(self.byte_start(l.span), head_end);
+                }
+
+                // A bare `local x` is nil until an arm sets it, so the
+                // checker reads it `T?` at the name. `never` adds nothing
+                // to the arms' union, so the hover and the hint read `T`.
+                if self.options.check && name.ty.is_none() {
+                    self.generate(head_end, " = nil :: never");
+                }
+
+                self.blank_lines(head_end, m_start);
+                let sink = format!("{} = ", self.text_of(name.name));
+                self.match_hoisted(m, &sink, " ");
+                self.declare_binding(name);
+            }
+
+            Stmt::Assign(a)
+                if a.targets.len() == 1
+                    && a.values.len() == 1
+                    && matches!(a.targets[0], Expr::Name(_))
+                    && self.text_of(a.op) == "="
+                    && block_arm_match(&a.values[0]).is_some() =>
+            {
+                let m = block_arm_match(&a.values[0]).expect("matched above");
+                let sink = format!("{} = ", self.text_of(a.targets[0].span()));
+                let m_start = self.byte_start(m.span);
+                self.blank_lines(self.byte_start(a.span), m_start);
+                self.match_hoisted(m, &sink, "");
+            }
+
+            Stmt::Return(r) if r.values.len() == 1 && block_arm_match(&r.values[0]).is_some() => {
+                let m = block_arm_match(&r.values[0]).expect("matched above");
+                // The tail of a value block writes into that block's sink.
+                let sink = match r.value_only {
+                    true => self
+                        .value_sink
+                        .clone()
+                        .unwrap_or_else(|| "return ".to_string()),
+
+                    false => "return ".to_string(),
+                };
+                let m_start = self.byte_start(m.span);
+                self.blank_lines(self.byte_start(r.span), m_start);
+                self.match_hoisted(m, &sink, "");
+            }
+
             Stmt::Local(l) if local_needs_rewrite(l) => self.local_stmt(l),
 
             // `return Err(e)` inside a `try do` block: the block fails
@@ -1482,7 +1595,11 @@ impl<'s> Desugar<'s> {
             // writes it in front of the expression.
             Stmt::Return(r) if r.value_only => {
                 let anchor = self.byte_start(r.span);
-                self.generate(anchor, "return ");
+                let lead = self
+                    .value_sink
+                    .clone()
+                    .unwrap_or_else(|| "return ".to_string());
+                self.generate(anchor, &lead);
                 self.stitch(r.span, &stmt_children(stmt), |d, child| match child {
                     Child::Expr(e) => d.expr(e),
 
@@ -1666,6 +1783,34 @@ impl<'s> Desugar<'s> {
 
             Stmt::GenericFor(f) if for_needs_rewrite(f) => self.generic_for(stmt.span(), f),
 
+            /*
+            Luau checks a `return` in a function written in a for-in header
+            against the function around the loop: the loop's scope spans
+            the header and is made first, and the lookup by position takes
+            the first scope that encloses the `return`. The check artifact
+            casts the value, so `xs:filter(function(v) return v > 2 end)`
+            reports nothing.
+
+            ponytail: the cast also hides a wrong return type there; drop
+            this arm once Luau makes the loop scope after the header.
+            */
+            Stmt::Return(r)
+                if self.options.check && self.for_header > 0 && !r.values.is_empty() =>
+            {
+                let mut cursor = self.byte_start(r.span);
+
+                for v in &r.values {
+                    let (vs, ve) = (self.byte_start(v.span()), self.byte_end(v.span()));
+                    self.copy(cursor, vs);
+                    self.generate(vs, "((");
+                    self.expr(v);
+                    self.generate(ve, ") :: any)");
+                    cursor = ve;
+                }
+
+                self.copy(cursor, self.byte_end(r.span));
+            }
+
             _ => {
                 let span = stmt.span();
                 let children = stmt_children(stmt);
@@ -1680,11 +1825,14 @@ impl<'s> Desugar<'s> {
 
                     _ => (Vec::new(), None),
                 };
+                let header = u32::from(matches!(stmt, Stmt::GenericFor(_)));
                 self.stitch(span, &children, |d, child| match child {
                     Child::Expr(e) => {
                         let at = std::ptr::from_ref::<Expr>(e);
                         let reads = d.reads;
+                        d.for_header += header;
                         d.expr_lazy(reevaluated.contains(&at), e);
+                        d.for_header -= header;
 
                         // A target is written, not read.
                         if targets.contains(&at) {
@@ -1778,7 +1926,10 @@ impl<'s> Desugar<'s> {
     pub(crate) fn is_import_call(&self, e: &Expr) -> bool {
         let (base, links) = flatten(e);
 
+        // A local named `import` is the file's own function, and a call
+        // to it stays a call.
         matches!(base, Expr::Name(n) if self.text_of(*n) == "import")
+            && !self.is_local("import")
             && matches!(
                 links.first(),
                 Some(Link::Plain(Step::Call { method: None, .. }))
@@ -2859,6 +3010,22 @@ impl<'s> Desugar<'s> {
     /// as the source wrote it with the bound around it.
     pub(crate) fn bind_nested_bounds(&mut self, block: &Block, bounds: &[(String, String)]) {
         for stmt in &block.stmts {
+            match stmt {
+                Stmt::Local(l) => {
+                    for b in &l.names {
+                        self.bind_type_bounds(b.ty, bounds);
+                    }
+                }
+
+                Stmt::GenericFor(f) => {
+                    for b in &f.vars {
+                        self.bind_type_bounds(b.ty, bounds);
+                    }
+                }
+
+                _ => {}
+            }
+
             self.bind_bounds_in(stmt_children(stmt), bounds);
         }
     }
@@ -2866,29 +3033,52 @@ impl<'s> Desugar<'s> {
     pub(crate) fn bind_bounds_in(&mut self, children: Vec<Child<'_>>, bounds: &[(String, String)]) {
         for child in children {
             match child {
-                Child::Expr(e) => self.bind_bounds_in(expr_children(e), bounds),
+                Child::Expr(e) => {
+                    if let Expr::TypeAssert { ty, .. } = e {
+                        self.bind_type_bounds(Some(*ty), bounds);
+                    }
+
+                    self.bind_bounds_in(expr_children(e), bounds);
+                }
 
                 Child::Block(b) => self.bind_nested_bounds(b, bounds),
 
                 Child::Function(f) => {
-                    for p in &f.params {
-                        let Some(t) = p.ty else {
-                            continue;
-                        };
-                        let text = self.text_of(t).trim().to_string();
+                    // A generic list of its own shadows the outer name.
+                    let own: Vec<String> = f
+                        .generics
+                        .map(|g| generic_names(self.text_of(g)))
+                        .unwrap_or_default();
+                    let bounds: Vec<(String, String)> = bounds
+                        .iter()
+                        .filter(|(n, _)| !own.contains(n))
+                        .cloned()
+                        .collect();
 
-                        let Some((_, bound)) = bounds.iter().find(|(n, _)| *n == text) else {
-                            continue;
-                        };
-                        let open = self.byte_start(t);
-                        let close = self.byte_end(t);
-                        self.inserts.push((open, "(".to_string()));
-                        self.inserts.push((close, format!(" & {bound})")));
+                    for p in &f.params {
+                        self.bind_type_bounds(p.ty, &bounds);
                     }
 
-                    self.bind_nested_bounds(&f.block, bounds);
+                    self.bind_type_bounds(f.ret_type, &bounds);
+                    self.bind_nested_bounds(&f.block, &bounds);
                 }
             }
+        }
+    }
+
+    /// A type written in a bounded function's body names the parameter
+    /// Luau sees with no bound: `local best: T?`. Each bare `T` in it
+    /// takes the intersection the parameters take.
+    fn bind_type_bounds(&mut self, ty: Option<TokSpan>, bounds: &[(String, String)]) {
+        let Some(t) = ty else {
+            return;
+        };
+        let open = self.byte_start(t);
+
+        for (start, end, bound) in bound_spots(self.text_of(t), bounds) {
+            self.inserts.push((open + start as u32, "(".to_string()));
+            self.inserts
+                .push((open + end as u32, format!(" & {bound})")));
         }
     }
 
@@ -3325,7 +3515,9 @@ impl<'s> Desugar<'s> {
             .map(|e| self.byte_end(e.span()))
             .unwrap_or(cursor);
         let children: Vec<Child<'_>> = f.exprs.iter().map(Child::Expr).collect();
+        self.for_header += 1;
         self.stitch_between(cursor, last_expr, &children);
+        self.for_header -= 1;
         cursor = last_expr;
 
         // `do`, with the filter turned into a guard after it.
@@ -3371,15 +3563,30 @@ impl<'s> Desugar<'s> {
         self.copy(end_tok.start, end_tok.end);
     }
 
+    /// The first token at or after `from` that reads `text`. A tree from
+    /// a lenient parse may lack it, and the last token answers then, so a
+    /// half-typed file reports instead of crashing the server.
     pub(crate) fn find_tok_after(&self, from: u32, text: &str) -> u32 {
-        let mut i = from;
+        let last = self.toks.len().saturating_sub(1) as u32;
+        let mut i = from.min(last);
 
-        while self.toks[i as usize].text(self.src) != text {
+        while i < last && self.toks[i as usize].text(self.src) != text {
             i += 1;
         }
 
         i
     }
+}
+
+/// A `match` whose arms run statements before their value, which only
+/// the statement forms `local x =`, `x =`, and `return` can hold.
+pub(crate) fn block_arm_match(e: &Expr) -> Option<&MatchExpr> {
+    let Expr::Match(m) = e else {
+        return None;
+    };
+    let block = |v: &Expr| matches!(v, Expr::Block { .. });
+
+    (m.arms.iter().any(|a| block(&a.value)) || m.default.as_deref().is_some_and(block)).then_some(m)
 }
 
 /// Whether a statement is `declare class Name ... end`, the definition

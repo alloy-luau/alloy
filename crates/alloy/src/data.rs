@@ -627,7 +627,7 @@ pub fn luau_key(key: &str) -> String {
 
 /// A Luau string literal for any text. Non-ASCII text stays as it is;
 /// a control character becomes a `\x` escape.
-fn luau_string(text: &str) -> String {
+pub(crate) fn luau_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
 

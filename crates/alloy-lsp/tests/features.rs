@@ -433,7 +433,7 @@ fn hover_completion_and_extensions() {
     assert!(h.contains("A record with fields"), "struct: {h}");
     let h = s.hover(&uri, 1, 8);
     assert!(
-        h.contains("struct Vec2 as\n    x: number\n    y: number\nend"),
+        h.contains("struct Vec2\n  x: number\n  y: number\nend"),
         "struct name: {h}"
     );
     let h = s.hover(&uri, 10, 10);
@@ -499,7 +499,7 @@ fn hover_completion_and_extensions() {
     // An interface hovers as the declaration, with what it extends.
     let h = s.hover(&uri, 25, 12);
     assert!(
-        h.contains("interface Entity extends Named as\n    id: number\nend"),
+        h.contains("interface Entity extends Named\n  id: number\nend"),
         "interface: {h}"
     );
 
@@ -518,7 +518,7 @@ fn hover_completion_and_extensions() {
     // and from a pattern, where the emit has only a string.
     let h = s.hover(&uri, 47, 6);
     assert!(
-        h.contains("enum Msg as") && h.contains("The message a client sends."),
+        h.contains("enum Msg\n") && h.contains("The message a client sends."),
         "enum: {h}"
     );
     let h = s.hover(&uri, 51, 16);
@@ -615,7 +615,7 @@ fn hover_completion_and_extensions() {
     );
     let h = s.hover(&uri, 76, 7);
     assert!(
-        h.contains("local box: Part") && h.contains("Initialized with"),
+        h.contains("local box: Part = new Instance(\"Part\") {") && !h.contains("Initialized with"),
         "init: {h}"
     );
 
@@ -717,7 +717,7 @@ fn code_actions_offer_the_lint_rewrites() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let src =
-        "local p = workspace\nlocal n = p and p.Name\nlocal q = math.floor(#n / 2)\nprint(n, q)\n";
+        "const p = workspace\nconst n = p and p.Name\nconst q = math.floor(#n / 2)\nprint(n, q)\n";
     let file = dir.join("fix.aly");
     std::fs::write(&file, src).unwrap();
 
@@ -946,11 +946,11 @@ fn formatting_reads_the_project_layout() {
     let text = r[0]["newText"].as_str().unwrap_or_default().to_string();
 
     assert!(
-        text.contains("\n  local x = 1"),
+        text.contains("\n  const x = 1"),
         "the project asked for two spaces: {text:?}"
     );
     assert!(
-        !text.contains("\n    local x = 1"),
+        !text.contains("\n    const x = 1"),
         "four spaces is the default, not this project's: {text:?}"
     );
 
@@ -1689,7 +1689,7 @@ fn an_attribute_contract_reaches_the_file_that_uses_it() {
 }
 
 /// A line the compiler reports on gets no report from the checker: the
-/// reserved word alone, not `Unknown global` beside it.
+/// missing import alone, not `Unknown global` beside it.
 #[test]
 fn a_compiler_error_line_silences_the_checker() {
     let Some(child) = luau_lsp() else {
@@ -1700,7 +1700,7 @@ fn a_compiler_error_line_silences_the_checker() {
     let dir = std::env::temp_dir().join(format!("alloy-lsp-kinds-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = "local test = namespace\nlocal n: number = \"s\"\nprint(test, n)\n";
+    let src = "local test: Iter<number>? = zork\nlocal n: number = \"s\"\nprint(test, n)\n";
     let file = dir.join("k.aly");
     std::fs::write(&file, src).unwrap();
 
@@ -1714,7 +1714,7 @@ fn a_compiler_error_line_silences_the_checker() {
 
     let diags = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("number")));
     assert!(
-        diags.iter().any(|d| d.starts_with("ReservedWord: ")),
+        diags.iter().any(|d| d.starts_with("ImportError: ")),
         "{diags:?}"
     );
     assert!(
@@ -3194,7 +3194,7 @@ fn an_impl_header_hovers_as_its_block() {
     // The `impl` keyword and the target name both answer with the block.
     for character in [0, 6] {
         let h = s.hover(&uri, 5, character);
-        assert!(h.contains("impl Test as"), "impl header: {h}");
+        assert!(h.contains("impl Test\n"), "impl header: {h}");
         assert!(h.contains("public function test()"), "impl header: {h}");
         assert!(!h.contains("hidden"), "a private method: {h}");
         assert!(!h.contains("struct Test"), "impl header: {h}");
@@ -3203,7 +3203,7 @@ fn an_impl_header_hovers_as_its_block() {
 
     // A block for a trait names the trait first.
     let h = s.hover(&uri, 17, 18);
-    assert!(h.contains("impl Display for Test as"), "trait impl: {h}");
+    assert!(h.contains("impl Display for Test\n"), "trait impl: {h}");
     assert!(
         h.contains("public function show(self): string"),
         "trait impl: {h}"
@@ -3211,9 +3211,9 @@ fn an_impl_header_hovers_as_its_block() {
 
     // The same name in an annotation and in a `new` keeps the struct.
     let h = s.hover(&uri, 24, 10);
-    assert!(h.contains("struct Test as"), "annotation: {h}");
+    assert!(h.contains("struct Test\n"), "annotation: {h}");
     let h = s.hover(&uri, 23, 15);
-    assert!(h.contains("struct Test as"), "new: {h}");
+    assert!(h.contains("struct Test\n"), "new: {h}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3391,11 +3391,12 @@ fn a_config_file_completes_from_the_schema() {
     assert!(!labels.contains(&"out"), "{labels:?}");
     assert!(!labels.contains(&"mode"), "a local is no key: {labels:?}");
     let input = items.iter().find(|i| i["label"] == "in").unwrap();
-    assert_eq!(input["insertText"], "[\"in\"] = \"${1:src}\"");
+    // No `[fmt]` loads from this file, so the default single quotes apply.
+    assert_eq!(input["insertText"], "in = '${1:src}'");
 
     // A value lists the choices the schema names.
     let values = s.completion_labels(&uri, 7, 26);
-    assert!(values.iter().any(|v| v == "\"force-single\""), "{values:?}");
+    assert!(values.iter().any(|v| v == "'force-single'"), "{values:?}");
 
     // A hover on a key reads the schema.
     let text = s.hover(&uri, 4, 9);

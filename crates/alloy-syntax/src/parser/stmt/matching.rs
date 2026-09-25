@@ -7,16 +7,23 @@ const TWO_DEFAULTS: &str =
     "a `default` arm cannot follow `default`; a `match` takes one `default` arm";
 const DEFAULT_ALONE: &str = "a `match` needs a `case` arm before `default`";
 const ALIAS_NEEDS_NAME: &str = "expected a name after `as`; write `match e as name with`";
+const ARM_GIVES_NO_VALUE: &str =
+    "this arm gives no value: end it with the value, or leave with `return`";
+const RUST_ARM: &str = "an arm reads `case Ok(v) then ...`; `=>` after a pattern is Rust's arm";
 const STMT_ARM_TAKES_STATEMENT: &str = "a statement arm takes a statement; write `local x = match ... with` to read the arms as values";
-const EXPR_ARM_ONE_EXPRESSION: &str =
-    "an expression arm is one expression; a match in statement position takes a block";
 
-/// Whether an expression stands alone as a statement: a call, and the
-/// three words that wrap one. `expr_stmt` takes the same set.
+/// Whether an expression stands alone as a statement: a call, the three
+/// words that wrap one, a macro call, `$assert(x)`, and a `match`, which
+/// in statement position is the statement form.
 fn stands_alone(e: &Expr) -> bool {
     matches!(
         e,
-        Expr::Call { .. } | Expr::New { .. } | Expr::Try { .. } | Expr::Await { .. }
+        Expr::Call { .. }
+            | Expr::New { .. }
+            | Expr::Try { .. }
+            | Expr::Await { .. }
+            | Expr::Macro { .. }
+            | Expr::Match(_)
     )
 }
 
@@ -97,7 +104,12 @@ impl<'a> Parser<'a> {
                 let arm_start = self.bump();
                 let (patterns, guard) = self.arm_head()?;
                 self.check_alias_binds(&aliases, &patterns)?;
-                self.expect("then")?;
+                // A broken head, one the author is still typing, keeps no
+                // arm: the emit reads an arm up to its `then`.
+                if !self.arm_then()? {
+                    continue;
+                }
+
                 let block = self.arm_block()?;
                 arms.push(MatchArm {
                     patterns,
@@ -120,6 +132,10 @@ impl<'a> Parser<'a> {
                 default = Some(self.arm_block()?);
 
                 continue;
+            }
+
+            if self.rust_arm_ahead() {
+                return Err(self.err(RUST_ARM));
             }
 
             return Err(self.err(&format!(
@@ -271,7 +287,9 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// The patterns of an arm, one per scrutinee, and the `and` guard.
+    /// The patterns of an arm, one per scrutinee, and the guard. `where`
+    /// is the guard's word, as on a `for` filter; `and` is the old one,
+    /// and a lint rewrites it.
     fn arm_head(&mut self) -> Result<(Vec<Pattern>, Option<Expr>), ParseError> {
         let mut patterns = vec![self.pattern()?];
 
@@ -279,13 +297,160 @@ impl<'a> Parser<'a> {
             patterns.push(self.pattern()?);
         }
 
-        let guard = if self.eat("and") {
+        let guard = if self.eat("where") || self.eat("and") {
             Some(self.expr()?)
         } else {
             None
         };
 
         Ok((patterns, guard))
+    }
+
+    /// The `then` after an arm's patterns. `=>` there is Rust's arm.
+    fn arm_then(&mut self) -> Result<bool, ParseError> {
+        if self.at("=>") {
+            return Err(self.err(RUST_ARM));
+        }
+
+        // A half-typed guard, `case n wh`, is the editor's everyday text.
+        // A lenient parse reports it once and moves to the next arm, so
+        // the arms around it and the match's `end` report nothing. Two
+        // spellings from other languages get the Alloy form.
+        let message = match self.text() {
+            "then" => None,
+
+            "if" => Some(
+                "a guard reads `where`, the word a `for` filter takes: `case n where n > 5 then`"
+                    .to_string(),
+            ),
+
+            "|" => Some("alternatives join with `or`: `case A or B then`".to_string()),
+
+            _ => Some(format!(
+                "expected `then` after the arm's patterns, found {}",
+                self.found()
+            )),
+        };
+
+        if let Some(message) = &message
+            && !self.lenient
+            && !self.at("then")
+            && matches!(self.text(), "if" | "|")
+        {
+            return Err(self.err(message));
+        }
+
+        if self.lenient
+            && let Some(message) = message
+        {
+            self.report(&message);
+
+            // A guard's `if` opens no block that an `end` closes.
+            if self.at("if") {
+                self.bump();
+            }
+
+            self.skip_to_next_arm();
+
+            return Ok(false);
+        }
+
+        self.expect("then").map(|_| true)
+    }
+
+    /// The value of an expression arm, read as a value position: a line
+    /// that opens with a string, `{`, or `[` ends it. An arm that holds
+    /// one expression is that expression; one that runs statements first
+    /// is a block whose last line is the value.
+    fn arm_value(&mut self) -> Result<Expr, ParseError> {
+        if self.arm_is_one_expression() {
+            self.value_lines += 1;
+            let value = self.expr();
+            self.value_lines -= 1;
+
+            return value;
+        }
+
+        let start = self.pos;
+        self.value_block = true;
+        self.in_match_arm += 1;
+        let block = self.block();
+        self.in_match_arm -= 1;
+        let block = block?;
+
+        // The arm gives a value or leaves; a last line that does neither
+        // would leave the binding nil.
+        if !matches!(
+            block.stmts.last(),
+            Some(Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_))
+        ) {
+            self.bad_arm(ARM_GIVES_NO_VALUE)?;
+        }
+
+        Ok(Expr::Block {
+            block,
+            span: TokSpan::new(start, self.pos),
+        })
+    }
+
+    /// Whether the arm at the cursor is one expression up to the next
+    /// arm. The read runs ahead and rewinds, as `arm_is_value` does.
+    fn arm_is_one_expression(&mut self) -> bool {
+        // A statement word opens a block arm; `continue` would otherwise
+        // read as a name.
+        if matches!(
+            self.text(),
+            "return" | "break" | "local" | "const" | "for" | "while" | "repeat" | "do"
+        ) || (self.at("continue") && self.continue_is_keyword())
+        {
+            return false;
+        }
+
+        let save = self.pos;
+        let reports = self.diagnostics.len();
+        let edits = self.type_edits.len();
+        let names = self.type_names.len();
+        self.value_lines += 1;
+        let one = self.expr().is_ok()
+            && (self.at_end() || matches!(self.text(), "case" | "default" | "end"));
+        self.value_lines -= 1;
+
+        self.pos = save;
+        self.diagnostics.truncate(reports);
+        self.type_edits.truncate(edits);
+        self.type_names.truncate(names);
+
+        one
+    }
+
+    /// Moves past a broken arm head to the next `case`, `default`, or the
+    /// match's `end`, over the blocks nested in the arm.
+    fn skip_to_next_arm(&mut self) {
+        let mut depth = 0usize;
+
+        while !self.at_end() {
+            match self.text() {
+                "case" | "default" if depth == 0 => return,
+
+                "end" if depth == 0 => return,
+
+                "end" => depth -= 1,
+
+                "if" | "function" | "do" => depth += 1,
+
+                _ => {}
+            }
+
+            self.bump();
+        }
+    }
+
+    /// Whether the line at the cursor holds a `=>`: `Ok(v) => f(v)`.
+    fn rust_arm_ahead(&self) -> bool {
+        (0..)
+            .take_while(|&n| n == 0 || !self.newline_after(n - 1))
+            .take_while(|&n| self.pos + n < self.toks.len())
+            .any(|n| self.text_at(n) == "=>")
     }
 
     /// Reports an arm list the emit cannot read: `default` ends the list
@@ -364,25 +529,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Reports an expression arm that holds more than one expression,
-    /// and reads the statements behind the value. Their own reports go
-    /// with them: the arm has one message, and the `end` of the match
-    /// still closes.
-    fn check_expr_arm(&mut self) -> Result<(), ParseError> {
-        if self.arm_ends() {
-            return Ok(());
-        }
-
-        self.bad_arm(EXPR_ARM_ONE_EXPRESSION)?;
-
-        let reports = self.diagnostics.len();
-        let _ = self.match_block();
-        self.diagnostics.truncate(reports);
-
-        Ok(())
-    }
-
-    /// The expression form: each arm is one expression.
+    /// The expression form: each arm is one expression, or statements
+    /// that end in the value ([`Self::arm_value`]).
     pub(in super::super) fn match_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
         self.bump();
@@ -410,9 +558,13 @@ impl<'a> Parser<'a> {
                 let arm_start = self.bump();
                 let (patterns, guard) = self.arm_head()?;
                 self.check_alias_binds(&aliases, &patterns)?;
-                self.expect("then")?;
-                let value = self.expr()?;
-                self.check_expr_arm()?;
+                // A broken head, one the author is still typing, keeps no
+                // arm: the emit reads an arm up to its `then`.
+                if !self.arm_then()? {
+                    continue;
+                }
+
+                let value = self.arm_value()?;
                 arms.push(MatchExprArm {
                     patterns,
                     guard,
@@ -431,10 +583,13 @@ impl<'a> Parser<'a> {
                 }
 
                 self.bump();
-                default = Some(Box::new(self.expr()?));
-                self.check_expr_arm()?;
+                default = Some(Box::new(self.arm_value()?));
 
                 continue;
+            }
+
+            if self.rust_arm_ahead() {
+                return Err(self.err(RUST_ARM));
             }
 
             return Err(self.err(&format!(

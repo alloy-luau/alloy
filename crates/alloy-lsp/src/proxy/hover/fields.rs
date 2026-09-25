@@ -546,6 +546,42 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
     let receiver_head = doc.source[..at].trim_end();
     let receiver_head = receiver_head.strip_suffix('?').unwrap_or(receiver_head);
 
+    // `s.backpack[1].x` and `list[i].x`: the element of what the index
+    // reads. The child answers here too, but not inside an intrinsic's
+    // argument, where the emit writes the code a second time.
+    if let Some(open) = receiver_head
+        .strip_suffix(']')
+        .and_then(|inner| inner.rfind('['))
+    {
+        let base = doc.source[..open].trim_end();
+        let base = base.strip_suffix(['?', '!']).unwrap_or(base);
+
+        if !base.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+
+        let (bs, be) = keywords::word_range(&doc.source, base.len() - 1);
+        let word = &doc.source[bs..be];
+        let declared = match used_field_owner(st, doc, bs) {
+            Some(hop) => declared_field_line(st, doc, &hop, word)?
+                .1
+                .split_once(':')?
+                .1
+                .trim()
+                .to_string(),
+
+            None => match context::declared(&doc.source, bs, word)? {
+                context::Declared::Annotation(t) => t,
+
+                context::Declared::Init(_) => return None,
+            },
+        };
+        let element = element_of(&declared)?;
+        let named = alloy::docs::type_head(&element)?;
+
+        return Some(named.rsplit('.').next().unwrap_or(&named).to_string());
+    }
+
     if !receiver_head.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
         return None;
     }
@@ -608,6 +644,33 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
     let owner = owner.split(['<', ' ', '{']).next().unwrap_or(&owner);
 
     Some(owner.rsplit('.').next().unwrap_or(owner).to_string())
+}
+
+/// What indexing a value of a declared type reads: `Item` of `Item[]`,
+/// `{ Item }` and `Array<Item>`, and the value type of `HashMap<K, V>`.
+pub(crate) fn element_of(ty: &str) -> Option<String> {
+    let ty = ty.trim().trim_end_matches(',').trim().trim_end_matches('?');
+
+    if let Some(inner) = ty.strip_suffix("[]") {
+        return Some(inner.trim().to_string());
+    }
+
+    if let Some(inner) = ty.strip_prefix('{').and_then(|t| t.strip_suffix('}'))
+        && !inner.contains(':')
+    {
+        return Some(inner.trim().to_string());
+    }
+
+    let (head, args) = ty.split_once('<')?;
+    let args = alloy::shapes::top_level_parts(args.strip_suffix('>')?);
+
+    match head.trim() {
+        "Array" => args.first().map(|a| a.trim().to_string()),
+
+        "HashMap" => args.get(1).map(|a| a.trim().to_string()),
+
+        _ => None,
+    }
 }
 
 /// The line a struct body writes for one field, with the keyword of
@@ -680,6 +743,184 @@ pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) 
     }
 
     Some(out)
+}
+
+/// A local whose hover prints a solver variable, `local b: t2 where t1 =
+/// ...`, names nothing a reader wrote. The checker prints a type that
+/// holds an imported struct that way. The binding's first value says
+/// what it holds: the type its `new` constructs, or the declared type of
+/// the field it reads.
+pub(crate) fn name_solver_local(
+    st: &State,
+    value: &str,
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let (fence, rest) = value.split_once('\n')?;
+    let (body, tail) = rest.split_once("\n```")?;
+    let (head, printed) = body.split_once(": ")?;
+    let printed = printed.split(" where ").next()?.lines().next()?;
+
+    if head.contains('\n') || !super::restyle::holds_solver_variable(printed) {
+        return None;
+    }
+
+    let offset = offset_of(&doc.source, line, character)?;
+    let (start, end) = keywords::word_range(&doc.source, offset);
+    let word = &doc.source[start..end];
+
+    if !head.ends_with(word) {
+        return None;
+    }
+
+    // The walk reads the whole line, so the cursor may sit on the
+    // declaration itself.
+    let line_end = doc.source[end..]
+        .find('\n')
+        .map_or(doc.source.len(), |i| end + i);
+    let (line_start, declared) = context::declared_at(&doc.source, line_end, word)?;
+    let context::Declared::Init(init) = declared else {
+        return None;
+    };
+    let named = match init.strip_prefix("new ") {
+        Some(after) => super::restyle::constructed_type(doc, after)?,
+
+        None => read_field_type(st, doc, line_start, &init)?,
+    };
+    let named = match printed.ends_with('?') && !named.ends_with('?') {
+        true => format!("{named}?"),
+
+        false => named,
+    };
+
+    Some(format!("{fence}\n{head}: {named}\n```{tail}"))
+}
+
+/*
+A print that names a struct only by its shape: `t2 where t1 = { new: ...
+} ; t2 = { @metatable t1, { x: number } }`. The checker writes a struct
+that way when its name is out of its reach, a member of a namespace or
+one an import brought. The field list names the struct: the one struct
+in reach that declares those fields and no others. The file's own
+declarations answer before the ones an import brings.
+*/
+pub(crate) fn name_solver_struct(value: &str, doc: &Doc) -> Option<String> {
+    let (fence, rest) = value.split_once('\n')?;
+    let (body, tail) = rest.split_once("\n```")?;
+    let (head, printed) = match body.split_once(": ") {
+        Some((head, printed)) if !head.contains(['\n', '{']) => (Some(head), printed),
+
+        _ => (None, body),
+    };
+    let first = printed.split(" where ").next()?.trim();
+
+    if !super::restyle::holds_solver_variable(first) {
+        return None;
+    }
+
+    // `{ @metatable t1,\n{ x: number } }`: the record after the comma.
+    let meta = printed.find("@metatable ")?;
+    let comma = meta + printed[meta..].find(',')? + 1;
+    let open = comma + printed[comma..].find(|c: char| !c.is_whitespace())?;
+
+    if !printed[open..].starts_with('{') {
+        return None;
+    }
+
+    let len = super::restyle::group_len(&printed[open..], '{', '}')?;
+    let mut fields: Vec<String> = context::record_entries(&printed[open..open + len])
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    fields.sort();
+
+    let matches = |d: &&alloy::declarations::Declaration| {
+        let mut own: Vec<String> = context::record_entries(&d.hover)
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        own.sort();
+
+        d.hover.contains("struct ") && own == fields
+    };
+    // A namespace member is indexed twice, under its path and under the
+    // flat name the emit gives it; the two share one hover.
+    let named = [&doc.decls, &doc.import_decls]
+        .into_iter()
+        .find_map(|decls| {
+            let hits: Vec<&alloy::declarations::Declaration> =
+                decls.iter().filter(matches).collect();
+            let first = hits.first()?;
+            let path = hits.iter().find(|d| d.name.contains('.')).unwrap_or(first);
+
+            hits.iter()
+                .all(|d| d.hover == first.hover)
+                .then(|| path.name.clone())
+        })?;
+    // The variable the metatable pair binds, `t2` of `t2 = { @metatable
+    // t1, ... }`, stands for the struct wherever the print reads it:
+    // `{t2}?` is `{Part}?`.
+    let var: String = printed[..meta]
+        .trim_end()
+        .strip_suffix('{')?
+        .trim_end()
+        .strip_suffix('=')?
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let mut named_first = String::new();
+    let mut rest = first;
+
+    while let Some(at) = keywords::find_word(rest, &var) {
+        named_first.push_str(&rest[..at]);
+        named_first.push_str(&named);
+        rest = &rest[at + var.len()..];
+    }
+
+    named_first.push_str(rest);
+
+    if super::restyle::holds_solver_variable(&named_first) {
+        return None;
+    }
+
+    Some(match head {
+        Some(head) => format!("{fence}\n{head}: {named_first}\n```{tail}"),
+
+        None => format!("{fence}\n{named_first}\n```{tail}"),
+    })
+}
+
+/// The declared type of the field a chain reads, `save?.inventory.slots`
+/// on the line that starts at `line_start`. A `?.` makes it optional.
+fn read_field_type(st: &State, doc: &Doc, line_start: usize, chain: &str) -> Option<String> {
+    if !chain
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '?'))
+    {
+        return None;
+    }
+
+    let line_end = doc.source[line_start..]
+        .find('\n')
+        .map_or(doc.source.len(), |i| line_start + i);
+    let at = line_start + doc.source[line_start..line_end].rfind(chain)?;
+    let last = at + chain.rfind('.')? + 1;
+    let owner = used_field_owner(st, doc, last)?;
+    let field = &doc.source[last..at + chain.len()];
+    let (_, declaration, _) = declared_field_line(st, doc, &owner, field)?;
+    let ty = declaration.split_once(':')?.1.trim();
+
+    Some(match chain.contains("?.") && !ty.ends_with('?') {
+        true => format!("{ty}?"),
+
+        false => ty.to_string(),
+    })
 }
 
 impl Server {

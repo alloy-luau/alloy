@@ -188,22 +188,22 @@ fn deletions_hold_the_contract() {
     }
 }
 
-/// `as` closes an `impl` and a `trait` header. A header without it
-/// reports on the header, and the body still parses, so the editor
-/// keeps working while the author migrates the file.
+/// `as` splits a header from a body on the same line. A body there
+/// without it reports on the header, and the body still parses. A body
+/// on the next line needs no `as`, and nothing reports.
 #[test]
 fn a_header_without_as_reports_and_still_parses() {
     for (src, head) in [
-        ("impl Test\n\tfunction f(self) end\nend\n", "impl Test"),
+        ("impl Test function f(self) end\nend\n", "impl Test"),
         (
-            "impl Shape for Test\n\tfunction f(self) end\nend\n",
+            "impl Shape for Test function f(self) end\nend\n",
             "impl Shape for Test",
         ),
         (
-            "trait Shape\n\tfunction area(self): number\nend\n",
+            "trait Shape function area(self): number\nend\n",
             "trait Shape",
         ),
-        ("impl Box<T>\n\tfunction f(self) end\nend\n", "impl Box<T>"),
+        ("impl Box<T> function f(self) end\nend\n", "impl Box<T>"),
     ] {
         let lexed = lexer::lex(src).unwrap();
         let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
@@ -225,6 +225,19 @@ fn a_header_without_as_reports_and_still_parses() {
                 .any(|s| matches!(s, Stmt::Error(_))),
             "the body still parses for {src:?}"
         );
+    }
+
+    for src in [
+        "impl Test\n\tfunction f(self) end\nend\n",
+        "trait Shape\n\tfunction area(self): number\nend\n",
+        "struct P\n\tx: number\nend\n",
+        "enum E\n\tA\n\tB\nend\n",
+        "namespace N\n\tconst X = 1\nend\n",
+        "interface I extends J\n\tx: number\nend\n",
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert!(diagnostics.is_empty(), "{src:?}: {diagnostics:?}");
     }
 }
 
@@ -499,22 +512,31 @@ fn a_body_in_braces_names_the_as_form() {
     for (src, message) in [
         (
             "struct S {}\n",
-            "a struct body is `as ... end`: `struct S as`",
+            "a struct body goes on the lines below the header and closes with `end`, not braces: `struct S`",
         ),
-        ("enum E {}\n", "an enum body is `as ... end`: `enum E as`"),
-        ("trait T {}\n", "a trait body is `as ... end`: `trait T as`"),
+        (
+            "enum E {}\n",
+            "an enum body goes on the lines below the header and closes with `end`, not braces: `enum E`",
+        ),
+        (
+            "trait T {}\n",
+            "a trait body goes on the lines below the header and closes with `end`, not braces: `trait T`",
+        ),
         (
             "interface I {}\n",
-            "an interface body is `as ... end`: `interface I as`",
+            "an interface body goes on the lines below the header and closes with `end`, not braces: `interface I`",
         ),
         (
             "namespace N {}\n",
-            "a namespace body is `as ... end`: `namespace N as`",
+            "a namespace body goes on the lines below the header and closes with `end`, not braces: `namespace N`",
         ),
-        ("impl S {}\n", "an impl body is `as ... end`: `impl S as`"),
+        (
+            "impl S {}\n",
+            "an impl body goes on the lines below the header and closes with `end`, not braces: `impl S`",
+        ),
         (
             "enum E {\n    A,\n    B,\n}\n",
-            "an enum body is `as ... end`: `enum E as`",
+            "an enum body goes on the lines below the header and closes with `end`, not braces: `enum E`",
         ),
     ] {
         let lexed = lexer::lex(src).unwrap();
@@ -731,14 +753,9 @@ fn an_arm_of_the_wrong_form_reports_once() {
             "5",
         ),
         (
-            "local v = match s with\n    case \"a\" then\n        print(\"a\")\n        2\n    default 0\nend\n",
-            "an expression arm is one expression; a match in statement position takes a block",
-            "2",
-        ),
-        (
-            "local v = match s with\n    case \"a\" then 1\n    default\n        print(\"d\")\n        0\nend\n",
-            "an expression arm is one expression; a match in statement position takes a block",
-            "0",
+            "local v = match s with\n    case \"a\" then\n        print(\"a\")\n        local y = 1\n    default 0\nend\n",
+            "this arm gives no value: end it with the value, or leave with `return`",
+            "default",
         ),
     ] {
         let lexed = lexer::lex(src).unwrap();
@@ -756,6 +773,15 @@ fn an_arm_of_the_wrong_form_reports_once() {
 
         let (errors, count) = lenient(src);
         assert_eq!((errors, count), (0, 1), "for {src:?}");
+    }
+
+    // An arm that runs statements ends in its value, as a value block
+    // does; both parse clean.
+    for src in [
+        "local v = match s with\n    case \"a\" then\n        print(\"a\")\n        2\n    default 0\nend\n",
+        "local v = match s with\n    case \"a\" then 1\n    default\n        print(\"d\")\n        0\nend\n",
+    ] {
+        assert_eq!(lenient(src), (0, 0), "for {src:?}");
     }
 
     // The arm a nested `end` closes goes with the report, so the match

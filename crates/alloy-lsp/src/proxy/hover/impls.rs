@@ -33,10 +33,11 @@ impl Server {
         else {
             return false;
         };
+        let hover = super::formatted_hover(&block.hover, &st.fmt_config(uri));
         let (sl, sc) = position_of(&doc.source, block.start);
         let (el, ec) = position_of(&doc.source, block.end);
         let result = json!({
-            "contents": { "kind": "markdown", "value": block.hover },
+            "contents": { "kind": "markdown", "value": hover },
             "range": {
                 "start": { "line": sl, "character": sc },
                 "end": { "line": el, "character": ec }

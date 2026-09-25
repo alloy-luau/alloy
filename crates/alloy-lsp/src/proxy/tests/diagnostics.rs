@@ -262,7 +262,7 @@ pub(crate) fn a_region_reads_the_kind_the_author_sees() {
 pub(crate) fn an_unmet_expectation_carries_its_reason() {
     // The covered line must come clean, so it holds no lint of
     // its own: an unused local would meet the expectation.
-    let source = "--@alloy-expect-error a negative count is refused\nlocal a = 1\nprint(a)\n";
+    let source = "--@alloy-expect-error a negative count is refused\nconst a = 1\nprint(a)\n";
     let (st, uri) = one_file(source);
     let doc = st.docs.get(uri).unwrap();
     let items = unmet_expectations(doc, &[]);
@@ -348,6 +348,43 @@ pub(crate) fn a_fix_that_deletes_names_what_it_removes() {
         "  match p with"
     );
 }
+/// A rename writes the new name at each read in one quick fix, and the
+/// fix-all takes every edit of it beside the other rewrites.
+#[test]
+pub(crate) fn a_rename_fix_edits_every_read() {
+    let source = "--@alloy-lint naming=warn\nconst playerCount = 1\nprint(playerCount)\nprint(p and p.Name)\n";
+    let (st, uri) = one_file(source);
+    let actions = st.lint_actions(uri, ((0, 0), (4, 0)));
+    let rename = actions
+        .iter()
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .is_some_and(|t| t.contains("naming_convention"))
+        })
+        .expect("the name offers a rename");
+
+    assert_eq!(
+        rename["title"],
+        json!("Rewrite as `player_count` (naming_convention)")
+    );
+    let lines: Vec<u64> = rename["edit"]["changes"][uri]
+        .as_array()
+        .expect("the edits")
+        .iter()
+        .map(|e| e["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![1, 2]);
+
+    let all = actions
+        .iter()
+        .find(|a| a["kind"] == "source.fixAll")
+        .expect("the fix-all");
+    assert_eq!(
+        all["edit"]["changes"][uri].as_array().map(Vec::len),
+        Some(3)
+    );
+}
 #[test]
 pub(crate) fn preserve_keeps_the_quick_fix_off_a_line() {
     let plain = "local n = p and p.Name\n";
@@ -418,6 +455,39 @@ pub(crate) fn one_report_per_problem() {
     let mut items = vec![one.clone(), one.clone(), wide];
     collapse_diagnostics(&mut items);
     assert_eq!(items, vec![one]);
+}
+
+/// `import { Ha } from "@alloy/std/collections"`: the name the module
+/// does not export draws one report, not a second that calls it unused.
+#[test]
+fn a_missing_import_is_not_also_unused() {
+    let at = |line: u32, character: u32, message: &str| {
+        json!({
+            "range": {
+                "start": { "line": line, "character": character },
+                "end": { "line": line, "character": character + 2 },
+            },
+            "message": message,
+        })
+    };
+    let missing = at(0, 9, "ImportError: the std has no `Ha`");
+    let unused = at(1, 9, "unused_import: `Hb` is imported and never used");
+    let mut items = vec![
+        missing.clone(),
+        at(0, 9, "unused_import: `Ha` is imported and never used"),
+        unused.clone(),
+    ];
+    collapse_diagnostics(&mut items);
+    assert_eq!(items, vec![missing, unused]);
+
+    // `Nope as N`: the alias stands four columns past the name.
+    let aliased = at(2, 9, "ImportError: \"./x\" does not export `Nope`");
+    let mut items = vec![
+        json!({ "range": range_value((2, 9), (2, 13)), "message": aliased["message"] }),
+        at(2, 17, "unused_import: `N` is imported and never used"),
+    ];
+    collapse_diagnostics(&mut items);
+    assert_eq!(items.len(), 1, "{items:?}");
 }
 
 /// Two open files: a module and the file that imports it. The import
@@ -837,7 +907,7 @@ pub(crate) fn a_three_line_import_cuts_the_dead_name_alone() {
 #[test]
 pub(crate) fn a_pull_lists_what_a_push_publishes() {
     let (st, uri) = one_file(
-        "struct Pt as\n    x: number\nend\nlocal p = new Pt { x = 1, y = 2 }\nlocal n: number = \"s\"\n",
+        "struct Pt\n    x: number\nend\nconst p = new Pt { x = 1, y = 2 }\nconst n: number = \"s\"\n",
     );
     let checker = json!({
         "message": "TypeError: Expected this to be 'number', but got 'string'",
@@ -1069,6 +1139,13 @@ fn a_config_file_reports_its_keys_and_its_load() {
         ["the config does not load"]
     );
     assert!(messages("export const build = { out = \"dist\" }\n").is_empty());
+
+    // A reserved word is a bare key there, and the child reads it quoted.
+    let src = "export const build = { in = \"src\" }\n";
+    assert!(messages(src).is_empty());
+    let st = super::support::files(&[("file:///p/.config.aly", src)]);
+    let shadow = &st.docs["file:///p/.config.aly"].shadow;
+    assert!(shadow.contains("[\"in\"] = \"src\""), "{shadow}");
 }
 
 /// The child computes a refactor on the lowered Luau. An edit over text
@@ -1226,6 +1303,31 @@ fn a_config_file_names_a_wrong_lint_and_the_line_that_failed() {
             2,
             "the config does not load: attempt to index nil with 'x'".to_string()
         )]
+    );
+}
+
+/// A std name the load refuses sits on its string. The message names no
+/// line, and the report once covered the whole `export` line.
+#[test]
+fn a_config_std_name_typo_sits_on_its_string() {
+    let src = "export default { std = { globals = { \"HashMap\", \"Sgnal\" } } }\n";
+    let st = super::support::files(&[("file:///p/.config.aly", src)]);
+    let reports = st.full_diagnostics("file:///p/.config.aly", Vec::new());
+    let at = src.find("Sgnal").unwrap() as u64;
+
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(
+        reports[0]["range"],
+        json!({
+            "start": { "line": 0, "character": at },
+            "end": { "line": 0, "character": at + 5 },
+        })
+    );
+    assert!(
+        reports[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("`Sgnal` is no std name")),
+        "{reports:?}"
     );
 }
 

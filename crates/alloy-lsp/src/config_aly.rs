@@ -13,6 +13,8 @@
 //! `export const build = {`, or a local the file returns or exports as
 //! its default. A table anywhere else is ordinary code.
 
+use alloy::config::{FmtConfig, IndentType};
+use alloy::fmt::requote;
 use alloy_syntax::lexer::{Tok, TokKind};
 use serde_json::{Value, json};
 
@@ -494,7 +496,7 @@ fn enum_values(node: &Value) -> Vec<&Value> {
     }
 }
 
-/// How a type reads in a list or a hover: `string`, `"a" | "b"`, `list`.
+/// How a type reads in a report: `string`, `"a" | "b"`, `table`.
 fn type_label(node: &Value) -> String {
     let values = enum_values(node);
 
@@ -530,6 +532,188 @@ fn type_label(node: &Value) -> String {
     }
 }
 
+/// How `luau_type` lays out a table.
+#[derive(Clone, Copy)]
+enum Layout {
+    /// One line. A table inside a table shows as `{ ... }`.
+    Line { nested: bool },
+    /// One field a line, at this depth.
+    Block(usize),
+}
+
+/// The most fields a table type lists. `fmt` has 23 keys and fits;
+/// `lint.rules` names every lint, and a hover that long hides the rest.
+const MAX_FIELDS: usize = 30;
+
+/// The Luau type of the values a node takes: `string`, `"a" | "b"`,
+/// `{ string }`, or a table with its fields. A key the schema does not
+/// require is optional, `in: string?`.
+fn luau_type(node: &Value, layout: Layout) -> String {
+    if let Some(values) = node.get("enum").and_then(Value::as_array) {
+        let words: Vec<String> = values.iter().map(Value::to_string).collect();
+
+        return words.join(" | ");
+    }
+
+    let mut parts: Vec<String> = match node.get("type") {
+        Some(Value::String(t)) => vec![named_type(node, t, layout)],
+
+        Some(Value::Array(ts)) => ts
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|t| named_type(node, t, layout))
+            .collect(),
+
+        _ => branches(node)
+            .into_iter()
+            .map(|b| luau_type(b, layout))
+            .collect(),
+    };
+    parts.dedup();
+
+    // `string` takes every string, so the names beside it are hints the
+    // completion lists, and the type reads as Luau prints it.
+    if parts.iter().any(|p| p == "string") {
+        parts.retain(|p| !p.starts_with('"'));
+    }
+
+    match parts.is_empty() {
+        true => "any".to_string(),
+
+        false => parts.join(" | "),
+    }
+}
+
+fn named_type(node: &Value, name: &str, layout: Layout) -> String {
+    match name {
+        "object" => table_type(node, layout),
+
+        // `items` is one schema, or a list of them for a fixed pair.
+        "array" => {
+            let items: Vec<&Value> = match node.get("items") {
+                Some(Value::Array(list)) => list.iter().collect(),
+
+                Some(one) => vec![one],
+
+                None => Vec::new(),
+            };
+            let mut kinds: Vec<String> = items.iter().map(|i| luau_type(i, layout)).collect();
+            kinds.dedup();
+
+            match kinds.is_empty() {
+                true => "{ any }".to_string(),
+
+                false => format!("{{ {} }}", kinds.join(" | ")),
+            }
+        }
+
+        "integer" => "number".to_string(),
+
+        "null" => "nil".to_string(),
+
+        other => other.to_string(),
+    }
+}
+
+fn table_type(node: &Value, layout: Layout) -> String {
+    let required: Vec<&str> = node
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let inner = match layout {
+        Layout::Line { .. } => Layout::Line { nested: true },
+
+        Layout::Block(depth) => Layout::Block(depth + 1),
+    };
+    let mut fields: Vec<String> = node
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(key, child)| {
+            let ty = luau_type(child, inner);
+            let ty = match required.contains(&key.as_str()) {
+                true => ty,
+
+                false => optional(&ty),
+            };
+
+            format!("{}: {ty}", alloy::config_aly::written_key(key))
+        })
+        .collect();
+
+    // With no `additionalProperties`, or `true`, a table takes any key.
+    match node.get("additionalProperties") {
+        Some(open @ Value::Object(_)) => {
+            fields.push(format!("[string]: {}", luau_type(open, inner)));
+        }
+
+        None | Some(Value::Bool(true)) if fields.is_empty() => {
+            fields.push("[string]: any".to_string());
+        }
+
+        _ => {}
+    }
+
+    let more = fields.len().saturating_sub(MAX_FIELDS);
+    fields.truncate(MAX_FIELDS);
+
+    match layout {
+        _ if fields.is_empty() => "{}".to_string(),
+
+        Layout::Line { nested: true } => "{ ... }".to_string(),
+
+        Layout::Line { nested: false } => {
+            if more > 0 {
+                fields.push("...".to_string());
+            }
+
+            format!("{{ {} }}", fields.join(", "))
+        }
+
+        Layout::Block(depth) => {
+            let pad = "    ".repeat(depth + 1);
+            let mut out = String::from("{\n");
+
+            for field in &fields {
+                out.push_str(&format!("{pad}{field},\n"));
+            }
+
+            if more > 0 {
+                out.push_str(&format!("{pad}-- and {more} more\n"));
+            }
+
+            out.push_str(&"    ".repeat(depth));
+            out.push('}');
+            out
+        }
+    }
+}
+
+/// A type that may also be nil. A union takes parentheses first, so the
+/// `?` covers all of it.
+fn optional(ty: &str) -> String {
+    let mut depth = 0i32;
+    let union = ty.chars().any(|c| {
+        match c {
+            '{' | '(' => depth += 1,
+
+            '}' | ')' => depth -= 1,
+
+            _ => {}
+        }
+
+        c == '|' && depth == 0
+    });
+
+    match union {
+        true => format!("({ty})?"),
+
+        false => format!("{ty}?"),
+    }
+}
+
 /// A value as Alloy writes it: a string in quotes, the rest as JSON.
 fn alloy_value(v: &Value) -> String {
     match v {
@@ -546,7 +730,10 @@ fn alloy_value(v: &Value) -> String {
 /// The documentation of one key: its type, its default, and the text
 /// the schema gives it.
 fn documentation(key: &str, node: &Value) -> String {
-    let mut out = format!("```alloy\n{key}: {}\n```", type_label(node));
+    let mut out = format!(
+        "```alloy\n{key}: {}\n```",
+        luau_type(node, Layout::Block(0))
+    );
 
     if let Some(text) = node.get("description").and_then(Value::as_str) {
         out.push_str("\n\n");
@@ -570,8 +757,15 @@ fn escape(text: &str) -> String {
         .replace('|', "\\|")
 }
 
-/// The value a new key starts with, as a snippet.
-fn value_snippet(node: &Value) -> String {
+/// A value as the project writes it: a string in the quotes `[fmt]`
+/// asks for.
+fn written_value(v: &Value, fmt: &FmtConfig) -> String {
+    requote(&alloy_value(v), fmt.quote_style)
+}
+
+/// The value a new key starts with, as a snippet, laid out the way the
+/// project's `[fmt]` lays it out.
+fn value_snippet(node: &Value, fmt: &FmtConfig) -> String {
     let values = enum_values(node);
     let default = node.get("default");
 
@@ -579,7 +773,10 @@ fn value_snippet(node: &Value) -> String {
         // The default leads, so Tab keeps it.
         let mut ordered: Vec<&Value> = default.into_iter().filter(|d| values.contains(d)).collect();
         ordered.extend(values.iter().filter(|v| Some(**v) != default));
-        let texts: Vec<String> = ordered.iter().map(|v| escape(&alloy_value(v))).collect();
+        let texts: Vec<String> = ordered
+            .iter()
+            .map(|v| escape(&written_value(v, fmt)))
+            .collect();
 
         return format!("${{1|{}|}}", texts.join(","));
     }
@@ -593,9 +790,12 @@ fn value_snippet(node: &Value) -> String {
             _ => "${1|true,false|}".to_string(),
         },
 
-        ["string"] => format!(
-            "\"${{1:{}}}\"",
-            escape(default.and_then(Value::as_str).unwrap_or(""))
+        ["string"] => requote(
+            &format!(
+                "\"${{1:{}}}\"",
+                escape(default.and_then(Value::as_str).unwrap_or(""))
+            ),
+            fmt.quote_style,
         ),
 
         ["integer"] | ["number"] => format!(
@@ -605,16 +805,22 @@ fn value_snippet(node: &Value) -> String {
                 .unwrap_or_else(|| "0".to_string())
         ),
 
-        ["object"] => "{\n\t$0\n}".to_string(),
+        ["object"] => match fmt.indent_type {
+            IndentType::Tabs => "{\n\t$0\n}".to_string(),
 
-        ["array"] => "{ $1 }".to_string(),
+            IndentType::Spaces => format!("{{\n{}$0\n}}", " ".repeat(fmt.indent_width)),
+        },
+
+        ["array"] if fmt.space_inside_braces => "{ $1 }".to_string(),
+
+        ["array"] => "{$1}".to_string(),
 
         _ => "$1".to_string(),
     }
 }
 
-/// The completion items at a site.
-pub fn completions(schema: &Value, site: &Site) -> Vec<Value> {
+/// The completion items at a site, in the layout `fmt` gives.
+pub fn completions(schema: &Value, site: &Site, fmt: &FmtConfig) -> Vec<Value> {
     let Some(node) = node_at(schema, &site.path) else {
         return Vec::new();
     };
@@ -622,28 +828,28 @@ pub fn completions(schema: &Value, site: &Site) -> Vec<Value> {
     match &site.slot {
         // A key slot of a list is an item.
         Slot::Key { .. } if types(node) == ["array"] => item_schema(node)
-            .map(|n| value_items(n, false))
+            .map(|n| value_items(n, false, fmt))
             .unwrap_or_default(),
 
-        Slot::Key { .. } => key_items(node, &site.present),
+        Slot::Key { .. } => key_items(node, &site.present, fmt),
 
         Slot::Value {
             key: Some(k),
             quoted,
             ..
         } => alloy::config_aly::property(node, k)
-            .map(|n| value_items(n, *quoted))
+            .map(|n| value_items(n, *quoted, fmt))
             .unwrap_or_default(),
 
         Slot::Value {
             key: None, quoted, ..
         } => item_schema(node)
-            .map(|n| value_items(n, *quoted))
+            .map(|n| value_items(n, *quoted, fmt))
             .unwrap_or_default(),
     }
 }
 
-fn key_items(node: &Value, present: &[String]) -> Vec<Value> {
+fn key_items(node: &Value, present: &[String], fmt: &FmtConfig) -> Vec<Value> {
     let mut keys: Vec<(String, &Value)> = node
         .get("properties")
         .and_then(Value::as_object)
@@ -667,14 +873,20 @@ fn key_items(node: &Value, present: &[String]) -> Vec<Value> {
         .enumerate()
         .filter(|(_, (k, _))| !present.contains(k))
         .map(|(n, (k, child))| {
-            let written = alloy::data::luau_key(&k);
+            let written = match alloy::config_aly::written_key(&k) {
+                w if w.starts_with('[') => {
+                    format!("[{}]", requote(&w[1..w.len() - 1], fmt.quote_style))
+                }
+
+                w => w,
+            };
 
             json!({
                 "label": k,
                 "kind": 10,
-                "detail": type_label(child),
+                "detail": luau_type(child, Layout::Line { nested: false }),
                 "documentation": { "kind": "markdown", "value": documentation(&k, child) },
-                "insertText": format!("{written} = {}", value_snippet(child)),
+                "insertText": format!("{written} = {}", value_snippet(child, fmt)),
                 "insertTextFormat": 2,
                 "filterText": k,
                 "sortText": format!("{n:04}"),
@@ -683,13 +895,13 @@ fn key_items(node: &Value, present: &[String]) -> Vec<Value> {
         .collect()
 }
 
-fn value_items(node: &Value, quoted: bool) -> Vec<Value> {
+fn value_items(node: &Value, quoted: bool, fmt: &FmtConfig) -> Vec<Value> {
     let default = node.get("default");
     let item = |v: &Value, n: usize| {
         let text = match (v, quoted) {
             (Value::String(s), true) => s.clone(),
 
-            _ => alloy_value(v),
+            _ => written_value(v, fmt),
         };
         let is_default = Some(v) == default;
 
@@ -997,6 +1209,11 @@ mod tests {
         alloy::schema::project(&[])
     }
 
+    /// The items under the default `[fmt]`: single quotes, two spaces.
+    fn completions(schema: &Value, site: &Site) -> Vec<Value> {
+        super::completions(schema, site, &FmtConfig::default())
+    }
+
     /// The site at the `|` of a source.
     fn at(src: &str) -> Option<Site> {
         let offset = src.find('|').unwrap();
@@ -1119,9 +1336,9 @@ mod tests {
         assert!(!labels.contains(&"out"), "{labels:?}");
         assert!(!labels.contains(&"clean"), "{labels:?}");
 
-        // `in` is a Luau word, so the key goes in brackets.
+        // `in` is a Luau word, and a config still writes it bare.
         let input = items.iter().find(|i| i["label"] == "in").unwrap();
-        assert_eq!(input["insertText"], "[\"in\"] = \"${1:src}\"");
+        assert_eq!(input["insertText"], "in = '${1:src}'");
         assert!(
             input["documentation"]["value"]
                 .as_str()
@@ -1139,7 +1356,57 @@ mod tests {
         }
 
         let fmt = top.iter().find(|i| i["label"] == "fmt").unwrap();
+        assert_eq!(fmt["insertText"], "fmt = {\n  $0\n}");
+
+        // Another `[fmt]` gives other quotes, indent, and braces.
+        let house = FmtConfig {
+            quote_style: alloy::config::QuoteStyle::ForceDouble,
+            indent_type: IndentType::Tabs,
+            space_inside_braces: false,
+            ..FmtConfig::default()
+        };
+        let keys = super::completions(&schema(), &site, &house);
+        let text =
+            |label: &str| keys.iter().find(|i| i["label"] == label).unwrap()["insertText"].clone();
+        assert_eq!(text("in"), "in = \"${1:src}\"");
+        assert_eq!(text("exclude"), "exclude = {$1}");
+        let top = super::completions(&schema(), &at("return {\n    |\n}\n").unwrap(), &house);
+        let fmt = top.iter().find(|i| i["label"] == "fmt").unwrap();
         assert_eq!(fmt["insertText"], "fmt = {\n\t$0\n}");
+    }
+
+    /// A table key reads as the Luau type of its table: each field, `?`
+    /// on a key the schema does not require, and a long table cut short.
+    #[test]
+    fn a_table_key_shows_its_fields() {
+        let src = "export default { build = {}, lint = {} }\n";
+        let build = hover(&schema(), src, src.find("build").unwrap() + 1).unwrap();
+        assert!(
+            build.starts_with("```alloy\nbuild: {\n    in: string?,\n    out: string?,\n    exclude: { string }?,\n    clean: boolean?,\n    artifact: (\"ship\" | \"check\")?,\n}\n```"),
+            "{build}"
+        );
+
+        // The lint names beside `string` are hints; `rules` names them
+        // all, so it stops at the cap. A naming style is a string or a
+        // list of them.
+        let lint = hover(&schema(), src, src.find("lint").unwrap() + 1).unwrap();
+        assert!(lint.contains("\n    deny: { string }?,\n"), "{lint}");
+        assert!(lint.contains(" more\n    }?,\n    naming: {\n"), "{lint}");
+        assert!(
+            lint.contains("\n        const: (\"snake_case\" | \"camelCase\" | \"PascalCase\" | \"SCREAMING_SNAKE_CASE\" | \"any\" | { \"snake_case\" |"),
+            "{lint}"
+        );
+
+        // The completion's detail is one line, with nested tables folded.
+        let top = completions(&schema(), &at("return {\n    |\n}\n").unwrap());
+        let detail =
+            |label: &str| top.iter().find(|i| i["label"] == label).unwrap()["detail"].clone();
+        assert_eq!(
+            detail("emit"),
+            "{ wait_timeout: number?, std_require: string?, erase_type_imports: boolean? }"
+        );
+        assert_eq!(detail("mount"), "{ [string]: { string } | string }");
+        assert_eq!(detail("ingots"), "{ [string]: string | { ... } }");
     }
 
     #[test]
@@ -1149,8 +1416,8 @@ mod tests {
             &at("export default { fmt = { quote_style = | } }\n").unwrap(),
         );
         let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
-        assert!(labels.contains(&"\"force-single\""), "{labels:?}");
-        assert!(labels.contains(&"\"auto-prefer-double\""), "{labels:?}");
+        assert!(labels.contains(&"'force-single'"), "{labels:?}");
+        assert!(labels.contains(&"'auto-prefer-double'"), "{labels:?}");
 
         let inside = completions(
             &schema(),
@@ -1190,7 +1457,7 @@ mod tests {
         );
         assert_eq!(
             raw["insertText"],
-            "raw_require = ${1|\"allow\",\"warn\",\"deny\"|}"
+            "raw_require = ${1|'allow','warn','deny'|}"
         );
         assert!(keys.iter().any(|i| i["label"] == "pedantic"), "the groups");
         assert!(keys.iter().any(|i| i["label"] == "alx"), "the markup table");
@@ -1200,7 +1467,7 @@ mod tests {
             &at("export default { lint = { rules = { raw_require = | } } }\n").unwrap(),
         );
         let labels: Vec<&str> = levels.iter().filter_map(|i| i["label"].as_str()).collect();
-        assert_eq!(labels, ["\"allow\"", "\"warn\"", "\"deny\""]);
+        assert_eq!(labels, ["'allow'", "'warn'", "'deny'"]);
 
         let problems: Vec<String> = check(&schema(), "export default { lint = { rules = { raw_require = \"alow\", my_ingot_lint = \"warn\" } } }\n")
             .into_iter()
@@ -1226,6 +1493,12 @@ mod tests {
 
         let src = "export const build = { [\"in\"] = \"src\" }\n";
         let text = hover(&schema(), src, src.find("\"in\"").unwrap() + 1).unwrap();
+        assert!(
+            text.starts_with("```alloy\nbuild.in: string\n```"),
+            "{text}"
+        );
+        let src = "export const build = { in = \"src\" }\n";
+        let text = hover(&schema(), src, src.find("in =").unwrap() + 1).unwrap();
         assert!(
             text.starts_with("```alloy\nbuild.in: string\n```"),
             "{text}"

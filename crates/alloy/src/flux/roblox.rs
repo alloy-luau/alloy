@@ -205,6 +205,12 @@ impl<'s> Scan<'s> {
     /// Roblox class. `deep` allows one step back to a local's
     /// initializer, so `local part = workspace.Part` carries over.
     fn roblox_expr(&self, a: usize, b: usize, event: bool, deep: bool) -> bool {
+        // A chain that starts at an imported name reaches another module,
+        // `Shop.Offer.default()`, not a child in the DataModel.
+        if self.is_name(a) && self.imported(self.t(a)) {
+            return false;
+        }
+
         for j in a..b {
             if !self.is_name(j) || !self.t(j).starts_with(|c: char| c.is_ascii_uppercase()) {
                 continue;
@@ -282,6 +288,27 @@ impl<'s> Scan<'s> {
         }
 
         None
+    }
+
+    /// Whether an `import` of the file binds `name` from a module: between
+    /// `import` and `from`, as a listed name, an alias, or the module
+    /// name. A service from `@game` is an instance, and does not count.
+    fn imported(&self, name: &str) -> bool {
+        (0..self.toks.len())
+            .filter(|&i| self.at(i, "import") && self.statement_start(i))
+            .any(|i| {
+                let mut j = i + 1;
+                let mut binds = false;
+
+                while j < self.toks.len() && !self.at(j, "from") && !self.statement_start(j) {
+                    binds |= self.t(j) == name;
+                    j += 1;
+                }
+
+                let spec = self.toks.get(j + 1).map_or("", |_| self.t(j + 1));
+
+                binds && !spec[1.min(spec.len())..].starts_with("@game")
+            })
     }
 
     /// The tokens of the value in `local name = value`, on one line.
@@ -617,7 +644,7 @@ mod tests {
 
     /// The sources here bind names to show a shape, not to read them.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        lints_of(src, &["unused_variable"])
+        lints_of(src, &["unused_variable", "redundant_as", "prefer_const"])
     }
 
     fn fixed(src: &str) -> String {

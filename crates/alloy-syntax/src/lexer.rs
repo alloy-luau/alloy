@@ -90,8 +90,9 @@ fn past_escape(b: &[u8], at: usize) -> usize {
     i
 }
 
-/// The language a source is in. Alloy opens a nested array with `[[`;
-/// Luau opens a long string.
+/// The language a source is in. Alloy reads `[[` after an intrinsic,
+/// `$map[[k, v]]`, as a nested array; everywhere else both read a long
+/// string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     Alloy,
@@ -153,10 +154,14 @@ pub fn lex_with(src: &str, dialect: Dialect) -> Result<Lexed, LexError> {
                 comments.push((start as u32, i as u32));
             }
 
-            // `[[` opens a nested array, `[[1, 2], [3]]`; a long string
-            // keeps Luau's leveled form, `[=[ ... ]=]`. Both begin the
-            // same way, and the array is the one an Alloy file writes.
-            b'[' if dialect == Dialect::Alloy && level_of(b, i) == 0 => {
+            // `[[` is Luau's long string, so a Luau file lexes as Luau.
+            // After an intrinsic, `$map[["a", 1]]`, a string cannot
+            // follow, and the bracket opens its list of pairs. A nested
+            // array elsewhere is `[ [1, 2], [3] ]`.
+            b'[' if dialect == Dialect::Alloy
+                && level_of(b, i) == 0
+                && intrinsic_before(src, &toks, i) =>
+            {
                 toks.push(single(TokKind::Symbol, i));
                 i += 1;
             }
@@ -492,6 +497,21 @@ fn level_of(b: &[u8], open: usize) -> usize {
     level
 }
 
+/// Reports if the bracket at `i` follows an intrinsic name with no gap:
+/// the `map` of `$map[[`.
+fn intrinsic_before(src: &str, toks: &[Tok], i: usize) -> bool {
+    match toks {
+        [.., sigil, name] => {
+            name.kind == TokKind::Ident
+                && name.end as usize == i
+                && &src[sigil.start as usize..sigil.end as usize] == "$"
+                && sigil.end == name.start
+        }
+
+        _ => false,
+    }
+}
+
 /// Describes what sits at a position that can open a `[[` or `--[==[` bracket.
 enum LongBracket {
     /// This is not a long bracket. So `[` is punctuation, and `--` starts a line comment.
@@ -695,16 +715,24 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_array_is_not_a_long_string() {
-        let src = "[[1, 2], [3]]";
-        let toks = lex(src).unwrap().toks;
-        assert!(toks.iter().all(|t| !matches!(t.kind, TokKind::Str { .. })));
-        assert_eq!(&src[toks[0].start as usize..toks[0].end as usize], "[");
-        assert_eq!(kinds("--[[ a ]] x"), vec![TokKind::Ident]);
+    fn a_long_string_is_luau_and_an_intrinsic_takes_pairs() {
+        assert!(matches!(
+            lex("[[hello]]").unwrap().toks[0].kind,
+            TokKind::Str { .. }
+        ));
         assert!(matches!(
             lex_luau("[[hello]]").unwrap().toks[0].kind,
             TokKind::Str { .. }
         ));
+        assert_eq!(kinds("--[[ a ]] x"), vec![TokKind::Ident]);
+
+        let src = "$map[[\"a\", 1], [\"b\", 2]]";
+        let toks = lex(src).unwrap().toks;
+        let text = |k: usize| &src[toks[k].start as usize..toks[k].end as usize];
+        assert_eq!((text(2), text(3), text(4)), ("[", "[", "\"a\""));
+        // A space splits the brackets, so a nested array is plain.
+        let toks = lex("[ [1, 2], [3] ]").unwrap().toks;
+        assert!(toks.iter().all(|t| !matches!(t.kind, TokKind::Str { .. })));
     }
 
     #[test]

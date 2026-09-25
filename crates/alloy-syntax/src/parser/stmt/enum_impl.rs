@@ -14,7 +14,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        self.expect("as")?;
+        self.header_as(open);
         let mut variants = Vec::new();
 
         while !self.at("end") {
@@ -103,12 +103,12 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// `as` closes an `impl` or a `trait` header, the way it closes a
-    /// `struct`, an `enum`, and an `interface` header. A header without
-    /// it reports and the parse goes on, so the editor still reads the
-    /// body while the author migrates the file.
+    /// `as` closes a declaration header when the body shares its line,
+    /// `enum Color as Red, Green end`. A body on the next line needs
+    /// none, the way Luau's block headers read. A body on the header's
+    /// line without it reports, and the parse goes on.
     pub(super) fn header_as(&mut self, head_start: usize) {
-        if self.eat("as") {
+        if self.eat("as") || self.newline_before_pos() || self.at("end") {
             return;
         }
 

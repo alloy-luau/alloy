@@ -345,10 +345,39 @@ fn deprecated_namespaces(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
             .args
             .first()
             .map(|e| {
-                let s = &src[toks[e.span().start as usize].start as usize
-                    ..toks[e.span().end as usize - 1].end as usize];
+                let text_of = |e: &alloy_syntax::ast::Expr| {
+                    src[toks[e.span().start as usize].start as usize
+                        ..toks[e.span().end as usize - 1].end as usize]
+                        .trim_matches(['"', '\''])
+                        .to_string()
+                };
 
-                format!("; {}", s.trim_matches(['"', '\'']))
+                // `{ use = "New", reason = "why" }` reads as the reason,
+                // then the name to use.
+                let alloy_syntax::ast::Expr::Table { fields, .. } = e else {
+                    return format!("; {}", text_of(e));
+                };
+                let key = |k: &str| {
+                    fields.iter().find_map(|f| match f {
+                        alloy_syntax::ast::TableField::Named { name, value }
+                            if text(*name) == k =>
+                        {
+                            Some(text_of(value))
+                        }
+
+                        _ => None,
+                    })
+                };
+
+                match (key("reason"), key("use")) {
+                    (Some(r), Some(u)) => format!("; {r}; use `{u}`"),
+
+                    (Some(r), None) => format!("; {r}"),
+
+                    (None, Some(u)) => format!("; use `{u}`"),
+
+                    (None, None) => String::new(),
+                }
             })
             .unwrap_or_default();
         let start = toks[ns.span.start as usize].start;
@@ -393,64 +422,71 @@ fn deprecated_namespaces(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
     out
 }
 
-/// An `import` under a statement that runs. The emit lifts every
-/// `require` to the top of the file, so the line reads in an order the
-/// run does not follow.
-fn import_order(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
-    let mut out = Vec::new();
-    let mut ran = false;
-    // The line a statement opens, as the source wrote it. An ingot
-    // rewrites the source before the lints read it, and a statement it
-    // wrote lands on a line the reader did not write code on.
-    let line_of = |stmt: &Stmt| -> &str {
-        let Some(tok) = toks.get(stmt.span().start as usize) else {
-            return "";
-        };
-        let at = tok.start as usize;
-        let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
-        let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+/// `struct P as` over a body on the next line. `as` joins a header to a
+/// body on its own line, `enum Dir as Up, Down end`; below it, the line
+/// break opens the body, so each layout has one spelling. fmt drops the
+/// word too.
+fn redundant_as(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
+    fn headers(stmt: &Stmt, out: &mut Vec<alloy_syntax::ast::TokSpan>) {
+        match stmt.under_default() {
+            Stmt::Namespace(ns) => {
+                out.push(ns.span);
 
-        src[start..end].trim()
-    };
-
-    for stmt in &chunk.block.stmts {
-        let Stmt::Import(i) = stmt else {
-            // The markup lowering prepends its helpers in front of the
-            // file, and the lints read the lowered text. A name that
-            // starts with `__` is the emit's, not the author's, so it
-            // puts no code in front of an import.
-            if let Stmt::LocalFunction(f) = stmt
-                && src[toks[f.name.start as usize].start as usize
-                    ..toks[f.name.end as usize - 1].end as usize]
-                    .starts_with("__")
-            {
-                continue;
+                for m in &ns.members {
+                    headers(&m.stmt, out);
+                }
             }
 
-            // A declaration binds a name and a call runs; both stand
-            // in front of the import in the source and behind it in the
-            // emit.
-            let text = line_of(stmt);
-            ran |= !matches!(stmt, Stmt::Empty(_)) && !text.is_empty() && !text.starts_with("--");
+            Stmt::Struct(s) => out.push(s.span),
 
+            Stmt::Enum(e) => out.push(e.span),
+
+            Stmt::Trait(t) => out.push(t.span),
+
+            Stmt::Interface(i) => out.push(i.span),
+
+            Stmt::Impl(i) => out.push(i.span),
+
+            _ => {}
+        }
+    }
+
+    let mut spans = Vec::new();
+
+    for stmt in &chunk.block.stmts {
+        headers(stmt, &mut spans);
+    }
+
+    let same_line =
+        |a: usize, b: usize| !src[toks[a].end as usize..toks[b].start as usize].contains('\n');
+    let mut out = Vec::new();
+
+    for span in spans {
+        let (start, end) = (span.start as usize, (span.end as usize).min(toks.len()));
+        let Some(word) = (start..end).find(|&i| {
+            matches!(
+                toks[i].text(src),
+                "struct" | "enum" | "trait" | "interface" | "namespace" | "impl"
+            )
+        }) else {
             continue;
         };
+        // The last token of the header's line.
+        let mut last = word;
 
-        if !ran {
-            continue;
+        while last + 1 < end && same_line(last, last + 1) {
+            last += 1;
         }
 
-        let start = toks[i.span.start as usize].start;
-        let end = toks[i.span.end as usize - 1].end;
-        out.push(Lint {
-            name: "import_order",
-            start,
-            end,
-            message:
-                "this `import` runs before the code above it; the imports go at the top of the file"
-                    .to_string(),
-            fix: None,
-        });
+        if last > word && last + 1 < end && toks[last].text(src) == "as" {
+            out.push(Lint {
+                name: "redundant_as",
+                start: toks[last].start,
+                end: toks[last].end,
+                message: "`as` joins a header to a body on the same line; this body starts on the next line, so drop `as`".to_string(),
+                fix: Some(Fix::new(src, toks[last - 1].end, toks[last].end, "")),
+            });
+        }
     }
 
     out
@@ -509,7 +545,6 @@ pub fn run(
     toks: &[Tok],
     chunk: &Chunk,
     definitions: bool,
-    ingot_rewrite: bool,
     thresholds: &Thresholds,
     import_privates: &[(String, Vec<String>)],
 ) -> Vec<Lint> {
@@ -520,11 +555,9 @@ pub fn run(
     }
 
     lints.extend(directive_lints(src));
+    lints.extend(redundant_as(src, toks, chunk));
     lints.extend(deprecated_namespaces(src, toks, chunk));
     lints.extend(game_alias(src, toks, chunk));
-    if !ingot_rewrite {
-        lints.extend(import_order(src, toks, chunk));
-    }
 
     let text = |i: usize| toks[i].text(src);
     let st = structure(src, toks);

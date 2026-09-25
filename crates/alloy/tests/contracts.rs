@@ -30,19 +30,12 @@ fn clean(src: &str) {
 
 const LIFECYCLE: &str = "enum Lifecycle as\n    Init\n    Start\nend\n\n";
 
-/// `@M.icon` reads an attribute of a module through a path. The
-/// grammar takes the path, because a namespace of the file answers to
-/// one; a module does not, and the report names the import that does.
+/// `@M.icon` reads an attribute of a module through its star import,
+/// as `M.icon` reads the value. The module keeps the targets, so the
+/// use compiles as a named import's does.
 #[test]
-fn a_dotted_attribute_names_the_bare_import() {
-    let got = one(
-        "import * as M from \"./defs\"\n\n@M.icon(\"x\")\nstruct NsUse as\n    x: number\nend\n",
-    );
-
-    assert_eq!(
-        got,
-        "an attribute of a module is used by its bare name; import it with `import { icon } from ...`"
-    );
+fn a_dotted_attribute_reads_through_a_star_import() {
+    clean("import * as M from \"./defs\"\n\n@M.icon(\"x\")\nstruct NsUse\n    x: number\nend\n");
 }
 
 /// Every clause form parses and holds.
@@ -394,8 +387,8 @@ fn the_members_a_gap_names_compile() {
         "  requires public function Start(self)\n",
         "  requires private field state: number\n",
         "end\n\n",
-        "struct S as\n  x: number\nend\n\n",
-        "@service\nimpl S as\nend\n\nprint(S)\n"
+        "struct S\n  x: number\nend\n\n",
+        "@service\nimpl S\nend\n\nprint(S)\n"
     );
     let out = compile(src);
     let mut text = src.to_string();

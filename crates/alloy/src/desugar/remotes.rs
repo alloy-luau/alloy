@@ -8,6 +8,25 @@ use super::*;
 /// The number widths a parameter or a field may carry.
 pub const WIRE_WIDTHS: &[&str] = &["u8", "u16", "u32", "i8", "i16", "i32", "f32", "f64"];
 
+/// The whole numbers an integer width holds; a float width takes any.
+pub(crate) fn width_range(width: &str) -> Option<(f64, f64)> {
+    Some(match width {
+        "u8" => (0.0, 255.0),
+
+        "u16" => (0.0, 65535.0),
+
+        "u32" => (0.0, 4294967295.0),
+
+        "i8" => (-128.0, 127.0),
+
+        "i16" => (-32768.0, 32767.0),
+
+        "i32" => (-2147483648.0, 2147483647.0),
+
+        _ => return None,
+    })
+}
+
 /// The type text a wire width cannot pack. A width packs a number, and
 /// `any` crosses as one; a trailing `?` makes no difference. `None` for a
 /// type the width fits.
@@ -15,29 +34,6 @@ pub(crate) fn width_misfit(ty: &str) -> Option<&str> {
     let base = ty.trim_end_matches('?').trim();
 
     (base != "number" && base != "any").then_some(base)
-}
-
-/// Every wire width written in a run of source, each with the byte it
-/// starts at. A remote parameter carries its attributes as text in front
-/// of the name, so `@u8 @u16 x` reads as two widths here.
-fn widths_in(gap: &str) -> Vec<(u32, String)> {
-    let mut out = Vec::new();
-    let mut at = 0;
-
-    while let Some(i) = gap[at..].find('@') {
-        let start = at + i;
-        let word: String = gap[start + 1..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        at = start + 1 + word.len();
-
-        if WIRE_WIDTHS.contains(&word.as_str()) {
-            out.push((start as u32, word));
-        }
-    }
-
-    out
 }
 
 /// One node of a wire layout: how a value packs.
@@ -54,35 +50,140 @@ pub(crate) enum Wire {
     },
     /// An array: a count, then each item.
     Array { item: Box<Wire>, optional: bool },
+    /// An enum of this file or an import. The value crosses beside the
+    /// buffer as Roblox copies a table, which drops the metatable; the
+    /// reader checks the variant and restores it.
+    Enum {
+        name: String,
+        /// Each variant with its payload count; a unit variant is a string.
+        variants: Vec<(String, usize)>,
+        optional: bool,
+    },
 }
 
 /// The bytes Roblox carries on an UnreliableRemoteEvent.
 pub(crate) const UNRELIABLE_LIMIT: usize = 900;
 
 impl Wire {
-    /// Why the value has no size bound, or `None` when it has one. A
-    /// number, a boolean, and a Roblox datatype all pack to a fixed
-    /// width; a string and an array grow with what the caller passes.
-    fn unbounded(&self) -> Option<&'static str> {
+    /// The most bytes the value packs to, or why it has no bound. A
+    /// number, a boolean, and an Instance reference have a fixed size; a
+    /// string, an array, and a value that crosses as a table grow with
+    /// what the caller passes.
+    fn max_size(&self) -> Result<usize, &'static str> {
+        let flag = |optional: bool| usize::from(optional);
+
         match self {
-            Wire::Scalar { kind, .. } if kind == "str" => Some("a string has no length bound"),
+            Wire::Scalar { kind, optional } => match kind.as_str() {
+                "str" => Err("a string has no length bound"),
 
-            Wire::Scalar { .. } => None,
+                // A unit enum's longest name, after its one-byte length.
+                k if k.starts_with("one:") => Ok(flag(*optional)
+                    + 1
+                    + k["one:".len()..]
+                        .split(',')
+                        .map(str::len)
+                        .max()
+                        .unwrap_or(0)),
 
-            Wire::Table { fields, .. } => fields.iter().find_map(|(_, w)| w.unbounded()),
+                "any" => Err("a value that crosses as a table has no size bound"),
 
-            Wire::Array { .. } => Some("an array has no length bound"),
+                k if k.starts_with("inst:") => Ok(flag(*optional)),
+
+                // A Roblox datatype crosses in the engine's own encoding,
+                // at about this many bytes.
+                k if k.starts_with("val:") => Ok(flag(*optional)
+                    + match &k["val:".len()..] {
+                        "Vector2" | "UDim" | "Vector2int16" => 8,
+
+                        "Vector3" | "Color3" | "Vector3int16" => 12,
+
+                        "UDim2" | "Rect" => 16,
+
+                        "CFrame" => 48,
+
+                        _ => 16,
+                    }),
+
+                "u8" | "i8" | "bool" => Ok(1 + flag(*optional)),
+
+                "u16" | "i16" => Ok(2 + flag(*optional)),
+
+                "u32" | "i32" | "f32" => Ok(4 + flag(*optional)),
+
+                _ => Ok(8 + flag(*optional)),
+            },
+
+            Wire::Table {
+                fields, optional, ..
+            } => fields
+                .iter()
+                .try_fold(flag(*optional), |sum, (_, w)| Ok(sum + w.max_size()?)),
+
+            Wire::Array { .. } => Err("an array has no length bound"),
+
+            Wire::Enum { .. } => Err("a value that crosses as a table has no size bound"),
         }
     }
 
+    /// Whether the value crosses beside the buffer: a table the layout
+    /// cannot open, or an Instance.
     fn is_any(&self) -> bool {
-        matches!(self, Wire::Scalar { kind, .. } if kind == "any")
+        match self {
+            Wire::Scalar { kind, .. } => {
+                kind == "any" || kind.starts_with("inst:") || kind.starts_with("val:")
+            }
+
+            Wire::Enum { .. } => true,
+
+            _ => false,
+        }
     }
 
-    /// Every struct name the layout writes, at any depth.
+    /// Whether a buffer carries the value in fewer bytes than Roblox's
+    /// own encoding: a narrowed number, a record, whose keys the buffer
+    /// drops, and an array of fixed-size items, whose type tags it
+    /// drops. A lone `f64`, `bool`, or string gains nothing.
+    fn gains(&self) -> bool {
+        match self {
+            Wire::Scalar { kind, .. } => matches!(
+                kind.as_str(),
+                "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32"
+            ),
+
+            Wire::Table { fields, .. } => fields.iter().any(|(_, w)| !w.is_any()),
+
+            Wire::Array { item, .. } => {
+                !item.is_any()
+                    && !matches!(item.as_ref(), Wire::Scalar { kind, .. } if kind == "str")
+            }
+
+            Wire::Enum { .. } => false,
+        }
+    }
+
+    /// The path to a part a buffer cannot carry, a table the layout
+    /// cannot open. An Instance crosses beside the buffer and counts as
+    /// carried.
+    fn opaque_path(&self, at: &str) -> Option<String> {
+        match self {
+            Wire::Scalar { kind, .. } if kind == "any" => Some(at.to_string()),
+
+            Wire::Scalar { .. } | Wire::Enum { .. } => None,
+
+            Wire::Table { fields, .. } => fields
+                .iter()
+                .find_map(|(n, w)| w.opaque_path(&format!("{at}.{n}"))),
+
+            Wire::Array { item, .. } => item.opaque_path(&format!("{at}[]")),
+        }
+    }
+
+    /// Every struct and enum name the layout writes, at any depth.
     fn structs(&self) -> Vec<String> {
         match self {
             Wire::Scalar { .. } => Vec::new(),
+
+            Wire::Enum { name, .. } => vec![name.clone()],
 
             Wire::Table {
                 fields,
@@ -96,16 +197,6 @@ impl Wire {
 
             Wire::Array { item, .. } => item.structs(),
         }
-    }
-
-    fn with_optional(mut self, flag: bool) -> Self {
-        match &mut self {
-            Wire::Scalar { optional, .. }
-            | Wire::Table { optional, .. }
-            | Wire::Array { optional, .. } => *optional = *optional || flag,
-        }
-
-        self
     }
 
     /// The layout as the Luau table the runtime reads.
@@ -137,6 +228,21 @@ impl Wire {
                 out.push_str(" }");
 
                 out
+            }
+
+            Wire::Enum {
+                name,
+                variants,
+                optional,
+            } => {
+                let tags: Vec<String> =
+                    variants.iter().map(|(v, n)| format!("{v} = {n}")).collect();
+                let optional = if *optional { ", optional = true" } else { "" };
+
+                format!(
+                    "{{ enum = {name}, tags = {{ {} }}{optional} }}",
+                    tags.join(", ")
+                )
             }
 
             Wire::Array { item, optional } => {
@@ -240,7 +346,7 @@ pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
             // A remote strips the metatable, so the methods do not
             // arrive. `Array<T>` and `T[]` are the exception: the wire
             // packs the items and the other side builds the array.
-            "HashMap" | "Set" | "Queue" | "Heap" | "Iter" => {
+            "HashMap" | "Set" | "BitSet" | "Queue" | "Heap" | "Iter" => {
                 return Some("carries a metatable that the wire cannot pack");
             }
             _ => {}
@@ -251,19 +357,37 @@ pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
 }
 
 impl<'s> Desugar<'s> {
+    /// The fields of a struct another file declares, when this file
+    /// imports it. A struct of the same name that this file never
+    /// imports is not the type the parameter names: a `Player` struct
+    /// elsewhere made `target: Player` a table layout, and the remote
+    /// then refused every real Player.
+    fn imported_shape(&self, name: &str) -> Option<Vec<crate::WireField>> {
+        if !self.imported_names.contains(name) {
+            return None;
+        }
+
+        // `import { Shot as S }` binds `S` to the struct named `Shot`.
+        let declared = self.import_renames.get(name).map_or(name, String::as_str);
+
+        self.options
+            .shapes
+            .iter()
+            .find(|sh| sh.name == declared)
+            .map(|sh| sh.fields.clone())
+    }
+
     /// `wire_offender` with the structs of this file, so a parameter
     /// that names one reports the field that cannot cross the wire.
     fn offender_of(&self, ty: &str) -> Option<Offender> {
         offender(
             ty,
             &|name| {
-                let declared = self.struct_wire.get(name).cloned().or_else(|| {
-                    self.options
-                        .shapes
-                        .iter()
-                        .find(|sh| sh.name == name)
-                        .map(|sh| sh.fields.clone())
-                })?;
+                let declared = self
+                    .struct_wire
+                    .get(name)
+                    .cloned()
+                    .or_else(|| self.imported_shape(name))?;
 
                 Some(
                     declared
@@ -379,7 +503,7 @@ impl<'s> Desugar<'s> {
                 self.diagnose(
                     p.name,
                     &format!(
-                        "parameter `{pname}` of remote `{name}` names struct `{s}`, which is declared below the remote; move the struct above it"
+                        "parameter `{pname}` of remote `{name}` names `{s}`, which is declared below the remote; move the declaration above it"
                     ),
                 );
             }
@@ -387,31 +511,108 @@ impl<'s> Desugar<'s> {
 
         // `@unreliable` rides an UnreliableRemoteEvent, and Roblox drops
         // a payload over 900 bytes. A parameter with no bound, a string
-        // or an array, can pass it on any call.
+        // or an array, can pass it on any call, and fixed sizes add up.
         if r.attributes
             .iter()
             .any(|a| a.name.is_some_and(|n| self.text_of(n) == "unreliable"))
         {
+            let mut total = 0;
+
             for (p, w) in r.params.iter().zip(&wire) {
-                let Some(why) = w.unbounded() else { continue };
                 let pname = self.text_of(p.name).to_string();
+
+                match w.max_size() {
+                    Ok(size) => total += size,
+
+                    Err(why) => {
+                        self.diagnose(
+                            p.name,
+                            &format!(
+                                "remote `{name}` is `@unreliable`, so its payload has to fit {UNRELIABLE_LIMIT} bytes; {why}, and parameter `{pname}` is one. Bound it, or drop `@unreliable`"
+                            ),
+                        );
+                        total = 0;
+
+                        break;
+                    }
+                }
+            }
+
+            if total > UNRELIABLE_LIMIT {
                 self.diagnose(
-                    p.name,
+                    r.name,
                     &format!(
-                        "remote `{name}` is `@unreliable`, so its payload has to fit {UNRELIABLE_LIMIT} bytes; {why}, and parameter `{pname}` is one. Bound it, or drop `@unreliable`"
+                        "remote `{name}` is `@unreliable`, so its payload has to fit {UNRELIABLE_LIMIT} bytes; its parameters pack to {total}. Narrow them with `@u8`, `@u16`, or `@f32`, or drop `@unreliable`"
                     ),
                 );
-
-                break;
             }
         }
 
-        let wire = if wire.iter().all(Wire::is_any) {
+        // `@wire(buffer)` or `@wire(table)` says how the payload
+        // travels. With neither, the buffer carries it when one of the
+        // parameters packs smaller there; Roblox's own encoding carries
+        // it otherwise, checked on arrival against the same layout.
+        // One remote takes one wire mode; a second `@wire` would lose.
+        let extra: Vec<TokSpan> = r
+            .attributes
+            .iter()
+            .filter(|a| a.name.is_some_and(|n| self.text_of(n) == "wire"))
+            .skip(1)
+            .map(|a| a.span)
+            .collect();
+
+        for at in extra {
+            self.diagnose(at, "a remote takes one `@wire`; keep `buffer` or `table`");
+        }
+
+        let chosen = r
+            .attributes
+            .iter()
+            .find(|a| a.name.is_some_and(|n| self.text_of(n) == "wire"))
+            .and_then(|a| {
+                a.args
+                    .first()
+                    .map(|x| (a.span, self.text_of(x.span()).to_string()))
+            });
+        let packs = match chosen.as_ref().map(|(_, m)| m.as_str()) {
+            Some("buffer") => {
+                for (p, w) in r.params.iter().zip(&wire) {
+                    let pname = self.text_of(p.name).to_string();
+
+                    if let Some(path) = w.opaque_path(&pname)
+                        && let Some((at, _)) = &chosen
+                    {
+                        self.diagnose(
+                            *at,
+                            &format!(
+                                "remote `{name}` is `@wire(buffer)`, and `{path}` is a table the layout cannot open, a map or an untyped value, which a buffer cannot hold; type it, or drop `@wire(buffer)`"
+                            ),
+                        );
+
+                        break;
+                    }
+                }
+
+                true
+            }
+
+            Some(_) => false,
+
+            None => wire.iter().any(Wire::gains),
+        };
+
+        // A value beside the buffer needs no layout, unless the reader
+        // restores an enum's metatable on it.
+        let wire = if wire
+            .iter()
+            .all(|w| w.is_any() && !matches!(w, Wire::Enum { .. }))
+        {
             String::new()
         } else {
             let kinds: Vec<String> = wire.iter().map(Wire::luau).collect();
+            let mode = if packs { "" } else { ", pack = false" };
 
-            format!(", wire = {{ {} }}", kinds.join(", "))
+            format!(", wire = {{ {} }}{mode}", kinds.join(", "))
         };
         let kind = if r.is_function { "function" } else { "event" };
         let std = self.std();
@@ -446,39 +647,43 @@ impl<'s> Desugar<'s> {
     /// a default marks one that may be nil.
     pub(crate) fn wire_layout(&mut self, r: &RemoteDecl) -> Vec<Wire> {
         let mut kinds = Vec::new();
-        let mut from = self.byte_end(r.name);
 
         for p in &r.params {
-            let gap_at = from;
-            let gap = self.src[from as usize..self.byte_start(p.name) as usize].to_string();
-            from = self.byte_end(p.name);
-            let width: Option<String> = gap.find('@').map(|at| {
-                gap[at + 1..]
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect()
-            });
-            // `@u8 @u16 x`: the first width packed and the second went
-            // in silence. One report at each width after the first.
-            let written = widths_in(&gap);
+            // The widths the parameter's own attributes write. `@u8 @u16
+            // x`: the first packs, and each one after it reports.
+            let written: Vec<(TokSpan, String)> = p
+                .attributes
+                .iter()
+                .filter_map(|a| {
+                    let n = self.text_of(a.name?).to_string();
 
-            for (at, w) in written.iter().skip(1) {
+                    WIRE_WIDTHS.contains(&n.as_str()).then_some((a.span, n))
+                })
+                .collect();
+
+            for (at, _) in written.iter().skip(1) {
                 let pname = self.text_of(p.name).to_string();
                 let first = &written[0].1;
-                let start = gap_at + at;
-                self.diagnostics.push(Diagnostic {
-                    start,
-                    end: start + 1 + w.len() as u32,
-                    message: format!("`{pname}` takes one wire width; `@{first}` is already on it"),
-                });
+                self.diagnose(
+                    *at,
+                    &format!("`{pname}` takes one wire width; `@{first}` is already on it"),
+                );
             }
+
+            let width = written.first().map(|(_, w)| w.clone());
             let ty =
                 p.ty.map(|t| self.text_of(t).trim().to_string())
                     .unwrap_or_else(|| "any".to_string());
-            let width = width.filter(|w| WIRE_WIDTHS.contains(&w.as_str()));
+
+            // `type Slot = number` is a number to the width, as the layout
+            // reads the alias through.
+            let seen = self
+                .alias_values
+                .get(ty.trim_end_matches('?').trim())
+                .cloned();
 
             if let Some(w) = &width
-                && let Some(base) = width_misfit(&ty)
+                && let Some(base) = width_misfit(seen.as_deref().unwrap_or(&ty))
             {
                 let pname = self.text_of(p.name).to_string();
                 self.diagnose(
@@ -487,9 +692,27 @@ impl<'s> Desugar<'s> {
                 );
             }
 
-            let wire = self
-                .wire_of_type(&ty, width.as_deref(), 0)
-                .with_optional(p.default.is_some());
+            // A default fills before the pack, so one the width cannot
+            // hold fails every fire that leaves the argument out.
+            if let (Some(w), Some(d)) = (&width, &p.default)
+                && let Some((lo, hi)) = width_range(w)
+                && let Ok(v) = self
+                    .text_of(d.span())
+                    .replace(['_', ' '], "")
+                    .parse::<f64>()
+                && (v < lo || v > hi || v.fract() != 0.0)
+            {
+                let pname = self.text_of(p.name).to_string();
+                let shown = self.text_of(d.span()).to_string();
+                self.diagnose(
+                    d.span(),
+                    &format!("`@{w}` holds a whole number from {lo} to {hi}; the default of `{pname}`, {shown}, does not fit"),
+                );
+            }
+
+            // A default fills before the pack and after the read, so the
+            // value is never nil on the wire.
+            let wire = self.wire_of_type(&ty, width.as_deref(), 0, false);
             kinds.push(wire);
         }
 
@@ -499,7 +722,20 @@ impl<'s> Desugar<'s> {
     /// The layout of one type text. A struct declared here or in the
     /// project opens to its fields; a record type to its members; `T[]`,
     /// `{ T }`, and `Array<T>` to their item. Anything else is `any`.
-    pub(crate) fn wire_of_type(&self, text: &str, width: Option<&str>, depth: usize) -> Wire {
+    /*
+    The layout of a type as written. `foreign` marks a type written in
+    another file, a field of an imported struct: its names belong to that
+    file, so this file's enums, aliases, and structs do not answer for
+    them. There a name is a project struct, one of the two engine names a
+    file never shadows, a datatype, or a value the layout leaves alone.
+    */
+    pub(crate) fn wire_of_type(
+        &self,
+        text: &str,
+        width: Option<&str>,
+        depth: usize,
+        foreign: bool,
+    ) -> Wire {
         let mut ty = text.trim();
         let mut optional = false;
 
@@ -536,7 +772,7 @@ impl<'s> Desugar<'s> {
         }
 
         let array = |item: &str| Wire::Array {
-            item: Box::new(self.wire_of_type(item, None, depth + 1)),
+            item: Box::new(self.wire_of_type(item, None, depth + 1, foreign)),
             optional,
         };
 
@@ -587,7 +823,7 @@ impl<'s> Desugar<'s> {
 
                 fields.push((
                     name.to_string(),
-                    self.wire_of_type(&part[colon + 1..], None, depth + 1),
+                    self.wire_of_type(&part[colon + 1..], None, depth + 1, foreign),
                 ));
             }
 
@@ -602,14 +838,48 @@ impl<'s> Desugar<'s> {
             };
         }
 
-        if ty.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            let declared = self.struct_wire.get(ty).cloned().or_else(|| {
-                self.options
-                    .shapes
+        let is_name = ty.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+        if is_name && foreign {
+            // One project struct of the name; its table is not in scope
+            // here, so the value decodes without a metatable.
+            let mut named = self.options.shapes.iter().filter(|sh| sh.name == ty);
+
+            if let (Some(shape), None) = (named.next(), named.next()) {
+                let fields = shape
+                    .fields
                     .iter()
-                    .find(|sh| sh.name == ty)
-                    .map(|sh| sh.fields.clone())
-            });
+                    .map(|f| {
+                        let w = self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, true);
+
+                        (f.name.clone(), w)
+                    })
+                    .collect();
+
+                return Wire::Table {
+                    fields,
+                    struct_name: None,
+                    optional,
+                };
+            }
+
+            return match ty {
+                "Instance" | "Player" => scalar(&format!("inst:{ty}")),
+
+                _ if crate::roblox_classes::DATATYPES.contains(&ty) => scalar(&format!("val:{ty}")),
+
+                _ => scalar("any"),
+            };
+        }
+
+        if is_name {
+            // A struct of this file reads its fields here; an imported one
+            // reads them in the file that declares it.
+            let (declared, fields_foreign) = match self.struct_wire.get(ty).cloned() {
+                Some(d) => (Some(d), false),
+
+                None => (self.imported_shape(ty), true),
+            };
 
             if let Some(declared) = declared {
                 let fields = declared
@@ -617,7 +887,7 @@ impl<'s> Desugar<'s> {
                     .map(|f| {
                         (
                             f.name.clone(),
-                            self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1),
+                            self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, fields_foreign),
                         )
                     })
                     .collect();
@@ -628,6 +898,60 @@ impl<'s> Desugar<'s> {
                     optional,
                 };
             }
+        }
+
+        // The file's own type wins over a Roblox class of the same name,
+        // as a struct does above: an `enum Team` sent as `inst:Team` made
+        // the reader refuse every packet. An alias reads as its value, a
+        // unit enum crosses as its string, and any other declaration, or
+        // an import, as a value the layout leaves to the checker.
+        if ty.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            if let Some(value) = self.alias_values.get(ty).cloned() {
+                let value = if optional {
+                    format!("({value})?")
+                } else {
+                    value
+                };
+
+                return self.wire_of_type(&value, width, depth + 1, false);
+            }
+
+            // A unit enum crosses as one of its names; the reader refuses
+            // any other string, so a forged `"Nuke"` reaches no handler.
+            if let Some(variants) = self.enum_decls.get(ty) {
+                let unit = variants.iter().all(|(_, n)| *n == 0);
+                let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
+
+                return match unit {
+                    true => scalar(&format!("one:{}", names.join(","))),
+
+                    false => Wire::Enum {
+                        name: ty.to_string(),
+                        variants: variants.clone(),
+                        optional,
+                    },
+                };
+            }
+
+            if self.declared_types.contains(ty) || self.imported_names.contains(ty) {
+                return scalar("any");
+            }
+        }
+
+        // An Instance crosses as the engine's reference, beside the
+        // buffer; the reader checks its class. A Roblox datatype crosses
+        // beside it too, in the engine's own encoding, and the reader
+        // checks its `typeof`. A struct of the same name, `Stats`, won
+        // above.
+        if ty == "Instance"
+            || ty == "Player"
+            || crate::roblox_classes::INSTANCE_CLASSES.contains(&ty)
+        {
+            return scalar(&format!("inst:{ty}"));
+        }
+
+        if crate::roblox_classes::DATATYPES.contains(&ty) {
+            return scalar(&format!("val:{ty}"));
         }
 
         scalar("any")
@@ -819,6 +1143,45 @@ mod tests {
             .collect()
     }
 
+    /// A payload enum crosses as a table, and Roblox drops its
+    /// metatable. The layout names the enum and its variants wherever
+    /// it sits, so the reader restores it; an enum declared below the
+    /// remote is nil when the layout is built, so it reports.
+    #[test]
+    fn a_payload_enum_names_itself_in_the_layout() {
+        let src = "enum Boost\n    None\n    Strength(number)\nend\nstruct Reward\n    boost: Boost\nend\nremote Grant(boost: Boost, maybe: Boost?) from server\nremote Give(reward: Reward, all: Boost[]) from server\n";
+        let out = crate::compile(src).unwrap();
+        let node = "{ enum = Boost, tags = { None = 0, Strength = 1 } }";
+
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        assert!(
+            out.ship.contains(&format!(
+                "wire = {{ {node}, {{ enum = Boost, tags = {{ None = 0, Strength = 1 }}, optional = true }} }}, pack = false"
+            )),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.ship.contains(&format!("{{ \"boost\", {node} }}")),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.ship
+                .contains(&format!("{{ item = {node}, array = true }}")),
+            "{}",
+            out.ship
+        );
+
+        let below = "remote Grant(boost: Boost) from server\nenum Boost\n    None\n    Strength(number)\nend\n";
+        assert_eq!(
+            messages(below),
+            [
+                "parameter `boost` of remote `Grant` names `Boost`, which is declared below the remote; move the declaration above it"
+            ]
+        );
+    }
+
     /// A remote's surface is a type the checker reads, so `T[]` lowers
     /// to `Array<T>` there and a std name takes the runtime's prefix.
     #[test]
@@ -847,7 +1210,9 @@ remote Take(xs: string[]) from client
             },
         )
         .unwrap();
-        let layout = "attrs = {}, wire = { \"f64\", \"str\" } })";
+        // A lone number and string gain nothing in a buffer, so they
+        // cross as Roblox encodes them, checked on arrival.
+        let layout = "attrs = {}, wire = { \"f64\", \"str\" }, pack = false })";
         assert!(out.ship.contains(layout), "{}", out.ship);
         assert!(out.check.contains(layout), "{}", out.check);
     }
@@ -1127,5 +1492,78 @@ remote Chain(n: Node) from client
         let out = crate::compile_with(src, &shared).unwrap();
         assert!(out.check.contains("fire: "), "{}", out.check);
         assert!(out.check.contains("on: "), "{}", out.check);
+    }
+
+    fn ship(src: &str) -> String {
+        crate::compile(src).unwrap().ship
+    }
+
+    /// A width reads the parameter's own attributes: a `@u8` inside a
+    /// default's string or a comment is no width.
+    #[test]
+    fn a_width_reads_only_its_own_attributes() {
+        let out = ship("remote A(tag: string = \"@u8\", n: number) from client\n");
+        assert!(out.contains("wire = { \"str\", \"f64\" }"), "{out}");
+        let out = ship("remote B(x: number, -- keep @i8 small\n    y: number) from client\n");
+        assert!(out.contains("wire = { \"f64\", \"f64\" }"), "{out}");
+    }
+
+    /// The buffer carries a payload when a parameter packs smaller
+    /// there; Roblox's encoding carries the rest, and `@wire` decides.
+    #[test]
+    fn the_wire_mode_follows_the_gain_and_the_attribute() {
+        assert!(ship("remote Chat(msg: string) from client\n").contains("pack = false"));
+        assert!(!ship("remote Hp(@u8 hp: number) from server\n").contains("pack = false"));
+        assert!(!ship("remote Pts(xs: number[]) from server\n").contains("pack = false"));
+        assert!(
+            !ship("@wire(buffer)\nremote Chat(msg: string) from client\n").contains("pack = false")
+        );
+        assert!(
+            ship("@wire(table)\nremote Hp(@u8 hp: number) from server\n").contains("pack = false")
+        );
+
+        let got = messages("@wire(buffer)\nremote Sync(m: { [string]: number }) from server\n");
+        assert!(
+            got.iter().any(|m| m.starts_with(
+                "remote `Sync` is `@wire(buffer)`, and `m` is a table the layout cannot open"
+            )),
+            "{got:?}"
+        );
+        let got = messages("@wire(json)\nremote Sync(n: number) from server\n");
+        assert!(
+            got.iter()
+                .any(|m| m.starts_with("`@wire` takes `buffer` or `table`")),
+            "{got:?}"
+        );
+    }
+
+    /// A `@skip` field stays off the wire; a struct the file declares wins
+    /// over a Roblox class of its name, and an Instance carries its class.
+    #[test]
+    fn the_layout_skips_and_names_what_it_should() {
+        let out = ship(
+            "struct Stats as\n    hp: number\n    @skip\n    cache: () -> ()\nend\nremote Sync(s: Stats, who: Player, at: Vector3) from server\n",
+        );
+        assert!(
+            out.contains("{ fields = { { \"hp\", \"f64\" } }, struct = Stats }"),
+            "{out}"
+        );
+        assert!(out.contains("\"inst:Player\", \"val:Vector3\""), "{out}");
+    }
+
+    /// Fixed sizes add up against the 900 bytes an unreliable remote
+    /// carries.
+    #[test]
+    fn an_unreliable_payload_adds_its_fixed_sizes() {
+        let fields: Vec<String> = (0..120).map(|i| format!("    f{i}: number")).collect();
+        let src = format!(
+            "struct Big as\n{}\nend\n@unreliable\nremote Blast(b: Big) from server\n",
+            fields.join("\n")
+        );
+        let got = messages(&src);
+        assert!(
+            got.iter().any(|m| m.contains("its parameters pack to 960")),
+            "{got:?}"
+        );
     }
 }

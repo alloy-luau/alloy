@@ -1,8 +1,8 @@
 //! Flux: the lints that read declarations and the names bound to them.
 //! A private member read outside its struct's impl, a constant's value
 //! changed through a method, one name given two function bodies, a
-//! local nothing reads, a name in the wrong case. The names and levels
-//! sit in `lint::LINTS`.
+//! local nothing reads. The names and levels sit in `lint::LINTS`, and
+//! the case of names is `crate::naming`.
 
 use alloy_syntax::lexer::TokKind;
 
@@ -17,6 +17,7 @@ const MUTATING_METHODS: &[&str] = &[
     "pop",
     "insert",
     "remove",
+    "swap_remove",
     "clear",
     "set",
     "add",
@@ -27,16 +28,10 @@ const MUTATING_METHODS: &[&str] = &[
     "get_or_insert",
 ];
 
-/// `playerCount`: starts lowercase, has a capital, has no underscore.
-fn is_camel_case(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && name.chars().any(|c| c.is_ascii_uppercase())
-        && !name.contains('_')
-}
-
-/// `PlayerState`: starts with a capital and has no underscore.
-fn is_pascal_case(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && !name.contains('_')
+/// A write into the value a name holds, as `value_write` reads it.
+enum ValueWrite<'s> {
+    Assign,
+    Method(&'s str),
 }
 
 impl<'s> Scan<'s> {
@@ -375,6 +370,12 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // A trait's method is a contract each impl writes, not a body
+            // of the file: two traits may name one method.
+            if self.inside_block(i, &["trait"]) {
+                continue;
+            }
+
             let start = i + 1;
             let mut j = start + 1;
 
@@ -418,7 +419,10 @@ impl<'s> Scan<'s> {
     /// or a call of a method that changes it. `const` freezes the
     /// binding alone, which the keyword does not say.
     pub(crate) fn const_mutation(&self, out: &mut Vec<Lint>) {
-        let mut names: Vec<&'s str> = Vec::new();
+        // Each const name with the token that declares it. A write above
+        // the declaration reaches another binding of the name, such as a
+        // parameter of a function higher in the file.
+        let mut names: Vec<(&'s str, usize)> = Vec::new();
 
         for i in 0..self.toks.len() {
             if !self.at(i, "const")
@@ -432,7 +436,7 @@ impl<'s> Scan<'s> {
             }
 
             for j in self.local_names(i) {
-                names.push(self.t(j));
+                names.push((self.t(j), j));
             }
         }
 
@@ -441,23 +445,14 @@ impl<'s> Scan<'s> {
         }
 
         for i in 0..self.toks.len() {
-            if !self.is_name(i) || !names.contains(&self.t(i)) || !self.statement_start(i) {
+            if !self.is_name(i) || !names.iter().any(|&(n, at)| n == self.t(i) && at < i) {
                 continue;
             }
 
-            // `X.a.b = v` and `X[k] = v`: the binding stands, the value
-            // does not.
-            let assigned = match self.path_end(i) {
-                Some(end) if end > i + 1 && self.at(end, "=") => true,
+            let name = self.t(i);
 
-                _ => {
-                    self.at(i + 1, "[") && self.matching(i + 1).is_some_and(|c| self.at(c + 1, "="))
-                }
-            };
-
-            if assigned {
-                let name = self.t(i);
-                self.lint(
+            match self.value_write(i) {
+                Some(ValueWrite::Assign) => self.lint(
                     out,
                     "const_mutation",
                     i,
@@ -466,17 +461,9 @@ impl<'s> Scan<'s> {
                         "`{name}` is a `const`; the binding is fixed and this writes into its value"
                     ),
                     None,
-                );
+                ),
 
-                continue;
-            }
-
-            if self.at(i + 1, ":")
-                && self.is_name(i + 2)
-                && MUTATING_METHODS.contains(&self.t(i + 2))
-            {
-                let (name, method) = (self.t(i), self.t(i + 2));
-                self.lint(
+                Some(ValueWrite::Method(method)) => self.lint(
                     out,
                     "const_mutation",
                     i,
@@ -485,9 +472,33 @@ impl<'s> Scan<'s> {
                         "`{name}` is a `const`; `{method}` changes the value the binding holds"
                     ),
                     None,
-                );
+                ),
+
+                None => {}
             }
         }
+    }
+
+    /// How the statement at the name `i` writes into the value the name
+    /// holds: `X.a.b = v` and `X[k] = v` assign into it, `X:push(v)`
+    /// calls a method that changes it. The binding itself stands.
+    fn value_write(&self, i: usize) -> Option<ValueWrite<'s>> {
+        if !self.statement_start(i) {
+            return None;
+        }
+
+        let assigned = match self.path_end(i) {
+            Some(end) if end > i + 1 && self.at(end, "=") => true,
+
+            _ => self.at(i + 1, "[") && self.matching(i + 1).is_some_and(|c| self.at(c + 1, "=")),
+        };
+
+        if assigned {
+            return Some(ValueWrite::Assign);
+        }
+
+        (self.at(i + 1, ":") && self.is_name(i + 2) && MUTATING_METHODS.contains(&self.t(i + 2)))
+            .then(|| ValueWrite::Method(self.t(i + 2)))
     }
 
     /// The names a `local` at `i` binds, with their tokens. A destructure
@@ -797,6 +808,106 @@ impl<'s> Scan<'s> {
         }
     }
 
+    /// `local x = v` that nothing assigns again reads as `const x = v`:
+    /// the word says the binding holds one value, and a later write
+    /// becomes a compile error. The scan is file-wide, as the one for
+    /// reads is, so a write to any local of the name keeps it quiet.
+    pub(crate) fn prefer_const(&self, out: &mut Vec<Lint>) {
+        for i in 0..self.toks.len() {
+            if !self.at(i, "local")
+                || !self.statement_start(i)
+                || matches!(self.t(i + 1), "function" | "async" | "const")
+            {
+                continue;
+            }
+
+            let names = self.local_names(i);
+            let Some(&last) = names.last() else {
+                continue;
+            };
+            // `local x` with no value takes one later, by an assignment.
+            let after = match self.t(i + 1) {
+                "{" | "[" => self.pattern_names(i + 1).1 + 1,
+
+                _ if self.at(last + 1, ":") => self.annotation_end(last + 2),
+
+                _ => last + 1,
+            };
+
+            // A value written into stays `local`: `const_mutation` reads
+            // `const` as deep, and the two would disagree.
+            if !self.at(after, "=")
+                || names.iter().any(|&n| {
+                    self.written_after(n)
+                        || (n + 1..self.toks.len()).any(|j| {
+                            self.t(j) == self.t(n)
+                                && !self.is_member(j)
+                                && self.value_write(j).is_some()
+                        })
+                })
+            {
+                continue;
+            }
+
+            let listed: Vec<String> = names.iter().map(|&n| format!("`{}`", self.t(n))).collect();
+            let message = match listed.len() {
+                1 => format!("{} is never assigned again; declare it `const`", listed[0]),
+
+                _ => format!(
+                    "{} are never assigned again; declare them `const`",
+                    listed.join(", ")
+                ),
+            };
+            self.lint(
+                out,
+                "prefer_const",
+                i,
+                i,
+                message,
+                Some("const".to_string()),
+            );
+        }
+    }
+
+    /// Whether a statement after the name at `n` assigns a name of its
+    /// text: `x = 1`, `x += 1`, or a target of `a, x = f()`.
+    fn written_after(&self, n: usize) -> bool {
+        let name = self.t(n);
+
+        (n + 1..self.toks.len()).any(|j| {
+            if self.toks[j].kind != TokKind::Ident || self.t(j) != name || self.is_member(j) {
+                return false;
+            }
+
+            // The rest of a list of targets, then the operator.
+            let mut k = j + 1;
+
+            while self.at(k, ",") && self.is_name(k + 1) {
+                k += 2;
+            }
+
+            // `??=` lexes as three tokens, `?`, `?`, and `=`.
+            let op = self.t(k);
+            let assigns = op == "="
+                || matches!(op, "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..=")
+                || (op == "?" && self.at(k + 1, "?") && self.at(k + 2, "="));
+
+            if !assigns {
+                return false;
+            }
+
+            // The first target opens the statement; `local x =` again
+            // declares a new local instead.
+            let mut first = j;
+
+            while first >= 2 && self.at(first - 1, ",") && self.is_name(first - 2) {
+                first -= 2;
+            }
+
+            self.statement_start(first) && !matches!(self.prev(first), "local" | "const")
+        })
+    }
+
     /// Whether the declaration at `i` sends its name out of the file:
     /// `export`, `global`, or `export default` in front of it.
     fn sends_out(&self, i: usize) -> bool {
@@ -847,6 +958,29 @@ impl<'s> Scan<'s> {
 
             if k == 0 {
                 return false;
+            }
+
+            // Luau's list, `@[native]`: the `]` closes an `@[`.
+            if src[k - 1] == b']' {
+                let mut depth = 0i32;
+
+                while k > 0 {
+                    k -= 1;
+
+                    match src[k] {
+                        b']' => depth += 1,
+                        b'[' => {
+                            depth -= 1;
+
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                return depth == 0 && k > 0 && src[k - 1] == b'@';
             }
 
             // `@name(...)`: step over the arguments.
@@ -903,113 +1037,5 @@ impl<'s> Scan<'s> {
             .iter()
             .enumerate()
             .any(|(i, e)| e.is_some_and(|e| i < j && j < e) && kinds.contains(&self.t(i)))
-    }
-
-    /// The case of declared names.
-    pub(crate) fn naming(&self, out: &mut Vec<Lint>) {
-        for i in 0..self.toks.len() {
-            match self.t(i) {
-                "local" | "const" if self.statement_start(i) => {
-                    let is_function = self.at(i + 1, "function");
-
-                    for n in self.local_names(i) {
-                        let name = self.t(n);
-
-                        if is_camel_case(name) {
-                            self.lint(
-                                out,
-                                "camel_case_name",
-                                n,
-                                n,
-                                format!("`{name}` is camelCase; Alloy names are snake_case"),
-                                None,
-                            );
-                        } else if is_function && is_pascal_case(name) {
-                            self.lint(
-                                out,
-                                "pascal_case_function",
-                                n,
-                                n,
-                                format!("`{name}` is a local function in PascalCase; write it snake_case"),
-                                None,
-                            );
-                        }
-                    }
-                }
-
-                "function" if !matches!(self.prev(i), "." | ":") => {
-                    // The last name of the path, then the parameters. A
-                    // `local function` had its name read with the `local`.
-                    let is_local = matches!(self.prev(i), "local" | "async" | "const");
-                    let mut j = i + 1;
-                    let mut last = None;
-
-                    while self.is_name(j) || self.at(j, ".") || self.at(j, ":") {
-                        if self.is_name(j) {
-                            last = Some(j);
-                        }
-
-                        j += 1;
-                    }
-
-                    if let Some(n) = last
-                        && !is_local
-                        && is_camel_case(self.t(n))
-                    {
-                        self.lint(
-                            out,
-                            "camel_case_name",
-                            n,
-                            n,
-                            format!("`{}` is camelCase; Alloy names are snake_case", self.t(n)),
-                            None,
-                        );
-                    }
-
-                    if self.at(j, "(")
-                        && let Some(close) = self.matching(j)
-                    {
-                        let mut at_start = true;
-
-                        for k in j + 1..close {
-                            if at_start && self.is_name(k) && is_camel_case(self.t(k)) {
-                                self.lint(
-                                    out,
-                                    "camel_case_name",
-                                    k,
-                                    k,
-                                    format!(
-                                        "parameter `{}` is camelCase; Alloy names are snake_case",
-                                        self.t(k)
-                                    ),
-                                    None,
-                                );
-                            }
-
-                            at_start = self.at(k, ",") && self.matching_depth(j, k) == 1;
-                        }
-                    }
-                }
-
-                w @ ("struct" | "enum" | "trait" | "interface" | "type")
-                    if self.statement_start(i) || matches!(self.prev(i), "export" | "global") =>
-                {
-                    let n = i + 1;
-
-                    if self.is_name(n) && !is_pascal_case(self.t(n)) && !self.at(n, "function") {
-                        self.lint(
-                            out,
-                            "type_case",
-                            n,
-                            n,
-                            format!("`{}` is a {w} name; write it PascalCase", self.t(n)),
-                            None,
-                        );
-                    }
-                }
-
-                _ => {}
-            }
-        }
     }
 }

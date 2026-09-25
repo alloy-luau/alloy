@@ -303,6 +303,7 @@ impl<'a> Parser<'a> {
                             | "Array"
                             | "HashMap"
                             | "Set"
+                            | "BitSet"
                             | "Signal"
                             | "SignalConnection"
                             | "Signalish"
@@ -329,6 +330,17 @@ impl<'a> Parser<'a> {
                     while self.at(".") {
                         self.bump();
                         self.expect_name()?;
+                    }
+
+                    // `HashMap<<string, number>>` is the call form; a type
+                    // writes one `<...>`, and the doubled form reached the
+                    // output as Luau that does not parse.
+                    if self.at("<") && self.text_at(1) == "<" {
+                        let at = self.toks[self.pos].start as usize;
+                        self.report_at(
+                            at,
+                            "a type takes its arguments in one `<...>`, `HashMap<string, number>`; `<<...>>` is the form a call writes",
+                        );
                     }
 
                     if self.at("<") {

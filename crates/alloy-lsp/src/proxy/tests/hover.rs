@@ -933,7 +933,7 @@ fn an_import_alias_reads_the_export_s_declaration() {
         .find(|d| d.name == "Thing")
         .map(|d| d.hover.clone())
         .expect("Thing");
-    assert!(hover.contains("export struct Thing as"), "{hover}");
+    assert!(hover.contains("export struct Thing\n"), "{hover}");
     assert!(!hover.contains(" where "), "{hover}");
 }
 
@@ -1841,4 +1841,208 @@ pub(crate) fn another_file_s_struct_is_no_method_hover() {
     assert!(!server.declaration_hover("file:///a.aly", &at(4, 21), &json!(1)));
     // The struct's own name still reads its declaration.
     assert!(server.declaration_hover("file:///a.aly", &at(0, 8), &json!(1)));
+}
+
+/// The checker prints a type that holds an imported struct as a solver
+/// variable with a `where` clause. The local reads what its first value
+/// names: the collection its `new` builds, or the field it reads.
+#[test]
+fn a_solver_variable_local_reads_its_first_value() {
+    const SRC: &str = "struct Inventory as\n    slots: HashMap<number, Item>\nend\n\nstruct Save as\n    inventory: Inventory\nend\n\nlocal b = new HashMap<<number, Item>>()\nlocal save: Save? = nil\nlocal slots = save?.inventory.slots\nprint(b, slots)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let named = |printed: &str, line: u32, character: u32| {
+        crate::proxy::hover::name_solver_local(
+            &st,
+            &format!("```luau\n{printed}\n```"),
+            doc,
+            line,
+            character,
+        )
+    };
+
+    assert_eq!(
+        named(
+            "local b: t2 where t1 = {\n    [number]: t6\n} ; t2 = {}",
+            8,
+            6
+        )
+        .as_deref(),
+        Some("```luau\nlocal b: HashMap<number, Item>\n```")
+    );
+    // A use below reads the same `new`.
+    assert_eq!(
+        named("local b: t7", 11, 6).as_deref(),
+        Some("```luau\nlocal b: HashMap<number, Item>\n```")
+    );
+    assert_eq!(
+        named("local slots: HashMap<number, t1>? where t1 = {}", 10, 7).as_deref(),
+        Some("```luau\nlocal slots: HashMap<number, Item>?\n```")
+    );
+    // A print with no solver variable stays.
+    assert_eq!(named("local b: HashMap<number, string>", 8, 6), None);
+}
+
+/// A callback's parameter belongs to the lambda around it, not to an
+/// earlier function that takes a parameter by the same name.
+#[test]
+fn a_callback_parameter_names_the_lambda_it_belongs_to() {
+    let src = "local function load(player: Player)\n    print(player)\nend\n\nPlayers.PlayerAdded:Connect(function(player)\n    print(player.Name)\nend)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let hover = |line: u32, character: u32| {
+        unlocal_parameter("```luau\nlocal player: Player\n```", doc, line, character)
+    };
+
+    assert_eq!(
+        hover(5, 11).as_deref(),
+        Some("```luau\nplayer: Player\n```\nA parameter of an anonymous function.")
+    );
+    assert_eq!(
+        hover(1, 11).as_deref(),
+        Some("```luau\nplayer: Player\n```\nA parameter of `function load`.")
+    );
+}
+
+/// A nested argument keeps its own `>`: the list of `<<...>>` closes at
+/// bracket depth zero. The hint once read `HashMap<string, Array<number>`.
+#[test]
+fn a_nested_type_argument_keeps_its_bracket() {
+    const SRC: &str = "local a = new HashMap<<string, Array<number>>>()\nlocal b = HashMap.new<<string, (number) -> number>>()\nlocal c = new Set<<Array<number>>>()\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+
+    assert_eq!(
+        source_type(doc, 0, 6).as_deref(),
+        Some("HashMap<string, Array<number>>")
+    );
+    assert_eq!(
+        source_type(doc, 1, 6).as_deref(),
+        Some("HashMap<string, (number) -> number>")
+    );
+    assert_eq!(
+        source_type(doc, 2, 6).as_deref(),
+        Some("Set<Array<number>>")
+    );
+}
+
+/// An expression match lowers to one expression, so the child types a
+/// bare binding by the arm's result: `k` read as `string` for a match on
+/// a number. The binding reads the value the match takes, and `...rest`
+/// reads an array of the element.
+#[test]
+fn an_expression_match_binding_reads_the_matched_value() {
+    const SRC: &str = "local n = 7\nlocal r = match n with\n    case k where k > 5 then \"big\"\n    default \"small\"\nend\nlocal t = { 1, 2 }\nlocal f = match t with\n    case [first, ...rest] then first\n    default 0\nend\nprint(r, f)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let known = st.known_shapes_at(Some(uri));
+    let hover = |needle: &str, word: &str| {
+        let at = SRC.find(needle).expect("needle");
+
+        case_binding_text(doc, position_of(SRC, at).0 as usize, at, word, &known)
+    };
+
+    assert_eq!(
+        hover("k where", "k").as_deref(),
+        Some("```alloy\nk: number\n```\nA binding of `match n`.")
+    );
+    assert_eq!(
+        hover("rest]", "rest").as_deref(),
+        Some("```alloy\nrest: number[]\n```\nA binding of the array pattern.")
+    );
+}
+
+/// The checker prints a value of a namespace struct by its shape: a
+/// solver variable with a `where` clause that holds the field list. The
+/// hover names the one struct in reach with those fields, as the hint
+/// already does.
+#[test]
+fn a_namespace_struct_value_hovers_by_its_name() {
+    const SRC: &str = "namespace Geo\n  struct Vec2\n    x: number\n  end\n  function make(): Vec2\n    return new Vec2 { x = 1 }\n  end\nend\nlocal p = Geo.make()\nprint(p)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed = "t2 where t1 = {\n    new: (f: {\n        x: number\n    }) -> t2\n} ; t2 = { @metatable t1,\n{\n    x: number\n} }";
+    let named = |text: String| crate::proxy::hover::name_solver_struct(&text, doc);
+
+    assert_eq!(
+        named(format!("```luau\nlocal p: {printed}\n```")).as_deref(),
+        Some("```luau\nlocal p: Geo.Vec2\n```")
+    );
+    // A field read prints the type alone.
+    assert_eq!(
+        named(format!("```luau\n{printed}\n```")).as_deref(),
+        Some("```luau\nGeo.Vec2\n```")
+    );
+    assert_eq!(named("```luau\nlocal p: number\n```".to_string()), None);
+    // The variable stands inside a larger type.
+    assert_eq!(
+        named(format!(
+            "```luau\nlocal ps: {{t2}}? where {}\n```",
+            &printed[9..]
+        ))
+        .as_deref(),
+        Some("```luau\nlocal ps: {Geo.Vec2}?\n```")
+    );
+}
+
+/// A file-level local and a parameter may share a name. Inside the
+/// function the parameter is the one in scope, so its hover names the
+/// function and not the local.
+#[test]
+fn a_parameter_shadows_a_file_local_of_its_name() {
+    let src = "local count = \"top\"\nlocal function bump(count: number): number\n    return count + 1\nend\nprint(bump(1), count)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+
+    assert_eq!(
+        unlocal_parameter("```luau\nlocal count: number\n```", doc, 2, 12).as_deref(),
+        Some("```luau\ncount: number\n```\nA parameter of `function bump`.")
+    );
+    // The local itself keeps its own hover.
+    assert_eq!(
+        unlocal_parameter("```luau\nlocal count: string\n```", doc, 4, 16),
+        None
+    );
+}
+
+/// `Light.Active` under `import { Status as Light }`: the hover reads
+/// the variant of the enum the alias names, and another module's
+/// `Status` stays out of it.
+#[test]
+fn an_aliased_variant_hovers_as_its_enum_s() {
+    use super::documents::Recorder;
+
+    let state = super::support::files(&[
+        (
+            "file:///a.aly",
+            "export enum Status as\n    Active\n    Closed(number)\nend\n",
+        ),
+        (
+            "file:///b.aly",
+            "export enum Status as\n    Active\n    Off\nend\n",
+        ),
+        (
+            "file:///f.aly",
+            "import { Status } from \"./a\"\nimport { Status as Light } from \"./b\"\nprint(Status.Closed(1), Light.Active)\n",
+        ),
+    ]);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let src = "import { Status } from \"./a\"\nimport { Status as Light } from \"./b\"\nprint(Status.Closed(1), Light.Active)\n";
+    let (line, character) = position_of(src, src.find("Active)").unwrap());
+    let message = json!({ "params": {
+        "textDocument": { "uri": "file:///f.aly" },
+        "position": { "line": line, "character": character },
+    } });
+
+    assert!(server.declaration_hover("file:///f.aly", &message, &json!(1)));
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log")).into_owned();
+    assert!(sent.contains("Status.Active"), "{sent}");
 }

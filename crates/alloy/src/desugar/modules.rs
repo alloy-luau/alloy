@@ -6,6 +6,23 @@ use alloy_syntax::ast::{
 
 use super::*;
 
+/// The type parameters the runtime declares a std type with, `<K, V>`,
+/// or an empty string for a type with none. `None` for a name the
+/// runtime declares no type for.
+fn runtime_type_params(name: &str) -> Option<String> {
+    crate::RUNTIME.lines().find_map(|line| {
+        let rest = line.strip_prefix("export type ")?.strip_prefix(name)?;
+
+        if rest.starts_with('<') {
+            let end = rest.find('>')?;
+
+            Some(rest[..=end].to_string())
+        } else {
+            rest.trim_start().starts_with('=').then(String::new)
+        }
+    })
+}
+
 /// The local an `export default <expr>` binds, when the expression is
 /// not already a name. The export table is written after the last line,
 /// so the value needs a binding to name there.
@@ -298,6 +315,109 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// Reports a std name the file writes with no import, once per
+    /// name: the first use carries the report, and its fix writes the
+    /// import that covers every use.
+    pub(crate) fn check_std_name(&mut self, at: TokSpan, name: &str) {
+        if crate::std_names::is_std_name(name)
+            && !self.options.std_globals.ambient(name)
+            && !self.std_imports.contains(name)
+            && self.std_reported.insert(name.to_string())
+        {
+            self.diagnose(at, &crate::std_names::missing_message(name));
+        }
+    }
+
+    /// `import { HashMap } from "@alloy/std/collections"`. The name
+    /// renders as `__alloy.HashMap` wherever it stands, so the import
+    /// writes nothing. An alias writes a local and a type for it, and a
+    /// star import binds the runtime itself, so `c.HashMap` reads both
+    /// the value and the type.
+    fn std_import(&mut self, i: &Import, spec: &str, module: &str) {
+        use crate::std_names::{MODULES, PREFIX};
+
+        let anchor = self.byte_start(i.span);
+        let Some(names) = crate::std_names::names_in(module) else {
+            let modules: Vec<String> = MODULES
+                .iter()
+                .map(|(m, _)| format!("\"{PREFIX}/{m}\""))
+                .collect();
+            let message = format!(
+                "\"{spec}\" is no std module; the std has {}",
+                modules.join(", ")
+            );
+            self.diagnose(i.path, &message);
+
+            return;
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let specs = match &i.kind {
+            ImportKind::Namespace(n, specs) => {
+                let name = self.text_of(*n).to_string();
+                lines.push(format!(
+                    "local {name} = require({})",
+                    luau_string(&self.options.std_require)
+                ));
+
+                specs
+            }
+
+            ImportKind::Default(n) | ImportKind::Both(n, _) => {
+                let name = self.text_of(*n).to_string();
+                let message = format!(
+                    "the std has no default export; write `import {{ ... }} from \"{spec}\"`, or `import * as {name} from \"{spec}\"` for the module"
+                );
+                self.diagnose(*n, &message);
+
+                match &i.kind {
+                    ImportKind::Both(_, specs) => specs,
+
+                    _ => return,
+                }
+            }
+
+            ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => specs,
+        };
+
+        for s in specs {
+            let name = self.text_of(s.name).to_string();
+
+            if !names.contains(&name.as_str()) {
+                let message = match crate::std_names::spec_of(&name) {
+                    Some(home) => format!("\"{spec}\" has no `{name}`; it is in \"{home}\""),
+
+                    None => format!("the std has no `{name}`"),
+                };
+                self.diagnose(s.name, &message);
+
+                continue;
+            }
+
+            let Some(alias) = s.alias else {
+                continue;
+            };
+            let local = self.text_of(alias).to_string();
+
+            if AMBIENT.contains(&name.as_str()) {
+                let std = self.std();
+                lines.push(format!("local {local} = {std}.{name}"));
+            }
+
+            if let Some(params) = runtime_type_params(&name) {
+                let std = self.type_std();
+                let args = crate::desugar::strip_bounds(&params);
+                let args = match args == "<>" {
+                    true => String::new(),
+
+                    false => args,
+                };
+                lines.push(format!("type {local}{params} = {std}{name}{args}"));
+            }
+        }
+
+        self.generate(anchor, &lines.join(" "));
+    }
+
     pub(crate) fn import_stmt(&mut self, i: &Import) {
         let anchor = self.byte_start(i.span);
         // The spec as written: `strip_literal` drops a data extension,
@@ -308,6 +428,12 @@ impl<'s> Desugar<'s> {
         // index is built under: the spec the source wrote.
         let target = self.require_literal(&spec);
         let bare = spec.trim_matches(['"', '\'']);
+
+        if let Some(module) = crate::std_names::module_of_spec(bare) {
+            self.std_import(i, bare, module);
+
+            return;
+        }
 
         // `"game"` and `"game:Players"` name services, not modules, so
         // the import binds `game:GetService` calls instead of a
@@ -568,24 +694,6 @@ impl<'s> Desugar<'s> {
         }
 
         self.generate(anchor, &lines.join(" "));
-    }
-
-    /// An `import` inside a function or a block. The emit lifts every
-    /// `require` to the top of the file, so a buried one binds nothing
-    /// where it stands.
-    pub(crate) fn check_import_places(&mut self, block: &Block) {
-        let mut buried = Vec::new();
-
-        for stmt in &block.stmts {
-            crate::desugar::modules::buried_imports(stmt, &mut buried);
-        }
-
-        for span in buried {
-            self.diagnose(
-                span,
-                "an import belongs at the top level of a file; the emit lifts the require above the block it sits in",
-            );
-        }
     }
 
     /// What an `export { ... }` list needs to be true, and what a
@@ -1113,26 +1221,65 @@ pub(crate) fn type_arguments(params: &str) -> String {
     format!("<{}>", names.join(", "))
 }
 
-/// Every `import` under a statement, at any depth.
-pub(crate) fn buried_imports(stmt: &Stmt, out: &mut Vec<TokSpan>) {
-    for child in crate::desugar::stmt_children(stmt) {
-        match child {
-            crate::desugar::Child::Block(b) => block_imports(b, out),
-
-            crate::desugar::Child::Function(f) => block_imports(&f.block, out),
-
-            crate::desugar::Child::Expr(_) => {}
+impl Desugar<'_> {
+    /// `sig.HashMap` under `import * as sig from "@alloy/std/signal"`:
+    /// the local is the whole runtime, so the reach stops here, at the
+    /// names the module exports. Every expression counts, a statement
+    /// the emit copies as it is included.
+    pub(crate) fn check_std_star_members(&mut self, block: &Block) {
+        for stmt in &block.stmts {
+            for c in stmt_children(stmt) {
+                self.std_star_in(c);
+            }
         }
     }
-}
 
-fn block_imports(block: &Block, out: &mut Vec<TokSpan>) {
-    for stmt in &block.stmts {
-        match stmt {
-            Stmt::Import(i) => out.push(i.span),
+    fn std_star_in(&mut self, c: Child<'_>) {
+        match c {
+            Child::Expr(e) => {
+                if let Expr::Index {
+                    object,
+                    key: IndexKey::Field(f),
+                    ..
+                } = e
+                    && let Expr::Name(n) = object.as_ref()
+                    && let Some(module) = self.std_namespaces.get(self.text_of(*n)).cloned()
+                {
+                    self.check_std_member(*f, &module);
+                }
 
-            other => buried_imports(other, out),
+                for c in expr_children(e) {
+                    self.std_star_in(c);
+                }
+            }
+
+            Child::Block(b) => self.check_std_star_members(b),
+
+            Child::Function(f) => self.check_std_star_members(&f.block),
         }
+    }
+
+    fn check_std_member(&mut self, f: TokSpan, module: &str) {
+        let member = self.text_of(f).to_string();
+        let exports = crate::std_names::names_in(module).unwrap_or_default();
+
+        if exports.contains(&member.as_str()) && !crate::std_names::is_std_attribute(&member) {
+            return;
+        }
+
+        let spec = match module.is_empty() {
+            true => crate::std_names::PREFIX.to_string(),
+
+            false => format!("{}/{module}", crate::std_names::PREFIX),
+        };
+        let message = match crate::std_names::spec_of(&member) {
+            Some(home) if home != spec => {
+                format!("\"{spec}\" has no `{member}`; it is in \"{home}\"")
+            }
+
+            _ => format!("\"{spec}\" has no `{member}`"),
+        };
+        self.diagnose(f, &message);
     }
 }
 

@@ -24,6 +24,7 @@ Commands:
   test [file]     Write a lest spec per source with a @test; --run runs it
   doc [topic]     Explain a keyword, an operator, a lint, an article
   init            Write alloy.toml and one Luau config (.config.luau)
+  migrate         Rewrite alloy.toml as .config.aly
   ingot           Scaffold, inspect, or run an extension
   self            Install, update, or remove the binaries
   help            Show this screen
@@ -214,6 +215,18 @@ Options:
   --config <file>       Read this alloy.toml instead of the nearest one
 
 `alloy doc test` explains the layout and the lest.toml it writes.
+";
+
+pub const MIGRATE_TEXT: &str = "\
+Usage: alloy migrate
+
+Rewrites alloy.toml in the current folder as .config.aly, then removes
+alloy.toml. While both files exist, alloy.toml wins.
+
+The new file keeps every key and every comment, and the [fmt] table
+of the project sets its quotes and its indent. Before it writes, the
+command loads the new file and compares the two configs; when they
+differ, it writes nothing. It never overwrites a .config.aly.
 ";
 
 pub const FMT_TEXT: &str = "\

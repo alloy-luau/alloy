@@ -15,6 +15,28 @@ impl<'a> Parser<'a> {
         // handled in the suffix loop; a lone `?` here is the ternary.
         if self.at("?") && !self.question_fuses() {
             self.bump();
+
+            // `parse(s)?` at the end of a line is Rust's early return. The
+            // ternary would read the next line as its value, and report a
+            // word there that says nothing about the `?`.
+            // A binary operator cannot open the ternary's value either:
+            // `load(s)? + 1`. A `-` can, as a negative number.
+            let operator = self.text() != "-" && binop_priority(self.text()).is_some();
+
+            if self.at_end()
+                || self.newline_before_pos()
+                || operator
+                || matches!(
+                    self.text(),
+                    ")" | "," | "]" | "}" | ";" | "end" | "then" | "do"
+                )
+            {
+                self.pos -= 1;
+                let message = self.early_return_message(start);
+
+                return Err(self.err(&message));
+            }
+
             self.no_method_call += 1;
             let then_value = self.expr();
             self.no_method_call -= 1;
@@ -123,6 +145,12 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // In a value position a `-` that opens a line is the next
+            // value, `-v`, not a subtraction from the call above it.
+            if self.value_lines > 0 && self.at("-") && self.newline_before_pos() {
+                break;
+            }
+
             let op = self.pos;
             self.pos += width;
             let rhs = self.sub_expr(right_prec)?;
@@ -190,7 +218,17 @@ impl<'a> Parser<'a> {
 
             "{" => self.table_expr()?,
 
-            "[" => self.array_expr()?,
+            // An array literal takes a method the way a string does:
+            // `[ 1, 2 ]:map(f)`. A ternary's `:` stays the ternary's.
+            "[" => {
+                let e = self.array_expr()?;
+
+                match self.at(":") && self.name_at(1) {
+                    true => self.suffix_chain(start, e)?,
+
+                    false => e,
+                }
+            }
 
             "if" => self.if_else_expr()?,
 
@@ -316,6 +354,25 @@ impl<'a> Parser<'a> {
         }
 
         Ok(e)
+    }
+
+    /// The report for `f(x)?`, Rust's early return, with the call the
+    /// source wrote: `try f(x)` is the Alloy form.
+    fn early_return_message(&self, start: usize) -> String {
+        let end = self.toks[self.pos.saturating_sub(1).max(start)].end as usize;
+        let written: String = self.src[self.toks[start].start as usize..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let written = match written.len() > 40 || written.is_empty() {
+            true => "parse(s)".to_string(),
+
+            false => written,
+        };
+
+        format!(
+            "a `?` after a value is Rust's early return; Alloy writes `try` in front of the call, `try {written}`, for a function that returns a Result"
+        )
     }
 
     /// Inside a ternary's then-branch, a `:` after `is` would be the else.
@@ -526,14 +583,6 @@ impl<'a> Parser<'a> {
         }
 
         let name = self.expect_name()?;
-        let tok = self.toks[name.start as usize];
-        let word = &self.src[tok.start as usize..tok.end as usize];
-
-        // `import(...)` and `import<<T>>(...)` are the expression form of
-        // `import`; the emit turns the call into `require`.
-        if !(word == "import" && (self.at("(") || self.at("<"))) {
-            self.reject_reserved(name);
-        }
 
         Ok(Expr::Name(name))
     }
@@ -569,6 +618,19 @@ impl<'a> Parser<'a> {
                         optional: false,
                         span: TokSpan::new(start, self.pos),
                     };
+                }
+
+                // In a value position a line that opens with `(`, `[`,
+                // `{`, or a string starts the next item: `print("one")`
+                // over `"one"` read as `print("one")("one")`. Luau refuses
+                // the `(` case as ambiguous, so no Luau reads otherwise.
+                "(" | "[" | "{" if self.value_lines > 0 && self.newline_before_pos() => break,
+
+                _ if self.value_lines > 0
+                    && self.newline_before_pos()
+                    && matches!(self.kind_at(0), Some(TokKind::Str { .. })) =>
+                {
+                    break;
                 }
 
                 "[" => {
@@ -703,6 +765,20 @@ impl<'a> Parser<'a> {
                             args,
                             span: TokSpan::new(start, self.pos),
                         };
+                    }
+
+                    "->" => {
+                        return Err(self.err(
+                            "`->` already reads a nil receiver as nil; write `a->b` without the `?`",
+                        ));
+                    }
+
+                    // `print(load(s)?)`: the value ends at the `?`, which
+                    // is Rust's early return, not a safe access.
+                    ")" | "," | "]" | "}" | ";" => {
+                        let message = self.early_return_message(start);
+
+                        return Err(self.err(&message));
                     }
 
                     _ => {
@@ -904,6 +980,12 @@ impl<'a> Parser<'a> {
             } else if self.at_name() && self.text_at(1) == "=" {
                 let name = self.expect_name()?;
                 self.bump();
+                let value = self.expr()?;
+                fields.push(TableField::Named { name, value });
+            } else if self.options.reserved_keys && self.at_reserved() && self.text_at(1) == "=" {
+                let name = TokSpan::new(self.pos, self.pos + 1);
+                self.reserved_keys.push(name);
+                self.pos += 2;
                 let value = self.expr()?;
                 fields.push(TableField::Named { name, value });
             } else {

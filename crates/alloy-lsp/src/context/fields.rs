@@ -80,6 +80,20 @@ fn field_entry(entry: &str) -> Option<Field> {
             }
         }
 
+        // `@f32 x: number` and `@rename("n") x: string`: an attribute
+        // stands in front of the name.
+        if cut.is_none()
+            && let Some(rest) = t.strip_prefix('@')
+        {
+            let rest = rest.trim_start_matches(is_word);
+            let rest = match rest.strip_prefix('(') {
+                Some(args) => args.split_once(')').map_or("", |(_, after)| after),
+
+                None => rest,
+            };
+            cut = Some(rest.trim_start());
+        }
+
         match cut {
             Some(rest) => t = rest,
 
@@ -208,13 +222,103 @@ pub fn struct_literal_target(src: &str, offset: usize) -> Option<(String, bool)>
     }
 
     // `local l: Loadout = { |`: the annotation of the binding names it.
-    let assigned = before.strip_suffix('=')?;
-    let line = assigned.rsplit('\n').next()?;
-    let colon = line.rfind(':')?;
-    let declared = type_text(&line[colon + 1..]);
+    // `return { |` reads the function's declared return, and `f({ |`
+    // the parameter the argument fills.
+    let declared = match before.strip_suffix('=') {
+        Some(assigned) => {
+            let line = assigned.rsplit('\n').next()?;
+            let colon = line.rfind(':')?;
+
+            type_text(&line[colon + 1..])
+        }
+
+        None if before.ends_with("return")
+            && !before[..before.len() - "return".len()].ends_with(is_word) =>
+        {
+            enclosing_return(src, open)?
+        }
+
+        None => argument_type(src, head, open)?,
+    };
 
     (!declared.is_empty() && declared.starts_with(|c: char| c.is_uppercase()))
         .then_some((declared, false))
+}
+
+/// The return type the function around `at` declares: `Pet` of
+/// `function make(): Pet` or of `function make() -> Pet`.
+fn enclosing_return(src: &str, at: usize) -> Option<String> {
+    let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let own = indent(&src[line_start..]);
+
+    src[..line_start].lines().rev().find_map(|line| {
+        let head = line.trim_start();
+
+        if indent(line) >= own || !head.contains("function") {
+            return None;
+        }
+
+        let open = head.find('(')?;
+        let len = super::scope::group_end(&head[open + 1..]) + 1;
+        let rest = head[open + 1 + len..].trim_start();
+        let rest = rest.strip_prefix(':').or_else(|| rest.strip_prefix("->"))?;
+
+        Some(type_text(rest))
+    })
+}
+
+/// The declared type of the parameter a call argument at `open` fills:
+/// `Pet` for the `{` of `feed({ ... })` under `function feed(p: Pet)`.
+fn argument_type(src: &str, head: &str, open: usize) -> Option<String> {
+    // The `(` of the call that holds the argument, and the argument's
+    // index: the commas at depth zero between the two.
+    let mut depth = 0i32;
+    let mut index = 0usize;
+    let mut call = None;
+
+    for (i, c) in head[..open].char_indices().rev() {
+        match c {
+            ')' | ']' | '}' => depth += 1,
+
+            '(' if depth == 0 => {
+                call = Some(i);
+
+                break;
+            }
+
+            '(' | '[' | '{' => depth -= 1,
+
+            ',' if depth == 0 => index += 1,
+
+            '\n' if depth == 0 && head[i..open].trim().is_empty() => {}
+
+            _ => {}
+        }
+    }
+
+    let call = call?;
+    let name_end = head[..call].trim_end();
+    let name_start = name_end
+        .rfind(|c: char| !(is_word(c) || c == '.'))
+        .map_or(0, |i| i + 1);
+    let name = &name_end[name_start..];
+
+    if name.is_empty() {
+        return None;
+    }
+
+    let bare = name.rsplit('.').next()?;
+    let header = format!("function {name}(");
+    let at = src
+        .find(&header)
+        .or_else(|| src.find(&format!("function {bare}(")))?;
+    let params_at = at + src[at..].find('(')? + 1;
+    let params = &src[params_at..params_at + super::scope::group_end(&src[params_at..])];
+    let param = super::scope::split_top(params).into_iter().nth(index)?;
+    let (_, ty) = param.split_once(':')?;
+
+    Some(type_text(ty))
 }
 
 /// The text with a trailing `<<...>>` group cut off, so
@@ -249,6 +353,37 @@ fn without_type_arguments(before: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A table argument fills the parameter its call declares, and a
+    /// returned table the function's declared return.
+    #[test]
+    fn a_literal_argument_and_a_returned_literal_take_their_declared_type() {
+        let src = "local function feed(n: number, p: Pet): Pet\n    return p\nend\nfeed(1, { \nlocal function make(): Pet\n    return { \nend\n";
+        let arg = src.find("1, { ").unwrap() + 5;
+        let ret = src.rfind("return { ").unwrap() + 9;
+
+        assert_eq!(
+            struct_literal_target(src, arg),
+            Some(("Pet".to_string(), false))
+        );
+        assert_eq!(
+            struct_literal_target(src, ret),
+            Some(("Pet".to_string(), false))
+        );
+        // A table for a parameter of no named type fills nothing.
+        let plain = "local function f(t: { any })\nend\nf({ ";
+        assert_eq!(struct_literal_target(plain, plain.len()), None);
+    }
+
+    /// A field's attributes stand in front of its name; the field is
+    /// still one a literal fills.
+    #[test]
+    fn a_field_with_attributes_is_still_a_field() {
+        let hover = "```alloy\nstruct Shot\n  @f32 x: number\n  @u8 power: number\n  @skip note: string\n  @rename(\"t\") tag: string\n  label: string\nend\n```";
+        let names: Vec<String> = record_entries(hover).into_iter().map(|f| f.name).collect();
+
+        assert_eq!(names, ["x", "power", "note", "tag", "label"]);
+    }
 
     /// `new Pair<<number>> { |`: the head names the struct, and the
     /// type arguments stand between it and the table.

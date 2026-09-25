@@ -265,10 +265,22 @@ impl Server {
                 }
             }
 
-            Target::Field { owner, name } => match st.field_edits(&owner, &name, &new_name) {
-                Some(edit) => edit,
+            // The child reads every value of the struct, typed by the
+            // checker, so it answers from the field list the artifact
+            // writes; the mend adds the declaration and the keys.
+            Target::Field { owner, name } => match shadow_field(doc, &owner, &name) {
+                Some(at) => {
+                    drop(st);
+                    self.forward_request_at(message.clone(), Some("textDocument/rename"), at);
 
-                None => return false,
+                    return true;
+                }
+
+                None => match st.field_edits(uri, &owner, &name, &new_name) {
+                    Some(edit) => edit,
+
+                    None => return false,
+                },
             },
 
             Target::Nothing => json!({ "changes": {} }),
@@ -353,10 +365,19 @@ impl Server {
                 }
             }
 
-            Target::Field { owner, name } => match st.field_edits(&owner, &name, &name) {
-                Some(edit) => locations_of(&edit),
+            Target::Field { owner, name } => match shadow_field(doc, &owner, &name) {
+                Some(at) => {
+                    drop(st);
+                    self.forward_request_at(message.clone(), Some("textDocument/references"), at);
 
-                None => return false,
+                    return true;
+                }
+
+                None => match st.field_edits(uri, &owner, &name, &name) {
+                    Some(edit) => locations_of(&edit),
+
+                    None => return false,
+                },
             },
 
             Target::Nothing => Vec::new(),
@@ -429,6 +450,22 @@ impl Server {
             return true;
         }
 
+        // `Light.Active` and `B.Status.Active`: the path names the enum,
+        // and another module may declare one by the same name.
+        if let Some((file, owner)) = st.variant_home(uri, offset)
+            && let Some(text) = st.module_text(&file)
+            && let Some((_, _, (a, b))) = enum_variants(&text)
+                .into_iter()
+                .find(|(o, v, _)| *o == owner && *v == doc.source[word_start..word_end])
+        {
+            let range = range_value(position_of(&text, a), position_of(&text, b));
+            let result = json!([{ "uri": path_to_uri(&file), "range": range }]);
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
         // `import { version } from "./m"`, and every use of `version`
         // under it: the module declares the name, and the emit binds it
         // in generated text the child cannot point at.
@@ -477,6 +514,15 @@ impl Server {
         // foreign target changes nothing about that.
         if raw_before.ends_with(':')
             && let Some(result) = st.impl_method_definition(uri, word)
+        {
+            drop(st);
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+            return true;
+        }
+
+        if raw_before.trim_end().ends_with('.')
+            && let Some(result) = st.field_definition(uri, offset)
         {
             drop(st);
             self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
@@ -540,6 +586,11 @@ impl Server {
         // `Size` is a declaration of its own and says nothing about the
         // binding the caret sits on, so the child answers for this one.
         let bound_here = binds_a_value(&doc.bindings, &key);
+        // `Phase.Lobby` under `import { Phase }`: the module the import
+        // reads declares it. Another file may keep a `Phase` of its own.
+        let home = st
+            .import_home(uri, key.split('.').next().unwrap_or(&key))
+            .map(|file| path_to_uri(&file));
         let found = doc
             .decls
             .iter()
@@ -547,12 +598,17 @@ impl Server {
             .map(|d| (uri.to_string(), doc, d))
             .or_else(|| {
                 (!bound_here).then(|| {
-                    st.docs.iter().find_map(|(u, d)| {
-                        d.decls
-                            .iter()
-                            .find(|x| x.name == key)
-                            .map(|x| (u.clone(), d, x))
-                    })
+                    let holds = |d: &Doc| d.decls.iter().any(|x| x.name == key);
+                    let (u, d) = home
+                        .as_ref()
+                        .and_then(|h| st.docs.get_key_value(h))
+                        .filter(|(_, d)| holds(d))
+                        .or_else(|| st.docs.iter().find(|(_, d)| holds(d)))?;
+
+                    d.decls
+                        .iter()
+                        .find(|x| x.name == key)
+                        .map(|x| (u.clone(), d, x))
                 })?
             });
 
@@ -888,7 +944,7 @@ impl State {
                 _ => false,
             });
 
-        for (a, b) in member_uses(&text, std::slice::from_ref(&owner.to_string()), name)
+        for (a, b) in variant_uses(&text, std::slice::from_ref(&owner.to_string()), name)
             .into_iter()
             .chain(pattern_uses(&text, name, unit))
         {
@@ -911,14 +967,13 @@ impl State {
                 .map(|it| it.bound)
                 .collect();
 
-            // `import * as M`: the enum reads `M.Shape`, so the word
-            // before the variant is still the enum's own name.
-            if module_bindings(&d.source)
-                .iter()
-                .any(|(_, spec)| reaches(spec))
-            {
-                holders.push(owner.to_string());
-            }
+            // `import * as M`: the enum reads `M.Shape`.
+            holders.extend(
+                module_bindings(&d.source)
+                    .into_iter()
+                    .filter(|(_, spec)| reaches(spec))
+                    .map(|(bound, _)| format!("{bound}.{owner}")),
+            );
 
             // A `case Some(v)` names the variant bare; the file reaches
             // the enum when it binds the enum's name.
@@ -927,7 +982,7 @@ impl State {
 
                 false => pattern_uses(&d.source, name, unit),
             };
-            let mut edits: Vec<Value> = member_uses(&d.source, &holders, name)
+            let mut edits: Vec<Value> = variant_uses(&d.source, &holders, name)
                 .into_iter()
                 .chain(patterns)
                 .map(|(a, b)| text_edit(&d.source, a, b, new_name))
@@ -1027,6 +1082,18 @@ impl State {
         {
             let (s, e) = keywords::word_range(source, offset);
             let word = source[s..e].to_string();
+
+            // A variant after the dot of `Shape.Circle`, `Light.Active`,
+            // or `B.Status.Active`: the path names the enum, and the
+            // module walks below would read the path as a module member.
+            if let Some((file, owner)) = self.variant_home(uri, offset) {
+                return Some(Target::Variant {
+                    file,
+                    owner,
+                    name: word,
+                });
+            }
+
             // A trait's method: the trait declares it once and every
             // `impl` writes it again, so the three places are one name.
             if let Some(target) = self.method_target(doc, offset) {
@@ -1089,17 +1156,25 @@ impl State {
             }
 
             // A variant of an enum this file reaches: the one the
-            // caret sits on in the enum body, or the one after the dot
-            // of `Shape.Circle`.
+            // caret sits on in the enum body, or one a pattern writes
+            // bare.
             if let Some(owner) = self.variant_owner(uri, &word) {
-                let declares = self.docs.iter().find_map(|(u, d)| {
-                    let holds = d
-                        .shapes
+                let holds = |d: &Doc| {
+                    d.shapes
                         .iter()
-                        .any(|s| s.name() == owner && names_a_variant(s, &word));
-
-                    holds.then(|| uri_to_path(u)).flatten()
-                });
+                        .any(|s| s.name() == owner && names_a_variant(s, &word))
+                };
+                // The enum this file declares, else the one its import
+                // reads: another module may keep an enum of the same
+                // name to itself.
+                let declares = holds(doc)
+                    .then(|| file.clone())
+                    .or_else(|| self.import_home(uri, &owner))
+                    .or_else(|| {
+                        self.docs
+                            .iter()
+                            .find_map(|(u, d)| holds(d).then(|| uri_to_path(u)).flatten())
+                    });
 
                 if let Some(file) = declares {
                     return Some(Target::Variant {
@@ -1401,6 +1476,132 @@ impl State {
             })
     }
 
+    /*
+    The struct a field at the caret belongs to, and the file that
+    declares it.
+
+    The file's own index answers for a receiver it can type: an
+    annotation, a `new`, a declared return. A receiver the checker
+    typed alone, `stock:get("x")` or a loop variable, still has an
+    answer: the child's sites for the field. One of them lands on the
+    struct's field list, which the emit writes as generated text on the
+    struct's `end` line, and another may sit on a receiver the index
+    can type.
+    */
+    fn field_target(
+        &self,
+        uri: &str,
+        start: usize,
+        end: usize,
+        child: &Value,
+    ) -> Option<(String, Option<PathBuf>)> {
+        let doc = self.docs.get(uri)?;
+        let name = &doc.source[start..end];
+        // An owner counts when a struct of the name declares the field:
+        // the index reads `stock:get("x")` as a value of `stock`.
+        let declares = |owner: &str, home: &Option<PathBuf>| match home {
+            Some(file) => self
+                .module_text(file)
+                .is_some_and(|text| field_declaration(&text, owner, name).is_some()),
+
+            None => self
+                .docs
+                .values()
+                .any(|d| field_declaration(&d.source, owner, name).is_some()),
+        };
+
+        if let Some(owner) = self.field_owner(doc, start, end) {
+            let home = self.struct_home(uri, &owner);
+
+            if declares(&owner, &home) {
+                return Some((owner, home));
+            }
+        }
+
+        if !doc.source[..start].trim_end().ends_with('.') {
+            return None;
+        }
+
+        site_list(child).into_iter().find_map(|(u, (l, c))| {
+            let path = uri_to_path(&u)?;
+            let text = self.module_text(&path)?;
+
+            if let Some((owner, _)) = struct_field_at_line(&text, l, name) {
+                return Some((owner, Some(path)));
+            }
+
+            let d = self.docs.get(&u)?;
+            let at = offset_of(&d.source, l, c)?;
+            let (s, e) = keywords::word_range(&d.source, at);
+            let owner = self.field_owner(d, s, e)?;
+            let home = self.struct_home(&u, &owner);
+
+            declares(&owner, &home).then_some((owner, home))
+        })
+    }
+
+    /// A field read whose receiver the checker typed: the child points
+    /// at the struct's `end` line, where the emit writes the field list.
+    /// The field's own line in the struct body is what the reader means.
+    pub(crate) fn mend_field_definition(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(Caret { start, end, .. }) = Caret::at(&doc.source, line, character) else {
+            return;
+        };
+
+        if !doc.source[..start].trim_end().ends_with('.') {
+            return;
+        }
+
+        let name = &doc.source[start..end];
+        let Some(list) = result.as_array_mut() else {
+            return;
+        };
+
+        for loc in list.iter_mut() {
+            let uri_key = if loc.get("targetUri").is_some() {
+                "targetUri"
+            } else {
+                "uri"
+            };
+            let range_key = if loc.get("targetRange").is_some() {
+                "targetRange"
+            } else {
+                "range"
+            };
+            let Some(path) = loc
+                .get(uri_key)
+                .and_then(Value::as_str)
+                .and_then(uri_to_path)
+            else {
+                continue;
+            };
+            let Some(((l, _), _)) = loc.get(range_key).and_then(range_of) else {
+                continue;
+            };
+            let Some(text) = self.module_text(&path) else {
+                continue;
+            };
+
+            if let Some((_, (a, b))) = struct_field_at_line(&text, l, name) {
+                let range = range_value(position_of(&text, a), position_of(&text, b));
+                loc[range_key] = range.clone();
+
+                if loc.get("targetSelectionRange").is_some() {
+                    loc["targetSelectionRange"] = range;
+                }
+            }
+        }
+    }
+
     /// The two places a rename of a struct field reaches and the child
     /// does not. `new Shape { x = 1 }` lowers to a table the emit hands
     /// to a constructor, where the child reads a plain record and ties
@@ -1416,6 +1617,7 @@ impl State {
         uri: &str,
         line: u32,
         character: u32,
+        child: &Value,
         result: &mut Value,
     ) {
         let changes = result.pointer("/changes").and_then(Value::as_object);
@@ -1436,7 +1638,7 @@ impl State {
             return;
         };
         let name = doc.source[start..end].to_string();
-        let Some(owner) = self.field_owner(doc, start, end) else {
+        let Some((owner, home)) = self.field_target(uri, start, end, child) else {
             return;
         };
         let Some(changes) = result
@@ -1447,13 +1649,13 @@ impl State {
         };
 
         for (u, d) in &self.docs {
-            let mut mine: Vec<Value> = field_sites(self, d, &owner, &name)
+            let mut mine: Vec<Value> = field_sites(self, u, home.as_deref(), &owner, &name)
                 .into_iter()
                 .map(|(s, e)| text_edit(&d.source, s, e, &new_name))
                 .collect();
 
             // A parameter pattern of the type reads the field too.
-            if super::patterns::reaches_struct(d, &owner) {
+            if self.struct_home(u, &owner) == home {
                 mine.extend(
                     super::patterns::pattern_field_edits(&d.source, &owner, &name, &new_name)
                         .into_iter()
@@ -1569,6 +1771,7 @@ impl State {
         uri: &str,
         line: u32,
         character: u32,
+        child: &Value,
         result: &mut Value,
     ) {
         let Some(doc) = self.docs.get(uri) else {
@@ -1578,7 +1781,7 @@ impl State {
             return;
         };
         let name = doc.source[start..end].to_string();
-        let Some(owner) = self.field_owner(doc, start, end) else {
+        let Some((owner, home)) = self.field_target(uri, start, end, child) else {
             return;
         };
         let Some(list) = result.as_array_mut() else {
@@ -1594,7 +1797,7 @@ impl State {
         });
 
         for (u, d) in &self.docs {
-            for (s, e) in field_sites(self, d, &owner, &name) {
+            for (s, e) in field_sites(self, u, home.as_deref(), &owner, &name) {
                 let loc = json!({
                     "uri": u,
                     "range": range_value(position_of(&d.source, s), position_of(&d.source, e)),
@@ -2002,17 +2205,24 @@ impl State {
     /// caret sits where the struct body declares the field, and the
     /// child answers nothing at all there, so this walk writes every
     /// place by itself.
-    pub(crate) fn field_edits(&self, owner: &str, name: &str, new_name: &str) -> Option<Value> {
+    pub(crate) fn field_edits(
+        &self,
+        uri: &str,
+        owner: &str,
+        name: &str,
+        new_name: &str,
+    ) -> Option<Value> {
         let mut changes: Map<String, Value> = Map::new();
+        let home = self.struct_home(uri, owner);
 
         for (u, d) in &self.docs {
             // A parameter pattern of the struct reads the field too.
-            let patterns = match super::patterns::reaches_struct(d, owner) {
+            let patterns = match self.struct_home(u, owner) == home {
                 true => super::patterns::pattern_field_edits(&d.source, owner, name, new_name),
 
                 false => Vec::new(),
             };
-            let edits: Vec<Value> = field_sites(self, d, owner, name)
+            let edits: Vec<Value> = field_sites(self, u, home.as_deref(), owner, name)
                 .into_iter()
                 .map(|(s, e)| text_edit(&d.source, s, e, new_name))
                 .chain(
@@ -2093,9 +2303,151 @@ impl State {
         })
     }
 
-    /// The file an entry's module spec names.
+    /// `p.b`, where `p` holds a struct: the line of the body that
+    /// declares `b`. The emit writes the field list in generated text,
+    /// so the child lands on the struct's `end`, and the fallback by
+    /// name finds a `b` that another file exports.
+    pub(crate) fn field_definition(&self, uri: &str, offset: usize) -> Option<Value> {
+        let doc = self.docs.get(uri)?;
+        let (start, end) = keywords::word_range(&doc.source, offset);
+        let name = &doc.source[start..end];
+        let owner = used_field_owner(self, doc, start)?;
+        let file = self.struct_home(uri, &owner)?;
+        let text = self.module_text(&file)?;
+        let (a, b) = field_declaration(&text, &owner, name)?;
+        let range = range_value(position_of(&text, a), position_of(&text, b));
+
+        Some(json!([{ "uri": path_to_uri(&file), "range": range }]))
+    }
+
+    /*
+    The enum a dotted variant at the caret names: the file that declares
+    it and the enum's name there.
+
+    The path in front of the variant says which enum: `Status.Active`
+    under the file's own enum or its import, `Light.Active` under
+    `import { Status as Light }`, and `B.Status.Active` under `import *
+    as B`. Two modules may each declare a `Status`, so the name alone
+    does not.
+    */
+    pub(crate) fn variant_home(&self, uri: &str, offset: usize) -> Option<(PathBuf, String)> {
+        let doc = self.docs.get(uri)?;
+        let lexed = alloy_syntax::lexer::lex(&doc.source).ok()?;
+        let toks = &lexed.toks;
+        // The caret at the head of the word also touches the `.` before.
+        let at = toks.iter().position(|t| {
+            t.kind == TokKind::Ident && (t.start as usize..=t.end as usize).contains(&offset)
+        })?;
+        let variant = toks[at].text(&doc.source);
+        let path = path_before(&doc.source, toks, at)?;
+        let (file, owner) = match path.split_once('.') {
+            None if doc.shapes.iter().any(|s| s.name() == path) => (uri_to_path(uri)?, path),
+
+            None => {
+                let entry = import_entries(&doc.source)
+                    .into_iter()
+                    .find(|e| e.bound == path)?;
+
+                (self.entry_module(uri, &entry)?, entry.name)
+            }
+
+            Some((module, owner)) => {
+                let spec = module_bindings(&doc.source)
+                    .into_iter()
+                    .find(|(bound, _)| bound == module)
+                    .map(|(_, spec)| spec)?;
+
+                (self.spec_module(uri, &spec)?, owner.to_string())
+            }
+        };
+        let text = self.module_text(&file)?;
+
+        enum_variants(&text)
+            .iter()
+            .any(|(o, v, _)| *o == owner && v == variant)
+            .then_some((file, owner))
+    }
+
+    /// The module a file's import list reads a name from: `./types`
+    /// for `Phase` under `import { Phase } from "./types"`.
+    pub(crate) fn import_home(&self, uri: &str, name: &str) -> Option<PathBuf> {
+        let doc = self.docs.get(uri)?;
+
+        import_entries(&doc.source)
+            .into_iter()
+            .find(|it| it.bound == name || it.name == name)
+            .and_then(|it| self.entry_module(uri, &it))
+    }
+
+    /// The file an entry's module spec names. A module the editor holds
+    /// open answers before the disk has it.
     fn entry_module(&self, uri: &str, entry: &ImportEntry) -> Option<PathBuf> {
-        imports::module_file(&imports::module_path(&self.resolve_spec(uri, &entry.spec)?))
+        self.spec_module(uri, &entry.spec)
+    }
+
+    /// The file a module spec names, on disk or open in the editor.
+    fn spec_module(&self, uri: &str, spec: &str) -> Option<PathBuf> {
+        let target = imports::module_path(&self.resolve_spec(uri, spec)?);
+
+        imports::module_file(&target).or_else(|| {
+            ["aly", "alx"]
+                .iter()
+                .map(|ext| PathBuf::from(format!("{}.{ext}", target.display())))
+                .find(|p| self.docs.contains_key(&path_to_uri(p)))
+        })
+    }
+
+    /*
+    The file that declares the struct a file means by `owner`.
+
+    Two modules may each declare a `Door`, so a field rename keys by the
+    declaring file and not by the name. A file means its own type of the
+    name first, then the one its import list names. A file that names no
+    such type may still read a field through a value, `make_item()`, and
+    then the struct comes from a module it imports. A project with one
+    struct of the name answers that one.
+    */
+    pub(crate) fn struct_home(&self, uri: &str, owner: &str) -> Option<PathBuf> {
+        let doc = self.docs.get(uri)?;
+        let named = |n: &str| n == owner || n.rsplit('.').next() == Some(owner);
+
+        if doc.decls.iter().any(|d| named(&d.name)) {
+            return uri_to_path(uri);
+        }
+
+        if let Some(home) = self.import_home(uri, owner) {
+            return Some(home);
+        }
+
+        let declares = |file: &Path| {
+            self.module_text(file)
+                .is_some_and(|text| declares_a_type(&text, owner))
+        };
+        let imported = import_entries(&doc.source)
+            .into_iter()
+            .filter_map(|e| self.entry_module(uri, &e))
+            .chain(
+                module_bindings(&doc.source)
+                    .into_iter()
+                    .filter_map(|(_, spec)| self.spec_module(uri, &spec)),
+            )
+            .find(|file| declares(file));
+
+        if imported.is_some() {
+            return imported;
+        }
+
+        let mut declaring = self.docs.iter().filter(|(_, d)| {
+            d.decls
+                .iter()
+                .any(|x| named(&x.name) && x.hover.contains("struct "))
+        });
+
+        match (declaring.next(), declaring.next()) {
+            (Some((u, _)), None) => uri_to_path(u),
+
+            _ => None,
+        }
     }
 
     /// A module's text: the open document first, then the disk.
@@ -2656,9 +3008,21 @@ fn bound_at(src: &str, name: &str) -> Option<(String, usize)> {
 /// in the struct body, each key of a constructor, and each read off a
 /// receiver of that type. A receiver whose type the source does not
 /// say names no struct, so it stays as it is.
-fn field_sites(st: &State, doc: &Doc, owner: &str, name: &str) -> Vec<(usize, usize)> {
-    // A file with a type of its own under the name holds another field.
-    if !super::patterns::reaches_struct(doc, owner) {
+fn field_sites(
+    st: &State,
+    uri: &str,
+    home: Option<&Path>,
+    owner: &str,
+    name: &str,
+) -> Vec<(usize, usize)> {
+    let Some(doc) = st.docs.get(uri) else {
+        return Vec::new();
+    };
+
+    // Another module may declare a struct of the same name, and a file
+    // with a type of its own under the name holds another field. The
+    // file reaches the struct the rename names, or it holds no site.
+    if st.struct_home(uri, owner).as_deref() != home {
         return Vec::new();
     }
 
@@ -3551,6 +3915,141 @@ fn pattern_uses(src: &str, name: &str, unit: bool) -> Vec<(usize, usize)> {
 }
 
 /// Every `Holder.name` in a source, as the byte range of `name`.
+/// Every site of a references list or a rename answer, as its URI and
+/// its start.
+fn site_list(answer: &Value) -> Vec<(String, (u32, u32))> {
+    let start = |v: &Value| v.get("range").and_then(range_of).map(|(s, _)| s);
+    let mut out: Vec<(String, (u32, u32))> = Vec::new();
+
+    if let Some(list) = answer.as_array() {
+        for loc in list {
+            if let (Some(u), Some(at)) = (loc.get("uri").and_then(Value::as_str), start(loc)) {
+                out.push((u.to_string(), at));
+            }
+        }
+    }
+
+    if let Some(changes) = answer.get("changes").and_then(Value::as_object) {
+        for (u, edits) in changes {
+            for e in edits.as_array().into_iter().flatten() {
+                if let Some(at) = start(e) {
+                    out.push((u.clone(), at));
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// The struct whose body holds `line`, from its header to its `end`,
+/// and the span of `field` in it. The emit writes a struct's field list
+/// as generated text on its `end` line, so a site the child gives for a
+/// field lands there.
+pub(crate) fn struct_field_at_line(
+    text: &str,
+    line: u32,
+    field: &str,
+) -> Option<(String, (usize, usize))> {
+    let lines: Vec<&str> = text.lines().collect();
+    let line = (line as usize).min(lines.len().checked_sub(1)?);
+
+    for at in (0..=line).rev() {
+        let head = lines[at].trim_start();
+        let head = head.strip_prefix("export ").unwrap_or(head);
+
+        if let Some(rest) = head.strip_prefix("struct ") {
+            let owner: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let close = (at + 1..lines.len()).find(|k| lines[*k].trim() == "end")?;
+
+            return (close >= line)
+                .then(|| field_declaration(text, &owner, field).map(|span| (owner, span)))
+                .flatten();
+        }
+
+        // The `end` of another block above the line: the line sits
+        // outside every struct.
+        if at < line && lines[at].trim() == "end" {
+            return None;
+        }
+    }
+
+    None
+}
+
+/// Where the check artifact writes `field` in the type of `owner`: the
+/// `type Owner = typeof(setmetatable({} :: { ... }, Owner))` the emit
+/// puts on the struct's `end` line. The child types the field there,
+/// so its references and its rename start from that position.
+pub(crate) fn shadow_field(doc: &Doc, owner: &str, field: &str) -> Option<(u32, u32)> {
+    let shadow = &doc.shadow;
+    let head = format!("type {owner}");
+
+    shadow.match_indices(&head).find_map(|(i, _)| {
+        let rest = &shadow[i + head.len()..];
+        let rest = match rest.strip_prefix('<') {
+            Some(generics) => &generics[generics.find('>')? + 1..],
+
+            None => rest,
+        };
+        let body = rest.strip_prefix(" = typeof(setmetatable({} :: {")?;
+        let body_at = shadow.len() - body.len();
+        let close = super::hover::group_len(&shadow[body_at - 1..], '{', '}')?;
+        let inside = &shadow[body_at..body_at - 1 + close];
+        let key = format!("{field}:");
+        let at = inside.match_indices(&key).find_map(|(k, _)| {
+            let before = inside[..k].chars().next_back();
+
+            before
+                .is_none_or(|c| matches!(c, ' ' | ',' | '{'))
+                .then_some(k)
+        })?;
+
+        Some(position_of(shadow, body_at + at))
+    })
+}
+
+/// The dotted path that stands in front of token `at`, the `.` before
+/// it included: `B.Status` for the `Active` of `B.Status.Active`.
+fn path_before(src: &str, toks: &[alloy_syntax::lexer::Tok], at: usize) -> Option<String> {
+    let mut k = at.checked_sub(2)?;
+
+    if toks[at - 1].text(src) != "." || toks[k].kind != TokKind::Ident {
+        return None;
+    }
+
+    let mut path = toks[k].text(src).to_string();
+
+    while k >= 2 && toks[k - 1].text(src) == "." && toks[k - 2].kind == TokKind::Ident {
+        k -= 2;
+        path = format!("{}.{path}", toks[k].text(src));
+    }
+
+    Some(path)
+}
+
+/// Each `Status.Active` a source writes, where the whole path in front
+/// of the variant is one of the holders: `Status` under an import,
+/// `B.Status` under `import * as B`. `X.Status.Active` names the enum of
+/// another module, so a holder matches the path whole.
+fn variant_uses(src: &str, holders: &[String], name: &str) -> Vec<(usize, usize)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let toks = &lexed.toks;
+
+    toks.iter()
+        .enumerate()
+        .filter(|(i, t)| {
+            t.text(src) == name && path_before(src, toks, *i).is_some_and(|p| holders.contains(&p))
+        })
+        .map(|(_, t)| (t.start as usize, t.end as usize))
+        .collect()
+}
+
 fn member_uses(src: &str, holders: &[String], name: &str) -> Vec<(usize, usize)> {
     let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
         return Vec::new();

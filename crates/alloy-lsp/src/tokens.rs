@@ -250,12 +250,29 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
             continue;
         }
 
+        // `local trait = 1`: a contextual word away from its construct
+        // is a plain name. The child paints no local, so without a token
+        // the grammar paints the word as the keyword it spells. A member,
+        // `Instance.new`, and a declared name keep the walks below.
+        let after = |w: &[&str]| i > 0 && w.contains(&toks[i - 1].text(src));
+
+        if alloy_syntax::contextual::is_contextual(text)
+            && !after(&[".", ":", "function"])
+            && !alloy_syntax::contextual::keyword_at(src, toks, i)
+        {
+            push(tok.start, tok.end, "variable", 0);
+            i += 1;
+
+            continue;
+        }
+
         // The head of a `macro` or an `attribute` declaration. The emit
         // keeps neither, so the child draws nothing on the line: the
         // name reads as its call site does, and the list holds
         // parameters.
         if matches!(text, "macro" | "attribute")
             && toks.get(i + 1).is_some_and(|n| n.kind == TokKind::Ident)
+            && alloy_syntax::contextual::keyword_at(src, toks, i)
         {
             let name = toks[i + 1];
             push(
@@ -515,6 +532,49 @@ mod tests {
         assert_eq!(at("return pt.x", "pt"), None, "{drawn:?}");
     }
 
+    /// A contextual word used as a name draws as a variable, so the
+    /// grammar's keyword color does not show. The same word as its
+    /// construct, and a member after a `.`, draw nothing here.
+    #[test]
+    fn a_contextual_word_as_a_name_draws_as_a_variable() {
+        const SRC: &str = "local trait = 1\nlocal remote = 2\nprint(trait, remote)\ntrait Show\n    function show(self): string\nend\nlocal p = Instance.new(\"Part\")\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let variable = type_index(&types, "variable").expect("the type");
+        let drawn: Vec<(u32, u32)> = alloy_tokens(&doc, &types, &[])
+            .into_iter()
+            .filter(|t| t.3 == variable)
+            .map(|t| (t.0, t.1))
+            .collect();
+
+        assert_eq!(drawn, [(0, 6), (1, 6), (2, 6), (2, 13)]);
+    }
+
+    /// `match macro with`: the word is the value the match reads, so the
+    /// `with` after it names no macro.
+    #[test]
+    fn a_contextual_scrutinee_draws_no_declaration() {
+        const SRC: &str = "local macro = 3\nmatch macro with\n    case 3 then print(macro)\n    default print(0)\nend\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let kind = type_index(&types, "macro").expect("the type");
+        let drawn = alloy_tokens(&doc, &types, &[]);
+
+        assert!(!drawn.iter().any(|t| t.3 == kind), "{drawn:?}");
+    }
+
     /// The emit gives a namespace member one flat name, `Ns_T`, so the
     /// child paints nothing on the word the source wrote for it. The
     /// declaration says what the member is.
@@ -707,11 +767,18 @@ mod tests {
         assert!(at("macro", "double("), "{drawn:?}");
         assert!(at("parameter", "x) x"), "{drawn:?}");
 
-        // `local macro = 1` declares nothing: the word is a name there,
-        // and the child reads it.
+        // `local macro = 1` declares nothing: the word is a name there.
+        // The child paints no local, so the name draws as a variable.
         let (line, _) = position_of(SRC, SRC.find("local macro").expect("the local"));
+        let variable = type_index(&types, "variable").expect("the type");
 
-        assert!(!drawn.iter().any(|t| t.0 == line), "{drawn:?}");
+        assert!(
+            drawn
+                .iter()
+                .filter(|t| t.0 == line)
+                .all(|t| t.3 == variable),
+            "{drawn:?}"
+        );
     }
 
     /// The contract body of an `attribute` declaration carries its own

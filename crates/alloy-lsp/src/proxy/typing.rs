@@ -179,18 +179,13 @@ impl State {
 }
 
 /// The layout of one open document, by the formatter `alloy fmt` reads
-/// for its name: markup lays out by its own rules, so an `.alx` file
-/// takes the markup pass.
+/// for its name.
 pub(crate) fn format_source(
     uri: &str,
     source: &str,
     options: &alloy::config::FmtConfig,
 ) -> Result<String, String> {
-    match uri.ends_with(".alx") {
-        true => alloy::fmt::alx::format_alx_file(source, options),
-
-        false => alloy::fmt::format_file(source, options),
-    }
+    alloy::fmt::format_named(uri, source, options)
 }
 
 /// Whether an `end` already stands under the opener: the first line
@@ -259,11 +254,22 @@ pub(crate) fn append_initializer(
                 && let Some(open) = rhs[..line_end].find('{')
                 && let Some(close) = matching_brace(rhs, open)
             {
-                let block = rhs[open..=close].trim();
+                // The value joins the declaration line, the way Rust
+                // shows a `const`: `local hits: Counter = new Counter {
+                // name = "hits" }`. A long one keeps its head alone.
+                let before = &doc.source[line_start..at];
+                let indent = &before[..before.len() - before.trim_start().len()];
+                let lines: Vec<&str> = rhs[..=close]
+                    .lines()
+                    .map(|l| l.strip_prefix(indent).unwrap_or(l))
+                    .collect();
+                let init = match lines.len() > 6 {
+                    true => format!("{} ... }}", rhs[..=open].trim_end()),
 
-                return Some(format!(
-                    "{value}\n\nInitialized with\n```alloy\n{block}\n```"
-                ));
+                    false => lines.join("\n"),
+                };
+
+                return Some(join_initializer(value, word, &init));
             }
 
             return None;
@@ -273,6 +279,30 @@ pub(crate) fn append_initializer(
     }
 
     None
+}
+
+/// The hover with ` = init` after the declaration line of its code
+/// block, or a code block of its own when the hover names no `local`.
+fn join_initializer(value: &str, word: &str, init: &str) -> String {
+    let decl = value.find("```").and_then(|fence| {
+        let start = fence + value[fence..].find('\n')? + 1;
+        let end = start + value[start..].find('\n')?;
+        let line = value[start..end].trim_start();
+        let declares = ["local ", "const ", "export local ", "export const "]
+            .iter()
+            .any(|k| {
+                line.strip_prefix(k)
+                    .is_some_and(|rest| rest.starts_with(word))
+            });
+
+        declares.then_some(end)
+    });
+
+    match decl {
+        Some(end) => format!("{} = {init}{}", &value[..end], &value[end..]),
+
+        None => format!("{value}\n\n```alloy\nlocal {word} = {init}\n```"),
+    }
 }
 
 /// Whether a stretch of source binds `name` again: a function that

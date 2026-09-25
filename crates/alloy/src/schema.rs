@@ -22,6 +22,8 @@ pub enum Ty {
     StrList,
     /// A string from a fixed set.
     Choice(&'static [&'static str]),
+    /// A string from a fixed set, or a list of names `suggest` offers.
+    ChoiceOrList(&'static [&'static str]),
 }
 
 /// One key of a table.
@@ -66,6 +68,32 @@ const fn unset(name: &'static str, ty: Ty, doc: &'static str) -> Key {
     }
 }
 
+/// The naming styles, as `[lint.naming]` spells them.
+const STYLES: &[&str] = &[
+    "snake_case",
+    "camelCase",
+    "PascalCase",
+    "SCREAMING_SNAKE_CASE",
+    "any",
+];
+const SNAKE: &str = r#""snake_case""#;
+const PASCAL: &str = r#""PascalCase""#;
+
+fn style_names() -> Vec<String> {
+    STYLES.iter().map(|s| s.to_string()).collect()
+}
+
+/// One key of `[lint.naming]`: a style, or a list of them.
+const fn style_key(name: &'static str, default: &'static str, doc: &'static str) -> Key {
+    Key {
+        name,
+        ty: Ty::ChoiceOrList(STYLES),
+        default: Some(default),
+        doc,
+        suggest: Some(style_names),
+    }
+}
+
 const fn lint_list(name: &'static str, doc: &'static str) -> Key {
     Key {
         name,
@@ -74,6 +102,14 @@ const fn lint_list(name: &'static str, doc: &'static str) -> Key {
         doc,
         suggest: Some(lint_names),
     }
+}
+
+/// Every std name, as `[std] globals` takes them.
+fn std_names() -> Vec<String> {
+    crate::std_names::every_name()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// The groups, then every lint, as a `[lint]` list accepts them.
@@ -354,6 +390,38 @@ pub const TABLES: &[Table] = &[
         open: Some(rule_value),
     },
     Table {
+        name: "lint.naming",
+        doc: "The case style of each kind of name, for the `naming_convention` lint. A value is `snake_case`, `camelCase`, `PascalCase`, `SCREAMING_SNAKE_CASE`, `any`, or a list of them. A name passes when it fits one style of its list, and `alloy flux --fix` and `alloy fmt` rename it to the first. `alloy doc naming-conventions` explains it.",
+        keys: &[
+            style_key("variable", SNAKE, "A local, and a loop variable."),
+            style_key(
+                "const",
+                r#"["snake_case", "SCREAMING_SNAKE_CASE"]"#,
+                "A `const` binding. Alloy marks any binding that the file never assigns again as `const`, so both cases pass by default.",
+            ),
+            style_key("function", SNAKE, "A free function and a `local function`."),
+            style_key(
+                "component",
+                PASCAL,
+                "A function of an `.alx` file that returns markup, or that a tag names, `<Row />`.",
+            ),
+            style_key("method", SNAKE, "A function in an `impl` or a `trait`."),
+            style_key("parameter", SNAKE, "A parameter of a function."),
+            style_key("field", SNAKE, "A field of a struct or an interface."),
+            style_key("struct", PASCAL, "A struct."),
+            style_key("enum", PASCAL, "An enum."),
+            style_key("variant", PASCAL, "A variant of an enum."),
+            style_key("trait", PASCAL, "A trait."),
+            style_key("interface", PASCAL, "An interface."),
+            style_key("type", PASCAL, "A type alias."),
+            style_key("namespace", PASCAL, "A namespace."),
+            style_key("attribute", SNAKE, "An attribute declaration."),
+            style_key("macro", SNAKE, "A macro."),
+            style_key("remote", PASCAL, "A remote."),
+        ],
+        open: None,
+    },
+    Table {
         name: "flux",
         doc: "What `alloy flux` runs beyond the lints, and the limits of the complexity lints. The levels of the lints stay in `[lint]`. `alloy doc flux` explains it.",
         keys: &[
@@ -592,10 +660,22 @@ pub const TABLES: &[Table] = &[
                 "Alloy's own: an `import { }` or `export { }` list with more than one name breaks one name per line. Off, a trailing comma in the list asks for the same.",
             ),
             key(
+                "prefer_const",
+                BOOL,
+                "true",
+                "Alloy's own: a `local` that nothing assigns again becomes a `const`, as the `prefer_const` lint asks. `recommended = false` leaves it off.",
+            ),
+            key(
                 "exclude",
                 Ty::StrList,
                 "[]",
                 "Paths the formatter leaves alone. A `*` matches any run of characters: `\"vendor/*\"`, `\"*.gen.aly\"`.",
+            ),
+            key(
+                "fix_naming",
+                BOOL,
+                "true",
+                "Rename a name that breaks its `[lint.naming]` style, as `alloy flux --fix` does, while the `naming_convention` lint is on. The rename skips a name that another file reads.",
             ),
         ],
         open: None,
@@ -720,6 +800,18 @@ pub const TABLES: &[Table] = &[
                 "Write `sourcemap.json` at the root on every build, the name Rojo and luau-lsp read. The language server reads it for `@game/` completion and instance types. On, the build writes over a `sourcemap.json` another tool wrote; off, it writes none.",
             ),
         ],
+        open: None,
+    },
+    Table {
+        name: "std",
+        doc: "How a file reaches the std. `alloy doc std` lists its modules.",
+        keys: &[Key {
+            name: "globals",
+            ty: Ty::ChoiceOrList(&["none", "all"]),
+            default: Some(r#""none""#),
+            doc: "The std names a file writes with no import. `none` means a file imports each one, `import { HashMap } from \"@alloy/std/collections\"`; `all` makes every one ambient; a list makes those names ambient. `Future`, `Result`, `Ok`, `Err`, `Array`, and the operator traits need no import under any value, since a keyword or an operator writes them.",
+            suggest: Some(std_names),
+        }],
         open: None,
     },
     Table {
@@ -861,6 +953,17 @@ fn key_schema(k: &Key) -> Value {
         Ty::Choice(values) => {
             s.insert("type".into(), json!("string"));
             s.insert("enum".into(), json!(values));
+        }
+
+        Ty::ChoiceOrList(values) => {
+            let names = k.suggest.map(|f| f()).unwrap_or_default();
+            s.insert(
+                "anyOf".into(),
+                json!([
+                    { "type": "string", "enum": values },
+                    { "type": "array", "items": { "type": "string", "enum": names } }
+                ]),
+            );
         }
 
         Ty::StrList => {

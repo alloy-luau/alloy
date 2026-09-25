@@ -277,70 +277,39 @@ fn a_types_only_export_list_returns_an_empty_table() {
     assert!(out.ship.contains("return {}"), "{}", out.ship);
 }
 
-/// The emit lifts every `require` to the top of the file, so an import
-/// inside a function binds nothing where it stands.
+/// An import resolves where it stands. One inside a function binds its
+/// names for that scope, a std import included, and one under code
+/// requires after the code above it runs, as Luau reads the lines.
 #[test]
-fn an_import_inside_a_block_reports() {
-    let hits = messages("local function f()\n    import { x } from \"./a\"\nend\n\nprint(f)\n");
-    assert_eq!(hits.len(), 1, "{hits:?}");
-    assert!(
-        hits[0].contains("an import belongs at the top level of a file"),
-        "{hits:?}"
-    );
-}
-
-/// An import under code still compiles, the way TypeScript hoists one.
-/// The `import_order` lint says the require runs first.
-#[test]
-fn an_import_under_code_draws_the_order_lint() {
+fn an_import_resolves_where_it_stands() {
     let options = alloy::EmitOptions {
         file_name: "t.aly".to_string(),
+        std_globals: alloy::std_names::Globals::None,
         ..alloy::EmitOptions::default()
     };
-    let out = alloy::compile_with(
-        "print(\"hello\")\nimport { x } from \"./a\"\n\nprint(x)\n",
-        &options,
-    )
-    .unwrap();
+    let src = "local function f()\n    import { x } from \"./a\"\n    import { Signal } from \"@alloy/std/signal\"\n    return x, Signal.new()\nend\n\nprint(\"hello\")\nimport { y } from \"./a\"\nprint(f, y)\n";
+    let out = alloy::compile_with(src, &options).unwrap();
+
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-    let hits: Vec<&alloy::lint::Lint> = out
-        .lints
-        .iter()
-        .filter(|l| l.name == "import_order")
-        .collect();
-    assert_eq!(hits.len(), 1, "{:?}", out.lints);
     assert!(
-        hits[0]
-            .message
-            .contains("the imports go at the top of the file"),
+        out.lints.iter().all(|l| l.name == "print_debug"),
+        "{:?}",
+        out.lints
+    );
+
+    let lines: Vec<&str> = out.ship.lines().collect();
+    assert!(
+        lines[1]
+            .trim_start()
+            .starts_with("local _m1 = require(\"./a\")"),
         "{}",
-        hits[0].message
+        out.ship
     );
-
-    // Imports first: nothing fires.
-    let clean = alloy::compile_with(
-        "import { x } from \"./a\"\n\nprint(\"hello\")\nprint(x)\n",
-        &options,
-    )
-    .unwrap();
-    assert!(!clean.lints.iter().any(|l| l.name == "import_order"));
-
-    // An ingot rewrites the source before the lints read it, and its
-    // own statements stand where it put them. The lint says nothing.
-    let src = "print(\"hello\")\nimport { x } from \"./a\"\n\nprint(x)\n";
-    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
-        panic!("the source does not lex");
-    };
-    let lints = alloy::lint::run(
-        src,
-        &parsed.lexed.toks,
-        &parsed.chunk,
-        false,
-        true,
-        &Default::default(),
-        &[],
+    assert!(
+        lines[7].starts_with("local _m2 = require(\"./a\")"),
+        "{}",
+        out.ship
     );
-    assert!(!lints.iter().any(|l| l.name == "import_order"));
 }
 
 /// The markup lowering prepends its helpers in front of the file, and

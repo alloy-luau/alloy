@@ -54,6 +54,10 @@ pub(crate) struct State {
     /// another file declares, as `alloy build` reads them. The walk
     /// costs one parse per source, so the answer is remembered.
     pub(crate) project: std::cell::RefCell<Option<Arc<alloy::extensions::ProjectImpls>>>,
+    /// The structs of the whole project with their wire widths and
+    /// derives, as `alloy build` feeds every file: a remote packs a
+    /// struct another file declares, and a derive reaches its importer.
+    pub(crate) project_shapes: std::cell::RefCell<Option<Arc<Vec<alloy::StructShape>>>>,
     /// The ingots of the root's alloy.toml, started at workspace open
     /// and again when the file changes.
     pub(crate) ingots: Option<std::sync::Arc<alloy::ingot::Ingots>>,
@@ -142,6 +146,7 @@ impl State {
         self.configs.borrow_mut().clear();
         self.luau_configs.borrow_mut().clear();
         self.project.borrow_mut().take();
+        self.project_shapes.borrow_mut().take();
     }
 
     /// The project's `impl` index, the one `alloy build` feeds every
@@ -154,39 +159,52 @@ impl State {
             return Arc::clone(held);
         }
 
-        let mut sources: Vec<String> = Vec::new();
+        let sources: Vec<String> = self
+            .project_sources()
+            .into_iter()
+            .filter_map(|path| match self.docs.get(&path_to_uri(&path)) {
+                Some(doc) => Some(doc.source.clone()),
 
-        if let Some(root) = self.root.as_deref() {
-            // The output folder holds the build's own Luau, never a
-            // source, and a walk of it would cost the whole tree.
-            let out = self
-                .config_at(root)
-                .map(|c| c.0.parent().unwrap_or(root).join(&c.1.build.out));
-            let mut files = Vec::new();
-            let mut plain = Vec::new();
-            super::documents::walk(root, out.as_deref(), &mut files, &mut plain);
-
-            for path in files {
-                if !path.to_string_lossy().ends_with(".aly") {
-                    continue;
-                }
-
-                match self.docs.get(&path_to_uri(&path)) {
-                    Some(doc) => sources.push(doc.source.clone()),
-
-                    None => {
-                        if let Ok(text) = std::fs::read_to_string(&path) {
-                            sources.push(text);
-                        }
-                    }
-                }
-            }
-        }
+                None => std::fs::read_to_string(&path).ok(),
+            })
+            .collect();
 
         let held = Arc::new(alloy::extensions::project_impls(&sources));
         *self.project.borrow_mut() = Some(Arc::clone(&held));
 
         held
+    }
+
+    /// The project's structs, the list `alloy build` feeds every file.
+    /// The compiler reads each one from disk, so a save is what changes
+    /// the answer.
+    pub(crate) fn project_shapes(&self) -> Arc<Vec<alloy::StructShape>> {
+        if let Some(held) = self.project_shapes.borrow().as_ref() {
+            return Arc::clone(held);
+        }
+
+        let held = Arc::new(alloy::build::struct_shapes(&self.project_sources()));
+        *self.project_shapes.borrow_mut() = Some(Arc::clone(&held));
+
+        held
+    }
+
+    /// The `.aly` sources under the workspace root.
+    fn project_sources(&self) -> Vec<PathBuf> {
+        let Some(root) = self.root.as_deref() else {
+            return Vec::new();
+        };
+        // The output folder holds the build's own Luau, never a source,
+        // and a walk of it would cost the whole tree.
+        let out = self
+            .config_at(root)
+            .map(|c| c.0.parent().unwrap_or(root).join(&c.1.build.out));
+        let mut files = Vec::new();
+        let mut plain = Vec::new();
+        super::documents::walk(root, out.as_deref(), &mut files, &mut plain);
+        files.retain(|path| path.to_string_lossy().ends_with(".aly"));
+
+        files
     }
 
     /// The `alloy.toml` over a folder, with its path. The climb stops
@@ -459,13 +477,17 @@ impl State {
     /// The climb starts at the file, not the workspace root, so a
     /// project inside a multi-root workspace keeps its own layout. The
     /// editor formats through this, the way `alloy fmt` does, so
-    /// format on save and the command agree.
+    /// format on save and the command agree. The renames of
+    /// `fix_naming` read the styles and the level from `[lint]`.
     pub(crate) fn fmt_config(&self, uri: &str) -> alloy::config::FmtConfig {
         let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
 
         self.config_at(&dir)
-            .map(|c| c.1.fmt.clone())
+            .map(|c| alloy::config::FmtConfig {
+                lint: c.1.lint.clone(),
+                ..c.1.fmt.clone()
+            })
             .unwrap_or_default()
     }
 
@@ -552,6 +574,8 @@ impl State {
                     erase_type_imports: config.emit.erase_type_imports,
                     test_runner: config.test.lest,
                     extensions: self.extensions.clone(),
+                    std_globals: config.std.globals.clone(),
+                    naming: config.lint.naming.clone(),
                     ..EmitOptions::default()
                 }
             }
@@ -584,6 +608,7 @@ impl State {
         let project = self.project_impls();
         options.foreign_impls = project.methods.clone();
         options.foreign_privates = project.privates.clone();
+        options.shapes = self.project_shapes().to_vec();
 
         (options, jsx)
     }

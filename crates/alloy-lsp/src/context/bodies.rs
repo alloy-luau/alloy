@@ -49,11 +49,16 @@ pub(crate) fn enclosing_body(src: &str, line_start: usize) -> Option<Body> {
             return None;
         }
 
+        // `struct P` opens its body on the next line with or without the
+        // `as`; a name after the word tells it from a local named struct.
+        let named = decl
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|w| w.starts_with(|c: char| c.is_alphabetic() || c == '_'));
+
         return match decl.split_whitespace().next() {
-            Some("struct" | "interface") if decl.contains(" as") || decl.ends_with("as") => {
-                Some(Body::Struct)
-            }
-            Some("enum") if decl.contains(" as") => Some(Body::Enum),
+            Some("struct" | "interface") if named => Some(Body::Struct),
+            Some("enum") if named => Some(Body::Enum),
             Some("attribute") if decl.contains(" as") => Some(Body::Attribute),
             // A negative depth means a method opened a block the walk
             // never closed: the caret sits in that method's body, which

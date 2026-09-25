@@ -12,7 +12,7 @@ name = "luaux"
 path = "src/lib.rs"
 
 [dependencies]
-full_moon = { version = "2.2.0", features = ["luau"] }
+alloy-syntax = { version = "0.1.0-rc.7", path = "../alloy-syntax" }
 globset = "0.4.19"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"

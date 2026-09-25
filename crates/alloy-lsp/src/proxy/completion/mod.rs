@@ -23,7 +23,9 @@ pub(crate) use members::{
     module_entries, payload_types, plain_snippet, private_fields, sep_of, set_call,
 };
 pub(crate) use namespaces::namespace_before;
-pub(crate) use std_completions::{complete_std_members, roblox_enum_names};
+pub(crate) use std_completions::{
+    StdReach, complete_std_members, complete_std_module, fix_edits, roblox_enum_names,
+};
 
 use super::documents::{normalize, project_aliases};
 use super::hints::writable_type;
@@ -77,11 +79,13 @@ pub(crate) fn declaration_detail(hover: &str) -> Option<String> {
         return None;
     }
 
+    // A namespace member carries its path, `struct Geo.Vec2`.
     let name: String = rest[word.len()..]
         .trim_start()
         .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
         .collect();
+    let name = name.trim_end_matches('.');
 
     match name.is_empty() {
         true => None,
@@ -662,8 +666,6 @@ pub fn is_internal_name(label: &str) -> bool {
     const STD_HELPERS: &[&str] = &[
         "Array2",
         "Array3",
-        "Iter2",
-        "Iter3",
         "Result2",
         "Result3",
         "ResultMethods",
@@ -799,14 +801,20 @@ pub(crate) fn clean_completion(
     let colon = member_position(doc, line, character) == Some(':');
 
     if colon {
-        // `new` and `from_table` take no `self`, so a colon would pass
-        // the value as their first argument; the list offers what a
-        // colon can call.
+        // `new`, `from_table`, and the `default` of `@derive(Default)`
+        // take no `self`, so a colon would pass the value as an argument
+        // they do not have; the list offers what a colon can call. An
+        // extension method prints with its receiver dropped, so the
+        // detail alone does not tell a static apart.
         items.retain(|i| {
-            !matches!(
-                i.get("label").and_then(Value::as_str),
-                Some("new") | Some("from_table")
-            )
+            let label = i.get("label").and_then(Value::as_str);
+            let takes_nothing = i
+                .get("detail")
+                .and_then(Value::as_str)
+                .is_some_and(|d| d.starts_with("() ->"));
+
+            !matches!(label, Some("new") | Some("from_table"))
+                && !(label == Some("default") && takes_nothing)
         });
     }
 

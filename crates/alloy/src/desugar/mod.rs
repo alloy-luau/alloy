@@ -27,7 +27,7 @@ use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 
-mod attributes;
+pub(crate) mod attributes;
 mod awaits;
 pub(crate) mod contracts;
 mod enums;
@@ -94,6 +94,11 @@ pub struct EmitOptions {
     /// their names routes through the dispatcher in every file, not only
     /// in the file that declares the impl.
     pub extensions: Vec<crate::extensions::Extension>,
+    /// `[std] globals`: the std names the source writes with no import.
+    /// The default is `All`, so a compile with no project reads every
+    /// name; a project's options carry its own setting, `None` unless
+    /// it says otherwise.
+    pub std_globals: crate::std_names::Globals,
     /// The `impl` blocks other files write on a struct or an enum this
     /// one declares. The check artifact declares each method on the
     /// class table, so the type carries what the runtime attaches. See
@@ -172,10 +177,11 @@ pub struct EmitOptions {
     /// expansion of a macro that calls itself has no end, so a depth
     /// of 16 stops it. See `expand_macro`.
     pub macro_depth: usize,
-    /// An ingot rewrote the source before the compile read it. The
-    /// order of the statements is then the ingot's, not the author's,
-    /// so `import_order` says nothing about it.
-    pub ingot_rewrite: bool,
+    /// `[lint.naming]`: the case style of each kind of name, for the
+    /// `naming_convention` lint.
+    pub naming: crate::naming::Naming,
+    /// The markup of an `.alx` file, for the component names.
+    pub markup: crate::naming::Markup,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -255,12 +261,16 @@ pub struct Require {
     pub shape: String,
 }
 
+pub use structs::RENAME_STYLES;
+
 /// A struct another file declares, for the wire layout of a remote
-/// that carries it: each field with its type text and its width.
-#[derive(Debug, Clone, PartialEq)]
+/// that carries it: each field with its type text and its width, and the
+/// derives it takes, so an importer's own derives reach through it.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct StructShape {
     pub name: String,
     pub fields: Vec<WireField>,
+    pub derives: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,6 +352,7 @@ impl Default for EmitOptions {
             shapes: Vec::new(),
             check: false,
             extensions: Vec::new(),
+            std_globals: crate::std_names::Globals::All,
             foreign_impls: Vec::new(),
             foreign_privates: Vec::new(),
             thresholds: crate::lint::Thresholds::default(),
@@ -361,7 +372,8 @@ impl Default for EmitOptions {
             import_attributes: Vec::new(),
             macro_enums: Vec::new(),
             macro_depth: 0,
-            ingot_rewrite: false,
+            naming: crate::naming::Naming::default(),
+            markup: crate::naming::Markup::default(),
         }
     }
 }
@@ -416,6 +428,7 @@ pub const AMBIENT: &[&str] = &[
     "Array",
     "HashMap",
     "Set",
+    "BitSet",
     "Symbol",
     "Attributes",
     "Signal",
@@ -434,6 +447,7 @@ pub const AMBIENT_TYPES: &[&str] = &[
     "Array",
     "HashMap",
     "Set",
+    "BitSet",
     "Signal",
     "SignalConnection",
     "Signalish",
@@ -492,9 +506,19 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         new_stmt_next: 0,
         import_next: 0,
         expected_generic: None,
+        field_expected: HashMap::new(),
+        value_sink: None,
+        for_header: 0,
+        last_link: false,
         expected_payload: None,
         result_asyncs: options.import_result_asyncs.iter().cloned().collect(),
-        inserts: Vec::new(),
+        // Luau reads a reserved word as a key only in brackets.
+        inserts: chunk
+            .reserved_keys
+            .iter()
+            .map(|k| toks[k.start as usize])
+            .flat_map(|t| [(t.start, "[\"".to_string()), (t.end, "\"]".to_string())])
+            .collect(),
         return_at: None,
         struct_field_types: HashMap::new(),
         struct_wire: HashMap::new(),
@@ -586,6 +610,12 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         macro_followed: false,
         structs_with_to_string: HashSet::new(),
         serializable: HashSet::new(),
+        deserializable: HashSet::new(),
+        cloneable: HashSet::new(),
+        defaultable: HashSet::new(),
+        std_imports: std_imports(src, toks, chunk).0,
+        std_namespaces: std_imports(src, toks, chunk).1,
+        std_reported: HashSet::new(),
         private_types: HashSet::new(),
         self_prologue: None,
         not_constructible: HashMap::new(),
@@ -639,7 +669,6 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.check_namespaces(&chunk.block);
     d.check_duplicate_decls(&chunk.block);
     d.check_exports(&chunk.block);
-    d.check_import_places(&chunk.block);
 
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
@@ -649,6 +678,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.scan_reduce_inserts(&chunk.block);
     d.scan_static_checks(&chunk.block);
     d.check_await_spots(&chunk.block);
+
+    if !d.std_namespaces.is_empty() {
+        d.check_std_star_members(&chunk.block);
+    }
     d.check_negations();
 
     // Leading trivia, the block, trailing trivia: the printer's shape. The
@@ -890,6 +923,86 @@ fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
     out
 }
 
+/// The std names a file's imports bind under their own names, then the
+/// locals its star imports of the std bind. A name under an alias binds
+/// the alias, a local the import writes.
+fn std_imports(
+    src: &str,
+    toks: &[Tok],
+    chunk: &Chunk,
+) -> (HashSet<String>, HashMap<String, String>) {
+    use alloy_syntax::ast::ImportKind;
+
+    let mut out = HashSet::new();
+    let mut stars = HashMap::new();
+
+    for i in imports_in(&chunk.block) {
+        let spec = i.path.text(src, toks).trim_matches(['"', '\'']);
+
+        let Some(module) = crate::std_names::module_of_spec(spec) else {
+            continue;
+        };
+
+        if let ImportKind::Namespace(n, _) = &i.kind {
+            stars.insert(n.text(src, toks).to_string(), module.to_string());
+        }
+
+        if let ImportKind::Named(specs)
+        | ImportKind::TypeOnly(specs)
+        | ImportKind::Both(_, specs)
+        | ImportKind::Namespace(_, specs) = &i.kind
+        {
+            for s in specs.iter().filter(|s| s.alias.is_none()) {
+                out.insert(s.name.text(src, toks).to_string());
+            }
+        }
+    }
+
+    (out, stars)
+}
+
+/// Every `import` of a block at any depth, in source order. An import
+/// resolves where it stands, so a function or a `do` block may hold one
+/// for its own scope; each scan of what a file imports reads them all.
+pub fn imports_in(block: &Block) -> Vec<&alloy_syntax::ast::Import> {
+    fn walk<'a>(block: &'a Block, out: &mut Vec<&'a alloy_syntax::ast::Import>) {
+        for stmt in &block.stmts {
+            if let Stmt::Import(i) = stmt {
+                out.push(i);
+
+                continue;
+            }
+
+            for child in stmt_children(stmt) {
+                match child {
+                    Child::Block(b) => walk(b, out),
+
+                    Child::Function(f) => walk(&f.block, out),
+
+                    Child::Expr(e) => expr_imports(e, out),
+                }
+            }
+        }
+    }
+
+    // A closure inside an expression holds a block of its own.
+    fn expr_imports<'a>(e: &'a Expr, out: &mut Vec<&'a alloy_syntax::ast::Import>) {
+        for child in expr_children(e) {
+            match child {
+                Child::Block(b) => walk(b, out),
+
+                Child::Function(f) => walk(&f.block, out),
+
+                Child::Expr(x) => expr_imports(x, out),
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(block, &mut out);
+    out
+}
+
 /// Every name an `import` binds.
 pub(crate) fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
     use alloy_syntax::ast::ImportKind;
@@ -964,6 +1077,20 @@ struct Desugar<'s> {
     /// name and arguments, so the constructor call takes them. The
     /// solver reads no expected type into a generic call.
     expected_generic: Option<(String, String)>,
+    /// The field values of a `new S { ... }` under render, by address,
+    /// with the arguments the field's declared type names: `visits =
+    /// HashMap.new()` under `visits: HashMap<string, number>`.
+    field_expected: HashMap<usize, (String, String)>,
+    /// The text a value-only `return` writes in front of its value: `s = `
+    /// in an arm of `local s = match`, `return ` for a value block. None
+    /// writes `return `.
+    value_sink: Option<String>,
+    /// Above zero while the check artifact renders a for-in header; see
+    /// the `return` cast in `statements`.
+    for_header: u32,
+    /// Whether the link under render ends its chain; a child lookup
+    /// there keeps its `Instance` type in the check artifact.
+    last_link: bool,
     /// `local f: Future<T> = async do ... end`: the payload type `T`,
     /// so the block's closure carries it. Without it the checker infers
     /// the closure's result, and an open result lands on `unknown`. An
@@ -1221,8 +1348,26 @@ struct Desugar<'s> {
     /// the default printer stays out.
     structs_with_to_string: HashSet<String>,
     /// The structs of this file that derive `Serialize`. A field of one
-    /// of them serializes through its own `to_table` and `from_table`.
+    /// of them serializes through its own `to_table`.
     serializable: HashSet<String>,
+    /// The structs of this file that derive `Deserialize`. A field of
+    /// one of them reads back through its own `from_table`.
+    deserializable: HashSet<String>,
+    /// The structs of this file that derive `Clone`: a field of one
+    /// clones through its own `clone`.
+    cloneable: HashSet<String>,
+    /// The structs of this file that derive `Default`: a field of one
+    /// starts as its own `default()`.
+    defaultable: HashSet<String>,
+    /// The std names this file imports under their own names. Each
+    /// renders as `__alloy.Name`, the way an ambient one does.
+    std_imports: HashSet<String>,
+    /// The locals a star import of the std binds, `import * as s`, each
+    /// with the module it names; the facade is `""`.
+    std_namespaces: HashMap<String, String>,
+    /// The std names already reported as missing their import. The first
+    /// use carries the report, and its fix writes the one line.
+    std_reported: HashSet<String>,
     /// Structs with a `private` field or method. The check artifact
     /// gives each two views: the public type, and `Name__all` for the
     /// impl's own methods.
@@ -1566,6 +1711,8 @@ pub(crate) fn expr_children(e: &Expr) -> Vec<Child<'_>> {
         | Expr::Name(_) => Vec::new(),
 
         Expr::Interp { parts, .. } => parts.iter().map(Child::Expr).collect(),
+
+        Expr::Block { block, .. } => vec![Child::Block(block)],
 
         Expr::Function { body, .. } => function_children(body),
 
@@ -2541,7 +2688,15 @@ impl<'s> Desugar<'s> {
 
                 if self.is_local(&name) || self.declared_types.contains(&name) {
                     self.r.copy(ns, ne);
-                } else if self.options.definitions {
+
+                    return self.copy(ne, end);
+                }
+
+                if !self.options.definitions {
+                    self.check_std_name(span, &name);
+                }
+
+                if self.options.definitions {
                     // Luau loads a definitions file on its own, with no
                     // require, and one unknown type drops the whole file.
                     let fix = match name.as_str() {

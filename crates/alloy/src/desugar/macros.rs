@@ -859,7 +859,15 @@ impl<'s> Desugar<'s> {
                     _ => rendered,
                 };
 
-                format!("{std}.Set.from({{ {} }})", items.join(", "))
+                let text = format!("{std}.Set.from({{ {} }})", items.join(", "));
+
+                // An empty set has no item to name its type; the binding or
+                // the field it lands in names it.
+                match items.is_empty() {
+                    true => self.any_cast(&text),
+
+                    false => text,
+                }
             }
 
             // `$map[[k, v], ...]` or `$map([k, v], ...)`: a HashMap of
@@ -933,7 +941,7 @@ impl<'s> Desugar<'s> {
                         format!("{std}.HashMap.from({{ {} }} :: {shape})", fields.join(", "))
                     }
 
-                    None => format!("{std}.HashMap.from({{}})"),
+                    None => self.any_cast(&format!("{std}.HashMap.from({{}})")),
                 }
             }
 

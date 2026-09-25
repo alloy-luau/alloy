@@ -24,6 +24,33 @@ describe("Result", function()
 		expect(Err("e"):unwrap_or(9)).toBe(9)
 	end)
 
+	it("and_then chains an Ok and or_else recovers an Err", function()
+		local function half(n: number)
+			return if n % 2 == 0 then Ok(n // 2) else Err("odd")
+		end
+		expect(Ok(8):and_then(half):and_then(half)._1).toBe(2)
+		expect(Ok(6):and_then(half):and_then(half)._1).toBe("odd")
+		expect(Err("e"):and_then(half)._1).toBe("e")
+		expect(Err("e"):or_else(function(e)
+			return Ok(#e)
+		end)._1).toBe(1)
+		expect(Ok(3):or_else(function()
+			return Ok(0)
+		end)._1).toBe(3)
+	end)
+
+	it("unwrap_or_else calls its fallback on an Err only", function()
+		local calls = 0
+		local function fallback(e: string)
+			calls += 1
+			return #e
+		end
+		expect(Ok(2):unwrap_or_else(fallback)).toBe(2)
+		expect(calls).toBe(0)
+		expect(Err("abc"):unwrap_or_else(fallback)).toBe(3)
+		expect(calls).toBe(1)
+	end)
+
 	it("map touches the Ok side and map_err the Err side", function()
 		expect(Ok(2):map(function(v)
 			return v * 3

@@ -131,6 +131,58 @@ pub(crate) fn the_project_impl_index_reaches_the_declaring_file() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+/// A remote that carries a struct another file declares packs it by
+/// the widths that file gives its fields. `alloy build` feeds every
+/// compile the project's structs, and the editor now does too, so an
+/// `@unreliable` remote of such a struct draws no size report.
+#[test]
+fn a_remote_of_an_imported_struct_reads_its_widths() {
+    let dir = alias_root(
+        "shapes",
+        &[
+            ("alloy.toml", "[build]\nin = \"src\"\nout = \"build\"\n"),
+            (
+                "src/types.aly",
+                "export struct Aim\n  @f32 x: number\n  @f32 y: number\nend\n",
+            ),
+            (
+                "src/net.aly",
+                "import { Aim } from \"./types\"\n\n@unreliable\nexport remote Look(a: Aim) from client\n",
+            ),
+        ],
+    );
+    let st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let net = dir.join("src/net.aly");
+    let (options, jsx) = st.options_for(&path_to_uri(&net));
+
+    assert!(
+        options.shapes.iter().any(|s| s.name == "Aim"),
+        "{:?}",
+        options.shapes
+    );
+
+    let source = std::fs::read_to_string(&net).expect("net.aly");
+    let options = options.imports_for_file(&net, &source);
+    let doc = Doc::new(source, 1, &options, &jsx, None);
+    let reports: Vec<&str> = doc
+        .output
+        .iter()
+        .flat_map(|o| o.diagnostics.iter())
+        .map(|d| d.message.as_str())
+        .collect();
+
+    assert!(
+        !reports.iter().any(|m| m.contains("no size bound")),
+        "{reports:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// After Enter on an opener the `end` arrives as one edit at the
 /// caret, so the caret keeps the line the editor indented.
 #[test]
@@ -1018,4 +1070,59 @@ pub(crate) fn stale_mirrors_of_other_roots_are_purged() {
     assert!(fresh.exists());
     assert!(!old.exists());
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A type from a module the file imports whole reads by the path the
+/// file reaches it through. The checker prints `Scheduler<>`, which
+/// names nothing here; the hint reads and inserts `planck.Scheduler<>`.
+#[test]
+pub(crate) fn a_hint_names_a_module_type_by_its_path() {
+    let hint = |src: &str, plain: bool| {
+        let options = EmitOptions {
+            plain_modules: match plain {
+                true => vec!["@pkg/planck".to_string()],
+
+                false => Vec::new(),
+            },
+            import_types: vec![(
+                "@pkg/planck".to_string(),
+                vec!["Scheduler<U...>=".to_string()],
+            )],
+            ..EmitOptions::default()
+        };
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let line = src.lines().position(|l| l.contains("scheduler =")).unwrap() as u32;
+        let at = json!({ "line": line, "character": 22 });
+        let mut hints = vec![json!({
+            "position": at,
+            "kind": 1,
+            "label": ": Scheduler<>",
+            "textEdits": [{ "range": { "start": at, "end": at }, "newText": ": Scheduler<>" }]
+        })];
+        clean_hints(&mut hints, &doc);
+
+        (
+            hint_label(&hints[0]),
+            hints[0].pointer("/textEdits/0/newText").cloned(),
+        )
+    };
+    let src =
+        "import planck from '@pkg/planck'\n\nexport const scheduler = new planck.Scheduler()\n";
+
+    let (label, edit) = hint(src, true);
+    assert_eq!(label, ": planck.Scheduler<>");
+    assert_eq!(edit, Some(json!(": planck.Scheduler<>")));
+
+    // An Alloy module's default is its `.default`, which holds no types.
+    assert_eq!(hint(src, false).0, ": Scheduler<>");
+
+    // The file imports the type by name, so the bare name reaches it.
+    let named = "import planck, { type Scheduler } from '@pkg/planck'\n\nexport const scheduler = new planck.Scheduler()\n";
+    assert_eq!(hint(named, true).0, ": Scheduler<>");
 }

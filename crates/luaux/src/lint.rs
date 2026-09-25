@@ -2,10 +2,10 @@
 //!
 //! Expressions are captured verbatim and never interpreted by the compiler, so
 //! anything checked here is checked by re-parsing the captured text with
-//! `full_moon`.
+//! Alloy's parser.
 
 use crate::backend::EmitError;
-use full_moon::ast::{BinOp, Expression};
+use alloy_syntax::ast::{Expr, Stmt, TokSpan};
 
 /// Rule 2 — a literal `nil` as the left operand of `and`.
 ///
@@ -18,13 +18,21 @@ use full_moon::ast::{BinOp, Expression};
 /// to. Luau's `if ... then ... else` expression is the unambiguous form.
 pub fn check_conditional_child(expression: &str, offset: usize) -> Result<(), EmitError> {
     let wrapped = format!("local _ = {expression}");
-    let parsed = full_moon::parse_fallible(&wrapped, full_moon::LuaVersion::luau());
-
-    let Some(expression_node) = first_expression(parsed.ast()) else {
+    let Ok(parsed) = alloy_syntax::parse_lenient(&wrapped, Default::default()) else {
         return Ok(());
     };
+    let text = |span: TokSpan| span.text(&wrapped, &parsed.lexed.toks);
+    let first = parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .find_map(|statement| match statement {
+            Stmt::Local(local) => local.values.first(),
+            _ => None,
+        });
 
-    if !has_nil_and_operand(expression_node) {
+    if !first.is_some_and(|e| has_nil_and_operand(e, &text)) {
         return Ok(());
     }
 
@@ -36,23 +44,16 @@ pub fn check_conditional_child(expression: &str, offset: usize) -> Result<(), Em
     .with_help("write `if cond then ... else ...` instead"))
 }
 
-fn first_expression(ast: &full_moon::ast::Ast) -> Option<&Expression> {
-    ast.nodes().stmts().find_map(|statement| match statement {
-        full_moon::ast::Stmt::LocalAssignment(assignment) => assignment.expressions().iter().next(),
-        _ => None,
-    })
-}
-
 /// Looks through parentheses for `<anything> and nil`, at any depth on the left
 /// spine — `a and nil or b` parses as `(a and nil) or b`.
-fn has_nil_and_operand(expression: &Expression) -> bool {
+fn has_nil_and_operand<'s>(expression: &Expr, text: &impl Fn(TokSpan) -> &'s str) -> bool {
     match expression {
-        Expression::Parentheses { expression, .. } => has_nil_and_operand(expression),
-        Expression::BinaryOperator { lhs, binop, rhs } => {
-            if matches!(binop, BinOp::And(_)) && is_nil_literal(rhs) {
+        Expr::Paren { inner, .. } => has_nil_and_operand(inner, text),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            if text(*op) == "and" && is_nil_literal(rhs) {
                 return true;
             }
-            has_nil_and_operand(lhs) || has_nil_and_operand(rhs)
+            has_nil_and_operand(lhs, text) || has_nil_and_operand(rhs, text)
         }
         _ => false,
     }
@@ -146,10 +147,10 @@ pub fn has_unwrapped_luaux(expression: &str, luaux_spans: &[(usize, usize)]) -> 
     })
 }
 
-fn is_nil_literal(expression: &Expression) -> bool {
+fn is_nil_literal(expression: &Expr) -> bool {
     match expression {
-        Expression::Parentheses { expression, .. } => is_nil_literal(expression),
-        Expression::Symbol(symbol) => symbol.token().to_string() == "nil",
+        Expr::Paren { inner, .. } => is_nil_literal(inner),
+        Expr::Nil(_) => true,
         _ => false,
     }
 }

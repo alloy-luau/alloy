@@ -57,10 +57,13 @@ impl<'s> Formatter<'s> {
             // A local named match opens nothing; `match x with` does.
             "match" => !self.items[i].name_here && !matches!(prev, Some(".") | Some(":")),
 
+            // `trait = 1` writes the word as a name, and opens nothing.
             "struct" | "enum" | "trait" | "impl" | "interface" | "macro" | "namespace" => {
-                self.items[i].newlines_before > 0
-                    || i == 0
-                    || matches!(prev, Some("export" | "global" | "public" | "private"))
+                !self.items[i].name_here
+                    && (self.items[i].newlines_before > 0
+                        || i == 0
+                        || matches!(prev, Some("export" | "global" | "public" | "private"))
+                        || self.attributes_open_line(i))
             }
 
             // `class Name` opens a body, as the structure pass reads
@@ -691,15 +694,24 @@ impl<'s> Formatter<'s> {
                 self.flush();
                 self.line_level = base + 1;
                 self.line = self.indent(base + 1);
-                self.render_nodes(&el[lead..], hard, extra + 1);
+                // The comma follows the code: after a comment it would
+                // be part of the comment, and each run would add one.
+                let body = &el[lead..];
+                let code = body
+                    .iter()
+                    .rposition(|n| !matches!(n, Node::Item(i) if self.items[*i].is_comment()))
+                    .map_or(0, |p| p + 1);
+                self.render_nodes(&body[..code], hard, extra + 1);
                 let last = k + 1 == elements.len();
 
-                if !last || trailing {
+                if code > 0 && (!last || trailing) {
                     let t = sep
                         .map(|s| self.items[s].text.clone())
                         .unwrap_or_else(|| ",".to_string());
                     self.line.push_str(&t);
                 }
+
+                self.render_nodes(&body[code..], hard, extra + 1);
             }
 
             self.flush();
@@ -866,6 +878,9 @@ impl<'s> Formatter<'s> {
         match self.items[open].text.as_str() {
             "{" => self.options.space_inside_braces,
             "(" | "?(" => self.options.space_inside_parens,
+            // Luau's own list, `@[native]`, keeps the form Luau writes.
+            "[" if self.luau_attr_list(open) => false,
+
             "[" | "?[" => {
                 if self.is_index(open) || self.in_macro_brackets(open) {
                     self.options.space_inside_brackets
@@ -875,6 +890,39 @@ impl<'s> Formatter<'s> {
             }
             _ => false,
         }
+    }
+
+    /// Whether the line of item `i` opens with an attribute before it:
+    /// `@test namespace Suite`, `@derive(Eq) struct P`.
+    fn attributes_open_line(&self, i: usize) -> bool {
+        let mut j = i;
+
+        while j > 0 && self.items[j].newlines_before == 0 {
+            j -= 1;
+        }
+
+        j < i && self.items[j].is("@")
+    }
+
+    /// The `[` of Luau's attribute list, `@[native]`.
+    pub(crate) fn luau_attr_list(&self, open: usize) -> bool {
+        self.items[open].is("[") && self.prev_code(open).is_some_and(|p| self.items[p].is("@"))
+    }
+
+    /// Whether item `i` sits inside Luau's attribute list, where the
+    /// arguments are Luau's and take no rewrite.
+    pub(crate) fn in_luau_attr_list(&self, i: usize) -> bool {
+        let mut at = i;
+
+        while let Some(open) = self.enclosing_open(at) {
+            if self.luau_attr_list(open) {
+                return true;
+            }
+
+            at = open;
+        }
+
+        false
     }
 
     /// A pair of `$map[["a", 1], ["b", 2]]`: the macro's brackets and the

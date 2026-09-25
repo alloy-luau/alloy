@@ -24,6 +24,7 @@ pub mod jsonc;
 pub mod lint;
 pub mod luau_config;
 pub mod modules;
+pub mod naming;
 pub mod net;
 pub mod project;
 pub mod render;
@@ -36,6 +37,8 @@ pub mod schema;
 /// the source wrote. The CLI and the language server both read it, so
 /// the terminal and the editor say the same thing.
 pub mod shapes;
+/// The std by name: its modules, and what a file writes with no import.
+pub mod std_names;
 pub mod tables;
 pub mod target;
 pub mod testbuild;
@@ -151,7 +154,7 @@ pub const SHIM: &str = include_str!("../std/shim.luau");
 pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileError> {
     let parse_options = alloy_syntax::parser::ParseOptions {
         definitions: options.definitions,
-        ..Default::default()
+        ..alloy_syntax::parser::ParseOptions::for_path(std::path::Path::new(&options.file_name))
     };
     let parsed = alloy_syntax::parse_lenient(src, parse_options).map_err(|e| CompileError {
         offset: e.offset,
@@ -270,11 +273,26 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         &parsed.lexed.toks,
         &parsed.chunk,
         options.definitions,
-        options.ingot_rewrite,
         &options.thresholds,
         &options.privates(),
     );
     lints.extend(rendered.lints);
+
+    if !options.definitions {
+        lints.extend(naming::lints(
+            src,
+            &parsed.lexed.toks,
+            &parsed.chunk,
+            &options.naming,
+            &options.markup,
+        ));
+    }
+
+    // A config names each value once, and the loader's Luau has no
+    // `const`, so fmt keeps its locals and the lint says nothing there.
+    if options.file_name.ends_with(config_aly::FILE_NAME) {
+        lints.retain(|l| l.name != "prefer_const");
+    }
 
     // A file the parser reported on has a tree its recovery invented:
     // a statement lands in the block the parser could close, not the
@@ -287,6 +305,14 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     lints.sort_by_key(|l| (l.start, l.name));
     // A node the desugar renders twice reports its lint twice.
     lints.dedup();
+    // An import the compiler refused is not also unused: the error is
+    // the one thing to fix there.
+    lints.retain(|l| {
+        l.name != "unused_import"
+            || !diagnostics
+                .iter()
+                .any(|d| d.start <= l.start && l.start < d.end.max(d.start + 1))
+    });
 
     // `--@alloy-nocheck` and `--@alloy-ignore` silence their lines.
     // `--@alloy-expect-error` silences too, and remembers the lines it
@@ -334,28 +360,28 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         }
     }
 
-    let imports = parsed
-        .chunk
-        .block
-        .stmts
-        .iter()
-        .filter_map(|s| match s {
-            alloy_syntax::ast::Stmt::Import(i) => {
-                let t = parsed.lexed.toks[i.path.start as usize];
-                let text = t.text(src);
-                let path = text
-                    .get(1..text.len().saturating_sub(1))
-                    .unwrap_or(text)
-                    .to_string();
+    // An import inside a function counts too: it resolves where it
+    // stands, and the module it names is a dependency all the same.
+    let imports = desugar::imports_in(&parsed.chunk.block)
+        .into_iter()
+        .filter_map(|i| {
+            let t = parsed.lexed.toks[i.path.start as usize];
+            let text = t.text(src);
+            let path = text
+                .get(1..text.len().saturating_sub(1))
+                .unwrap_or(text)
+                .to_string();
 
-                Some(ImportRef {
-                    start: t.start,
-                    end: t.end,
-                    path,
-                })
+            // The std is no module on disk: its import writes nothing.
+            if std_names::module_of_spec(&path).is_some() {
+                return None;
             }
 
-            _ => None,
+            Some(ImportRef {
+                start: t.start,
+                end: t.end,
+                path,
+            })
         })
         .collect();
 
@@ -393,17 +419,6 @@ pub fn compile_file(
     let ingots = ingots.filter(|i| !i.is_empty());
     let layer = ingots.map(|i| i.before(path, source));
     let text = layer.as_ref().map_or(source, |l| l.text.as_str());
-    // An ingot's own statements stand where it put them, so a lint
-    // about the order of the source has nothing to read.
-    let rewritten = layer.as_ref().is_some_and(|l| l.text != source);
-    let options = &match rewritten {
-        true => EmitOptions {
-            ingot_rewrite: true,
-            ..options.clone()
-        },
-
-        false => options.clone(),
-    };
     let mut out = if path.ends_with(".alx") {
         compile_alx(text, options, jsx.cloned().unwrap_or_default())?.output
     } else {
@@ -516,7 +531,9 @@ mod tests {
         let braces = "struct S {\n    n: number\n}\nprint(S)\n";
         assert_eq!(
             messages(braces),
-            vec!["a struct body is `as ... end`: `struct S as`"]
+            vec![
+                "a struct body goes on the lines below the header and closes with `end`, not braces: `struct S`"
+            ]
         );
         assert_eq!(docs::kind_for(&messages(braces)[0]), "SyntaxError");
         let at = compile(braces).unwrap().diagnostics[0].start;
@@ -690,7 +707,7 @@ mod tests {
         let got = messages(below);
         assert_eq!(got.len(), 1, "{got:?}");
         assert!(
-            got[0].contains("names struct `Shot`, which is declared below the remote"),
+            got[0].contains("names `Shot`, which is declared below the remote"),
             "{got:?}"
         );
 
@@ -816,10 +833,11 @@ mod tests {
     }
 
     #[test]
-    fn reserved_words_cannot_be_names() {
-        let bad = compile("local trait = 1\nlocal function macro() end\nlocal function f(impl) end\nprint(namespace)\nlocal private = 1\n").unwrap();
-        assert_eq!(bad.diagnostics.len(), 5, "{:?}", bad.diagnostics);
-        assert!(bad.diagnostics[0].message.contains("reserved"));
+    fn alloy_words_are_names_off_their_declaration() {
+        // Roblox code names a local `remote`, and Luau reserves none of
+        // these words, so each one is a name wherever a name stands.
+        let words = compile("local trait = 1\nlocal function macro() end\nlocal function f(impl) end\nprint(namespace)\nlocal private = 1\nlocal remote = folder.Hit\nlocal public, attribute = 1, 2\nprint(trait, macro, f, private, remote, public, attribute)\n").unwrap();
+        assert!(words.diagnostics.is_empty(), "{:?}", words.diagnostics);
 
         // The contextual words are names wherever a name can stand.
         let names = compile("local struct = 1\nlocal function await() end\nlocal function f(delete) end\nlocal function destroy(self) return self end\nlocal enum = { Idle = 1 }\nlocal interface = enum.Idle\nlocal async = false\nlocal after = 2\nprint(struct, await, f, destroy, interface, async, after)\n").unwrap();
@@ -1297,6 +1315,10 @@ mod tests {
         // the way the struct form does.
         assert_eq!(
             docs::kind_for("`Geo` is declared below this use; move the namespace above it"),
+            "DeclareError"
+        );
+        assert_eq!(
+            docs::kind_for("`remote` is declared below this use; move the function above it"),
             "DeclareError"
         );
         assert_eq!(

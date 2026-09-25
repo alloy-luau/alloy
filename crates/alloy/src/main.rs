@@ -104,6 +104,10 @@ fn run() -> ExitCode {
         Some("init") if wants_help(&args) => command_help(help::INIT_TEXT),
         Some("init") => cli::init::init(&args[1..]),
 
+        Some("migrate") if wants_help(&args) => command_help(help::MIGRATE_TEXT),
+
+        Some("migrate") => cli::migrate::migrate(&args[1..]),
+
         // Before the dispatcher: `alloy self uninstall --help` must
         // print the usage, not remove the install.
         Some("self") if wants_help(&args) => command_help(help::SELF_TEXT),

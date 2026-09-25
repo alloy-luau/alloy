@@ -10,13 +10,20 @@ local alloy = {}
 -- own `to_string` replaces the default the compiler writes.
 -- ---------------------------------------------------------------------------
 
---- The text of a value inside a printed container: a string in quotes,
---- anything else through `tostring`.
-function alloy.show(v: any): string
-	if type(v) == "string" then
-		return `"{string.gsub(v, '["\\]', "\\%0")}"`
+--- The keys of a map in a stable order, so a printed map reads the same
+--- every time.
+local function sorted_keys(t: { [any]: any }): { any }
+	local keys = {}
+	for k in pairs(t) do
+		table.insert(keys, k)
 	end
-	return tostring(v)
+	table.sort(keys, function(a, b)
+		if type(a) == type(b) and (type(a) == "number" or type(a) == "string") then
+			return a < b
+		end
+		return tostring(a) < tostring(b)
+	end)
+	return keys
 end
 
 local function show_list(values: { any }, open: string, close: string): string
@@ -30,20 +37,66 @@ local function show_list(values: { any }, open: string, close: string): string
 	return open .. " " .. table.concat(parts, ", ") .. " " .. close
 end
 
+--- The entries of a map, `a = 1, [3] = "x"`, in a stable order.
+local function show_entries(t: { [any]: any }): string
+	local keys = sorted_keys(t)
+	local parts = table.create(#keys)
+	for i, k in ipairs(keys) do
+		local key = if type(k) == "string" and string.match(k, "^[%a_][%w_]*$") then k else `[{alloy.show(k)}]`
+		parts[i] = key .. " = " .. alloy.show(t[k])
+	end
+	return table.concat(parts, ", ")
+end
+
+-- The plain tables `alloy.show` prints now. A table that holds itself
+-- prints its address the second time, not a loop without end.
+local showing: { [any]: boolean } = {}
+
+--- The text of a value inside a printed container: a string in quotes,
+--- anything else through `tostring`. A plain table has no `__tostring`
+--- and `tostring` gives its address, so it prints the way an `Array` or
+--- a `HashMap` does. `from_table` gives the one for the other, and the
+--- two print alike.
+function alloy.show(v: any): string
+	if type(v) == "string" then
+		return `"{string.gsub(v, '["\\]', "\\%0")}"`
+	end
+	if type(v) == "table" and getmetatable(v) == nil and not showing[v] then
+		local count = 0
+		for _ in next, v do
+			count += 1
+		end
+		showing[v] = true
+		local text = if count == #v then show_list(v, "[", "]") else `\{ {show_entries(v)} }`
+		showing[v] = nil
+		return text
+	end
+	return tostring(v)
+end
+
+--- A value whose declared type is an enum. A unit variant is a string
+--- at runtime, and it prints under the enum's name, `Item.Junk`.
+local function show_in(v: any, enum: string?): string
+	if enum ~= nil and type(v) == "string" then
+		return enum .. "." .. v
+	end
+	return alloy.show(v)
+end
+
 --- `Name { x = 1, y = 2 }`: the default printer of a struct, over its
---- declared fields in order.
-function alloy.show_struct(name: string, s: any, fields: { string }): string
+--- declared fields in order. `enums` names the enum of each field that
+--- declares one.
+function alloy.show_struct(name: string, s: any, fields: { string }, enums: { [string]: string }?): string
 	if #fields == 0 then
 		return name .. " {}"
 	end
 	local parts = table.create(#fields)
 	for i, f in ipairs(fields) do
-		parts[i] = f .. " = " .. alloy.show(s[f])
+		parts[i] = f .. " = " .. show_in(s[f], enums and enums[f])
 	end
 	return name .. " { " .. table.concat(parts, ", ") .. " }"
 end
 
---- `Msg.Move(1, 2)`: the printer of an enum variant with a payload.
 --- A new table with `f` applied to each value, for a map of structs
 --- that `@derive(Serialize)` or `Deserialize` walks.
 function alloy.map_values(t: any, f: (any) -> any): any
@@ -81,30 +134,18 @@ function alloy.deep_eq(a: any, b: any): boolean
 	return true
 end
 
-function alloy.show_variant(name: string, v: any): string
+--- `Msg.Move(1, 2)`: the printer of an enum variant with a payload.
+--- `enums` names the enum of each payload slot that declares one, by
+--- variant: `{ Tool = { [1] = "Kind" } }`.
+function alloy.show_variant(name: string, v: any, enums: { [string]: { [number]: string } }?): string
+	local slots = enums and enums[v.tag]
 	local parts = {}
 	local i = 1
 	while v["_" .. i] ~= nil do
-		table.insert(parts, alloy.show(v["_" .. i]))
+		table.insert(parts, show_in(v["_" .. i], slots and slots[i]))
 		i += 1
 	end
 	return `{name}.{v.tag}({table.concat(parts, ", ")})`
-end
-
---- The keys of a map in a stable order, so a printed map reads the same
---- every time.
-local function sorted_keys(t: { [any]: any }): { any }
-	local keys = {}
-	for k in pairs(t) do
-		table.insert(keys, k)
-	end
-	table.sort(keys, function(a, b)
-		if type(a) == type(b) and (type(a) == "number" or type(a) == "string") then
-			return a < b
-		end
-		return tostring(a) < tostring(b)
-	end)
-	return keys
 end
 
 -- ---------------------------------------------------------------------------
@@ -1242,16 +1283,10 @@ function HashMap.to_table(self)
 end
 
 function HashMap.__tostring(self)
-	local keys = sorted_keys(self._items)
-	if #keys == 0 then
+	if next(self._items) == nil then
 		return "HashMap {}"
 	end
-	local parts = table.create(#keys)
-	for i, k in ipairs(keys) do
-		local key = if type(k) == "string" and string.match(k, "^[%a_][%w_]*$") then k else `[{alloy.show(k)}]`
-		parts[i] = key .. " = " .. alloy.show(self._items[k])
-	end
-	return "HashMap { " .. table.concat(parts, ", ") .. " }"
+	return `HashMap \{ {show_entries(self._items)} }`
 end
 
 alloy.HashMap = HashMap

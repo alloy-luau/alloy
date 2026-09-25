@@ -1013,17 +1013,14 @@ impl<'s> Desugar<'s> {
         // the struct's impl, or `@derive(Debug)`, writes its own and this
         // one stays out; a `__tostring` set later replaces it either way.
         if !derives_debug && !self.structs_with_to_string.contains(&name) {
-            let std = self.std();
             let sn = if self.options.check && !self.generic_types.contains(&name) {
                 format!(": {}", self.self_alias(&name))
             } else {
                 String::new()
             };
-            let fields: Vec<String> = field_names.iter().map(|f| luau_string(f)).collect();
+            let show = self.show_struct_call(&name, &st.fields);
             tail.push_str(&format!(
-                " {name}.__tostring = function(s{sn}) return {std}.show_struct({}, s, {{ {} }}) end",
-                luau_string(&self.display_name(&name)),
-                fields.join(", ")
+                " {name}.__tostring = function(s{sn}) return {show} end"
             ));
         }
 
@@ -1240,6 +1237,38 @@ impl<'s> Desugar<'s> {
         format!("{{ {} }}", parts.join(", ")).replace("{  }", "{}")
     }
 
+    /// The call that prints a struct: `show_struct("Name", s, { "a" })`.
+    /// A field whose type is an enum with a unit variant adds its enum,
+    /// `{ item = "Item" }`: the variant is a string at runtime, and the
+    /// printer writes `Item.Junk` for it.
+    fn show_struct_call(&mut self, name: &str, decls: &[Field]) -> String {
+        let std = self.std();
+        let mut fields = Vec::new();
+        let mut enums = Vec::new();
+
+        for f in decls {
+            let fname = self.text_of(f.name).to_string();
+
+            if let Some(e) = self.unit_enum_named(self.text_of(f.ty)) {
+                enums.push(format!("{fname} = {}", luau_string(&e)));
+            }
+
+            fields.push(luau_string(&fname));
+        }
+
+        let enums = match enums.is_empty() {
+            true => String::new(),
+
+            false => format!(", {{ {} }}", enums.join(", ")),
+        };
+
+        format!(
+            "{std}.show_struct({}, s, {{ {} }}{enums})",
+            luau_string(&self.display_name(name)),
+            fields.join(", ")
+        )
+    }
+
     pub(crate) fn derive_struct(
         &mut self,
         name: &str,
@@ -1269,7 +1298,7 @@ impl<'s> Desugar<'s> {
 
             false => x.to_string(),
         };
-        let (a, b, s_, this) = (view("a"), view("b"), view("s"), view("self"));
+        let (a, b, this) = (view("a"), view("b"), view("self"));
         let tn = if self.options.check { ": any" } else { "" };
         // A named derived method of a generic struct takes the struct's
         // parameters, `Box.clone<T>(self: Box<T>): Box<T>`; a bare `Box`
@@ -1371,21 +1400,15 @@ impl<'s> Desugar<'s> {
                 )
             }
 
+            // The default printer, as `alloy doc derive:Debug` says, with
+            // `debug` beside it: a field prints the way it prints inside
+            // any container.
             "Debug" => {
-                let parts: Vec<String> = fields
-                    .iter()
-                    .map(|f| format!("\"{f} = \" .. tostring({s_}.{f})"))
-                    .collect();
-                let inner = if parts.is_empty() {
-                    "\"\"".to_string()
-                } else {
-                    parts.join(" .. \", \" .. ")
-                };
-
+                let show = self.show_struct_call(name, decls);
                 let ret = if self.options.check { ": string" } else { "" };
 
                 format!(
-                    "{name}.__tostring = function(s{sn}) return \"{name} {{ \" .. {inner} .. \" }}\" end function {name}.debug(self{sn}){ret} return tostring(self) end"
+                    "{name}.__tostring = function(s{sn}) return {show} end function {name}.debug(self{sn}){ret} return tostring(self) end"
                 )
             }
 

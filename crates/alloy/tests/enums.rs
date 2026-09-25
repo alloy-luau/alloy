@@ -76,3 +76,29 @@ fn a_derived_debug_names_the_enum_for_every_variant() {
         Some("Event.Quit|Event.Scored(3, \"bob\")")
     );
 }
+
+/// A unit variant in a payload slot or a field printed as a bare
+/// string, `Item.Tool("Axe", 1)`, and a field that held a plain table
+/// printed its address. The printer knows each declared type now.
+#[test]
+fn a_printed_unit_variant_names_its_enum_in_a_slot_and_a_field() {
+    let src = concat!(
+        "enum Kind\n    Axe\nend\n",
+        "@derive(Debug)\nenum Item\n    Tool(Kind, number)\n    Junk\nend\n",
+        "struct Stack\n    item: Item\nend\n",
+        "@derive(Debug)\nstruct Bag\n    slots: { Stack }\nend\n",
+        "local tool = Item.Tool(Kind.Axe, 1):debug()\n",
+        "local stack = tostring(new Stack { item = Item.Junk })\n",
+        "local bag = new Bag { slots = { new Stack { item = Item.Junk } } }:debug()\n",
+        "export const project = { name = `{tool}|{stack}|{bag}` }\n",
+    );
+    let config = alloy::config_aly::evaluate_source(src, std::path::Path::new(".config.aly"))
+        .expect("the code runs");
+
+    assert_eq!(
+        config["project"]["name"].as_str(),
+        Some(
+            "Item.Tool(Kind.Axe, 1)|Stack { item = Item.Junk }|Bag { slots = [ Stack { item = Item.Junk } ] }"
+        )
+    );
+}

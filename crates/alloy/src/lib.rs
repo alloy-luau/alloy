@@ -1107,10 +1107,13 @@ mod tests {
 
         let own = "struct V as\n    x: number\nend\nimpl V as\n    function to_string(self): string\n        return `v{self.x}`\n    end\nend\n@derive(Debug)\nstruct W as\n    x: number\nend\n";
         let out = compile(own).unwrap();
-        assert!(!out.ship.contains("show_struct"), "{}", out.ship);
+        assert!(!out.ship.contains("show_struct(\"V\""), "{}", out.ship);
+        // `@derive(Debug)` prints the way the default printer does, and
+        // adds `debug`.
         assert!(
-            out.ship
-                .contains("W.__tostring = function(s) return \"W { \""),
+            out.ship.contains(
+                "W.__tostring = function(s) return __alloy.show_struct(\"W\", s, { \"x\" }) end function W.debug(self) return tostring(self) end"
+            ),
             "{}",
             out.ship
         );

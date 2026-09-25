@@ -319,14 +319,40 @@ impl<'s> Desugar<'s> {
             ""
         };
         // A variant with a payload prints as `Msg.Move(1, 2)`; a unit
-        // variant is a string and prints as its name already.
+        // variant is a string and prints as its name already. A slot
+        // whose type is an enum with a unit variant names that enum, so
+        // the payload prints `Tool(Kind.Axe)` and not `Tool("Axe")`.
         let mut printer = if self.options.definitions {
             String::new()
         } else {
             let std = self.std();
+            let slots: Vec<String> = e
+                .variants
+                .iter()
+                .filter_map(|v| {
+                    let named: Vec<String> = v
+                        .payload
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, t)| {
+                            let e = self.unit_enum_named(self.text_of(*t))?;
+
+                            Some(format!("[{}] = {}", i + 1, luau_string(&e)))
+                        })
+                        .collect();
+
+                    (!named.is_empty())
+                        .then(|| format!("{} = {{ {} }}", self.text_of(v.name), named.join(", ")))
+                })
+                .collect();
+            let slots = match slots.is_empty() {
+                true => String::new(),
+
+                false => format!(", {{ {} }}", slots.join(", ")),
+            };
 
             format!(
-                " {name}.__tostring = function(v) return {std}.show_variant({}, v) end",
+                " {name}.__tostring = function(v) return {std}.show_variant({}, v{slots}) end",
                 luau_string(&self.display_name(&name))
             )
         };
@@ -560,6 +586,18 @@ impl<'s> Desugar<'s> {
             .rev()
             .find_map(|m| m.get(name).cloned())
             .or_else(|| self.ns_member_name(name))
+    }
+
+    /// The name a printer puts before a unit variant of type `ty`: the
+    /// enum the type names, when that enum has a unit variant.
+    pub(crate) fn unit_enum_named(&self, ty: &str) -> Option<String> {
+        let e = self.enum_named(ty)?;
+
+        self.enums
+            .get(&e)?
+            .iter()
+            .any(|(_, n)| *n == 0)
+            .then(|| self.display_name(&e))
     }
 
     /// Reports if a bare name is a unit variant of a known enum.

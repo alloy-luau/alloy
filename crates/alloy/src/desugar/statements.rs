@@ -1124,16 +1124,44 @@ impl<'s> Desugar<'s> {
             let ty = match b.ty {
                 Some(ty) => Some(self.annotation_text(ty)),
 
-                None => l
-                    .values
-                    .get(i)
-                    .and_then(|v| self.argument_struct(v, annotated)),
+                None => match l.values.get(i) {
+                    Some(t @ Expr::Table { .. }) => self.literal_shape(t, annotated),
+
+                    v => v.and_then(|v| self.argument_struct(v, annotated)),
+                },
             };
 
             if let Some(ty) = ty {
                 annotated.insert(self.text_of(b.name).to_string(), ty);
             }
         }
+    }
+
+    /// The type of a value as a table type text: a table literal names
+    /// the type of each named field it can read. `{ holder = new
+    /// Holder { } }` gives `{ holder: Holder }`.
+    fn literal_shape(&self, v: &Expr, annotated: &HashMap<String, String>) -> Option<String> {
+        let Expr::Table { fields, .. } = v else {
+            return match v {
+                Expr::Name(_) | Expr::Index { .. } => self.receiver_type(v, annotated),
+
+                _ => self.argument_struct(v, annotated),
+            };
+        };
+        let members: Vec<String> = fields
+            .iter()
+            .filter_map(|f| match f {
+                TableField::Named { name, value } => Some(format!(
+                    "{}: {}",
+                    self.text_of(*name),
+                    self.literal_shape(value, annotated)?
+                )),
+
+                _ => None,
+            })
+            .collect();
+
+        (!members.is_empty()).then(|| format!("{{ {} }}", members.join(", ")))
     }
 
     /// The type an annotation span names, without its `:`.
@@ -1160,18 +1188,32 @@ impl<'s> Desugar<'s> {
     /// The type a receiver holds: a name's annotation, or the declared
     /// type of a field of a struct. `p.rarity` reads `rarity: Rarity`
     /// from the struct `p` holds, in this file or in an imported one.
+    /// A path walks each step: a field of a table type or an alias of
+    /// one, and `hs[1]` of an array `Holder[]`.
     fn receiver_type(&self, e: &Expr, annotated: &HashMap<String, String>) -> Option<String> {
         match e {
             Expr::Name(n) => annotated.get(self.text_of(*n)).cloned(),
 
-            Expr::Index {
-                object,
-                key: IndexKey::Field(f),
-                ..
-            } => {
+            Expr::Paren { inner, .. } => self.receiver_type(inner, annotated),
+
+            Expr::Index { object, key, .. } => {
                 let owner = self.receiver_type(object, annotated)?;
-                let owner = owner.trim_end_matches('?');
+                let owner = owner.trim().trim_end_matches('?');
+                let owner = self.alias_values.get(owner).map_or(owner, |v| v.trim());
+
+                let IndexKey::Field(f) = key else {
+                    return array_element(owner).map(str::to_string);
+                };
                 let field = self.text_of(*f);
+
+                // `{ holder: Holder }` names the type of each field.
+                if let Some(body) = owner.strip_prefix('{').and_then(|o| o.strip_suffix('}')) {
+                    return split_top_level(body, ',').into_iter().find_map(|m| {
+                        let (k, ty) = m.split_once(':')?;
+
+                        (k.trim() == field).then(|| ty.trim().to_string())
+                    });
+                }
 
                 match self.type_members.get(owner) {
                     Some(ms) => ms
@@ -4479,6 +4521,27 @@ mod tests {
         assert_eq!(
             got,
             ["`Rarity` is a unit enum, a string at runtime; call `Rarity.weight(p.rarity)`"]
+        );
+    }
+
+    /// `props.holder.d:color()` took two field steps, and the check read
+    /// one. The ship raised "attempt to call missing method 'color' of
+    /// string". The walk now reads each step: a table literal local, a
+    /// table type, an alias of one, and `hs[1]` of an array.
+    #[test]
+    fn a_colon_call_through_a_path_names_the_static_form() {
+        let src = "enum Diff as Easy, Hard end\nimpl Diff\n    function color(self): number\n        return 1\n    end\nend\nstruct Holder\n    d: Diff\nend\ntype Props = { holder: Holder }\nlocal props = { holder = new Holder { d = Diff.Easy } }\nprint(props.holder.d:color())\nlocal function f(p: Props, q: { holder: Holder }, hs: Holder[])\n    print(p.holder.d:color(), q.holder.d:color(), hs[1].d:color())\nend\nprint(f)\n";
+        let want = |recv: &str| {
+            format!("`Diff` is a unit enum, a string at runtime; call `Diff.color({recv})`")
+        };
+        assert_eq!(
+            messages(src),
+            [
+                want("props.holder.d"),
+                want("p.holder.d"),
+                want("q.holder.d"),
+                want("hs[1].d")
+            ]
         );
     }
 

@@ -148,7 +148,10 @@ impl State {
             }
 
             // `@serde.|` lists the std module's attributes, and `@M.|`
-            // the ones a module of the project exports.
+            // the ones a module of the project exports. `@Ns.|` lists
+            // what a namespace holds: its attributes and the namespaces
+            // inside it, through a star import, a named import, or the
+            // file's own declaration.
             // The target decides here as it does after a bare `@`.
             Context::AttributePath {
                 alias,
@@ -156,15 +159,17 @@ impl State {
                 bare,
                 ..
             } => {
-                let Some(spec) = crate::proxy::navigation::module_bindings(&doc.source)
+                let (head, inner) = alias.split_once('.').unwrap_or((alias.as_str(), ""));
+                let star = crate::proxy::navigation::module_bindings(&doc.source)
                     .into_iter()
-                    .find(|(bound, _)| bound == alias)
-                    .map(|(_, spec)| spec)
-                else {
-                    return items;
-                };
+                    .find(|(bound, _)| bound == head)
+                    .map(|(_, spec)| spec);
 
-                if let Some(module) = alloy::std_names::module_of_spec(&spec) {
+                if let Some(module) = star
+                    .as_deref()
+                    .filter(|_| inner.is_empty())
+                    .and_then(alloy::std_names::module_of_spec)
+                {
                     for (m, names) in alloy::std_names::ATTRIBUTES {
                         if module.is_empty() || module == *m {
                             for name in *names {
@@ -184,22 +189,83 @@ impl State {
                             }
                         }
                     }
-                } else if let Some(file) = self
-                    .resolve_spec(uri, &spec)
-                    .and_then(|p| imports::module_file(&imports::module_path(&p)))
-                    && let Some(text) = self.module_text(&file)
-                {
-                    for d in alloy::declarations::summaries(&text, false) {
-                        if let Some(name) = d.name.strip_prefix('@')
-                            && fits_target(&declared_attribute_targets(&d.hover), *target, *bare)
-                        {
-                            items.push(json!({
-                                "label": name,
-                                "kind": 14,
-                                "documentation": { "kind": "markdown", "value": d.hover },
-                            }));
-                        }
+
+                    return items;
+                }
+
+                let module_text = |spec: &str| {
+                    self.resolve_spec(uri, spec)
+                        .and_then(|p| imports::module_file(&imports::module_path(&p)))
+                        .and_then(|file| self.module_text(&file))
+                };
+                let named = crate::proxy::navigation::import_entries(&doc.source)
+                    .into_iter()
+                    .find(|e| e.bound == head);
+                // The text that declares the attributes, and the path of
+                // the namespace in it. An import reaches what the module
+                // exports; the file reaches its own declarations.
+                let (text, path, own) = match (&star, named) {
+                    (Some(spec), _) => (module_text(spec), inner.to_string(), false),
+
+                    (None, Some(e)) => {
+                        let path = match inner.is_empty() {
+                            true => e.name,
+
+                            false => format!("{}.{inner}", e.name),
+                        };
+
+                        (module_text(&e.spec), path, false)
                     }
+
+                    (None, None) => (Some(doc.source.clone()), alias.clone(), true),
+                };
+                let Some(text) = text else {
+                    return items;
+                };
+                let decls = match own {
+                    true => alloy::modules::attribute_paths(&text),
+
+                    false => alloy::modules::exported_attribute_decls(&text),
+                };
+                let hovers = alloy::declarations::summaries(&text, false);
+                let mut namespaces = HashSet::new();
+
+                for (key, decl) in &decls {
+                    let rest = match path.is_empty() {
+                        true => Some(key.as_str()),
+
+                        false => key.strip_prefix(&format!("{path}.")),
+                    };
+                    let Some(rest) = rest else {
+                        continue;
+                    };
+
+                    if let Some((ns, _)) = rest.split_once('.') {
+                        if namespaces.insert(ns.to_string()) {
+                            items.push(json!({ "label": ns, "kind": 9 }));
+                        }
+
+                        continue;
+                    }
+
+                    let targets: Vec<&str> = decl.targets.iter().map(String::as_str).collect();
+
+                    if !fits_target(&targets, *target, *bare) {
+                        continue;
+                    }
+
+                    // A top-level declaration hovers with its comment; a
+                    // member of a namespace reads as its declaration.
+                    let hover = hovers
+                        .iter()
+                        .find(|d| key.as_str() == rest && d.name == format!("@{rest}"))
+                        .map(|d| d.hover.clone())
+                        .unwrap_or_else(|| attribute_doc(rest, decl));
+                    items.push(json!({
+                        "label": rest,
+                        "kind": 14,
+                        "documentation": { "kind": "markdown", "value": hover },
+                    }));
                 }
             }
 
@@ -2734,6 +2800,29 @@ fn written_entries(src: &str, offset: usize, open: char, close: char) -> Vec<&st
 /// that goes anywhere fits: every other one names a target the reader
 /// has not written. `attribute X on function` covers a method too, so a
 /// method position takes what a function takes.
+/// An attribute a namespace declares, as its declaration reads.
+fn attribute_doc(name: &str, decl: &alloy::desugar::AttrDecl) -> String {
+    let params: Vec<String> = decl
+        .params
+        .iter()
+        .map(|(n, t)| match t {
+            Some(t) => format!("{n}: {t}"),
+
+            None => n.clone(),
+        })
+        .collect();
+    let params = match params.is_empty() {
+        true => String::new(),
+
+        false => format!("({})", params.join(", ")),
+    };
+
+    format!(
+        "```alloy\nattribute {name}{params} on {}\n```",
+        decl.targets.join(", ")
+    )
+}
+
 fn fits_target(targets: &[&str], target: Option<&str>, bare: bool) -> bool {
     match target {
         Some("method") => targets.contains(&"method") || targets.contains(&"function"),

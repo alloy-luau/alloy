@@ -1565,7 +1565,13 @@ pub fn import_star_modules(
         .map(|(path, local)| {
             let text = module_text(&path).unwrap_or_default();
             let mut namespaces = Vec::new();
-            attribute_walk(&text, &mut Vec::new(), &mut namespaces, &mut Vec::new());
+            attribute_walk(
+                &text,
+                &mut Vec::new(),
+                &mut namespaces,
+                &mut Vec::new(),
+                false,
+            );
 
             (local, namespaces, exported_names(&text))
         })
@@ -1576,7 +1582,17 @@ pub fn import_star_modules(
 /// imports it, with the public attributes of its exported namespaces.
 pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
     let mut out = Vec::new();
-    attribute_walk(src, &mut out, &mut Vec::new(), &mut Vec::new());
+    attribute_walk(src, &mut out, &mut Vec::new(), &mut Vec::new(), false);
+
+    out
+}
+
+/// Every attribute a file can name, by its path: its own declarations,
+/// exported or not, and the public members of its namespaces. The
+/// editor completes `@Ns.` from it.
+pub fn attribute_paths(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
+    let mut out = Vec::new();
+    attribute_walk(src, &mut out, &mut Vec::new(), &mut Vec::new(), true);
 
     out
 }
@@ -1592,7 +1608,7 @@ pub fn import_private_attributes(
 ) -> Vec<String> {
     let modules = module_decls(source, from, aliases, |text| {
         let mut private = Vec::new();
-        attribute_walk(text, &mut Vec::new(), &mut Vec::new(), &mut private);
+        attribute_walk(text, &mut Vec::new(), &mut Vec::new(), &mut private, false);
 
         private.into_iter().map(|p| (p, ())).collect()
     });
@@ -1618,13 +1634,15 @@ pub fn import_private_attributes(
 
 /// The attributes a module exports, and the path of every namespace
 /// the walk reads them from. A top-level declaration counts when it is
-/// exported, and a namespace member when it is not private. `private`
-/// gets the path of each private attribute of those namespaces.
+/// exported, or always under `every`, and a namespace member when it is
+/// not private. `private` gets the path of each private attribute of
+/// those namespaces.
 fn attribute_walk(
     src: &str,
     out: &mut Vec<(String, crate::desugar::AttrDecl)>,
     namespaces: &mut Vec<String>,
     private: &mut Vec<String>,
+    every: bool,
 ) {
     use alloy_syntax::ast::Stmt;
 
@@ -1687,7 +1705,7 @@ fn attribute_walk(
             _ => false,
         };
 
-        if exported {
+        if exported || every {
             walk(src, toks, stmt, "", out, namespaces, private);
         }
     }

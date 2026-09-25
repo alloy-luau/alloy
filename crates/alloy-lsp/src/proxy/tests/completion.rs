@@ -236,6 +236,47 @@ fn a_dotted_attribute_follows_the_declaration_under_it() {
     assert_eq!(at(0), ["deny_unknown_fields", "rename_all"]);
     assert_eq!(at(1), ["rename", "skip"]);
 }
+
+/// `@K.` lists what the namespace holds: its attributes that go on the
+/// declaration under it, and the namespaces inside it. `@K.Inner.`
+/// walks down one more. Both completed nothing.
+#[test]
+fn a_namespace_path_completes_its_attributes() {
+    let src = concat!(
+        "namespace K\n",
+        "    attribute tag on struct\n",
+        "    attribute mark on field\n",
+        "    private attribute hidden on struct\n",
+        "    namespace Inner\n",
+        "        attribute deep on struct\n",
+        "    end\n",
+        "end\n",
+        "@K.\n",
+        "struct A\n",
+        "    x: number\n",
+        "end\n",
+        "@K.Inner.\n",
+        "struct B\n",
+        "    x: number\n",
+        "end\n",
+    );
+    let labels = |needle: &str| {
+        let offset = src.find(needle).unwrap() + needle.len();
+        let (st, uri) = one_file(src);
+        let ctx = context::detect(src, offset).expect("an attribute path");
+        let mut labels: Vec<String> = st
+            .context_items(uri, offset, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect();
+        labels.sort();
+
+        labels
+    };
+
+    assert_eq!(labels("@K."), ["Inner", "tag"]);
+    assert_eq!(labels("@K.Inner."), ["deep"]);
+}
 /// A whole keyword with more names behind it keeps the list, and
 /// takes the first row. `else` is `elseif` as far as the letters go,
 /// so the reader still needs to see both.

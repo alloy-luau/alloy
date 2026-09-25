@@ -587,13 +587,13 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
     let prefix = trailing_word(before);
     let head = &before[..before.len() - prefix.len()];
 
-    // `@serde.|`: a module's attribute, through a star import.
+    // `@serde.|`: a module's attribute, through a star import. `@Ns.|`
+    // and `@M.Ns.|`: one a namespace holds.
     if let Some(path) = head.strip_suffix('.')
         && let Some(at) = path.rfind('@')
         && path[at + 1..]
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_')
-        && at + 1 < path.len()
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_alphanumeric() || c == '_'))
     {
         let (target, bare) = bodies::attribute_target(src, line_start, line_end, head);
 

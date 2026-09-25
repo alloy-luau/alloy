@@ -717,6 +717,12 @@ mod tests {
         // an Instance as far as the file says.
         assert!(!all_names("delete self.part\n").contains(&"prefer_destroy"));
         assert!(!all_names("local bag = make()\ndelete bag\n").contains(&"prefer_destroy"));
+
+        // A statement after the name on its line is not the operand.
+        assert_eq!(
+            all_names("local part = Instance.new(\"Part\")\ndelete part part = nil\n"),
+            vec!["prefer_destroy"]
+        );
     }
 
     #[test]

@@ -47,6 +47,33 @@ pub(crate) const BINARY_OPS: &[&str] = &[
 /// Tokens that close the block a statement sits in.
 pub(crate) const CLOSERS: &[&str] = &["end", "else", "elseif", "until", "case", "default"];
 
+/// The words that go on with the expression or the statement in front
+/// of them: a word operator, a clause word, or a word that closes a
+/// block. Any other name or keyword after a complete expression opens
+/// the next statement.
+const GOES_ON: &[&str] = &[
+    "and",
+    "or",
+    "not",
+    "in",
+    "is",
+    "satisfies",
+    "bor",
+    "bxor",
+    "band",
+    "shl",
+    "shr",
+    "then",
+    "do",
+    "else",
+    "elseif",
+    "until",
+    "end",
+    "with",
+    "where",
+    "as",
+];
+
 /// The parts of one `if` statement: the token after each branch's
 /// keyword, and the `end`.
 pub(crate) struct IfParts {
@@ -547,10 +574,39 @@ impl<'s> Scan<'s> {
         })
     }
 
+    /// Whether the token at `j` opens a statement on the line of the
+    /// token before it: a name or a keyword right after a complete
+    /// expression. No expression goes on from `{}` to a name, so
+    /// `const out = {} table.insert(out, 1)` is two statements. A word
+    /// that may be a name, such as `new` or `match`, completes nothing.
+    pub(crate) fn begins_after_expr(&self, j: usize) -> bool {
+        use alloy_syntax::contextual::{is_contextual, is_luau_reserved};
+
+        if j == 0 || self.toks[j].kind != TokKind::Ident || GOES_ON.contains(&self.t(j)) {
+            return false;
+        }
+
+        let prev = self.t(j - 1);
+
+        match self.toks[j - 1].kind {
+            TokKind::Number | TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpTail => {
+                true
+            }
+
+            TokKind::Ident => {
+                matches!(prev, "end" | "true" | "false" | "nil")
+                    || !(is_luau_reserved(prev) || is_contextual(prev) || GOES_ON.contains(&prev))
+            }
+
+            _ => matches!(prev, ")" | "]" | "}" | "..."),
+        }
+    }
+
     /// The exclusive end of the statement that starts at `i`: the next
     /// token on a later line that does not continue the expression, a
-    /// `;`, or a closer. A block opener inside it skips to its `end`,
-    /// and an `if` expression runs to the end of its `else` branch.
+    /// name or a keyword after a complete expression, a `;`, or a
+    /// closer. A block opener inside it skips to its `end`, and an `if`
+    /// expression runs to the end of its `else` branch.
     pub(crate) fn statement_end(&self, i: usize) -> usize {
         let mut j = i + 1;
         let mut depth = 0i32;
@@ -565,6 +621,10 @@ impl<'s> Scan<'s> {
             let text = self.t(j);
 
             if depth == 0 {
+                if self.begins_after_expr(j) {
+                    return j;
+                }
+
                 if text == "if" && !self.is_statement_if(j) {
                     open_ifs += 1;
                 } else if open_ifs > 0 && matches!(text, "else" | "elseif") {

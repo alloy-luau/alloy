@@ -1648,6 +1648,25 @@ mod tests {
             fixed("if ok then\n    local r = f()\n    return r\nend\n"),
             "if ok then\n    return (f())\nend\n"
         );
+
+        // Two statements on one line: `{}` ends the first, and the name
+        // after it opens the second. The rewrite once took both as the
+        // value, `return ({} table.insert(out, 1))`.
+        for line in [
+            "const out = {} table.insert(out, 1)",
+            "local out = f() print(out)",
+            "local out = 1 if ok then out = 2 end",
+            "local out = \"s\" print(out)",
+        ] {
+            let src = format!("local function g()\n    {line}\n    return out\nend\n");
+            assert!(!names(&src).contains(&"local_then_return"), "{src}");
+        }
+
+        // A word operator goes on with the value: it is one statement.
+        assert_eq!(
+            fixed("local function g()\n    local out = a and b\n    return out\nend\n"),
+            "local function g()\n    return a and b\nend\n"
+        );
     }
 
     /// A rewrite that breaks the parse does not land, and one beside it

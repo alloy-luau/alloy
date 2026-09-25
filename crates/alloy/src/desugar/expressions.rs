@@ -136,6 +136,44 @@ pub(crate) fn one_line(text: &str) -> String {
 }
 
 impl<'s> Desugar<'s> {
+    /// A field of `new S { }` constructs under its declared type, as a
+    /// `local` under an annotation does: `votes = HashMap.new()` takes
+    /// the arguments `HashMap<string, string>` names. `n` is the struct's
+    /// name here; an imported struct gives the type text its module
+    /// wrote, under the name the source writes.
+    fn expect_field_types(&mut self, n: &str, name: &Expr, table: &Expr) {
+        let types: Option<Vec<(String, String)>> = match self.struct_field_types.get(n) {
+            Some(own) => Some(
+                own.iter()
+                    .map(|t| (t.name.clone(), self.text_of(t.ty).to_string()))
+                    .collect(),
+            ),
+
+            None => {
+                let written = self.text_of(name.span()).trim();
+
+                self.options
+                    .import_field_types
+                    .iter()
+                    .find(|(s, _)| s == written)
+                    .map(|(_, fields)| fields.clone())
+            }
+        };
+        let (Expr::Table { fields, .. }, Some(types)) = (table, types) else {
+            return;
+        };
+
+        for f in fields {
+            if let TableField::Named { name, value } = f
+                && let Some((_, ty)) = types.iter().find(|(t, _)| t == self.text_of(*name))
+                && let Some(g) = super::types::generic_head(ty)
+            {
+                self.field_expected
+                    .insert(std::ptr::from_ref(value) as usize, g);
+            }
+        }
+    }
+
     /*
     Renders an expression. A hoist goes in front of the statement, so it
     runs first. That is wrong when `e` runs on some paths only, when the
@@ -447,23 +485,7 @@ impl<'s> Desugar<'s> {
                     };
                     self.generate(anchor, &open);
 
-                    // A field's constructor takes the arguments its declared
-                    // type names, as a `local` under an annotation does.
-                    if let Expr::Table { fields, .. } = table
-                        && let Some(types) = self.struct_field_types.get(&n).cloned()
-                    {
-                        for f in fields {
-                            if let TableField::Named { name, value } = f
-                                && let Some(ft) =
-                                    types.iter().find(|t| t.name == self.text_of(*name))
-                                && let Some(g) = super::types::generic_head(self.text_of(ft.ty))
-                            {
-                                self.field_expected
-                                    .insert(std::ptr::from_ref(value) as usize, g);
-                            }
-                        }
-                    }
-
+                    self.expect_field_types(&n, name, table);
                     self.expr(table);
                     let close = if full_view {
                         format!(") :: any) :: {n}__all)")
@@ -482,6 +504,8 @@ impl<'s> Desugar<'s> {
                     self.generate(anchor, &head);
 
                     if let Some(table) = init.as_deref() {
+                        let written = self.text_of(name.span()).trim().to_string();
+                        self.expect_field_types(&written, name, table);
                         self.expr(table);
                         self.generate(self.byte_end(table.span()), ")");
                     }

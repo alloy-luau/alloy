@@ -157,6 +157,11 @@ pub struct EmitOptions {
     /// it carries a default, so `new Box { }` here reports the fields it
     /// leaves unset. See `crate::modules::import_struct_fields`.
     pub import_struct_fields: Vec<(String, Vec<(String, bool)>)>,
+    /// Per struct an imported module declares, the type text of each
+    /// field this file can write the way the module does. A field's
+    /// constructor takes the arguments the type names, as in the
+    /// module. See `crate::modules::import_field_types`.
+    pub import_field_types: Vec<(String, Vec<(String, String)>)>,
     /// Per struct an imported module declares that writes a
     /// constructor, the name of that `new` or `New`. A report of
     /// `Box(1)` reads it, so it names the constructor. See
@@ -424,6 +429,7 @@ impl Default for EmitOptions {
             import_privates: Vec::new(),
             import_callables: Vec::new(),
             import_struct_fields: Vec::new(),
+            import_field_types: Vec::new(),
             import_struct_ctors: Vec::new(),
             import_private_views: Vec::new(),
             plain_modules: Vec::new(),
@@ -925,7 +931,7 @@ pub fn bound_names(src: &str, toks: &[Tok], stmt: &Stmt) -> Vec<String> {
 /// Every name the top level of a file binds: a local, a function, a
 /// declaration, an import. A global by one of these names is the file's
 /// own name, so nothing is injected over it.
-fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
+pub(crate) fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
     let text = |span: TokSpan| span.text_or_empty(src, toks).to_string();
     let mut out = HashSet::new();
 

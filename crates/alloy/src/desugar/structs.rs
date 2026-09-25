@@ -3639,6 +3639,36 @@ mod tests {
         assert!(whole.is_empty(), "{whole:?}");
     }
 
+    /// A field of an imported struct constructs under the type its
+    /// module declares. `new Ballot { votes = HashMap.new() }` wrote the
+    /// call bare in another file, and flux reported that the type
+    /// arguments differ; the declaring file passed them.
+    #[test]
+    fn a_field_of_an_imported_struct_takes_its_type_arguments() {
+        let options = crate::EmitOptions {
+            check: true,
+            import_struct_fields: vec![("Ballot".to_string(), vec![("votes".to_string(), false)])],
+            import_field_types: vec![(
+                "Ballot".to_string(),
+                vec![("votes".to_string(), "HashMap<string, string>".to_string())],
+            )],
+            ..Default::default()
+        };
+        let out = crate::compile_with(
+            "import { Ballot } from \"./book\"\n\nprint(new Ballot { votes = HashMap.new() })\n",
+            &options,
+        )
+        .unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("votes = __alloy.HashMap.new<<string, string>>()"),
+            "{}",
+            out.check
+        );
+    }
+
     #[test]
     fn an_optional_field_can_stay_unset() {
         let src = "struct Health as\n    current: number\n    last_hit: number?\n    note: nil | string\nend\n\nlocal h = new Health { current = 1 }\n";

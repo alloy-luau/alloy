@@ -1464,6 +1464,21 @@ pub fn import_struct_fields(
     keyed_by_local(source, from, aliases, &modules)
 }
 
+/// The field types of every struct a module the source imports
+/// declares, where this file can write them. A field of `new S { }`
+/// then constructs under its declared type, as in the module.
+pub fn import_field_types(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<(String, String)>)> {
+    let modules = module_decls(source, from, aliases, |text| {
+        crate::declarations::struct_field_types(text)
+    });
+
+    keyed_by_local(source, from, aliases, &modules)
+}
+
 /// The constructor every struct a module the source imports declares
 /// writes: the struct's name with its `new` or `New`. The construction
 /// check reads it, so a report of `Box(1)` names the constructor the
@@ -2100,6 +2115,7 @@ impl crate::EmitOptions {
         self.import_privates = import_privates(source, from, aliases);
         self.import_callables = import_callables(source, from, aliases);
         self.import_struct_fields = import_struct_fields(source, from, aliases);
+        self.import_field_types = import_field_types(source, from, aliases);
         self.import_struct_ctors = import_struct_ctors(source, from, aliases);
         self.import_private_views = import_private_views(source, from, aliases);
         self.import_attributes = import_attributes(source, from, aliases);

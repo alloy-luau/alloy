@@ -1247,6 +1247,8 @@ pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<Sco
         decls: Vec::new(),
         roles: vec![Role::Unknown; toks.len()],
         exported: Vec::new(),
+        const_locals: HashSet::new(),
+        promoted: Vec::new(),
     };
     w.block(&block.stmts, toks.len(), true, false);
 
